@@ -353,8 +353,15 @@ ensure_sudo() {
         die "sudo is required but not installed. Please install packages manually or run as root."
     fi
     # Validate sudo access
-    if ! sudo -v 2>/dev/null; then
-        die "Failed to obtain sudo privileges."
+    # When piped (curl | bash), stdin is the pipe — redirect from /dev/tty so sudo can prompt
+    if [[ -e /dev/tty ]]; then
+        if ! sudo -v 2>/dev/null < /dev/tty; then
+            die "Failed to obtain sudo privileges."
+        fi
+    else
+        if ! sudo -v 2>/dev/null; then
+            die "Failed to obtain sudo privileges. Try running the script directly instead of piping."
+        fi
     fi
 }
 
@@ -372,7 +379,12 @@ ensure_homebrew() {
     fi
 
     info "Installing Homebrew first..."
-    /bin/bash -c "$(download_to_stdout https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # When piped (curl | bash), stdin is the pipe — Homebrew needs TTY for sudo password prompt
+    if [[ -e /dev/tty ]]; then
+        /bin/bash -c "$(download_to_stdout https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" < /dev/tty
+    else
+        NONINTERACTIVE=1 /bin/bash -c "$(download_to_stdout https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
 
     # Add Homebrew to PATH for Apple Silicon
     if [[ -f /opt/homebrew/bin/brew ]]; then
