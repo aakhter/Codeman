@@ -291,6 +291,9 @@ const SSE_EVENTS = {
   ORCHESTRATOR_TASK_FAILED: 'orchestrator:taskFailed',
   ORCHESTRATOR_COMPLETED: 'orchestrator:completed',
   ORCHESTRATOR_ERROR: 'orchestrator:error',
+
+  // Clipboard
+  CLIPBOARD_WRITE: 'clipboard:write',
 };
 
 // ═══════════════════════════════════════════════════════════════
