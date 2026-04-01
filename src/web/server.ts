@@ -545,7 +545,8 @@ export class WebServer extends EventEmitter {
       cacheControl: false,
       preCompressed: true,
       setHeaders: (res, path) => {
-        if (path.endsWith('.html')) {
+        // Use .includes() not .endsWith() — preCompressed serves .html.br/.html.gz
+        if (path.includes('.html')) {
           res.setHeader('Cache-Control', 'no-cache');
         } else {
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
