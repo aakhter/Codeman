@@ -256,6 +256,7 @@ Object.assign(CodemanApp.prototype, {
       // Accumulate sub-line pixel deltas so slow swipes still scroll
       let pixelAccum = 0;
 
+      let didScroll = false; // track whether touchmove fired (tap vs scroll)
       container.addEventListener(
         'touchstart',
         (ev) => {
@@ -264,6 +265,7 @@ Object.assign(CodemanApp.prototype, {
             velocity = 0;
             pixelAccum = 0;
             isTouching = true;
+            didScroll = false;
             lastTime = 0;
             if (scrollFrame) {
               cancelAnimationFrame(scrollFrame);
@@ -278,6 +280,7 @@ Object.assign(CodemanApp.prototype, {
         'touchmove',
         (ev) => {
           if (ev.touches.length === 1 && isTouching) {
+            didScroll = true;
             const touchY = ev.touches[0].clientY;
             const delta = touchLastY - touchY; // positive = scroll down
             pixelAccum += delta;
@@ -301,6 +304,12 @@ Object.assign(CodemanApp.prototype, {
           isTouching = false;
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
+          }
+          // Tap (no scroll): refocus xterm's hidden textarea so keyboard input
+          // routes back to the terminal. Without this, a tap on the terminal area
+          // consumes the touch event but xterm's textarea never regains focus.
+          if (!didScroll && this.terminal) {
+            this.terminal.focus();
           }
         },
         { passive: true }
@@ -361,22 +370,6 @@ Object.assign(CodemanApp.prototype, {
           }
           this.flushFlickerBuffer();
         }
-        // Clear viewport + scrollback for Ink-based sessions before sending SIGWINCH.
-        // fitAddon.fit() reflows content: lines at old width may wrap to more rows,
-        // pushing overflow into scrollback. Ink's cursor-up count is based on the
-        // pre-reflow line count, so ghost renders accumulate in scrollback.
-        // Fix: \x1b[3J (Erase Saved Lines) clears scrollback reflow debris,
-        // then \x1b[H\x1b[2J clears the viewport for a clean Ink redraw.
-        const activeResizeSession = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
-        if (
-          activeResizeSession &&
-          activeResizeSession.mode !== 'shell' &&
-          !activeResizeSession._ended &&
-          this.terminal &&
-          this.isTerminalAtBottom()
-        ) {
-          this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
-        }
         // Skip server resize while mobile keyboard is visible — sending SIGWINCH
         // causes Ink to re-render at the new row count, garbling terminal output.
         // Local fit() still runs so xterm knows the viewport size for scrolling.
@@ -388,6 +381,24 @@ Object.assign(CodemanApp.prototype, {
           const rows = dims ? Math.max(dims.rows, MIN_ROWS) : MIN_ROWS;
           // Only send resize if dimensions actually changed
           if (!this._lastResizeDims || cols !== this._lastResizeDims.cols || rows !== this._lastResizeDims.rows) {
+            // Clear viewport + scrollback ONLY when dimensions actually change.
+            // fitAddon.fit() reflows content: lines at old width may wrap to more rows,
+            // pushing overflow into scrollback. Ink's cursor-up count is based on the
+            // pre-reflow line count, so ghost renders accumulate in scrollback.
+            // Fix: \x1b[3J (Erase Saved Lines) clears scrollback reflow debris,
+            // then \x1b[H\x1b[2J clears the viewport for a clean Ink redraw.
+            // IMPORTANT: Only clear when we're actually sending SIGWINCH (dims changed).
+            // Clearing without a subsequent Ink redraw leaves the terminal blank.
+            const activeResizeSession = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+            if (
+              activeResizeSession &&
+              activeResizeSession.mode !== 'shell' &&
+              !activeResizeSession._ended &&
+              this.terminal &&
+              this.isTerminalAtBottom()
+            ) {
+              this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
+            }
             this._lastResizeDims = { cols, rows };
             fetch(`/api/sessions/${this.activeSessionId}/resize`, {
               method: 'POST',
@@ -1425,6 +1436,10 @@ Object.assign(CodemanApp.prototype, {
     if (this.fitAddon) this.fitAddon.fit();
     const dims = this.getTerminalDimensions();
     if (!dims) return;
+    // Update _lastResizeDims so the throttledResize handler won't redundantly
+    // clear the terminal for the same dimensions (which would blank the screen
+    // without a subsequent Ink redraw to repaint it).
+    this._lastResizeDims = { cols: dims.cols, rows: dims.rows };
     // Fast path: WebSocket resize
     if (this._wsReady && this._wsSessionId === sessionId) {
       try {

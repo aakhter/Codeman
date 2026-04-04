@@ -294,6 +294,12 @@ const SSE_EVENTS = {
 
   // Clipboard
   CLIPBOARD_WRITE: 'clipboard:write',
+
+  // Cases
+  CASE_CREATED: 'case:created',
+  CASE_LINKED: 'case:linked',
+  CASE_DELETED: 'case:deleted',
+  CASE_ORDER_CHANGED: 'case:order-changed',
 };
 
 // ═══════════════════════════════════════════════════════════════

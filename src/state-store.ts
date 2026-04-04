@@ -309,7 +309,7 @@ export class StateStore {
 
     this.ensureDir();
 
-    const tempPath = this.filePath + '.tmp';
+    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     const backupPath = this.filePath + '.bak';
 
     // Step 1: Serialize state (validates it's JSON-safe)
@@ -373,7 +373,7 @@ export class StateStore {
 
     this.ensureDir();
 
-    const tempPath = this.filePath + '.tmp';
+    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     const backupPath = this.filePath + '.bak';
 
     const json = this.serializeState();

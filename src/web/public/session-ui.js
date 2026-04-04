@@ -1075,13 +1075,19 @@ Object.assign(CodemanApp.prototype, {
     modal.querySelectorAll('.modal-tab-content').forEach(content => {
       content.classList.toggle('hidden', content.id !== tabName);
     });
-    // Update submit button text
+    // Update submit button (hide for manage tab)
     const submitBtn = document.getElementById('caseModalSubmit');
-    submitBtn.textContent = tabName === 'case-create' ? 'Create' : 'Link';
+    if (tabName === 'case-manage') {
+      submitBtn.style.display = 'none';
+      this.renderCaseManageList();
+    } else {
+      submitBtn.style.display = '';
+      submitBtn.textContent = tabName === 'case-create' ? 'Create' : 'Link';
+    }
     // Focus appropriate input
     if (tabName === 'case-create') {
       document.getElementById('newCaseName').focus();
-    } else {
+    } else if (tabName === 'case-link') {
       document.getElementById('linkCaseName').focus();
     }
   },
@@ -1190,6 +1196,107 @@ Object.assign(CodemanApp.prototype, {
 
 
   // ═══════════════════════════════════════════════════════════════
+  // Case Management (reorder + delete)
+  // ═══════════════════════════════════════════════════════════════
+
+  renderCaseManageList() {
+    const container = document.getElementById('caseManageList');
+    const cases = this.cases || [];
+    if (cases.length === 0) {
+      container.innerHTML = '<div class="form-hint" style="text-align: center; padding: 2rem 0;">No cases yet</div>';
+      return;
+    }
+
+    let html = '';
+    cases.forEach((c, idx) => {
+      const isFirst = idx === 0;
+      const isLast = idx === cases.length - 1;
+      const pathDisplay = c.path ? c.path.replace(/^\/Users\/[^/]+/, '~') : '';
+      html += `
+        <div class="case-manage-item" data-case="${escapeHtml(c.name)}">
+          <div class="case-manage-info">
+            <span class="case-manage-name">${escapeHtml(c.name)}</span>
+            <span class="case-manage-path">${escapeHtml(pathDisplay)}</span>
+          </div>
+          <div class="case-manage-actions">
+            <button class="case-manage-btn" onclick="app.moveCaseUp('${escapeHtml(c.name)}')"
+                    title="Move up" ${isFirst ? 'disabled' : ''}>&#x25B2;</button>
+            <button class="case-manage-btn" onclick="app.moveCaseDown('${escapeHtml(c.name)}')"
+                    title="Move down" ${isLast ? 'disabled' : ''}>&#x25BC;</button>
+            <button class="case-manage-btn case-manage-btn-delete" onclick="app.deleteCase('${escapeHtml(c.name)}')"
+                    title="Delete case">&#x2715;</button>
+          </div>
+        </div>
+      `;
+    });
+    container.innerHTML = html;
+  },
+
+  async moveCaseUp(name) {
+    const cases = this.cases || [];
+    const idx = cases.findIndex(c => c.name === name);
+    if (idx <= 0) return;
+    // Swap positions (immutable)
+    const reordered = [...cases];
+    [reordered[idx - 1], reordered[idx]] = [reordered[idx], reordered[idx - 1]];
+    this.cases = reordered;
+    this.renderCaseManageList();
+    await this.saveCaseOrder(reordered.map(c => c.name));
+  },
+
+  async moveCaseDown(name) {
+    const cases = this.cases || [];
+    const idx = cases.findIndex(c => c.name === name);
+    if (idx < 0 || idx >= cases.length - 1) return;
+    const reordered = [...cases];
+    [reordered[idx], reordered[idx + 1]] = [reordered[idx + 1], reordered[idx]];
+    this.cases = reordered;
+    this.renderCaseManageList();
+    await this.saveCaseOrder(reordered.map(c => c.name));
+  },
+
+  async deleteCase(name) {
+    if (!confirm(`Delete case "${name}"? Linked cases will only be unlinked (folder preserved). Created cases will be permanently deleted.`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(`Case "${name}" ${data.data?.type === 'unlinked' ? 'unlinked' : 'deleted'}`, 'success');
+        // Remove from current list and refresh
+        this.cases = (this.cases || []).filter(c => c.name !== name);
+        this.renderCaseManageList();
+        // Refresh the dropdown
+        const select = document.getElementById('quickStartCase');
+        const currentCase = select.value;
+        await this.loadQuickStartCases(currentCase === name ? null : currentCase);
+      } else {
+        this.showToast(data.error || 'Failed to delete case', 'error');
+      }
+    } catch (err) {
+      this.showToast('Failed to delete case: ' + err.message, 'error');
+    }
+  },
+
+  async saveCaseOrder(order) {
+    try {
+      await fetch('/api/cases/order', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order })
+      });
+      // Refresh dropdown to reflect new order
+      const select = document.getElementById('quickStartCase');
+      const currentCase = select.value;
+      await this.loadQuickStartCases(currentCase);
+    } catch (err) {
+      this.showToast('Failed to save case order: ' + err.message, 'error');
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
   // Mobile Case Picker
   // ═══════════════════════════════════════════════════════════════
 
@@ -1218,6 +1325,11 @@ Object.assign(CodemanApp.prototype, {
             </svg>
           </span>
           <span class="mobile-case-item-name">${escapeHtml(c.name)}</span>
+          <span class="mobile-case-item-delete" onclick="event.stopPropagation(); app.deleteCaseMobile('${escapeHtml(c.name)}')" title="Delete">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </span>
           <span class="mobile-case-item-check">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
               <polyline points="20 6 9 17 4 12"/>
@@ -1260,6 +1372,25 @@ Object.assign(CodemanApp.prototype, {
     if (label) {
       // Let CSS handle truncation via text-overflow: ellipsis
       label.textContent = caseName;
+    }
+  },
+
+  async deleteCaseMobile(name) {
+    if (!confirm(`Delete case "${name}"?`)) return;
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(`Case "${name}" ${data.data?.type === 'unlinked' ? 'unlinked' : 'deleted'}`, 'success');
+        this.cases = (this.cases || []).filter(c => c.name !== name);
+        // Refresh mobile picker and dropdown
+        this.closeMobileCasePicker();
+        await this.loadQuickStartCases();
+      } else {
+        this.showToast(data.error || 'Failed to delete case', 'error');
+      }
+    } catch (err) {
+      this.showToast('Failed to delete case: ' + err.message, 'error');
     }
   },
 

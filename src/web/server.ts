@@ -1769,15 +1769,28 @@ export class WebServer extends EventEmitter {
 
             this.sessions.set(session.id, session);
             await this.setupSessionListeners(session);
-            this.persistSessionState(session);
 
-            // Mark it as restored (not started yet - user needs to attach)
-            getLifecycleLog().log({
-              event: 'recovered',
-              sessionId: session.id,
-              name: session.name,
-            });
-            console.log(`[Server] Restored session ${session.id} from mux ${muxSession.muxName}`);
+            // Auto-attach PTY to the surviving tmux session immediately.
+            // This ensures ALL sessions resume capturing output right away,
+            // not just the one the client happens to select first.
+            try {
+              await session.startInteractive();
+              getLifecycleLog().log({
+                event: 'recovered',
+                sessionId: session.id,
+                name: session.name,
+              });
+              console.log(`[Server] Restored and attached session ${session.id} from mux ${muxSession.muxName}`);
+            } catch (attachErr) {
+              console.error(`[Server] Failed to attach session ${session.id}, keeping as detached:`, attachErr);
+              getLifecycleLog().log({
+                event: 'recovered',
+                sessionId: session.id,
+                name: session.name,
+              });
+            }
+
+            this.persistSessionState(session);
           }
         }
 

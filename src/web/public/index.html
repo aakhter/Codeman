@@ -905,6 +905,17 @@
                 </label>
               </div>
 
+              <div class="settings-item settings-item-multiline" title="Show additional buttons (Tab, Shift+Tab, Ctrl+O, Esc, Alt+Enter, left/right arrows) in the mobile keyboard accessory bar.">
+                <div class="settings-item-text">
+                  <span class="settings-item-label">Extended Keyboard Bar</span>
+                  <span class="settings-item-desc">Extra keys: Tab, Esc, arrows, Ctrl+O</span>
+                </div>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsExtendedKeyboardBar">
+                  <span class="slider"></span>
+                </label>
+              </div>
+
               <!-- Header Displays Section -->
               <div class="settings-section-header">Header Displays</div>
               <div class="settings-item" title="Show A-/A+ font size buttons in header">
@@ -1373,6 +1384,7 @@
         <div class="modal-tabs">
           <button class="modal-tab-btn active" data-tab="case-create">Create New</button>
           <button class="modal-tab-btn" data-tab="case-link">Link Existing</button>
+          <button class="modal-tab-btn" data-tab="case-manage">Manage</button>
         </div>
         <div class="modal-body">
           <!-- Create New Tab -->
@@ -1399,6 +1411,13 @@
               <input type="text" id="linkCasePath" placeholder="/home/user/projects/my-project" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
               <span class="form-hint">Absolute path to an existing project folder, e.g. /home/you/my-project</span>
             </div>
+          </div>
+          <!-- Manage Tab -->
+          <div class="modal-tab-content hidden" id="case-manage">
+            <div class="case-manage-list" id="caseManageList">
+              <!-- Populated by JS -->
+            </div>
+            <span class="form-hint" style="margin-top: 8px; display: block;">Use arrows to reorder. Changes are saved automatically.</span>
           </div>
         </div>
         <div class="form-actions">

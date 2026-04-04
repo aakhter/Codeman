@@ -431,6 +431,11 @@ export const LinkCaseSchema = z.object({
   path: safePathSchema,
 });
 
+/** PUT /api/cases/order */
+export const CaseOrderSchema = z.object({
+  order: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')),
+});
+
 /** POST /api/auth/revoke */
 export const RevokeSessionSchema = z.object({
   sessionToken: z.string().min(1).max(200).optional(),

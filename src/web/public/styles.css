@@ -2973,6 +2973,93 @@ body {
   font-size: 0.6rem;
 }
 
+/* Case Management List (Manage tab) */
+.case-manage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.case-manage-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  transition: background var(--transition-smooth);
+}
+
+.case-manage-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.case-manage-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.case-manage-name {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.case-manage-path {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.case-manage-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: 10px;
+  flex-shrink: 0;
+}
+
+.case-manage-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 0.65rem;
+  cursor: pointer;
+  transition: all var(--transition-smooth);
+}
+
+.case-manage-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+.case-manage-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.case-manage-btn-delete:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+}
+
 .toolbar-input {
   padding: 0.4rem 0.5rem;
   background: var(--bg-input);
@@ -3699,6 +3786,25 @@ body {
 
 .mobile-case-item.selected .mobile-case-item-check {
   opacity: 1;
+}
+
+.mobile-case-item-delete {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  opacity: 0.4;
+  flex-shrink: 0;
+  border-radius: 4px;
+  transition: all var(--transition-smooth);
+}
+
+.mobile-case-item-delete:active {
+  opacity: 1;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.15);
 }
 
 .mobile-case-picker-footer {
