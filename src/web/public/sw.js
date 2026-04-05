@@ -18,7 +18,7 @@
  * @see src/push-store.ts -- server-side VAPID key management and subscription CRUD
  */
 
-const CACHE_NAME = 'codeman-v1';
+const CACHE_NAME = 'codeman-v2';
 
 // Core app shell -- cached on install for instant startup
 const APP_SHELL = [
