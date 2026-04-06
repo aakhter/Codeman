@@ -131,23 +131,35 @@ Object.assign(CodemanApp.prototype, {
       const xtermTextarea = container.querySelector('.xterm-helper-textarea');
       if (xtermTextarea && MobileDetection.isTouchDevice()) {
         let composing = false;
+        let lastKeydownHandled = 0;
         xtermTextarea.addEventListener('compositionstart', () => { composing = true; });
         xtermTextarea.addEventListener('compositionend', () => { composing = false; });
+        // Track when xterm handles a keydown normally (non-229 keyCode).
+        // If xterm processed the keydown, it will emit onData itself --
+        // the input event handler below must NOT re-send the character.
+        xtermTextarea.addEventListener('keydown', (e) => {
+          if (!e.isComposing && e.keyCode !== 229) {
+            lastKeydownHandled = Date.now();
+          }
+        });
         xtermTextarea.addEventListener('input', (e) => {
-          // Only handle insertText events outside of composition — these are
+          // Only handle insertText events outside of composition -- these are
           // the ones xterm.js misses on Android virtual keyboards.
           if (composing || e.isComposing) return;
           if (e.inputType !== 'insertText' || !e.data) return;
+          // If xterm just handled a keydown (within 50ms), it already sent the
+          // char via onData. Skip to avoid double-send (e.g., Shift+A => AA).
+          if (Date.now() - lastKeydownHandled < 50) return;
           // xterm.js may have already processed this via its own input handler.
           // Check if the textarea was cleared by xterm (value is empty or just
-          // whitespace) — if so, xterm handled it and we should not double-send.
+          // whitespace) -- if so, xterm handled it and we should not double-send.
           // Use a microtask to check after xterm's own handlers have run.
           const data = e.data;
           Promise.resolve().then(() => {
-            // If xterm cleared the textarea, it processed the input — skip.
+            // If xterm cleared the textarea, it processed the input -- skip.
             const val = xtermTextarea.value;
             if (!val || val.trim() === '') return;
-            // xterm didn't process it — forward to terminal as if typed.
+            // xterm didn't process it -- forward to terminal as if typed.
             // Emit via onData path by writing to terminal's input handler.
             this.terminal._core.coreService.triggerDataEvent(data, true);
             // Clear the textarea to prevent xterm from processing it later.
