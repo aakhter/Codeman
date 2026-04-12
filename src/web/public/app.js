@@ -1709,6 +1709,8 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
 
   renderSessionTabs() {
+    // Don't re-render while user is typing in the inline rename input
+    if (this._inlineRenameActive) return;
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
   }
 
@@ -1853,6 +1855,7 @@ class CodemanApp {
   }
 
   _fullRenderSessionTabs() {
+    if (this._inlineRenameActive) return;
     const container = this.$('sessionTabs');
 
     // Clean up any orphaned dropdowns before re-rendering
