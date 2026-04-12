@@ -6,7 +6,9 @@
 
 import { FastifyInstance } from 'fastify';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import {
   ApiErrorCode,
@@ -51,6 +53,9 @@ import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
+
+// Path to linked-cases registry (same file used by case-routes resolveCasePath)
+const LINKED_CASES_FILE = join(homedir(), '.codeman', 'linked-cases.json');
 
 // Pre-compiled regex for terminal buffer cleaning (avoids per-request compilation)
 // eslint-disable-next-line no-control-regex
@@ -545,14 +550,18 @@ export function registerSessionRoutes(
     }
 
     const session = findSessionOrFail(ctx, id);
-    const muxName = (session as any)._muxSession?.muxName;
+    const muxName = session.muxName;
     if (!muxName) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No tmux session');
     }
 
     try {
-      const { execFileSync } = await import('child_process');
-      execFileSync('tmux', ['send-keys', '-H', '-t', muxName, ...hex], { timeout: 5000 });
+      await new Promise<void>((resolve, reject) => {
+        execFile('tmux', ['send-keys', '-H', '-t', muxName, ...hex], { timeout: 5000 }, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
     } catch (err) {
       console.error('[Server] send-key failed:', err);
       return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, 'tmux send-keys failed');
@@ -914,12 +923,23 @@ export function registerSessionRoutes(
       }
     }
 
-    const casePath = validatePathWithinBase(caseName, CASES_DIR);
+    // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
+    // This mirrors the behaviour of resolveCasePath() in case-routes so that linked
+    // external project directories are honoured by quick-start just like regular case routes.
+    let linkedCases: Record<string, string> = {};
+    try {
+      const raw = await fs.readFile(LINKED_CASES_FILE, 'utf-8');
+      linkedCases = JSON.parse(raw);
+    } catch {
+      // File missing or unparseable — treat as empty registry
+    }
+    const linkedCasePath = linkedCases[caseName];
+    const casePath = linkedCasePath || validatePathWithinBase(caseName, CASES_DIR);
     if (!casePath) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case path');
     }
 
-    // Create case folder and CLAUDE.md if it doesn't exist
+    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked cases)
     if (!existsSync(casePath)) {
       try {
         mkdirSync(casePath, { recursive: true });
@@ -1093,7 +1113,7 @@ export function registerSessionRoutes(
           text.length < 8
         )
           continue;
-        return text.length > MAX_PROMPT_LEN ? text.slice(0, MAX_PROMPT_LEN) + '…' : text;
+        return text.length > MAX_PROMPT_LEN ? text.slice(0, MAX_PROMPT_LEN) + '\u2026' : text;
       } catch {
         // Malformed line — skip
       }

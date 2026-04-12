@@ -83,10 +83,8 @@ Object.assign(CodemanApp.prototype, {
 
       // Shift+Enter / Ctrl+Enter: insert newline for multi-line input.
       // xterm.js sends plain \r for all Enter variants, so Claude Code (Ink) can't
-      // distinguish them.  We use tmux send-keys via HTTP POST to send the named
-      // key (e.g. S-Enter) which tmux translates to the correct CSI u sequence
-      // for the inner application.  Direct PTY write doesn't work because tmux
-      // doesn't know xterm.js supports CSI u (no client capability negotiation).
+      // distinguish them. We use tmux send-keys -H to send a line feed byte (0x0a)
+      // which the inner application recognizes as "insert newline" vs carriage return.
       if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey) && ev.type === 'keydown') {
         if (this.activeSessionId) {
           if (this._localEchoEnabled) {

@@ -6614,6 +6614,22 @@ kbd {
   padding-left: 0.5rem;
 }
 
+.file-tree-download {
+  display: none;
+  margin-left: auto;
+  padding: 0 4px;
+  color: #888;
+  text-decoration: none;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.file-tree-item:hover .file-tree-download {
+  display: inline;
+}
+.file-tree-download:hover {
+  color: #4fc3f7;
+}
+
 /* File tree indent levels */
 .file-tree-item[data-depth="0"] { padding-left: 0.5rem; }
 .file-tree-item[data-depth="1"] { padding-left: 1.25rem; }

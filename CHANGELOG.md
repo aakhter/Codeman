@@ -1,5 +1,28 @@
 # aicodeman
 
+## 0.5.12
+
+### Patch Changes
+
+- Fix quick-start to resolve linked cases before codeman-cases fallback. `/api/quick-start` was always resolving `caseName` against `CASES_DIR`, ignoring entries in `~/.codeman/linked-cases.json`. Sessions started via quick-start now correctly honour linked external project directories, consistent with regular case routes.
+
+## 0.5.11
+
+### Patch Changes
+
+- Community contributions and security hardening:
+  - Mobile response viewer: native-scroll panel for reading full Claude responses with markdown rendering via marked.js (PR #62)
+  - PWA support: service worker caching, web app manifest, and Android home screen install (PR #59)
+  - Named Cloudflare tunnel support (PR #58)
+  - Markdown rendering for response viewer with HTML sanitization (XSS prevention) — strips dangerous elements, event handlers, and javascript: URIs
+  - Service worker switched from stale-while-revalidate to network-first caching so deploys take effect immediately
+  - Content-Disposition filename sanitization to prevent header injection in file downloads
+  - Expose session.muxName public getter, replace unsafe `as any` cast in session-routes
+  - Static import for execFile in session-routes
+  - Keyboard shortcut updates: Alt+1-9 tab switching, Shift+Enter newline
+  - Repo restructure for cleaner GitHub landing page
+  - Mobile logo, expandable history, session resume fixes
+
 ## 0.5.10
 
 ### Patch Changes
