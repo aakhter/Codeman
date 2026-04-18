@@ -314,7 +314,6 @@ body {
 .session-tab.active[data-color="purple"] { background: rgba(168, 85, 247, 0.15); border-color: rgba(168, 85, 247, 0.5); box-shadow: 0 0 10px rgba(168, 85, 247, 0.3); }
 .session-tab.active[data-color="pink"] { background: rgba(236, 72, 153, 0.15); border-color: rgba(236, 72, 153, 0.5); box-shadow: 0 0 10px rgba(236, 72, 153, 0.3); }
 
-
 /* Tab number indicator (Alt+N shortcut hint) */
 .session-tab .tab-number {
   display: inline-flex;

@@ -287,8 +287,8 @@ Object.assign(CodemanApp.prototype, {
         });
         const createCaseData = await createCaseRes.json();
         if (!createCaseData.success) throw new Error(createCaseData.error || 'Failed to create case');
-        // Use the newly created case data (API returns { success, case: { name, path } })
-        caseData = createCaseData.case;
+        // API returns { success, data: { case: { name, path } } }
+        caseData = createCaseData.data.case;
       }
 
       const workingDir = caseData.path;
@@ -425,7 +425,21 @@ Object.assign(CodemanApp.prototype, {
     try {
       // Get the case path
       const caseRes = await fetch(`/api/cases/${caseName}`);
-      const caseData = await caseRes.json();
+      let caseData = await caseRes.json();
+
+      // Create the case if it doesn't exist
+      if (!caseData.path) {
+        const createCaseRes = await fetch('/api/cases', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: caseName, description: '' })
+        });
+        const createCaseData = await createCaseRes.json();
+        if (!createCaseData.success) throw new Error(createCaseData.error || 'Failed to create case');
+        // API returns { success, data: { case: { name, path } } }
+        caseData = createCaseData.data.case;
+      }
+
       const workingDir = caseData.path;
       if (!workingDir) throw new Error('Case path not found');
 
