@@ -10,7 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Type check | `tsc --noEmit` |
 | Lint | `npm run lint` (fix: `npm run lint:fix`) |
 | Format | `npm run format` (check: `npm run format:check`) |
-| Single test | `npx vitest run test/<file>.test.ts` |
+| Single test | `npm test -- test/<file>.test.ts` (or `npx vitest run --config config/vitest.config.ts test/<file>.test.ts`) |
+| Build | `npm run build` (esbuild via `scripts/build.mjs`, NOT tsc — `tsc --noEmit` is type-check only) |
 | Production | `npm run build && systemctl --user restart codeman-web` |
 
 ## CRITICAL: Session Safety
@@ -48,9 +49,11 @@ When user says "COM":
    CHANGESET
    ```
    Replace `patch` with `minor` or `major` as needed. Include `"xterm-zerolag-input": patch` on a separate line if that package changed too.
-3. **Consume the changeset**: `npm run version-packages` (bumps versions in `package.json` files and updates `CHANGELOG.md`)
+3. **Consume the changeset**: `npm run version-packages` (auto-bumps `package.json` files, updates `CHANGELOG.md`, runs `npm install --package-lock-only`, and verifies lockfile sync via `scripts/check-lockfile-sync.mjs` — all in one command; never hand-edit `CHANGELOG.md` or `package-lock.json` versions)
 4. **Sync CLAUDE.md version**: Update the `**Version**` line below to match the new version from `package.json`
 5. **Commit and deploy**: `git add -A && git commit -m "chore: version packages" && git push && npm run build && systemctl --user restart codeman-web`
+
+CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
 **Version**: 0.6.0 (must match `package.json`)
 
@@ -78,7 +81,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | Production start | `npm run start` |
 | Production logs | `journalctl --user -u codeman-web -f` |
 
-**CI**: `.github/workflows/ci.yml` runs `typecheck`, `lint`, `format:check` on push to master/main and on PRs (Node 22). Tests excluded (they spawn tmux).
+**CI**: `.github/workflows/ci.yml` runs `check:lockfile`, `typecheck`, `lint`, `format:check` on push to master/main and on PRs (Node 22). Tests excluded (they spawn tmux).
 
 **Code style**: Prettier (`singleQuote: true`, `printWidth: 120`, `trailingComma: "es5"`). ESLint flat config (`config/eslint.config.js`) allows `no-console`, warns on `@typescript-eslint/no-explicit-any`. Ignores: `app.js`, `scripts/**/*.mjs`, `src/web/public/vendor/**`, `scripts/remotion/**`.
 
@@ -87,7 +90,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 - **Single-line prompts only** — `writeViaMux()` sends text+Enter separately; multi-line breaks Ink
 - **ESM only** — Never `require()`, use `await import()`. `tsx` masks CJS/ESM issues in dev but production breaks
 - **Package ≠ product name** — npm: `aicodeman`, product: **Codeman**. Release renames tags accordingly
-- **Global regex `lastIndex`** — Use `createAnsiPatternFull/Simple()` factories, not shared `g`-flag patterns in loops
+- **Global regex `lastIndex`** — Shared `g`-flag patterns in loops must reset `lastIndex = 0` first, or use the `execPattern()` helper in `utils/regex-patterns.ts` (resets automatically)
 
 **Import conventions**: Utils from `./utils`, types from `./types` (barrel), config from specific `./config/*` files.
 
@@ -110,10 +113,10 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | **Infra** | `src/hooks-config.ts`, `src/push-store.ts`, `src/tunnel-manager.ts`, `src/image-watcher.ts`, `src/file-stream-manager.ts` | |
 | **Plan** | `src/plan-orchestrator.ts`, `src/prompts/*.ts`, `src/templates/claude-md.ts` | |
 | **Web** | `src/web/server.ts`, `src/web/sse-events.ts`, `src/web/routes/*.ts` (15 route modules + barrel), `src/web/route-helpers.ts`, `src/web/ports/*.ts`, `src/web/middleware/auth.ts`, `src/web/schemas.ts` | |
-| **Frontend** | `src/web/public/app.js` (~2.8K lines, core) + 5 infra modules (`constants.js`, `mobile-handlers.js`, `voice-input.js`, `notification-manager.js`, `keyboard-accessory.js`) + 7 domain modules (`terminal-ui.js`, `respawn-ui.js`, `ralph-panel.js`, `orchestrator-panel.js`, `settings-ui.js`, `panels-ui.js`, `session-ui.js`) + 4 feature modules (`ralph-wizard.js`, `api-client.js`, `subagent-windows.js`, `input-cjk.js`) + `sw.js` | |
-| **Types** | `src/types/index.ts` → 14 domain files | See `@fileoverview` in index.ts |
+| **Frontend** | `src/web/public/app.js` (~2.9K lines, core) + 5 infra modules (`constants.js`, `mobile-handlers.js`, `voice-input.js`, `notification-manager.js`, `keyboard-accessory.js`) + 7 domain modules (`terminal-ui.js`, `respawn-ui.js`, `ralph-panel.js`, `orchestrator-panel.js`, `settings-ui.js`, `panels-ui.js`, `session-ui.js`) + 4 feature modules (`ralph-wizard.js`, `api-client.js`, `subagent-windows.js`, `input-cjk.js`) + `sw.js` | |
+| **Types** | `src/types/index.ts` (barrel) → 14 domain files; also `src/types.ts` root re-export | See `@fileoverview` in index.ts |
 
-★ = Large file (>50KB). All files have `@fileoverview` JSDoc — read that before diving in.
+★ = Large file (>50KB). All files have `@fileoverview` JSDoc — read that before diving in. Discovery aid: `grep -l '@fileoverview' src/web/routes/*.ts` lists all route modules; same grep works for `src/types/`, `src/web/public/*.js`.
 
 **Local package**: `packages/xterm-zerolag-input/` — local echo overlay for xterm.js; copy embedded in `app.js`.
 
@@ -167,11 +170,11 @@ Frontend JS modules have `@fileoverview` with `@dependency`/`@loadorder` tags. L
 
 ### SSE Event Registry
 
-~118 event types in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). Both must be kept in sync.
+~120 event types in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). Both must be kept in sync.
 
 ### API Routes
 
-~125 handlers across 15 route files in `src/web/routes/`: system (36), sessions (25), orchestrator (10), ralph (9), plan (8), respawn (7), cases (7), files (5), mux (5), scheduled (4), push (4), teams (2), hooks (1), clipboard (1), ws (1 WebSocket). Each file has `@fileoverview` with endpoint details.
+~128 handlers across 15 route files in `src/web/routes/`: system (36), sessions (27), orchestrator (10), cases (9), ralph (9), plan (8), respawn (7), files (5), mux (5), push (4), scheduled (4), teams (2), hooks (1), clipboard (1), ws (1 WebSocket). Each file has `@fileoverview` with endpoint details.
 
 ## Adding Features
 
@@ -193,10 +196,12 @@ All in `~/.codeman/`: `state.json` (sessions, settings, respawn), `mux-sessions.
 **CRITICAL: You are running inside a Codeman-managed tmux session.** Never run `npx vitest run` (full suite) — it spawns/kills tmux sessions and will crash your own session. Only run individual files:
 
 ```bash
-npx vitest run test/<specific-file>.test.ts     # Single file (SAFE)
-npx vitest run -t "pattern"                      # By name (SAFE)
-# npx vitest run                                 # DANGEROUS — DON'T DO THIS
+npm test -- test/<specific-file>.test.ts         # Single file (SAFE, uses config/vitest.config.ts)
+npm test -- -t "pattern"                          # By name (SAFE)
+# npm test                                        # DANGEROUS — runs full suite, DON'T DO THIS
 ```
+
+Raw `npx vitest` skips `config/vitest.config.ts`; always use `npm test --` or pass `--config config/vitest.config.ts`.
 
 **Config**: Vitest with `globals: true`, `fileParallelism: false`. Timeout 30s, teardown 60s.
 
@@ -205,10 +210,6 @@ npx vitest run -t "pattern"                      # By name (SAFE)
 **Ports**: Pick unique ports manually. Search `const PORT =` before adding new tests.
 
 **Respawn tests**: Use `MockSession` from `test/respawn-test-utils.ts`. **Route tests**: `app.inject()` in `test/routes/`. **Mobile tests**: Playwright suite in `test/mobile/` (135 device profiles).
-
-## Screenshots
-
-Mobile screenshots in `~/.codeman/screenshots/`. API: `GET /api/screenshots`, `POST /api/screenshots`.
 
 ## Debugging
 
@@ -220,27 +221,14 @@ curl localhost:3000/api/subagents | jq             # Background agents
 cat ~/.codeman/state.json | jq                     # Persisted state
 ```
 
+Mobile screenshots: `~/.codeman/screenshots/`, accessed via `GET/POST /api/screenshots`.
+
 ## Performance & Limits
 
 Target: 20 sessions, 50 agent windows at 60fps. Limits in `src/config/`: terminal 2MB, text 1MB, messages 1000, max agents 500, max sessions 50, max SSE clients 100. Use `LRUMap` for bounded caches, `StaleExpirationMap` for TTL cleanup. Anti-flicker pipeline: `docs/terminal-anti-flicker.md`.
 
-## References
+**Memory leaks (24+ hour sessions)**: use `CleanupManager`, clear Maps in `stop()`, guard async with `if (this.cleanup.isStopped) return`. Frontend: store handler refs, clean in `close*()`. Verify: `npm test -- test/memory-leak-prevention.test.ts`.
 
-Deep-dive docs in `docs/`: `respawn-state-machine.md`, `ralph-wiggum-guide.md`, `claude-code-hooks-reference.md`, `terminal-anti-flicker.md`, `opencode-integration.md`, `qr-auth-plan.md`, `orchestrator-loop-architecture.md`, `browser-testing-guide.md`. Agent Teams: `docs/agent-teams/README.md`. SSE events: `src/web/sse-events.ts` + `constants.js`.
+## Scripts & Tunnel
 
-## Scripts
-
-Key: `scripts/tmux-manager.sh` (safe tmux mgmt), `scripts/tunnel.sh` (tunnel start/stop/url). Production: `scripts/codeman-web.service`, `scripts/codeman-tunnel.service`.
-
-## Memory Leak Prevention
-
-24+ hour sessions: use `CleanupManager`, clear Maps in `stop()`, guard async with `if (this.cleanup.isStopped) return`. Frontend: store handler refs, clean in `close*()`. Verify: `npx vitest run test/memory-leak-prevention.test.ts`.
-
-## Common Workflows
-
-**Bug investigation**: Dev server → reproduce in browser → check terminal + `~/.codeman/state.json`.
-**Respawn changes**: Read `docs/respawn-state-machine.md` first. Use `MockSession` from `test/respawn-test-utils.ts`.
-
-## Tunnel
-
-`./scripts/tunnel.sh start|stop|url`. **Always set `CODEMAN_PASSWORD`** before exposing via tunnel.
+Key scripts: `scripts/tmux-manager.sh` (safe tmux mgmt), `scripts/tunnel.sh start|stop|url` (tunnel). Production services: `scripts/codeman-web.service`, `scripts/codeman-tunnel.service`. **Always set `CODEMAN_PASSWORD`** before exposing via tunnel.
