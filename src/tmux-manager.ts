@@ -904,14 +904,20 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Batch: single tmux call to get all session names + pane PIDs (replaces N per-session subprocess calls)
     const activeSessions = new Map<string, number>();
     try {
-      const output = execSync("tmux list-panes -a -F '#{session_name}\t#{pane_pid}' 2>/dev/null || true", {
+      // Use '|' rather than '\t' as FORMAT separator: under non-tty execution
+      // contexts (launchd on macOS, systemd without TTY) tmux emits '\t' in
+      // FORMAT strings as the literal two chars `\` + `t`, so `indexOf(tab-char)`
+      // never matches, `activeSessions` stays empty, and every known session is
+      // classified as dead — wiping state.json on restart. '|' is passed through
+      // verbatim in every environment and is not a valid tmux session-name char.
+      const output = execSync("tmux list-panes -a -F '#{session_name}|#{pane_pid}' 2>/dev/null || true", {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
       }).trim();
 
       for (const line of output.split('\n')) {
         if (!line) continue;
-        const sep = line.indexOf('\t');
+        const sep = line.indexOf('|');
         if (sep === -1) continue;
         const name = line.slice(0, sep);
         const pid = parseInt(line.slice(sep + 1), 10);
