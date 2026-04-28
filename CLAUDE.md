@@ -55,7 +55,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 0.6.1 (must match `package.json`)
+**Version**: 0.6.3 (must match `package.json`)
 
 ## Project Overview
 
@@ -78,6 +78,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | Dev with TLS | `npx tsx src/index.ts web --https` |
 | Continuous typecheck | `tsc --noEmit --watch` |
 | Test coverage | `npm run test:coverage` |
+| Dead-code sweep | `npm run knip` (config in `knip.json`) |
 | Production start | `npm run start` |
 | Production logs | `journalctl --user -u codeman-web -f` |
 
@@ -91,6 +92,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 - **ESM only** — Never `require()`, use `await import()`. `tsx` masks CJS/ESM issues in dev but production breaks
 - **Package ≠ product name** — npm: `aicodeman`, product: **Codeman**. Release renames tags accordingly
 - **Global regex `lastIndex`** — Shared `g`-flag patterns in loops must reset `lastIndex = 0` first, or use the `execPattern()` helper in `utils/regex-patterns.ts` (resets automatically)
+- **`envOverrides` flow `CLAUDE_CODE_*` / `OPENCODE_*` env vars** — Set via `POST /api/sessions { envOverrides }`, stored on `Session._envOverrides`, exported by `tmux-manager.buildEnvExports()` at spawn time, persisted in `SessionState.envOverrides`. **Do NOT** write these to `<case>/.claude/settings.local.json` — that's the old path and creates UI/disk drift
 
 **Import conventions**: Utils from `./utils`, types from `./types` (barrel), config from specific `./config/*` files.
 

@@ -2203,13 +2203,10 @@ body {
 
 .history-item {
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.55rem 0.8rem;
+  flex-direction: column;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
-  cursor: pointer;
   transition: all var(--transition-smooth);
   text-align: left;
 }
@@ -2220,20 +2217,37 @@ body {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
+.history-item.expanded {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.history-item-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.8rem;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
 .history-item-text {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.2rem;
 }
 
 .history-item-title {
   font-size: 0.8rem;
   color: var(--text);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .history-item-subtitle {
@@ -2244,18 +2258,99 @@ body {
   white-space: nowrap;
 }
 
+.history-item-subtitle.is-case {
+  color: #7aa7ff;
+  font-weight: 500;
+}
+
 .history-item-meta {
   font-size: 0.7rem;
   color: var(--text-muted);
   white-space: nowrap;
+  align-self: center;
 }
 
-.history-item-size {
-  font-size: 0.7rem;
+.history-item-expand {
+  appearance: none;
+  border: none;
+  background: transparent;
   color: var(--text-dim);
-  white-space: nowrap;
-  min-width: 45px;
-  text-align: right;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background var(--transition-smooth), color var(--transition-smooth);
+  flex-shrink: 0;
+}
+
+.history-item-expand:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.history-item.expanded .history-item-expand {
+  color: #7aa7ff;
+  transform: rotate(90deg);
+}
+
+.history-item-detail {
+  padding: 0.5rem 0.8rem 0.7rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.history-item-detail[hidden] {
+  display: none;
+}
+
+.history-detail-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  word-break: break-word;
+}
+
+.history-detail-label {
+  color: var(--text-dim);
+  min-width: 46px;
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding-top: 0.1rem;
+}
+
+.history-detail-value {
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.history-detail-path {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.68rem;
+  color: #a8b5c9;
+}
+
+.history-detail-meta {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
+@media (max-width: 640px) {
+  .history-item-meta {
+    font-size: 0.65rem;
+  }
+  .history-item-main {
+    gap: 0.45rem;
+    padding: 0.6rem 0.7rem;
+  }
 }
 
 .history-show-more {
@@ -7834,9 +7929,8 @@ kbd {
    Response Viewer — native-scroll overlay for reading Claude responses
    ═══════════════════════════════════════════════════════════════ */
 
-/* Hidden on desktop — only shown on mobile via mobile.css override */
 .btn-response-viewer-header {
-  display: none !important;
+  display: inline-flex !important;
 }
 
 .response-viewer {
@@ -7902,33 +7996,54 @@ kbd {
   line-height: 1;
 }
 
-/* Conversation thread messages */
+/* Conversation thread messages — card-style layout for clear separation */
 .rv-message {
-  margin-bottom: 16px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #2a2a3a;
+  margin: 0 0 18px;
+  padding: 14px 16px 16px;
+  border-radius: 10px;
+  border: 1px solid #252538;
+  border-left-width: 3px;
+  background: #181826;
+  position: relative;
 }
 
 .rv-message:last-child {
-  border-bottom: none;
-  margin-bottom: 0;
-  padding-bottom: 0;
-}
-
-.rv-role {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   margin-bottom: 6px;
 }
 
+/* Distinct accent per role so threads are scannable at a glance */
+.rv-message:has(.rv-role-user),
+.rv-message.rv-msg-user {
+  border-left-color: #7aa2ff;
+  background: #16182a;
+}
+
+.rv-message:has(.rv-role-assistant),
+.rv-message.rv-msg-assistant {
+  border-left-color: #6ddb7f;
+  background: #161f1a;
+}
+
+.rv-role {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .rv-role-user {
-  color: #5c7cfa;
+  color: #7aa2ff;
+  background: rgba(122, 162, 255, 0.12);
 }
 
 .rv-role-assistant {
-  color: #51cf66;
+  color: #6ddb7f;
+  background: rgba(109, 219, 127, 0.12);
 }
 
 /* Markdown rendered content inside response viewer */
@@ -7968,6 +8083,116 @@ kbd {
   border-radius: 6px;
   padding: 10px 12px;
   overflow-x: auto;
+  margin: 1em 0;
+  -webkit-overflow-scrolling: touch;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  position: relative;
+}
+
+/* Default: wrap long lines so mobile code reads naturally without horizontal scroll.
+   Preserve indentation (pre-wrap) but allow breaks inside long tokens
+   (URLs, paths, identifiers) so they don't overflow. */
+.rv-text pre code,
+.response-viewer-body > pre code {
+  background: none;
+  color: #e6e6f0;
+  padding: 0;
+  font-family: 'Fira Code', 'JetBrains Mono', 'SF Mono', Menlo, Monaco, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+
+/* ASCII diagrams (box-drawing, arrows): default is wrap for mobile readability.
+   A toggle button lets users switch to horizontal-scroll mode when preserving
+   the original grid structure matters more than fitting the viewport. The
+   button lives in a wrapper div outside the <pre> so it stays pinned to the
+   visual right edge when the user scrolls horizontally. */
+.rv-text .rv-diagram-wrap,
+.response-viewer-body .rv-diagram-wrap {
+  position: relative;
+  margin: 1em 0;
+  max-width: var(--rv-content-max, 720px);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.rv-text .rv-diagram-wrap > pre.rv-diagram,
+.response-viewer-body .rv-diagram-wrap > pre.rv-diagram {
+  /* Pre lives inside wrap — move outer spacing to wrap */
+  margin: 0;
+  padding-right: 44px;    /* reserve space for the pinned button */
+}
+
+/* Default state: wrap long lines — same behavior as regular code blocks */
+.rv-text pre.rv-diagram code,
+.response-viewer-body pre.rv-diagram code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* Scroll-mode (toggled): preserve structure, horizontal scroll with gradient hint */
+.rv-text pre.rv-diagram.rv-nowrap code,
+.response-viewer-body pre.rv-diagram.rv-nowrap code {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.rv-text pre.rv-diagram.rv-nowrap,
+.response-viewer-body pre.rv-diagram.rv-nowrap {
+  background:
+    linear-gradient(to left, #0f0f1a 0, rgba(15, 15, 26, 0) 28px) right / 28px 100% no-repeat,
+    linear-gradient(to left, rgba(122, 162, 255, 0.18) 0, rgba(15, 15, 26, 0) 28px) right / 28px 100% no-repeat,
+    #0f0f1a;
+}
+
+/* Toggle button — pinned to the wrapper's top-right, NOT affected by <pre>'s
+   horizontal scroll since it lives outside that scrolling container. */
+.rv-wrap-toggle {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #2f2f45;
+  border-radius: 5px;
+  background: rgba(20, 20, 32, 0.92);
+  color: #8b8b97;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s;
+  z-index: 2;
+}
+
+.rv-wrap-toggle:hover,
+.rv-wrap-toggle:active {
+  color: #e0e0ec;
+  border-color: #4a4a65;
+}
+
+/* Default icon = "return" (wrap is active). Clicking switches to expand/scroll. */
+.rv-wrap-toggle::before {
+  content: '↵';
+  font-size: 13px;
+}
+
+.rv-diagram-wrap:has(> pre.rv-nowrap) .rv-wrap-toggle::before,
+.rv-diagram-wrap.rv-wrap-nowrap .rv-wrap-toggle::before {
+  content: '⤢';
+}
+
+.rv-text ul, .rv-text ol,
+.response-viewer-body > ul, .response-viewer-body > ol {
   margin: 0.6em 0;
 }
 
@@ -8003,25 +8228,80 @@ kbd {
   text-decoration: none;
 }
 
-.rv-text table {
+.rv-text a:hover,
+.response-viewer-body a:hover {
+  border-bottom-color: #7aa2ff;
+}
+
+/* Tables — scroll wrapper keeps table proper while allowing horizontal overflow */
+.rv-table-wrap {
+  margin: 1em 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid #2a2a3d;
+  border-radius: 8px;
+  background: #12121d;
+}
+
+.rv-text table,
+.response-viewer-body > table,
+.rv-table-wrap > table {
   border-collapse: collapse;
-  margin: 0.6em 0;
+  margin: 0;
   width: 100%;
-  font-size: 0.9em;
+  font-size: 0.92em;
+  line-height: 1.55;
 }
 
-.rv-text th, .rv-text td {
-  border: 1px solid #333;
-  padding: 4px 8px;
+.rv-text th, .rv-text td,
+.response-viewer-body > table th,
+.response-viewer-body > table td,
+.rv-table-wrap th, .rv-table-wrap td {
+  border-bottom: 1px solid #252538;
+  border-right: 1px solid #252538;
+  padding: 8px 12px;
   text-align: left;
+  vertical-align: top;
+  white-space: normal;
 }
 
-.rv-text th {
-  background: #2a2a3e;
-  color: #e0e0e0;
+.rv-text th:last-child, .rv-text td:last-child,
+.response-viewer-body > table th:last-child,
+.response-viewer-body > table td:last-child,
+.rv-table-wrap th:last-child, .rv-table-wrap td:last-child {
+  border-right: none;
 }
 
-.rv-text hr {
+.rv-text tr:last-child td,
+.response-viewer-body > table tr:last-child td,
+.rv-table-wrap tr:last-child td {
+  border-bottom: none;
+}
+
+.rv-text th,
+.response-viewer-body > table th,
+.rv-table-wrap th {
+  background: #20202e;
+  color: #f0f0f5;
+  font-weight: 600;
+  border-bottom: 2px solid #2f2f45;
+  white-space: nowrap;
+}
+
+.rv-text tbody tr:nth-child(even) td,
+.response-viewer-body > table tbody tr:nth-child(even) td,
+.rv-table-wrap tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.rv-text tbody tr:hover td,
+.response-viewer-body > table tbody tr:hover td,
+.rv-table-wrap tbody tr:hover td {
+  background: rgba(122, 162, 255, 0.06);
+}
+
+.rv-text hr,
+.response-viewer-body > hr {
   border: none;
   border-top: 1px solid #333;
   margin: 1em 0;

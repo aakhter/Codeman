@@ -44,7 +44,7 @@ import {
   validatePathWithinBase,
 } from '../route-helpers.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
-import { writeHooksConfig, updateCaseEnvVars, updateCaseModel } from '../../hooks-config.js';
+import { writeHooksConfig, updateCaseModel, stripCaseEnvKeys } from '../../hooks-config.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { imageWatcher } from '../../image-watcher.js';
 import { getLifecycleLog } from '../../session-lifecycle-log.js';
@@ -166,9 +166,21 @@ export function registerSessionRoutes(
       }
     }
 
-    // Write env overrides to .claude/settings.local.json if provided
-    if (body.envOverrides && Object.keys(body.envOverrides).length > 0) {
-      await updateCaseEnvVars(workingDir, body.envOverrides);
+    // envOverrides flow through Session → tmux setenv (ephemeral, per-session).
+    //
+    // For keys the caller is actively setting, strip any stale disk entry a prior
+    // Codeman version may have written. Scope limited to:
+    //   - Claude mode (OpenCode doesn't read .claude/settings.local.json)
+    //   - workingDir inside CASES_DIR (Codeman's managed territory — we never mutate
+    //     .claude/settings.local.json in arbitrary user repos that POST /api/sessions
+    //     can target, because those may have hand-authored values).
+    const canStripDisk =
+      body.mode !== 'opencode' &&
+      body.envOverrides &&
+      Object.keys(body.envOverrides).length > 0 &&
+      workingDir.startsWith(CASES_DIR + '/');
+    if (canStripDisk) {
+      await stripCaseEnvKeys(workingDir, Object.keys(body.envOverrides!));
     }
 
     // Write model override to .claude/settings.local.json if provided
@@ -239,6 +251,7 @@ export function registerSessionRoutes(
       allowedTools: claudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
       resumeSessionId: validatedResumeId,
+      envOverrides: body.envOverrides,
     });
 
     ctx.addSession(session);
@@ -582,15 +595,99 @@ export function registerSessionRoutes(
 
   // ========== Get Last Response (from transcript JSONL) ==========
 
+  // Resolves the most recent Claude conversation id for a session's cwd by
+  // tailing ~/.claude/history.jsonl. After `/clear`, Claude Code keeps writing
+  // to a new <uuid>.jsonl; history.jsonl is the only source-of-truth update
+  // that does not rely on project-local hooks (we intentionally don't install
+  // hooks in arbitrary user repos, see the POST /api/sessions comment).
+  //
+  // Entries from OTHER Codeman sessions in the same cwd are filtered out by
+  // their known claudeSessionIds so concurrent tabs don't shadow each other,
+  // as long as each has had its id resolved at least once.
+  async function resolveActiveClaudeSessionIdFromHistory(
+    session: Session,
+    projectsDir: string
+  ): Promise<string | null> {
+    const historyPath = join(homedir(), '.claude', 'history.jsonl');
+    const otherClaudeIds = new Set<string>();
+    for (const s of ctx.sessions.values()) {
+      if (s.id !== session.id && s.workingDir === session.workingDir && s.claudeSessionId) {
+        otherClaudeIds.add(s.claudeSessionId);
+      }
+    }
+
+    let candidateSid: string | null = null;
+    try {
+      const content = await fs.readFile(historyPath, 'utf8');
+      const lines = content.split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line) as { project?: string; sessionId?: string };
+          if (
+            entry.project === session.workingDir &&
+            typeof entry.sessionId === 'string' &&
+            !otherClaudeIds.has(entry.sessionId)
+          ) {
+            candidateSid = entry.sessionId;
+            break;
+          }
+        } catch {
+          // Skip unparseable lines
+        }
+      }
+    } catch {
+      return null;
+    }
+    if (!candidateSid || candidateSid === session.id) return candidateSid;
+
+    // Safety: only adopt if the candidate's jsonl is more recently written
+    // than our initial conversation's jsonl. Blocks stale ids inherited from
+    // a prior Codeman session that happened to share this cwd.
+    try {
+      const projectDirs = await fs.readdir(projectsDir);
+      let candidateMtime = 0;
+      let initialMtime = 0;
+      for (const projDir of projectDirs) {
+        try {
+          const cs = await fs.stat(join(projectsDir, projDir, `${candidateSid}.jsonl`));
+          if (cs.mtimeMs > candidateMtime) candidateMtime = cs.mtimeMs;
+        } catch {
+          /* not in this dir */
+        }
+        try {
+          const is = await fs.stat(join(projectsDir, projDir, `${session.id}.jsonl`));
+          if (is.mtimeMs > initialMtime) initialMtime = is.mtimeMs;
+        } catch {
+          /* not in this dir */
+        }
+      }
+      if (candidateMtime === 0) return null;
+      if (initialMtime > 0 && candidateMtime <= initialMtime) return null;
+    } catch {
+      return null;
+    }
+    return candidateSid;
+  }
+
   app.get('/api/sessions/:id/last-response', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id);
 
-    // The Claude conversation ID (used as JSONL filename)
-    const claudeSessionId = session.claudeSessionId || session.id;
-
     // Scan ~/.claude/projects/*/ for the transcript file
     const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
+
+    // Adopt the current conversation id if the user ran `/clear` — Claude CLI's
+    // interactive PTY emits no JSON on stdout, so without this lookup the
+    // stored id stays pinned to the pre-/clear transcript.
+    const activeId = await resolveActiveClaudeSessionIdFromHistory(session, projectsDir);
+    if (activeId && activeId !== session.claudeSessionId) {
+      session.adoptClaudeSessionId(activeId);
+    }
+
+    // The Claude conversation ID (used as JSONL filename)
+    const claudeSessionId = session.claudeSessionId || session.id;
     let transcriptText = '';
     let transcriptTimestamp = '';
 
@@ -854,7 +951,11 @@ export function registerSessionRoutes(
       );
     }
 
-    const { prompt, workingDir } = parseBody(QuickRunSchema, req.body, 'Invalid request body');
+    const {
+      prompt,
+      workingDir,
+      envOverrides: runEnvOverrides,
+    } = parseBody(QuickRunSchema, req.body, 'Invalid request body');
 
     if (!prompt.trim()) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'prompt is required');
@@ -873,7 +974,7 @@ export function registerSessionRoutes(
       }
     }
 
-    const session = new Session({ workingDir: dir });
+    const session = new Session({ workingDir: dir, envOverrides: runEnvOverrides });
     ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
@@ -910,7 +1011,12 @@ export function registerSessionRoutes(
       );
     }
 
-    const { caseName = 'testcase', mode = 'claude', openCodeConfig } = parseBody(QuickStartSchema, req.body);
+    const {
+      caseName = 'testcase',
+      mode = 'claude',
+      openCodeConfig,
+      envOverrides,
+    } = parseBody(QuickStartSchema, req.body);
 
     // Check OpenCode availability if requested
     if (mode === 'opencode') {
@@ -962,6 +1068,12 @@ export function registerSessionRoutes(
       }
     }
 
+    // Strip stale disk entries for keys this request is actively setting (Claude only —
+    // see POST /api/sessions for full rationale).
+    if (mode !== 'opencode' && envOverrides && Object.keys(envOverrides).length > 0) {
+      await stripCaseEnvKeys(casePath, Object.keys(envOverrides));
+    }
+
     // Create a new session with the case as working directory
     // Apply global Nice priority config and model config from settings
     const niceConfig = await ctx.getGlobalNiceConfig();
@@ -983,6 +1095,7 @@ export function registerSessionRoutes(
       claudeMode: qsClaudeModeConfig.claudeMode,
       allowedTools: qsClaudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
+      envOverrides,
     });
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting

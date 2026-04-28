@@ -857,8 +857,40 @@ Object.assign(CodemanApp.prototype, {
     return items;
   },
 
+  /**
+   * Resolve workingDir to a case-aware short label.
+   * - Exact case path match → "#caseName"
+   * - workingDir under a case dir → "#caseName/subdir"
+   * - Otherwise → basename (e.g. "Claudeman")
+   */
+  _resolveCaseLabel(workingDir, cases) {
+    if (!workingDir) return '';
+    let best = null;
+    for (const c of cases || []) {
+      if (!c || !c.path) continue;
+      if (workingDir === c.path) {
+        return `#${c.name}`;
+      }
+      if (workingDir.startsWith(c.path + '/')) {
+        const len = c.path.length;
+        if (!best || len > best.len) {
+          best = { name: c.name, suffix: workingDir.slice(len), len };
+        }
+      }
+    }
+    if (best) return `#${best.name}${best.suffix}`;
+    return workingDir.split('/').pop() || workingDir;
+  },
+
+  /** Normalize home prefixes to "~/" on both Linux and macOS */
+  _shortenHomePath(p) {
+    return (p || '')
+      .replace(/^\/home\/[^/]+\//, '~/')
+      .replace(/^\/Users\/[^/]+\//, '~/');
+  },
+
   /** Build a single history item DOM element */
-  _buildHistoryItem(s) {
+  _buildHistoryItem(s, cases) {
     const size =
       s.sizeBytes < 1024
         ? `${s.sizeBytes}B`
@@ -870,12 +902,17 @@ Object.assign(CodemanApp.prototype, {
       date.toLocaleDateString('en', { month: 'short', day: 'numeric' }) +
       ' ' +
       date.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: false });
-    const shortDir = s.workingDir.replace(/^\/home\/[^/]+\//, '~/');
+    const shortDir = this._shortenHomePath(s.workingDir);
+    const caseLabel = this._resolveCaseLabel(s.workingDir, cases);
 
     const item = document.createElement('div');
     item.className = 'history-item';
     item.title = s.workingDir;
-    item.addEventListener('click', () => this.resumeHistorySession(s.sessionId, s.workingDir));
+
+    // Main row: clickable surface that triggers resume
+    const mainRow = document.createElement('div');
+    mainRow.className = 'history-item-main';
+    mainRow.addEventListener('click', () => this.resumeHistorySession(s.sessionId, s.workingDir));
 
     const textCol = document.createElement('div');
     textCol.className = 'history-item-text';
@@ -886,7 +923,8 @@ Object.assign(CodemanApp.prototype, {
 
     const subtitleSpan = document.createElement('span');
     subtitleSpan.className = 'history-item-subtitle';
-    subtitleSpan.textContent = shortDir;
+    if (caseLabel.startsWith('#')) subtitleSpan.classList.add('is-case');
+    subtitleSpan.textContent = caseLabel;
 
     textCol.append(titleSpan, subtitleSpan);
 
@@ -894,11 +932,54 @@ Object.assign(CodemanApp.prototype, {
     metaSpan.className = 'history-item-meta';
     metaSpan.textContent = timeStr;
 
-    const sizeSpan = document.createElement('span');
-    sizeSpan.className = 'history-item-size';
-    sizeSpan.textContent = size;
+    const expandBtn = document.createElement('button');
+    expandBtn.className = 'history-item-expand';
+    expandBtn.type = 'button';
+    expandBtn.setAttribute('aria-label', 'Show details');
+    expandBtn.setAttribute('aria-expanded', 'false');
+    expandBtn.textContent = '⋯'; // ⋯
 
-    item.append(textCol, metaSpan, sizeSpan);
+    mainRow.append(textCol, metaSpan, expandBtn);
+
+    // Detail panel: full prompt + full path, hidden by default
+    const detail = document.createElement('div');
+    detail.className = 'history-item-detail';
+    detail.hidden = true;
+
+    const promptRow = document.createElement('div');
+    promptRow.className = 'history-detail-row';
+    const promptLabel = document.createElement('span');
+    promptLabel.className = 'history-detail-label';
+    promptLabel.textContent = 'Prompt';
+    const promptText = document.createElement('span');
+    promptText.className = 'history-detail-value history-detail-prompt';
+    promptText.textContent = s.firstPrompt || '(no prompt captured)';
+    promptRow.append(promptLabel, promptText);
+
+    const pathRow = document.createElement('div');
+    pathRow.className = 'history-detail-row';
+    const pathLabel = document.createElement('span');
+    pathLabel.className = 'history-detail-label';
+    pathLabel.textContent = 'Path';
+    const pathText = document.createElement('span');
+    pathText.className = 'history-detail-value history-detail-path';
+    pathText.textContent = shortDir;
+    pathRow.append(pathLabel, pathText);
+
+    const metaRow = document.createElement('div');
+    metaRow.className = 'history-detail-row history-detail-meta';
+    metaRow.textContent = `${timeStr} · ${size} · ${s.sessionId.slice(0, 8)}`;
+
+    detail.append(promptRow, pathRow, metaRow);
+
+    expandBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const expanded = item.classList.toggle('expanded');
+      detail.hidden = !expanded;
+      expandBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    });
+
+    item.append(mainRow, detail);
     return item;
   },
 
@@ -911,7 +992,15 @@ Object.assign(CodemanApp.prototype, {
     if (!container || !list) return;
 
     try {
-      const allSessions = await this._fetchHistorySessions(30);
+      // Load cases in parallel so subtitle can show "#caseName" labels.
+      // Prefer already-loaded this.cases to avoid an extra request.
+      const casesPromise = Array.isArray(this.cases) && this.cases.length > 0
+        ? Promise.resolve(this.cases)
+        : fetch('/api/cases').then((r) => (r.ok ? r.json() : [])).catch(() => []);
+      const [allSessions, cases] = await Promise.all([
+        this._fetchHistorySessions(30),
+        casesPromise,
+      ]);
       if (allSessions.length === 0) {
         container.style.display = 'none';
         return;
@@ -922,7 +1011,7 @@ Object.assign(CodemanApp.prototype, {
 
       // Render initial items
       for (let i = 0; i < Math.min(initialCount, allSessions.length); i++) {
-        list.appendChild(this._buildHistoryItem(allSessions[i]));
+        list.appendChild(this._buildHistoryItem(allSessions[i], cases));
       }
 
       // Add "Show More" button if there are more items
@@ -932,7 +1021,7 @@ Object.assign(CodemanApp.prototype, {
         moreBtn.textContent = `Show ${allSessions.length - initialCount} more`;
         moreBtn.addEventListener('click', () => {
           for (let i = initialCount; i < allSessions.length; i++) {
-            list.insertBefore(this._buildHistoryItem(allSessions[i]), moreBtn);
+            list.insertBefore(this._buildHistoryItem(allSessions[i], cases), moreBtn);
           }
           moreBtn.remove();
         });
@@ -965,11 +1054,21 @@ Object.assign(CodemanApp.prototype, {
       }
       const name = `w${startNumber}-${dirName}`;
 
-      // Create session with resumeSessionId
+      // Create session with resumeSessionId — include envOverrides so resumed
+      // conversations inherit current UI settings (effort, agent teams, etc.).
+      // Match by path (not basename) so linked/renamed cases still resolve correctly.
+      const matchingCase = (this.cases || []).find((c) => c.path === workingDir);
+      const caseName = matchingCase?.name || workingDir.split('/').pop() || '';
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
       const createRes = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workingDir, name, resumeSessionId: sessionId }),
+        body: JSON.stringify({
+          workingDir,
+          name,
+          resumeSessionId: sessionId,
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        }),
       });
       const createData = await createRes.json();
       if (!createData.success) throw new Error(createData.error);

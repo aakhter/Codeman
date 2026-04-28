@@ -1,5 +1,33 @@
 # aicodeman
 
+## 0.6.3
+
+### Patch Changes
+
+- **Fix**
+  - Allowlist `opusContext1mEnabled` in `SettingsUpdateSchema`. Without this entry, the strict schema rejected `PUT /api/settings {"opusContext1mEnabled":...}` with `INVALID_INPUT`, so the toggle's value never persisted across reloads. The frontend was already reading and writing this key (`settings-ui.js:336/1137`, `session-ui.js:340`), so saves were silently failing — users never noticed because the load path falls back to `false` on missing keys, hiding the bug. (#78)
+
+## 0.6.2
+
+### Patch Changes
+
+- **Mobile UX**
+  - Resume Conversation list (welcome page) reworked for narrow screens: 2-line title clamp so more of the first prompt is visible; case-aware subtitle that renders `#caseName` (or `#caseName/sub`) when `workingDir` matches a known case, otherwise falls back to the directory basename; inline `⋯` toggle that expands a detail panel with full prompt, full path, timestamp, size, and short session id; `/Users/<user>/` now collapses to `~/` alongside `/home/<user>/`. (#77)
+  - Response viewer: ASCII diagram wrap toggle, dedicated mobile code-block layout, and chrome-stripping fallback when the model wraps its reply in extra markup. (#75)
+  - Mobile keyboard accessory bar no longer triggers vertical scroll. (#72)
+
+  **Sessions & settings**
+  - New `thinkingEffort` setting on session creation, with `xhigh` option and `/effort max` mobile shortcut. (#73)
+  - `thinkingEffort` is now allowlisted in `SettingsUpdateSchema` so it round-trips through PATCH /api/settings.
+  - `envOverrides` (`CLAUDE_CODE_*` / `OPENCODE_*`) are now passed to Claude via tmux env exports at spawn time instead of being written to `<case>/.claude/settings.local.json`. Eliminates UI/disk drift; the value lives on `Session._envOverrides`, is exported by `tmux-manager.buildEnvExports()`, and is persisted in `SessionState.envOverrides`. (#74)
+
+  **Fixes**
+  - Eye icon (active-session indicator) now follows `/clear` to the new Claude conversation instead of getting stuck on the previous transcript. (#76)
+  - `tmux-manager.reconcileSessions` now uses `|` as the field separator, fixing parsing when session names contain other delimiters. (#71)
+
+  **Docs**
+  - CLAUDE.md: added `npm run knip` to the dead-code sweep table and a `Common Gotchas` entry documenting the `envOverrides` → tmux export flow.
+
 ## 0.6.1
 
 ### Patch Changes

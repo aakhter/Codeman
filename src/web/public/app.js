@@ -911,11 +911,9 @@ class CodemanApp {
     const tpl = document.createElement('template');
     tpl.innerHTML = html;  // Safe: this is a sanitizer that strips dangerous content before use
     const frag = tpl.content;
-    // Remove dangerous elements
     for (const el of frag.querySelectorAll('script, iframe, object, embed, form, base, meta, link, style')) {
       el.remove();
     }
-    // Strip dangerous attributes from all elements
     for (const el of frag.querySelectorAll('*')) {
       for (const attr of [...el.attributes]) {
         const name = attr.name.toLowerCase();
@@ -929,22 +927,169 @@ class CodemanApp {
         }
       }
     }
-    // Serialize back via a container
     const div = document.createElement('div');
     div.appendChild(frag);
     return div.innerHTML;
+  }
+
+  /**
+   * Strip ANSI escape sequences and Claude CLI chrome (status bar, hints,
+   * spinner, progress bar) from a terminal buffer so the response viewer can
+   * show just the conversational text when the JSONL transcript is missing.
+   */
+  _cleanTerminalBuffer(buf) {
+    const stripped = buf
+      // CSI sequences — params (0x30-0x3F includes digits, ?, ;, <, =, >),
+      // intermediates (0x20-0x2F), final byte (0x40-0x7E). Catches \x1b[>c,
+      // \x1b[>q, \x1b[?25l etc. that the previous regex missed.
+      .replace(/\x1b\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x7E]/g, '')
+      // OSC sequences (window titles etc.) terminated by BEL or ST
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      // DCS / APC / PM / SOS sequences
+      .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')
+      // SS2/SS3 + charset selects + single-char escapes
+      .replace(/\x1b[NO()][A-Z0-9]?/g, '')
+      .replace(/\x1b[>=<78cDEHM]/g, '')
+      // Stray control chars (except \t \n)
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+      .replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Drop Claude CLI chrome lines that aren't part of the response.
+    const CHROME_PATTERNS = [
+      /^\s*❯\s*/,                                  // shell prompt
+      /^\s*[⏵⏺⏸⏹]+\s*/,                           // status glyphs
+      /^\s*✻\s*(Crunching|Crunched|Thinking)/i,   // spinner lines
+      /bypass permissions/i,
+      /\bshift\+tab to cycle\b/i,
+      /^\s*focus\s*$/,
+      /^\s*new task\?/i,
+      /\/clear to save/i,
+      /^\s*─{5,}\s*$/,                            // horizontal dividers
+      /\[(Opus|Sonnet|Haiku|GPT|Claude)[\s\S]*(tokens?|\$|¥|%|↑|↓)/i, // status bar
+      /^\s*\[\d+[km]?\/\d+[km]?\]/i,              // token counter
+      /[█░▓▒]{3,}/,                              // progress bar
+      /^\s*\(.*\s*(tokens?|context).*\)\s*$/i,
+    ];
+
+    const lines = stripped.split('\n');
+    const kept = lines.filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true; // keep blanks so paragraphs survive
+      return !CHROME_PATTERNS.some((re) => re.test(line));
+    });
+
+    return kept
+      .join('\n')
+      .replace(/[ \t]+$/gm, '')
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim();
+  }
+
+  /**
+   * Wrap ASCII/box diagrams in fenced code blocks so marked.js preserves whitespace.
+   * Claude often emits box-drawing diagrams without triple-backticks; without this
+   * step, HTML collapses the whitespace and the diagram becomes unreadable prose.
+   */
+  _preprocessAsciiArt(text) {
+    // Only trigger on characters that rarely appear in prose:
+    //   U+2500-U+257F  Box Drawing      (─│┌┐└┘├┤┬┴┼╔╗╚╝═║)
+    //   U+2580-U+259F  Block Elements   (▀▄█▌▐░▒▓, progress bars)
+    // Deliberately excluded:
+    //   U+2190-U+21FF  Arrows           (→←↑↓⇒ — common rhetorical prose)
+    //   U+25A0-U+25FF  Geometric Shapes (●○■□◆◇ — common bullets)
+    // Triggering on those would wrap numbered lists / prose that merely uses
+    // arrows in code blocks and break their markdown rendering.
+    const BOX_PATTERN = /[─-╿▀-▟]/;
+
+    // Preserve existing fenced code blocks as-is (hide them behind placeholders)
+    const fenceRe = /```[\s\S]*?```/g;
+    const placeholders = [];
+    const masked = text.replace(fenceRe, (m) => {
+      placeholders.push(m);
+      return ` FENCE${placeholders.length - 1} `;
+    });
+
+    // Split on blank-line paragraph boundaries; wrap any paragraph containing
+    // box-drawing/arrow chars in its own fenced block.
+    const processed = masked
+      .split(/(\n{2,})/)
+      .map((chunk) => {
+        if (/^\n{2,}$/.test(chunk)) return chunk; // keep separators
+        if (!chunk.trim()) return chunk;
+        if (chunk.includes(' FENCE')) return chunk;
+        if (BOX_PATTERN.test(chunk)) return '\n```\n' + chunk + '\n```\n';
+        return chunk;
+      })
+      .join('');
+
+    return processed.replace(/ FENCE(\d+) /g, (_m, i) => placeholders[Number(i)]);
   }
 
   /** Render markdown to sanitized HTML, falling back to plain text if marked.js unavailable */
   _renderMarkdown(text) {
     if (typeof marked !== 'undefined' && marked.parse) {
       try {
-        return this._sanitizeHtml(marked.parse(text, { breaks: true, gfm: true }));
+        const prepared = this._preprocessAsciiArt(text);
+        let html = this._sanitizeHtml(marked.parse(prepared, { breaks: true, gfm: true }));
+        // Wrap tables in a horizontal-scroll container so they overflow gracefully
+        // on mobile without collapsing into block-level cells.
+        html = html.replace(/<table>/g, '<div class="rv-table-wrap"><table>')
+                   .replace(/<\/table>/g, '</table></div>');
+        // Tag code blocks containing box-drawing glyphs as diagrams (same
+        // narrow trigger as _preprocessAsciiArt — arrows/geometric shapes
+        // don't count because they appear frequently in prose).
+        // Default is wrap (readable on mobile); a toggle button lets the user
+        // switch to horizontal-scroll mode when the original structure matters.
+        // The button must live OUTSIDE the <pre> scroll container so it stays
+        // pinned to the visual right edge when the user scrolls horizontally.
+        const DIAGRAM_CHAR = /[─-╿▀-▟]/;
+        const tmpl = document.createElement('template');
+        tmpl.innerHTML = html;
+        tmpl.content.querySelectorAll('pre > code').forEach((code) => {
+          if (!DIAGRAM_CHAR.test(code.textContent || '')) return;
+          const pre = code.parentElement;
+          pre.classList.add('rv-diagram');
+
+          const wrap = document.createElement('div');
+          wrap.className = 'rv-diagram-wrap';
+
+          const btn = document.createElement('button');
+          btn.className = 'rv-wrap-toggle';
+          btn.type = 'button';
+          btn.setAttribute('aria-label', 'Toggle line wrapping');
+          btn.setAttribute('title', 'Toggle line wrapping');
+
+          pre.parentNode.insertBefore(wrap, pre);
+          wrap.appendChild(btn);
+          wrap.appendChild(pre);
+        });
+        return tmpl.innerHTML;
       } catch { /* fall through */ }
     }
     // Fallback: escape HTML and preserve whitespace
     const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return `<pre style="white-space:pre-wrap;word-break:break-word">${escaped}</pre>`;
+  }
+
+  /**
+   * Bind click handlers inside the response viewer body. Uses event delegation
+   * so a single listener serves every diagram-toggle button, including those
+   * added when the conversation is reloaded. Idempotent via a dataset flag.
+   */
+  _bindResponseViewerInteractions(body) {
+    if (!body || body.dataset.rvBound === '1') return;
+    body.dataset.rvBound = '1';
+    body.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.rv-wrap-toggle');
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const wrap = btn.closest('.rv-diagram-wrap');
+      const pre = wrap?.querySelector('pre.rv-diagram');
+      if (!pre || !wrap) return;
+      const nowrap = pre.classList.toggle('rv-nowrap');
+      wrap.classList.toggle('rv-wrap-nowrap', nowrap);
+    });
   }
 
   async toggleResponseViewer() {
@@ -966,27 +1111,18 @@ class CodemanApp {
       const data = await res.json();
       let lastResponse = data.text || '';
 
-      // Source 2: Terminal buffer fallback (strip ANSI codes)
+      // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
       if (!lastResponse) {
         const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
         const termData = await termRes.json();
         if (termData.terminalBuffer) {
-          lastResponse = termData.terminalBuffer
-            .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '')
-            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-            .replace(/\x1b[()][A-Z0-9]/g, '')
-            .replace(/\x1b[>=<]/g, '')
-            .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
-            .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-            .replace(/[ \t]+$/gm, '')
-            .replace(/\n{4,}/g, '\n\n\n')
-            .trim();
+          lastResponse = this._cleanTerminalBuffer(termData.terminalBuffer);
         }
       }
 
       const body = document.getElementById('responseViewerBody');
       body.innerHTML = this._renderMarkdown(lastResponse);
+      this._bindResponseViewerInteractions(body);
 
       // Reset state for fresh open
       const title = document.getElementById('responseViewerTitle');
@@ -1023,11 +1159,12 @@ class CodemanApp {
       body.innerHTML = '';
       for (const msg of messages) {
         const div = document.createElement('div');
-        div.className = 'rv-message';
+        const isUser = msg.role === 'user';
+        div.className = 'rv-message ' + (isUser ? 'rv-msg-user' : 'rv-msg-assistant');
 
         const role = document.createElement('div');
-        role.className = 'rv-role ' + (msg.role === 'user' ? 'rv-role-user' : 'rv-role-assistant');
-        role.textContent = msg.role === 'user' ? 'You' : 'Claude';
+        role.className = 'rv-role ' + (isUser ? 'rv-role-user' : 'rv-role-assistant');
+        role.textContent = isUser ? 'You' : 'Claude';
         div.appendChild(role);
 
         const text = document.createElement('div');
@@ -1037,6 +1174,7 @@ class CodemanApp {
 
         body.appendChild(div);
       }
+      this._bindResponseViewerInteractions(body);
 
       if (title) title.textContent = `Conversation (${messages.length} messages)`;
       if (moreBtn) moreBtn.style.display = 'none';

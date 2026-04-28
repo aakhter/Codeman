@@ -1196,11 +1196,6 @@ html.mobile-init .file-browser-panel {
     touch-action: none;
   }
 
-  /* Response viewer — show eye icon in header on mobile */
-  .btn-response-viewer-header {
-    display: inline-flex !important;
-  }
-
   .response-viewer {
     padding-bottom: var(--safe-area-bottom, 0px);
   }

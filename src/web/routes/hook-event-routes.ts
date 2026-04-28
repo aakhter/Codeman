@@ -43,6 +43,14 @@ export function registerHookEventRoutes(
       }
     }
 
+    // Sync Claude's current conversation id. Interactive PTY mode never emits
+    // `session_id` on stdout, so hooks are the only reliable way to learn that
+    // the user ran `/clear` (which spins up a new conversation jsonl).
+    if (data && typeof data.session_id === 'string' && data.session_id) {
+      const session = ctx.sessions.get(sessionId);
+      session?.adoptClaudeSessionId(data.session_id);
+    }
+
     // Sanitize forwarded data: only include known safe fields, limit size
     const safeData = sanitizeHookData(data);
     ctx.broadcast(`hook:${event}`, { sessionId, timestamp: Date.now(), ...safeData });
