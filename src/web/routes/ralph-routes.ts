@@ -44,9 +44,12 @@ export function registerRalphRoutes(
     };
     const session = findSessionOrFail(ctx, id);
 
-    // Ralph tracker is not supported for opencode sessions
-    if (session.mode === 'opencode') {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Ralph tracker is not supported for opencode sessions');
+    // Ralph tracker is not supported for opencode / codex sessions
+    if (session.mode === 'opencode' || session.mode === 'codex') {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        `Ralph tracker is not supported for ${session.mode} sessions`
+      );
     }
 
     // Handle reset first (before other config)

@@ -1,5 +1,5 @@
 /**
- * @fileoverview Quick start (case loading, session spawning for Claude/Shell/OpenCode),
+ * @fileoverview Quick start (case loading, session spawning for Claude/Shell/OpenCode/Codex),
  * session options modal (per-session settings, color picker, rename),
  * session options tabs (Ralph config tab), case settings (CRUD, links),
  * create case modal, and mobile case picker.
@@ -139,11 +139,14 @@ Object.assign(CodemanApp.prototype, {
     return this.run();
   },
 
-  /** Run using the selected mode (Claude Code or OpenCode) */
+  /** Run using the selected mode (Claude Code, OpenCode, or Codex) */
   async run() {
     const mode = this._runMode || 'claude';
     if (mode === 'opencode') {
       return this.runOpenCode();
+    }
+    if (mode === 'codex') {
+      return this.runCodex();
     }
     return this.runClaude();
   },
@@ -241,7 +244,7 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : 'Run';
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : 'Run';
     }
   },
 
@@ -565,6 +568,47 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async runCodex() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+
+    this.terminal.clear();
+    this.terminal.writeln(`\x1b[1;32m Starting Codex session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln('');
+    this.terminal.focus();
+
+    try {
+      const statusRes = await fetch('/api/codex/status');
+      const status = await statusRes.json();
+      if (!status.available) {
+        this.terminal.writeln('\x1b[1;31m Codex CLI not found.\x1b[0m');
+        this.terminal.writeln('\x1b[90m Install with: npm install -g @openai/codex\x1b[0m');
+        return;
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'codex',
+          codexConfig: {},
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Codex');
+
+      if (data.sessionId) {
+        await this.selectSession(data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+    }
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Session Options Modal
@@ -576,8 +620,9 @@ Object.assign(CodemanApp.prototype, {
 
     this.editingSessionId = sessionId;
 
-    // Reset to an appropriate tab — Summary for OpenCode (Respawn/Ralph are Claude-only)
-    this.switchOptionsTab(session.mode === 'opencode' ? 'summary' : 'respawn');
+    // Reset to an appropriate tab — Summary for OpenCode/Codex (Respawn/Ralph are Claude-only)
+    const isAltMode = session.mode === 'opencode' || session.mode === 'codex';
+    this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
     const respawnStatus = document.getElementById('sessionRespawnStatus');
@@ -605,8 +650,8 @@ Object.assign(CodemanApp.prototype, {
       respawnSection.style.display = 'none';
     }
 
-    // Hide Claude-specific options for OpenCode sessions
-    const isOpenCode = session.mode === 'opencode';
+    // Hide Claude-specific options for OpenCode and Codex sessions
+    const isOpenCode = session.mode === 'opencode' || session.mode === 'codex';
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isOpenCode ? 'none' : ''; });
 
@@ -652,20 +697,20 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('respawnPresetSelect').value = '';
     document.getElementById('presetDescriptionHint').textContent = '';
 
-    // Hide Ralph/Todo tab and Respawn tab for opencode sessions (not supported)
+    // Hide Ralph/Todo tab and Respawn tab for opencode / codex sessions (not supported)
     const ralphTabBtn = document.querySelector('#sessionOptionsModal .modal-tab-btn[data-tab="ralph"]');
     const respawnTabBtn = document.querySelector('#sessionOptionsModal .modal-tab-btn[data-tab="respawn"]');
     if (isOpenCode) {
       if (ralphTabBtn) ralphTabBtn.style.display = 'none';
       if (respawnTabBtn) respawnTabBtn.style.display = 'none';
-      // Default to Context tab for opencode sessions since Respawn is hidden
+      // Default to Context tab for opencode / codex sessions since Respawn is hidden
       this.switchOptionsTab('context');
     } else {
       if (ralphTabBtn) ralphTabBtn.style.display = '';
       if (respawnTabBtn) respawnTabBtn.style.display = '';
     }
 
-    // Populate Ralph Wiggum form with current session values (skip for opencode)
+    // Populate Ralph Wiggum form with current session values (skip for opencode / codex)
     if (!isOpenCode) {
       const ralphState = this.ralphStates.get(sessionId);
       this.populateRalphForm({

@@ -14,6 +14,7 @@ import type {
   ClaudeMode,
   SessionMode,
   OpenCodeConfig,
+  CodexConfig,
 } from './types.js';
 
 /**
@@ -61,6 +62,7 @@ export interface CreateSessionOptions {
   claudeMode?: ClaudeMode;
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
+  codexConfig?: CodexConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EFFORT_LEVEL). Ephemeral — not written to disk. */
@@ -77,6 +79,7 @@ export interface RespawnPaneOptions {
   claudeMode?: ClaudeMode;
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
+  codexConfig?: CodexConfig;
   /** Resume a previous Claude conversation when respawning */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */
@@ -102,7 +105,7 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /**
    * Create a new multiplexer session.
-   * The session runs the appropriate command (claude, opencode, or shell) in detached mode.
+   * The session runs the appropriate command (claude, opencode, codex, or shell) in detached mode.
    */
   createSession(options: CreateSessionOptions): Promise<MuxSession>;
 

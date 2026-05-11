@@ -8,10 +8,11 @@
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
  * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error'
- * - SessionMode — 'claude' | 'shell' | 'opencode' (which CLI backend)
+ * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
+ * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, resumeSessionId)
  *
  * Cross-domain relationships:
  * - SessionState.respawnConfig embeds RespawnConfig (respawn domain)
@@ -38,7 +39,7 @@ export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error';
 export type ClaudeMode = 'dangerously-skip-permissions' | 'normal' | 'allowedTools';
 
 /** Session mode: which CLI backend a session runs */
-export type SessionMode = 'claude' | 'shell' | 'opencode';
+export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex';
 
 /** OpenCode session configuration */
 export interface OpenCodeConfig {
@@ -52,6 +53,16 @@ export interface OpenCodeConfig {
   forkSession?: boolean;
   /** Custom inline config JSON (passed via OPENCODE_CONFIG_CONTENT) */
   configContent?: string;
+}
+
+/** Codex (OpenAI CLI) session configuration */
+export interface CodexConfig {
+  /** Model identifier (e.g., "gpt-5", "o4-mini"). Passed via --model. */
+  model?: string;
+  /** Resume a previous codex conversation by session id (passed via --resume) */
+  resumeSessionId?: string;
+  /** Bypass approval prompts (passes --dangerously-bypass-approvals-and-sandbox) */
+  dangerouslyBypassApprovals?: boolean;
 }
 
 /**
@@ -143,6 +154,8 @@ export interface SessionState {
   cliLatestVersion?: string;
   /** OpenCode-specific configuration (only for mode === 'opencode') */
   openCodeConfig?: OpenCodeConfig;
+  /** Codex-specific configuration (only for mode === 'codex') */
+  codexConfig?: CodexConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
 }

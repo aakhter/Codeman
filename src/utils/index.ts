@@ -25,3 +25,4 @@ export { assertNever } from './type-safety.js';
 export { wrapWithNice } from './nice-wrapper.js';
 export { findClaudeDir, getAugmentedPath } from './claude-cli-resolver.js';
 export { resolveOpenCodeDir } from './opencode-cli-resolver.js';
+export { resolveCodexDir } from './codex-cli-resolver.js';

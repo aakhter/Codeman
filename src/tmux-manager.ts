@@ -39,8 +39,9 @@ import {
   type ClaudeMode,
   type SessionMode,
   type OpenCodeConfig,
+  type CodexConfig,
 } from './types.js';
-import { wrapWithNice, SAFE_PATH_PATTERN, findClaudeDir, resolveOpenCodeDir } from './utils/index.js';
+import { wrapWithNice, SAFE_PATH_PATTERN, findClaudeDir, resolveOpenCodeDir, resolveCodexDir } from './utils/index.js';
 import type {
   TerminalMultiplexer,
   MuxSession,
@@ -209,6 +210,29 @@ function buildOpenCodeCommand(config?: OpenCodeConfig): string {
 }
 
 /**
+ * Build the codex CLI command with appropriate flags.
+ */
+function buildCodexCommand(config?: CodexConfig): string {
+  const parts = ['codex'];
+
+  if (config?.dangerouslyBypassApprovals) {
+    parts.push('--dangerously-bypass-approvals-and-sandbox');
+  }
+
+  if (config?.model) {
+    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
+    if (safeModel) parts.push('--model', safeModel);
+  }
+
+  if (config?.resumeSessionId) {
+    const safeId = /^[a-zA-Z0-9_-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
+    if (safeId) parts.push('resume', safeId);
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
@@ -219,6 +243,7 @@ function buildSpawnCommand(options: {
   claudeMode?: ClaudeMode;
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
+  codexConfig?: CodexConfig;
   resumeSessionId?: string;
 }): string {
   if (options.mode === 'claude') {
@@ -241,6 +266,9 @@ function buildSpawnCommand(options: {
   if (options.mode === 'opencode') {
     return buildOpenCodeCommand(options.openCodeConfig);
   }
+  if (options.mode === 'codex') {
+    return buildCodexCommand(options.codexConfig);
+  }
   return '$SHELL';
 }
 
@@ -254,6 +282,29 @@ function setOpenCodeEnvVars(muxName: string): void {
     const val = process.env[key];
     if (val) {
       // Shell-escape: wrap in single quotes, escape any inner single quotes
+      const escaped = val.replace(/'/g, "'\\''");
+      try {
+        execSync(`tmux setenv -t '${muxName}' ${key} '${escaped}'`, {
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch {
+        /* Non-critical — key may not be needed */
+      }
+    }
+  }
+}
+
+/**
+ * Set sensitive environment variables for Codex on a tmux session via setenv.
+ * Codex (OpenAI CLI) needs OPENAI_API_KEY; we also forward CODEX_* keys.
+ */
+function setCodexEnvVars(muxName: string): void {
+  const sensitiveVars = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
+  for (const key of sensitiveVars) {
+    const val = process.env[key];
+    if (val) {
       const escaped = val.replace(/'/g, "'\\''");
       try {
         execSync(`tmux setenv -t '${muxName}' ${key} '${escaped}'`, {
@@ -462,6 +513,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const dir = resolveOpenCodeDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
+    if (mode === 'codex') {
+      const dir = resolveCodexDir();
+      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+    }
     return { pathExport: '', dir: null };
   }
 
@@ -473,6 +528,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private _configureOpenCode(muxName: string, openCodeConfig?: OpenCodeConfig): void {
     setOpenCodeEnvVars(muxName);
     setOpenCodeConfigContent(muxName, openCodeConfig);
+  }
+
+  /**
+   * Configure Codex-specific environment on a tmux session.
+   * Sets OPENAI_API_KEY (and related keys) via tmux setenv so secrets don't
+   * appear in the bash command line.
+   */
+  private _configureCodex(muxName: string): void {
+    setCodexEnvVars(muxName);
   }
 
   /**
@@ -490,6 +554,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       claudeMode,
       allowedTools,
       openCodeConfig,
+      codexConfig,
       resumeSessionId,
       envOverrides,
     } = options;
@@ -527,6 +592,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (mode === 'opencode' && !cliDir) {
       throw new Error('OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash');
     }
+    if (mode === 'codex' && !cliDir) {
+      throw new Error('Codex CLI not found. Install with: npm install -g @openai/codex');
+    }
 
     const envExportsStr = this.buildEnvExports(sessionId, muxName, mode).join(' && ');
 
@@ -537,6 +605,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       claudeMode,
       allowedTools,
       openCodeConfig,
+      codexConfig,
       resumeSessionId,
     });
 
@@ -577,6 +646,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // (not visible in ps output or tmux history, inherited by panes)
       if (mode === 'opencode') {
         this._configureOpenCode(muxName, openCodeConfig);
+      }
+      // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv
+      if (mode === 'codex') {
+        this._configureCodex(muxName);
       }
 
       // Apply user-supplied env overrides (e.g., CLAUDE_CODE_EFFORT_LEVEL) via tmux setenv
@@ -722,6 +795,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       claudeMode,
       allowedTools,
       openCodeConfig,
+      codexConfig,
       resumeSessionId,
       envOverrides,
     } = options;
@@ -743,6 +817,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       claudeMode,
       allowedTools,
       openCodeConfig,
+      codexConfig,
       resumeSessionId,
     });
     const config = niceConfig || DEFAULT_NICE_CONFIG;
@@ -753,6 +828,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn
       if (mode === 'opencode') {
         this._configureOpenCode(muxName, openCodeConfig);
+      }
+      // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv before respawn
+      if (mode === 'codex') {
+        this._configureCodex(muxName);
       }
 
       // Re-apply user env overrides before respawn so the new shell inherits them.

@@ -240,7 +240,7 @@ export function registerSystemRoutes(
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // CLI Integrations (OpenCode)
+  // CLI Integrations (OpenCode, Codex)
   // ═══════════════════════════════════════════════════════════════
 
   // ========== OpenCode ==========
@@ -250,6 +250,16 @@ export function registerSystemRoutes(
     return {
       available: isOpenCodeAvailable(),
       path: resolveOpenCodeDir(),
+    };
+  });
+
+  // ========== Codex ==========
+
+  app.get('/api/codex/status', async () => {
+    const { isCodexAvailable, resolveCodexDir } = await import('../../utils/codex-cli-resolver.js');
+    return {
+      available: isCodexAvailable(),
+      path: resolveCodexDir(),
     };
   });
 

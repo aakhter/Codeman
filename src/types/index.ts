@@ -14,7 +14,7 @@
  * | Module       | Key exports                                                           | Persistence / API                              |
  * |--------------|-----------------------------------------------------------------------|-------------------------------------------------|
  * | common       | Disposable, BufferConfig, CleanupRegistration, NiceConfig, ProcessStats | In-memory only                                 |
- * | session      | SessionState, SessionConfig, SessionStatus, SessionMode, ClaudeMode, OpenCodeConfig | `~/.codeman/state.json` → `GET /api/sessions`  |
+ * | session      | SessionState, SessionConfig, SessionStatus, SessionMode, ClaudeMode, OpenCodeConfig, CodexConfig | `~/.codeman/state.json` → `GET /api/sessions`  |
  * | task         | TaskDefinition, TaskState, TaskStatus                                 | `~/.codeman/state.json` → `GET /api/tasks`     |
  * | app-state    | AppState, AppConfig, GlobalStats, TokenStats, DEFAULT_CONFIG          | `~/.codeman/state.json` → `GET /api/status`    |
  * | respawn      | RespawnConfig, RespawnPreset, RespawnCycleMetrics, RalphLoopHealthScore, TimingHistory | Per-session in state.json → `GET /api/sessions/:id/respawn` |

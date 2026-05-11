@@ -1,6 +1,6 @@
 /**
  * @fileoverview Pure functions for building CLI arguments and environment variables
- * for Claude and OpenCode CLI spawning.
+ * for Claude, OpenCode, and Codex CLI spawning.
  *
  * Extracted from Session to keep argument construction logic testable and
  * separate from PTY lifecycle management.

@@ -170,12 +170,13 @@ export function registerSessionRoutes(
     //
     // For keys the caller is actively setting, strip any stale disk entry a prior
     // Codeman version may have written. Scope limited to:
-    //   - Claude mode (OpenCode doesn't read .claude/settings.local.json)
+    //   - Claude mode (OpenCode/Codex don't read .claude/settings.local.json)
     //   - workingDir inside CASES_DIR (Codeman's managed territory — we never mutate
     //     .claude/settings.local.json in arbitrary user repos that POST /api/sessions
     //     can target, because those may have hand-authored values).
     const canStripDisk =
       body.mode !== 'opencode' &&
+      body.mode !== 'codex' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       workingDir.startsWith(CASES_DIR + '/');
@@ -195,6 +196,17 @@ export function registerSessionRoutes(
         return createErrorResponse(
           ApiErrorCode.OPERATION_FAILED,
           'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash'
+        );
+      }
+    }
+
+    // Check Codex availability if requested
+    if (body.mode === 'codex') {
+      const { isCodexAvailable } = await import('../../utils/codex-cli-resolver.js');
+      if (!isCodexAvailable()) {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          'Codex CLI not found. Install with: npm install -g @openai/codex'
         );
       }
     }
@@ -235,9 +247,11 @@ export function registerSessionRoutes(
     const model =
       mode === 'opencode'
         ? body.openCodeConfig?.model
-        : mode !== 'shell'
-          ? modelConfig?.defaultModel || undefined
-          : undefined;
+        : mode === 'codex'
+          ? body.codexConfig?.model
+          : mode !== 'shell'
+            ? modelConfig?.defaultModel || undefined
+            : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     const session = new Session({
       workingDir,
@@ -250,6 +264,7 @@ export function registerSessionRoutes(
       claudeMode: claudeModeConfig.claudeMode,
       allowedTools: claudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
+      codexConfig: mode === 'codex' ? body.codexConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
     });
@@ -447,9 +462,10 @@ export function registerSessionRoutes(
 
     try {
       // Auto-detect completion phrase from CLAUDE.md BEFORE starting (only if globally enabled and not explicitly disabled by user)
-      // Ralph tracker is not supported for opencode sessions
+      // Ralph tracker is not supported for opencode / codex sessions
       if (
         session.mode !== 'opencode' &&
+        session.mode !== 'codex' &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -1015,6 +1031,7 @@ export function registerSessionRoutes(
       caseName = 'testcase',
       mode = 'claude',
       openCodeConfig,
+      codexConfig,
       envOverrides,
     } = parseBody(QuickStartSchema, req.body);
 
@@ -1025,6 +1042,17 @@ export function registerSessionRoutes(
         return createErrorResponse(
           ApiErrorCode.OPERATION_FAILED,
           'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash'
+        );
+      }
+    }
+
+    // Check Codex availability if requested
+    if (mode === 'codex') {
+      const { isCodexAvailable } = await import('../../utils/codex-cli-resolver.js');
+      if (!isCodexAvailable()) {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          'Codex CLI not found. Install with: npm install -g @openai/codex'
         );
       }
     }
@@ -1057,8 +1085,8 @@ export function registerSessionRoutes(
         writeFileSync(join(casePath, 'CLAUDE.md'), claudeMd);
 
         // Write .claude/settings.local.json with hooks for desktop notifications
-        // (Claude-specific — OpenCode uses its own plugin system)
-        if (mode !== 'opencode') {
+        // (Claude-specific — OpenCode and Codex use their own plugin systems)
+        if (mode !== 'opencode' && mode !== 'codex') {
           await writeHooksConfig(casePath);
         }
 
@@ -1070,7 +1098,7 @@ export function registerSessionRoutes(
 
     // Strip stale disk entries for keys this request is actively setting (Claude only —
     // see POST /api/sessions for full rationale).
-    if (mode !== 'opencode' && envOverrides && Object.keys(envOverrides).length > 0) {
+    if (mode !== 'opencode' && mode !== 'codex' && envOverrides && Object.keys(envOverrides).length > 0) {
       await stripCaseEnvKeys(casePath, Object.keys(envOverrides));
     }
 
@@ -1081,9 +1109,11 @@ export function registerSessionRoutes(
     const qsModel =
       mode === 'opencode'
         ? openCodeConfig?.model
-        : mode !== 'shell'
-          ? qsModelConfig?.defaultModel || undefined
-          : undefined;
+        : mode === 'codex'
+          ? codexConfig?.model
+          : mode !== 'shell'
+            ? qsModelConfig?.defaultModel || undefined
+            : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const session = new Session({
       workingDir: casePath,
@@ -1095,6 +1125,7 @@ export function registerSessionRoutes(
       claudeMode: qsClaudeModeConfig.claudeMode,
       allowedTools: qsClaudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
+      codexConfig: mode === 'codex' ? codexConfig : undefined,
       envOverrides,
     });
 
@@ -1132,7 +1163,7 @@ export function registerSessionRoutes(
         });
         ctx.broadcast(SseEvent.SessionInteractive, { id: session.id, mode: 'shell' });
       } else {
-        // Both 'claude' and 'opencode' modes use startInteractive()
+        // 'claude', 'opencode', and 'codex' modes use startInteractive()
         await session.startInteractive();
         getLifecycleLog().log({
           event: 'started',
