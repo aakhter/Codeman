@@ -178,6 +178,7 @@ export class WebServer extends EventEmitter {
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
   private sse: SseStreamManager;
   private store = getStore();
+  private host: string;
   private port: number;
   private https: boolean;
   private testMode: boolean;
@@ -226,9 +227,10 @@ export class WebServer extends EventEmitter {
     teamRemoved: (config: unknown) => void;
     taskUpdated: (data: unknown) => void;
   } | null = null;
-  constructor(port: number = 3000, https: boolean = false, testMode: boolean = false) {
+  constructor(port: number = 3000, https: boolean = false, testMode: boolean = false, host: string = '127.0.0.1') {
     super();
     this.setMaxListeners(0);
+    this.host = host;
     this.port = port;
     this.https = https;
     this.testMode = testMode;
@@ -1506,19 +1508,22 @@ export class WebServer extends EventEmitter {
     // Clean up stale sessions from state file that don't have active mux sessions
     this.cleanupStaleSessions();
 
-    await this.app.listen({ port: this.port, host: '0.0.0.0' });
+    await this.app.listen({ port: this.port, host: this.host });
     const protocol = this.https ? 'https' : 'http';
-    console.log(`Codeman web interface running at ${protocol}://localhost:${this.port}`);
+    const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
+    console.log(`Codeman web interface running at ${protocol}://${displayHost}:${this.port}`);
 
-    // Security warning: server binds to 0.0.0.0 (all interfaces) — warn if no auth configured
-    if (!process.env.CODEMAN_PASSWORD) {
+    const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1']);
+    if (!loopbackHosts.has(this.host) && !process.env.CODEMAN_PASSWORD) {
       console.warn('\n⚠  WARNING: No CODEMAN_PASSWORD set — server is accessible without authentication.');
       console.warn('   Anyone on your network can access and control Claude sessions.');
       console.warn('   Set CODEMAN_PASSWORD environment variable to enable auth.\n');
     }
 
     // Set API URL for child processes (MCP server, spawned sessions)
-    process.env.CODEMAN_API_URL = `${protocol}://localhost:${this.port}`;
+    const apiHost =
+      this.host === '0.0.0.0' || this.host === 'localhost' || this.host === '::1' ? '127.0.0.1' : this.host;
+    process.env.CODEMAN_API_URL = `${protocol}://${apiHost}:${this.port}`;
 
     // Start scheduled runs cleanup timer
     this.cleanup.setInterval(
@@ -1996,9 +2001,10 @@ export class WebServer extends EventEmitter {
 export async function startWebServer(
   port: number = 3000,
   https: boolean = false,
-  testMode: boolean = false
+  testMode: boolean = false,
+  host: string = '127.0.0.1'
 ): Promise<WebServer> {
-  const server = new WebServer(port, https, testMode);
+  const server = new WebServer(port, https, testMode, host);
   await server.start();
   return server;
 }

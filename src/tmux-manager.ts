@@ -412,7 +412,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,
-      `export CODEMAN_API_URL=${process.env.CODEMAN_API_URL || 'http://localhost:3000'}`,
+      `export CODEMAN_API_URL=${process.env.CODEMAN_API_URL || 'http://127.0.0.1:3000'}`,
     ];
     // Only unset CLAUDECODE for Claude sessions
     if (mode === 'claude') exports.splice(2, 0, 'unset CLAUDECODE');
