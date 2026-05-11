@@ -86,6 +86,56 @@ setInterval(() => {
   } catch {}
 }, 2000);
 
+// rAF heartbeat — counts animation frames so we can detect rAF starvation
+// (compositor stuck, GPU process unhealthy) where longtask observer is silent
+// because the main thread isn't busy, just waiting.
+let _rafHeartbeatCount = 0;
+let _rafHeartbeatLast = performance.now();
+const _rafHeartbeat = () => { _rafHeartbeatCount++; requestAnimationFrame(_rafHeartbeat); };
+requestAnimationFrame(_rafHeartbeat);
+
+// Periodic state snapshot — runs in setInterval so it fires even when rAF is
+// starved or SSE handlers stop firing. Only logs when something looks wrong,
+// to avoid breadcrumb spam during normal operation.
+setInterval(() => {
+  try {
+    const now = performance.now();
+    const elapsed = now - _rafHeartbeatLast;
+    _rafHeartbeatLast = now;
+    const rafsPerSec = elapsed > 0 ? (_rafHeartbeatCount * 1000 / elapsed) : 0;
+    _rafHeartbeatCount = 0;
+
+    const app = window.app;
+    const queued = (app?.pendingWrites?.reduce((s, w) => s + (w?.length || 0), 0) || 0)
+      + (app?.flickerFilterBuffer?.length || 0);
+    const sseState = app?.eventSource?.readyState ?? -1; // 0=connecting 1=open 2=closed
+    const heapMB = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : 0;
+    const vis = document.visibilityState[0]; // 'v' or 'h'
+    const sessions = app?.sessions?.size ?? 0;
+
+    // Log when abnormal:
+    //   rAF starvation while tab visible (< 10/s, normal is ~60)
+    //   render queue piling up (> 64KB)
+    //   SSE not OPEN
+    const abnormal =
+      (vis === 'v' && rafsPerSec < 10) ||
+      queued > 65536 ||
+      sseState !== 1;
+    // Throttle-floor heartbeat: log at most once per minute even when
+    // everything looks normal so we can prove the main thread is alive
+    // (helps distinguish true freezes from quiet operation).
+    if (!_heartbeatFloorLast) _heartbeatFloorLast = 0;
+    const sinceFloor = now - _heartbeatFloorLast;
+    if (abnormal || sinceFloor > 60000) {
+      _heartbeatFloorLast = now;
+      _crashDiag.log(
+        `HB raf=${rafsPerSec.toFixed(0)}/s q=${(queued/1024).toFixed(0)}KB sse=${sseState} h=${heapMB}MB ${vis} s=${sessions}`
+      );
+    }
+  } catch {}
+}, 1000);
+let _heartbeatFloorLast = 0;
+
 window.addEventListener('error', (e) => {
   _crashDiag.log(`ERROR: ${e.message} at ${e.filename}:${e.lineno}`);
   console.error('[CRASH-DIAG] Uncaught error:', e.message, '\n  File:', e.filename, ':', e.lineno, ':', e.colno, '\n  Stack:', e.error?.stack);
@@ -286,6 +336,12 @@ class CodemanApp {
     this.totalTokens = 0;
     this.globalStats = null; // Global token/cost stats across all sessions
     this.eventSource = null;
+    // Stable per-page client ID — lets the server target this connection
+    // for live filter updates (POST /api/events/subscribe) without forcing
+    // an SSE reconnect on session switches.
+    this._clientId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'c-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
     this.terminal = null;
     this.fitAddon = null;
     this.activeSessionId = null;
@@ -617,12 +673,55 @@ class CodemanApp {
       this._webglAddon = new WebglAddon.WebglAddon();
       this._webglAddon.onContextLoss(() => {
         console.error('[CRASH-DIAG] WebGL context LOST — falling back to canvas renderer');
-        this._webglAddon.dispose();
+        _crashDiag.log('WEBGL_LOST');
+        this._disableWebGLSticky('context-lost');
+        this._webglAddon?.dispose();
         this._webglAddon = null;
       });
       this.terminal.loadAddon(this._webglAddon);
       console.log('[CRASH-DIAG] WebGL renderer enabled');
+      this._installWebGLLongTaskGuard();
     } catch (_e) { /* WebGL2 unavailable — canvas renderer used */ }
+  }
+
+  /**
+   * Watch for sustained main-thread stalls that indicate WebGL/GPU trouble.
+   * After 3 long tasks (>200ms each) within 30s, dispose the WebGL addon and
+   * persist a sticky disable so subsequent reloads also use the DOM renderer.
+   * 5s grace period skips initial-load stalls. Force-re-enable: ?webgl=force.
+   */
+  _installWebGLLongTaskGuard() {
+    if (typeof PerformanceObserver === 'undefined' || this._webglLongTaskObserver) return;
+    const installedAt = performance.now();
+    const recent = [];
+    try {
+      this._webglLongTaskObserver = new PerformanceObserver((list) => {
+        if (!this._webglAddon) return;
+        const now = performance.now();
+        if (now - installedAt < 5000) return;
+        for (const entry of list.getEntries()) {
+          if (entry.duration >= 200) recent.push(entry.startTime);
+        }
+        while (recent.length && now - recent[0] > 30000) recent.shift();
+        if (recent.length >= 3) {
+          console.warn(`[CRASH-DIAG] WebGL long-task threshold (${recent.length} stalls/30s) — falling back to canvas renderer`);
+          _crashDiag.log(`WEBGL_FALLBACK: ${recent.length}`);
+          this._disableWebGLSticky('long-tasks');
+          this._webglAddon?.dispose();
+          this._webglAddon = null;
+          try { this._webglLongTaskObserver.disconnect(); } catch {}
+          this._webglLongTaskObserver = null;
+          try { this.terminal.refresh(0, this.terminal.rows - 1); } catch {}
+        }
+      });
+      this._webglLongTaskObserver.observe({ type: 'longtask', buffered: false });
+    } catch { /* longtask not supported */ }
+  }
+
+  _disableWebGLSticky(reason) {
+    try {
+      localStorage.setItem('codeman-webgl-disabled', JSON.stringify({ reason, at: Date.now() }));
+    } catch {}
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -699,6 +798,28 @@ class CodemanApp {
   // SSE Connection
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * POST a live subscription update so the server filters terminal events
+   * to the given session(s) for this client. Fire-and-forget — failures
+   * are non-fatal because we'll still get every event we don't want
+   * (just at higher cost), and the next reconnect carries the filter via
+   * the SSE query string.
+   */
+  _updateSseSubscription(sessionId) {
+    try {
+      const body = JSON.stringify({
+        clientId: this._clientId,
+        sessions: sessionId ? [sessionId] : null,
+      });
+      fetch('/api/events/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true,
+      }).catch(() => { /* non-fatal */ });
+    } catch { /* non-fatal */ }
+  }
+
   connectSSE() {
     // Check if browser is offline
     if (!navigator.onLine) {
@@ -728,7 +849,13 @@ class CodemanApp {
       this.setConnectionStatus('reconnecting');
     }
 
-    this.eventSource = new EventSource('/api/events');
+    // Build URL with stable client ID and (if known) the active-session
+    // filter so the server only streams session:terminal events for the
+    // session we're rendering. Lifecycle/metadata events are sent globally
+    // regardless of filter (server side).
+    const _sseParams = new URLSearchParams({ clientId: this._clientId });
+    if (this.activeSessionId) _sseParams.set('sessions', this.activeSessionId);
+    this.eventSource = new EventSource(`/api/events?${_sseParams.toString()}`);
 
     // Store all event listeners for cleanup on reconnect
     const listeners = [];
@@ -880,10 +1007,10 @@ class CodemanApp {
       if (data.data.length > 32768) _crashDiag.log(`TERMINAL: ${(data.data.length/1024).toFixed(0)}KB`);
 
       // Hard cap: track total bytes queued in render buffers (pendingWrites +
-      // flickerFilterBuffer). When rAF is throttled (tab
-      // backgrounded, GPU busy), data accumulates with no flush, reaching
-      // 889KB+ and freezing Chrome for minutes. Drop data beyond 128KB and
-      // schedule a buffer reload to recover the display once the burst subsides.
+      // flickerFilterBuffer). When rAF is throttled (tab backgrounded, GPU
+      // busy), data accumulates with no flush, reaching 889KB+ and freezing
+      // Chrome for minutes. Drop data beyond 128KB and schedule a buffer
+      // reload to recover the display once the burst subsides.
       const queued = (this.pendingWrites?.reduce((s, w) => s + w.length, 0) || 0)
         + (this.flickerFilterBuffer?.length || 0);
       if (queued > 131072) { // 128KB — drop to prevent accumulation
@@ -2427,6 +2554,12 @@ class CodemanApp {
     this._cleanupPreviousSession(sessionId);
     this.activeSessionId = sessionId;
     try { localStorage.setItem('codeman-active-session', sessionId); } catch {}
+    // Narrow SSE filter to the active session — server stops streaming
+    // session:terminal events for other sessions to this client. Cuts
+    // SSE traffic ~Nx for N concurrent sessions. Fire-and-forget; on the
+    // rare race where server doesn't know our clientId yet, the next
+    // selectSession or reconnect catches up.
+    this._updateSseSubscription(sessionId);
     this.hideWelcome();
     // Clear idle hooks on view, but keep action hooks until user interacts
     this.clearPendingHooks(sessionId, 'idle_prompt');

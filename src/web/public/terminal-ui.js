@@ -181,10 +181,36 @@ Object.assign(CodemanApp.prototype, {
     // but the 48KB/frame flush cap in flushPendingWrites() now prevents
     // oversized terminal.write() calls that triggered the stalls.
     // Disable with ?nowebgl URL param if GPU issues return.
+    // Auto-fallback: _initWebGL installs a long-task watchdog that disables
+    // WebGL sticky in localStorage after repeated GPU stalls (see app.js).
+    // Force re-enable after sticky disable with ?webgl=force.
     // Lazy-loaded: script downloaded only on desktop (saves 244KB on mobile).
     this._webglAddon = null;
-    const skipWebGL = MobileDetection.getDeviceType() !== 'desktop';
-    if (!skipWebGL && !new URLSearchParams(location.search).has('nowebgl')) {
+    const _params = new URLSearchParams(location.search);
+    if (_params.get('webgl') === 'force') {
+      try { localStorage.removeItem('codeman-webgl-disabled'); } catch {}
+    }
+    const _stickyDisabled = (() => {
+      try {
+        const raw = localStorage.getItem('codeman-webgl-disabled');
+        if (!raw) return false;
+        const { at } = JSON.parse(raw);
+        // Auto-expire after 7 days so we retry (driver may have been fixed)
+        if (Date.now() - at > 7 * 24 * 60 * 60 * 1000) {
+          localStorage.removeItem('codeman-webgl-disabled');
+          return false;
+        }
+        return true;
+      } catch { return false; }
+    })();
+    const skipWebGL =
+      MobileDetection.getDeviceType() !== 'desktop' ||
+      _params.has('nowebgl') ||
+      _stickyDisabled;
+    if (_stickyDisabled) {
+      console.log('[CRASH-DIAG] WebGL sticky-disabled from prior stalls — DOM renderer in use. Re-enable: ?webgl=force');
+    }
+    if (!skipWebGL) {
       if (typeof WebglAddon !== 'undefined') {
         this._initWebGL();
       } else {
@@ -1161,13 +1187,71 @@ Object.assign(CodemanApp.prototype, {
 
     if (!this.writeFrameScheduled) {
       this.writeFrameScheduled = true;
-      requestAnimationFrame(() => {
+      this._safeYield(() => {
         // xterm.js 6.0 handles DEC 2026 sync markers natively — it buffers
         // content between 2026h/2026l and renders atomically. No need for
         // client-side incomplete-block detection; just flush every frame.
         this.flushPendingWrites();
         this.writeFrameScheduled = false;
       });
+    }
+  },
+
+  /**
+   * Schedule cb via THREE racing primitives so data-pacing makes progress
+   * regardless of which scheduling primitive Chrome is throttling:
+   *   1. requestAnimationFrame — primary, fires at compositor rate
+   *      (may be 0Hz when window is occluded / on backgrounded monitor)
+   *   2. setTimeout(50) — fallback for occluded-but-visible windows
+   *      (clamped to 1Hz by Chrome's intensive wake-up throttling
+   *      after ~5 min of no user interaction)
+   *   3. Worker postMessage — bypasses intensive throttling entirely;
+   *      Workers are not subject to background-tab/idle-tab throttling
+   *      (this is the React Scheduler trick).
+   * Whichever fires first wins; the others are no-ops.
+   * Without all three, chunkedTerminalWrite and the deferred path of
+   * flushPendingWrites stall indefinitely when the substrate is degraded.
+   */
+  _safeYield(cb) {
+    let done = false;
+    const wrapped = () => {
+      if (done) return;
+      done = true;
+      cb();
+    };
+    requestAnimationFrame(wrapped);
+    setTimeout(wrapped, 50);
+    this._workerYield(wrapped);
+  },
+
+  /**
+   * Lazy-init a tiny "tick" worker whose only job is to postMessage back to
+   * us as fast as possible, escaping main-thread throttling. The worker's
+   * setTimeout(0) is not subject to Chrome's intensive wake-up throttling
+   * even when the parent tab is idle.
+   */
+  _workerYield(cb) {
+    try {
+      if (this._yieldWorker === undefined) {
+        // First call: build the worker (or mark unavailable). Each
+        // postMessage in produces exactly one postMessage out — we count on
+        // FIFO 1:1 to drain queue entries.
+        const src = "onmessage=()=>setTimeout(()=>postMessage(0),0);";
+        const blob = new Blob([src], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        this._yieldWorker = new Worker(url);
+        URL.revokeObjectURL(url);
+        this._yieldQueue = [];
+        this._yieldWorker.onmessage = () => {
+          const fn = this._yieldQueue.shift();
+          if (fn) fn();
+        };
+      }
+      if (!this._yieldWorker) return;
+      this._yieldQueue.push(cb);
+      this._yieldWorker.postMessage(0);
+    } catch {
+      this._yieldWorker = null; // mark unavailable, future calls skip
     }
   },
 
@@ -1274,7 +1358,7 @@ Object.assign(CodemanApp.prototype, {
       deferred = true;
       if (!this.writeFrameScheduled) {
         this.writeFrameScheduled = true;
-        requestAnimationFrame(() => {
+        this._safeYield(() => {
           this.flushPendingWrites();
           this.writeFrameScheduled = false;
         });
@@ -1407,7 +1491,7 @@ Object.assign(CodemanApp.prototype, {
             `[CRASH-DIAG] chunkedTerminalWrite complete: ${cleanBuffer.length} bytes in ${_chunkCount} chunks, ${_totalMs.toFixed(0)}ms total`
           );
           // Wait one more frame for xterm to finish rendering before resolving
-          requestAnimationFrame(finish);
+          this._safeYield(finish);
           return;
         }
 
@@ -1422,12 +1506,13 @@ Object.assign(CodemanApp.prototype, {
           );
         offset += chunkSize;
 
-        // Schedule next chunk on next frame
-        requestAnimationFrame(writeChunk);
+        // Schedule next chunk; rAF if possible, else setTimeout fallback
+        // so progress doesn't stall on occluded/unfocused windows.
+        this._safeYield(writeChunk);
       };
 
       // Start writing
-      requestAnimationFrame(writeChunk);
+      this._safeYield(writeChunk);
     });
   },
 
