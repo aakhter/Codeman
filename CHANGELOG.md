@@ -1,5 +1,16 @@
 # aicodeman
 
+## 0.6.5
+
+### Patch Changes
+
+- **Mobile fix**
+  - Android virtual keyboard: space character was silently dropped on touch devices using GBoard / SwiftKey / similar IMEs. Root cause: the input-event handler in `terminal-ui.js` treated any whitespace-only textarea value as proof that xterm had already processed the input. A lone space (`' '.trim() === ''`) tripped this guard, so the space was consumed but never forwarded. Now skips only when the textarea is truly empty (or whitespace from a non-space key). Reported and diagnosed by @coolk8 in #79.
+
+  **Docs**
+  - `CLAUDE.md`: added Zod `.optional()`-vs-`null` gotcha (recurring trap from 0.6.3 / 0.6.4 incidents) and a more visible warning against running bare `npm test` (kills the host tmux session).
+  - `docs/local-echo-overlay-plan.md`: marked SHIPPED, corrected xterm version reference (v5.3.0 → `@xterm/xterm` ^6.0.0).
+
 ## 0.6.4
 
 ### Patch Changes

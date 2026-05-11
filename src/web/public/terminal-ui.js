@@ -165,7 +165,7 @@ Object.assign(CodemanApp.prototype, {
           Promise.resolve().then(() => {
             // If xterm cleared the textarea, it processed the input -- skip.
             const val = xtermTextarea.value;
-            if (!val || val.trim() === '') return;
+            if (!val || (val.trim() === '' && data !== ' ')) return;
             // xterm didn't process it -- forward to terminal as if typed.
             // Emit via onData path by writing to terminal's input handler.
             this.terminal._core.coreService.triggerDataEvent(data, true);

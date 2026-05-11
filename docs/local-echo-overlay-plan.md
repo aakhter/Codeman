@@ -1,5 +1,7 @@
 # Local Echo Overlay — Implementation Plan
 
+> **Status: SHIPPED.** Implementation lives in `packages/xterm-zerolag-input/src/` (overlay-renderer.ts, prompt-finder.ts, cell-dimensions.ts, zerolag-input-addon.ts) with the embedded copy in `src/web/public/app.js`. This document is retained as historical design context.
+
 ## Context
 
 User accesses Codeman remotely from Thailand to Switzerland over Tailscale (~200-300ms RTT).
@@ -18,9 +20,9 @@ redraws. A DOM overlay sits in a separate rendering layer (z-index 7) and doesn'
 with Ink's cursor management or screen redraws at all. When Ink redraws (server output arrives),
 we simply hide the overlay.
 
-**Why it will look indistinguishable:** We use the DOM renderer (not canvas/WebGL) in our
-xterm.js v5.3.0, so both terminal text and overlay text are rendered by the same browser
-font engine with identical sub-pixel rendering.
+**Why it will look indistinguishable:** We use the DOM renderer (not canvas/WebGL), so both
+terminal text and overlay text are rendered by the same browser font engine with identical
+sub-pixel rendering. (Originally designed against xterm.js v5.3.0; project now on `@xterm/xterm` ^6.0.0 — the internal `_core._renderService.dimensions` access path still works in v6.)
 
 ## Key Technical Details (from research)
 
@@ -36,7 +38,7 @@ const top  = cursorY * dims.css.cell.height;  // CSS pixels, relative to .xterm-
 - `cursorY` = `terminal.buffer.active.cursorY` (0 to terminal.rows-1, ALREADY viewport-relative)
 - No scroll offset math needed
 
-### Cell Dimensions (v5.3.0 — no public API, use internal)
+### Cell Dimensions (no public API in v5/v6 — use internal; public in v7+)
 ```js
 const dims = terminal._core._renderService.dimensions;
 dims.css.cell.width   // e.g., 8.4px

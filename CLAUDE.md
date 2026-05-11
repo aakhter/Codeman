@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Type check | `tsc --noEmit` |
 | Lint | `npm run lint` (fix: `npm run lint:fix`) |
 | Format | `npm run format` (check: `npm run format:check`) |
-| Single test | `npm test -- test/<file>.test.ts` (or `npx vitest run --config config/vitest.config.ts test/<file>.test.ts`) |
+| Single test | `npm test -- test/<file>.test.ts` (or `npx vitest run --config config/vitest.config.ts test/<file>.test.ts`) — ⚠ **never** run bare `npm test`, see Testing section |
 | Build | `npm run build` (esbuild via `scripts/build.mjs`, NOT tsc — `tsc --noEmit` is type-check only) |
 | Production | `npm run build && systemctl --user restart codeman-web` |
 
@@ -55,7 +55,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 0.6.4 (must match `package.json`)
+**Version**: 0.6.5 (must match `package.json`)
 
 ## Project Overview
 
@@ -93,6 +93,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 - **Package ≠ product name** — npm: `aicodeman`, product: **Codeman**. Release renames tags accordingly
 - **Global regex `lastIndex`** — Shared `g`-flag patterns in loops must reset `lastIndex = 0` first, or use the `execPattern()` helper in `utils/regex-patterns.ts` (resets automatically)
 - **`envOverrides` flow `CLAUDE_CODE_*` / `OPENCODE_*` env vars** — Set via `POST /api/sessions { envOverrides }`, stored on `Session._envOverrides`, exported by `tmux-manager.buildEnvExports()` at spawn time, persisted in `SessionState.envOverrides`. **Do NOT** write these to `<case>/.claude/settings.local.json` — that's the old path and creates UI/disk drift
+- **Zod `.optional()` rejects `null`** — accepts `undefined` only. When the frontend builds a request body with `JSON.stringify`, an explicit `null` field is preserved on the wire and fails validation with `INVALID_INPUT`. Convert `null` → `undefined` before stringifying (e.g. `field: value ?? undefined`), or declare the schema `.nullish()`. Real bugs caused: 0.6.4 (`durationMinutes` for ∞ respawn), and the same shape pattern hit `opusContext1mEnabled` in 0.6.3
 
 **Import conventions**: Utils from `./utils`, types from `./types` (barrel), config from specific `./config/*` files.
 
