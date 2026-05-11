@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
-import { homedir } from 'node:os';
+import { homedir, hostname as getHostname } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionState } from '../types.js';
@@ -119,6 +119,10 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+function escapeHtmlText(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
 import {
   SESSIONS_LIST_CACHE_TTL,
   SCHEDULED_CLEANUP_INTERVAL,
@@ -178,6 +182,7 @@ export class WebServer extends EventEmitter {
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
   private sse: SseStreamManager;
   private store = getStore();
+  private host: string;
   private port: number;
   private https: boolean;
   private testMode: boolean;
@@ -220,18 +225,31 @@ export class WebServer extends EventEmitter {
   private pushStore: PushSubscriptionStore = new PushSubscriptionStore();
   private teamWatcher: TeamWatcher = new TeamWatcher();
   private _orchestratorLoop: import('../orchestrator-loop.js').OrchestratorLoop | null = null;
+  private readonly titleHostname: string;
+  private readonly windowTitle: string;
+  private readonly indexHtmlTemplate: string;
   private teamWatcherHandlers: {
     teamCreated: (config: unknown) => void;
     teamUpdated: (config: unknown) => void;
     teamRemoved: (config: unknown) => void;
     taskUpdated: (data: unknown) => void;
   } | null = null;
-  constructor(port: number = 3000, https: boolean = false, testMode: boolean = false) {
+  constructor(
+    port: number = 3000,
+    https: boolean = false,
+    testMode: boolean = false,
+    host: string = '127.0.0.1',
+    titleHostname?: string
+  ) {
     super();
     this.setMaxListeners(0);
+    this.host = host;
     this.port = port;
     this.https = https;
     this.testMode = testMode;
+    this.titleHostname = titleHostname || getHostname();
+    this.windowTitle = `codeman:${this.titleHostname}`;
+    this.indexHtmlTemplate = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
 
     if (https) {
       const { key, cert } = getOrCreateSelfSignedCert();
@@ -526,6 +544,12 @@ export class WebServer extends EventEmitter {
 
     // Security headers + CORS
     registerSecurityHeaders(this.app, this.https);
+    this.app.get('/', async (_req, reply) => {
+      return reply.header('Cache-Control', 'no-cache').type('text/html; charset=utf-8').send(this.renderIndexHtml());
+    });
+    this.app.get('/index.html', async (_req, reply) => {
+      return reply.header('Cache-Control', 'no-cache').type('text/html; charset=utf-8').send(this.renderIndexHtml());
+    });
     // Service worker must never be cached — browsers check for SW updates on navigation
     this.app.get('/sw.js', async (_req, reply) => {
       return reply
@@ -946,6 +970,13 @@ export class WebServer extends EventEmitter {
     }
 
     this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
+  }
+
+  private renderIndexHtml(): string {
+    return this.indexHtmlTemplate.replace(
+      '<title>Codeman</title>',
+      `<title>${escapeHtmlText(this.windowTitle)}</title>`
+    );
   }
 
   private async setupSessionListeners(session: Session): Promise<void> {
@@ -1506,19 +1537,22 @@ export class WebServer extends EventEmitter {
     // Clean up stale sessions from state file that don't have active mux sessions
     this.cleanupStaleSessions();
 
-    await this.app.listen({ port: this.port, host: '0.0.0.0' });
+    await this.app.listen({ port: this.port, host: this.host });
     const protocol = this.https ? 'https' : 'http';
-    console.log(`Codeman web interface running at ${protocol}://localhost:${this.port}`);
+    const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
+    console.log(`Codeman web interface running at ${protocol}://${displayHost}:${this.port}`);
 
-    // Security warning: server binds to 0.0.0.0 (all interfaces) — warn if no auth configured
-    if (!process.env.CODEMAN_PASSWORD) {
+    const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1']);
+    if (!loopbackHosts.has(this.host) && !process.env.CODEMAN_PASSWORD) {
       console.warn('\n⚠  WARNING: No CODEMAN_PASSWORD set — server is accessible without authentication.');
       console.warn('   Anyone on your network can access and control Claude sessions.');
       console.warn('   Set CODEMAN_PASSWORD environment variable to enable auth.\n');
     }
 
     // Set API URL for child processes (MCP server, spawned sessions)
-    process.env.CODEMAN_API_URL = `${protocol}://localhost:${this.port}`;
+    const apiHost =
+      this.host === '0.0.0.0' || this.host === 'localhost' || this.host === '::1' ? '127.0.0.1' : this.host;
+    process.env.CODEMAN_API_URL = `${protocol}://${apiHost}:${this.port}`;
 
     // Start scheduled runs cleanup timer
     this.cleanup.setInterval(
@@ -1996,9 +2030,11 @@ export class WebServer extends EventEmitter {
 export async function startWebServer(
   port: number = 3000,
   https: boolean = false,
-  testMode: boolean = false
+  testMode: boolean = false,
+  host: string = '127.0.0.1',
+  titleHostname?: string
 ): Promise<WebServer> {
-  const server = new WebServer(port, https, testMode);
+  const server = new WebServer(port, https, testMode, host, titleHostname);
   await server.start();
   return server;
 }

@@ -152,7 +152,7 @@ export class TunnelManager extends EventEmitter {
     }
 
     const protocol = https ? 'https' : 'http';
-    const args = ['tunnel', '--url', `${protocol}://localhost:${localPort}`];
+    const args = ['tunnel', '--url', `${protocol}://127.0.0.1:${localPort}`];
     if (https) {
       args.push('--no-tls-verify');
     }

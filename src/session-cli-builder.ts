@@ -91,7 +91,7 @@ export function buildClaudeEnv(sessionId: string): Record<string, string | undef
     // Inform Claude it's running within Codeman (helps prevent self-termination)
     CODEMAN_MUX: '1',
     CODEMAN_SESSION_ID: sessionId,
-    CODEMAN_API_URL: process.env.CODEMAN_API_URL || 'http://localhost:3000',
+    CODEMAN_API_URL: process.env.CODEMAN_API_URL || 'http://127.0.0.1:3000',
   };
 }
 
@@ -127,6 +127,6 @@ export function buildShellEnv(sessionId: string): Record<string, string | undefi
     TERM: 'xterm-256color',
     CODEMAN_MUX: '1',
     CODEMAN_SESSION_ID: sessionId,
-    CODEMAN_API_URL: process.env.CODEMAN_API_URL || 'http://localhost:3000',
+    CODEMAN_API_URL: process.env.CODEMAN_API_URL || 'http://127.0.0.1:3000',
   };
 }
