@@ -992,6 +992,24 @@ export class Session extends EventEmitter {
   }
 
   private _handleTerminalOutput(data: string): void {
+    // Codex 0.130.0 emits sequences that wipe xterm.js scrollback even with
+    // --no-alt-screen (openai/codex#14277):
+    //   - \x1b[?1049h / \x1b[?47h / \x1b[?1047h: switch to alt buffer (no scrollback)
+    //   - \x1b[3J: erase scrollback (saved lines)
+    //   - \x1b[2J: erase the visible viewport — clears the area where prior
+    //     conversation/shell-output sits before codex repaints just its
+    //     banner + prompt, so the user's content disappears on every redraw.
+    // Filter them at the source so neither the persisted buffer nor the live
+    // SSE/WS stream carries them. The non-cleared rows keep their previous
+    // content; codex's cursor-positioned redraws overwrite only the cells
+    // it actually writes to (banner rows + prompt/status rows).
+    if (this.mode === 'codex') {
+      data = data
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '')
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[[23]J/g, '');
+    }
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
     this._lastActivityAt = Date.now();
