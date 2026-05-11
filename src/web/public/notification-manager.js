@@ -3,7 +3,7 @@
  *
  * The NotificationManager class implements five notification layers:
  *   1. In-app notification drawer (slide-out panel with grouped notifications)
- *   2. Tab title flash (alternating "(*) Codeman" when tab is hidden)
+ *   2. Tab title flash (alternating unread count with the original title when tab is hidden)
  *   3. Browser Notification API (desktop push with auto-close after 8s)
  *   4. Web Push via service worker (OS-level notifications when tab is closed)
  *   5. Audio alerts (Web Audio API beep, user-opt-in)
@@ -291,11 +291,11 @@ class NotificationManager {
         this.titleFlashInterval = setInterval(() => {
           this.titleFlashState = !this.titleFlashState;
           document.title = this.titleFlashState
-            ? `\u26A0\uFE0F (${this.unreadCount}) Codeman`
+            ? `\u26A0\uFE0F (${this.unreadCount}) ${this.originalTitle}`
             : this.originalTitle;
         }, TITLE_FLASH_INTERVAL_MS);
         // Set immediately
-        document.title = `\u26A0\uFE0F (${this.unreadCount}) Codeman`;
+        document.title = `\u26A0\uFE0F (${this.unreadCount}) ${this.originalTitle}`;
       }
     }
   }
