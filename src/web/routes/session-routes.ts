@@ -65,42 +65,58 @@ const CTRL_L_PATTERN = /\x0c/g;
 const LEADING_WHITESPACE_PATTERN = /^[\s\r\n]+/;
 
 /**
- * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
- * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA, CSI n;m H = CUP)
- * to animate the spinner and update the status bar. During long thinking phases, these frames
- * accumulate to 500KB+ of repeated overwrites to the same rows. When the buffer is tailed,
- * only spinner frames are returned, making the terminal appear empty.
+ * Strip redundant TUI redraw frames from the terminal buffer.
  *
- * Strategy: find where absolute-positioned redraws begin (first VPA sequence), then keep
- * only the last ~4KB of redraw frames (the final visual state) and discard the rest.
+ * Both Ink (Claude Code) and Ratatui (Codex) repaint their viewports many
+ * times per second via absolute cursor positioning. During long thinking
+ * phases or working states, these frames accumulate to hundreds of KB of
+ * repeated overwrites to the same rows. When the buffer is tailed, only
+ * the redraw frames are returned and the terminal appears to show only
+ * the latest viewport (welcome banner + prompt for Codex; empty spinner
+ * frame for Claude), with conversation history pushed out of the tail.
+ *
+ * - Ink (Claude) emits VPA (CSI n d) to move cursor to a row.
+ * - Ratatui (Codex) emits CUP (CSI n;m H) to move cursor to row;col.
+ * Both reset to the top of the viewport at the start of each render cycle.
+ *
+ * Strategy: find where absolute-positioned redraws begin (first VPA or CUP),
+ * then keep only the last complete frame (since the row drops back to ~top)
+ * and discard the rest.
  */
 function stripInkRedrawBloat(buffer: string): string {
-  // Find where Ink's absolute-positioned redraws start (first CSI n d = VPA)
+  // Find where TUI absolute-positioned redraws start.
+  // Use the earlier of: first VPA (Ink) or first CUP (Ratatui/Codex).
   // eslint-disable-next-line no-control-regex
   const firstVPA = buffer.search(/\x1b\[\d+d/);
-  if (firstVPA === -1) return buffer; // No Ink redraws
+  // eslint-disable-next-line no-control-regex
+  const firstCUP = buffer.search(/\x1b\[\d+;\d+H/);
+  let firstRedraw = -1;
+  if (firstVPA >= 0 && firstCUP >= 0) firstRedraw = Math.min(firstVPA, firstCUP);
+  else if (firstVPA >= 0) firstRedraw = firstVPA;
+  else if (firstCUP >= 0) firstRedraw = firstCUP;
+  if (firstRedraw === -1) return buffer; // No TUI redraws
 
-  const contentPart = buffer.slice(0, firstVPA);
-  const redrawPart = buffer.slice(firstVPA);
+  const contentPart = buffer.slice(0, firstRedraw);
+  const redrawPart = buffer.slice(firstRedraw);
 
   // If the redraw section is small (<16KB), not worth stripping
   if (redrawPart.length < 16384) return buffer;
 
-  // Find the last complete Ink frame by searching for where the VPA row
-  // number drops (cursor jumps back to viewport top for a new render cycle).
-  // Search the last 64KB — a single Ink frame with response content can be
-  // 10-20KB, so 4KB was too small and caused partial frames (blank gap).
+  // Find the last complete frame by searching for where the cursor row
+  // drops back near the top (start of a new render cycle). Match either
+  // VPA (CSI n d) or CUP (CSI n;m H). A single frame with response content
+  // can be 10-20KB, so we search the last 64KB.
   const searchLen = Math.min(redrawPart.length, 65536);
   const searchWindow = redrawPart.slice(-searchLen);
 
   // eslint-disable-next-line no-control-regex
-  const vpaRe = /\x1b\[(\d+)d/g;
+  const moveRe = /\x1b\[(\d+)(?:;\d+)?[dH]/g;
   let lastFrameStart = 0;
   let prevRow = -1;
   let match;
-  while ((match = vpaRe.exec(searchWindow)) !== null) {
+  while ((match = moveRe.exec(searchWindow)) !== null) {
     const row = parseInt(match[1], 10);
-    // Row number dropped significantly — Ink started a new frame
+    // Row number dropped significantly — start of a new frame
     if (prevRow > 0 && row < prevRow - 5) {
       lastFrameStart = match.index;
     }
