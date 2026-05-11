@@ -437,10 +437,17 @@ Object.assign(CodemanApp.prototype, {
             // then \x1b[H\x1b[2J clears the viewport for a clean Ink redraw.
             // IMPORTANT: Only clear when we're actually sending SIGWINCH (dims changed).
             // Clearing without a subsequent Ink redraw leaves the terminal blank.
+            //
+            // Gated to Claude only: this fix is specific to Ink's cursor-up reflow math.
+            // OpenCode (Bubble Tea) and Codex (Ratatui) don't have the same bug, and for
+            // Codex the clear actually causes the conversation to disappear (the TUI
+            // redraws only its current frame — the welcome banner — into the empty
+            // viewport, so prior scrollback is gone visually even though the process
+            // still has full context).
             const activeResizeSession = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
             if (
               activeResizeSession &&
-              activeResizeSession.mode !== 'shell' &&
+              activeResizeSession.mode === 'claude' &&
               !activeResizeSession._ended &&
               this.terminal &&
               this.isTerminalAtBottom()
