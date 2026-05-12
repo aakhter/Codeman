@@ -993,12 +993,19 @@ export class Session extends EventEmitter {
 
   private _handleTerminalOutput(data: string): void {
     // Codex 0.130.0 emits sequences that wipe xterm.js scrollback even with
-    // --no-alt-screen (openai/codex#14277):
+    // --no-alt-screen (openai/codex#14277), plus mouse-tracking enables that
+    // hijack the scroll wheel so the user can't access scrollback at all:
     //   - \x1b[?1049h / \x1b[?47h / \x1b[?1047h: switch to alt buffer (no scrollback)
     //   - \x1b[3J: erase scrollback (saved lines)
     //   - \x1b[2J: erase the visible viewport — clears the area where prior
     //     conversation/shell-output sits before codex repaints just its
     //     banner + prompt, so the user's content disappears on every redraw.
+    //   - \x1b[?1000h / 1002h / 1003h / 1005h / 1006h / 1007h: mouse tracking
+    //     modes (X10, button-event, any-event, UTF-8, SGR, alt-scroll). Once
+    //     enabled, xterm.js forwards wheel events to the codex process instead
+    //     of scrolling the viewport — the conversation IS in scrollback but
+    //     the user can't scroll up to see it. (Focus events at ?1004 are left
+    //     alone — codeman uses them for active-tab detection.)
     // Filter them at the source so neither the persisted buffer nor the live
     // SSE/WS stream carries them. The non-cleared rows keep their previous
     // content; codex's cursor-positioned redraws overwrite only the cells
@@ -1008,7 +1015,9 @@ export class Session extends EventEmitter {
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '')
         // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[[23]J/g, '');
+        .replace(/\x1b\[[23]J/g, '')
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
     }
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
