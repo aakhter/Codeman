@@ -212,17 +212,20 @@ function buildOpenCodeCommand(config?: OpenCodeConfig): string {
 /**
  * Build the codex CLI command with appropriate flags.
  *
- * Always passes --no-alt-screen so codex's TUI renders inline in the main
- * tmux/xterm buffer. Without this flag, codex uses an alternate screen and
- * the conversation history isn't part of the captured PTY byte stream —
- * only codex's most recent viewport frame is. When the user switches away
- * from the codex tab in the codeman web UI and back, the tail buffer refetch
- * paints only that frame (typically the welcome banner), erasing the visible
- * conversation. Inline mode keeps everything in scrollback, matching how
- * claude renders.
+ * - `--no-alt-screen` keeps codex's TUI in the main buffer so conversation
+ *   bytes stay in xterm.js scrollback (openai/codex#14277).
+ * - `-c tui.animations=false` disables the welcome shimmer, spinner, and
+ *   other animated elements that drive frequent CUP-based viewport
+ *   repaints. Each repaint overwrites the cells where prior shell-command
+ *   output / conversation lived, so even with --no-alt-screen the user
+ *   sees content get wiped over time as codex idle-redraws.
+ *
+ * Both flags are codeman-specific (other codex invocations the user runs
+ * directly keep their default behavior — they need their own `~/.codex/
+ * config.toml` for that).
  */
 function buildCodexCommand(config?: CodexConfig): string {
-  const parts = ['codex', '--no-alt-screen'];
+  const parts = ['codex', '--no-alt-screen', '-c', 'tui.animations=false'];
 
   if (config?.dangerouslyBypassApprovals) {
     parts.push('--dangerously-bypass-approvals-and-sandbox');
