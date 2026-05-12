@@ -1725,6 +1725,7 @@ class CodemanApp {
     this.ralphStates.clear();
     this.terminalBuffers.clear();
     this.terminalBufferCache.clear();
+    this._xtermSnapshots?.clear();
     this.projectInsights.clear();
     this.teams.clear();
     this.teamTasks.clear();
@@ -2459,6 +2460,27 @@ class CodemanApp {
    * @param {string} newSessionId - The session being switched TO.
    */
   _cleanupPreviousSession(newSessionId) {
+    // Snapshot the OUTGOING session's xterm rendered state (viewport + scrollback +
+    // colors/attrs) before the terminal gets cleared/reset. Lets us restore the
+    // exact view on switch-back rather than replaying codex's byte stream, which
+    // drops earlier conversation from each TUI redraw and ends up showing only
+    // the latest (idle) frame.
+    if (this.activeSessionId && this._serializeAddon && this._xtermSnapshots) {
+      try {
+        const snapshot = this._serializeAddon.serialize({ scrollback: 1000 });
+        if (snapshot) {
+          this._xtermSnapshots.set(this.activeSessionId, snapshot);
+          // Cap snapshot cache at 20 entries; evict oldest on overflow.
+          if (this._xtermSnapshots.size > 20) {
+            const oldest = this._xtermSnapshots.keys().next().value;
+            this._xtermSnapshots.delete(oldest);
+          }
+        }
+      } catch (_err) {
+        /* Serialize failed — fall back to server buffer replay */
+      }
+    }
+
     // Close WebSocket for previous session (new one opens after buffer load)
     this._disconnectWs();
 
@@ -2635,6 +2657,27 @@ class CodemanApp {
       // If the browser was resized while viewing another session, the terminal
       // canvas may be at stale dimensions — content would render at wrong width.
       if (this.fitAddon) this.fitAddon.fit();
+
+      // xterm snapshot restore: if we have a serialized xterm state from a
+      // previous visit to this session, restore the user's exact prior view
+      // (viewport + scrollback + colors). Skips the server buffer replay
+      // which, for codex sessions, ends up showing only the latest TUI
+      // frame (the idle welcome banner) because codex doesn't include
+      // earlier conversation in its current redraw.
+      const snapshot = this._xtermSnapshots?.get(sessionId);
+      if (snapshot) {
+        _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
+        this.terminal.clear();
+        this.terminal.reset();
+        this.terminal.write(snapshot);
+        if (this._isStaleSelect(selectGen)) return;
+        this.terminal.scrollToBottom();
+        _crashDiag.log('SNAPSHOT_RESTORE_DONE');
+        // Don't fall through to buffer-fetch — SSE will catch up with any
+        // new bytes emitted during the away period.
+        this._finishBufferLoad();
+        return;
+      }
 
       // Instant cache restore for IDLE sessions only.
       // For busy sessions, the cache is always stale — writing it first causes a
@@ -2839,6 +2882,7 @@ class CodemanApp {
     }
     this.terminalBuffers.delete(sessionId);
     this.terminalBufferCache.delete(sessionId);
+    this._xtermSnapshots?.delete(sessionId);
 
     this._flushedOffsets?.delete(sessionId);
     this._flushedTexts?.delete(sessionId);
@@ -3016,6 +3060,7 @@ class CodemanApp {
       this.sessions.clear();
       this.terminalBuffers.clear();
       this.terminalBufferCache.clear();
+      this._xtermSnapshots?.clear();
       this.activeSessionId = null;
       try { localStorage.removeItem('codeman-active-session'); } catch {}
       this.respawnStatus = {};
