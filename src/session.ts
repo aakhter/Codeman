@@ -1026,15 +1026,16 @@ export class Session extends EventEmitter {
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[[0-3]?J/g, '')
         // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '')
-        // DECSTBM (CSI N;M r): scroll region. Codex uses partial scroll regions
-        // (e.g. \x1b[1;28r within a 33-row viewport) so content scrolled off the
-        // top of the region — including conversation history on /rename, /clear,
-        // and long working-state completions — is DISCARDED by xterm rather than
-        // pushed to scrollback. Strip these (leaves the default = full viewport)
-        // so codex's scrolls flow into xterm's real scrollback.
-        // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[\d+;\d+r/g, '');
+        .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
+      // NOTE: previously also stripped DECSTBM (\x1b[N;Mr scroll region) so
+      // codex's scrolls flowed into xterm's real scrollback. But removing
+      // DECSTBM made codex's CUP-based redraws drift visually — codex
+      // computes element positions assuming its partial scroll region, and
+      // the full-viewport rendering left the UI squashed into 2-3 visible
+      // rows with content spilling outside. Keeping DECSTBM in the stream
+      // restores correct layout; the trade-off is that /rename, /clear,
+      // and long completions still lose content scrolled off the top of
+      // codex's partial region — recoverable via `codex resume <thread>`.
     }
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
