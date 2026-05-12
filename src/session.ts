@@ -1014,8 +1014,17 @@ export class Session extends EventEmitter {
       data = data
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '')
+        // Erase-in-display, all modes:
+        //   \x1b[J  / \x1b[0J  = erase from cursor to end of display
+        //   \x1b[1J = erase from start of display to cursor
+        //   \x1b[2J = erase entire display
+        //   \x1b[3J = erase scrollback
+        // After codex emits \x1b[H (cursor home), \x1b[J wipes everything
+        // below — same effect as \x1b[2J. Strip all variants. \x1b[K
+        // (erase IN LINE) is left alone — codex needs it for normal
+        // single-line rendering.
         // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[[23]J/g, '')
+        .replace(/\x1b\[[0-3]?J/g, '')
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '')
         // DECSTBM (CSI N;M r): scroll region. Codex uses partial scroll regions
