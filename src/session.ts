@@ -1017,7 +1017,15 @@ export class Session extends EventEmitter {
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[[23]J/g, '')
         // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
+        .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '')
+        // DECSTBM (CSI N;M r): scroll region. Codex uses partial scroll regions
+        // (e.g. \x1b[1;28r within a 33-row viewport) so content scrolled off the
+        // top of the region — including conversation history on /rename, /clear,
+        // and long working-state completions — is DISCARDED by xterm rather than
+        // pushed to scrollback. Strip these (leaves the default = full viewport)
+        // so codex's scrolls flow into xterm's real scrollback.
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[\d+;\d+r/g, '');
     }
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
