@@ -2470,10 +2470,34 @@ class CodemanApp {
         const snapshot = this._serializeAddon.serialize({ scrollback: 1000 });
         if (snapshot) {
           this._xtermSnapshots.set(this.activeSessionId, snapshot);
-          // Cap snapshot cache at 20 entries; evict oldest on overflow.
+          // Cap in-memory snapshot cache at 20 entries; evict oldest on overflow.
           if (this._xtermSnapshots.size > 20) {
             const oldest = this._xtermSnapshots.keys().next().value;
             this._xtermSnapshots.delete(oldest);
+          }
+          // Persist to localStorage so the snapshot survives tab discard /
+          // browser reload (Chrome discards inactive tabs after idle periods,
+          // wiping in-memory state). Cap per-snapshot at 256KB and limit total
+          // to 10 sessions; codex buffer-replay produces a visual mess of
+          // stacked banner redraws when no snapshot exists, so persistence
+          // matters more here than for claude.
+          if (snapshot.length < 256 * 1024) {
+            try {
+              localStorage.setItem(`codeman-xs-${this.activeSessionId}`, snapshot);
+              // LRU eviction: keep at most 10 snapshot keys
+              const keys = Object.keys(localStorage).filter((k) => k.startsWith('codeman-xs-'));
+              if (keys.length > 10) {
+                // Drop ones not in the current sessions map (stale)
+                const liveIds = new Set(Array.from(this.sessions?.keys?.() || []));
+                for (const k of keys) {
+                  if (!liveIds.has(k.slice('codeman-xs-'.length))) {
+                    localStorage.removeItem(k);
+                  }
+                }
+              }
+            } catch (_e) {
+              /* localStorage quota exceeded — silently fall through */
+            }
           }
         }
       } catch (_err) {
@@ -2664,7 +2688,22 @@ class CodemanApp {
       // which, for codex sessions, ends up showing only the latest TUI
       // frame (the idle welcome banner) because codex doesn't include
       // earlier conversation in its current redraw.
-      const snapshot = this._xtermSnapshots?.get(sessionId);
+      //
+      // Try in-memory first (fast); fall back to localStorage so snapshots
+      // survive tab discards / browser reloads.
+      let snapshot = this._xtermSnapshots?.get(sessionId);
+      if (!snapshot) {
+        try {
+          const persisted = localStorage.getItem(`codeman-xs-${sessionId}`);
+          if (persisted) {
+            snapshot = persisted;
+            // Hoist into in-memory cache for next time
+            this._xtermSnapshots?.set(sessionId, persisted);
+          }
+        } catch (_e) {
+          /* localStorage unavailable — proceed without snapshot */
+        }
+      }
       if (snapshot) {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this.terminal.clear();
@@ -2883,6 +2922,7 @@ class CodemanApp {
     this.terminalBuffers.delete(sessionId);
     this.terminalBufferCache.delete(sessionId);
     this._xtermSnapshots?.delete(sessionId);
+    try { localStorage.removeItem(`codeman-xs-${sessionId}`); } catch {}
 
     this._flushedOffsets?.delete(sessionId);
     this._flushedTexts?.delete(sessionId);
@@ -3061,6 +3101,11 @@ class CodemanApp {
       this.terminalBuffers.clear();
       this.terminalBufferCache.clear();
       this._xtermSnapshots?.clear();
+      try {
+        for (const k of Object.keys(localStorage)) {
+          if (k.startsWith('codeman-xs-')) localStorage.removeItem(k);
+        }
+      } catch {}
       this.activeSessionId = null;
       try { localStorage.removeItem('codeman-active-session'); } catch {}
       this.respawnStatus = {};
