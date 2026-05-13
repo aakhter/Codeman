@@ -740,7 +740,12 @@ class CodemanApp {
       { key: 'Tab', ctrl: true, action: () => this.nextSession() },
       // { key: 'k', ctrl: true, action: () => this.killAllSessions() }, // disabled: too easy to trigger accidentally
       { key: 'l', ctrl: true, action: () => this.clearTerminal() },
-      { key: 'R', ctrl: true, shift: true, action: () => this.restoreTerminalSize() },
+      // Ctrl+Shift+R left to the browser for hard-reload. The previous binding
+      // to restoreTerminalSize() sent a resize POST + Ctrl+L (form feed) to
+      // the active session — for codex sessions that triggers a fresh TUI
+      // redraw (banner + status bar) per press, stacking ghost frames in
+      // xterm with every press. restoreTerminalSize remains callable via
+      // the toolbar / mobile keyboard accessory.
       { key: '=', altKey: '+', ctrl: true, action: () => this.increaseFontSize() },
       { key: '-', ctrl: true, action: () => this.decreaseFontSize() },
       { key: 'V', ctrl: true, shift: true, action: () => VoiceInput.toggle() },
