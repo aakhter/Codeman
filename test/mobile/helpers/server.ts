@@ -1,4 +1,4 @@
-import { WebServer } from '../../src/web/server.js';
+import { WebServer } from '../../../src/web/server.js';
 
 let servers: Map<number, WebServer> = new Map();
 

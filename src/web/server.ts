@@ -1471,6 +1471,10 @@ export class WebServer extends EventEmitter {
 
     const payload = JSON.stringify({
       title: template.title,
+      // Hostname-aware prefix so OS-level notifications from multiple Codeman
+      // instances (laptop / dev box / NAS) are unambiguous in the system tray.
+      // Mirrors the in-page Notification format in notification-manager.js.
+      hostTitle: this.windowTitle,
       body,
       tag: `codeman-${event}-${sessionId}`,
       sessionId,

@@ -1981,7 +1981,7 @@ class CodemanApp {
 
   renderSessionTabs() {
     // Don't re-render while user is typing in the inline rename input
-    if (this._inlineRenameActive) return;
+    if (this._activeRename) return;
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
   }
 
@@ -2126,7 +2126,7 @@ class CodemanApp {
   }
 
   _fullRenderSessionTabs() {
-    if (this._inlineRenameActive) return;
+    if (this._activeRename) return;
     const container = this.$('sessionTabs');
 
     // Clean up any orphaned dropdowns before re-rendering
@@ -2917,6 +2917,11 @@ class CodemanApp {
 
   // Shared cleanup for all session data — called from both closeSession() and session:deleted handler
   _cleanupSessionData(sessionId) {
+    // If the deleted session is currently being renamed, abort the rename
+    // so the inline <input> doesn't ghost as a stale tab on screen.
+    if (this._activeRename?.sessionId === sessionId) {
+      this._activeRename.cancel();
+    }
     this.sessions.delete(sessionId);
     // Remove from tab order
     const orderIndex = this.sessionOrder.indexOf(sessionId);

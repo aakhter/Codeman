@@ -110,7 +110,7 @@ self.addEventListener('push', (event) => {
     return;
   }
 
-  const { title, body, tag, sessionId, urgency, actions } = payload;
+  const { title, hostTitle, body, tag, sessionId, urgency, actions } = payload;
 
   const options = {
     body: body || '',
@@ -126,8 +126,15 @@ self.addEventListener('push', (event) => {
     options.actions = actions;
   }
 
+  // Match the in-page Notification format: "codeman:<host>: <event title>".
+  // hostTitle is sent by servers >= the hostname-aware push payload change;
+  // older servers omit it and we fall back to the bare title.
+  const displayTitle = hostTitle && title
+    ? `${hostTitle}: ${title}`
+    : (title || hostTitle || 'Codeman');
+
   event.waitUntil(
-    self.registration.showNotification(title || 'Codeman', options)
+    self.registration.showNotification(displayTitle, options)
   );
 });
 

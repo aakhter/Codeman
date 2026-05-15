@@ -957,8 +957,9 @@ Object.assign(CodemanApp.prototype, {
     const tabName = document.querySelector(`.tab-name[data-session-id="${sessionId}"]`);
     if (!tabName) return;
 
-    // Prevent tab re-renders from destroying the input while renaming
-    this._inlineRenameActive = true;
+    // If a previous rename somehow leaked (shouldn't happen, but defends against
+    // future code paths that throw before cleanup), abort it before starting fresh.
+    if (this._activeRename) this._activeRename.cancel();
 
     const currentName = this.getSessionName(session);
     const parsed = parseSessionPrefix(session.name);
@@ -986,19 +987,26 @@ Object.assign(CodemanApp.prototype, {
     input.focus();
     input.select();
 
-    const finishRename = async () => {
-      if (!this._inlineRenameActive) return; // prevent double-fire
-      this._inlineRenameActive = false;
-      const suffix = input.value.trim();
-      let fullName;
-      if (parsed) {
-        fullName = parsed.prefix + (suffix ? ': ' + suffix : '');
-      } else {
-        fullName = suffix;
+    let settled = false;
+    const finishRename = async ({ commit }) => {
+      if (settled) return;
+      settled = true;
+      this._activeRename = null;
+
+      // Aborted (e.g. session was deleted mid-rename): just re-render so any
+      // ghost DOM left behind is replaced with the canonical tab list.
+      if (!commit) {
+        this.renderSessionTabs();
+        return;
       }
+
+      const suffix = input.value.trim();
+      const fullName = parsed ? parsed.prefix + (suffix ? ': ' + suffix : '') : suffix;
       tabName.textContent = fullName || originalContent;
 
-      if (fullName !== session.name) {
+      // Skip the API call if the session vanished between focus and blur.
+      const stillExists = this.sessions.has(sessionId);
+      if (stillExists && fullName !== session.name) {
         try {
           await fetch(`/api/sessions/${sessionId}/name`, {
             method: 'PUT',
@@ -1014,8 +1022,18 @@ Object.assign(CodemanApp.prototype, {
       this.renderSessionTabs();
     };
 
-    input.addEventListener('blur', finishRename);
+    // Register only after the input is wired so a throw above can't strand state.
+    this._activeRename = {
+      sessionId,
+      cancel: () => finishRename({ commit: false }),
+    };
+
+    input.addEventListener('blur', () => finishRename({ commit: true }));
     input.addEventListener('keydown', (e) => {
+      // Enter/Escape during IME composition belong to the IME (e.g. confirming
+      // a Chinese pinyin candidate). keyCode 229 is the legacy signal for the
+      // same condition on browsers that don't set isComposing reliably.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         input.blur();

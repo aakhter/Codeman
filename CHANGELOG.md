@@ -1,5 +1,41 @@
 # aicodeman
 
+## 0.6.8
+
+### Patch Changes
+
+- Finish the hostname-aware notification plumbing started in 0.6.7 and lock down the recent UI/runtime fixes with regression tests.
+  - Browser Notification API (OS-level desktop pop-ups, layer 3 of the 5-layer notification system) now uses `${originalTitle}: ${title}` instead of the hardcoded `Codeman:` literal — so multi-host users running Codeman on laptop / dev box / NAS see `codeman:<host>: <event>` consistently across tab title, tab-flash, Web Push, and OS notifications.
+  - Inline session rename hardened against three corner cases: IME composition commits (Chinese pinyin Enter no longer ships half-composed text as the session name), mid-rename SSE deletion (orphaned `<input>` no longer 404s on blur), and double-fire on stuck settle-once flag (closure-local `settled` boolean replaces the boolean instance flag).
+  - Test coverage backfilled for two prior shipped fixes:
+    - `<title>codeman:<host></title>` server-side templating (#82): 8 tests covering default `os.hostname()`, `--title-hostname` override, HTML-escape against `<script>`-style breakout, ampersand non-double-encoding, and template-tail byte-identical invariance.
+    - tmux size-query helper (#80): 15 tests covering the browser-resize-between-attaches happy path, the query-then-die race, zero/negative/empty/non-numeric output fallbacks, and argv-form/timeout assertions that lock down the no-shell-interpolation guarantee. Inline 14-line query block extracted into a named `queryTmuxWindowSize()` export in `session.ts` so the test surface is a pure function.
+  - Regression coverage added for `stripInkRedrawBloat` route helper.
+  - CLAUDE.md and README.md updated to document dual-CLI env-prefix discipline (`CLAUDE_CODE_*` vs `OPENCODE_*`), the `xterm-zerolag-input` published-package side-effect of overlay edits, and the unified hostname prefix across tab title / tab-flash / OS notifications.
+
+## 0.6.7
+
+### Patch Changes
+
+- - **fix(client): preserve inline rename input across tab re-renders** (#81) — Right-click → rename on a session tab no longer loses keystrokes when SSE traffic from sibling sessions triggers a tab re-render. Adds an `_inlineRenameActive` guard at the top of `renderSessionTabs()` and `_fullRenameSessionTabs()` so the in-progress input isn't destroyed mid-typing. Also fixes a latent double-fire of `finishRename` (blur + Enter could both invoke it). Drive-by: safer DOM child clearing in place of `innerHTML = ''`.
+  - **feat: hostname-aware window title** (#82) — The browser tab title is now `codeman:<hostname>` instead of the bare `Codeman` literal, so users running Codeman on multiple hosts (laptop, dev box, NAS) can tell at a glance which tab points at which backend. New `--title-hostname <name>` CLI flag overrides the detected `os.hostname()` when it's noisy or you want a cosmetic name. The title is templated into the served HTML on first byte (with narrow HTML escaping), so it's correct from the first paint and works without JavaScript. Title-flash logic now respects the per-host title.
+  - **perf: larger terminal tail on tab switch** — `TERMINAL_TAIL_SIZE` raised from 128KB to 1MB. When switching back to a busy session tab you now get ~8× more scrollback restored immediately.
+  - **fix: preserve response text in Ink redraw stripping** — `stripInkRedrawBloat()` rewritten from a first-VPA approach to cluster-based detection. The previous algorithm assumed all VPA escapes after the first one belonged to a single redraw region and discarded everything in between, which silently lost 100KB+ of legitimate Claude response text once a render had occurred. The new approach groups VPAs into clusters separated by ≥8KB gaps and only collapses clusters spanning ≥32KB, so streamed response content between redraw bursts is preserved.
+  - **docs**: `CLAUDE.md` Additional Commands gains the `--title-hostname` row; `README.md` gets a "Hostname-Aware Window Title" subsection under Multi-Session Dashboard.
+
+## 0.6.6
+
+### Patch Changes
+
+- **Terminal scrollback significantly increased** — both the xterm.js viewport and the tmux backing buffer were bottlenecking how far back you could scroll. Three changes:
+  - `DEFAULT_SCROLLBACK` raised from 20000 → 50000 lines (xterm.js, main terminal). The previous bump from 5000 only helped users with empty localStorage; existing users were stuck on whatever value they first picked up. The loader now treats `DEFAULT_SCROLLBACK` as a floor — if your stored value is below the new minimum, you're raised to it automatically.
+  - Subagent / teammate terminals (`panels-ui.js`) were stuck at 5000; now use the same `DEFAULT_SCROLLBACK` constant (50000).
+  - New tmux sessions now run with `history-limit 50000` (tmux defaults to 2000). This matters for hard-reload / re-attach — without it, only the last ~2000 lines survive the round-trip back into a fresh xterm.
+
+  **Tmux flicker on session re-attach fixed (PR #80 by @aakhter)**: the PTY now queries the existing tmux window size via `tmux display -p` before spawning, instead of hardcoding 120x40. Previously, every re-attach forced tmux to resize down to 120x40, causing a visible flicker and one frame of scrollback loss. The `-x 120 -y 40` flag was also dropped from `tmux new-session` so the initial size matches the first attaching client. Uses `execFileSync` (not shell) for safety and falls back to 120x40 on any error.
+
+  **Docs**: CLAUDE.md now documents two recurring foot-guns — the `xterm-zerolag-input` overlay code is duplicated between `packages/xterm-zerolag-input/src/` and inline inside `src/web/public/app.js`, so any overlay change must touch both; and the COM workflow explicitly includes a post-push `gh run watch` step to confirm CI before considering the release done.
+
 ## 0.6.5
 
 ### Patch Changes
