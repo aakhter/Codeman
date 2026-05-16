@@ -471,7 +471,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
-      'unset COLORTERM',
+      mode === 'codex' ? 'export COLORTERM=truecolor' : 'unset COLORTERM',
+      ...(mode === 'codex' ? ['unset NO_COLOR'] : []),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,

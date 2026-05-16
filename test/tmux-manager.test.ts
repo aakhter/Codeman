@@ -83,6 +83,30 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('environment exports', () => {
+    it('advertises truecolor for Codex sessions', () => {
+      const exports = (
+        manager as unknown as {
+          buildEnvExports(sessionId: string, muxName: string, mode: string): string[];
+        }
+      ).buildEnvExports('session-1', 'codeman-abc12345', 'codex');
+
+      expect(exports).toContain('export COLORTERM=truecolor');
+      expect(exports).toContain('unset NO_COLOR');
+      expect(exports).not.toContain('unset COLORTERM');
+    });
+
+    it('keeps COLORTERM unset for OpenCode sessions', () => {
+      const exports = (
+        manager as unknown as {
+          buildEnvExports(sessionId: string, muxName: string, mode: string): string[];
+        }
+      ).buildEnvExports('session-1', 'codeman-abc12345', 'opencode');
+
+      expect(exports).toContain('unset COLORTERM');
+    });
+  });
+
   describe('isAvailable', () => {
     it('should return true when tmux is found', () => {
       mockedExecSync.mockImplementation((cmd: string) => {

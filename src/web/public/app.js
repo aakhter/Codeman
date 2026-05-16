@@ -2687,6 +2687,24 @@ class CodemanApp {
       // canvas may be at stale dimensions — content would render at wrong width.
       if (this.fitAddon) this.fitAddon.fit();
 
+      // Also push the new dimensions to the PTY. Without this, codex/codeman
+      // sees the size that was set the last time the throttled resize handler
+      // fired (often the size of a different session's container, or the
+      // initial tmux default). The visible symptom is codex rendering inside
+      // a small region with empty rows below the status bar.
+      // sendResize is a no-op on the server when dims haven't changed, so
+      // calling it every tab switch is cheap.
+      const _selDims = this.fitAddon ? this.getTerminalDimensions() : null;
+      if (
+        _selDims &&
+        (!this._lastResizeDims ||
+          _selDims.cols !== this._lastResizeDims.cols ||
+          _selDims.rows !== this._lastResizeDims.rows)
+      ) {
+        this._lastResizeDims = { cols: _selDims.cols, rows: _selDims.rows };
+        this.sendResize(sessionId).catch(() => {});
+      }
+
       // xterm snapshot restore: if we have a serialized xterm state from a
       // previous visit to this session, restore the user's exact prior view
       // (viewport + scrollback + colors). Skips the server buffer replay
