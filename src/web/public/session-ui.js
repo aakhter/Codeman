@@ -1505,3 +1505,14 @@ Object.assign(CodemanApp.prototype, {
     setTimeout(() => modal.classList.remove('from-mobile'), 300);
   },
 });
+
+Object.defineProperty(CodemanApp.prototype, 'runMode', {
+  configurable: true,
+  enumerable: true,
+  get() {
+    return this._runMode || 'claude';
+  },
+  set(mode) {
+    this._runMode = mode === 'opencode' || mode === 'codex' || mode === 'claude' ? mode : 'claude';
+  },
+});
