@@ -686,7 +686,7 @@ class CodemanApp {
 
   /**
    * Watch for sustained main-thread stalls that indicate WebGL/GPU trouble.
-   * After 3 long tasks (>200ms each) within 30s, dispose the WebGL addon and
+   * After 3 long tasks (>=200ms each) within 30s, dispose the WebGL addon and
    * persist a sticky disable so subsequent reloads also use the DOM renderer.
    * 5s grace period skips initial-load stalls. Force-re-enable: ?webgl=force.
    */

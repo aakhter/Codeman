@@ -119,6 +119,11 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Bounded, predictable shape for SSE client identifiers: alphanumerics, `_`, `-`.
+// Length range covers crypto.randomUUID() (36 chars) plus any short stable IDs,
+// while capping growth of `sseClientsById` and blocking pathological inputs.
+const SSE_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
 function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
@@ -602,7 +607,8 @@ export class WebServer extends EventEmitter {
           sessionFilter = new Set(ids);
         }
       }
-      const clientId = typeof query.clientId === 'string' && query.clientId ? query.clientId : undefined;
+      const clientId =
+        typeof query.clientId === 'string' && SSE_CLIENT_ID_RE.test(query.clientId) ? query.clientId : undefined;
 
       reply.raw.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -634,11 +640,13 @@ export class WebServer extends EventEmitter {
     // Empty/null sessions array = remove filter (receive all session:terminal events).
     this.app.post('/api/events/subscribe', (req, reply) => {
       const body = (req.body || {}) as { clientId?: string; sessions?: string[] | null };
-      if (!body.clientId || typeof body.clientId !== 'string') {
+      if (typeof body.clientId !== 'string' || !SSE_CLIENT_ID_RE.test(body.clientId)) {
         reply.code(400).send({ error: 'clientId required' });
         return;
       }
-      const sessions = Array.isArray(body.sessions) ? body.sessions.filter((s) => typeof s === 'string') : null;
+      const sessions = Array.isArray(body.sessions)
+        ? body.sessions.filter((s) => typeof s === 'string' && s.length > 0 && s.length <= 128).slice(0, 64)
+        : null;
       const updated = this.sse.updateClientFilter(body.clientId, sessions);
       reply.code(updated ? 204 : 404).send();
     });

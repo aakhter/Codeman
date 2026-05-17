@@ -1,5 +1,16 @@
 # aicodeman
 
+## 0.6.9
+
+### Patch Changes
+
+- Terminal renderer hardening, SSE bandwidth cut, image paste, and a security tightening on the new live filter:
+  - **Multi-primitive yield for write pacing** (#85): replaces six raw `requestAnimationFrame` callsites in the xterm.js write pipeline with a yielding helper that races `requestAnimationFrame`, `setTimeout(50)`, and a tick Worker. Keeps the terminal responsive when the tab is backgrounded or occluded — Chrome's intensive-throttling no longer stalls long writes.
+  - **WebGL longtask auto-fallback** (#83): a `PerformanceObserver` watches for ≥200ms WebGL frames; three within a 30s window disposes the WebGL addon and falls back to the canvas renderer. Decision is persisted in localStorage for 7 days, and `?webgl=force` clears it.
+  - **Per-client live SSE subscription filter** (#86): each connected client gets a stable UUID and can narrow its terminal stream to one session via `POST /api/events/subscribe` — no EventSource reconnect on tab switches. Cuts SSE bandwidth roughly N× when N sessions are open. Lifecycle/metadata events (`session:*`, `case:*`, `ralph:*`, `hook:*`) now broadcast to every client so sidebars stay in sync.
+  - **Image paste and drag-and-drop into the terminal** (#84): `Ctrl+V` and dropped images upload to `POST /api/sessions/:id/paste-image`, save under `${workingDir}/.claude-images/paste-${ts}.${ext}` and type the path into the terminal. Hard 10MB cap, server-generated filename (no traversal), `.svg` deliberately excluded from the allowlist to avoid a same-origin XSS path through `file-raw`.
+  - **SSE clientId validation**: the per-client identifier introduced in #86 is now constrained to `[A-Za-z0-9_-]{8,64}` at both ingress points. Without this, an authenticated attacker could send another tab's clientId to silently evict it from broadcasts, mutate any clientId's session filter to blackhole the victim's terminal stream, or grow `sseClientsById` unboundedly via long IDs. The subscribe payload is also capped at 64 session entries of ≤128 chars each.
+
 ## 0.6.8
 
 ### Patch Changes

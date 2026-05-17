@@ -1539,7 +1539,7 @@ export function registerSessionRoutes(
   // ═══════════════════════════════════════════════════════════════
 
   const MAX_PASTE_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB
-  const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
+  const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 
   app.post('/api/sessions/:id/paste-image', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -1606,7 +1606,7 @@ export function registerSessionRoutes(
       const origExt = extname(filenameMatch[1]).toLowerCase();
       if (ALLOWED_IMAGE_EXTS.has(origExt)) ext = origExt;
     }
-    const ctMatch = imagePart.headers.match(/Content-Type:\s*image\/(png|jpeg|jpg|webp|gif|bmp|svg\+xml)/i);
+    const ctMatch = imagePart.headers.match(/Content-Type:\s*image\/(png|jpeg|jpg|webp|gif|bmp)/i);
     if (ctMatch) {
       const map: Record<string, string> = {
         png: '.png',
@@ -1615,7 +1615,6 @@ export function registerSessionRoutes(
         webp: '.webp',
         gif: '.gif',
         bmp: '.bmp',
-        'svg+xml': '.svg',
       };
       ext = map[ctMatch[1].toLowerCase()] ?? ext;
     }
