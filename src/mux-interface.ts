@@ -15,6 +15,7 @@ import type {
   SessionMode,
   OpenCodeConfig,
   CodexConfig,
+  GeminiConfig,
 } from './types.js';
 
 /**
@@ -63,6 +64,7 @@ export interface CreateSessionOptions {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  geminiConfig?: GeminiConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EFFORT_LEVEL). Ephemeral — not written to disk. */
@@ -80,6 +82,7 @@ export interface RespawnPaneOptions {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  geminiConfig?: GeminiConfig;
   /** Resume a previous Claude conversation when respawning */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */

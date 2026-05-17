@@ -48,6 +48,7 @@ import {
   type SessionMode,
   type OpenCodeConfig,
   type CodexConfig,
+  type GeminiConfig,
 } from './types.js';
 import type { TerminalMultiplexer, MuxSession } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
@@ -123,6 +124,25 @@ const CTRL_L_PATTERN = /\x0c/g;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 const CODEX_UI_ROW_TEXT_PATTERN = /[›❯]|gpt-[\w.-]+|Context \d+% left|Messages.*toolcall|Use \/skills/;
+
+function isExternalCliMode(mode: SessionMode): boolean {
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
+}
+
+function getModeLabel(mode: SessionMode): string {
+  switch (mode) {
+    case 'opencode':
+      return 'OpenCode';
+    case 'codex':
+      return 'Codex';
+    case 'gemini':
+      return 'Gemini';
+    case 'shell':
+      return 'Shell';
+    case 'claude':
+      return 'Claude';
+  }
+}
 
 function ansiCount(params: string, fallback = 1): number {
   const value = parseInt(params.replace(/[?<>=]/g, '').split(';')[0] || '', 10);
@@ -365,6 +385,8 @@ export class Session extends EventEmitter {
   private _openCodeConfig: OpenCodeConfig | undefined;
   // Codex configuration (only for mode === 'codex')
   private _codexConfig: CodexConfig | undefined;
+  // Gemini configuration (only for mode === 'gemini')
+  private _geminiConfig: GeminiConfig | undefined;
   // Debug capture (CODEMAN_CODEX_RAW_LOG=1): set to true after the first
   // write failure so we don't spam the server log.
   private _codexRawLogErrored = false;
@@ -446,6 +468,8 @@ export class Session extends EventEmitter {
       openCodeConfig?: OpenCodeConfig;
       /** Codex configuration (only for mode === 'codex') */
       codexConfig?: CodexConfig;
+      /** Gemini configuration (only for mode === 'gemini') */
+      geminiConfig?: GeminiConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
       resumeSessionId?: string;
       /** Extra env vars exported to the CLI at spawn time (no disk persistence) */
@@ -500,6 +524,11 @@ export class Session extends EventEmitter {
     // Apply Codex configuration
     if (config.codexConfig) {
       this._codexConfig = config.codexConfig;
+    }
+
+    // Apply Gemini configuration
+    if (config.geminiConfig) {
+      this._geminiConfig = config.geminiConfig;
     }
 
     // Apply env overrides (exported at spawn, not persisted to disk)
@@ -926,6 +955,7 @@ export class Session extends EventEmitter {
       cliLatestVersion: this._cliLatestVersion || undefined,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
+      geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       // envOverrides intentionally NOT on the public SessionState type — they must not
       // leak into SSE / GET /api/sessions broadcasts (schema allows OPENCODE_*, which
@@ -1140,6 +1170,7 @@ export class Session extends EventEmitter {
       //   on a row in a prior frame survive as ghosts. When we see ≥20 K's
       //   (or ≥ ptyRows/2, whichever is larger) in one chunk, codex is
       //   trying to clear the whole screen — give it a real clear.
+      // eslint-disable-next-line no-control-regex
       const kEraseCount = (data.match(/\x1b\[K/g) || []).length;
       const kThreshold = Math.max(20, Math.floor(this._ptyRows / 2));
       const triggerA = kEraseCount >= kThreshold;
@@ -1154,6 +1185,7 @@ export class Session extends EventEmitter {
       //   rows. "Small" = bottom < ptyRows/2, "large" = bottom ≥ 80% of
       //   ptyRows. Tracks across chunks via _codexLastDecstbmBottom.
       let triggerB = false;
+      // eslint-disable-next-line no-control-regex
       const decstbmRe = /\x1b\[(\d+);(\d+)r/g;
       for (const m of data.matchAll(decstbmRe)) {
         const bottom = parseInt(m[2], 10);
@@ -1189,6 +1221,7 @@ export class Session extends EventEmitter {
       // generate clear sequences past the terminal height and leave the
       // cursor parked near the bottom, breaking the next chunk's DECRI math.
       const cupRows: number[] = [];
+      // eslint-disable-next-line no-control-regex
       for (const m of data.matchAll(/\x1b\[(\d+);(\d+)H/g)) {
         const r = parseInt(m[1], 10);
         if (Number.isFinite(r) && r > 3 && r <= this._ptyRows) cupRows.push(r);
@@ -1316,7 +1349,7 @@ export class Session extends EventEmitter {
 
     this._resetBuffers();
 
-    const modeLabel = this.mode === 'opencode' ? 'OpenCode' : this.mode === 'codex' ? 'Codex' : 'Claude';
+    const modeLabel = getModeLabel(this.mode);
     console.log(
       `[Session] Starting interactive ${modeLabel} session` + (this._useMux ? ` (with ${this._mux!.backend})` : '')
     );
@@ -1335,6 +1368,7 @@ export class Session extends EventEmitter {
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
             codexConfig: this._codexConfig,
+            geminiConfig: this._geminiConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
           },
@@ -1349,6 +1383,7 @@ export class Session extends EventEmitter {
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
             codexConfig: this._codexConfig,
+            geminiConfig: this._geminiConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
           },
@@ -1361,8 +1396,8 @@ export class Session extends EventEmitter {
         // For NEW mux sessions: wait for readiness then clean buffer
         // For RESTORED mux sessions: don't do anything - client will fetch buffer on tab switch
         if (!isRestored) {
-          if (this.mode === 'opencode' || this.mode === 'codex') {
-            // OpenCode (Bubble Tea) and Codex (Ink/Ratatui) use custom TUIs — no ❯ prompt to detect.
+          if (isExternalCliMode(this.mode)) {
+            // External CLIs use custom TUIs — no Claude ❯ prompt to detect.
             // Wait for TUI to stabilize, then mark ready. Don't clear the buffer — the TUI's
             // initial render IS the useful content. Emit needsRefresh so the client fetches
             // the full buffer once the TUI has rendered.
@@ -1420,6 +1455,10 @@ export class Session extends EventEmitter {
       // Codex sessions require tmux for OPENAI_API_KEY injection via setenv
       if (this.mode === 'codex') {
         throw new Error('Codex sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      // Gemini sessions require tmux for Gemini/Google auth env injection via setenv
+      if (this.mode === 'gemini') {
+        throw new Error('Gemini sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
@@ -1580,9 +1619,9 @@ export class Session extends EventEmitter {
    * PTY data chunk. Receives accumulated raw data to process in one batch.
    */
   private _processExpensiveParsers(rawData: string): void {
-    // Skip Claude-specific parsers for OpenCode and Codex sessions — Ralph tracker,
+    // Skip Claude-specific parsers for external CLI sessions — Ralph tracker,
     // BashToolParser, token parsing, and CLI info parsing all depend on Claude's output format.
-    if (this.mode === 'opencode' || this.mode === 'codex') return;
+    if (isExternalCliMode(this.mode)) return;
 
     // Lazy ANSI strip: only compute cleanData when a consumer actually needs it.
     let _cleanData: string | null = null;

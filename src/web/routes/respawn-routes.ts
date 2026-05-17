@@ -88,8 +88,8 @@ export function registerRespawnRoutes(
     }
     const session = findSessionOrFail(ctx, id);
 
-    // Respawn is not supported for opencode / codex sessions
-    if (session.mode === 'opencode' || session.mode === 'codex') {
+    // Respawn is not supported for opencode / codex / gemini sessions
+    if (session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini') {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
 
@@ -231,8 +231,8 @@ export function registerRespawnRoutes(
       return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
     }
 
-    // Respawn is not supported for opencode / codex sessions
-    if (session.mode === 'opencode' || session.mode === 'codex') {
+    // Respawn is not supported for opencode / codex / gemini sessions
+    if (session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini') {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
 
@@ -296,8 +296,8 @@ export function registerRespawnRoutes(
     const body = reResult.data as { config?: Partial<RespawnConfig>; durationMinutes?: number };
     const session = findSessionOrFail(ctx, id);
 
-    // Respawn is not supported for opencode / codex sessions
-    if (session.mode === 'opencode' || session.mode === 'codex') {
+    // Respawn is not supported for opencode / codex / gemini sessions
+    if (session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini') {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
 
