@@ -123,7 +123,8 @@ const CTRL_L_PATTERN = /\x0c/g;
 /** Pattern to split by newlines (CR or LF) */
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
-const CODEX_UI_ROW_TEXT_PATTERN = /[›❯]|gpt-[\w.-]+|Context \d+% left|Messages.*toolcall|Use \/skills/;
+const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = /gpt-[\w.-]+|Context \d+% left|Messages.*toolcall|Use \/skills/;
+const CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN = /^\s*[›❯](?:\s|$)/;
 
 function isExternalCliMode(mode: SessionMode): boolean {
   return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
@@ -194,10 +195,18 @@ function collectCodexUiRows(data: string, maxRows: number): number[] {
     i++;
   }
 
-  return [...rowText.entries()]
-    .filter(([r, text]) => r > 3 && r <= maxRows && CODEX_UI_ROW_TEXT_PATTERN.test(text))
-    .map(([r]) => r)
-    .sort((a, b) => a - b);
+  const candidateRows = [...rowText.entries()].filter(([r]) => r > 3 && r <= maxRows);
+  const anchorRows = candidateRows.filter(([, text]) => CODEX_UI_ANCHOR_ROW_TEXT_PATTERN.test(text)).map(([r]) => r);
+  const rows = new Set(anchorRows);
+
+  for (const [r, text] of candidateRows) {
+    if (!CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN.test(text)) continue;
+    if (anchorRows.some((anchor) => Math.abs(anchor - r) <= 3)) {
+      rows.add(r);
+    }
+  }
+
+  return [...rows].sort((a, b) => a - b);
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)

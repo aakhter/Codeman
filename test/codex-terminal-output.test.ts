@@ -71,4 +71,26 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).toContain('\x1b[55;1H\x1b[2K');
     expect(emitted[0].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(advisoryRedraw));
   });
+
+  it('does not clear Codex resume-picker rows just because an option is selected', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    const resumePickerRedraw =
+      '\x1b[1;2H\x1b[36m\x1b[1mResume a previous session' +
+      '\x1b[3;2H\x1b[2mType to search      Filter: \x1b[35m[Cwd]\x1b[39m\x1b[2m All' +
+      '\x1b[5;3H\x1b[33m\x1b[48;2;42;42;42m\x1b[1m❯ \x1b[2m22h ago     ll' +
+      '\x1b[6;3H\x1b[2m  1d ago      $kb-health' +
+      '\x1b[60;1H\x1b[2m──── 2 / 2 · 100% ─' +
+      '\x1b[61;1H enter resume   esc exit   ↑/↓ browse';
+
+    handleOutput(session, resumePickerRedraw);
+
+    expect(emitted[0]).not.toContain('\x1b[4;1H\x1b[2K');
+    expect(emitted[0]).not.toContain('\x1b[5;1H\x1b[2K');
+    expect(emitted[0]).toContain(resumePickerRedraw);
+  });
 });
