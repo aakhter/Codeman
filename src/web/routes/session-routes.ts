@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import {
   ApiErrorCode,
   createErrorResponse,
@@ -140,6 +141,76 @@ export function stripInkRedrawBloat(buffer: string): string {
   }
   parts.push(buffer.slice(cursor));
   return parts.join('');
+}
+
+/**
+ * Validate image bytes against a declared extension. Sniffs the first ~12 bytes
+ * for a known magic-number signature. Defends against polyglots (e.g. HTML or
+ * SVG disguised under a `Content-Type: image/png` header) and against simple
+ * extension-only spoofing — both the multipart filename and the Content-Type
+ * are attacker-controlled, the raw bytes are not.
+ *
+ * Signatures: https://en.wikipedia.org/wiki/List_of_file_signatures
+ */
+export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
+  if (data.length < 12) return false;
+  const u32be = (off: number): number => data.readUInt32BE(off);
+  switch (ext) {
+    case '.png':
+      return u32be(0) === 0x89504e47 && u32be(4) === 0x0d0a1a0a;
+    case '.jpg':
+    case '.jpeg':
+      return data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+    case '.gif':
+      return (
+        data[0] === 0x47 &&
+        data[1] === 0x49 &&
+        data[2] === 0x46 &&
+        data[3] === 0x38 &&
+        (data[4] === 0x37 || data[4] === 0x39) &&
+        data[5] === 0x61
+      );
+    case '.webp':
+      // RIFF....WEBP
+      return u32be(0) === 0x52494646 && u32be(8) === 0x57454250;
+    case '.bmp':
+      return data[0] === 0x42 && data[1] === 0x4d;
+    default:
+      return false;
+  }
+}
+
+// Per-(IP, sessionId) token bucket for paste-image. 30 requests/minute.
+// Bucket map entries are pruned when they drift > 1h stale to bound memory
+// against a flood of unique IP keys.
+const PASTE_RATE_TOKENS = 30;
+const PASTE_RATE_REFILL_PER_MS = PASTE_RATE_TOKENS / 60_000;
+const PASTE_BUCKET_TTL_MS = 60 * 60 * 1000;
+const PASTE_BUCKET_GC_THRESHOLD = 1000;
+const pasteRateBuckets = new Map<string, { tokens: number; lastRefill: number }>();
+
+export function consumePasteToken(key: string, now: number = Date.now()): boolean {
+  if (pasteRateBuckets.size > PASTE_BUCKET_GC_THRESHOLD) {
+    for (const [k, b] of pasteRateBuckets) {
+      if (now - b.lastRefill > PASTE_BUCKET_TTL_MS) pasteRateBuckets.delete(k);
+    }
+  }
+  let b = pasteRateBuckets.get(key);
+  if (!b) {
+    b = { tokens: PASTE_RATE_TOKENS, lastRefill: now };
+    pasteRateBuckets.set(key, b);
+  }
+  const delta = (now - b.lastRefill) * PASTE_RATE_REFILL_PER_MS;
+  b.tokens = Math.min(PASTE_RATE_TOKENS, b.tokens + delta);
+  b.lastRefill = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
+// Test hook: reset between runs.
+export function _resetPasteRateBuckets(): void {
+  pasteRateBuckets.clear();
 }
 
 export function registerSessionRoutes(
@@ -1538,76 +1609,98 @@ export function registerSessionRoutes(
   // Paste Image (clipboard / drag-drop upload)
   // ═══════════════════════════════════════════════════════════════
 
-  const MAX_PASTE_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB
   const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
+  // The 10MB size cap is enforced by @fastify/multipart (registered in server.ts).
 
   app.post('/api/sessions/:id/paste-image', async (req, reply) => {
+    // CSRF defense: state-changing routes must come from same origin.
+    // Cookies are SameSite=lax, multipart/form-data is a "simple" CORS request
+    // (no preflight), so a cross-origin <form enctype="multipart/form-data">
+    // submit attaches the session cookie unimpeded. Reject unless Origin/Referer
+    // matches req.host. Non-browser clients (no Origin AND no Referer) must
+    // supply X-Codeman-CSRF — a header browsers cannot add cross-origin without
+    // a preflight, which our CORS config does not allow from other origins.
+    const reqHost = req.headers.host;
+    const origin = req.headers.origin;
+    const referer = req.headers.referer;
+    let csrfOk = false;
+    if (origin) {
+      try {
+        csrfOk = new URL(origin).host === reqHost;
+      } catch {
+        /* invalid Origin → not ok */
+      }
+    } else if (referer) {
+      try {
+        csrfOk = new URL(referer).host === reqHost;
+      } catch {
+        /* invalid Referer → not ok */
+      }
+    } else {
+      csrfOk = !!req.headers['x-codeman-csrf'];
+    }
+    if (!csrfOk) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'CSRF check failed');
+    }
+
     const { id } = req.params as { id: string };
+
+    // Rate limit per (IP, sessionId): 30/min. Defends against disk-fill DoS
+    // — even an authenticated attacker can otherwise loop 10MB POSTs.
+    if (!consumePasteToken(`${req.ip}:${id}`)) {
+      reply.code(429);
+      reply.header('Retry-After', '60');
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Rate limit exceeded (30 uploads/min per session)');
+    }
+
     const session = findSessionOrFail(ctx, id);
 
-    const contentType = req.headers['content-type'] ?? '';
-    if (!contentType.includes('multipart/form-data')) {
+    if (!req.isMultipart()) {
       reply.code(400);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Expected multipart/form-data');
     }
 
-    // Parse multipart boundary
-    const boundaryMatch = contentType.match(/boundary=(.+?)(?:;|$)/);
-    if (!boundaryMatch) {
-      reply.code(400);
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing boundary');
+    // Read the single file part. @fastify/multipart enforces the 10MB size cap
+    // and the 1-file/4-field count limits (server.ts), replacing a hand-rolled
+    // boundary scanner with several bugs: literal boundary matches anywhere in
+    // body, LF-only clients silently corrupted the last byte (hard-coded \r\n
+    // offsets), no part-count cap.
+    let part: import('@fastify/multipart').MultipartFile | undefined;
+    try {
+      part = await req.file();
+    } catch (err: unknown) {
+      reply.code(413);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || 'Invalid multipart payload');
     }
-
-    // Collect raw body with size limit
-    const chunks: Buffer[] = [];
-    let totalSize = 0;
-    for await (const chunk of req.raw) {
-      totalSize += chunk.length;
-      if (totalSize > MAX_PASTE_IMAGE_SIZE) {
-        reply.code(413);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File too large (max 10MB)');
-      }
-      chunks.push(chunk as Buffer);
-    }
-    const body = Buffer.concat(chunks);
-
-    // Extract image from multipart body
-    const boundary = '--' + boundaryMatch[1];
-    const boundaryBuf = Buffer.from(boundary);
-    const parts: { headers: string; data: Buffer }[] = [];
-    let pos = 0;
-
-    while (pos < body.length) {
-      const start = body.indexOf(boundaryBuf, pos);
-      if (start === -1) break;
-      const afterBoundary = start + boundaryBuf.length;
-      if (body[afterBoundary] === 0x2d && body[afterBoundary + 1] === 0x2d) break;
-      const headerStart = afterBoundary + 2;
-      const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), headerStart);
-      if (headerEnd === -1) break;
-      const headers = body.subarray(headerStart, headerEnd).toString();
-      const dataStart = headerEnd + 4;
-      const nextBoundary = body.indexOf(boundaryBuf, dataStart);
-      const dataEnd = nextBoundary === -1 ? body.length : nextBoundary - 2;
-      parts.push({ headers, data: body.subarray(dataStart, dataEnd) });
-      pos = nextBoundary === -1 ? body.length : nextBoundary;
-    }
-
-    const imagePart = parts.find((p) => p.headers.includes('name="image"'));
-    if (!imagePart || imagePart.data.length === 0) {
+    if (!part) {
       reply.code(400);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No image uploaded');
     }
+    if (part.fieldname !== 'image') {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Unexpected field "${part.fieldname}", expected "image"`);
+    }
+    let imageBytes: Buffer;
+    try {
+      imageBytes = await part.toBuffer();
+    } catch (err: unknown) {
+      reply.code(413);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || 'File too large (max 10MB)');
+    }
+    if (imageBytes.length === 0) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Empty file');
+    }
 
-    // Determine extension from filename or Content-Type
+    // Determine extension from filename or Content-Type.
     let ext = '.png';
-    const filenameMatch = imagePart.headers.match(/filename="(.+?)"/);
-    if (filenameMatch) {
-      const origExt = extname(filenameMatch[1]).toLowerCase();
+    if (part.filename) {
+      const origExt = extname(part.filename).toLowerCase();
       if (ALLOWED_IMAGE_EXTS.has(origExt)) ext = origExt;
     }
-    const ctMatch = imagePart.headers.match(/Content-Type:\s*image\/(png|jpeg|jpg|webp|gif|bmp)/i);
-    if (ctMatch) {
+    const mimeMatch = (part.mimetype || '').toLowerCase().match(/^image\/(png|jpeg|jpg|webp|gif|bmp)$/);
+    if (mimeMatch) {
       const map: Record<string, string> = {
         png: '.png',
         jpeg: '.jpg',
@@ -1616,7 +1709,7 @@ export function registerSessionRoutes(
         gif: '.gif',
         bmp: '.bmp',
       };
-      ext = map[ctMatch[1].toLowerCase()] ?? ext;
+      ext = map[mimeMatch[1]] ?? ext;
     }
 
     if (!ALLOWED_IMAGE_EXTS.has(ext)) {
@@ -1627,14 +1720,47 @@ export function registerSessionRoutes(
       );
     }
 
-    // Save to {workingDir}/.claude-images/
-    const imageDir = join(session.workingDir, '.claude-images');
-    if (!existsSync(imageDir)) {
-      mkdirSync(imageDir, { recursive: true });
+    // Sniff actual bytes — filename and Content-Type are both attacker-supplied.
+    // Polyglot HTML/PNG would otherwise pass and serve back with image/png MIME.
+    if (!imageMagicMatchesExt(imageBytes, ext)) {
+      reply.code(415);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Image bytes do not match declared type ${ext}`);
     }
-    const filename = `paste-${Date.now()}${ext}`;
+
+    // Save to {workingDir}/.claude-images/
+    // Refuse symlinks at imageDir — an agent or postinstall script could plant
+    // `.claude-images -> ~/.ssh/` and redirect future writes outside workingDir.
+    // We lstat (not stat) so we see the symlink itself. Use mkdir without
+    // `recursive` so the leaf creation does not follow a symlink either, and
+    // O_EXCL|O_NOFOLLOW on the file open so the write itself is symlink-safe.
+    const imageDir = join(session.workingDir, '.claude-images');
+    try {
+      const dirStat = await fs.lstat(imageDir);
+      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
+      }
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      // Non-recursive mkdir: errors on EEXIST and does not follow symlinks for
+      // the leaf. session.workingDir is guaranteed to exist (live session).
+      await fs.mkdir(imageDir);
+    }
+    // Date.now() collides on same-ms uploads from two tabs (last-write wins
+    // silently). Append 8 hex chars so concurrent pastes get distinct names.
+    const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${ext}`;
     const filepath = join(imageDir, filename);
-    await fs.writeFile(filepath, imagePart.data);
+    // O_EXCL: refuse to overwrite (collision is impossible with random suffix,
+    // but defends against TOCTOU). O_NOFOLLOW: refuse if filepath is a symlink.
+    const fh = await fs.open(
+      filepath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
+    );
+    try {
+      await fh.writeFile(imageBytes);
+    } finally {
+      await fh.close();
+    }
 
     return { success: true, path: filepath, filename };
   });
