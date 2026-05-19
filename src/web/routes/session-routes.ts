@@ -1420,42 +1420,76 @@ export function registerSessionRoutes(
    * Claude CLI encodes both '/' and '_' as '-', so each '-' in the key could be
    * any of: '/' (path separator), '_' (underscore), or '-' (literal dash).
    *
-   * Strategy: look-ahead matching. At each '-', try consuming multiple segments
-   * joined by '_' or '-' to find an existing child directory, then recurse.
-   * E.g. for segments [AI, project, Mirror] inside /Workspace:
-   *   try /Workspace/AI (no) -> /Workspace/AI_project (yes!) -> continue with [Mirror]
+   * Strategy: recursive backtracking with longest-match-first preference.
+   * At each segment boundary, try joining as many segments as possible (with '_'
+   * or '-') into a single existing directory name. If a shorter match leads to a
+   * dead end, backtrack and try the next-shorter candidate.
+   *
+   * Why backtracking: when both `diary/` and `diary-app/` exist as siblings, the
+   * naive shortest-match would pick `diary` and then fail to find `app` inside,
+   * leaving the rest of the key unresolved. Longest-first picks `diary-app`.
    */
   async function decodeProjectKey(projKey: string): Promise<string> {
     const encoded = projKey.startsWith('-') ? projKey.slice(1) : projKey;
     const segments = encoded.split('-');
 
-    const isDir = async (p: string): Promise<boolean> =>
-      fs
+    const isDirCache = new Map<string, boolean>();
+    const isDir = async (p: string): Promise<boolean> => {
+      const cached = isDirCache.get(p);
+      if (cached !== undefined) return cached;
+      const result = await fs
         .stat(p)
         .then((s) => s.isDirectory())
         .catch(() => false);
+      isDirCache.set(p, result);
+      return result;
+    };
 
+    // Recursive backtracking: returns the deepest valid path that consumes all
+    // segments. Tries the longest segment-join first at each step so that
+    // dash-containing directory names win over shorter same-prefix siblings.
+    async function tryDecode(idx: number, current: string): Promise<string | null> {
+      if (idx >= segments.length) return current;
+      const maxLook = Math.min(idx + 4, segments.length);
+      // Longest first: end = maxLook-1 down to idx
+      for (let end = maxLook - 1; end >= idx; end--) {
+        const candidates: string[] = [];
+        if (end === idx) {
+          candidates.push(segments[idx]);
+        } else {
+          candidates.push(segments.slice(idx, end + 1).join('-'));
+          candidates.push(segments.slice(idx, end + 1).join('_'));
+        }
+        for (const child of candidates) {
+          const candidate = current + '/' + child;
+          if (await isDir(candidate)) {
+            const result = await tryDecode(end + 1, candidate);
+            if (result) return result;
+          }
+        }
+      }
+      return null;
+    }
+
+    const decoded = await tryDecode(0, '');
+    if (decoded) return decoded;
+
+    // Fallback: greedy shortest-match (original behavior) — best effort when
+    // no fully-valid path exists (e.g. directory was deleted after the
+    // conversation was recorded).
     let current = '';
     let i = 0;
-
     while (i < segments.length) {
-      // Try progressively longer child names by joining segments with '_' or '-'
       let matched = false;
-      // Limit look-ahead to avoid excessive fs checks (max 4 segments per component)
       const maxLook = Math.min(i + 4, segments.length);
       for (let end = i; end < maxLook; end++) {
-        // Build candidate child name from segments[i..end]
-        // Try all separator combinations: for 2+ segments, try '_' first then '-'
         const candidates: string[] = [];
         if (end === i) {
           candidates.push(segments[i]);
         } else {
-          // Build with underscores between joined segments
           candidates.push(segments.slice(i, end + 1).join('_'));
-          // Build with dashes (literal)
           candidates.push(segments.slice(i, end + 1).join('-'));
         }
-
         for (const child of candidates) {
           const candidate = current + '/' + child;
           if (await isDir(candidate)) {
@@ -1468,12 +1502,10 @@ export function registerSessionRoutes(
         if (matched) break;
       }
       if (!matched) {
-        // No directory match found — append as-is and move on
         current = current + '/' + segments[i];
         i++;
       }
     }
-
     const finalExists = await fs
       .access(current)
       .then(() => true)
