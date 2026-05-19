@@ -294,7 +294,6 @@ body {
 }
 .session-tab .tab-status.error { background: var(--red); }
 .session-tab .tab-status.ended { background: var(--text-muted); opacity: 0.5; }
-.session-tab[data-ended] { opacity: 0.55; }
 
 /* Session color coding - left border indicator */
 .session-tab[data-color="red"] { border-left: 3px solid var(--session-red); }

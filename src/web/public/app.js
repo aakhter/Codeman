@@ -1853,8 +1853,10 @@ class CodemanApp {
       }
     });
 
-    // Restore tabs that were open before refresh but are no longer on the server
-    this._restoreEndedTabs();
+    // Server is source of truth for open sessions — don't resurrect stale tabs
+    // from localStorage (would show phantom "ended" tabs when a session was closed
+    // on another device).
+    try { localStorage.removeItem('codeman-tab-meta'); } catch {}
 
     // Sync sessionOrder with current sessions (preserve order, add new, remove stale)
     this.syncSessionOrder();
@@ -2176,8 +2178,7 @@ class CodemanApp {
       const tallTabsEnabled = this._tallTabsEnabled ?? false;
       const showFolder = tallTabsEnabled && session.name && folderName && folderName !== name;
 
-      const endedAttr = session._ended ? ' data-ended="1"' : '';
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}" data-id="${id}" data-color="${color}"${endedAttr} onclick="app.selectSession('${escapeHtml(id)}')" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}" data-id="${id}" data-color="${color}" onclick="app.selectSession('${escapeHtml(id)}')" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
@@ -2196,9 +2197,6 @@ class CodemanApp {
     }
 
     container.innerHTML = parts.join('');
-
-    // Persist tab metadata for refresh recovery
-    this._saveTabMetadata();
 
     // Set up drag-and-drop handlers for tab reordering
     this.setupTabDragHandlers();
@@ -2297,33 +2295,6 @@ class CodemanApp {
     } catch {
       // Ignore storage errors
     }
-  }
-
-  // Save tab metadata to localStorage so ended sessions can be restored after refresh
-  _saveTabMetadata() {
-    try {
-      const meta = {};
-      for (const [id, s] of this.sessions) {
-        if (s._ended) continue; // Don't persist ended stubs back
-        meta[id] = { id, name: s.name || '', workingDir: s.workingDir || '', mode: s.mode || 'claude', color: s.color || 'default' };
-      }
-      localStorage.setItem('codeman-tab-meta', JSON.stringify(meta));
-    } catch { /* ignore */ }
-  }
-
-  // Restore tabs that were open before refresh but are no longer on the server
-  _restoreEndedTabs() {
-    try {
-      const saved = localStorage.getItem('codeman-tab-meta');
-      if (!saved) return;
-      const meta = JSON.parse(saved);
-      for (const [id, info] of Object.entries(meta)) {
-        if (!this.sessions.has(id)) {
-          // Add a stub session so the tab renders
-          this.sessions.set(id, { id, name: info.name, workingDir: info.workingDir, mode: info.mode, color: info.color, status: 'ended', _ended: true });
-        }
-      }
-    } catch { /* ignore */ }
   }
 
   // Set up drag-and-drop handlers on tab elements
@@ -2650,16 +2621,9 @@ class CodemanApp {
     // Check if this is a restored session that needs to be attached
     const session = this.sessions.get(sessionId);
 
-    // Ended tabs (restored from localStorage, no longer on server) — show message, skip buffer load
-    if (session?._ended) {
-      this.terminal.clear();
-      this.terminal.write('\r\n  \x1b[2mSession ended. Close tab or click to reopen.\x1b[0m\r\n');
-      return;
-    }
-
     // Track working directory for path normalization in Project Insights
     this.currentSessionWorkingDir = session?.workingDir || null;
-    if (session && session.pid === null && !session._ended) {
+    if (session && session.pid === null) {
       // Session has no PTY attached — either restored after server restart
       // or detached for some other reason. Re-attach regardless of status.
       try {

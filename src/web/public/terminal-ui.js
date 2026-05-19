@@ -485,7 +485,6 @@ Object.assign(CodemanApp.prototype, {
             if (
               activeResizeSession &&
               activeResizeSession.mode === 'claude' &&
-              !activeResizeSession._ended &&
               this.terminal &&
               this.isTerminalAtBottom()
             ) {
