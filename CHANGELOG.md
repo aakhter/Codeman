@@ -1,5 +1,39 @@
 # aicodeman
 
+## 0.6.10
+
+### Patch Changes
+
+- ## Security: paste-image endpoint hardening (#90)
+
+  Addresses seven findings from the dismissed review of #84. Most exposed in tunneled deployments where `CODEMAN_PASSWORD` is set but the server is reachable beyond localhost.
+  - **CSRF protection** on `POST /api/sessions/:id/paste-image`. Requires `Origin`/`Referer` to match `req.host`; non-browser clients (no `Origin` and no `Referer`) must send `X-Codeman-CSRF`. Defeats cross-origin `<form enctype="multipart/form-data">` submits that would otherwise plant arbitrary bytes into the victim's `.claude-images/` while their session cookie is live.
+  - **Magic-byte validation** on uploaded images. Sniffs the first 12 bytes against PNG/JPEG/GIF/WebP/BMP signatures and rejects 415 on mismatch. Polyglot HTML-or-SVG-with-image-MIME no longer round-trips through the endpoint.
+  - **Symlink-safe writes** on `.claude-images/`. `lstat` before the write, non-recursive `mkdir`, `O_EXCL|O_NOFOLLOW` on file open. A `node_modules` postinstall (or the agent itself) planting `.claude-images -> ~/.ssh/` no longer redirects pastes outside `workingDir`.
+  - **Multipart parser swap** to `@fastify/multipart` with `limits: { fileSize: 10MB, files: 1, fields: 4 }`. Replaces a hand-rolled boundary scanner that matched the literal boundary anywhere in the body, hard-coded `\r\n` (silently corrupting LF-only clients), and had no part-count cap.
+  - **Rate limit + GC**: token-bucket (30/min per IP+session) and hourly GC of `paste-*` files older than 7 days from each live session's `.claude-images/`. New `paste-image-gc.ts` started/stopped from `WebServer.start/stop`.
+  - **Collision-free filenames**: `paste-${Date.now()}-${randomBytes(4)}${ext}`. Two tabs pasting in the same millisecond no longer silently last-write-wins.
+  - **Bracketed-paste preservation**: text-only paste in `image-input.js` now goes through `terminal.paste(text)` instead of `sendInput(text)`, so xterm preserves `CSI 200~ ... CSI 201~` markers — Claude Code uses them as part of its prompt-injection defenses.
+
+  ## Fix: duplicate multipart parser conflict
+
+  Removed a duplicate multipart content-type parser left behind after the swap above. The duplicate registration conflicted with `@fastify/multipart`'s own parser; uploads now flow through the plugin exclusively.
+
+  ## WebGL renderer auto-fallback hardening (#91)
+
+  Follow-ups on the longtask auto-fallback shipped in #83.
+  - `PerformanceObserver` is now disconnected on `onContextLoss` as well as on the trip path. Previously the observer outlived its disposed addon after a context loss, holding a closure reference over every longtask the page emitted.
+  - Thresholds (`200ms / 3 longtasks / 30s window / 5s grace / 7d sticky-disable`) are hoisted to `WEBGL_FALLBACK` in `constants.js`. No more inline literals.
+  - New `evaluateWebGLLongTaskTrip()` pure helper splits the rolling-window arithmetic from the `PerformanceObserver` callback so the trip math is unit-testable. New `test/webgl-fallback.test.ts` (9 tests, port 3166): trip inside window, no-trip when spread, sub-threshold filtering, stale-entry pruning, cumulative counting across batches, observer-dispose idempotency.
+
+  ## CI: server boot smoke test
+
+  GitHub Actions now boots the server as a final step after typecheck/lint/format. Catches production-only ESM/CJS regressions that `tsx` masks in dev.
+
+  ## Docs
+
+  `CLAUDE.md` frontend-module table updated to include `image-input.js` (overlooked when #84 landed).
+
 ## 0.6.9
 
 ### Patch Changes
