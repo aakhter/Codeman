@@ -34,6 +34,32 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      - name: Server boot smoke test
+        run: |
+          set -u
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y tmux
+          fi
+          npx tsx src/index.ts web --port 3151 > /tmp/boot.log 2>&1 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3151/api/status -o /dev/null; then
+              echo "Server booted in ${i}s"
+              exit 0
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server exited before becoming ready. Logs:"
+              cat /tmp/boot.log
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "Server did not respond on /api/status within 30s. Logs:"
+          cat /tmp/boot.log
+          exit 1
+
 # Note: The test suite is intentionally excluded from CI.
 # Tests spawn real tmux sessions and require a full system environment.
 # Run tests locally with: npx vitest run test/<file>.test.ts
