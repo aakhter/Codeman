@@ -1,5 +1,14 @@
 # aicodeman
 
+## 0.6.11
+
+### Patch Changes
+
+- Resume Conversation: fixes and folder drill-down.
+  - **fix(history)**: `decodeProjectKey()` now uses longest-join-first backtracking with on-disk validation, so sibling directories sharing a prefix (e.g. `diary/` vs `diary-app/`) resolve to the correct path. Previously the greedy shortest-match decoder picked the shorter name and bailed, surfacing `$HOME` in the Resume Conversation list and resuming into the wrong folder. Greedy decode is kept as a fallback so history for deleted projects still resolves. (#92)
+  - **fix(tabs)**: Drop the client-side resurrection of ended-session tabs. The old code cached open tabs in `localStorage` and rebuilt them as grayed-out stubs whenever the server no longer knew them, which left phantom tabs after closing a session on another device. The server is now the single source of truth; legacy `localStorage` keys are purged on init. Net -44 / +6 lines. (#93)
+  - **feat(history)**: New "View all in this folder" drill-down on Resume Conversation. `GET /api/history/sessions` accepts `projectKey` (validated against `^[A-Za-z0-9_-]+$` before any filesystem access), `offset`, and `limit`; single-folder mode bypasses the 50-cap and returns `{ sessions, total }`. Frontend adds a modal listing 20 sessions per page with a "Show more" pagination button. Modal items omit their own "View all" button to prevent recursive entry points. (#94)
+
 ## 0.6.10
 
 ### Patch Changes
