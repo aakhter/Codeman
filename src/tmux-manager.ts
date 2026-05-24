@@ -727,8 +727,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // (Production uses systemd which has a clean env, but dev/test may be nested.)
       const cleanEnv = { ...process.env };
       delete cleanEnv.TMUX;
-      execSync(`tmux new-session -ds "${muxName}" -c "${workingDir}"`, {
-        cwd: workingDir,
+      // Use -c /tmp so the tmux server's cwd never settles on a FUSE mount path.
+      // If a FUSE mount (e.g. rclone gdrive) blips later, the server's namespace
+      // cache goes stale and getcwd() fails ("Transport endpoint is not connected").
+      // The actual workingDir is reached by respawn-pane below via cd bounce.
+      execSync(`tmux new-session -ds "${muxName}" -c /tmp`, {
+        cwd: '/tmp',
         timeout: EXEC_TIMEOUT_MS,
         stdio: 'ignore',
         env: cleanEnv,
@@ -762,8 +766,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // so secret values stay off the bash command line. Must run before respawn-pane.
       this.applyEnvOverrides(muxName, envOverrides);
 
-      // Replace the shell with the actual command (no echo in terminal)
-      execSync(`tmux respawn-pane -k -t "${muxName}" bash -c ${JSON.stringify(fullCmd)}`, {
+      // Replace the shell with the actual command (no echo in terminal).
+      // Use -c /tmp + shell cd bounce: the shell starts in /tmp (resolves cleanly)
+      // then cds into workingDir via the current kernel mount table, sidestepping
+      // any stale dentry cache the tmux server may hold for FUSE paths.
+      const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
+      execSync(`tmux respawn-pane -k -c /tmp -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`, {
         timeout: EXEC_TIMEOUT_MS,
         stdio: 'ignore',
       });
@@ -956,7 +964,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // Re-apply user env overrides before respawn so the new shell inherits them.
       this.applyEnvOverrides(muxName, envOverrides);
 
-      await execAsync(`tmux respawn-pane -k -t "${muxName}" bash -c ${JSON.stringify(fullCmd)}`, {
+      // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
+      const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
+      await execAsync(`tmux respawn-pane -k -c /tmp -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`, {
         timeout: EXEC_TIMEOUT_MS,
       });
       // Wait for the respawned process to start

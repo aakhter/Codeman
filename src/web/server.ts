@@ -523,11 +523,9 @@ export class WebServer extends EventEmitter {
   }
 
   private async setupRoutes(): Promise<void> {
-    // Allow multipart/form-data for screenshot uploads — skip Fastify's body parser
-    // so the route handler can read the raw stream directly.
-    this.app.addContentTypeParser('multipart/form-data', (_req, _payload, done) => {
-      done(null);
-    });
+    // (Removed leftover hand-rolled multipart/form-data parser from the pre-
+    // fastifyMultipart era — it conflicted with the @fastify/multipart register
+    // below on cold start: "Content type parser 'multipart/form-data' already present".)
 
     // Enable gzip/brotli compression for all responses.
     // Massive win: 793KB uncompressed → ~120KB compressed for static assets.
