@@ -1833,8 +1833,8 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  // Legacy hook for newly-created sessions; kept as a no-op so the SSE
-  // idle/working handlers can still call it without conditional guards.
+  // Vestigial no-op: this method has no callers today. It's kept (not deleted)
+  // as a documented guard so the Ctrl+L behavior below isn't reintroduced.
   //
   // Originally this sent Ctrl+L (\x0c) when a flagged session first reached
   // idle/working to scrub mux-init junk from the screen. Two problems:
