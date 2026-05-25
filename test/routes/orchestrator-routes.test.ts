@@ -103,7 +103,7 @@ describe('orchestrator-routes', () => {
         url: '/api/orchestrator/start',
         payload: { goal: '' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -114,7 +114,7 @@ describe('orchestrator-routes', () => {
         url: '/api/orchestrator/start',
         payload: {},
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -228,7 +228,7 @@ describe('orchestrator-routes', () => {
         url: '/api/orchestrator/reject',
         payload: {},
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });

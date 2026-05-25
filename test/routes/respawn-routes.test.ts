@@ -172,7 +172,7 @@ describe('respawn-routes', () => {
         url: `/api/sessions/${harness.ctx._sessionId}/respawn/config`,
         payload: { idleTimeoutMs: 'not-a-number' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -196,7 +196,7 @@ describe('respawn-routes', () => {
       expect(mockController.updateConfig).toHaveBeenCalled();
       expect(harness.ctx.broadcast).toHaveBeenCalledWith(
         'respawn:configUpdated',
-        expect.objectContaining({ sessionId: harness.ctx._sessionId }),
+        expect.objectContaining({ sessionId: harness.ctx._sessionId })
       );
     });
 

@@ -89,8 +89,6 @@ const require = createRequire(import.meta.url);
 const { version: APP_VERSION } = require('../../package.json');
 import {
   getErrorMessage,
-  ApiErrorCode,
-  createErrorResponse,
   type PersistedRespawnConfig,
   type NiceConfig,
   type ImageDetectedEvent,
@@ -101,6 +99,7 @@ import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.j
 import { SseEvent } from './sse-events.js';
 import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders } from './middleware/auth.js';
+import { installRouteErrorHandler } from './route-error-handler.js';
 import {
   registerPushRoutes,
   registerTeamRoutes,
@@ -664,16 +663,9 @@ export class WebServer extends EventEmitter {
       reply.code(updated ? 204 : 404).send();
     });
 
-    // Global error handler for structured errors thrown by findSessionOrFail
-    this.app.setErrorHandler((error, _req, reply) => {
-      const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
-      const body = (error as { body?: unknown }).body;
-      if (body) {
-        reply.code(statusCode).send(body);
-      } else {
-        reply.code(statusCode).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(error)));
-      }
-    });
+    // Global error handler for structured errors thrown by findSessionOrFail /
+    // parseBody. Shared with the route test harness so test behavior matches prod.
+    installRouteErrorHandler(this.app);
 
     // Crash diagnostics beacon — frontend POSTs breadcrumbs, GET to read them
     let _crashBreadcrumbs = '';

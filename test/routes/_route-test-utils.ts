@@ -7,6 +7,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
+import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 
 export interface RouteTestHarness {
   app: FastifyInstance;
@@ -24,7 +25,7 @@ export interface RouteTestHarness {
 export async function createRouteTestHarness(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registerFn: (app: FastifyInstance, ctx: any) => void,
-  ctxOptions?: { sessionId?: string },
+  ctxOptions?: { sessionId?: string }
 ): Promise<RouteTestHarness> {
   const app = Fastify({ logger: false });
 
@@ -34,6 +35,9 @@ export async function createRouteTestHarness(
   const ctx = createMockRouteContext(ctxOptions);
 
   registerFn(app, ctx);
+  // Mirror production: structured errors thrown by route helpers (findSessionOrFail,
+  // parseBody) are rendered to {success:false} bodies at the right status.
+  installRouteErrorHandler(app);
   await app.ready();
 
   return { app, ctx };

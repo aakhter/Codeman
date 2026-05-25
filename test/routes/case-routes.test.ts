@@ -104,9 +104,7 @@ describe('case-routes', () => {
     });
 
     it('includes hasClaudeMd flag', async () => {
-      mockedReaddir.mockResolvedValue([
-        { name: 'case-with-md', isDirectory: () => true },
-      ] as never);
+      mockedReaddir.mockResolvedValue([{ name: 'case-with-md', isDirectory: () => true }] as never);
       mockedExistsSync.mockReturnValue(true);
 
       const res = await harness.app.inject({
@@ -120,9 +118,7 @@ describe('case-routes', () => {
 
     it('includes linked cases from linked-cases.json', async () => {
       // CASES_DIR readdir returns one case
-      mockedReaddir.mockResolvedValue([
-        { name: 'regular-case', isDirectory: () => true },
-      ] as never);
+      mockedReaddir.mockResolvedValue([{ name: 'regular-case', isDirectory: () => true }] as never);
       // linked-cases.json is read second (after CASES_DIR readdir)
       let readCallCount = 0;
       mockedReadFile.mockImplementation(async () => {
@@ -158,7 +154,7 @@ describe('case-routes', () => {
         url: '/api/cases',
         payload: { name: 'invalid case name!!' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -169,7 +165,7 @@ describe('case-routes', () => {
         url: '/api/cases',
         payload: {},
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -180,7 +176,7 @@ describe('case-routes', () => {
         url: '/api/cases',
         payload: { name: '../etc' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -230,7 +226,7 @@ describe('case-routes', () => {
         url: '/api/cases/link',
         payload: { name: 'bad name!' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -241,7 +237,7 @@ describe('case-routes', () => {
         url: '/api/cases/link',
         payload: {},
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -294,7 +290,10 @@ describe('case-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
       expect(body.data.case.name).toBe('linked-project');
-      expect(harness.ctx.broadcast).toHaveBeenCalledWith('case:linked', expect.objectContaining({ name: 'linked-project' }));
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith(
+        'case:linked',
+        expect.objectContaining({ name: 'linked-project' })
+      );
     });
   });
 

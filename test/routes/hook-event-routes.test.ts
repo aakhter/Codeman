@@ -38,7 +38,7 @@ describe('hook-event-routes', () => {
       expect(body.success).toBe(true);
       expect(harness.ctx.broadcast).toHaveBeenCalledWith(
         'hook:stop',
-        expect.objectContaining({ sessionId: harness.ctx._sessionId }),
+        expect.objectContaining({ sessionId: harness.ctx._sessionId })
       );
     });
 
@@ -55,7 +55,7 @@ describe('hook-event-routes', () => {
       expect(res.statusCode).toBe(200);
       expect(harness.ctx.sendPushNotifications).toHaveBeenCalledWith(
         'hook:idle_prompt',
-        expect.objectContaining({ sessionId: harness.ctx._sessionId }),
+        expect.objectContaining({ sessionId: harness.ctx._sessionId })
       );
     });
 
@@ -85,7 +85,7 @@ describe('hook-event-routes', () => {
           data: null,
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -98,7 +98,7 @@ describe('hook-event-routes', () => {
           event: 'stop',
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -180,10 +180,7 @@ describe('hook-event-routes', () => {
         },
       });
       expect(res.statusCode).toBe(200);
-      expect(mockTracker.recordHookEvent).toHaveBeenCalledWith(
-        'stop',
-        expect.any(Object),
-      );
+      expect(mockTracker.recordHookEvent).toHaveBeenCalledWith('stop', expect.any(Object));
     });
 
     it('starts transcript watcher when transcript_path is provided', async () => {
@@ -199,7 +196,7 @@ describe('hook-event-routes', () => {
       expect(res.statusCode).toBe(200);
       expect(harness.ctx.startTranscriptWatcher).toHaveBeenCalledWith(
         harness.ctx._sessionId,
-        '/home/user/.claude/transcript.jsonl',
+        '/home/user/.claude/transcript.jsonl'
       );
     });
 

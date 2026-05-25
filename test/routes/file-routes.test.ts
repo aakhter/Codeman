@@ -312,7 +312,8 @@ describe('file-routes', () => {
         method: 'GET',
         url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=../../etc/shadow`,
       });
-      expect(res.statusCode).toBe(400);
+      // Path traversal returns 404 ("File not found") to avoid revealing the target exists.
+      expect(res.statusCode).toBe(404);
     });
 
     it('rejects overly large raw files', async () => {

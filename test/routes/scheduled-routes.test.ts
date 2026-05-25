@@ -114,7 +114,7 @@ describe('scheduled-routes', () => {
           prompt: '',
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -125,7 +125,7 @@ describe('scheduled-routes', () => {
         url: '/api/scheduled',
         payload: {},
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -139,7 +139,7 @@ describe('scheduled-routes', () => {
           workingDir: '/tmp/test;rm -rf /',
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -171,11 +171,7 @@ describe('scheduled-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
       // Should default to 60 minutes
-      expect(harness.ctx.startScheduledRun).toHaveBeenCalledWith(
-        'test',
-        expect.any(String),
-        60,
-      );
+      expect(harness.ctx.startScheduledRun).toHaveBeenCalledWith('test', expect.any(String), 60);
     });
   });
 
