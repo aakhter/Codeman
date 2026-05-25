@@ -1,5 +1,14 @@
 # aicodeman
 
+## 0.7.0
+
+### Minor Changes
+
+- Response viewer & terminal-stability improvements, plus test/error-handling hardening.
+  - **Copy button on code blocks (#98):** Every fenced code block in the response viewer now has a one-click copy button pinned to its top-right, outside the `<pre>` scroll container so it stays put during horizontal scroll. ASCII diagrams keep their line-wrap toggle alongside it. Copy prefers the async Clipboard API and falls back to a hidden-textarea + `execCommand` path, so it works over plain HTTP (tunnel) too, with a brief ✓/✕ feedback state.
+  - **Fix: stop auto-sending Ctrl+L from session-selection paths (#99):** A fast page refresh or SSE reconnect could fire two programmatic Ctrl+L (`\x0c`) sends within Claude Code 2.x's "clear conversation" confirmation window, silently wiping the active conversation. Removed the automatic Ctrl+L sends from `selectSession()`, `restoreTerminalSize()`, and the dead `sendPendingCtrlL()` path; redraws now rely on resize/SIGWINCH. User-initiated Ctrl+L still works. Trade-off: an occasional transient stale Ink frame right after refresh that self-heals on the next keypress — far preferable to silent data loss.
+  - **Test & error-handling hardening (#97):** Repaired route-test harness error rendering via a dedicated `route-error-handler.ts`, and stopped the AI idle/plan checkers from spawning real processes during tests.
+
 ## 0.6.12
 
 ### Patch Changes
