@@ -1186,22 +1186,40 @@ class CodemanApp {
         const DIAGRAM_CHAR = /[─-╿▀-▟]/;
         const tmpl = document.createElement('template');
         tmpl.innerHTML = html;
+        // Every fenced code block gets a positioned wrapper with an action
+        // toolbar pinned to its top-right corner. The toolbar lives OUTSIDE the
+        // <pre> scroll container so its buttons stay put during horizontal
+        // scroll. All blocks get a one-click copy button; ASCII diagrams keep
+        // the additional line-wrap toggle.
         tmpl.content.querySelectorAll('pre > code').forEach((code) => {
-          if (!DIAGRAM_CHAR.test(code.textContent || '')) return;
           const pre = code.parentElement;
-          pre.classList.add('rv-diagram');
+          const isDiagram = DIAGRAM_CHAR.test(code.textContent || '');
 
           const wrap = document.createElement('div');
-          wrap.className = 'rv-diagram-wrap';
+          wrap.className = isDiagram ? 'rv-code-wrap rv-diagram-wrap' : 'rv-code-wrap';
 
-          const btn = document.createElement('button');
-          btn.className = 'rv-wrap-toggle';
-          btn.type = 'button';
-          btn.setAttribute('aria-label', 'Toggle line wrapping');
-          btn.setAttribute('title', 'Toggle line wrapping');
+          const actions = document.createElement('div');
+          actions.className = 'rv-code-actions';
+
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'rv-copy-btn';
+          copyBtn.type = 'button';
+          copyBtn.setAttribute('aria-label', 'Copy code');
+          copyBtn.setAttribute('title', 'Copy code');
+          actions.appendChild(copyBtn);
+
+          if (isDiagram) {
+            pre.classList.add('rv-diagram');
+            const toggle = document.createElement('button');
+            toggle.className = 'rv-wrap-toggle';
+            toggle.type = 'button';
+            toggle.setAttribute('aria-label', 'Toggle line wrapping');
+            toggle.setAttribute('title', 'Toggle line wrapping');
+            actions.appendChild(toggle);
+          }
 
           pre.parentNode.insertBefore(wrap, pre);
-          wrap.appendChild(btn);
+          wrap.appendChild(actions);
           wrap.appendChild(pre);
         });
         return tmpl.innerHTML;
@@ -1220,7 +1238,23 @@ class CodemanApp {
   _bindResponseViewerInteractions(body) {
     if (!body || body.dataset.rvBound === '1') return;
     body.dataset.rvBound = '1';
-    body.addEventListener('click', (ev) => {
+    body.addEventListener('click', async (ev) => {
+      // One-click copy: lift the raw source from the sibling <pre><code>.
+      const copyBtn = ev.target.closest('.rv-copy-btn');
+      if (copyBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const code = copyBtn.closest('.rv-code-wrap')?.querySelector('pre code');
+        const ok = code ? await this._copyText(code.textContent || '') : false;
+        copyBtn.classList.remove('rv-copied', 'rv-copy-failed');
+        copyBtn.classList.add(ok ? 'rv-copied' : 'rv-copy-failed');
+        clearTimeout(copyBtn._resetTimer);
+        copyBtn._resetTimer = setTimeout(() => {
+          copyBtn.classList.remove('rv-copied', 'rv-copy-failed');
+        }, 1500);
+        return;
+      }
+
       const btn = ev.target.closest('.rv-wrap-toggle');
       if (!btn) return;
       ev.preventDefault();
@@ -1231,6 +1265,34 @@ class CodemanApp {
       const nowrap = pre.classList.toggle('rv-nowrap');
       wrap.classList.toggle('rv-wrap-nowrap', nowrap);
     });
+  }
+
+  /**
+   * Copy text to the clipboard. Prefers the async Clipboard API (secure
+   * contexts); falls back to a hidden-textarea + execCommand path so copy
+   * still works over plain HTTP. Returns true on success.
+   */
+  async _copyText(text) {
+    if (!text) return false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch { /* secure-context write failed — try the legacy path */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
   }
 
   async toggleResponseViewer() {

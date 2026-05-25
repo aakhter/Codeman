@@ -8309,6 +8309,74 @@ kbd {
   content: '⤢';
 }
 
+/* ── Code block one-click copy ──────────────────────────────────────────────
+   Every fenced code block is wrapped in .rv-code-wrap with an action toolbar
+   pinned to its top-right. Regular blocks get the relative positioning here;
+   ASCII diagrams already get it from .rv-diagram-wrap (don't clobber its
+   centering margins). */
+.rv-text .rv-code-wrap:not(.rv-diagram-wrap),
+.response-viewer-body .rv-code-wrap:not(.rv-diagram-wrap) {
+  position: relative;
+  margin: 1em 0;
+}
+
+.rv-text .rv-code-wrap:not(.rv-diagram-wrap) > pre,
+.response-viewer-body .rv-code-wrap:not(.rv-diagram-wrap) > pre {
+  margin: 0;
+  padding-right: 44px;    /* reserve room for the copy button */
+}
+
+/* Diagrams carry two buttons (copy + wrap toggle) — widen the reserve. */
+.rv-text .rv-code-wrap.rv-diagram-wrap > pre.rv-diagram,
+.response-viewer-body .rv-code-wrap.rv-diagram-wrap > pre.rv-diagram {
+  padding-right: 76px;
+}
+
+.rv-code-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  gap: 4px;
+  z-index: 2;
+}
+
+/* Inside the flex toolbar the wrap toggle flows normally — drop its own pin. */
+.rv-code-actions .rv-wrap-toggle {
+  position: static;
+  top: auto;
+  right: auto;
+}
+
+.rv-copy-btn {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #2f2f45;
+  border-radius: 5px;
+  background: rgba(20, 20, 32, 0.92);
+  color: #8b8b97;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.rv-copy-btn:hover,
+.rv-copy-btn:active {
+  color: #e0e0ec;
+  border-color: #4a4a65;
+}
+
+.rv-copy-btn::before { content: '\2398'; }            /* ⎘ — matches file-preview copy */
+.rv-copy-btn.rv-copied { color: #9ece6a; border-color: #3a5a3a; }
+.rv-copy-btn.rv-copied::before { content: '\2713'; }  /* ✓ */
+.rv-copy-btn.rv-copy-failed { color: #f7768e; border-color: #5a3a3a; }
+.rv-copy-btn.rv-copy-failed::before { content: '\2715'; } /* ✕ */
+
 .rv-text ul, .rv-text ol,
 .response-viewer-body > ul, .response-viewer-body > ol {
   margin: 0.6em 0;
