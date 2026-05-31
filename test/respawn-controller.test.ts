@@ -931,13 +931,17 @@ describe('RespawnController Edge Cases', () => {
       autoAcceptController.stop();
     });
 
-    it('should NOT send Enter when completion message was detected', async () => {
+    it('should NOT send Enter when completion message has no selection menu', async () => {
+      // A bare "Worked for X" with no menu following must not trigger auto-accept —
+      // the pre-filter is what gates this (since v0.7+, completion-message + menu IS
+      // allowed; see "should send Enter even when a completion message preceded the menu").
       const autoAcceptController = new RespawnController(session as unknown as Session, {
         autoAcceptPrompts: true,
         autoAcceptDelayMs: 100,
         completionConfirmMs: 200, // Longer than autoAcceptDelay
         noOutputTimeoutMs: 5000,
         aiIdleCheckEnabled: false,
+        aiPlanCheckEnabled: false,
       });
 
       let autoAcceptFired = false;
@@ -947,13 +951,104 @@ describe('RespawnController Edge Cases', () => {
 
       autoAcceptController.start();
 
-      // Simulate completion message - normal idle flow should handle this
+      // Completion message with no menu — pre-filter must reject
       session.simulateCompletionMessage();
 
       // Wait for autoAcceptDelayMs
       await new Promise((resolve) => setTimeout(resolve, 200));
 
       expect(autoAcceptFired).toBe(false);
+      autoAcceptController.stop();
+    });
+
+    it('should send Enter when completion message and menu arrive in separate PTY chunks', async () => {
+      // Modern Claude Code emits "Worked for X" right before a plan-approval menu.
+      // Two-chunk path: completion detected → confirming_idle, menu chunk hits the
+      // substantial-output cancel and brings state back to watching.
+      const autoAcceptController = new RespawnController(session as unknown as Session, {
+        autoAcceptPrompts: true,
+        autoAcceptDelayMs: 100,
+        completionConfirmMs: 1000, // Longer than autoAcceptDelay so timer wins
+        noOutputTimeoutMs: 5000,
+        aiIdleCheckEnabled: false,
+        aiPlanCheckEnabled: false, // Pre-filter only for this test
+      });
+
+      let autoAcceptFired = false;
+      autoAcceptController.on('autoAcceptSent', () => {
+        autoAcceptFired = true;
+      });
+
+      autoAcceptController.start();
+
+      // "Worked for X" first (as Claude Code emits it before the menu)…
+      session.simulateCompletionMessage();
+      // …then the plan-approval menu renders.
+      session.simulateTerminalOutput('\nWould you like to proceed?\n❯ 1. Yes\n  2. No\n');
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(autoAcceptFired).toBe(true);
+      autoAcceptController.stop();
+    });
+
+    it('should send Enter when completion message and menu arrive in a single PTY chunk', async () => {
+      // Same-burst path: "Worked for X" and the menu arrive in one data chunk.
+      // _detectCompletionMessage returns early so the substantial-output cancel
+      // never fires — state stays 'confirming_idle'. canAutoAccept must accept it.
+      const autoAcceptController = new RespawnController(session as unknown as Session, {
+        autoAcceptPrompts: true,
+        autoAcceptDelayMs: 100,
+        completionConfirmMs: 1000, // Longer than autoAcceptDelay so auto-accept wins
+        noOutputTimeoutMs: 5000,
+        aiIdleCheckEnabled: false,
+        aiPlanCheckEnabled: false,
+      });
+
+      let autoAcceptFired = false;
+      autoAcceptController.on('autoAcceptSent', () => {
+        autoAcceptFired = true;
+      });
+
+      autoAcceptController.start();
+
+      // Single chunk: completion message immediately followed by the menu.
+      session.simulateTerminalOutput('✻ Worked for 1m 30s\n\nWould you like to proceed?\n❯ 1. Yes\n  2. No\n');
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(autoAcceptFired).toBe(true);
+      autoAcceptController.stop();
+    });
+
+    it('should send Enter on AskUserQuestion menu after elicitation hook fires', async () => {
+      // The elicitation_dialog hook now hints "menu coming" rather than blocking.
+      // Once the menu renders, pre-filter matches and auto-accept fires.
+      const autoAcceptController = new RespawnController(session as unknown as Session, {
+        autoAcceptPrompts: true,
+        autoAcceptDelayMs: 100,
+        completionConfirmMs: 5000,
+        noOutputTimeoutMs: 5000,
+        aiIdleCheckEnabled: false,
+        aiPlanCheckEnabled: false,
+      });
+
+      let autoAcceptFired = false;
+      autoAcceptController.on('autoAcceptSent', () => {
+        autoAcceptFired = true;
+      });
+
+      autoAcceptController.start();
+
+      // Question prose, then hook fires (Claude Code signals dialog opening)…
+      session.simulateTerminalOutput('Which option do you prefer?');
+      autoAcceptController.signalElicitation();
+      // …then the numbered menu renders.
+      session.simulateTerminalOutput('\n❯ 1. Yes\n  2. No\n');
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(autoAcceptFired).toBe(true);
       autoAcceptController.stop();
     });
 
@@ -1102,13 +1197,16 @@ describe('RespawnController Edge Cases', () => {
       autoAcceptController.stop();
     });
 
-    it('should NOT auto-accept when elicitation dialog is signaled', async () => {
+    it('should NOT auto-accept on elicitation hook alone (without menu pattern)', async () => {
+      // The elicitation hook hints "menu coming", but if the menu never actually
+      // renders (no numbered options + selector), the pre-filter rejects.
       const autoAcceptController = new RespawnController(session as unknown as Session, {
         autoAcceptPrompts: true,
         autoAcceptDelayMs: 100,
         completionConfirmMs: 50,
         noOutputTimeoutMs: 5000,
         aiIdleCheckEnabled: false,
+        aiPlanCheckEnabled: false,
       });
 
       let autoAcceptFired = false;
@@ -1119,13 +1217,13 @@ describe('RespawnController Edge Cases', () => {
       autoAcceptController.start();
       session.simulateTerminalOutput('Which option do you prefer?');
 
-      // Signal that an elicitation dialog (AskUserQuestion) was detected
+      // Hook fires but no menu actually renders
       autoAcceptController.signalElicitation();
 
       // Wait for autoAcceptDelayMs to expire
       await new Promise((resolve) => setTimeout(resolve, 200));
 
-      // Auto-accept should NOT fire because elicitation was signaled
+      // Pre-filter rejects (no numbered option / no selector arrow)
       expect(autoAcceptFired).toBe(false);
       autoAcceptController.stop();
     });

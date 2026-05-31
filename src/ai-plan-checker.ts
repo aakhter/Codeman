@@ -64,20 +64,27 @@ const DEFAULT_PLAN_CHECK_CONFIG: AiPlanCheckConfig = {
 const VERDICT_PATTERN = /^\s*(PLAN_MODE|NOT_PLAN_MODE)\b/i;
 
 /** The prompt sent to the AI plan checker */
-const AI_PLAN_CHECK_PROMPT = `Analyze this terminal output from a running Claude Code session. Determine if the terminal is currently showing a PLAN MODE APPROVAL PROMPT or not.
+const AI_PLAN_CHECK_PROMPT = `Analyze this terminal output from a running Claude Code session. Determine if the terminal is currently showing a NUMBERED SELECTION MENU that is waiting for the user to press Enter on the highlighted default option.
 
-A plan mode approval prompt is a numbered selection menu that Claude Code shows when it wants the user to approve a plan before proceeding. It typically has these characteristics:
+A qualifying menu has all of these characteristics:
 - A numbered list of options (e.g., "1. Yes", "2. No", "3. Type your own")
-- A selection indicator arrow (❯ or >) pointing to one of the options
-- Text asking for approval like "Would you like to proceed?" or "Ready to implement?"
-- The prompt appears at the BOTTOM of the output (most recent content)
+- A selection indicator arrow (❯ or >) pointing to one of the options (the default)
+- The menu appears at the BOTTOM of the output (most recent content)
+- It is asking the user to choose, not just displaying numbered information
 
-NOT a plan mode prompt:
+This includes BOTH:
+- Plan-mode approval prompts ("Would you like to proceed?" / "Ready to implement?")
+- AskUserQuestion / elicitation dialogs (Claude Code's numbered question menus)
+
+NOT a qualifying menu:
 - Claude actively working (spinners, "Thinking", tool execution)
-- A completed response with no selection menu
-- An AskUserQuestion/elicitation dialog (different format, free-text input)
+- A completed response with no selection menu visible
+- A free-text input field with no numbered options
+- A numbered LIST in the assistant's prose with no selection arrow
 - Network lag or mid-output pause
-- Any state without a visible numbered selection menu
+- Any state without a visible selector arrow on a numbered option
+
+The verdict name PLAN_MODE is historical — it now means "auto-accept this selection menu by pressing Enter on the default".
 
 Terminal output (most recent at bottom):
 ---

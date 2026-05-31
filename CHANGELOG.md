@@ -1,5 +1,26 @@
 # aicodeman
 
+## 0.7.1
+
+### Patch Changes
+
+- **fix(respawn): auto-accept now fires on plan approvals after `Worked for X` line, and on AskUserQuestion menus**
+
+  Two related blockers in the respawn controller's auto-accept path:
+  - Modern Claude Code emits `✻ Worked for Xm Ys` immediately before a plan-approval menu. `_detectCompletionMessage()` cancelled the auto-accept timer and `canAutoAccept()` then rejected on `completionMessageTime !== null`, so plan approvals **never** auto-accepted — the 10 s completion-confirm timer instead started a respawn cycle while the menu sat unanswered.
+  - The same logic in `signalElicitation()` set a hard flag that blocked auto-accept whenever Claude Code fired the `elicitation_dialog` hook, contradicting the in-UI hint ("Auto-accept presses Enter for plan approvals **and default question options**"). AskUserQuestion menus were therefore never auto-accepted either.
+
+  Fix:
+  - `_detectCompletionMessage()` no longer cancels the auto-accept timer; the auto-accept pre-filter is now the authoritative "is there a numbered selection menu?" gate.
+  - `canAutoAccept()` and the AI-plan-check callback both accept `'watching'` AND `'confirming_idle'` states (covers the single-PTY-burst case where `Worked for` and the menu arrive together — `_detectCompletionMessage` returns early before the substantial-output check can demote state back to watching). `sendAutoAcceptEnter()` self-transitions back to `'watching'` before sending Enter.
+  - `signalElicitation()` is now an affirmative hint that primes the auto-accept timer instead of blocking. Still gated on `config.autoAcceptPrompts` AND state ∈ {`watching`, `confirming_idle`} — never fires Enter when respawn is off or auto-accept is disabled.
+  - AI plan-check prompt broadened to recognize AskUserQuestion / elicitation menus as valid for auto-accept (the verdict name `PLAN_MODE` is preserved for compatibility but now means "auto-accept this selection menu").
+  - Removed the now-unused `elicitationDetected` field and its assignments.
+
+  Two new regression tests cover both the separate-PTY-chunk and single-PTY-chunk cases; the previously misleading "should NOT send Enter when completion message was detected" test was renamed and re-scoped to clarify it tests the **no-menu** path (which still correctly rejects via the pre-filter).
+
+  **docs(web): correct `sendPendingCtrlL` comment** — removed the stale "called by foo/bar" note from the dead-call-graph helper after #99.
+
 ## 0.7.0
 
 ### Minor Changes

@@ -513,7 +513,7 @@ const DEFAULT_CONFIG: RespawnConfig = {
   sendInit: true, // send /init after /clear
   completionConfirmMs: 10000, // 10 seconds of silence after completion message
   noOutputTimeoutMs: 30000, // 30 seconds fallback if no output at all
-  autoAcceptPrompts: true, // auto-accept plan mode prompts (not questions)
+  autoAcceptPrompts: true, // auto-accept numbered selection menus (plan approvals + question dialogs)
   autoAcceptDelayMs: 8000, // 8 seconds before auto-accepting
   aiIdleCheckEnabled: true, // use AI to confirm idle state
   aiIdleCheckModel: AI_CHECK_MODEL,
@@ -622,9 +622,6 @@ export class RespawnController extends EventEmitter {
 
   /** Whether any terminal output has been received since start/last-auto-accept */
   private hasReceivedOutput: boolean = false;
-
-  /** Whether an elicitation dialog (AskUserQuestion) was detected via hook signal */
-  private elicitationDetected: boolean = false;
 
   // ========== Hook-Based Detection State (Layer 0 - Highest Priority) ==========
 
@@ -1369,7 +1366,12 @@ export class RespawnController extends EventEmitter {
     this.clearWorkingPatternWindow();
     this.workingDetected = false;
     this.completionMessageTime = now;
-    this.cancelAutoAcceptTimer(); // Normal idle flow handles this
+    // Don't cancel the auto-accept timer here — modern Claude Code emits "Worked for X"
+    // immediately before a plan-approval menu, and the auto-accept pre-filter is
+    // responsible for distinguishing menu-present from menu-absent. Cancelling here
+    // would silently block auto-accept for every plan approval and AskUserQuestion
+    // dialog. If no menu is in the buffer, the pre-filter rejects and the
+    // completion-confirm timer (started below) drives the normal idle flow.
     this.log(`Completion message detected: "${data.trim().substring(0, 50)}..."`);
 
     // In watching state, start completion confirmation timer
@@ -1417,7 +1419,6 @@ export class RespawnController extends EventEmitter {
 
     this.workingDetected = true;
     this.promptDetected = false;
-    this.elicitationDetected = false; // Clear on new work cycle
     this.resetHookState(); // Clear hook signals on new work
     this.lastWorkingPatternTime = now;
 
@@ -2222,11 +2223,11 @@ export class RespawnController extends EventEmitter {
    * @returns True if auto-accept should proceed to the AI confirmation stage
    */
   private canAutoAccept(): boolean {
-    // Only auto-accept in watching state (not during a respawn cycle)
-    if (this._state !== 'watching') return false;
-
-    // Don't auto-accept if a completion message was detected (normal idle handles it)
-    if (this.completionMessageTime !== null) return false;
+    // Allow auto-accept from 'watching' AND 'confirming_idle'. The latter is reached
+    // when "Worked for X" was detected — which Claude Code now emits in the same PTY
+    // burst as a plan-approval menu. `sendAutoAcceptEnter()` self-transitions back to
+    // 'watching' before sending Enter. Reject any other state (respawn cycle, etc.).
+    if (this._state !== 'watching' && this._state !== 'confirming_idle') return false;
 
     // Don't auto-accept if disabled
     if (!this.config.autoAcceptPrompts) return false;
@@ -2234,15 +2235,15 @@ export class RespawnController extends EventEmitter {
     // Don't auto-accept if we haven't received any output yet (prevents spurious Enter on fresh start)
     if (!this.hasReceivedOutput) return false;
 
-    // Don't auto-accept if an elicitation dialog (AskUserQuestion) was detected
-    if (this.elicitationDetected) {
-      this.log('Skipping auto-accept: elicitation dialog detected (AskUserQuestion)');
-      return false;
-    }
+    // Note: completionMessageTime and elicitationDetected used to block here, but both
+    // legitimately co-occur with selection menus (Claude Code emits "Worked for X"
+    // before plan approvals, and AskUserQuestion fires the elicitation hook). The
+    // pre-filter below is the authoritative gate for "is there a numbered menu?".
 
-    // Stage 1: Pre-filter — check if buffer looks like plan mode
+    // Stage 1: Pre-filter — check if buffer looks like a numbered selection menu
+    // (covers both plan-mode approvals and AskUserQuestion dialogs)
     if (!this.isPlanModePreFilterMatch(this.terminalBuffer.value)) {
-      this.log('Skipping auto-accept: pre-filter did not match plan mode patterns');
+      this.log('Skipping auto-accept: pre-filter did not match selection-menu patterns');
       return false;
     }
 
@@ -2308,8 +2309,10 @@ export class RespawnController extends EventEmitter {
         }
 
         if (result.verdict === 'PLAN_MODE') {
-          // Don't send Enter if state changed (e.g., AI idle check started or respawn cycle began)
-          if (this._state !== 'watching') {
+          // Don't send Enter if state moved into a respawn cycle while the check ran.
+          // 'watching' and 'confirming_idle' are both valid — sendAutoAcceptEnter()
+          // self-transitions to 'watching' before sending.
+          if (this._state !== 'watching' && this._state !== 'confirming_idle') {
             this.logAction('plan-check', `Verdict: PLAN_MODE but state is ${this._state}, not sending Enter`);
             return;
           }
@@ -2368,13 +2371,18 @@ export class RespawnController extends EventEmitter {
 
   /**
    * Signal that an elicitation dialog (AskUserQuestion) was detected via hook.
-   * This prevents auto-accept from firing, since the user needs to make a selection.
-   * The flag is cleared when working patterns are detected (new turn starts).
+   * Used as a positive hint that a numbered selection menu is about to render —
+   * we restart the auto-accept timer so the pre-filter gets a fresh shot at it
+   * once the menu finishes drawing. The actual gate is `isPlanModePreFilterMatch()`
+   * plus (optionally) the AI plan check; this hook just primes the timer.
+   * No-op if respawn isn't `'watching'`/`'confirming_idle'` or `autoAcceptPrompts`
+   * is off, so this can never fire Enter when the user has disabled auto-accept.
    */
   signalElicitation(): void {
-    this.elicitationDetected = true;
-    this.cancelAutoAcceptTimer();
-    this.log('Elicitation dialog signaled - auto-accept blocked until next work cycle');
+    this.log('Elicitation dialog signaled - auto-accept will trigger if pre-filter matches');
+    if (this.config.autoAcceptPrompts && (this._state === 'watching' || this._state === 'confirming_idle')) {
+      this.startAutoAcceptTimer();
+    }
   }
 
   /**
