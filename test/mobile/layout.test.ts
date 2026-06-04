@@ -151,6 +151,51 @@ describe('Mobile Layout', () => {
     });
   });
 
+  // ─── Toolbar Collision Regression ───────────────────────────────────────
+
+  describe('Toolbar Collision Regression', () => {
+    it('keeps phone toolbar controls inside the viewport', async () => {
+      const device = REPRESENTATIVE_DEVICES['small-phone'];
+      const { context, page } = await createDevicePage(device, BASE_URL, 'chromium');
+      try {
+        await page.waitForTimeout(WAIT.PAGE_SETTLE);
+        const violations = await page.evaluate(() => {
+          return [...document.querySelectorAll('.toolbar button')]
+            .filter((el): el is HTMLButtonElement => {
+              const rect = el.getBoundingClientRect();
+              const style = getComputedStyle(el);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            })
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              return {
+                selector: el.id ? `#${el.id}` : `.${[...el.classList].join('.')}`,
+                left: rect.left,
+                right: rect.right,
+              };
+            })
+            .filter(({ left, right }) => left < 0 || right > window.innerWidth);
+        });
+
+        expect(violations).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    });
+
+    it('does not render the desktop voice button at the 430px phone/tablet boundary', async () => {
+      const device = REPRESENTATIVE_DEVICES['large-phone'];
+      const { context, page } = await createDevicePage(device, BASE_URL, 'chromium');
+      try {
+        await page.waitForTimeout(WAIT.PAGE_SETTLE);
+        await assertHidden(page, '#voiceInputBtn');
+        await assertVisible(page, '#voiceInputBtnMobile');
+      } finally {
+        await context.close();
+      }
+    });
+  });
+
   // ─── Device Classes ───────────────────────────────────────────────────────
 
   describe('Device Classes', () => {
@@ -164,7 +209,7 @@ describe('Mobile Layout', () => {
     });
 
     it('Android user agent does NOT add ios-device', async () => {
-      const pixel = DEVICE_REGISTRY.find(d => d.name === 'Pixel 7')!;
+      const pixel = DEVICE_REGISTRY.find((d) => d.name === 'Pixel 7')!;
       const { context, page } = await createDevicePage(pixel, BASE_URL);
       try {
         await assertNotHasClass(page, 'body', BODY_CLASSES.IOS);
@@ -273,7 +318,7 @@ describe('Mobile Layout', () => {
         if (violations.length > 0) {
           console.warn(
             `Touch target violations (${violations.length}):\n` +
-            violations.map(v => `  ${v.selector}: ${v.width}x${v.height}px`).join('\n'),
+              violations.map((v) => `  ${v.selector}: ${v.width}x${v.height}px`).join('\n')
           );
         }
         // Allow known small elements — notification action buttons (26x26px),

@@ -93,6 +93,34 @@ describe('Tab Navigation', () => {
         expect(maxWidthPx).toBeGreaterThan(0);
       }
     });
+
+    it('tabs retain usable width on large phone and tablet headers', async () => {
+      for (const device of [REPRESENTATIVE_DEVICES['large-phone'], REPRESENTATIVE_DEVICES['small-tablet']]) {
+        const { context: deviceContext, page: devicePage } = await createDevicePage(device, BASE_URL, 'chromium');
+        try {
+          await devicePage.waitForTimeout(WAIT.PAGE_SETTLE);
+          await devicePage.evaluate(() => {
+            const container = document.querySelector('.session-tabs');
+            if (!container) return;
+            container.innerHTML = '';
+            for (let i = 1; i <= 3; i++) {
+              const tab = document.createElement('div');
+              tab.className = i === 1 ? 'session-tab active' : 'session-tab';
+              tab.innerHTML = `<span class="tab-status idle"></span><span class="tab-name">Session ${i}</span>`;
+              container.appendChild(tab);
+            }
+          });
+
+          const tabsWidth = await devicePage.evaluate(() => {
+            return document.querySelector('.session-tabs')?.clientWidth ?? 0;
+          });
+
+          expect(tabsWidth).toBeGreaterThanOrEqual(120);
+        } finally {
+          await deviceContext.close();
+        }
+      }
+    });
   });
 
   // ─── Swipe Navigation (CDP - Chromium) ───────────────────────────────────
@@ -134,7 +162,9 @@ describe('Tab Navigation', () => {
     }
 
     async function clearSwipeLog(): Promise<void> {
-      await page.evaluate(() => { (window as any).__swipeLog = []; });
+      await page.evaluate(() => {
+        (window as any).__swipeLog = [];
+      });
     }
 
     it('swipe left calls nextSession', async () => {
@@ -193,10 +223,12 @@ describe('Tab Navigation', () => {
       const steps = 5;
       for (let i = 1; i <= steps; i++) {
         const progress = i / steps;
-        await dispatchTouchEvent(cdp, 'touchMove', [{
-          x: startX + (endX - startX) * progress,
-          y: startY + (endY - startY) * progress,
-        }]);
+        await dispatchTouchEvent(cdp, 'touchMove', [
+          {
+            x: startX + (endX - startX) * progress,
+            y: startY + (endY - startY) * progress,
+          },
+        ]);
         await page.waitForTimeout(20);
       }
       await dispatchTouchEvent(cdp, 'touchEnd', []);
@@ -521,10 +553,11 @@ describe('Tab Navigation', () => {
             const isActive = tab?.classList.contains('active') ?? false;
             const style = getComputedStyle(gear);
             // Gear hidden via display:none (mobile) or opacity:0 + width:0 (desktop)
-            const isVisible = style.display !== 'none'
-              && style.visibility !== 'hidden'
-              && parseFloat(style.opacity) > 0
-              && parseFloat(style.width) > 0;
+            const isVisible =
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              parseFloat(style.opacity) > 0 &&
+              parseFloat(style.width) > 0;
             return { isActive, isVisible };
           });
         });

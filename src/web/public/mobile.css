@@ -617,6 +617,10 @@ html.mobile-init .file-browser-panel {
     align-items: center;
   }
 
+  .toolbar-center .btn-toolbar.btn-voice {
+    display: none !important;
+  }
+
   .toolbar-right {
     display: none !important;
   }
@@ -869,6 +873,12 @@ html.mobile-init .file-browser-panel {
   .btn-case-settings-mobile:active {
     background: rgba(255, 255, 255, 0.1);
     color: #fff;
+  }
+
+  @media (max-width: 360px) {
+    .btn-case-settings-mobile {
+      display: none !important;
+    }
   }
 
   /* Mobile case settings popover */
@@ -1269,6 +1279,16 @@ html.mobile-init .file-browser-panel {
     min-height: 44px;
     padding: 0.75rem 1rem;
     font-size: 0.85rem;
+  }
+
+  .history-show-more {
+    display: block;
+    margin-bottom: 0.75rem;
+  }
+
+  .welcome-ralph-link {
+    display: block;
+    margin: 0.75rem auto 0;
   }
 
   .welcome-hint {

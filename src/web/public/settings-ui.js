@@ -1420,9 +1420,10 @@ Object.assign(CodemanApp.prototype, {
   applyHeaderVisibilitySettings() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
-    const showFontControls = settings.showFontControls ?? defaults.showFontControls ?? false;
-    const showSystemStats = settings.showSystemStats ?? defaults.showSystemStats ?? true;
-    const showTokenCount = settings.showTokenCount ?? defaults.showTokenCount ?? true;
+    const compactHeader = MobileDetection.getDeviceType() !== 'desktop';
+    const showFontControls = compactHeader ? false : (settings.showFontControls ?? defaults.showFontControls ?? false);
+    const showSystemStats = compactHeader ? false : (settings.showSystemStats ?? defaults.showSystemStats ?? true);
+    const showTokenCount = compactHeader ? false : (settings.showTokenCount ?? defaults.showTokenCount ?? true);
 
     const fontControlsEl = document.querySelector('.header-font-controls');
     const systemStatsEl = document.getElementById('headerSystemStats');
