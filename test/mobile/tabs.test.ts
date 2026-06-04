@@ -94,7 +94,7 @@ describe('Tab Navigation', () => {
       }
     });
 
-    it('tabs retain usable width on large phone and tablet headers', async () => {
+    it('tabs remain visible on large phone and tablet headers', async () => {
       for (const device of [REPRESENTATIVE_DEVICES['large-phone'], REPRESENTATIVE_DEVICES['small-tablet']]) {
         const { context: deviceContext, page: devicePage } = await createDevicePage(device, BASE_URL, 'chromium');
         try {
@@ -114,8 +114,33 @@ describe('Tab Navigation', () => {
           const tabsWidth = await devicePage.evaluate(() => {
             return document.querySelector('.session-tabs')?.clientWidth ?? 0;
           });
+          const visibleTabMetrics = await devicePage.evaluate(() => {
+            return Array.from(document.querySelectorAll('.session-tab')).map((tab) => {
+              const rect = tab.getBoundingClientRect();
+              const style = window.getComputedStyle(tab);
+              return {
+                display: style.display,
+                visibility: style.visibility,
+                opacity: style.opacity,
+                width: rect.width,
+                height: rect.height,
+                top: rect.top,
+                bottom: rect.bottom,
+              };
+            });
+          });
 
           expect(tabsWidth).toBeGreaterThanOrEqual(120);
+          expect(visibleTabMetrics).toHaveLength(3);
+          for (const tab of visibleTabMetrics) {
+            expect(tab.display).not.toBe('none');
+            expect(tab.visibility).toBe('visible');
+            expect(Number(tab.opacity)).toBeGreaterThan(0);
+            expect(tab.width).toBeGreaterThan(24);
+            expect(tab.height).toBeGreaterThan(20);
+            expect(tab.top).toBeGreaterThanOrEqual(0);
+            expect(tab.bottom).toBeLessThanOrEqual(device.viewport.height);
+          }
         } finally {
           await deviceContext.close();
         }
