@@ -588,14 +588,17 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
 
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const globalSettings = this.loadAppSettingsFromStorage();
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
       const res = await fetch('/api/quick-start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseName,
           mode: 'codex',
-          codexConfig: {},
+          codexConfig: {
+            dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
+          },
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
         })
       });

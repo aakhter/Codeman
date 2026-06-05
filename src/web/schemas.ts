@@ -321,6 +321,8 @@ export const SettingsUpdateSchema = z
     // Claude CLI settings
     claudeMode: z.string().max(50).optional(),
     allowedTools: z.string().max(2000).optional(),
+    // Codex CLI settings
+    codexDangerouslyBypassApprovals: z.boolean().optional(),
     // CPU priority
     nice: z
       .object({

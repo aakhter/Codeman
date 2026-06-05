@@ -214,13 +214,21 @@ describe('Settings Schema Security', () => {
       tunnelEnabled: true,
       ralphTrackerEnabled: false,
       defaultClaudeMdPath: '/some/path',
+      codexDangerouslyBypassApprovals: true,
     });
     expect(result.success).toBe(true);
   });
 
+  it('should enforce codexDangerouslyBypassApprovals as boolean', () => {
+    const result = SettingsUpdateSchema.safeParse({
+      codexDangerouslyBypassApprovals: 'true',
+    });
+    expect(result.success).toBe(false);
+  });
+
   it('should enforce tunnelEnabled as boolean', () => {
     const result = SettingsUpdateSchema.safeParse({
-      tunnelEnabled: 'yes',  // truthy string — should be rejected
+      tunnelEnabled: 'yes', // truthy string — should be rejected
     });
     expect(result.success).toBe(false);
   });
@@ -264,7 +272,7 @@ describe('Settings Schema Security', () => {
     expect(validResult.success).toBe(true);
 
     const invalidResult = SettingsUpdateSchema.safeParse({
-      nice: { enabled: true, niceValue: 100 },  // Out of range
+      nice: { enabled: true, niceValue: 100 }, // Out of range
     });
     expect(invalidResult.success).toBe(false);
   });
@@ -292,7 +300,7 @@ describe('No-Auth Server Warning', () => {
   });
 
   it('should warn when no CODEMAN_PASSWORD is set', () => {
-    const hasWarning = consoleWarnSpy.some(msg => msg.includes('No CODEMAN_PASSWORD set'));
+    const hasWarning = consoleWarnSpy.some((msg) => msg.includes('No CODEMAN_PASSWORD set'));
     expect(hasWarning).toBe(true);
   });
 

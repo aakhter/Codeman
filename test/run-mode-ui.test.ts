@@ -67,3 +67,49 @@ describe('run mode UI', () => {
     expect(runBtnLabel.textContent).toBe('Run GM');
   });
 });
+
+describe('Codex quick start settings', () => {
+  it('passes the global Codex bypass setting into quick-start config', async () => {
+    const elements: Record<string, any> = {
+      quickStartCase: { value: 'codex-case' },
+    };
+    const requests: Array<{ url: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: {
+        getItem: () => null,
+        setItem: () => {},
+      },
+      document: {
+        getElementById: (id: string) => elements[id] ?? null,
+      },
+      fetch: async (url: string, init?: { body?: string }) => {
+        requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/codex/status') return { json: async () => ({ available: true }) };
+        if (url === '/api/quick-start') return { json: async () => ({ success: true, sessionId: 'sess-1' }) };
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    app.loadAppSettingsFromStorage = () => ({ codexDangerouslyBypassApprovals: true });
+    app.getCaseSettings = () => ({});
+    app.buildEnvOverrides = () => ({});
+    app.selectSession = async () => {};
+
+    await app.runCodex();
+
+    expect(requests.find((req) => req.url === '/api/quick-start')?.body).toMatchObject({
+      caseName: 'codex-case',
+      mode: 'codex',
+      codexConfig: { dangerouslyBypassApprovals: true },
+    });
+  });
+});
