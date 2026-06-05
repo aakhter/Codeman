@@ -68,4 +68,17 @@ describe('Codex tab resize behavior', () => {
     expect(selectSetup).toContain('this._xtermSnapshots?.delete(sessionId)');
     expect(selectSetup).toContain('this.activeSessionId = null');
   });
+
+  it('scrolls replayed buffers to the last non-empty terminal line', () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const terminalSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+
+    expect(terminalSource).toContain('scrollToLastNonEmptyLine()');
+    expect(terminalSource).toContain('this.terminal.scrollToLine');
+
+    const rewriteStart = appSource.indexOf('REWRITE: ${');
+    const rewriteBlock = appSource.slice(rewriteStart, appSource.indexOf('// Update cache', rewriteStart));
+    expect(rewriteBlock).toContain('this.scrollToLastNonEmptyLine();');
+    expect(rewriteBlock).not.toContain('this.terminal.scrollToBottom();');
+  });
 });

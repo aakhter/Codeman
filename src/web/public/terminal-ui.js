@@ -1733,6 +1733,38 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  scrollToLastNonEmptyLine() {
+    if (!this.terminal?.buffer?.active) {
+      this.terminal?.scrollToBottom?.();
+      return;
+    }
+
+    const buffer = this.terminal.buffer.active;
+    const totalLines = buffer.baseY + buffer.length;
+    let lastNonEmptyLine = -1;
+
+    for (let lineIndex = totalLines - 1; lineIndex >= 0; lineIndex--) {
+      const line = buffer.getLine(lineIndex);
+      if (line?.translateToString(true).trim()) {
+        lastNonEmptyLine = lineIndex;
+        break;
+      }
+    }
+
+    if (lastNonEmptyLine >= 0 && typeof this.terminal.scrollToLine === 'function') {
+      let targetLine = Math.max(0, lastNonEmptyLine - this.terminal.rows + 2);
+      const maxTargetLine = Math.max(0, lastNonEmptyLine);
+      while (targetLine < maxTargetLine) {
+        const line = buffer.getLine(targetLine);
+        if (line?.translateToString(true).trim()) break;
+        targetLine++;
+      }
+      this.terminal.scrollToLine(targetLine);
+    } else {
+      this.terminal.scrollToBottom();
+    }
+  },
+
   /**
    * Write large buffer to terminal in chunks to avoid UI jank.
    * Uses _safeYield to spread work across frames; falls back to setTimeout

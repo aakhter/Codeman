@@ -2948,7 +2948,7 @@ class CodemanApp {
         this._resetTerminalForReplay();
         await new Promise((resolve) => this.terminal.write(snapshot, resolve));
         if (this._isStaleSelect(selectGen)) return;
-        this.terminal.scrollToBottom();
+        this.scrollToLastNonEmptyLine();
         _crashDiag.log('SNAPSHOT_RESTORE_DONE');
         restoredSnapshot = true;
       }
@@ -2964,7 +2964,7 @@ class CodemanApp {
         this._resetTerminalForReplay();
         await this.chunkedTerminalWrite(cachedBuffer);
         if (this._isStaleSelect(selectGen)) return;
-        this.terminal.scrollToBottom();
+        this.scrollToLastNonEmptyLine();
         _crashDiag.log('CACHE_DONE');
       } else if (sessionIsBusy) {
         // Clear stale content immediately — fresh buffer is being fetched
@@ -3002,8 +3002,7 @@ class CodemanApp {
           // Use chunked write for large buffers to avoid UI jank
           await this.chunkedTerminalWrite(data.terminalBuffer);
           if (this._isStaleSelect(selectGen)) return;
-          // Ensure terminal is scrolled to bottom after buffer load
-          this.terminal.scrollToBottom();
+          this.scrollToLastNonEmptyLine();
         }
 
         // Update cache (cap at 20 entries)
@@ -3132,7 +3131,7 @@ class CodemanApp {
 
       _crashDiag.log('FOCUS');
       this.terminal.focus();
-      this.terminal.scrollToBottom();
+      this.scrollToLastNonEmptyLine();
       _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${(performance.now() - _selStart).toFixed(0)}ms`);
     } catch (err) {
