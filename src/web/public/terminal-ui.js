@@ -14,9 +14,10 @@
 
 (function (global) {
   const TERMINAL_QUERY_RESPONSE_PATTERN = /^\x1b\[[\?>=]?[\d;]*[cnR]$/;
+  const TERMINAL_OSC_RESPONSE_PATTERN = /^\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\)$/;
 
   function isTerminalQueryResponse(data) {
-    return TERMINAL_QUERY_RESPONSE_PATTERN.test(data);
+    return TERMINAL_QUERY_RESPONSE_PATTERN.test(data) || TERMINAL_OSC_RESPONSE_PATTERN.test(data);
   }
 
   function shouldSuppressTerminalQueryResponse(data) {
