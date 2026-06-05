@@ -98,6 +98,26 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('window sizing', () => {
+    it('pins a tmux window to manual sizing before browser attach', () => {
+      expect(manager.setManualWindowSize('codeman-abc12345')).toBe(true);
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        "tmux -L 'codeman' set-window-option -t 'codeman-abc12345' window-size manual",
+        expect.objectContaining({ stdio: 'ignore' })
+      );
+    });
+
+    it('resizes the tmux window when Codeman accepts a desktop resize', () => {
+      expect(manager.resizeWindow('codeman-abc12345', 140, 42)).toBe(true);
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        "tmux -L 'codeman' resize-window -t 'codeman-abc12345' -x 140 -y 42",
+        expect.objectContaining({ stdio: 'ignore' })
+      );
+    });
+  });
+
   describe('environment exports', () => {
     it('advertises truecolor for Codex sessions', () => {
       const exports = (

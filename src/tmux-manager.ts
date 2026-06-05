@@ -195,6 +195,10 @@ function isValidMuxName(name: string): boolean {
   return SAFE_MUX_NAME_PATTERN.test(name) || LEGACY_MUX_NAME_PATTERN.test(name);
 }
 
+function isValidTerminalDimension(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0 && value <= 1000;
+}
+
 /**
  * Validates that a path contains only safe characters.
  * Prevents command injection via malformed paths.
@@ -843,6 +847,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         stdio: 'ignore',
         env: cleanEnv,
       });
+      this.resizeWindow(muxName, 120, 40);
 
       // Set remain-on-exit now that the server is running — must be before respawn-pane
       try {
@@ -1974,6 +1979,46 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
   getAttachArgs(muxName: string): string[] {
     return ['-L', this.tmuxSocket, 'attach-session', '-t', muxName];
+  }
+
+  setManualWindowSize(muxName: string): boolean {
+    if (!isValidMuxName(muxName)) {
+      console.error('[TmuxManager] Invalid session name in setManualWindowSize:', muxName);
+      return false;
+    }
+
+    try {
+      execSync(`${this.tmux()} set-window-option -t ${shellescape(muxName)} window-size manual`, {
+        timeout: EXEC_TIMEOUT_MS,
+        stdio: 'ignore',
+      });
+      return true;
+    } catch (err) {
+      console.error('[TmuxManager] Failed to set manual window size:', err);
+      return false;
+    }
+  }
+
+  resizeWindow(muxName: string, cols: number, rows: number): boolean {
+    if (!isValidMuxName(muxName)) {
+      console.error('[TmuxManager] Invalid session name in resizeWindow:', muxName);
+      return false;
+    }
+    if (!isValidTerminalDimension(cols) || !isValidTerminalDimension(rows)) {
+      console.error('[TmuxManager] Invalid resize dimensions:', { cols, rows });
+      return false;
+    }
+
+    try {
+      execSync(`${this.tmux()} resize-window -t ${shellescape(muxName)} -x ${cols} -y ${rows}`, {
+        timeout: EXEC_TIMEOUT_MS,
+        stdio: 'ignore',
+      });
+      return true;
+    } catch (err) {
+      console.error('[TmuxManager] Failed to resize tmux window:', err);
+      return false;
+    }
   }
 
   isAvailable(): boolean {

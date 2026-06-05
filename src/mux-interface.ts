@@ -193,6 +193,12 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   getAttachArgs(muxName: string): string[];
 
+  /** Pin a mux window so client attaches do not automatically dictate its size. */
+  setManualWindowSize?(muxName: string): boolean;
+
+  /** Explicitly resize a mux window after Codeman accepts a terminal resize. */
+  resizeWindow?(muxName: string, cols: number, rows: number): boolean;
+
   // ========== Availability ==========
 
   /** Check if the multiplexer binary is available on the system */
