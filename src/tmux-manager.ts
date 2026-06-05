@@ -1835,8 +1835,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   }
 
   /**
-   * Capture the current buffer of a specific pane.
-   * Returns the pane content with ANSI escape codes preserved.
+   * Capture the current visible text of a specific pane.
+   *
+   * Do not use `capture-pane -e` here. Codex output can leave non-style control
+   * bytes in tmux's captured escape stream (for example RI/scroll-region state);
+   * replaying those as a browser snapshot mutates xterm instead of painting rows.
    */
   capturePaneBuffer(muxName: string, paneTarget: string): string | null {
     if (IS_TEST_MODE) return '';
@@ -1852,7 +1855,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const target = paneTarget.startsWith('%') ? `${muxName}.${paneTarget}` : `${muxName}.%${paneTarget}`;
 
     try {
-      const buffer = execSync(`${this.tmux()} capture-pane -p -e -t ${shellescape(target)}`, {
+      const buffer = execSync(`${this.tmux()} capture-pane -p -t ${shellescape(target)}`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
       }).replace(/\n+$/g, '');
