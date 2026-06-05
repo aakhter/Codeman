@@ -1788,12 +1788,12 @@ class CodemanApp {
     if (!cjkEl) return;
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings?.() || {};
-    const forceTouchComposer =
+    const isTouchTerminal =
       typeof MobileDetection !== 'undefined' &&
       MobileDetection.isTouchDevice() &&
       (MobileDetection.isSmallScreen() || MobileDetection.isMediumScreen());
     const showCjk =
-      forceTouchComposer || this._serverCjkOverride || (settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false);
+      this._serverCjkOverride || (!isTouchTerminal && (settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false));
     cjkEl.classList.toggle('cjk-input-visible', !!showCjk);
     document.body.classList.toggle('cjk-input-visible', !!showCjk);
     cjkEl.style.display = showCjk ? 'block' : 'none';

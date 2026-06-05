@@ -472,6 +472,7 @@ describe('Virtual Keyboard', () => {
         const settings = app.loadAppSettingsFromStorage();
         settings.cjkInputEnabled = true;
         app.saveAppSettingsToStorage(settings);
+        app._serverCjkOverride = true;
         app._updateCjkInputState?.();
       });
 
@@ -497,11 +498,9 @@ describe('Virtual Keyboard', () => {
       expect(afterEnter.sentInputs).toEqual(['hello', '\r']);
     });
 
-    it('shows the CJK textarea when enabled on mobile', async () => {
+    it('shows the CJK textarea on mobile only for server override', async () => {
       const state = await page.evaluate(() => {
-        const settings = app.loadAppSettingsFromStorage();
-        settings.cjkInputEnabled = true;
-        app.saveAppSettingsToStorage(settings);
+        app._serverCjkOverride = true;
         app._updateCjkInputState();
 
         const input = document.getElementById('cjkInput');
@@ -523,7 +522,7 @@ describe('Virtual Keyboard', () => {
       expect(state?.ariaHidden).toBe('false');
     });
 
-    it('shows the visible mobile textarea by default on phones', async () => {
+    it('hides the CJK textarea by default on phones', async () => {
       const state = await page.evaluate(() => {
         localStorage.removeItem(app.getSettingsStorageKey());
         app._cachedAppSettings = null;
@@ -540,15 +539,14 @@ describe('Virtual Keyboard', () => {
       });
 
       expect(state).not.toBeNull();
-      expect(state?.display).not.toBe('none');
-      expect(state?.position).toBe('fixed');
-      expect(state?.bodyClass).toBe(true);
+      expect(state?.display).toBe('none');
+      expect(state?.bodyClass).toBe(false);
     });
 
-    it('keeps the visible mobile textarea on even when old phone settings disabled CJK input', async () => {
+    it('keeps the CJK textarea hidden even when old phone settings enabled it', async () => {
       const state = await page.evaluate(() => {
         const settings = app.loadAppSettingsFromStorage();
-        settings.cjkInputEnabled = false;
+        settings.cjkInputEnabled = true;
         app.saveAppSettingsToStorage(settings);
         app._updateCjkInputState();
 
@@ -563,12 +561,11 @@ describe('Virtual Keyboard', () => {
       });
 
       expect(state).not.toBeNull();
-      expect(state?.display).not.toBe('none');
-      expect(state?.position).toBe('fixed');
-      expect(state?.bodyClass).toBe(true);
+      expect(state?.display).toBe('none');
+      expect(state?.bodyClass).toBe(false);
     });
 
-    it('focuses the visible mobile textarea when the terminal is tapped', async () => {
+    it('focuses the terminal helper textarea when the terminal is tapped', async () => {
       await page.evaluate(() => {
         app.activeSessionId = 'mobile-focus-visible-input-test';
         app.sessions.set('mobile-focus-visible-input-test', {
@@ -578,15 +575,15 @@ describe('Virtual Keyboard', () => {
         });
         app.hideWelcome();
         const settings = app.loadAppSettingsFromStorage();
-        settings.cjkInputEnabled = true;
+        settings.cjkInputEnabled = false;
         app.saveAppSettingsToStorage(settings);
         app._updateCjkInputState();
       });
 
       await page.locator('#terminalContainer').tap({ position: { x: 40, y: 40 } });
 
-      const activeId = await page.evaluate(() => document.activeElement?.id);
-      expect(activeId).toBe('cjkInput');
+      const activeClass = await page.evaluate(() => document.activeElement?.className);
+      expect(activeClass).toContain('xterm-helper-textarea');
     });
 
     it('keeps terminal touch drag available for scrollback with the visible textarea enabled', async () => {
@@ -658,7 +655,7 @@ describe('Virtual Keyboard', () => {
       expect(calls.some((lines) => lines !== 0)).toBe(true);
     });
 
-    it('keeps typed phone text visible in the textarea until Enter sends it', async () => {
+    it('keeps typed phone text in the terminal local echo path', async () => {
       await page.evaluate(() => {
         window.__sentInputs = [];
         app.activeSessionId = 'mobile-visible-input-test';
@@ -667,33 +664,41 @@ describe('Virtual Keyboard', () => {
           mode: 'codex',
           status: 'running',
         });
+        app.hideWelcome();
         app._sendInputAsync = (_sessionId: string, input: string) => {
           window.__sentInputs.push(input);
         };
         const settings = app.loadAppSettingsFromStorage();
-        settings.cjkInputEnabled = true;
+        settings.cjkInputEnabled = false;
+        settings.localEchoEnabled = true;
         app.saveAppSettingsToStorage(settings);
         app._updateCjkInputState();
+        app._updateLocalEchoState();
+        app.terminal.focus();
       });
 
-      await page.locator('#cjkInput').focus();
+      await page.locator('#terminalContainer').tap({ position: { x: 40, y: 40 } });
       await page.keyboard.type('find bug');
 
       const beforeEnter = await page.evaluate(() => ({
-        visibleText: (document.getElementById('cjkInput') as HTMLTextAreaElement).value.replace(/\u200B/g, ''),
+        activeClass: document.activeElement?.className,
+        cjkDisplay: getComputedStyle(document.getElementById('cjkInput') as HTMLElement).display,
+        pendingText: app._localEchoOverlay?.pendingText,
         sentInputs: window.__sentInputs,
       }));
-      expect(beforeEnter.visibleText).toBe('find bug');
+      expect(beforeEnter.activeClass).toContain('xterm-helper-textarea');
+      expect(beforeEnter.cjkDisplay).toBe('none');
+      expect(beforeEnter.pendingText).toBe('find bug');
       expect(beforeEnter.sentInputs).toEqual([]);
 
       await page.keyboard.press('Enter');
-      await page.waitForFunction(() => window.__sentInputs?.length > 0);
+      await page.waitForFunction(() => window.__sentInputs?.join('') === 'find bug\r');
 
       const afterEnter = await page.evaluate(() => ({
-        visibleText: (document.getElementById('cjkInput') as HTMLTextAreaElement).value.replace(/\u200B/g, ''),
+        pendingText: app._localEchoOverlay?.pendingText,
         sentInputs: window.__sentInputs,
       }));
-      expect(afterEnter.visibleText).toBe('');
+      expect(afterEnter.pendingText).toBe('');
       expect(afterEnter.sentInputs.join('')).toBe('find bug\r');
     });
   });
