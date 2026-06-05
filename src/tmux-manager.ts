@@ -1852,10 +1852,26 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const target = paneTarget.startsWith('%') ? `${muxName}.${paneTarget}` : `${muxName}.%${paneTarget}`;
 
     try {
-      return execSync(`${this.tmux()} capture-pane -p -e -t ${shellescape(target)} -S -5000`, {
+      const buffer = execSync(`${this.tmux()} capture-pane -p -e -t ${shellescape(target)} -S -5000`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
       });
+      try {
+        const cursor = execSync(
+          `${this.tmux()} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y}'`,
+          {
+            encoding: 'utf-8',
+            timeout: EXEC_TIMEOUT_MS,
+          }
+        ).trim();
+        const [cursorX, cursorY] = cursor.split(/\s+/).map((value) => parseInt(value, 10));
+        if (Number.isFinite(cursorX) && Number.isFinite(cursorY) && cursorX >= 0 && cursorY >= 0) {
+          return `${buffer}\x1b[${cursorY + 1};${cursorX + 1}H`;
+        }
+      } catch (cursorErr) {
+        console.error('[TmuxManager] Failed to query pane cursor after capture:', cursorErr);
+      }
+      return buffer;
     } catch (err) {
       console.error('[TmuxManager] Failed to capture pane buffer:', err);
       return null;

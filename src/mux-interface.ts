@@ -206,4 +206,7 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /** Respawn a dead pane with a fresh command. Returns the new PID or null on failure. */
   respawnPane(options: RespawnPaneOptions): Promise<number | null>;
+
+  /** Capture a pane's current tmux buffer with ANSI escape codes preserved. */
+  capturePaneBuffer?(muxName: string, paneTarget: string): string | null;
 }
