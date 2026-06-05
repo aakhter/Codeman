@@ -1788,7 +1788,9 @@ class CodemanApp {
     if (!cjkEl) return;
     const settings = this.loadAppSettingsFromStorage();
     const showCjk = this._serverCjkOverride || settings.cjkInputEnabled || false;
+    cjkEl.classList.toggle('cjk-input-visible', !!showCjk);
     cjkEl.style.display = showCjk ? 'block' : 'none';
+    cjkEl.setAttribute('aria-hidden', showCjk ? 'false' : 'true');
     if (!showCjk) window.cjkActive = false;
   }
 
