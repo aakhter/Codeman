@@ -307,7 +307,7 @@ describe('session-routes', () => {
       expect(body.terminalBuffer).toBeDefined();
     });
 
-    it('preserves accumulated history even when a live mux pane capture is available', async () => {
+    it('preserves accumulated history and appends the live mux pane snapshot', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
       (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
@@ -323,8 +323,12 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.terminalBuffer).toContain('hello world');
       expect(body.terminalBuffer).toContain('later accumulated history');
-      expect(body.terminalBuffer).not.toContain('visible tmux pane only');
-      expect(harness.ctx.mux.capturePaneBuffer).not.toHaveBeenCalled();
+      expect(body.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
+      expect(body.terminalBuffer.indexOf('hello world')).toBeLessThan(
+        body.terminalBuffer.indexOf('visible tmux pane only')
+      );
+      expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, '0');
     });
 
     it('uses live mux pane capture only when the accumulated buffer is empty', async () => {
