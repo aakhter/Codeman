@@ -2514,6 +2514,9 @@ body {
 }
 
 .toolbar-center {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
@@ -2841,8 +2844,9 @@ body {
   white-space: nowrap;
 }
 
-/* Mobile voice input button - hidden on desktop */
-.btn-voice-mobile {
+/* Mobile input buttons - hidden on desktop */
+.btn-voice-mobile,
+.btn-upload-mobile {
   display: none;
 }
 

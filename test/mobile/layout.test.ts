@@ -194,6 +194,75 @@ describe('Mobile Layout', () => {
         await context.close();
       }
     });
+
+    it('uses phone upload and voice controls without toolbar overlap', async () => {
+      const device = REPRESENTATIVE_DEVICES['small-phone'];
+      const { context, page } = await createDevicePage(device, BASE_URL, 'chromium');
+      try {
+        await page.waitForTimeout(WAIT.PAGE_SETTLE);
+        expect(await page.locator('.toolbar-center .btn-upload').isVisible()).toBe(false);
+        await assertVisible(page, '.btn-upload-mobile');
+        await assertVisible(page, '#voiceInputBtnMobile');
+
+        const violations = await page.evaluate(() => {
+          const visibleToolbarButtons = [...document.querySelectorAll('.toolbar button')]
+            .filter((el): el is HTMLButtonElement => {
+              const rect = el.getBoundingClientRect();
+              const style = getComputedStyle(el);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            })
+            .map((el) => ({
+              selector: el.id ? `#${el.id}` : `.${[...el.classList].join('.')}`,
+              rect: el.getBoundingClientRect(),
+            }));
+
+          const overlaps: string[] = [];
+          for (let i = 0; i < visibleToolbarButtons.length; i += 1) {
+            for (let j = i + 1; j < visibleToolbarButtons.length; j += 1) {
+              const a = visibleToolbarButtons[i];
+              const b = visibleToolbarButtons[j];
+              const intersects =
+                a.rect.left < b.rect.right &&
+                a.rect.right > b.rect.left &&
+                a.rect.top < b.rect.bottom &&
+                a.rect.bottom > b.rect.top;
+              if (intersects) {
+                overlaps.push(`${a.selector} overlaps ${b.selector}`);
+              }
+            }
+          }
+          return overlaps;
+        });
+
+        expect(violations).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    });
+
+    it('keeps desktop upload and voice controls in one centered row', async () => {
+      const { context, page } = await createDevicePage(iPadPro, BASE_URL, 'chromium');
+      try {
+        await page.setViewportSize({ width: 1280, height: 800 });
+        await page.waitForTimeout(WAIT.PAGE_SETTLE);
+        await assertVisible(page, '.toolbar-center .btn-upload');
+        await assertVisible(page, '#voiceInputBtn');
+
+        const layout = await page.evaluate(() => {
+          const upload = document.querySelector('.toolbar-center .btn-upload')!.getBoundingClientRect();
+          const voice = document.querySelector('#voiceInputBtn')!.getBoundingClientRect();
+          return {
+            centerYDifference: Math.abs(upload.top + upload.height / 2 - (voice.top + voice.height / 2)),
+            centerXDifference: Math.abs(upload.left + upload.width / 2 - (voice.left + voice.width / 2)),
+          };
+        });
+
+        expect(layout.centerYDifference).toBeLessThanOrEqual(2);
+        expect(layout.centerXDifference).toBeGreaterThan(20);
+      } finally {
+        await context.close();
+      }
+    });
   });
 
   // ─── Device Classes ───────────────────────────────────────────────────────

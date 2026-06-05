@@ -11,12 +11,20 @@ function handleOutput(session: Session, data: string): void {
 }
 
 describe('Codex terminal output filtering', () => {
-  it('strips unsolicited Codex erase-display redraws to preserve scrollback', () => {
+  it('preserves Codex erase-display redraws used by the TUI layout engine', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
 
     handleOutput(session, '\x1b[H\x1b[Jidle redraw');
 
-    expect(session.terminalBuffer).toBe('\x1b[Hidle redraw');
+    expect(session.terminalBuffer).toBe('\x1b[H\x1b[Jidle redraw');
+  });
+
+  it('strips Codex scrollback erase without stripping visible-screen erase', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+
+    handleOutput(session, '\x1b[?1049h\x1b[2Jvisible\x1b[3Jscrollback\x1b[?1049l');
+
+    expect(session.terminalBuffer).toBe('\x1b[2Jvisiblescrollback');
   });
 
   it('preserves Codex erase-display redraw when the user pressed Ctrl+L', () => {

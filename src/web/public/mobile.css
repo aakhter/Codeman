@@ -429,7 +429,7 @@ html.mobile-init .file-browser-panel {
     color: #93c5fd;
     cursor: pointer;
     flex-shrink: 0;
-    order: 5; /* Between Run Shell and settings gear */
+    order: 6; /* After upload, before settings gear */
   }
 
   .btn-voice-mobile svg {
@@ -462,7 +462,7 @@ html.mobile-init .file-browser-panel {
     font-size: 0.85rem;
     cursor: pointer;
     flex-shrink: 0;
-    order: 6; /* Far right */
+    order: 7; /* Far right */
     position: relative;
   }
 
@@ -611,10 +611,9 @@ html.mobile-init .file-browser-panel {
     bottom: calc(var(--safe-area-bottom) + 40px);
   }
 
-  /* Show case selector in center */
+  /* Desktop-centered inputs overlap the compact phone toolbar. */
   .toolbar-center {
-    display: flex !important;
-    align-items: center;
+    display: none !important;
   }
 
   .toolbar-center .btn-toolbar.btn-voice {
@@ -835,6 +834,27 @@ html.mobile-init .file-browser-panel {
     padding: 0 10px !important;
   }
 
+  .btn-upload-mobile {
+    display: flex !important;
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    min-width: 26px !important;
+    padding: 0 !important;
+    align-items: center;
+    justify-content: center;
+    background: rgba(59, 130, 246, 0.12);
+    color: #93c5fd;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 4px;
+    order: 5;
+  }
+
+  .btn-upload-mobile svg {
+    width: 13px;
+    height: 13px;
+  }
+
   /* Mobile case button - visible on mobile */
   .btn-toolbar.btn-case-mobile {
     display: flex !important;
@@ -873,6 +893,18 @@ html.mobile-init .file-browser-panel {
   .btn-case-settings-mobile:active {
     background: rgba(255, 255, 255, 0.1);
     color: #fff;
+  }
+
+  @media (max-width: 374px) {
+    .toolbar {
+      padding: 0 2px;
+    }
+
+    .toolbar-left,
+    .toolbar-left .toolbar-group,
+    .toolbar-left .toolbar-group:first-child {
+      gap: 2px;
+    }
   }
 
   @media (max-width: 360px) {

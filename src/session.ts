@@ -1283,9 +1283,8 @@ export class Session extends EventEmitter {
         prependBottomBand += '\x1b8';
       }
 
-      // Preserve home+erase only when it directly follows a user Ctrl+L.
-      // Codex emits the same sequence during idle in-place redraws; treating
-      // every occurrence as a full clear makes the prompt/status band jump.
+      // Track home+erase when it directly follows a user Ctrl+L so internal
+      // frame-position repair state resets with the user's explicit clear.
       // eslint-disable-next-line no-control-regex
       const hasHomeErase = /\x1b\[(?:1;1)?H\x1b\[[0-3]?J/.test(data);
       const preserveUserClear = this._codexPendingUserClearUntil >= Date.now() && hasHomeErase;
@@ -1301,20 +1300,13 @@ export class Session extends EventEmitter {
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '');
 
-      if (!preserveUserClear) {
-        data = data
-          // Erase-in-display, all modes:
-          //   \x1b[J  / \x1b[0J  = erase from cursor to end of display
-          //   \x1b[1J = erase from start of display to cursor
-          //   \x1b[2J = erase entire display
-          //   \x1b[3J = erase scrollback
-          // After codex emits \x1b[H (cursor home), \x1b[J wipes everything
-          // below — same effect as \x1b[2J. Strip all variants. \x1b[K
-          // (erase IN LINE) is left alone — codex needs it for normal
-          // single-line rendering.
-          // eslint-disable-next-line no-control-regex
-          .replace(/\x1b\[[0-3]?J/g, '');
-      }
+      data = data
+        // Keep visible-screen erases (J/0J/1J/2J): Codex relies on them
+        // before scroll-region and reverse-index redraws. Stripping them
+        // leaves stale rows that xterm later scrolls into the active frame.
+        // Strip only 3J, which erases saved scrollback.
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[3J/g, '');
 
       data = data
         // eslint-disable-next-line no-control-regex
