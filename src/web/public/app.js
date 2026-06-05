@@ -781,13 +781,32 @@ class CodemanApp {
         this.closeHelp();
       }
 
-      // Alt+1-9: switch to Codeman session by index
-      if (e.altKey && !e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '9') {
-        const idx = parseInt(e.key) - 1;
-        if (idx < this.sessionOrder.length) {
+      // Option/Alt navigation uses physical key codes so macOS keyboard layouts
+      // that emit special characters (for example Option+1 -> ¡) still work.
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        const code = e.code || '';
+        const digitMatch = code.match(/^Digit([1-9])$/);
+        if (digitMatch) {
+          const idx = parseInt(digitMatch[1], 10) - 1;
           e.preventDefault();
-          this.selectSession(this.sessionOrder[idx]);
+          if (idx < this.sessionOrder.length) {
+            this.selectSession(this.sessionOrder[idx]);
+          }
+          return;
         }
+
+        if (e.code === 'BracketLeft') {
+          e.preventDefault();
+          this.previousSession();
+          return;
+        }
+
+        if (e.code === 'BracketRight') {
+          e.preventDefault();
+          this.nextSession();
+          return;
+        }
+
         return;
       }
 
