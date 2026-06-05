@@ -489,9 +489,19 @@ body {
   box-shadow: 0 0 6px var(--red);
 }
 
+.connection-dot.connected {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.35);
+}
+
 .connection-dot.reconnecting {
   background: var(--yellow);
   animation: connection-pulse 1.5s ease-in-out infinite;
+}
+
+.connection-dot.fallback {
+  background: var(--yellow);
+  box-shadow: 0 0 6px rgba(234, 179, 8, 0.35);
 }
 
 .connection-dot.draining {
