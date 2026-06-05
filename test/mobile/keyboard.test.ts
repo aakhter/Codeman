@@ -5,16 +5,22 @@ import { PORTS, KEYBOARD, SELECTORS, BODY_CLASSES, WAIT } from './helpers/consta
 import { createTestServer, stopTestServer } from './helpers/server.js';
 import { createDevicePage, getBrowser, closeAllBrowsers } from './helpers/browser.js';
 import {
-  showKeyboard, hideKeyboard,
-  showKeyboardViaCDP, hideKeyboardViaCDP,
-  showKeyboardViaMock, hideKeyboardViaMock,
-  showKeyboardViaDOM, hideKeyboardViaDOM,
+  showKeyboard,
+  hideKeyboard,
+  showKeyboardViaCDP,
+  hideKeyboardViaCDP,
+  showKeyboardViaMock,
+  hideKeyboardViaMock,
+  showKeyboardViaDOM,
+  hideKeyboardViaDOM,
   setupViewportMock,
 } from './helpers/keyboard-sim.js';
 import { getCDP, setVisualViewportHeight } from './helpers/cdp.js';
 import {
-  assertHasClass, assertNotHasClass,
-  assertVisible, assertHidden,
+  assertHasClass,
+  assertNotHasClass,
+  assertVisible,
+  assertHidden,
   getCSSProperty,
 } from './helpers/assertions.js';
 import { REPRESENTATIVE_DEVICES } from './devices.js';
@@ -167,9 +173,7 @@ describe('Virtual Keyboard', () => {
         const success = await showKeyboardViaMock(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
         expect(success).toBe(true);
 
-        const hasClass = await page.evaluate(() =>
-          document.body.classList.contains('keyboard-visible'),
-        );
+        const hasClass = await page.evaluate(() => document.body.classList.contains('keyboard-visible'));
         expect(hasClass).toBe(true);
       } finally {
         await context.close();
@@ -415,6 +419,30 @@ describe('Virtual Keyboard', () => {
       const callCount = await page.evaluate(() => (window as any).__fitCallCount ?? 0);
       // Soft assertion — fitAddon may not be initialized without real terminal
       expect(callCount).toBeGreaterThanOrEqual(0);
+    });
+
+    it('keeps xterm helper textarea focusable on touch devices', async () => {
+      const styles = await page.evaluate(() => {
+        const textarea = document.querySelector('.xterm-helper-textarea');
+        if (!(textarea instanceof HTMLElement)) return null;
+        const cs = getComputedStyle(textarea);
+        return {
+          left: cs.left,
+          top: cs.top,
+          width: cs.width,
+          height: cs.height,
+          zIndex: cs.zIndex,
+          opacity: cs.opacity,
+        };
+      });
+
+      expect(styles).not.toBeNull();
+      expect(styles?.left).toBe('0px');
+      expect(styles?.top).toBe('0px');
+      expect(styles?.width).toBe('1px');
+      expect(styles?.height).toBe('1px');
+      expect(styles?.opacity).toBe('0');
+      expect(Number(styles?.zIndex)).toBeGreaterThanOrEqual(0);
     });
   });
 
