@@ -8624,10 +8624,11 @@ kbd {
   position: fixed;
   left: var(--safe-area-left);
   right: var(--safe-area-right);
-  bottom: calc(var(--safe-area-bottom) + 84px);
+  bottom: calc(var(--safe-area-bottom) + 40px);
   z-index: 52;
   display: block;
-  min-height: 42px;
+  min-height: 44px;
+  max-height: 96px;
   border: 1px solid rgba(80, 120, 190, 0.55);
   border-left: none;
   border-right: none;
@@ -8636,6 +8637,14 @@ kbd {
   box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.35);
   transition: transform 0.15s ease-out;
   will-change: transform;
+}
+
+.touch-device.keyboard-visible #cjkInput.cjk-input-visible {
+  bottom: calc(var(--safe-area-bottom) + 84px);
+}
+
+body.touch-device.cjk-input-visible .main {
+  padding-bottom: calc(84px + var(--safe-area-bottom));
 }
 
 /* ═══════════════════════════════════════════════════════════════
