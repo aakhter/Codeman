@@ -143,7 +143,7 @@ describe('TmuxManager (unit)', () => {
         cursorY: 1,
       });
 
-      expect(snapshot).toBe(`\x1b[1;1H${fullWidthLine}\x1b[2;1Hnext line\x1b[2;3H`);
+      expect(snapshot).toBe(`\x1b[1;1H${'x'.repeat(9)}\x1b[2;1Hnext line\x1b[2;3H`);
       expect(snapshot).not.toContain('\n');
     });
   });

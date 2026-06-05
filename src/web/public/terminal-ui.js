@@ -199,7 +199,24 @@ Object.assign(CodemanApp.prototype, {
           // whitespace) -- if so, xterm handled it and we should not double-send.
           // Use a microtask to check after xterm's own handlers have run.
           const data = e.data;
+          const pendingBefore = this._localEchoOverlay?.pendingText || '';
           Promise.resolve().then(() => {
+            if (
+              this._lastTerminalData?.data === data &&
+              performance.now() - this._lastTerminalData.time < 100
+            ) {
+              xtermTextarea.value = '';
+              return;
+            }
+            const pendingAfter = this._localEchoOverlay?.pendingText || '';
+            if (
+              this._localEchoEnabled &&
+              pendingAfter.length > pendingBefore.length &&
+              pendingAfter.endsWith(data)
+            ) {
+              xtermTextarea.value = '';
+              return;
+            }
             // If xterm cleared the textarea, it processed the input -- skip.
             const val = xtermTextarea.value;
             if (!val || (val.trim() === '' && data !== ' ')) return;
@@ -556,6 +573,7 @@ Object.assign(CodemanApp.prototype, {
         ) {
           return;
         }
+        this._lastTerminalData = { data, time: performance.now() };
 
         // ── Local Echo Mode ──
         // When enabled, keystrokes are buffered locally in the overlay for
@@ -1951,9 +1969,10 @@ Object.assign(CodemanApp.prototype, {
   /**
    * Send resize to a session with minimum dimension enforcement.
    * @param {string} sessionId
+   * @param {{ forceHttp?: boolean }} [options]
    * @returns {Promise<void>}
    */
-  async sendResize(sessionId) {
+  async sendResize(sessionId, options = {}) {
     // Fit terminal to container before reading dimensions — ensures local
     // terminal size matches what we report to the server PTY.
     if (this.fitAddon) this.fitAddon.fit();
@@ -1964,7 +1983,7 @@ Object.assign(CodemanApp.prototype, {
     // without a subsequent Ink redraw to repaint it).
     this._lastResizeDims = { cols: dims.cols, rows: dims.rows };
     // Fast path: WebSocket resize
-    if (this._wsReady && this._wsSessionId === sessionId) {
+    if (!options.forceHttp && this._wsReady && this._wsSessionId === sessionId) {
       try {
         this._ws.send(JSON.stringify({ t: 'z', c: dims.cols, r: dims.rows }));
         return;
