@@ -267,9 +267,7 @@ Object.assign(CodemanApp.prototype, {
     if (typeof CjkInput !== 'undefined') {
       this._cjkInput = CjkInput.init({
         send: (text) => {
-          if (this.activeSessionId) {
-            this._sendInputAsync(this.activeSessionId, text);
-          }
+          this._handleCjkInput(text);
         },
       });
     }
@@ -1471,6 +1469,49 @@ Object.assign(CodemanApp.prototype, {
         this._localEchoOverlay.setPrompt({ type: 'character', char: '\u276f', offset: 2 });
       }
     }
+  },
+
+  _handleCjkInput(text) {
+    if (!this.activeSessionId) return;
+    const sessionId = this.activeSessionId;
+    const session = this.sessions.get(sessionId);
+    const useLocalEcho = !!(this._localEchoEnabled && this._localEchoOverlay && session?.mode !== 'shell');
+    if (!useLocalEcho) {
+      this._sendInputAsync(sessionId, text);
+      return;
+    }
+
+    if (text === '\x7f') {
+      const source = this._localEchoOverlay.removeChar();
+      if (source === 'flushed') this._sendInputAsync(sessionId, text);
+      return;
+    }
+
+    if (/[\r\n]+$/.test(text)) {
+      const committed = text.replace(/[\r\n]+$/g, '');
+      if (committed) this._localEchoOverlay.appendText(committed);
+      const pending = this._localEchoOverlay.pendingText || '';
+      this._localEchoOverlay.clear();
+      this._localEchoOverlay.suppressBufferDetection();
+      this._flushedOffsets?.delete(sessionId);
+      this._flushedTexts?.delete(sessionId);
+      if (pending) this._sendInputAsync(sessionId, pending);
+      setTimeout(() => this._sendInputAsync(sessionId, '\r'), pending ? 80 : 0);
+      return;
+    }
+
+    if (text.length === 1 && text.charCodeAt(0) < 32) {
+      const pending = this._localEchoOverlay.pendingText || '';
+      this._localEchoOverlay.clear();
+      this._localEchoOverlay.suppressBufferDetection();
+      this._flushedOffsets?.delete(sessionId);
+      this._flushedTexts?.delete(sessionId);
+      if (pending) this._sendInputAsync(sessionId, pending);
+      this._sendInputAsync(sessionId, text);
+      return;
+    }
+
+    this._localEchoOverlay.appendText(text);
   },
 
   /**
