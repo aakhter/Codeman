@@ -269,18 +269,17 @@ function buildOpenCodeCommand(config?: OpenCodeConfig): string {
  *
  * - `--no-alt-screen` keeps codex's TUI in the main buffer so conversation
  *   bytes stay in xterm.js scrollback (openai/codex#14277).
- * - `-c tui.animations=false` disables the welcome shimmer, spinner, and
- *   other animated elements that drive frequent CUP-based viewport
- *   repaints. Each repaint overwrites the cells where prior shell-command
- *   output / conversation lived, so even with --no-alt-screen the user
- *   sees content get wiped over time as codex idle-redraws.
+ * - TUI animations stay enabled. Codex's live status line (for example
+ *   `Working (31s)`) is driven by those redraw ticks; disabling animations
+ *   makes the timer update only when other terminal output arrives.
  *
- * Both flags are codeman-specific (other codex invocations the user runs
- * directly keep their default behavior — they need their own `~/.codex/
- * config.toml` for that).
+ * `--no-alt-screen` is codeman-specific (other codex invocations the user
+ * runs directly keep their default behavior — they need their own `~/.codex/
+ * config.toml` for that). Codeman handles the extra animated redraws with
+ * row-repair filtering in Session._handleTerminalOutput.
  */
-function buildCodexCommand(config?: CodexConfig): string {
-  const parts = ['codex', '--no-alt-screen', '-c', 'tui.animations=false'];
+export function buildCodexCommand(config?: CodexConfig): string {
+  const parts = ['codex', '--no-alt-screen'];
 
   if (config?.dangerouslyBypassApprovals) {
     parts.push('--dangerously-bypass-approvals-and-sandbox');
@@ -861,10 +860,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // then cds into workingDir via the current kernel mount table, sidestepping
       // any stale dentry cache the tmux server may hold for FUSE paths.
       const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      execSync(`${this.tmux()} respawn-pane -k -c /tmp -t ${shellescape(muxName)} bash -c ${JSON.stringify(launchCmd)}`, {
-        timeout: EXEC_TIMEOUT_MS,
-        stdio: 'ignore',
-      });
+      execSync(
+        `${this.tmux()} respawn-pane -k -c /tmp -t ${shellescape(muxName)} bash -c ${JSON.stringify(launchCmd)}`,
+        {
+          timeout: EXEC_TIMEOUT_MS,
+          stdio: 'ignore',
+        }
+      );
 
       // Wait for tmux session to be queryable
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
@@ -1056,9 +1058,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      await execAsync(`${this.tmux()} respawn-pane -k -c /tmp -t ${shellescape(muxName)} bash -c ${JSON.stringify(launchCmd)}`, {
-        timeout: EXEC_TIMEOUT_MS,
-      });
+      await execAsync(
+        `${this.tmux()} respawn-pane -k -c /tmp -t ${shellescape(muxName)} bash -c ${JSON.stringify(launchCmd)}`,
+        {
+          timeout: EXEC_TIMEOUT_MS,
+        }
+      );
       // Wait for the respawned process to start
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
       const pid = this.getPanePid(muxName);

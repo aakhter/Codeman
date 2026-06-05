@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TmuxManager, parsePaneList } from '../src/tmux-manager.js';
+import { TmuxManager, buildCodexCommand, parsePaneList } from '../src/tmux-manager.js';
 import { execSync } from 'node:child_process';
 
 // ============================================================================
@@ -119,6 +119,16 @@ describe('TmuxManager (unit)', () => {
       ).buildEnvExports('session-1', 'codeman-abc12345', 'opencode');
 
       expect(exports).toContain('unset COLORTERM');
+    });
+  });
+
+  describe('Codex command', () => {
+    it('keeps Codex TUI animations enabled so live Working timer redraws continue', () => {
+      const command = buildCodexCommand({ dangerouslyBypassApprovals: true });
+
+      expect(command).toContain('codex --no-alt-screen');
+      expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
+      expect(command).not.toContain('tui.animations=false');
     });
   });
 
