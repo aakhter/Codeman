@@ -307,11 +307,11 @@ describe('session-routes', () => {
       expect(body.terminalBuffer).toBeDefined();
     });
 
-    it('prefers live mux pane capture over stale in-memory buffer', async () => {
-      harness.ctx._session.terminalBuffer = 'stale codeman buffer\n› Implement {feature}';
+    it('preserves accumulated history even when a live mux pane capture is available', async () => {
+      harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
       (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
-        () => 'live tmux pane\n› whats next?'
+        () => 'visible tmux pane only\n› current prompt'
       );
 
       const res = await harness.app.inject({
@@ -321,9 +321,28 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain('live tmux pane');
-      expect(body.terminalBuffer).toContain('› whats next?');
-      expect(body.terminalBuffer).not.toContain('Implement {feature}');
+      expect(body.terminalBuffer).toContain('hello world');
+      expect(body.terminalBuffer).toContain('later accumulated history');
+      expect(body.terminalBuffer).not.toContain('visible tmux pane only');
+      expect(harness.ctx.mux.capturePaneBuffer).not.toHaveBeenCalled();
+    });
+
+    it('uses live mux pane capture only when the accumulated buffer is empty', async () => {
+      harness.ctx._session.terminalBuffer = '';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+        () => 'visible restored tmux pane\n› current prompt'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.terminalBuffer).toContain('visible restored tmux pane');
+      expect(body.terminalBuffer).toContain('› current prompt');
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, '0');
     });
 

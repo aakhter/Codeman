@@ -941,11 +941,10 @@ export function registerSessionRoutes(
 
     const muxName = session.muxName;
     const liveMuxBuffer =
-      muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName, '0') : null;
-    const rawBuffer =
-      liveMuxBuffer !== null && (liveMuxBuffer.length > 0 || session.terminalBufferLength === 0)
-        ? liveMuxBuffer
-        : session.terminalBuffer;
+      session.terminalBufferLength === 0 && muxName && typeof ctx.mux.capturePaneBuffer === 'function'
+        ? ctx.mux.capturePaneBuffer(muxName, '0')
+        : null;
+    const rawBuffer = liveMuxBuffer ?? session.terminalBuffer;
     const tailBytes = query.tail ? parseInt(query.tail, 10) : 0;
     const fullSize = rawBuffer.length;
     let truncated = false;
