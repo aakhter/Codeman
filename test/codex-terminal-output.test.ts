@@ -140,4 +140,20 @@ describe('Codex terminal output filtering', () => {
 
     expect(emitted[1]).not.toContain('\x1b[H\x1b[2J');
   });
+
+  it('clears status-only Codex Working redraw rows before writing them', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    const workingRedraw = '\x1b[55;1H\x1b[2m• Working (21s)';
+
+    handleOutput(session, workingRedraw);
+
+    expect(emitted[0]).toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[0].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(workingRedraw));
+    expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
+  });
 });
