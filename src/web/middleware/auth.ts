@@ -159,7 +159,7 @@ export function registerSecurityHeaders(app: FastifyInstance, https: boolean): v
     reply.header('X-Frame-Options', 'SAMEORIGIN');
     reply.header(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob:; connect-src 'self' wss://api.deepgram.com; font-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'"
+      "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob:; connect-src 'self' wss://api.deepgram.com; font-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'"
     );
     if (https) {
       reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');

@@ -42,6 +42,16 @@ describe('Auth Security', () => {
   });
 
   describe('Basic Auth', () => {
+    it('allows blob workers for terminal rendering helpers in the CSP', async () => {
+      const res = await fetch(`${baseUrl}/api/status`, {
+        headers: { Authorization: basicAuthHeader(TEST_USER, TEST_PASS) },
+      });
+      expect(res.status).toBe(200);
+
+      const csp = res.headers.get('content-security-policy');
+      expect(csp).toContain("worker-src 'self' blob:");
+    });
+
     it('should reject requests without credentials', async () => {
       const res = await fetch(`${baseUrl}/api/status`);
       expect(res.status).toBe(401);
@@ -290,7 +300,7 @@ describe('No-Auth Server Warning', () => {
     console.warn = (...args: unknown[]) => {
       consoleWarnSpy.push(args.map(String).join(' '));
     };
-    server = new WebServer(NOAUTH_PORT, false, true);
+    server = new WebServer(NOAUTH_PORT, false, true, '0.0.0.0');
     await server.start();
   });
 

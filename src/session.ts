@@ -410,6 +410,9 @@ export class Session extends EventEmitter {
   // the ghost-row repair heuristic to detect the "small region → full region"
   // transition that causes stacked status bars (see _handleTerminalOutput).
   private _codexLastDecstbmBottom: number | null = null;
+  // Last contiguous Codex prompt/status band rows we explicitly cleared.
+  // Used to erase rows vacated when the UI band moves down as well as up.
+  private _codexLastUiBandRows: number[] = [];
   // Deepest CUP row codex hit in the most recent chunk. Used by heuristic C
   // to detect when codex's persistent-UI band shifts upward (e.g. the MCP
   // loader finishes and the status bar moves up 2 rows) so we can clear the
@@ -1274,13 +1277,30 @@ export class Session extends EventEmitter {
       const promptStatusRows = collectCodexUiRows(data, this._ptyRows);
       const promptStatusTop = promptStatusRows.length ? Math.max(4, Math.min(...promptStatusRows) - 1) : null;
       const promptStatusBottom = promptStatusRows.length ? Math.max(...promptStatusRows) : null;
+      const currentUiBandRows: number[] = [];
+      let prependVacatedUiRows = '';
       let prependBottomBand = '';
       if (promptStatusTop !== null && promptStatusBottom !== null) {
+        for (let r = promptStatusTop; r <= promptStatusBottom; r++) {
+          currentUiBandRows.push(r);
+        }
+
+        const currentUiBandSet = new Set(currentUiBandRows);
+        const vacatedUiRows = this._codexLastUiBandRows.filter((r) => !currentUiBandSet.has(r));
+        if (vacatedUiRows.length > 0) {
+          prependVacatedUiRows = '\x1b7';
+          for (const r of vacatedUiRows) {
+            prependVacatedUiRows += `\x1b[${r};1H\x1b[2K`;
+          }
+          prependVacatedUiRows += '\x1b8';
+        }
+
         prependBottomBand = '\x1b7';
         for (let r = promptStatusTop; r <= promptStatusBottom; r++) {
           prependBottomBand += `\x1b[${r};1H\x1b[2K`;
         }
         prependBottomBand += '\x1b8';
+        this._codexLastUiBandRows = currentUiBandRows;
       }
 
       // Track home+erase when it directly follows a user Ctrl+L so internal
@@ -1294,6 +1314,7 @@ export class Session extends EventEmitter {
       if (preserveUserClear) {
         this._codexFrameBottomRow = null;
         this._codexLastDecstbmBottom = null;
+        this._codexLastUiBandRows = [];
       }
 
       data = data
@@ -1317,8 +1338,12 @@ export class Session extends EventEmitter {
       // clears (C). Heuristic C still runs even when A or B fires — A/B
       // wipes the viewport but doesn't update _codexFrameBottomRow.
       let prefix = '';
-      if (triggerA || triggerB) prefix += '\x1b[H\x1b[2J';
+      if (triggerA || triggerB) {
+        prefix += '\x1b[H\x1b[2J';
+        if (currentUiBandRows.length === 0) this._codexLastUiBandRows = [];
+      }
       prefix += prependC;
+      prefix += prependVacatedUiRows;
       prefix += prependBottomBand;
       if (prefix) {
         if (process.env.CODEMAN_CODEX_RAW_LOG === '1') {

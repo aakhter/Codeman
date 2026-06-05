@@ -215,4 +215,48 @@ describe('WebGL longtask auto-fallback', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('terminal write pacing', () => {
+    it('uses a smaller first browser frame for active Codex terminal output', async () => {
+      const result = await page.evaluate(() => {
+        const app = (
+          window as unknown as {
+            app: {
+              activeSessionId: string;
+              sessions: Map<string, { mode: string }>;
+              pendingWrites: string[];
+              writeFrameScheduled: boolean;
+              _wasAtBottomBeforeWrite: boolean;
+              _workerYield: (cb: () => void) => void;
+              terminal: { write: (data: string) => void; scrollToBottom: () => void };
+              flushPendingWrites: () => void;
+            };
+          }
+        ).app;
+        const writes: string[] = [];
+        app.activeSessionId = 'codex-browser-test';
+        app.sessions = new Map([['codex-browser-test', { mode: 'codex' }]]);
+        app.pendingWrites = ['x'.repeat(96 * 1024)];
+        app.writeFrameScheduled = false;
+        app._wasAtBottomBeforeWrite = false;
+        app._workerYield = () => {};
+        app.terminal = {
+          write: (data: string) => writes.push(data),
+          scrollToBottom: () => {},
+        };
+
+        app.flushPendingWrites();
+
+        return {
+          firstWriteBytes: writes[0]?.length ?? 0,
+          remainingBytes: app.pendingWrites.join('').length,
+        };
+      });
+
+      expect(result).toEqual({
+        firstWriteBytes: 32 * 1024,
+        remainingBytes: 64 * 1024,
+      });
+    });
+  });
 });

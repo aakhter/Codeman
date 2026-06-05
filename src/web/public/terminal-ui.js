@@ -1401,64 +1401,6 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * Schedule cb via THREE racing primitives so data-pacing makes progress
-   * regardless of which scheduling primitive Chrome is throttling:
-   *   1. requestAnimationFrame — primary, fires at compositor rate
-   *      (may be 0Hz when window is occluded / on backgrounded monitor)
-   *   2. setTimeout(50) — fallback for occluded-but-visible windows
-   *      (clamped to 1Hz by Chrome's intensive wake-up throttling
-   *      after ~5 min of no user interaction)
-   *   3. Worker postMessage — bypasses intensive throttling entirely;
-   *      Workers are not subject to background-tab/idle-tab throttling
-   *      (this is the React Scheduler trick).
-   * Whichever fires first wins; the others are no-ops.
-   * Without all three, chunkedTerminalWrite and the deferred path of
-   * flushPendingWrites stall indefinitely when the substrate is degraded.
-   */
-  _safeYield(cb) {
-    let done = false;
-    const wrapped = () => {
-      if (done) return;
-      done = true;
-      cb();
-    };
-    requestAnimationFrame(wrapped);
-    setTimeout(wrapped, 50);
-    this._workerYield(wrapped);
-  },
-
-  /**
-   * Lazy-init a tiny "tick" worker whose only job is to postMessage back to
-   * us as fast as possible, escaping main-thread throttling. The worker's
-   * setTimeout(0) is not subject to Chrome's intensive wake-up throttling
-   * even when the parent tab is idle.
-   */
-  _workerYield(cb) {
-    try {
-      if (this._yieldWorker === undefined) {
-        // First call: build the worker (or mark unavailable). Each
-        // postMessage in produces exactly one postMessage out — we count on
-        // FIFO 1:1 to drain queue entries.
-        const src = "onmessage=()=>setTimeout(()=>postMessage(0),0);";
-        const blob = new Blob([src], { type: 'application/javascript' });
-        const url = URL.createObjectURL(blob);
-        this._yieldWorker = new Worker(url);
-        URL.revokeObjectURL(url);
-        this._yieldQueue = [];
-        this._yieldWorker.onmessage = () => {
-          const fn = this._yieldQueue.shift();
-          if (fn) fn();
-        };
-      }
-      if (!this._yieldWorker) return;
-      this._yieldQueue.push(cb);
-      this._yieldWorker.postMessage(0);
-    } catch {
-      this._yieldWorker = null; // mark unavailable, future calls skip
-    }
-  },
-
-  /**
    * Flush the flicker filter buffer to the terminal.
    * Called after the buffer window expires.
    */
@@ -1548,8 +1490,10 @@ Object.assign(CodemanApp.prototype, {
     if (_joinedLen > 16384) _crashDiag.log(`FLUSH: ${(_joinedLen / 1024).toFixed(0)}KB`);
 
     // Per-frame byte budget to prevent main thread blocking.
-    // Large writes (141KB+) can freeze Chrome for 2+ minutes.
-    const MAX_FRAME_BYTES = 65536; // 64KB budget per frame
+    // Codex produces dense synchronized TUI redraws, so use a smaller first
+    // frame to reduce xterm/WebGL stalls without slowing other modes.
+    const activeSession = this.activeSessionId && this.sessions ? this.sessions.get(this.activeSessionId) : null;
+    const MAX_FRAME_BYTES = activeSession?.mode === 'codex' ? 32768 : 65536;
     let deferred = false;
 
     if (_joinedLen <= MAX_FRAME_BYTES) {

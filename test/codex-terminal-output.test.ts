@@ -101,4 +101,43 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).not.toContain('\x1b[5;1H\x1b[2K');
     expect(emitted[0]).toContain(resumePickerRedraw);
   });
+
+  it('clears Codex UI rows vacated when the status band moves downward', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    handleOutput(
+      session,
+      '\x1b[55;1H\x1b[2m• Working (1s)\x1b[56;1H\x1b[1m›\x1b[0m ask\x1b[57;3Hgpt-5.5 · Context 80% left'
+    );
+    handleOutput(
+      session,
+      '\x1b[58;1H\x1b[2m• Working (2s)\x1b[59;1H\x1b[1m›\x1b[0m ask\x1b[60;3Hgpt-5.5 · Context 79% left'
+    );
+
+    expect(emitted[1]).toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[1]).toContain('\x1b[56;1H\x1b[2K');
+    expect(emitted[1]).toContain('\x1b[57;1H\x1b[2K');
+    expect(emitted[1].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[1].indexOf('\x1b[58;1H'));
+    expect(emitted[1]).not.toContain('\x1b[54;1H\x1b[2K');
+  });
+
+  it('does not full-clear the viewport for stable Codex UI rows at the same position', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    const stableRedraw =
+      '\x1b[58;1H\x1b[2m• Working (2s)\x1b[59;1H\x1b[1m›\x1b[0m ask\x1b[60;3Hgpt-5.5 · Context 79% left';
+
+    handleOutput(session, stableRedraw);
+    handleOutput(session, stableRedraw.replace('2s', '3s'));
+
+    expect(emitted[1]).not.toContain('\x1b[H\x1b[2J');
+  });
 });
