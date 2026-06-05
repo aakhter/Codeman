@@ -69,6 +69,22 @@ describe('run mode UI', () => {
 });
 
 describe('Codex quick start settings', () => {
+  it('renders Codex CLI settings in a dedicated app settings tab', () => {
+    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
+
+    expect(html).toContain('data-tab="settings-codex">Codex CLI</button>');
+
+    const claudeTab = html.match(
+      /<div class="modal-tab-content hidden" id="settings-claude">([\s\S]*?)<!-- Codex CLI Tab -->/
+    );
+    expect(claudeTab?.[1]).not.toContain('appSettingsCodexDangerouslyBypassApprovals');
+
+    const codexTab = html.match(
+      /<div class="modal-tab-content hidden" id="settings-codex">([\s\S]*?)<\/div>\s*<!-- Models Tab -->/
+    );
+    expect(codexTab?.[1]).toContain('appSettingsCodexDangerouslyBypassApprovals');
+  });
+
   it('passes the global Codex bypass setting into quick-start config', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },
