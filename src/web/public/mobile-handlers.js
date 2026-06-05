@@ -386,6 +386,8 @@ const KeyboardHandler = {
         // to the accessory bar.
         this._shrinkPaddingToFit();
         app.terminal.scrollToBottom();
+        app._syncMobileHelperTextareaToCursor?.();
+        app._localEchoOverlay?.rerender?.();
         // Send resize to server so PTY dimensions match xterm
         this._sendTerminalResize();
       }

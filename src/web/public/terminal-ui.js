@@ -261,6 +261,10 @@ Object.assign(CodemanApp.prototype, {
     }
 
     this._localEchoOverlay = new LocalEchoOverlay(this.terminal);
+    if (MobileDetection.isTouchDevice()) {
+      this.terminal.onCursorMove(() => this._syncMobileHelperTextareaToCursor());
+      this.terminal.onRender(() => this._syncMobileHelperTextareaToCursor());
+    }
 
     // CJK IME input — textarea in index.html, just wire up send
     this._cjkInput = null;
@@ -393,6 +397,7 @@ Object.assign(CodemanApp.prototype, {
             if (cjkInput?.classList.contains('cjk-input-visible')) {
               cjkInput.focus();
             } else {
+              this._syncMobileHelperTextareaToCursor();
               this.terminal.focus();
             }
           }
@@ -1877,6 +1882,23 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       this.showToast('Failed to copy', 'error');
     }
+  },
+
+  _syncMobileHelperTextareaToCursor() {
+    if (!MobileDetection.isTouchDevice() || !this.terminal?.element) return;
+    try {
+      const xtermEl = this.terminal.element;
+      const cursor = this.terminal.element.querySelector('.xterm-cursor');
+      const screen = this.terminal.element.querySelector('.xterm-screen');
+      if (!(xtermEl instanceof HTMLElement) || !(cursor instanceof HTMLElement) || !(screen instanceof HTMLElement)) return;
+      const cursorRect = cursor.getBoundingClientRect();
+      const screenRect = screen.getBoundingClientRect();
+      if (!cursorRect.width && !cursorRect.height) return;
+      const left = Math.max(0, Math.round(cursorRect.left - screenRect.left));
+      const top = Math.max(0, Math.round(cursorRect.top - screenRect.top));
+      xtermEl.style.setProperty('--xterm-helper-left', `${left}px`);
+      xtermEl.style.setProperty('--xterm-helper-top', `${top}px`);
+    } catch {}
   },
 
   increaseFontSize() {
