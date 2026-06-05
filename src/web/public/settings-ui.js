@@ -1384,7 +1384,7 @@ Object.assign(CodemanApp.prototype, {
         imageWatcherEnabled: false,
         ralphTrackerEnabled: false,
         tabTwoRows: false,
-        cjkInputEnabled: true,
+        cjkInputEnabled: false,
       };
     }
     // Desktop defaults - rely on ?? operators in apply functions
