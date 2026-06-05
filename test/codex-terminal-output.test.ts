@@ -156,4 +156,20 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(workingRedraw));
     expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
   });
+
+  it('clears Codex spinner Working rows that omit elapsed time parentheses', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 29;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    const spinnerRedraw = '\x1b[24;1H\x1b[38;5;254m\x1b[1m•\x1b[CWorking\x1b[27;3H';
+
+    handleOutput(session, spinnerRedraw);
+
+    expect(emitted[0]).toContain('\x1b[24;1H\x1b[2K');
+    expect(emitted[0].indexOf('\x1b[24;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(spinnerRedraw));
+    expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
+  });
 });

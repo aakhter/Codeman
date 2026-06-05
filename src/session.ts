@@ -123,7 +123,10 @@ const CTRL_L_PATTERN = /\x0c/g;
 /** Pattern to split by newlines (CR or LF) */
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
-const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = /gpt-[\w.-]+|Context \d+% left|Messages.*toolcall|Use \/skills|Working \(/;
+const CODEX_WORKING_STATUS_TEXT_PATTERN = /(?:[•●].{0,8}Working|Working(?:\s|\(|$))/;
+const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = new RegExp(
+  `gpt-[\\w.-]+|Context \\d+% left|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
+);
 const CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN = /^\s*[›❯](?:\s|$)/;
 
 function isExternalCliMode(mode: SessionMode): boolean {
@@ -1275,7 +1278,7 @@ export class Session extends EventEmitter {
       }
 
       const promptStatusRows = collectCodexUiRows(data, this._ptyRows);
-      const hasExplicitStatusRow = /Working \(/.test(data);
+      const hasExplicitStatusRow = CODEX_WORKING_STATUS_TEXT_PATTERN.test(data);
       const promptStatusTop = promptStatusRows.length
         ? Math.max(4, Math.min(...promptStatusRows) - (hasExplicitStatusRow ? 0 : 1))
         : null;
