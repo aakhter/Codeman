@@ -589,6 +589,75 @@ describe('Virtual Keyboard', () => {
       expect(activeId).toBe('cjkInput');
     });
 
+    it('keeps terminal touch drag available for scrollback with the visible textarea enabled', async () => {
+      const calls = await page.evaluate(async () => {
+        app.activeSessionId = 'mobile-touch-scroll-test';
+        app.sessions.set('mobile-touch-scroll-test', {
+          id: 'mobile-touch-scroll-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app.hideWelcome();
+        app._updateCjkInputState();
+
+        const originalScrollLines = app.terminal.scrollLines.bind(app.terminal);
+        const scrollCalls: number[] = [];
+        app.terminal.scrollLines = (lines: number) => {
+          scrollCalls.push(lines);
+          return originalScrollLines(lines);
+        };
+
+        const target =
+          document.querySelector('#terminalContainer .xterm-screen') ?? document.getElementById('terminalContainer');
+        if (!target) return scrollCalls;
+        const rect = target.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const startY = rect.top + Math.min(180, rect.height - 20);
+        const endY = startY - 120;
+
+        function createTouch(y: number) {
+          return new Touch({
+            identifier: 1,
+            target,
+            clientX: x,
+            clientY: y,
+            pageX: x,
+            pageY: y,
+          });
+        }
+
+        target.dispatchEvent(
+          new TouchEvent('touchstart', {
+            touches: [createTouch(startY)],
+            changedTouches: [createTouch(startY)],
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        target.dispatchEvent(
+          new TouchEvent('touchmove', {
+            touches: [createTouch(endY)],
+            changedTouches: [createTouch(endY)],
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        target.dispatchEvent(
+          new TouchEvent('touchend', {
+            touches: [],
+            changedTouches: [createTouch(endY)],
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return scrollCalls;
+      });
+
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.some((lines) => lines !== 0)).toBe(true);
+    });
+
     it('keeps typed phone text visible in the textarea until Enter sends it', async () => {
       await page.evaluate(() => {
         window.__sentInputs = [];

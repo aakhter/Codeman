@@ -136,20 +136,14 @@ const CjkInput = (() => {
       _textarea.addEventListener('focus', _listeners.focus);
       _textarea.addEventListener('blur', _listeners.blur);
 
-      _listeners.terminalFocusRedirect = (e) => {
+      _listeners.xtermFocusRedirect = () => {
         if (!_isMobileComposer()) return;
-        e.preventDefault();
-        e.stopPropagation();
         _textarea.focus();
       };
       if (_terminalContainer) {
-        _terminalContainer.addEventListener('pointerdown', _listeners.terminalFocusRedirect, { capture: true });
-        _terminalContainer.addEventListener('touchstart', _listeners.terminalFocusRedirect, { capture: true });
-        _terminalContainer.addEventListener('mousedown', _listeners.terminalFocusRedirect, { capture: true });
-        _terminalContainer.addEventListener('click', _listeners.terminalFocusRedirect, { capture: true });
         _xtermTextarea = _terminalContainer.querySelector('.xterm-helper-textarea');
         if (_xtermTextarea) {
-          _xtermTextarea.addEventListener('focus', _listeners.terminalFocusRedirect, { capture: true });
+          _xtermTextarea.addEventListener('focus', _listeners.xtermFocusRedirect, { capture: true });
         }
       }
 
@@ -311,14 +305,8 @@ const CjkInput = (() => {
           if (handler) _textarea.removeEventListener(event, handler);
         }
       }
-      if (_terminalContainer && _listeners.terminalFocusRedirect) {
-        _terminalContainer.removeEventListener('pointerdown', _listeners.terminalFocusRedirect, { capture: true });
-        _terminalContainer.removeEventListener('touchstart', _listeners.terminalFocusRedirect, { capture: true });
-        _terminalContainer.removeEventListener('mousedown', _listeners.terminalFocusRedirect, { capture: true });
-        _terminalContainer.removeEventListener('click', _listeners.terminalFocusRedirect, { capture: true });
-      }
-      if (_xtermTextarea && _listeners.terminalFocusRedirect) {
-        _xtermTextarea.removeEventListener('focus', _listeners.terminalFocusRedirect, { capture: true });
+      if (_xtermTextarea && _listeners.xtermFocusRedirect) {
+        _xtermTextarea.removeEventListener('focus', _listeners.xtermFocusRedirect, { capture: true });
       }
       window.cjkActive = false;
       _composing = false;

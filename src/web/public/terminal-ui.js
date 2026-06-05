@@ -389,7 +389,12 @@ Object.assign(CodemanApp.prototype, {
           // routes back to the terminal. Without this, a tap on the terminal area
           // consumes the touch event but xterm's textarea never regains focus.
           if (!didScroll && this.terminal) {
-            this.terminal.focus();
+            const cjkInput = document.getElementById('cjkInput');
+            if (cjkInput?.classList.contains('cjk-input-visible')) {
+              cjkInput.focus();
+            } else {
+              this.terminal.focus();
+            }
           }
         },
         { passive: true }
