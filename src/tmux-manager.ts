@@ -167,6 +167,22 @@ export function parsePaneList(output: string): Map<string, number> {
   return result;
 }
 
+export function formatPaneSnapshot(
+  lines: string[],
+  geometry: { cols: number; rows: number; cursorX: number; cursorY: number }
+): string {
+  const cols = Math.max(1, geometry.cols);
+  const rows = Math.max(1, geometry.rows);
+  const parts: string[] = [];
+  for (let row = 0; row < Math.min(lines.length, rows); row++) {
+    parts.push(`\x1b[${row + 1};1H${lines[row].slice(0, cols)}`);
+  }
+  const cursorX = Math.max(0, Math.min(cols - 1, geometry.cursorX));
+  const cursorY = Math.max(0, Math.min(rows - 1, geometry.cursorY));
+  parts.push(`\x1b[${cursorY + 1};${cursorX + 1}H`);
+  return parts.join('');
+}
+
 /** Characters unsafe in paths — shell metacharacters, quotes, and control chars */
 const UNSAFE_PATH_CHARS = /[;&|$`(){}<>'"\n\r]/;
 
@@ -1861,15 +1877,24 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       }).replace(/\n+$/g, '');
       try {
         const cursor = execSync(
-          `${this.tmux()} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y}'`,
+          `${this.tmux()} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`,
           {
             encoding: 'utf-8',
             timeout: EXEC_TIMEOUT_MS,
           }
         ).trim();
-        const [cursorX, cursorY] = cursor.split(/\s+/).map((value) => parseInt(value, 10));
-        if (Number.isFinite(cursorX) && Number.isFinite(cursorY) && cursorX >= 0 && cursorY >= 0) {
-          return `${buffer}\x1b[${cursorY + 1};${cursorX + 1}H`;
+        const [cursorX, cursorY, cols, rows] = cursor.split(/\s+/).map((value) => parseInt(value, 10));
+        if (
+          Number.isFinite(cursorX) &&
+          Number.isFinite(cursorY) &&
+          Number.isFinite(cols) &&
+          Number.isFinite(rows) &&
+          cursorX >= 0 &&
+          cursorY >= 0 &&
+          cols > 0 &&
+          rows > 0
+        ) {
+          return formatPaneSnapshot(buffer.split('\n'), { cols, rows, cursorX, cursorY });
         }
       } catch (cursorErr) {
         console.error('[TmuxManager] Failed to query pane cursor after capture:', cursorErr);

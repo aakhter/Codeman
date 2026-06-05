@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TmuxManager, buildCodexCommand, parsePaneList } from '../src/tmux-manager.js';
+import { TmuxManager, buildCodexCommand, formatPaneSnapshot, parsePaneList } from '../src/tmux-manager.js';
 import { execSync } from 'node:child_process';
 
 // ============================================================================
@@ -129,6 +129,22 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('codex --no-alt-screen');
       expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
       expect(command).not.toContain('tui.animations=false');
+    });
+  });
+
+  describe('formatPaneSnapshot', () => {
+    it('paints captured rows with absolute cursor positions to avoid newline autowrap scroll', () => {
+      const fullWidthLine = 'x'.repeat(10);
+
+      const snapshot = formatPaneSnapshot([fullWidthLine, 'next line'], {
+        cols: 10,
+        rows: 4,
+        cursorX: 2,
+        cursorY: 1,
+      });
+
+      expect(snapshot).toBe(`\x1b[1;1H${fullWidthLine}\x1b[2;1Hnext line\x1b[2;3H`);
+      expect(snapshot).not.toContain('\n');
     });
   });
 
