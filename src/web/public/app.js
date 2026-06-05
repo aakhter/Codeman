@@ -2774,6 +2774,11 @@ class CodemanApp {
     }
   }
 
+  _resetTerminalForReplay() {
+    this.terminal.reset();
+    this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
+  }
+
   async selectSession(sessionId) {
     if (this.activeSessionId === sessionId) return;
     // Focus terminal SYNCHRONOUSLY before any await — iOS Safari only honors
@@ -2880,7 +2885,8 @@ class CodemanApp {
       // a small region with empty rows below the status bar.
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
-      this.sendResize(sessionId).catch(() => {});
+      await this.sendResize(sessionId, { forceHttp: true }).catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 400));
 
       // xterm snapshot restore: if we have a serialized xterm state from a
       // previous visit to this session, restore the user's exact prior view
@@ -2904,10 +2910,10 @@ class CodemanApp {
           /* localStorage unavailable — proceed without snapshot */
         }
       }
-      if (snapshot) {
+      const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
+      if (snapshot && !sessionIsBusy) {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
-        this.terminal.clear();
-        this.terminal.reset();
+        this._resetTerminalForReplay();
         this.terminal.write(snapshot);
         if (this._isStaleSelect(selectGen)) return;
         this.terminal.scrollToBottom();
@@ -2924,19 +2930,16 @@ class CodemanApp {
       // blank and rewrites with fresh data. Skip the cache and write the fresh
       // buffer once for a single clean transition.
       const cachedBuffer = this.terminalBufferCache.get(sessionId);
-      const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
       if (cachedBuffer && !sessionIsBusy) {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
-        this.terminal.clear();
-        this.terminal.reset();
+        this._resetTerminalForReplay();
         await this.chunkedTerminalWrite(cachedBuffer);
         if (this._isStaleSelect(selectGen)) return;
         this.terminal.scrollToBottom();
         _crashDiag.log('CACHE_DONE');
       } else if (sessionIsBusy) {
         // Clear stale content immediately — fresh buffer is being fetched
-        this.terminal.clear();
-        this.terminal.reset();
+        this._resetTerminalForReplay();
         _crashDiag.log('CACHE_SKIP_BUSY');
       }
 
@@ -2953,8 +2956,7 @@ class CodemanApp {
         const needsRewrite = data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
-          this.terminal.clear();
-          this.terminal.reset();
+          this._resetTerminalForReplay();
           // Show truncation indicator if buffer was cut
           if (data.truncated) {
             this.terminal.write('\x1b[90m... (earlier output truncated for performance) ...\x1b[0m\r\n\r\n');
@@ -2975,8 +2977,7 @@ class CodemanApp {
         }
       } else if (!cachedBuffer) {
         // No fresh buffer and no cache — clear any stale content
-        this.terminal.clear();
-        this.terminal.reset();
+        this._resetTerminalForReplay();
       }
 
       // Buffer load complete — unblock live SSE writes (queued events are discarded

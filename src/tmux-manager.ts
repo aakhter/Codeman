@@ -172,10 +172,11 @@ export function formatPaneSnapshot(
   geometry: { cols: number; rows: number; cursorX: number; cursorY: number }
 ): string {
   const cols = Math.max(1, geometry.cols);
+  const paintCols = Math.max(1, cols - 1);
   const rows = Math.max(1, geometry.rows);
   const parts: string[] = [];
   for (let row = 0; row < Math.min(lines.length, rows); row++) {
-    parts.push(`\x1b[${row + 1};1H${lines[row].slice(0, cols)}`);
+    parts.push(`\x1b[${row + 1};1H${lines[row].slice(0, paintCols)}`);
   }
   const cursorX = Math.max(0, Math.min(cols - 1, geometry.cursorX));
   const cursorY = Math.max(0, Math.min(rows - 1, geometry.cursorY));
