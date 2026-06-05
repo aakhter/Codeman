@@ -939,8 +939,15 @@ export function registerSessionRoutes(
     const query = req.query as { tail?: string };
     const session = findSessionOrFail(ctx, id);
 
+    const muxName = session.muxName;
+    const liveMuxBuffer =
+      muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName, '0') : null;
+    const rawBuffer =
+      liveMuxBuffer !== null && (liveMuxBuffer.length > 0 || session.terminalBufferLength === 0)
+        ? liveMuxBuffer
+        : session.terminalBuffer;
     const tailBytes = query.tail ? parseInt(query.tail, 10) : 0;
-    const fullSize = session.terminalBufferLength;
+    const fullSize = rawBuffer.length;
     let truncated = false;
     let cleanBuffer: string;
 
@@ -948,7 +955,7 @@ export function registerSessionRoutes(
     // During long thinking phases, Ink rewrites the same rows thousands of times
     // (500KB+). Without stripping, tail mode returns only spinner frames and
     // the terminal appears empty when switching tabs.
-    let strippedBuffer = stripInkRedrawBloat(session.terminalBuffer);
+    let strippedBuffer = stripInkRedrawBloat(rawBuffer);
 
     // Strip alt-screen toggles and scrollback-erase from codex byte streams.
     // Codex 0.130.0 emits these even with --no-alt-screen (openai/codex#14277);
