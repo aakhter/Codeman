@@ -348,6 +348,7 @@ class CodemanApp {
     this._initGeneration = 0;     // dedup concurrent handleInit calls
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
+    this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
     this.respawnCountdownTimers = {}; // { sessionId: { timerName: { endsAt, totalMs, reason } } }
@@ -2238,6 +2239,45 @@ class CodemanApp {
     }
   }
 
+  _setTerminalLoadState(sessionId, selectGen, phase) {
+    this.terminalLoadStates.set(sessionId, { generation: selectGen, phase });
+    this._updateTerminalLoadTab(sessionId);
+  }
+
+  _clearTerminalLoadState(sessionId, selectGen) {
+    const state = this.terminalLoadStates.get(sessionId);
+    if (state && state.generation !== selectGen) return;
+    this.terminalLoadStates.delete(sessionId);
+    this._updateTerminalLoadTab(sessionId);
+  }
+
+  _updateTerminalLoadTab(sessionId) {
+    const tab = this.$('sessionTabs')?.querySelector(`.session-tab[data-id="${sessionId}"]`);
+    if (!tab) return;
+
+    const loadState = this.terminalLoadStates.get(sessionId);
+    tab.classList.toggle('tab-loading', !!loadState);
+    if (loadState) {
+      tab.setAttribute('aria-busy', 'true');
+      tab.dataset.loadPhase = loadState.phase;
+      if (!tab.querySelector('.tab-load-spinner')) {
+        const spinner = document.createElement('span');
+        spinner.className = 'tab-load-spinner';
+        spinner.setAttribute('aria-hidden', 'true');
+        const numberEl = tab.querySelector('.tab-number');
+        if (numberEl) {
+          numberEl.insertAdjacentElement('afterend', spinner);
+        } else {
+          tab.insertBefore(spinner, tab.firstChild);
+        }
+      }
+    } else {
+      tab.setAttribute('aria-busy', 'false');
+      delete tab.dataset.loadPhase;
+      tab.querySelector('.tab-load-spinner')?.remove();
+    }
+  }
+
   _renderSessionTabsImmediate() {
     const container = this.$('sessionTabs');
     const existingTabs = container.querySelectorAll('.session-tab[data-id]');
@@ -2259,12 +2299,34 @@ class CodemanApp {
         const name = this.getSessionName(session);
         const taskStats = session.taskStats || { running: 0, total: 0 };
         const hasRunningTasks = taskStats.running > 0;
+        const loadState = this.terminalLoadStates.get(id);
 
         // Update active class
         if (isActive && !tab.classList.contains('active')) {
           tab.classList.add('active');
         } else if (!isActive && tab.classList.contains('active')) {
           tab.classList.remove('active');
+        }
+
+        tab.classList.toggle('tab-loading', !!loadState);
+        if (loadState) {
+          tab.setAttribute('aria-busy', 'true');
+          tab.dataset.loadPhase = loadState.phase;
+          if (!tab.querySelector('.tab-load-spinner')) {
+            const spinner = document.createElement('span');
+            spinner.className = 'tab-load-spinner';
+            spinner.setAttribute('aria-hidden', 'true');
+            const numberEl = tab.querySelector('.tab-number');
+            if (numberEl) {
+              numberEl.insertAdjacentElement('afterend', spinner);
+            } else {
+              tab.insertBefore(spinner, tab.firstChild);
+            }
+          }
+        } else {
+          tab.setAttribute('aria-busy', 'false');
+          delete tab.dataset.loadPhase;
+          tab.querySelector('.tab-load-spinner')?.remove();
         }
 
         // Update alert class
@@ -2395,6 +2457,7 @@ class CodemanApp {
       const hasRunningTasks = taskStats.running > 0;
       const alertType = this.tabAlerts.get(id);
       const alertClass = alertType === 'action' ? ' tab-alert-action' : alertType === 'idle' ? ' tab-alert-idle' : '';
+      const loadState = this.terminalLoadStates.get(id);
 
       // Get minimized subagents for this session
       const minimizedAgents = this.minimizedSubagents.get(id);
@@ -2406,8 +2469,9 @@ class CodemanApp {
       const tallTabsEnabled = this._tallTabsEnabled ?? false;
       const showFolder = tallTabsEnabled && session.name && folderName && folderName !== name;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}" data-id="${id}" data-color="${color}" onclick="app.selectSession('${escapeHtml(id)}', { forceReload: true })" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${loadState ? ' tab-loading' : ''}" data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.selectSession('${escapeHtml(id)}', { forceReload: true })" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
+          ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
@@ -2825,8 +2889,12 @@ class CodemanApp {
     console.log(`[CRASH-DIAG] selectSession START: ${sessionId.slice(0,8)}`);
 
     const selectGen = ++this._selectGeneration;
+    this._setTerminalLoadState(sessionId, selectGen, 'resizing');
 
-    if (selectGen !== this._selectGeneration) return; // newer tab switch won
+    if (selectGen !== this._selectGeneration) {
+      this._clearTerminalLoadState(sessionId, selectGen);
+      return; // newer tab switch won
+    }
 
     this._cleanupPreviousSession(sessionId);
     this.activeSessionId = sessionId;
@@ -2918,6 +2986,10 @@ class CodemanApp {
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
       await this.sendResize(sessionId, { forceHttp: true }).catch(() => {});
+      if (this._isStaleSelect(selectGen)) {
+        this._clearTerminalLoadState(sessionId, selectGen);
+        return;
+      }
 
       // xterm snapshot restore: if we have a serialized xterm state from a
       // previous visit to this session, restore the user's exact prior view
@@ -2945,9 +3017,13 @@ class CodemanApp {
       let restoredSnapshot = false;
       if (snapshot && !sessionIsBusy && session?.mode === 'codex') {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
+        this._setTerminalLoadState(sessionId, selectGen, 'replaying');
         this._resetTerminalForReplay();
         await new Promise((resolve) => this.terminal.write(snapshot, resolve));
-        if (this._isStaleSelect(selectGen)) return;
+        if (this._isStaleSelect(selectGen)) {
+          this._clearTerminalLoadState(sessionId, selectGen);
+          return;
+        }
         this.scrollToLastNonEmptyLine();
         _crashDiag.log('SNAPSHOT_RESTORE_DONE');
         restoredSnapshot = true;
@@ -2961,9 +3037,13 @@ class CodemanApp {
       const cachedBuffer = this.terminalBufferCache.get(sessionId);
       if (cachedBuffer && !sessionIsBusy && !restoredSnapshot) {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
+        this._setTerminalLoadState(sessionId, selectGen, 'replaying');
         this._resetTerminalForReplay();
         await this.chunkedTerminalWrite(cachedBuffer);
-        if (this._isStaleSelect(selectGen)) return;
+        if (this._isStaleSelect(selectGen)) {
+          this._clearTerminalLoadState(sessionId, selectGen);
+          return;
+        }
         this.scrollToLastNonEmptyLine();
         _crashDiag.log('CACHE_DONE');
       } else if (sessionIsBusy) {
@@ -2978,12 +3058,19 @@ class CodemanApp {
       // appear immediately when switching between shells.
       if (session?.mode !== 'shell') {
         await new Promise((resolve) => setTimeout(resolve, 400));
-        if (this._isStaleSelect(selectGen)) return;
+        if (this._isStaleSelect(selectGen)) {
+          this._clearTerminalLoadState(sessionId, selectGen);
+          return;
+        }
       }
 
+      this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
       const res = await fetch(`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
-      if (this._isStaleSelect(selectGen)) return;
+      if (this._isStaleSelect(selectGen)) {
+        this._clearTerminalLoadState(sessionId, selectGen);
+        return;
+      }
       const data = await res.json();
       _crashDiag.log(`FETCH_DONE: ${data.terminalBuffer ? (data.terminalBuffer.length/1024).toFixed(0) + 'KB' : 'empty'} truncated=${data.truncated}`);
 
@@ -2994,6 +3081,7 @@ class CodemanApp {
         const needsRewrite = data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
+          this._setTerminalLoadState(sessionId, selectGen, 'replaying');
           this._resetTerminalForReplay();
           // Show truncation indicator if buffer was cut
           if (data.truncated) {
@@ -3001,7 +3089,10 @@ class CodemanApp {
           }
           // Use chunked write for large buffers to avoid UI jank
           await this.chunkedTerminalWrite(data.terminalBuffer);
-          if (this._isStaleSelect(selectGen)) return;
+          if (this._isStaleSelect(selectGen)) {
+            this._clearTerminalLoadState(sessionId, selectGen);
+            return;
+          }
           this.scrollToLastNonEmptyLine();
         }
 
@@ -3132,11 +3223,13 @@ class CodemanApp {
       _crashDiag.log('FOCUS');
       this.terminal.focus();
       this.scrollToLastNonEmptyLine();
+      this._clearTerminalLoadState(sessionId, selectGen);
       _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${(performance.now() - _selStart).toFixed(0)}ms`);
     } catch (err) {
       if (this._isLoadingBuffer) this._finishBufferLoad();
       this._restoringFlushedState = false;
+      this._setTerminalLoadState(sessionId, selectGen, 'failed');
       console.error('Failed to load session terminal:', err);
     }
   }
@@ -3168,6 +3261,7 @@ class CodemanApp {
     this.projectInsights.delete(sessionId);
     this.pendingHooks.delete(sessionId);
     this.tabAlerts.delete(sessionId);
+    this.terminalLoadStates.delete(sessionId);
     this.clearCountdownTimers(sessionId);
     this.closeSessionLogViewerWindows(sessionId);
     this.closeSessionImagePopups(sessionId);
@@ -3336,6 +3430,7 @@ class CodemanApp {
       this.sessions.clear();
       this.terminalBuffers.clear();
       this.terminalBufferCache.clear();
+      this.terminalLoadStates.clear();
       this._xtermSnapshots?.clear();
       try {
         for (const k of Object.keys(localStorage)) {

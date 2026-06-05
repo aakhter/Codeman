@@ -81,4 +81,34 @@ describe('Codex tab resize behavior', () => {
     expect(rewriteBlock).toContain('this.scrollToLastNonEmptyLine();');
     expect(rewriteBlock).not.toContain('this.terminal.scrollToBottom();');
   });
+
+  it('tracks tab terminal reload state by select generation', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const selectBlock = source.slice(selectStart, source.indexOf('// Shared cleanup', selectStart));
+
+    expect(source).toContain('this.terminalLoadStates = new Map();');
+    expect(source).toContain('_setTerminalLoadState(sessionId, selectGen,');
+    expect(source).toContain('_clearTerminalLoadState(sessionId, selectGen)');
+    expect(selectBlock).toContain("this._setTerminalLoadState(sessionId, selectGen, 'fetching')");
+    expect(selectBlock).toContain("this._setTerminalLoadState(sessionId, selectGen, 'replaying')");
+    expect(selectBlock).toContain('this._clearTerminalLoadState(sessionId, selectGen);');
+    expect(selectBlock).toContain("this._setTerminalLoadState(sessionId, selectGen, 'failed')");
+    expect(source).toContain('if (state && state.generation !== selectGen) return;');
+  });
+
+  it('renders terminal loading state on session tabs', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const styles = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
+
+    expect(source).toContain('const loadState = this.terminalLoadStates.get(id);');
+    expect(source).toContain("tab.classList.toggle('tab-loading'");
+    expect(source).toContain("tab.setAttribute('aria-busy', 'true')");
+    expect(source).toContain('tab.dataset.loadPhase = loadState.phase');
+    expect(source).toContain('tab-load-spinner');
+    expect(source).toContain("${loadState ? ' tab-loading' : ''}");
+    expect(source).toContain("aria-busy=\"${loadState ? 'true' : 'false'}\"");
+    expect(styles).toContain('.session-tab.tab-loading');
+    expect(styles).toContain('.tab-load-spinner');
+  });
 });
