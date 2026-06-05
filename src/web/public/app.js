@@ -1680,28 +1680,24 @@ class CodemanApp {
       }
     }
 
-    // Slow path: HTTP POST — chain on dispatch only, don't wait for response.
-    // The server handles writeViaMux as fire-and-forget anyway.
-    this._inputSendChain = this._inputSendChain.then(() => {
-      const fetchPromise = fetch(`/api/sessions/${sessionId}/input`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input }),
-        keepalive: input.length < 65536,
-      });
-
-      // Handle response asynchronously — don't block next keystroke on response
-      fetchPromise.then(resp => {
+    // Slow path: HTTP POST. Await each request before dispatching the next
+    // chunk so fast desktop typing cannot arrive at the server out of order.
+    this._inputSendChain = this._inputSendChain.catch(() => {}).then(async () => {
+      try {
+        const resp = await fetch(`/api/sessions/${sessionId}/input`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input }),
+          keepalive: input.length < 65536,
+        });
         if (!resp.ok) {
           this._enqueueInput(sessionId, input);
         } else {
           this.clearPendingHooks(sessionId);
         }
-      }).catch(() => {
+      } catch {
         this._enqueueInput(sessionId, input);
-      });
-
-      // Return immediately after fetch is dispatched (don't await response)
+      }
     });
   }
 
