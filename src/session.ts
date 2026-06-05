@@ -123,7 +123,7 @@ const CTRL_L_PATTERN = /\x0c/g;
 /** Pattern to split by newlines (CR or LF) */
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
-const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = /gpt-[\w.-]+|Context \d+% left|Messages.*toolcall|Use \/skills/;
+const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = /gpt-[\w.-]+|Context \d+% left|Messages.*toolcall|Use \/skills|Working \(/;
 const CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN = /^\s*[›❯](?:\s|$)/;
 
 function isExternalCliMode(mode: SessionMode): boolean {
@@ -1275,7 +1275,10 @@ export class Session extends EventEmitter {
       }
 
       const promptStatusRows = collectCodexUiRows(data, this._ptyRows);
-      const promptStatusTop = promptStatusRows.length ? Math.max(4, Math.min(...promptStatusRows) - 1) : null;
+      const hasExplicitStatusRow = /Working \(/.test(data);
+      const promptStatusTop = promptStatusRows.length
+        ? Math.max(4, Math.min(...promptStatusRows) - (hasExplicitStatusRow ? 0 : 1))
+        : null;
       const promptStatusBottom = promptStatusRows.length ? Math.max(...promptStatusRows) : null;
       const currentUiBandRows: number[] = [];
       let prependVacatedUiRows = '';
