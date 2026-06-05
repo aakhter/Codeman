@@ -25,6 +25,12 @@ describe('terminal input filter', () => {
     expect(filter.shouldSuppressTerminalQueryResponse('\x1b[12;40R')).toBe(true);
   });
 
+  it('suppresses automatic OSC color query replies from xterm', () => {
+    expect(filter.shouldSuppressTerminalQueryResponse('\x1b]10;rgb:e0e0/e0e0/e0e0\x1b\\')).toBe(true);
+    expect(filter.shouldSuppressTerminalQueryResponse('\x1b]11;rgb:0d0d/0d0d/0d0d\x1b\\')).toBe(true);
+    expect(filter.shouldSuppressTerminalQueryResponse('\x1b]12;rgb:e0e0/e0e0/e0e0\x07')).toBe(true);
+  });
+
   it('does not suppress normal user input', () => {
     expect(filter.shouldSuppressTerminalQueryResponse('hello')).toBe(false);
     expect(filter.shouldSuppressTerminalQueryResponse('\r')).toBe(false);
