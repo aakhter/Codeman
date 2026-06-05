@@ -445,7 +445,7 @@ describe('Virtual Keyboard', () => {
       expect(Number(styles?.zIndex)).toBeGreaterThanOrEqual(0);
     });
 
-    it('routes CJK textarea typing through local echo before Enter', async () => {
+    it('routes CJK textarea typing through local echo on Enter', async () => {
       await page.evaluate(() => {
         window.__sentInputs = [];
         const sessionId = 'mobile-cjk-local-echo-test';
@@ -471,7 +471,7 @@ describe('Virtual Keyboard', () => {
         };
         const settings = app.loadAppSettingsFromStorage();
         settings.cjkInputEnabled = true;
-        localStorage.setItem('codeman-settings', JSON.stringify(settings));
+        app.saveAppSettingsToStorage(settings);
         app._updateCjkInputState?.();
       });
 
@@ -479,10 +479,12 @@ describe('Virtual Keyboard', () => {
       await page.keyboard.type('hello');
 
       const beforeEnter = await page.evaluate(() => ({
+        visibleText: (document.getElementById('cjkInput') as HTMLTextAreaElement).value.replace(/\u200B/g, ''),
         pendingText: app._localEchoOverlay.pendingText,
         sentInputs: window.__sentInputs,
       }));
-      expect(beforeEnter.pendingText).toBe('hello');
+      expect(beforeEnter.visibleText).toBe('hello');
+      expect(beforeEnter.pendingText).toBe('');
       expect(beforeEnter.sentInputs).toEqual([]);
 
       await page.keyboard.press('Enter');
@@ -499,7 +501,7 @@ describe('Virtual Keyboard', () => {
       const state = await page.evaluate(() => {
         const settings = app.loadAppSettingsFromStorage();
         settings.cjkInputEnabled = true;
-        localStorage.setItem('codeman-settings', JSON.stringify(settings));
+        app.saveAppSettingsToStorage(settings);
         app._updateCjkInputState();
 
         const input = document.getElementById('cjkInput');
@@ -519,6 +521,88 @@ describe('Virtual Keyboard', () => {
       expect(state?.position).toBe('fixed');
       expect(Number(state?.zIndex)).toBeGreaterThan(50);
       expect(state?.ariaHidden).toBe('false');
+    });
+
+    it('shows the visible mobile textarea by default on phones', async () => {
+      const state = await page.evaluate(() => {
+        localStorage.removeItem(app.getSettingsStorageKey());
+        app._cachedAppSettings = null;
+        app._updateCjkInputState();
+
+        const input = document.getElementById('cjkInput');
+        if (!(input instanceof HTMLElement)) return null;
+        const cs = getComputedStyle(input);
+        return {
+          display: cs.display,
+          position: cs.position,
+          bodyClass: document.body.classList.contains('cjk-input-visible'),
+        };
+      });
+
+      expect(state).not.toBeNull();
+      expect(state?.display).not.toBe('none');
+      expect(state?.position).toBe('fixed');
+      expect(state?.bodyClass).toBe(true);
+    });
+
+    it('focuses the visible mobile textarea when the terminal is tapped', async () => {
+      await page.evaluate(() => {
+        app.activeSessionId = 'mobile-focus-visible-input-test';
+        app.sessions.set('mobile-focus-visible-input-test', {
+          id: 'mobile-focus-visible-input-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = true;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+      });
+
+      await page.locator('#terminalContainer').tap({ position: { x: 40, y: 40 } });
+
+      const activeId = await page.evaluate(() => document.activeElement?.id);
+      expect(activeId).toBe('cjkInput');
+    });
+
+    it('keeps typed phone text visible in the textarea until Enter sends it', async () => {
+      await page.evaluate(() => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-visible-input-test';
+        app.sessions.set('mobile-visible-input-test', {
+          id: 'mobile-visible-input-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = true;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+      });
+
+      await page.locator('#cjkInput').focus();
+      await page.keyboard.type('find bug');
+
+      const beforeEnter = await page.evaluate(() => ({
+        visibleText: (document.getElementById('cjkInput') as HTMLTextAreaElement).value.replace(/\u200B/g, ''),
+        sentInputs: window.__sentInputs,
+      }));
+      expect(beforeEnter.visibleText).toBe('find bug');
+      expect(beforeEnter.sentInputs).toEqual([]);
+
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => window.__sentInputs?.length > 0);
+
+      const afterEnter = await page.evaluate(() => ({
+        visibleText: (document.getElementById('cjkInput') as HTMLTextAreaElement).value.replace(/\u200B/g, ''),
+        sentInputs: window.__sentInputs,
+      }));
+      expect(afterEnter.visibleText).toBe('');
+      expect(afterEnter.sentInputs.join('')).toBe('find bug\r');
     });
   });
 

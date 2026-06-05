@@ -37,6 +37,8 @@ Recent history uses Conventional Commit-style messages such as `feat(web): ...`,
 
 Do not develop new features or bug fixes directly on `master`. Start from an up-to-date `master`, create a focused branch such as `fix/mobile-toolbar-overlap` or `feat/session-search`, commit there, then merge or open a pull request after verification. Keep uncommitted work on the branch until it is ready to integrate.
 
+Do not push commits or branches to any remote unless the user explicitly instructs you to push. Merging and deploying locally does not imply permission to push.
+
 ## Security & Configuration Tips
 
 Do not commit secrets or local state from `~/.codeman/`. Auth and CLI behavior are controlled through environment variables such as `CODEMAN_USERNAME`, `CODEMAN_PASSWORD`, `CLAUDE_CODE_*`, and `OPENCODE_*`; validate new settings through the existing schemas and prefix allowlists.

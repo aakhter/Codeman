@@ -1787,11 +1787,15 @@ class CodemanApp {
     const cjkEl = document.getElementById('cjkInput');
     if (!cjkEl) return;
     const settings = this.loadAppSettingsFromStorage();
-    const showCjk = this._serverCjkOverride || settings.cjkInputEnabled || false;
+    const defaults = this.getDefaultSettings?.() || {};
+    const showCjk = this._serverCjkOverride || (settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false);
     cjkEl.classList.toggle('cjk-input-visible', !!showCjk);
+    document.body.classList.toggle('cjk-input-visible', !!showCjk);
     cjkEl.style.display = showCjk ? 'block' : 'none';
     cjkEl.setAttribute('aria-hidden', showCjk ? 'false' : 'true');
+    if (showCjk && cjkEl.value === '\u200B') cjkEl.value = '';
     if (!showCjk) window.cjkActive = false;
+    if (typeof KeyboardHandler !== 'undefined') KeyboardHandler.updateLayoutForKeyboard();
   }
 
   /**
