@@ -442,6 +442,10 @@ class CodemanApp {
     this._ws = null;            // WebSocket instance for active session
     this._wsSessionId = null;   // Session ID the WS is connected to
     this._wsReady = false;      // True when WS is open and ready for I/O
+    this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | disconnected
+    this._wsLastClose = null; // { code, reason, at } for transport diagnostics
+    this._wsInputSendCount = 0;
+    this._httpFallbackSendCount = 0;
 
     // Terminal write batching with DEC 2026 sync support
     this.pendingWrites = [];
@@ -480,6 +484,10 @@ class CodemanApp {
 
     // Sequential input send chain — ensures keystroke ordering across async fetches
     this._inputSendChain = Promise.resolve();
+    this._httpInputQueues = new Map(); // Map<sessionId, string> for ordered fallback coalescing
+    this._httpInputDrainActive = false;
+    this._httpFallbackGraceTimer = null;
+    this._httpFallbackGraceMs = 150;
 
     // Local echo overlay — DOM overlay positioned at the visible ❯ prompt
     // (not at buffer.cursorY, which reflects Ink's internal cursor position)
@@ -1592,12 +1600,18 @@ class CodemanApp {
     const ws = new WebSocket(url);
     this._ws = ws;
     this._wsSessionId = sessionId;
+    this._wsReady = false;
+    this._wsState = 'connecting';
+    this._updateConnectionIndicator();
 
     ws.onopen = () => {
       // Only mark ready if this is still the intended session
       if (this._ws === ws) {
         this._wsReady = true;
+        this._wsState = 'connected';
         this._wsReconnectAttempts = 0;
+        this._flushHttpFallbackQueuesViaWs();
+        this._updateConnectionIndicator();
       }
     };
 
@@ -1623,11 +1637,18 @@ class CodemanApp {
       this._ws = null;
       this._wsSessionId = null;
       this._wsReady = false;
+      this._wsLastClose = {
+        code: event.code,
+        reason: event.reason || '',
+        at: new Date().toISOString(),
+      };
 
       // Reconnect on unexpected close (server restart, network blip, ping timeout).
       // Don't reconnect if we intentionally disconnected (_disconnectWs nulls onclose)
       // or if the server rejected the session (4004=not found, 4008=too many, 4009=terminated).
       if (event.code < 4004 && this.activeSessionId === sessionId) {
+        this._wsState = 'reconnecting';
+        this._updateConnectionIndicator();
         const delay = Math.min(1000 * Math.pow(2, this._wsReconnectAttempts || 0), 10000);
         this._wsReconnectAttempts = (this._wsReconnectAttempts || 0) + 1;
         this._wsReconnectTimer = setTimeout(() => {
@@ -1636,6 +1657,9 @@ class CodemanApp {
             this._connectWs(sessionId);
           }
         }, delay);
+      } else {
+        this._wsState = this.activeSessionId === sessionId ? 'fallback' : 'disconnected';
+        this._updateConnectionIndicator();
       }
     };
 
@@ -1654,6 +1678,8 @@ class CodemanApp {
       this._ws = null;
       this._wsSessionId = null;
       this._wsReady = false;
+      this._wsState = 'disconnected';
+      this._updateConnectionIndicator();
     }
   }
 
@@ -1673,34 +1699,142 @@ class CodemanApp {
     if (this._wsReady && this._wsSessionId === sessionId) {
       try {
         this._ws.send(JSON.stringify({ t: 'i', d: input }));
+        this._wsInputSendCount += 1;
         this.clearPendingHooks(sessionId);
+        this._updateConnectionIndicator();
         return;
       } catch {
         // WS send failed — fall through to HTTP POST
       }
     }
 
-    // Slow path: HTTP POST. Await each request before dispatching the next
-    // chunk so fast desktop typing cannot arrive at the server out of order.
-    this._inputSendChain = this._inputSendChain.catch(() => {}).then(async () => {
-      try {
-        const resp = await fetch(`/api/sessions/${sessionId}/input`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input }),
-          keepalive: input.length < 65536,
-        });
-        if (!resp.ok) {
-          this._enqueueInput(sessionId, input);
-        } else {
-          this.clearPendingHooks(sessionId);
-        }
-      } catch {
-        this._enqueueInput(sessionId, input);
-      }
-    });
+    // Fallback path: preserve ordering without creating a request per
+    // keystroke. New input appends to a per-session buffer while the previous
+    // fallback POST is in flight; the next drain sends the combined chunk.
+    this._queueHttpFallbackInput(sessionId, input);
   }
 
+  _queueHttpFallbackInput(sessionId, input) {
+    const existing = this._httpInputQueues.get(sessionId) || '';
+    this._httpInputQueues.set(sessionId, existing + input);
+    if (this._wsState !== 'connecting' && this._wsState !== 'reconnecting') {
+      this._wsState = 'fallback';
+    }
+    this._updateConnectionIndicator();
+
+    if (this._wsState === 'connecting' || this._wsState === 'reconnecting') {
+      if (!this._httpFallbackGraceTimer) {
+        this._httpFallbackGraceTimer = setTimeout(() => {
+          this._httpFallbackGraceTimer = null;
+          if (!this._flushHttpFallbackQueuesViaWs()) {
+            this._startHttpFallbackDrain();
+          }
+        }, this._httpFallbackGraceMs);
+      }
+      return;
+    }
+
+    this._startHttpFallbackDrain();
+  }
+
+  _flushHttpFallbackQueuesViaWs() {
+    if (!this._wsReady || !this._ws || !this._wsSessionId) return false;
+    if (this._httpFallbackGraceTimer) {
+      clearTimeout(this._httpFallbackGraceTimer);
+      this._httpFallbackGraceTimer = null;
+    }
+    const queuedInput = this._httpInputQueues.get(this._wsSessionId);
+    if (!queuedInput) return this._httpInputQueues.size === 0;
+    try {
+      this._ws.send(JSON.stringify({ t: 'i', d: queuedInput }));
+      this._wsInputSendCount += 1;
+      this._httpInputQueues.delete(this._wsSessionId);
+      this.clearPendingHooks(this._wsSessionId);
+      this._updateConnectionIndicator();
+      return this._httpInputQueues.size === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  _startHttpFallbackDrain() {
+    if (this._httpInputDrainActive) return;
+    this._httpInputDrainActive = true;
+    this._inputSendChain = this._inputSendChain
+      .catch(() => {})
+      .then(async () => {
+        try {
+          while (this._httpInputQueues.size > 0) {
+            const batch = Array.from(this._httpInputQueues.entries());
+            this._httpInputQueues.clear();
+            for (const [queuedSessionId, queuedInput] of batch) {
+              this._httpFallbackSendCount += 1;
+              this._updateConnectionIndicator();
+              try {
+                const resp = await fetch(`/api/sessions/${queuedSessionId}/input`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ input: queuedInput }),
+                  keepalive: queuedInput.length < 65536,
+                });
+                if (!resp.ok) {
+                  this._enqueueInput(queuedSessionId, queuedInput);
+                } else {
+                  this.clearPendingHooks(queuedSessionId);
+                }
+              } catch {
+                this._enqueueInput(queuedSessionId, queuedInput);
+              }
+            }
+          }
+        } finally {
+          this._httpInputDrainActive = false;
+          this._updateConnectionIndicator();
+        }
+      });
+  }
+
+  _pendingHttpFallbackBytes() {
+    let totalBytes = 0;
+    for (const v of this._httpInputQueues.values()) {
+      totalBytes += v.length;
+    }
+    return totalBytes;
+  }
+
+  _transportSummary() {
+    const pendingHttpBytes = this._pendingHttpFallbackBytes();
+    if (this._wsReady && this._wsSessionId === this.activeSessionId) {
+      return {
+        state: 'ws',
+        label: 'WS',
+        detail: `WebSocket connected. WS sends: ${this._wsInputSendCount}. HTTP fallback sends: ${this._httpFallbackSendCount}.`,
+      };
+    }
+    if (this._wsState === 'connecting') {
+      return {
+        state: 'connecting',
+        label: 'WS connecting',
+        detail: 'WebSocket is opening; input will use ordered HTTP fallback until it is ready.',
+      };
+    }
+    if (this._wsState === 'reconnecting') {
+      return {
+        state: 'reconnecting',
+        label: 'WS reconnecting',
+        detail: this._wsLastClose
+          ? `WebSocket reconnecting after close ${this._wsLastClose.code} ${this._wsLastClose.reason}`.trim()
+          : 'WebSocket reconnecting.',
+      };
+    }
+    return {
+      state: 'fallback',
+      label: pendingHttpBytes > 0 ? `HTTP fallback ${pendingHttpBytes}B` : 'HTTP fallback',
+      detail: this._wsLastClose
+        ? `Using ordered HTTP fallback. Last WS close: ${this._wsLastClose.code} ${this._wsLastClose.reason} at ${this._wsLastClose.at}.`
+        : 'Using ordered HTTP fallback; WebSocket is not ready.',
+    };
+  }
 
   _enqueueInput(sessionId, input) {
     const existing = this._inputQueue.get(sessionId) || '';
@@ -1740,29 +1874,34 @@ class CodemanApp {
 
     const status = this._connectionStatus;
     const hasQueue = totalBytes > 0;
-
-    // Connected with empty queue — hide
-    if ((status === 'connected' || status === 'connecting') && !hasQueue) {
-      indicator.style.display = 'none';
-      return;
-    }
+    const transport = this._transportSummary();
 
     indicator.style.display = 'flex';
     dot.className = 'connection-dot';
+    indicator.title = transport.detail;
 
     const formatBytes = (b) => b < 1024 ? `${b}B` : `${(b / 1024).toFixed(1)}KB`;
 
     if (status === 'connected' && hasQueue) {
       // Draining
       dot.classList.add('draining');
-      text.textContent = `Sending ${formatBytes(totalBytes)}...`;
+      text.textContent = `${transport.label} · sending ${formatBytes(totalBytes)}`;
     } else if (status === 'reconnecting') {
       dot.classList.add('reconnecting');
       text.textContent = hasQueue ? `Reconnecting (${formatBytes(totalBytes)} queued)` : 'Reconnecting...';
-    } else {
+    } else if (status === 'disconnected' || !this.isOnline) {
       // Offline or disconnected
       dot.classList.add('offline');
       text.textContent = hasQueue ? `Offline (${formatBytes(totalBytes)} queued)` : 'Offline';
+    } else if (transport.state === 'ws') {
+      dot.classList.add('connected');
+      text.textContent = transport.label;
+    } else if (transport.state === 'connecting' || transport.state === 'reconnecting') {
+      dot.classList.add('reconnecting');
+      text.textContent = transport.label;
+    } else {
+      dot.classList.add('fallback');
+      text.textContent = transport.label;
     }
   }
 
@@ -2661,6 +2800,10 @@ class CodemanApp {
     // rare race where server doesn't know our clientId yet, the next
     // selectSession or reconnect catches up.
     this._updateSseSubscription(sessionId);
+    // Open WebSocket as soon as the active session is known. It does not
+    // depend on terminal buffer loading, and opening it early keeps normal
+    // typing on the ordered WS path instead of temporary HTTP fallback.
+    this._connectWs(sessionId);
     this.hideWelcome();
     // Clear idle hooks on view, but keep action hooks until user interacts
     this.clearPendingHooks(sessionId, 'idle_prompt');
@@ -2947,9 +3090,6 @@ class CodemanApp {
           }
         }
       });
-
-      // Open WebSocket for low-latency terminal I/O (after buffer load completes)
-      this._connectWs(sessionId);
 
       _crashDiag.log('FOCUS');
       this.terminal.focus();
