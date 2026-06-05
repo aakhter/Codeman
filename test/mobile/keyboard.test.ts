@@ -421,11 +421,19 @@ describe('Virtual Keyboard', () => {
       expect(callCount).toBeGreaterThanOrEqual(0);
     });
 
-    it('keeps xterm helper textarea focusable on touch devices', async () => {
-      const styles = await page.evaluate(() => {
+    it('keeps xterm helper textarea focusable near the terminal cursor on touch devices', async () => {
+      const styles = await page.evaluate(async () => {
+        await new Promise<void>((resolve) => app.terminal.write('prompt', resolve));
+        app.terminal.focus();
+        app._syncMobileHelperTextareaToCursor?.();
         const textarea = document.querySelector('.xterm-helper-textarea');
-        if (!(textarea instanceof HTMLElement)) return null;
+        const cursor = document.querySelector('.xterm-cursor');
+        const screen = document.querySelector('.xterm-screen');
+        if (!(textarea instanceof HTMLElement) || !(cursor instanceof HTMLElement) || !(screen instanceof HTMLElement))
+          return null;
         const cs = getComputedStyle(textarea);
+        const cursorRect = cursor.getBoundingClientRect();
+        const screenRect = screen.getBoundingClientRect();
         return {
           left: cs.left,
           top: cs.top,
@@ -433,12 +441,15 @@ describe('Virtual Keyboard', () => {
           height: cs.height,
           zIndex: cs.zIndex,
           opacity: cs.opacity,
+          cursorLeft: `${Math.max(0, Math.round(cursorRect.left - screenRect.left))}px`,
+          cursorTop: `${Math.max(0, Math.round(cursorRect.top - screenRect.top))}px`,
         };
       });
 
       expect(styles).not.toBeNull();
-      expect(styles?.left).toBe('0px');
-      expect(styles?.top).toBe('0px');
+      expect(styles?.left).toBe(styles?.cursorLeft);
+      expect(styles?.top).toBe(styles?.cursorTop);
+      expect(styles?.cursorLeft).not.toBe('0px');
       expect(styles?.width).toBe('1px');
       expect(styles?.height).toBe('1px');
       expect(styles?.opacity).toBe('0');
