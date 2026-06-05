@@ -411,8 +411,8 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 |----------|--------|
 | `Ctrl+Enter` | Quick-start session |
 | `Ctrl+W` | Close session |
-| `Ctrl+Tab` | Next session |
-| `Alt+1`–`Alt+9` | Switch to tab N |
+| `Option+[` / `Option+]` | Previous / next session |
+| `Option+1`-`Option+9` | Switch to tab N |
 | `Ctrl+Shift+{` / `Ctrl+Shift+}` | Move active tab left / right |
 | `Ctrl+K` | Kill all sessions |
 | `Ctrl+L` | Clear terminal |
