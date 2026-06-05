@@ -111,7 +111,7 @@ textarea:focus-visible {
   top: 0 !important;
   width: 1px !important;
   height: 1px !important;
-  z-index: -1 !important;
+  z-index: 0 !important;
   font-size: 16px !important; /* prevent iOS auto-zoom on focus */
 }
 
