@@ -382,6 +382,7 @@ Object.assign(CodemanApp.prototype, {
         'touchmove',
         (ev) => {
           if (ev.touches.length === 1 && isTouching) {
+            ev.preventDefault();
             didScroll = true;
             const touchY = ev.touches[0].clientY;
             const delta = touchLastY - touchY; // positive = scroll down
@@ -397,7 +398,7 @@ Object.assign(CodemanApp.prototype, {
             }
           }
         },
-        { passive: true }
+        { passive: false }
       );
 
       container.addEventListener(

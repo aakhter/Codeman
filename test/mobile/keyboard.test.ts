@@ -666,6 +666,83 @@ describe('Virtual Keyboard', () => {
       expect(calls.some((lines) => lines !== 0)).toBe(true);
     });
 
+    it('consumes terminal touch drag while keyboard is visible so Safari does not pan the viewport', async () => {
+      await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
+      await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
+
+      const state = await page.evaluate(async () => {
+        app.activeSessionId = 'mobile-keyboard-touch-scroll-test';
+        app.sessions.set('mobile-keyboard-touch-scroll-test', {
+          id: 'mobile-keyboard-touch-scroll-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app.hideWelcome();
+        app._updateCjkInputState();
+
+        const originalScrollLines = app.terminal.scrollLines.bind(app.terminal);
+        const scrollCalls: number[] = [];
+        app.terminal.scrollLines = (lines: number) => {
+          scrollCalls.push(lines);
+          return originalScrollLines(lines);
+        };
+
+        const target = document.getElementById('terminalContainer');
+        if (!target) return { scrollCalls, moveAllowedDefault: true, moveDefaultPrevented: false };
+        const rect = target.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const startY = rect.top + Math.min(160, rect.height - 20);
+        const endY = startY - 120;
+
+        function createTouch(y: number) {
+          return new Touch({
+            identifier: 1,
+            target,
+            clientX: x,
+            clientY: y,
+            pageX: x,
+            pageY: y,
+          });
+        }
+
+        const start = new TouchEvent('touchstart', {
+          touches: [createTouch(startY)],
+          changedTouches: [createTouch(startY)],
+          bubbles: true,
+          cancelable: true,
+        });
+        target.dispatchEvent(start);
+
+        const move = new TouchEvent('touchmove', {
+          touches: [createTouch(endY)],
+          changedTouches: [createTouch(endY)],
+          bubbles: true,
+          cancelable: true,
+        });
+        const moveAllowedDefault = target.dispatchEvent(move);
+
+        target.dispatchEvent(
+          new TouchEvent('touchend', {
+            touches: [],
+            changedTouches: [createTouch(endY)],
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        return {
+          scrollCalls,
+          moveAllowedDefault,
+          moveDefaultPrevented: move.defaultPrevented,
+        };
+      });
+
+      expect(state.scrollCalls.some((lines) => lines !== 0)).toBe(true);
+      expect(state.moveAllowedDefault).toBe(false);
+      expect(state.moveDefaultPrevented).toBe(true);
+    });
+
     it('keeps typed phone text in the terminal local echo path', async () => {
       await page.evaluate(() => {
         window.__sentInputs = [];

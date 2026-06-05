@@ -2886,7 +2886,6 @@ class CodemanApp {
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
       await this.sendResize(sessionId, { forceHttp: true }).catch(() => {});
-      await new Promise((resolve) => setTimeout(resolve, 400));
 
       // xterm snapshot restore: if we have a serialized xterm state from a
       // previous visit to this session, restore the user's exact prior view
@@ -2941,6 +2940,15 @@ class CodemanApp {
         // Clear stale content immediately — fresh buffer is being fetched
         this._resetTerminalForReplay();
         _crashDiag.log('CACHE_SKIP_BUSY');
+      }
+
+      // Give TUI sessions a short chance to redraw after resize before the
+      // fresh buffer fetch captures the live mux pane. Shell sessions and
+      // snapshot restores do not need this delay, so terminal content can
+      // appear immediately when switching between shells.
+      if (session?.mode !== 'shell') {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        if (this._isStaleSelect(selectGen)) return;
       }
 
       _crashDiag.log('FETCH_START');
