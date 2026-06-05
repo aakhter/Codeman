@@ -2406,7 +2406,7 @@ class CodemanApp {
       const tallTabsEnabled = this._tallTabsEnabled ?? false;
       const showFolder = tallTabsEnabled && session.name && folderName && folderName !== name;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}" data-id="${id}" data-color="${color}" onclick="app.selectSession('${escapeHtml(id)}')" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}" data-id="${id}" data-color="${color}" onclick="app.selectSession('${escapeHtml(id)}', { forceReload: true })" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
@@ -2453,7 +2453,7 @@ class CodemanApp {
       if ((e.key === 'Enter' || e.key === ' ') && currentIndex >= 0) {
         e.preventDefault();
         const sessionId = tabs[currentIndex].dataset.id;
-        this.selectSession(sessionId);
+        this.selectSession(sessionId, { forceReload: true });
         return;
       }
 
@@ -2798,8 +2798,21 @@ class CodemanApp {
     this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
   }
 
-  async selectSession(sessionId) {
-    if (this.activeSessionId === sessionId) return;
+  async selectSession(sessionId, options = {}) {
+    const forceReload = options?.forceReload === true;
+    if (this.activeSessionId === sessionId && !forceReload) return;
+    if (this.activeSessionId === sessionId && forceReload) {
+      this.terminalBufferCache?.delete(sessionId);
+      this._xtermSnapshots?.delete(sessionId);
+      try { localStorage.removeItem(`codeman-xs-${sessionId}`); } catch {}
+      this._clearTimer('syncWaitTimeout');
+      this.pendingWrites = [];
+      this.writeFrameScheduled = false;
+      this._isLoadingBuffer = false;
+      this._loadBufferQueue = null;
+      this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
+      this.activeSessionId = null;
+    }
     // Focus terminal SYNCHRONOUSLY before any await — iOS Safari only honors
     // programmatic focus() within the user-gesture call stack (e.g. tab click).
     // After the first await the gesture context is lost and focus() is silently
@@ -2929,17 +2942,15 @@ class CodemanApp {
         }
       }
       const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
+      let restoredSnapshot = false;
       if (snapshot && !sessionIsBusy && session?.mode === 'codex') {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this._resetTerminalForReplay();
-        this.terminal.write(snapshot);
+        await new Promise((resolve) => this.terminal.write(snapshot, resolve));
         if (this._isStaleSelect(selectGen)) return;
         this.terminal.scrollToBottom();
         _crashDiag.log('SNAPSHOT_RESTORE_DONE');
-        // Don't fall through to buffer-fetch — SSE will catch up with any
-        // new bytes emitted during the away period.
-        this._finishBufferLoad();
-        return;
+        restoredSnapshot = true;
       }
 
       // Instant cache restore for IDLE sessions only.
@@ -2948,7 +2959,7 @@ class CodemanApp {
       // blank and rewrites with fresh data. Skip the cache and write the fresh
       // buffer once for a single clean transition.
       const cachedBuffer = this.terminalBufferCache.get(sessionId);
-      if (cachedBuffer && !sessionIsBusy) {
+      if (cachedBuffer && !sessionIsBusy && !restoredSnapshot) {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
         this._resetTerminalForReplay();
         await this.chunkedTerminalWrite(cachedBuffer);

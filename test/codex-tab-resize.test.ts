@@ -30,15 +30,19 @@ describe('Codex tab resize behavior', () => {
     expect(source.slice(cacheRestore, settleDelay)).toContain("session?.mode !== 'shell'");
   });
 
-  it('only lets codex sessions skip the fresh terminal buffer fetch via xterm snapshots', () => {
+  it('does not let xterm snapshots skip the fresh terminal buffer fetch', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const start = source.indexOf('xterm snapshot restore');
     const snapshotCondition = source.match(/if \(snapshot && [^)]+\)/)?.[0] || '';
+    const snapshotDone = source.indexOf('SNAPSHOT_RESTORE_DONE', start);
     const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", start);
+    const snapshotBlockEnd = source.indexOf('const cachedBuffer = this.terminalBufferCache.get(sessionId);', start);
 
     expect(start).toBeGreaterThan(-1);
     expect(snapshotCondition).toContain("session?.mode === 'codex'");
     expect(fetchStart).toBeGreaterThan(start);
+    expect(snapshotBlockEnd).toBeGreaterThan(snapshotDone);
+    expect(source.slice(snapshotDone, snapshotBlockEnd)).not.toContain('return;');
   });
 
   it('waits for xterm to parse small buffer writes before resolving tab switch restore', () => {
@@ -49,5 +53,19 @@ describe('Codex tab resize behavior', () => {
     expect(start).toBeGreaterThan(-1);
     expect(smallWriteBlock).toContain('this.terminal.write(cleanBuffer, finish)');
     expect(smallWriteBlock).not.toContain('this.terminal.write(cleanBuffer);\n        finish();');
+  });
+
+  it('lets clicking the active tab force a fresh terminal reload', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const selectSetup = source.slice(selectStart, source.indexOf('// Focus terminal SYNCHRONOUSLY', selectStart));
+
+    expect(selectStart).toBeGreaterThan(-1);
+    expect(source).toContain('onclick="app.selectSession(\'${escapeHtml(id)}\', { forceReload: true })"');
+    expect(source).toContain('this.selectSession(sessionId, { forceReload: true });');
+    expect(selectSetup).toContain('this.activeSessionId === sessionId && forceReload');
+    expect(selectSetup).toContain('this.terminalBufferCache?.delete(sessionId)');
+    expect(selectSetup).toContain('this._xtermSnapshots?.delete(sessionId)');
+    expect(selectSetup).toContain('this.activeSessionId = null');
   });
 });
