@@ -701,6 +701,40 @@ describe('Virtual Keyboard', () => {
       expect(afterEnter.pendingText).toBe('');
       expect(afterEnter.sentInputs.join('')).toBe('find bug\r');
     });
+
+    it('shows terminal local echo at the cursor when no prompt marker is visible', async () => {
+      await page.evaluate(async () => {
+        app.activeSessionId = 'mobile-cursor-fallback-test';
+        app.sessions.set('mobile-cursor-fallback-test', {
+          id: 'mobile-cursor-fallback-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        settings.localEchoEnabled = true;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+        app._updateLocalEchoState();
+        app.terminal.reset();
+        await new Promise<void>((resolve) => app.terminal.write('working without prompt marker', resolve));
+        app.terminal.focus();
+      });
+
+      await page.keyboard.type('abc');
+
+      const state = await page.evaluate(() => ({
+        cjkDisplay: getComputedStyle(document.getElementById('cjkInput') as HTMLElement).display,
+        pendingText: app._localEchoOverlay?.pendingText,
+        overlayState: app._localEchoOverlay?.state,
+      }));
+
+      expect(state.cjkDisplay).toBe('none');
+      expect(state.pendingText).toBe('abc');
+      expect(state.overlayState?.visible).toBe(true);
+      expect(state.overlayState?.promptPosition).not.toBeNull();
+    });
   });
 
   // ── Cross-device keyboard behavior ────────────────────────────────────

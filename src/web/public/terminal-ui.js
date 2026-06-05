@@ -1470,8 +1470,33 @@ Object.assign(CodemanApp.prototype, {
         this._localEchoOverlay.clear();
         this._localEchoEnabled = false;
       } else {
-        // Claude Code: scan for ❯ prompt character
-        this._localEchoOverlay.setPrompt({ type: 'character', char: '\u276f', offset: 2 });
+        // Codex/Claude-style TUIs usually expose a ❯ prompt. During active
+        // redraws or compact mobile layouts that marker may not be present in
+        // the viewport, while xterm's cursor still marks the editable input
+        // position. Fall back to cursor coordinates so phone typing appears at
+        // the terminal cursor instead of disappearing into pending state.
+        this._localEchoOverlay.setPrompt({
+          type: 'custom',
+          offset: 0,
+          find: (terminal) => {
+            try {
+              const buf = terminal.buffer.active;
+              for (let row = terminal.rows - 1; row >= 0; row--) {
+                const line = buf.getLine(buf.viewportY + row);
+                if (!line) continue;
+                const text = line.translateToString(true);
+                const idx = text.lastIndexOf('\u276f');
+                if (idx >= 0) return { row, col: idx + 2 };
+              }
+              return {
+                row: Math.max(0, Math.min(terminal.rows - 1, buf.cursorY)),
+                col: Math.max(0, Math.min(terminal.cols - 1, buf.cursorX)),
+              };
+            } catch {
+              return null;
+            }
+          },
+        });
       }
     }
   },
