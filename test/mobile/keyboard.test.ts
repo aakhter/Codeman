@@ -444,6 +444,56 @@ describe('Virtual Keyboard', () => {
       expect(styles?.opacity).toBe('0');
       expect(Number(styles?.zIndex)).toBeGreaterThanOrEqual(0);
     });
+
+    it('routes CJK textarea typing through local echo before Enter', async () => {
+      await page.evaluate(() => {
+        window.__sentInputs = [];
+        const sessionId = 'mobile-cjk-local-echo-test';
+        app.activeSessionId = sessionId;
+        app.sessions.set(sessionId, { id: sessionId, mode: 'codex' });
+        app._localEchoEnabled = true;
+        app._localEchoOverlay = {
+          pendingText: '',
+          appendText(text: string) {
+            this.pendingText += text;
+          },
+          removeChar() {
+            this.pendingText = this.pendingText.slice(0, -1);
+            return 'pending';
+          },
+          clear() {
+            this.pendingText = '';
+          },
+          suppressBufferDetection() {},
+        };
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = true;
+        localStorage.setItem('codeman-settings', JSON.stringify(settings));
+        app._updateCjkInputState?.();
+      });
+
+      await page.locator('#cjkInput').focus();
+      await page.keyboard.type('hello');
+
+      const beforeEnter = await page.evaluate(() => ({
+        pendingText: app._localEchoOverlay.pendingText,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(beforeEnter.pendingText).toBe('hello');
+      expect(beforeEnter.sentInputs).toEqual([]);
+
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => window.__sentInputs?.length === 2);
+      const afterEnter = await page.evaluate(() => ({
+        pendingText: app._localEchoOverlay.pendingText,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(afterEnter.pendingText).toBe('');
+      expect(afterEnter.sentInputs).toEqual(['hello', '\r']);
+    });
   });
 
   // ── Cross-device keyboard behavior ────────────────────────────────────
