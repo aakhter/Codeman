@@ -295,6 +295,7 @@ const KeyboardHandler = {
 
     const toolbar = document.querySelector('.toolbar');
     const accessoryBar = document.querySelector('.keyboard-accessory-bar');
+    const cjkInput = document.getElementById('cjkInput');
     const main = document.querySelector('.main');
 
     if (this.keyboardVisible) {
@@ -317,13 +318,18 @@ const KeyboardHandler = {
       if (accessoryBar) {
         accessoryBar.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
       }
+      if (cjkInput?.classList.contains('cjk-input-visible')) {
+        cjkInput.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
+      }
 
       // Shrink main content area so terminal doesn't extend behind keyboard.
       // Use stable keyboard height (not scroll-dependent) for padding.
-      // 84px = toolbar (40px) + accessory bar (44px).
+      // 84px = toolbar (40px) + accessory bar (44px). Add room for the
+      // visible CJK input row when enabled.
       const keyboardHeight = this.initialViewportHeight - (window.visualViewport.height || window.innerHeight);
       if (main && keyboardHeight > 0) {
-        main.style.paddingBottom = `${keyboardHeight + 84}px`;
+        const cjkInputHeight = cjkInput?.classList.contains('cjk-input-visible') ? 44 : 0;
+        main.style.paddingBottom = `${keyboardHeight + 84 + cjkInputHeight}px`;
       }
     } else {
       this.resetLayout();
@@ -334,6 +340,7 @@ const KeyboardHandler = {
   resetLayout() {
     const toolbar = document.querySelector('.toolbar');
     const accessoryBar = document.querySelector('.keyboard-accessory-bar');
+    const cjkInput = document.getElementById('cjkInput');
     const main = document.querySelector('.main');
 
     if (toolbar) {
@@ -341,6 +348,9 @@ const KeyboardHandler = {
     }
     if (accessoryBar) {
       accessoryBar.style.transform = '';
+    }
+    if (cjkInput) {
+      cjkInput.style.transform = '';
     }
     if (main) {
       main.style.paddingBottom = '';

@@ -494,6 +494,32 @@ describe('Virtual Keyboard', () => {
       expect(afterEnter.pendingText).toBe('');
       expect(afterEnter.sentInputs).toEqual(['hello', '\r']);
     });
+
+    it('shows the CJK textarea when enabled on mobile', async () => {
+      const state = await page.evaluate(() => {
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = true;
+        localStorage.setItem('codeman-settings', JSON.stringify(settings));
+        app._updateCjkInputState();
+
+        const input = document.getElementById('cjkInput');
+        if (!(input instanceof HTMLElement)) return null;
+        const cs = getComputedStyle(input);
+        return {
+          display: cs.display,
+          position: cs.position,
+          bottom: cs.bottom,
+          zIndex: cs.zIndex,
+          ariaHidden: input.getAttribute('aria-hidden'),
+        };
+      });
+
+      expect(state).not.toBeNull();
+      expect(state?.display).not.toBe('none');
+      expect(state?.position).toBe('fixed');
+      expect(Number(state?.zIndex)).toBeGreaterThan(50);
+      expect(state?.ariaHidden).toBe('false');
+    });
   });
 
   // ── Cross-device keyboard behavior ────────────────────────────────────
