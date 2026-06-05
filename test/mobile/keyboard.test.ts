@@ -545,6 +545,29 @@ describe('Virtual Keyboard', () => {
       expect(state?.bodyClass).toBe(true);
     });
 
+    it('keeps the visible mobile textarea on even when old phone settings disabled CJK input', async () => {
+      const state = await page.evaluate(() => {
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+
+        const input = document.getElementById('cjkInput');
+        if (!(input instanceof HTMLElement)) return null;
+        const cs = getComputedStyle(input);
+        return {
+          display: cs.display,
+          position: cs.position,
+          bodyClass: document.body.classList.contains('cjk-input-visible'),
+        };
+      });
+
+      expect(state).not.toBeNull();
+      expect(state?.display).not.toBe('none');
+      expect(state?.position).toBe('fixed');
+      expect(state?.bodyClass).toBe(true);
+    });
+
     it('focuses the visible mobile textarea when the terminal is tapped', async () => {
       await page.evaluate(() => {
         app.activeSessionId = 'mobile-focus-visible-input-test';
