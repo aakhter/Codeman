@@ -1771,8 +1771,7 @@ Object.assign(CodemanApp.prototype, {
 
       // For small buffers, write directly — single-frame render is fast enough
       if (cleanBuffer.length <= chunkSize) {
-        this.terminal.write(cleanBuffer);
-        finish();
+        this.terminal.write(cleanBuffer, finish);
         return;
       }
 

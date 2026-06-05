@@ -40,4 +40,14 @@ describe('Codex tab resize behavior', () => {
     expect(snapshotCondition).toContain("session?.mode === 'codex'");
     expect(fetchStart).toBeGreaterThan(start);
   });
+
+  it('waits for xterm to parse small buffer writes before resolving tab switch restore', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+    const start = source.indexOf('For small buffers, write directly');
+    const smallWriteBlock = source.slice(start, source.indexOf('// Large buffers', start));
+
+    expect(start).toBeGreaterThan(-1);
+    expect(smallWriteBlock).toContain('this.terminal.write(cleanBuffer, finish)');
+    expect(smallWriteBlock).not.toContain('this.terminal.write(cleanBuffer);\n        finish();');
+  });
 });
