@@ -155,12 +155,12 @@ describe('Mobile Layout', () => {
 
   describe('Toolbar Collision Regression', () => {
     it('keeps phone toolbar controls inside the viewport', async () => {
-      const device = REPRESENTATIVE_DEVICES['small-phone'];
+      const device = DEVICE_REGISTRY.find((d) => d.name === 'iPhone 8')!;
       const { context, page } = await createDevicePage(device, BASE_URL, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
-        const violations = await page.evaluate(() => {
-          return [...document.querySelectorAll('.toolbar button')]
+        const layout = await page.evaluate(() => {
+          const buttons = [...document.querySelectorAll('.toolbar button')]
             .filter((el): el is HTMLButtonElement => {
               const rect = el.getBoundingClientRect();
               const style = getComputedStyle(el);
@@ -173,11 +173,15 @@ describe('Mobile Layout', () => {
                 left: rect.left,
                 right: rect.right,
               };
-            })
-            .filter(({ left, right }) => left < 0 || right > window.innerWidth);
+            });
+          return {
+            overflow: buttons.filter(({ left, right }) => left < 0 || right > window.innerWidth),
+            caseWidth: document.querySelector('.btn-case-mobile')?.getBoundingClientRect().width ?? 0,
+          };
         });
 
-        expect(violations).toEqual([]);
+        expect(layout.overflow).toEqual([]);
+        expect(layout.caseWidth).toBeGreaterThanOrEqual(36);
       } finally {
         await context.close();
       }

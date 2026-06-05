@@ -829,9 +829,17 @@ html.mobile-init .file-browser-panel {
 
   .btn-toolbar.btn-shell {
     flex: 0 0 auto;
-    min-width: fit-content;
+    min-width: 54px;
+    width: 54px;
     white-space: nowrap;
-    padding: 0 10px !important;
+    padding: 0 8px !important;
+    overflow: hidden;
+    font-size: 0 !important;
+  }
+
+  .btn-toolbar.btn-shell::after {
+    content: "Shell";
+    font-size: 0.65rem;
   }
 
   .btn-upload-mobile {
@@ -907,7 +915,7 @@ html.mobile-init .file-browser-panel {
     }
   }
 
-  @media (max-width: 360px) {
+  @media (max-width: 430px) {
     .btn-case-settings-mobile {
       display: none !important;
     }

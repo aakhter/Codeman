@@ -114,7 +114,12 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort): void {
           msg.r >= 1 &&
           msg.r <= 200
         ) {
-          session.resize(msg.c, msg.r);
+          const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : undefined;
+          if (viewportType) {
+            session.resize(msg.c, msg.r, { viewportType });
+          } else {
+            session.resize(msg.c, msg.r);
+          }
         }
       } catch {
         // Ignore malformed messages

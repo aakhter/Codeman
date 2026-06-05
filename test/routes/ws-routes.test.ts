@@ -292,6 +292,21 @@ describe('ws-routes', () => {
       }
     });
 
+    it('passes viewport type through for resize arbitration', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        const session = ctx._session;
+
+        ws.send(JSON.stringify({ t: 'z', c: 48, r: 28, v: 'mobile' }));
+
+        await vi.waitFor(() => {
+          expect(session.resize).toHaveBeenCalledWith(48, 28, { viewportType: 'mobile' });
+        });
+      } finally {
+        ws.close();
+      }
+    });
+
     it('accepts resize at minimum bounds (1x1)', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
       try {

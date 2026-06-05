@@ -84,6 +84,8 @@ import { SessionTaskCache } from './session-task-cache.js';
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
 
+export type ResizeViewportType = 'mobile' | 'tablet' | 'desktop';
+
 /** Line buffer flush interval (100ms) - forces processing of partial lines */
 const LINE_BUFFER_FLUSH_INTERVAL = 100;
 
@@ -2419,7 +2421,11 @@ export class Session extends EventEmitter {
    * @param cols - Number of columns (width in characters)
    * @param rows - Number of rows (height in lines)
    */
-  resize(cols: number, rows: number): void {
+  resize(cols: number, rows: number, options: { viewportType?: ResizeViewportType } = {}): void {
+    const isSmallViewport = options.viewportType === 'mobile' || options.viewportType === 'tablet';
+    if (isSmallViewport && cols < this._ptyCols) {
+      return;
+    }
     if (this.ptyProcess && (cols !== this._ptyCols || rows !== this._ptyRows)) {
       this._ptyCols = cols;
       this._ptyRows = rows;

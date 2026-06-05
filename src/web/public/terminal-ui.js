@@ -1983,10 +1983,18 @@ Object.assign(CodemanApp.prototype, {
     // clear the terminal for the same dimensions (which would blank the screen
     // without a subsequent Ink redraw to repaint it).
     this._lastResizeDims = { cols: dims.cols, rows: dims.rows };
+    const viewportType =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : window.innerWidth < 430
+          ? 'mobile'
+          : window.innerWidth < 768
+            ? 'tablet'
+            : 'desktop';
     // Fast path: WebSocket resize
     if (!options.forceHttp && this._wsReady && this._wsSessionId === sessionId) {
       try {
-        this._ws.send(JSON.stringify({ t: 'z', c: dims.cols, r: dims.rows }));
+        this._ws.send(JSON.stringify({ t: 'z', c: dims.cols, r: dims.rows, v: viewportType }));
         return;
       } catch {
         // Fall through to HTTP POST
@@ -1995,7 +2003,7 @@ Object.assign(CodemanApp.prototype, {
     await fetch(`/api/sessions/${sessionId}/resize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(dims),
+      body: JSON.stringify({ ...dims, viewportType }),
     });
   },
 
