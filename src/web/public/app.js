@@ -2929,7 +2929,7 @@ class CodemanApp {
         }
       }
       const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
-      if (snapshot && !sessionIsBusy) {
+      if (snapshot && !sessionIsBusy && session?.mode === 'codex') {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this._resetTerminalForReplay();
         this.terminal.write(snapshot);

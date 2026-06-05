@@ -29,4 +29,15 @@ describe('Codex tab resize behavior', () => {
     expect(settleDelay).toBeGreaterThan(cacheRestore);
     expect(source.slice(cacheRestore, settleDelay)).toContain("session?.mode !== 'shell'");
   });
+
+  it('only lets codex sessions skip the fresh terminal buffer fetch via xterm snapshots', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const start = source.indexOf('xterm snapshot restore');
+    const snapshotCondition = source.match(/if \(snapshot && [^)]+\)/)?.[0] || '';
+    const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", start);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(snapshotCondition).toContain("session?.mode === 'codex'");
+    expect(fetchStart).toBeGreaterThan(start);
+  });
 });
