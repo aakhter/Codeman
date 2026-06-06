@@ -8,7 +8,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TmuxManager, buildCodexCommand, formatPaneSnapshot, parsePaneList } from '../src/tmux-manager.js';
+import {
+  TmuxManager,
+  buildCodexCommand,
+  formatPaneSnapshot,
+  parsePaneList,
+  resolveTmuxPaneTarget,
+} from '../src/tmux-manager.js';
 import { execSync } from 'node:child_process';
 
 // ============================================================================
@@ -165,6 +171,27 @@ describe('TmuxManager (unit)', () => {
 
       expect(snapshot).toBe(`\x1b[1;1H${'x'.repeat(9)}\x1b[2;1Hnext line\x1b[2;3H`);
       expect(snapshot).not.toContain('\n');
+    });
+  });
+
+  describe('resolveTmuxPaneTarget', () => {
+    it('targets the active pane when no explicit pane is requested', () => {
+      expect(resolveTmuxPaneTarget('codeman-abc12345')).toBe('codeman-abc12345');
+      expect(resolveTmuxPaneTarget('codeman-abc12345', 'active')).toBe('codeman-abc12345');
+    });
+
+    it('treats numeric pane targets as pane indexes, not global pane ids', () => {
+      expect(resolveTmuxPaneTarget('codeman-abc12345', '0')).toBe('codeman-abc12345.0');
+      expect(resolveTmuxPaneTarget('codeman-abc12345', '12')).toBe('codeman-abc12345.12');
+    });
+
+    it('preserves explicit tmux pane ids without inventing %0', () => {
+      expect(resolveTmuxPaneTarget('codeman-abc12345', '%3')).toBe('codeman-abc12345.%3');
+    });
+
+    it('rejects invalid session and pane targets', () => {
+      expect(resolveTmuxPaneTarget('codeman-not-hex', '0')).toBeNull();
+      expect(resolveTmuxPaneTarget('codeman-abc12345', 'pane-0')).toBeNull();
     });
   });
 

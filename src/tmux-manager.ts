@@ -107,8 +107,8 @@ const SAFE_MUX_NAME_PATTERN = /^codeman-[a-f0-9-]+$/;
 /** Legacy pattern for pre-rename sessions (claudeman- prefix) */
 const LEGACY_MUX_NAME_PATTERN = /^claudeman-[a-f0-9-]+$/;
 
-/** Regex to validate tmux pane targets (e.g., "%0", "%1", "0", "1") */
-const SAFE_PANE_TARGET_PATTERN = /^(%\d+|\d+)$/;
+/** Regex to validate tmux pane targets (e.g., "%3" pane ids, "0" pane indexes, or active pane). */
+const SAFE_PANE_TARGET_PATTERN = /^(%\d+|\d+|active)$/;
 
 /** Dedicated tmux socket for new Codeman-owned sessions. */
 const DEFAULT_CODEMAN_TMUX_SOCKET = 'codeman';
@@ -165,6 +165,27 @@ export function parsePaneList(output: string): Map<string, number> {
     }
   }
   return result;
+}
+
+/**
+ * Resolve an app-level pane reference into a tmux target.
+ *
+ * Important: a numeric pane target is a pane index (`session.0`), not a tmux
+ * pane id (`%0`). Pane ids are global and monotonically assigned by tmux, so
+ * assuming `%0` exists breaks restored sessions whose real pane id is `%3`,
+ * `%12`, etc.
+ */
+export function resolveTmuxPaneTarget(muxName: string, paneTarget?: string): string | null {
+  if (!isValidMuxName(muxName)) {
+    return null;
+  }
+  if (paneTarget === undefined || paneTarget === 'active') {
+    return muxName;
+  }
+  if (!SAFE_PANE_TARGET_PATTERN.test(paneTarget)) {
+    return null;
+  }
+  return `${muxName}.${paneTarget}`;
 }
 
 export function formatPaneSnapshot(
@@ -1811,17 +1832,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    */
   sendInputToPane(muxName: string, paneTarget: string, input: string): boolean {
     if (IS_TEST_MODE) return true;
-    if (!isValidMuxName(muxName)) {
-      console.error('[TmuxManager] Invalid session name in sendInputToPane:', muxName);
-      return false;
-    }
-    if (!SAFE_PANE_TARGET_PATTERN.test(paneTarget)) {
-      console.error('[TmuxManager] Invalid pane target:', paneTarget);
+    const target = resolveTmuxPaneTarget(muxName, paneTarget);
+    if (!target) {
+      console.error('[TmuxManager] Invalid pane target in sendInputToPane:', { muxName, paneTarget });
       return false;
     }
 
-    // Build target: sessionName.paneId (e.g., "codeman-abc12345.%1")
-    const target = paneTarget.startsWith('%') ? `${muxName}.${paneTarget}` : `${muxName}.%${paneTarget}`;
     const tmux = this.tmux();
 
     try {
@@ -1863,18 +1879,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * bytes in tmux's captured escape stream (for example RI/scroll-region state);
    * replaying those as a browser snapshot mutates xterm instead of painting rows.
    */
-  capturePaneBuffer(muxName: string, paneTarget: string): string | null {
+  capturePaneBuffer(muxName: string, paneTarget?: string): string | null {
     if (IS_TEST_MODE) return '';
-    if (!isValidMuxName(muxName)) {
-      console.error('[TmuxManager] Invalid session name in capturePaneBuffer:', muxName);
+    const target = resolveTmuxPaneTarget(muxName, paneTarget);
+    if (!target) {
+      console.error('[TmuxManager] Invalid pane target in capturePaneBuffer:', { muxName, paneTarget });
       return null;
     }
-    if (!SAFE_PANE_TARGET_PATTERN.test(paneTarget)) {
-      console.error('[TmuxManager] Invalid pane target:', paneTarget);
-      return null;
-    }
-
-    const target = paneTarget.startsWith('%') ? `${muxName}.${paneTarget}` : `${muxName}.%${paneTarget}`;
 
     try {
       const buffer = execSync(`${this.tmux()} capture-pane -p -t ${shellescape(target)}`, {
@@ -1918,20 +1929,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    */
   startPipePane(muxName: string, paneTarget: string, outputFile: string): boolean {
     if (IS_TEST_MODE) return true;
-    if (!isValidMuxName(muxName)) {
-      console.error('[TmuxManager] Invalid session name in startPipePane:', muxName);
-      return false;
-    }
-    if (!SAFE_PANE_TARGET_PATTERN.test(paneTarget)) {
-      console.error('[TmuxManager] Invalid pane target:', paneTarget);
+    const target = resolveTmuxPaneTarget(muxName, paneTarget);
+    if (!target) {
+      console.error('[TmuxManager] Invalid pane target in startPipePane:', { muxName, paneTarget });
       return false;
     }
     if (!isValidPath(outputFile)) {
       console.error('[TmuxManager] Invalid output file path:', outputFile);
       return false;
     }
-
-    const target = paneTarget.startsWith('%') ? `${muxName}.${paneTarget}` : `${muxName}.%${paneTarget}`;
 
     try {
       execSync(`${this.tmux()} pipe-pane -O -t ${shellescape(target)} ${shellescape('cat >> ' + outputFile)}`, {
@@ -1950,16 +1956,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    */
   stopPipePane(muxName: string, paneTarget: string): boolean {
     if (IS_TEST_MODE) return true;
-    if (!isValidMuxName(muxName)) {
-      console.error('[TmuxManager] Invalid session name in stopPipePane:', muxName);
+    const target = resolveTmuxPaneTarget(muxName, paneTarget);
+    if (!target) {
+      console.error('[TmuxManager] Invalid pane target in stopPipePane:', { muxName, paneTarget });
       return false;
     }
-    if (!SAFE_PANE_TARGET_PATTERN.test(paneTarget)) {
-      console.error('[TmuxManager] Invalid pane target:', paneTarget);
-      return false;
-    }
-
-    const target = paneTarget.startsWith('%') ? `${muxName}.${paneTarget}` : `${muxName}.%${paneTarget}`;
 
     try {
       execSync(`${this.tmux()} pipe-pane -t ${shellescape(target)}`, {

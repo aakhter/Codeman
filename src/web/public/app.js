@@ -1943,6 +1943,17 @@ class CodemanApp {
     if (typeof KeyboardHandler !== 'undefined') KeyboardHandler.updateLayoutForKeyboard();
   }
 
+  _isUsableXtermSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'string' || snapshot.length < 8) return false;
+    const visibleText = snapshot
+      .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[()][0-2A-Z]/g, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+      .trim();
+    return visibleText.length >= 3;
+  }
+
   /**
    * Reset all app state maps, timers, and handlers to a clean baseline.
    * Called by handleInit() on SSE reconnect / page reload to prevent
@@ -2701,7 +2712,7 @@ class CodemanApp {
     if (this.activeSessionId && this._serializeAddon && this._xtermSnapshots) {
       try {
         const snapshot = this._serializeAddon.serialize({ scrollback: 1000 });
-        if (snapshot) {
+        if (this._isUsableXtermSnapshot(snapshot)) {
           this._xtermSnapshots.set(this.activeSessionId, snapshot);
           // Cap in-memory snapshot cache at 20 entries; evict oldest on overflow.
           if (this._xtermSnapshots.size > 20) {
@@ -2732,6 +2743,9 @@ class CodemanApp {
               /* localStorage quota exceeded — silently fall through */
             }
           }
+        } else {
+          this._xtermSnapshots.delete(this.activeSessionId);
+          try { localStorage.removeItem(`codeman-xs-${this.activeSessionId}`); } catch {}
         }
       } catch (_err) {
         /* Serialize failed — fall back to server buffer replay */
@@ -2936,13 +2950,19 @@ class CodemanApp {
       // Try in-memory first (fast); fall back to localStorage so snapshots
       // survive tab discards / browser reloads.
       let snapshot = this._xtermSnapshots?.get(sessionId);
+      if (snapshot && !this._isUsableXtermSnapshot(snapshot)) {
+        this._xtermSnapshots?.delete(sessionId);
+        snapshot = null;
+      }
       if (!snapshot) {
         try {
           const persisted = localStorage.getItem(`codeman-xs-${sessionId}`);
-          if (persisted) {
+          if (persisted && this._isUsableXtermSnapshot(persisted)) {
             snapshot = persisted;
             // Hoist into in-memory cache for next time
             this._xtermSnapshots?.set(sessionId, persisted);
+          } else if (persisted) {
+            localStorage.removeItem(`codeman-xs-${sessionId}`);
           }
         } catch (_e) {
           /* localStorage unavailable — proceed without snapshot */

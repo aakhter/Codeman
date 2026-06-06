@@ -29,4 +29,17 @@ describe('Codex tab resize behavior', () => {
     expect(settleDelay).toBeGreaterThan(cacheRestore);
     expect(source.slice(cacheRestore, settleDelay)).toContain("session?.mode !== 'shell'");
   });
+
+  it('rejects blank xterm snapshots before saving or restoring them', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const helper = source.indexOf('_isUsableXtermSnapshot(snapshot)');
+    const save = source.indexOf('this._xtermSnapshots.set(this.activeSessionId, snapshot)');
+    const restore = source.indexOf('SNAPSHOT_RESTORE:', save);
+    const restoreBlock = source.slice(save, restore);
+
+    expect(helper).toBeGreaterThan(-1);
+    expect(source.slice(save - 250, save)).toContain('this._isUsableXtermSnapshot(snapshot)');
+    expect(restoreBlock).toContain('if (snapshot && !this._isUsableXtermSnapshot(snapshot))');
+    expect(restoreBlock).toContain('persisted && this._isUsableXtermSnapshot(persisted)');
+  });
 });
