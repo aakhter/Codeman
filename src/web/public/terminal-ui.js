@@ -1771,8 +1771,7 @@ Object.assign(CodemanApp.prototype, {
 
       // For small buffers, write directly — single-frame render is fast enough
       if (cleanBuffer.length <= chunkSize) {
-        this.terminal.write(cleanBuffer);
-        finish();
+        this.terminal.write(cleanBuffer, finish);
         return;
       }
 
@@ -1801,18 +1800,19 @@ Object.assign(CodemanApp.prototype, {
 
         const _ct0 = performance.now();
         const chunk = cleanBuffer.slice(offset, offset + chunkSize);
-        this.terminal.write(chunk);
+        this.terminal.write(chunk, () => {
+          offset += chunkSize;
+          // Schedule next chunk after xterm has processed this one; rAF if
+          // possible, else setTimeout/Worker fallback so progress doesn't
+          // stall on occluded/unfocused windows.
+          this._safeYield(writeChunk);
+        });
         const _cdt = performance.now() - _ct0;
         _chunkCount++;
         if (_cdt > 50)
           console.warn(
             `[CRASH-DIAG] chunk #${_chunkCount} write took ${_cdt.toFixed(0)}ms (${chunk.length} bytes at offset ${offset})`
           );
-        offset += chunkSize;
-
-        // Schedule next chunk; rAF if possible, else setTimeout/Worker
-        // fallback so progress doesn't stall on occluded/unfocused windows.
-        this._safeYield(writeChunk);
       };
 
       // Start writing
@@ -1841,6 +1841,31 @@ Object.assign(CodemanApp.prototype, {
 
   clearTerminal() {
     this.terminal.clear();
+  },
+
+  /**
+   * Ask xterm to repaint its current viewport from its in-memory buffer.
+   * This is a local renderer nudge only: it does not send input to tmux/Codex.
+   * Running it now, next frame, and once shortly after covers WebGL/canvas
+   * repaints that were skipped while the browser or app tab was inactive.
+   */
+  _scheduleTerminalRepaint() {
+    if (!this.terminal) return;
+
+    const repaint = () => {
+      if (!this.terminal || !this.terminal.rows) return;
+      try { this.terminal.refresh(0, this.terminal.rows - 1); } catch {}
+    };
+
+    repaint();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(repaint);
+    }
+    this._clearTimer('_terminalRepaintTimer');
+    this._terminalRepaintTimer = setTimeout(() => {
+      this._terminalRepaintTimer = null;
+      repaint();
+    }, 80);
   },
 
   /**

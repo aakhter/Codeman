@@ -819,6 +819,12 @@ class CodemanApp {
       clearTimeout(this._tabOverflowResizeTimer);
       this._tabOverflowResizeTimer = setTimeout(() => this.updateTabOverflowMode(), 80);
     });
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this._scheduleTerminalRepaint();
+    });
+
+    window.addEventListener('focus', () => this._scheduleTerminalRepaint());
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2949,6 +2955,7 @@ class CodemanApp {
       //
       // Try in-memory first (fast); fall back to localStorage so snapshots
       // survive tab discards / browser reloads.
+      let restoredSnapshot = false;
       let snapshot = this._xtermSnapshots?.get(sessionId);
       if (snapshot && !this._isUsableXtermSnapshot(snapshot)) {
         this._xtermSnapshots?.delete(sessionId);
@@ -2976,10 +2983,11 @@ class CodemanApp {
         if (this._isStaleSelect(selectGen)) return;
         this.terminal.scrollToBottom();
         _crashDiag.log('SNAPSHOT_RESTORE_DONE');
-        // Don't fall through to buffer-fetch — SSE will catch up with any
-        // new bytes emitted during the away period.
-        this._finishBufferLoad();
-        return;
+        // Snapshot restore is only first paint. Inactive tabs intentionally
+        // unsubscribe from high-volume terminal output, so they can miss bytes
+        // emitted while away. Keep going and replace the snapshot with the
+        // canonical live tmux pane frame from /terminal.
+        restoredSnapshot = true;
       }
 
       // Instant cache restore for IDLE sessions only.
@@ -2988,7 +2996,8 @@ class CodemanApp {
       // blank and rewrites with fresh data. Skip the cache and write the fresh
       // buffer once for a single clean transition.
       const cachedBuffer = this.terminalBufferCache.get(sessionId);
-      if (cachedBuffer && !sessionIsBusy) {
+      let clearedForBusy = false;
+      if (cachedBuffer && !sessionIsBusy && !restoredSnapshot) {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
         this._resetTerminalForReplay();
         await this.chunkedTerminalWrite(cachedBuffer);
@@ -2998,13 +3007,15 @@ class CodemanApp {
       } else if (sessionIsBusy) {
         // Clear stale content immediately — fresh buffer is being fetched
         this._resetTerminalForReplay();
+        clearedForBusy = true;
         _crashDiag.log('CACHE_SKIP_BUSY');
       }
 
       // Give TUI sessions a short chance to redraw after resize before the
-      // fresh buffer fetch captures the live mux pane. Shell sessions and
-      // snapshot restores do not need this delay, so terminal content can
-      // appear immediately when switching between shells.
+      // fresh buffer fetch captures the live mux pane. Snapshot restore still
+      // falls through this path, but it has already provided an immediate first
+      // paint so the wait is not a blank-screen delay. Shell sessions do not
+      // need this delay, so terminal content can appear immediately there.
       if (session?.mode !== 'shell') {
         await new Promise((resolve) => setTimeout(resolve, 400));
         if (this._isStaleSelect(selectGen)) return;
@@ -3020,7 +3031,7 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
-        const needsRewrite = data.terminalBuffer !== cachedBuffer;
+        const needsRewrite = restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._resetTerminalForReplay();
@@ -3162,6 +3173,7 @@ class CodemanApp {
       _crashDiag.log('FOCUS');
       this.terminal.focus();
       this.terminal.scrollToBottom();
+      this._scheduleTerminalRepaint();
       _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${(performance.now() - _selStart).toFixed(0)}ms`);
     } catch (err) {

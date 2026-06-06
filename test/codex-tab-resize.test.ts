@@ -42,4 +42,58 @@ describe('Codex tab resize behavior', () => {
     expect(restoreBlock).toContain('if (snapshot && !this._isUsableXtermSnapshot(snapshot))');
     expect(restoreBlock).toContain('persisted && this._isUsableXtermSnapshot(persisted)');
   });
+
+  it('uses xterm snapshots as first paint but still fetches the canonical terminal frame', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const snapshotRestore = source.indexOf('SNAPSHOT_RESTORE:');
+    const cacheRestore = source.indexOf('Instant cache restore', snapshotRestore);
+    const fetchStart = source.indexOf("FETCH_START'", snapshotRestore);
+    const needsRewrite = source.indexOf('const needsRewrite', fetchStart);
+    const snapshotBlock = source.slice(snapshotRestore, cacheRestore);
+    const postSnapshotRestore = source.slice(snapshotRestore, needsRewrite + 120);
+
+    expect(snapshotRestore).toBeGreaterThan(-1);
+    expect(cacheRestore).toBeGreaterThan(snapshotRestore);
+    expect(fetchStart).toBeGreaterThan(cacheRestore);
+    expect(needsRewrite).toBeGreaterThan(fetchStart);
+    expect(snapshotBlock).not.toContain('this._finishBufferLoad();');
+    expect(snapshotBlock).not.toContain("Don't fall through to buffer-fetch");
+    expect(postSnapshotRestore).toContain('restoredSnapshot');
+    expect(postSnapshotRestore).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+  });
+
+  it('forces replay after clearing a busy tab even when the fetched frame matches cache', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const cacheRestore = source.indexOf('Instant cache restore');
+    const busyClear = source.indexOf('CACHE_SKIP_BUSY', cacheRestore);
+    const needsRewrite = source.indexOf('const needsRewrite', busyClear);
+    const replayBlock = source.slice(cacheRestore, needsRewrite + 160);
+
+    expect(cacheRestore).toBeGreaterThan(-1);
+    expect(busyClear).toBeGreaterThan(cacheRestore);
+    expect(needsRewrite).toBeGreaterThan(busyClear);
+    expect(replayBlock).toContain('clearedForBusy');
+    expect(replayBlock).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+  });
+
+  it('nudges xterm to repaint after session restore and browser refocus', () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const terminalSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+    const focus = appSource.indexOf("_crashDiag.log('FOCUS')");
+    const selectDone = appSource.indexOf('SELECT_DONE', focus);
+    const visibilityListener = appSource.indexOf("document.addEventListener('visibilitychange'");
+    const windowFocusListener = appSource.indexOf("window.addEventListener('focus'");
+
+    expect(focus).toBeGreaterThan(-1);
+    expect(selectDone).toBeGreaterThan(focus);
+    expect(appSource.slice(focus, selectDone)).toContain('this._scheduleTerminalRepaint()');
+    expect(visibilityListener).toBeGreaterThan(-1);
+    expect(appSource.slice(visibilityListener, visibilityListener + 400)).toContain('this._scheduleTerminalRepaint()');
+    expect(windowFocusListener).toBeGreaterThan(-1);
+    expect(appSource.slice(windowFocusListener, windowFocusListener + 300)).toContain(
+      'this._scheduleTerminalRepaint()'
+    );
+    expect(terminalSource).toContain('_scheduleTerminalRepaint()');
+    expect(terminalSource).toContain('this.terminal.refresh(0, this.terminal.rows - 1)');
+  });
 });
