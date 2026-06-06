@@ -195,4 +195,24 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0].indexOf('\x1b[24;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(spinnerRedraw));
     expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
   });
+
+  it('does not erase prompt or status rows during partial Working spinner ticks', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    handleOutput(
+      session,
+      '\x1b[55;1H\x1b[2m• Working (1s)' +
+        '\x1b[56;1H\x1b[1m›\x1b[0m ask' +
+        '\x1b[57;3Hgpt-5.5 xhigh fast · codeman · Working · Context 79% left'
+    );
+    handleOutput(session, '\x1b[55;1H\x1b[2m• Working (2s)');
+
+    expect(emitted[1]).toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[56;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[57;1H\x1b[2K');
+  });
 });

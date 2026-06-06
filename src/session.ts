@@ -126,8 +126,9 @@ const CTRL_L_PATTERN = /\x0c/g;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 const CODEX_WORKING_STATUS_TEXT_PATTERN = /(?:[•●].{0,8}Working|Working(?:\s|\(|$))/;
+const CODEX_STATUS_LINE_TEXT_PATTERN = /gpt-[\w.-]+|Context \d+% left/;
 const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = new RegExp(
-  `gpt-[\\w.-]+|Context \\d+% left|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
+  `${CODEX_STATUS_LINE_TEXT_PATTERN.source}|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
 );
 const CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN = /^\s*[›❯](?:\s|$)/;
 
@@ -1261,6 +1262,10 @@ export class Session extends EventEmitter {
       // size cache lags behind SIGWINCH). Tracking those would lead C to
       // generate clear sequences past the terminal height and leave the
       // cursor parked near the bottom, breaking the next chunk's DECRI math.
+      const rowTextForRepair = collectCodexRowText(data);
+      const hasStableStatusAnchor = [...rowTextForRepair.values()].some((text) =>
+        CODEX_STATUS_LINE_TEXT_PATTERN.test(text)
+      );
       const cupRows: number[] = [];
       // eslint-disable-next-line no-control-regex
       for (const m of data.matchAll(/\x1b\[(\d+);(\d+)H/g)) {
@@ -1277,6 +1282,7 @@ export class Session extends EventEmitter {
       const MAX_C_DRIFT = 5;
       let prependC = '';
       if (
+        hasStableStatusAnchor &&
         thisFrameBottom !== null &&
         this._codexFrameBottomRow !== null &&
         thisFrameBottom < this._codexFrameBottomRow &&
@@ -1311,7 +1317,9 @@ export class Session extends EventEmitter {
         }
 
         const currentUiBandSet = new Set(currentUiBandRows);
-        const vacatedUiRows = this._codexLastUiBandRows.filter((r) => !currentUiBandSet.has(r));
+        const vacatedUiRows = hasStableStatusAnchor
+          ? this._codexLastUiBandRows.filter((r) => !currentUiBandSet.has(r))
+          : [];
         if (vacatedUiRows.length > 0) {
           prependVacatedUiRows = '\x1b7';
           for (const r of vacatedUiRows) {
@@ -1325,7 +1333,9 @@ export class Session extends EventEmitter {
           prependBottomBand += `\x1b[${r};1H\x1b[2K`;
         }
         prependBottomBand += '\x1b8';
-        this._codexLastUiBandRows = currentUiBandRows;
+        if (hasStableStatusAnchor) {
+          this._codexLastUiBandRows = currentUiBandRows;
+        }
       }
 
       // Track home+erase when it directly follows a user Ctrl+L so internal
