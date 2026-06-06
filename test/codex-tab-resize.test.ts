@@ -111,4 +111,17 @@ describe('Codex tab resize behavior', () => {
     expect(styles).toContain('.session-tab.tab-loading');
     expect(styles).toContain('.tab-load-spinner');
   });
+
+  it('does not force terminal focus on touch tab switches when the keyboard was closed', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const selectBlock = source.slice(selectStart, source.indexOf('// Shared cleanup', selectStart));
+
+    expect(source).toContain('_shouldFocusTerminalForTabSwitch()');
+    expect(source).toContain('MobileDetection.isTouchDevice()');
+    expect(source).toContain('KeyboardHandler.keyboardVisible');
+    expect(selectBlock).toContain('const shouldFocusTerminal = this._shouldFocusTerminalForTabSwitch();');
+    expect(selectBlock).toContain('if (shouldFocusTerminal && this.terminal) this.terminal.focus();');
+    expect(selectBlock).not.toContain('if (this.terminal) this.terminal.focus();');
+  });
 });
