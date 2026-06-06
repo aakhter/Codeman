@@ -737,6 +737,23 @@ Object.assign(CodemanApp.prototype, {
             return;
           }
           if (data.length === 1 && data.charCodeAt(0) >= 32) {
+            if (this._shouldBypassLocalEchoPrintable(data)) {
+              const text = this._localEchoOverlay?.pendingText || '';
+              this._localEchoOverlay?.clear();
+              this._localEchoOverlay?.suppressBufferDetection();
+              this._flushedOffsets?.delete(this.activeSessionId);
+              this._flushedTexts?.delete(this.activeSessionId);
+              if (text) {
+                this._pendingInput += text;
+              }
+              this._pendingInput += data;
+              if (this._inputFlushTimeout) {
+                clearTimeout(this._inputFlushTimeout);
+                this._inputFlushTimeout = null;
+              }
+              flushInput();
+              return;
+            }
             // Printable char: add to overlay only (sent on Enter)
             this._localEchoOverlay?.addChar(data);
             return;
@@ -1524,6 +1541,12 @@ Object.assign(CodemanApp.prototype, {
         });
       }
     }
+  },
+
+  _shouldBypassLocalEchoPrintable(data) {
+    if (data !== '$') return false;
+    const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+    return session?.mode === 'codex';
   },
 
   _handleCjkInput(text) {

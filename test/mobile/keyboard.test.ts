@@ -790,6 +790,39 @@ describe('Virtual Keyboard', () => {
       expect(afterEnter.sentInputs.join('')).toBe('find bug\r');
     });
 
+    it('sends Codex skill picker trigger immediately despite local echo', async () => {
+      await page.evaluate(() => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-codex-skill-trigger-test';
+        app.sessions.set('mobile-codex-skill-trigger-test', {
+          id: 'mobile-codex-skill-trigger-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app.hideWelcome();
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        settings.localEchoEnabled = true;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+        app._updateLocalEchoState();
+        app.terminal.focus();
+      });
+
+      await page.keyboard.type('$');
+      await page.waitForFunction(() => window.__sentInputs?.length === 1);
+
+      const state = await page.evaluate(() => ({
+        pendingText: app._localEchoOverlay?.pendingText,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(state.pendingText).toBe('');
+      expect(state.sentInputs).toEqual(['$']);
+    });
+
     it('shows terminal local echo at the cursor when no prompt marker is visible', async () => {
       await page.evaluate(async () => {
         app.activeSessionId = 'mobile-cursor-fallback-test';
