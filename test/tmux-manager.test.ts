@@ -172,6 +172,53 @@ describe('TmuxManager (unit)', () => {
       expect(snapshot).toBe(`\x1b[1;1H${'x'.repeat(9)}\x1b[2;1Hnext line\x1b[2;3H`);
       expect(snapshot).not.toContain('\n');
     });
+
+    it('preserves SGR color while stripping non-style pane controls', () => {
+      const snapshot = formatPaneSnapshot(['\x1b[32mgreen\x1b[0m\x1b[2K\x1b[10;20Htail'], {
+        cols: 40,
+        rows: 2,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toContain('\x1b[32mgreen\x1b[0m');
+      expect(snapshot).toContain('tail');
+      expect(snapshot).not.toContain('\x1b[2K');
+      expect(snapshot).not.toContain('\x1b[10;20H');
+    });
+
+    it('truncates styled rows by visible columns without cutting SGR escapes', () => {
+      const snapshot = formatPaneSnapshot(['\x1b[31mabcdef\x1b[0m'], {
+        cols: 4,
+        rows: 1,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toBe('\x1b[1;1H\x1b[31mabc\x1b[0m\x1b[1;1H');
+    });
+
+    it('does not let full-width glyphs cross the paint boundary', () => {
+      const snapshot = formatPaneSnapshot(['abc\u754cdef'], {
+        cols: 5,
+        rows: 1,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toBe('\x1b[1;1Habc\x1b[1;1H');
+    });
+
+    it('keeps combining marks attached without consuming a terminal column', () => {
+      const snapshot = formatPaneSnapshot(['a\u0301bc'], {
+        cols: 4,
+        rows: 1,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toBe('\x1b[1;1Ha\u0301bc\x1b[1;1H');
+    });
   });
 
   describe('resolveTmuxPaneTarget', () => {

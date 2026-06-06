@@ -188,6 +188,220 @@ export function resolveTmuxPaneTarget(muxName: string, paneTarget?: string): str
   return `${muxName}.${paneTarget}`;
 }
 
+type GraphemeSegmenter = {
+  segment(input: string): Iterable<{ segment: string }>;
+};
+
+const GRAPHEME_SEGMENTER: GraphemeSegmenter | null = (() => {
+  try {
+    const Segmenter = (
+      Intl as typeof Intl & {
+        Segmenter?: new (locale?: string, options?: { granularity: 'grapheme' }) => GraphemeSegmenter;
+      }
+    ).Segmenter;
+    return Segmenter ? new Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  } catch {
+    return null;
+  }
+})();
+
+function findEscapeEnd(text: string, start: number): number {
+  const type = text[start + 1];
+  if (type === '[') {
+    for (let i = start + 2; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code >= 0x40 && code <= 0x7e) return i;
+    }
+    return text.length - 1;
+  }
+
+  if (type === ']') {
+    for (let i = start + 2; i < text.length; i++) {
+      if (text.charCodeAt(i) === 0x07) return i;
+      if (text[i] === '\x1b' && text[i + 1] === '\\') return i + 1;
+    }
+    return text.length - 1;
+  }
+
+  if (type === 'P' || type === '^' || type === '_' || type === 'X') {
+    for (let i = start + 2; i < text.length; i++) {
+      if (text.charCodeAt(i) === 0x07) return i;
+      if (text[i] === '\x1b' && text[i + 1] === '\\') return i + 1;
+    }
+    return text.length - 1;
+  }
+
+  return Math.min(start + 1, text.length - 1);
+}
+
+function sanitizePaneLineStyles(line: string): string {
+  let result = '';
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] !== '\x1b') {
+      result += line[i];
+      continue;
+    }
+
+    const end = findEscapeEnd(line, i);
+    const sequence = line.slice(i, end + 1);
+    if (/^\x1b\[[0-9;:]*m$/.test(sequence)) {
+      result += sequence;
+    }
+    i = end;
+  }
+  return result;
+}
+
+function isZeroWidthCodePoint(codePoint: number): boolean {
+  return (
+    codePoint === 0x00ad ||
+    codePoint === 0x034f ||
+    codePoint === 0x061c ||
+    codePoint === 0x115f ||
+    codePoint === 0x1160 ||
+    codePoint === 0x17b4 ||
+    codePoint === 0x17b5 ||
+    codePoint === 0x180e ||
+    codePoint === 0x200b ||
+    codePoint === 0x200c ||
+    codePoint === 0x200d ||
+    codePoint === 0x2060 ||
+    codePoint === 0xfeff ||
+    (codePoint >= 0x0300 && codePoint <= 0x036f) ||
+    (codePoint >= 0x0483 && codePoint <= 0x0489) ||
+    (codePoint >= 0x0591 && codePoint <= 0x05bd) ||
+    codePoint === 0x05bf ||
+    (codePoint >= 0x05c1 && codePoint <= 0x05c2) ||
+    (codePoint >= 0x05c4 && codePoint <= 0x05c5) ||
+    codePoint === 0x05c7 ||
+    (codePoint >= 0x0610 && codePoint <= 0x061a) ||
+    (codePoint >= 0x064b && codePoint <= 0x065f) ||
+    codePoint === 0x0670 ||
+    (codePoint >= 0x06d6 && codePoint <= 0x06dc) ||
+    (codePoint >= 0x06df && codePoint <= 0x06e4) ||
+    (codePoint >= 0x06e7 && codePoint <= 0x06e8) ||
+    (codePoint >= 0x06ea && codePoint <= 0x06ed) ||
+    codePoint === 0x0711 ||
+    (codePoint >= 0x0730 && codePoint <= 0x074a) ||
+    (codePoint >= 0x07a6 && codePoint <= 0x07b0) ||
+    (codePoint >= 0x07eb && codePoint <= 0x07f3) ||
+    (codePoint >= 0x0816 && codePoint <= 0x0819) ||
+    (codePoint >= 0x081b && codePoint <= 0x0823) ||
+    (codePoint >= 0x0825 && codePoint <= 0x0827) ||
+    (codePoint >= 0x0829 && codePoint <= 0x082d) ||
+    (codePoint >= 0x0859 && codePoint <= 0x085b) ||
+    (codePoint >= 0x08d3 && codePoint <= 0x08e1) ||
+    (codePoint >= 0x08e3 && codePoint <= 0x0902) ||
+    (codePoint >= 0x093a && codePoint <= 0x093c) ||
+    codePoint === 0x094d ||
+    (codePoint >= 0x0951 && codePoint <= 0x0957) ||
+    (codePoint >= 0x0962 && codePoint <= 0x0963) ||
+    (codePoint >= 0x1ab0 && codePoint <= 0x1aff) ||
+    (codePoint >= 0x1dc0 && codePoint <= 0x1dff) ||
+    (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xfe20 && codePoint <= 0xfe2f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+  );
+}
+
+function isWideCodePoint(codePoint: number): boolean {
+  return (
+    codePoint >= 0x1100 &&
+    (codePoint <= 0x115f ||
+      codePoint === 0x2329 ||
+      codePoint === 0x232a ||
+      (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+      (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+      (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+      (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+      (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+      (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+      (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+      (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
+      (codePoint >= 0x20000 && codePoint <= 0x3fffd))
+  );
+}
+
+function nextGrapheme(text: string, start: number): { value: string; nextIndex: number } {
+  if (GRAPHEME_SEGMENTER) {
+    const iterator = GRAPHEME_SEGMENTER.segment(text.slice(start))[Symbol.iterator]();
+    const next = iterator.next();
+    if (!next.done && next.value.segment) {
+      return { value: next.value.segment, nextIndex: start + next.value.segment.length };
+    }
+  }
+
+  const first = text.codePointAt(start);
+  if (first === undefined) return { value: '', nextIndex: start + 1 };
+  let value = String.fromCodePoint(first);
+  let nextIndex = start + value.length;
+  while (nextIndex < text.length) {
+    const codePoint = text.codePointAt(nextIndex);
+    if (codePoint === undefined || !isZeroWidthCodePoint(codePoint)) break;
+    const mark = String.fromCodePoint(codePoint);
+    value += mark;
+    nextIndex += mark.length;
+  }
+  return { value, nextIndex };
+}
+
+function terminalCellWidth(grapheme: string): number {
+  let hasVisible = false;
+  let hasWide = false;
+  for (let i = 0; i < grapheme.length; i++) {
+    const codePoint = grapheme.codePointAt(i);
+    if (codePoint === undefined) continue;
+    if (codePoint > 0xffff) i++;
+    if (isZeroWidthCodePoint(codePoint) || codePoint < 0x20 || (codePoint >= 0x7f && codePoint < 0xa0)) {
+      continue;
+    }
+    hasVisible = true;
+    if (isWideCodePoint(codePoint)) hasWide = true;
+  }
+  if (!hasVisible) return 0;
+  return hasWide ? 2 : 1;
+}
+
+function truncatePaneLineByVisibleColumns(line: string, maxColumns: number): string {
+  let result = '';
+  let visibleColumns = 0;
+  let sawSgr = false;
+
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '\x1b') {
+      const end = findEscapeEnd(line, i);
+      const sequence = line.slice(i, end + 1);
+      if (/^\x1b\[[0-9;:]*m$/.test(sequence)) {
+        result += sequence;
+        sawSgr = true;
+      }
+      i = end;
+      continue;
+    }
+
+    const grapheme = nextGrapheme(line, i);
+    const width = terminalCellWidth(grapheme.value);
+    if (width === 0) {
+      result += grapheme.value;
+    } else if (visibleColumns + width <= maxColumns) {
+      result += grapheme.value;
+      visibleColumns += width;
+    } else {
+      break;
+    }
+    i = grapheme.nextIndex - 1;
+    if (visibleColumns >= maxColumns) {
+      continue;
+    }
+  }
+
+  if (sawSgr) {
+    result += '\x1b[0m';
+  }
+  return result;
+}
+
 export function formatPaneSnapshot(
   lines: string[],
   geometry: { cols: number; rows: number; cursorX: number; cursorY: number }
@@ -197,7 +411,8 @@ export function formatPaneSnapshot(
   const rows = Math.max(1, geometry.rows);
   const parts: string[] = [];
   for (let row = 0; row < Math.min(lines.length, rows); row++) {
-    parts.push(`\x1b[${row + 1};1H${lines[row].slice(0, paintCols)}`);
+    const safeLine = truncatePaneLineByVisibleColumns(sanitizePaneLineStyles(lines[row]), paintCols);
+    parts.push(`\x1b[${row + 1};1H${safeLine}`);
   }
   const cursorX = Math.max(0, Math.min(cols - 1, geometry.cursorX));
   const cursorY = Math.max(0, Math.min(rows - 1, geometry.cursorY));
@@ -1873,11 +2088,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   }
 
   /**
-   * Capture the current visible text of a specific pane.
+   * Capture the current visible text and SGR styles of a specific pane.
    *
-   * Do not use `capture-pane -e` here. Codex output can leave non-style control
-   * bytes in tmux's captured escape stream (for example RI/scroll-region state);
-   * replaying those as a browser snapshot mutates xterm instead of painting rows.
+   * `capture-pane -e` is sanitized by `formatPaneSnapshot`: SGR color/style
+   * codes are preserved, while cursor/erase/scroll-region controls are stripped
+   * before rows are repainted at absolute positions in browser xterm.
    */
   capturePaneBuffer(muxName: string, paneTarget?: string): string | null {
     if (IS_TEST_MODE) return '';
@@ -1888,7 +2103,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     try {
-      const buffer = execSync(`${this.tmux()} capture-pane -p -t ${shellescape(target)}`, {
+      const buffer = execSync(`${this.tmux()} capture-pane -p -e -t ${shellescape(target)}`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
       }).replace(/\n+$/g, '');
