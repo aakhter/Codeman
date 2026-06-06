@@ -244,6 +244,27 @@ describe('Mobile Layout', () => {
       }
     });
 
+    it('keeps the mobile recording mic effect inside the button bounds', async () => {
+      const device = REPRESENTATIVE_DEVICES['small-phone'];
+      const { context, page } = await createDevicePage(device, BASE_URL, 'chromium');
+      try {
+        await page.waitForTimeout(WAIT.PAGE_SETTLE);
+        await page.evaluate(() => {
+          document.getElementById('voiceInputBtnMobile')?.classList.add('recording');
+        });
+
+        const shadow = await page.evaluate(() => {
+          const button = document.getElementById('voiceInputBtnMobile');
+          return button ? getComputedStyle(button).boxShadow : '';
+        });
+
+        expect(shadow).toContain('inset');
+        expect(shadow).not.toContain(' 6px ');
+      } finally {
+        await context.close();
+      }
+    });
+
     it('keeps desktop upload and voice controls in one centered row', async () => {
       const { context, page } = await createDevicePage(iPadPro, BASE_URL, 'chromium');
       try {
