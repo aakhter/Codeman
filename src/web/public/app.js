@@ -814,6 +814,11 @@ class CodemanApp {
 
     // Color picker for session customization
     this.setupColorPicker();
+
+    window.addEventListener('resize', () => {
+      clearTimeout(this._tabOverflowResizeTimer);
+      this._tabOverflowResizeTimer = setTimeout(() => this.updateTabOverflowMode(), 80);
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2343,6 +2348,38 @@ class CodemanApp {
       this._fullRenderSessionTabs();
     }
 
+    this.updateTabOverflowMode();
+  }
+
+  updateTabOverflowMode() {
+    const container = this.$('sessionTabs');
+    if (!container) return;
+
+    const deviceType = MobileDetection.getDeviceType();
+    const settings = this.loadAppSettingsFromStorage();
+    const defaults = this.getDefaultSettings();
+    const manualTwoRows = deviceType === 'desktop'
+      ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false)
+      : false;
+
+    if (manualTwoRows || deviceType !== 'desktop') {
+      container.classList.remove('tabs-auto-wrap');
+      return;
+    }
+
+    // Measure the natural one-row overflow, then enable wrapping only if needed.
+    container.classList.remove('tabs-auto-wrap');
+    const shouldWrap = window.CodemanTabOverflow?.shouldAutoWrapTabs
+      ? window.CodemanTabOverflow.shouldAutoWrapTabs({
+          deviceType,
+          manualTwoRows,
+          tabCount: this.sessions.size,
+          scrollWidth: container.scrollWidth,
+          clientWidth: container.clientWidth,
+        })
+      : container.scrollWidth > container.clientWidth + 1;
+
+    container.classList.toggle('tabs-auto-wrap', shouldWrap);
   }
 
   _fullRenderSessionTabs() {
@@ -2412,6 +2449,8 @@ class CodemanApp {
 
     // Set up keyboard navigation for tabs
     this.setupTabKeyboardNavigation(container);
+
+    this.updateTabOverflowMode();
 
     // Update connection lines after tabs change (positions may have shifted)
     this.updateConnectionLines();

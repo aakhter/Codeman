@@ -197,6 +197,7 @@ body {
   flex-wrap: nowrap;
   gap: 4px 2px;
   flex: 1;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 0.15rem 0.25rem;
@@ -209,6 +210,13 @@ body {
   overflow-x: hidden;
   overflow-y: auto;
   max-height: 120px;
+}
+
+.session-tabs.tabs-auto-wrap {
+  flex-wrap: wrap;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 96px;
 }
 
 .session-tabs::-webkit-scrollbar {
@@ -464,6 +472,7 @@ body {
   margin-left: auto;
   padding-left: 0.75rem;
   border-left: 1px solid var(--glass-border);
+  flex-shrink: 0;
 }
 
 /* Connection Indicator */

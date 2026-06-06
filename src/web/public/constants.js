@@ -10,6 +10,7 @@
  * @globals {function} scheduleBackground - scheduler.postTask wrapper (background priority)
  * @globals {function} getEventCoords - Unified mouse/touch coordinate extractor
  * @globals {function} escapeHtml - XSS-safe HTML escaping
+ * @globals {object} CodemanTabOverflow - Tab overflow layout policy helper
  * @globals {object} SSE_EVENTS - Centralized SSE event type constants (~73 event types)
  * @globals {Array} BUILTIN_RESPAWN_PRESETS - Built-in respawn configuration presets
  *
@@ -109,12 +110,25 @@ function evaluateWebGLLongTaskTrip(recent, entries, now, config = WEBGL_FALLBACK
   return recent.length >= config.LONGTASK_COUNT;
 }
 
+function shouldAutoWrapTabs(input) {
+  if (!input || input.deviceType !== 'desktop') return false;
+  if (input.manualTwoRows) return false;
+  if ((input.tabCount || 0) < 2) return false;
+
+  const scrollWidth = Number(input.scrollWidth) || 0;
+  const clientWidth = Number(input.clientWidth) || 0;
+  return scrollWidth > clientWidth + 1;
+}
+
 // Expose for tests. `const` declarations at the top of a non-module script
 // are global lexical bindings but not `window` properties, so explicit
 // assignment is the test-visible API surface.
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
+  window.CodemanTabOverflow = {
+    shouldAutoWrapTabs,
+  };
 }
 
 // Scheduler API — prioritize terminal writes over background UI updates.

@@ -1479,6 +1479,7 @@ Object.assign(CodemanApp.prototype, {
       tabsEl.classList.toggle('tabs-two-rows', twoRows);
       tabsEl.classList.toggle('tabs-show-folder', twoRows);
     }
+    this.updateTabOverflowMode?.();
     // Re-render tabs if folder visibility changed (folder spans are generated in JS)
     if (prevTallTabs !== undefined && prevTallTabs !== twoRows) {
       this._fullRenderSessionTabs();
