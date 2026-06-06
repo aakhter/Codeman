@@ -122,4 +122,24 @@ describe('Codex tab resize behavior', () => {
     expect(selectBlock).not.toContain('this._finishBufferLoad()');
     expect(catchBlock).not.toContain('this._finishBufferLoad()');
   });
+
+  it('repaints the terminal after WebGL renderer fallback paths', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const contextLoss = source.slice(
+      source.indexOf('this._webglAddon.onContextLoss(() => {'),
+      source.indexOf('this.terminal.loadAddon(this._webglAddon);')
+    );
+    const longTaskFallback = source.slice(
+      source.indexOf("this._disableWebGLSticky('long-tasks');"),
+      source.indexOf('});', source.indexOf("this._disableWebGLSticky('long-tasks');"))
+    );
+
+    expect(contextLoss).toContain("this._disableWebGLSticky('context-lost')");
+    expect(contextLoss).toContain('this._disposeWebGLObserver()');
+    expect(contextLoss).toContain('this._webglAddon?.dispose()');
+    expect(contextLoss).toContain('this._scheduleTerminalRepaint()');
+
+    expect(longTaskFallback).toContain('this._webglAddon?.dispose()');
+    expect(longTaskFallback).toContain('this._scheduleTerminalRepaint()');
+  });
 });

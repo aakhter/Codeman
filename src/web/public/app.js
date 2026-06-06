@@ -688,6 +688,7 @@ class CodemanApp {
         this._disposeWebGLObserver();
         this._webglAddon?.dispose();
         this._webglAddon = null;
+        this._scheduleTerminalRepaint();
       });
       this.terminal.loadAddon(this._webglAddon);
       console.log('[CRASH-DIAG] WebGL renderer enabled');
@@ -718,7 +719,7 @@ class CodemanApp {
           this._disposeWebGLObserver();
           this._webglAddon?.dispose();
           this._webglAddon = null;
-          try { this.terminal.refresh(0, this.terminal.rows - 1); } catch {}
+          this._scheduleTerminalRepaint();
         }
       });
       this._webglLongTaskObserver.observe({ type: 'longtask', buffered: false });

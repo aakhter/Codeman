@@ -196,6 +196,22 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
   });
 
+  it('does not treat ordinary gpt model mentions as Codex status rows', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    const outputRow = '\x1b[20;1Hnormal output comparing gpt-5 and another model';
+
+    handleOutput(session, outputRow);
+
+    expect(emitted[0]).toContain(outputRow);
+    expect(emitted[0]).not.toContain('\x1b[19;1H\x1b[2K');
+    expect(emitted[0]).not.toContain('\x1b[20;1H\x1b[2K');
+  });
+
   it('does not erase prompt or status rows during partial Working spinner ticks', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;

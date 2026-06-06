@@ -126,7 +126,7 @@ const CTRL_L_PATTERN = /\x0c/g;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 const CODEX_WORKING_STATUS_TEXT_PATTERN = /(?:[•●].{0,8}Working|Working(?:\s|\(|$))/;
-const CODEX_STATUS_LINE_TEXT_PATTERN = /gpt-[\w.-]+|Context \d+% left/;
+const CODEX_STATUS_LINE_TEXT_PATTERN = /Context \d+% left|Tasks \d+\/\d+/;
 const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = new RegExp(
   `${CODEX_STATUS_LINE_TEXT_PATTERN.source}|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
 );
