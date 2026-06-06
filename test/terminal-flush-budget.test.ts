@@ -96,4 +96,19 @@ describe('terminal flush budget', () => {
     expect(resolved).toBe(true);
     expect(finishBufferLoad).toHaveBeenCalledOnce();
   });
+
+  it('keeps stale buffer load owners from finishing a newer load', () => {
+    const { app } = loadTerminalUiHarness('codex');
+
+    app._beginBufferLoad('select-1');
+    app._beginBufferLoad('select-2');
+
+    expect(app._finishBufferLoad('select-1')).toBe(false);
+    expect(app._isLoadingBuffer).toBe(true);
+    expect(app._bufferLoadOwner).toBe('select-2');
+
+    expect(app._finishBufferLoad('select-2')).toBe(true);
+    expect(app._isLoadingBuffer).toBe(false);
+    expect(app._bufferLoadOwner).toBe(null);
+  });
 });

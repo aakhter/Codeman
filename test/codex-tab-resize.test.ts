@@ -96,4 +96,30 @@ describe('Codex tab resize behavior', () => {
     expect(terminalSource).toContain('_scheduleTerminalRepaint()');
     expect(terminalSource).toContain('this.terminal.refresh(0, this.terminal.rows - 1)');
   });
+
+  it('keeps selectSession buffer-load cleanup scoped to the active generation', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const staleHelper = source.slice(
+      source.indexOf('_isStaleSelect(selectGen)'),
+      source.indexOf('return false;', source.indexOf('_isStaleSelect(selectGen)'))
+    );
+    const loadStart = source.indexOf('const bufferLoadOwner = this._beginBufferLoad(selectGen);');
+    const selectDone = source.indexOf('SELECT_DONE', loadStart);
+    const selectBlock = source.slice(loadStart, selectDone);
+    const catchBlock = source.slice(
+      source.indexOf('} catch (err) {', selectDone),
+      source.indexOf("console.error('Failed to load session terminal:'", selectDone)
+    );
+
+    expect(staleHelper).toContain('this._finishBufferLoad(selectGen)');
+    expect(loadStart).toBeGreaterThan(-1);
+    expect(selectBlock).toContain('this.chunkedTerminalWrite(cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)');
+    expect(selectBlock).toContain(
+      'this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)'
+    );
+    expect(selectBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
+    expect(catchBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
+    expect(selectBlock).not.toContain('this._finishBufferLoad()');
+    expect(catchBlock).not.toContain('this._finishBufferLoad()');
+  });
 });

@@ -454,6 +454,8 @@ class CodemanApp {
     this.syncWaitTimeout = null; // Timeout for incomplete sync blocks
     this._isLoadingBuffer = false; // true during chunkedTerminalWrite — blocks live SSE writes
     this._loadBufferQueue = null;  // queued SSE events during buffer load
+    this._bufferLoadSeq = 0;
+    this._bufferLoadOwner = null;
 
     // Flicker filter state (buffers output after screen clears)
     this.flickerFilterBuffer = '';
@@ -528,7 +530,7 @@ class CodemanApp {
   // If stale, cleans up buffer-loading state and returns true.
   _isStaleSelect(selectGen) {
     if (selectGen !== this._selectGeneration) {
-      if (this._isLoadingBuffer) this._finishBufferLoad();
+      if (this._isLoadingBuffer) this._finishBufferLoad(selectGen);
       this._restoringFlushedState = false;
       return true;
     }
@@ -1989,6 +1991,7 @@ class CodemanApp {
     this.writeFrameScheduled = false;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
+    this._bufferLoadOwner = null;
     // Abort any in-flight chunkedTerminalWrite (SSE reconnect reloads buffers)
     this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
     // Preserve local echo overlay text across SSE reconnect — just hide until
@@ -2783,6 +2786,7 @@ class CodemanApp {
     this.writeFrameScheduled = false;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
+    this._bufferLoadOwner = null;
     // Abort any in-flight chunkedTerminalWrite from the previous session.
     // Without this, old rAF-scheduled chunks continue writing stale data
     // into the terminal, interleaving with the new session's buffer.
@@ -2929,8 +2933,7 @@ class CodemanApp {
     // Without this, SSE events arriving during the fetch() gap compete with
     // the buffer write, causing 70KB+ single-frame flushes that stall WebGL.
     // chunkedTerminalWrite also sets this, but we need it before the fetch too.
-    this._isLoadingBuffer = true;
-    this._loadBufferQueue = [];
+    const bufferLoadOwner = this._beginBufferLoad(selectGen);
     try {
       // Fit terminal to container BEFORE writing any buffer data.
       // If the browser was resized while viewing another session, the terminal
@@ -3000,7 +3003,7 @@ class CodemanApp {
       if (cachedBuffer && !sessionIsBusy && !restoredSnapshot) {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
         this._resetTerminalForReplay();
-        await this.chunkedTerminalWrite(cachedBuffer);
+        await this.chunkedTerminalWrite(cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
         if (this._isStaleSelect(selectGen)) return;
         this.terminal.scrollToBottom();
         _crashDiag.log('CACHE_DONE');
@@ -3040,7 +3043,7 @@ class CodemanApp {
             this.terminal.write('\x1b[90m... (earlier output truncated for performance) ...\x1b[0m\r\n\r\n');
           }
           // Use chunked write for large buffers to avoid UI jank
-          await this.chunkedTerminalWrite(data.terminalBuffer);
+          await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
           if (this._isStaleSelect(selectGen)) return;
           // Ensure terminal is scrolled to bottom after buffer load
           this.terminal.scrollToBottom();
@@ -3062,7 +3065,7 @@ class CodemanApp {
       // to prevent duplicate content). chunkedTerminalWrite calls _finishBufferLoad
       // internally, but if we skipped the write (cache hit or empty), call it here.
       if (this._isLoadingBuffer) {
-        this._finishBufferLoad();
+        this._finishBufferLoad(bufferLoadOwner);
       }
       // Drop the guard so user input clears state normally
       this._restoringFlushedState = false;
@@ -3177,7 +3180,7 @@ class CodemanApp {
       _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${(performance.now() - _selStart).toFixed(0)}ms`);
     } catch (err) {
-      if (this._isLoadingBuffer) this._finishBufferLoad();
+      if (this._isLoadingBuffer) this._finishBufferLoad(bufferLoadOwner);
       this._restoringFlushedState = false;
       console.error('Failed to load session terminal:', err);
     }
