@@ -4800,6 +4800,17 @@ body {
   padding: 1rem;
 }
 
+.shortcut-section + .shortcut-section {
+  margin-top: 1rem;
+}
+
+.shortcut-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 .shortcuts-grid {
   display: grid;
   grid-template-columns: auto 1fr;

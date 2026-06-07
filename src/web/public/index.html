@@ -299,7 +299,7 @@
             <h3 class="history-title">Resume Conversation</h3>
             <div class="history-list" id="historyList"></div>
           </div>
-          <p class="welcome-hint">Or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to start</p>
+          <p class="welcome-hint">Choose a tool to start</p>
           <button class="welcome-ralph-link" onclick="app.showRalphWizard()">Start Ralph Loop &rarr;</button>
         </div>
       </div>
@@ -368,7 +368,7 @@
         <!-- Run AI -->
         <div class="toolbar-group">
           <div class="run-btn-group">
-            <button class="btn-toolbar btn-run" id="runBtn" onclick="app.run()" title="Run (Ctrl+Enter)">
+            <button class="btn-toolbar btn-run" id="runBtn" onclick="app.run()" title="Run selected AI backend">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               <span id="runBtnLabel">Run</span>
             </button>
@@ -511,17 +511,46 @@
           <button class="modal-close" onclick="app.closeHelp()" aria-label="Close help">&times;</button>
         </div>
         <div class="modal-body">
-          <div class="shortcuts-grid">
-            <div><kbd>Ctrl</kbd>+<kbd>W</kbd></div><div>Close Session</div>
-            <div><kbd>Option</kbd>+<kbd>[</kbd> / <kbd>Option</kbd>+<kbd>]</kbd></div><div>Previous / Next Session</div>
-            <div><kbd>Option</kbd>+<kbd>1-9</kbd></div><div>Switch to Tab N</div>
-            <div><kbd>Ctrl</kbd>+<kbd>L</kbd></div><div>Clear Terminal</div>
-            <div><kbd>Ctrl</kbd>+<kbd>+</kbd></div><div>Increase Font</div>
-            <div><kbd>Ctrl</kbd>+<kbd>-</kbd></div><div>Decrease Font</div>
-            <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Help</div>
-            <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd></div><div>Voice Input</div>
-            <div><kbd>Escape</kbd></div><div>Close Panels</div>
-          </div>
+          <section class="shortcut-section">
+            <h4>Session</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>W</kbd></div><div>Close Session</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Tab</kbd></div><div>Next Session</div>
+              <div><kbd>Option</kbd>+<kbd>[</kbd> / <kbd>Option</kbd>+<kbd>]</kbd></div><div>Previous / Next Session</div>
+              <div><kbd>Option</kbd>+<kbd>1-9</kbd></div><div>Switch to Tab N</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Tabs</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>{</kbd></div><div>Move Active Tab Left</div>
+              <div><kbd>Ctrl</kbd>+<kbd>}</kbd></div><div>Move Active Tab Right</div>
+              <div><kbd>ArrowLeft</kbd></div><div>Focus Previous Tab</div>
+              <div><kbd>ArrowRight</kbd></div><div>Focus Next Tab</div>
+              <div><kbd>Home</kbd></div><div>Focus First Tab</div>
+              <div><kbd>End</kbd></div><div>Focus Last Tab</div>
+              <div><kbd>Enter</kbd> / <kbd>Space</kbd></div><div>Activate Focused Tab</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Terminal</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>L</kbd></div><div>Clear Terminal</div>
+              <div><kbd>Ctrl</kbd>+<kbd>+</kbd></div><div>Increase Font</div>
+              <div><kbd>Ctrl</kbd>+<kbd>-</kbd></div><div>Decrease Font</div>
+              <div><kbd>Shift</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd></div><div>Voice Input</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Panels</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Help</div>
+              <div><kbd>Ctrl</kbd>+<kbd>/</kbd></div><div>Show Help</div>
+              <div><kbd>Escape</kbd></div><div>Close Panels</div>
+            </div>
+          </section>
         </div>
       </div>
     </div>
