@@ -33,6 +33,8 @@ Route tests should use `app.inject()` instead of live ports. When adding tests t
 
 Recent history uses Conventional Commit-style messages such as `feat(web): ...`, `fix: ...`, `docs: ...`, and `chore: version packages`. Keep commits scoped and descriptive. Pull requests should include the problem, the approach, linked issues when available, and screenshots or screen recordings for UI/mobile changes. Before opening a PR, run `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run check:lockfile`, and relevant targeted tests.
 
+For Jira-backed work, always link git and Jira both ways. Include the Jira key in the commit subject, then update the Jira issue after the commit with a concise description of what changed, the commit hash, and the verification that passed. Include a Bitbucket commit URL when the remote URL is available. Do this before marking the Jira issue Done or reporting the work complete.
+
 ## Branch Workflow
 
 Do not develop new features or bug fixes directly on `master`. Start from an up-to-date `master`, create a focused branch such as `fix/mobile-toolbar-overlap` or `feat/session-search`, commit there, then merge or open a pull request after verification. Keep uncommitted work on the branch until it is ready to integrate.

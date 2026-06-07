@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript, Fastify route handlers, Vitest route/unit tests, static public HTML/CSS/JS.
 
+**Status:** Completed on 2026-06-07 in commit `0c1eec3 COD-8 add away digest` after rebasing onto `origin/local`.
+
 ---
 
 ## File Structure
@@ -28,7 +30,7 @@
 - Create: `src/web/away-digest.ts`
 - Test: `test/away-digest.test.ts`
 
-- [ ] **Step 1: Write failing builder tests**
+- [x] **Step 1: Write failing builder tests**
 
 Cover:
 
@@ -41,7 +43,7 @@ Cover:
 Run: `npm test -- test/away-digest.test.ts`
 Expected: FAIL because `src/web/away-digest.ts` does not exist.
 
-- [ ] **Step 2: Implement minimal builder**
+- [x] **Step 2: Implement minimal builder**
 
 Create `AwayDigestInput`, `AwayDigestResponse`, `resolveAwayDigestRange()`, and `buildAwayDigest()`.
 
@@ -53,7 +55,7 @@ Use this classification:
 - `idle`: active session idle
 - `informational`: zero-exit lifecycle, created/started/recovered/deleted, token milestones, recent subagents
 
-- [ ] **Step 3: Verify builder tests pass**
+- [x] **Step 3: Verify builder tests pass**
 
 Run: `npm test -- test/away-digest.test.ts`
 Expected: PASS.
@@ -65,7 +67,7 @@ Expected: PASS.
 - Modify: `src/web/routes/system-routes.ts`
 - Modify: `test/routes/system-routes.test.ts`
 
-- [ ] **Step 1: Write failing route tests**
+- [x] **Step 1: Write failing route tests**
 
 Add tests for:
 
@@ -76,7 +78,7 @@ Add tests for:
 Run: `npm test -- test/routes/system-routes.test.ts`
 Expected: FAIL because route does not exist.
 
-- [ ] **Step 2: Add route**
+- [x] **Step 2: Add route**
 
 Route behavior:
 
@@ -89,7 +91,7 @@ Route behavior:
 - collect recent subagents from `subagentWatcher.getRecentSubagents(60)`
 - return `{ success: true, digest }`
 
-- [ ] **Step 3: Verify route tests pass**
+- [x] **Step 3: Verify route tests pass**
 
 Run: `npm test -- test/routes/system-routes.test.ts test/away-digest.test.ts`
 Expected: PASS.
@@ -104,7 +106,7 @@ Expected: PASS.
 - Modify: `src/web/public/mobile.css`
 - Create: `test/away-digest-ui.test.ts`
 
-- [ ] **Step 1: Write failing static UI test**
+- [x] **Step 1: Write failing static UI test**
 
 Cover:
 
@@ -117,7 +119,7 @@ Cover:
 Run: `npm test -- test/away-digest-ui.test.ts`
 Expected: FAIL because the modal does not exist.
 
-- [ ] **Step 2: Add HTML/CSS shell**
+- [x] **Step 2: Add HTML/CSS shell**
 
 Add a header icon button near notifications/lifecycle log:
 
@@ -132,7 +134,7 @@ Add `#awayDigestModal` using the existing `.modal` pattern with:
 - five section containers
 - retry/refresh and close buttons
 
-- [ ] **Step 3: Add JS renderer**
+- [x] **Step 3: Add JS renderer**
 
 Add methods to `panels-ui.js`:
 
@@ -148,14 +150,14 @@ Last-viewed behavior:
 - read localStorage key `codeman-away-digest-last-viewed`
 - update the key only after successful load and close
 
-- [ ] **Step 4: Verify UI tests pass**
+- [x] **Step 4: Verify UI tests pass**
 
 Run: `npm test -- test/away-digest-ui.test.ts`
 Expected: PASS.
 
 ## Task 4: Final Verification And Commit
 
-- [ ] **Step 1: Run focused verification**
+- [x] **Step 1: Run focused verification**
 
 Run:
 
@@ -167,7 +169,7 @@ Run:
 
 Expected: all pass.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 Commit all COD-8 implementation files:
 
@@ -177,3 +179,19 @@ git commit -m "COD-8 add away digest"
 ```
 
 Expected: commit succeeds and the worktree is clean.
+
+## Completion Notes
+
+- Jira COD-8 was marked Done on 2026-06-07.
+- The UI entry point is labeled **Away Digest** and appears in the top-right header row between the response-viewer eye icon and the notifications bell.
+- Since-last-visit uses `codeman-away-digest-last-viewed` and updates only after a successful load and close.
+- Recent run summaries and subagent completions are included with a freshness note because they are live/recent state rather than durable event-store data.
+- Zero-exit lifecycle entries remain informational unless paired with stronger completion evidence.
+
+Final verification after the rebase:
+
+- `npm test -- test/auth-security.test.ts test/cli-commands.test.ts test/help-modal-shortcuts.test.ts test/keyboard-shortcuts.test.ts test/away-digest.test.ts test/routes/system-routes.test.ts test/away-digest-ui.test.ts`: 7 files passed; 185 tests passed.
+- `npm run check:public-assets`: 32 files passed.
+- `npm run lint`
+- `npm run typecheck`
+- `npm run format:check`

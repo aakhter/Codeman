@@ -32,6 +32,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The production server caches static files for 1 year (`maxAge: '1y'` in `server.ts`). After deploying frontend changes, users may need a hard refresh (Ctrl+Shift+R) to see updates.
 
+## CRITICAL: Jira/Git Traceability
+
+For Jira-backed work, always keep Jira and git linked:
+
+1. Include the Jira key in the commit subject, e.g. `COD-8 add away digest`.
+2. After committing, update the Jira issue with a concise implementation note describing what changed, which files or behavior were affected, and what verification passed.
+3. Include the git commit hash in the Jira note. When the remote URL is known, include the Bitbucket commit URL as well.
+4. Do this before marking the Jira issue Done or before reporting the work complete. If Jira update fails, say so explicitly in the final response.
+
 ## COM Shorthand (Deployment)
 
 Uses [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`) via `@changesets/cli`.
@@ -248,5 +257,6 @@ Key scripts: `scripts/tmux-manager.sh` (safe tmux mgmt), `scripts/tunnel.sh star
 - Avoid bare `node dist/index.js web` or `npx codeman web` on port 3000 in this checkout. That starts HTTP, blocks the managed HTTPS app, and makes `codeman-ctl` report the app as stopped while `start` fails with `port 3000 is already in use`.
 - When refreshing dependencies, use `CODEMAN_NO_AUTOSTART=1 npm ci` so `scripts/postinstall.js` does not auto-start the bare HTTP server.
 - From Codex tool sessions, `setsid /home/aakhter/.local/bin/codeman-it15` is the persistent managed start path; direct `codeman-ctl start` may have its background child reaped by the tool runner.
+- If manually launching the rebuilt server from a Codex tool session, use an isolated tmux socket such as `tmux -L codeman-launcher new-session -d -s web -c /home/aakhter/.codeman/app 'NODE_COMPILE_CACHE=/home/aakhter/.codeman/compile-cache node dist/index.js web --host 127.0.0.1 --port 3000 --https >> /home/aakhter/.codeman/logs/codeman-it15.log 2>&1'`. Do **not** launch the web process in the default/Codeman tmux socket with a name like `codeman-web`; the app will discover it as a managed mux session and may show/clean it as a bogus Codeman session.
 - Remotes are Bitbucket `origin` and GitHub `upstream` (`https://github.com/Ark0N/Codeman.git`). Local upstream merges should not be pushed unless the user explicitly asks.
 - `/mnt/c/Users/aakhter/codeman-fix` was a stale scratch directory and has been removed; do not treat it as a Codeman checkout.
