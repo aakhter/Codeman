@@ -15,6 +15,7 @@
 (function (global) {
   const TERMINAL_QUERY_RESPONSE_PATTERN = /^\x1b\[[\?>=]?[\d;]*[cnR]$/;
   const TERMINAL_OSC_RESPONSE_PATTERN = /^\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\)$/;
+  const USER_SCROLL_STICKY_SUPPRESS_MS = 1500;
 
   function isTerminalQueryResponse(data) {
     return TERMINAL_QUERY_RESPONSE_PATTERN.test(data) || TERMINAL_OSC_RESPONSE_PATTERN.test(data);
@@ -27,6 +28,7 @@
   global.CodemanTerminalInput = {
     isTerminalQueryResponse,
     shouldSuppressTerminalQueryResponse,
+    USER_SCROLL_STICKY_SUPPRESS_MS,
   };
 })(window);
 
@@ -319,6 +321,7 @@ Object.assign(CodemanApp.prototype, {
       (ev) => {
         ev.preventDefault();
         const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
+        this._noteTerminalUserScroll(lines);
         this.terminal.scrollLines(lines);
       },
       { passive: false }
@@ -393,6 +396,7 @@ Object.assign(CodemanApp.prototype, {
             const ch = cellHeight();
             const lines = Math.trunc(pixelAccum / ch);
             if (lines !== 0) {
+              this._noteTerminalUserScroll(lines);
               this.terminal.scrollLines(lines);
               pixelAccum -= lines * ch;
             }
@@ -445,6 +449,7 @@ Object.assign(CodemanApp.prototype, {
     this._chunkedWriteGen = 0;
     this._bufferLoadSeq = 0;
     this._bufferLoadOwner = null;
+    this._lastUserScrollUpAt = null;
 
     // Handle resize with throttling for performance
     this._resizeTimeout = null;
@@ -1379,6 +1384,19 @@ Object.assign(CodemanApp.prototype, {
     return buffer.viewportY >= buffer.baseY - 2;
   },
 
+  _noteTerminalUserScroll(lines) {
+    if (lines < 0) {
+      this._lastUserScrollUpAt = performance.now();
+    } else if (this.isTerminalAtBottom()) {
+      this._lastUserScrollUpAt = null;
+    }
+  },
+
+  _hasRecentUserScrollUp() {
+    if (typeof this._lastUserScrollUpAt !== 'number') return false;
+    return performance.now() - this._lastUserScrollUpAt < window.CodemanTerminalInput.USER_SCROLL_STICKY_SUPPRESS_MS;
+  },
+
   batchTerminalWrite(data) {
     // If a buffer load (chunkedTerminalWrite) is in progress, queue live events
     // to prevent interleaving historical buffer data with live SSE data.
@@ -1639,8 +1657,11 @@ Object.assign(CodemanApp.prototype, {
         `[CRASH-DIAG] flushPendingWrites: ${_dt.toFixed(0)}ms, ${(bytesThisFrame / 1024).toFixed(0)}KB written${deferred ? ', rest deferred' : ''} (total ${(_joinedLen / 1024).toFixed(0)}KB)`
       );
 
-    // Sticky scroll: if user was at bottom, keep them there after new output
-    if (this._wasAtBottomBeforeWrite) {
+    // Sticky scroll: if user was at bottom, keep them there after new output.
+    // Give manual scroll-up gestures a short grace window so high-frequency
+    // Codex status ticks do not snap the viewport back while the user is
+    // trying to inspect earlier output.
+    if (this._wasAtBottomBeforeWrite && !this._hasRecentUserScrollUp()) {
       this.terminal.scrollToBottom();
     }
 
