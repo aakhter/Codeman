@@ -304,7 +304,8 @@ const KeyboardHandler = {
       // translate up so it sits at the bottom of the visual viewport.
       // This formula accounts for iOS scrolling the visual viewport (offsetTop)
       // when the user types in xterm's hidden textarea.
-      const layoutHeight = window.innerHeight;
+      const appEl = document.querySelector('.app');
+      const layoutHeight = appEl?.getBoundingClientRect().bottom || window.innerHeight;
       const visualBottom = window.visualViewport.offsetTop + window.visualViewport.height;
       const keyboardOffset = Math.max(0, layoutHeight - visualBottom);
 

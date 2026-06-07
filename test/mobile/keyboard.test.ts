@@ -222,16 +222,29 @@ describe('Virtual Keyboard', () => {
       await context.close();
     });
 
-    it('toolbar slides up via translateY on keyboard show', async () => {
+    it('toolbar remains below terminal when keyboard show shrinks the app viewport', async () => {
       await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
       await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
 
-      const transform = await page.evaluate(() => {
+      const layout = await page.evaluate(() => {
         const toolbar = document.querySelector('.toolbar') as HTMLElement | null;
-        return toolbar?.style.transform ?? '';
+        const accessory = document.querySelector('.keyboard-accessory-bar') as HTMLElement | null;
+        const terminalWrap = document.querySelector('.terminal-wrap') as HTMLElement | null;
+        const toolbarRect = toolbar?.getBoundingClientRect();
+        const accessoryRect = accessory?.getBoundingClientRect();
+        const terminalRect = terminalWrap?.getBoundingClientRect();
+        return {
+          toolbarTransform: toolbar?.style.transform ?? '',
+          accessoryTransform: (accessory as HTMLElement | null)?.style.transform ?? '',
+          toolbarTop: toolbarRect?.top ?? 0,
+          accessoryTop: accessoryRect?.top ?? 0,
+          terminalBottom: terminalRect?.bottom ?? 0,
+        };
       });
-      expect(transform).not.toBe('');
-      expect(transform).toContain('translateY');
+      expect(layout.toolbarTransform).toBe('');
+      expect(layout.accessoryTransform).toBe('');
+      expect(layout.accessoryTop).toBeGreaterThanOrEqual(layout.terminalBottom - 4);
+      expect(layout.toolbarTop).toBeGreaterThan(layout.accessoryTop);
     });
 
     it('accessory bar gets .visible class', async () => {
