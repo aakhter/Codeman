@@ -86,21 +86,27 @@ const ALT_SCREEN_TOGGLE_PATTERN = /\x1b\[\?(?:47|1047|1049)[hl]/g;
 const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
 const OAUTH_AUTHORIZATION_URL_PATTERN =
   /https?:\/\/[^\s"'<>]*(?:\/authorize\?|auth\.atlassian\.com\/authorize\?)[^\s"'<>]*/i;
-const OAUTH_AUTHORIZATION_NOTICE_PATTERN =
-  /\b(?:authorize|authorization|opening this URL|copy the URL|browser launch failed)\b/i;
+const OAUTH_AUTHORIZATION_PROMPT_PATTERN =
+  /\b(?:Authorize `[^`]+` by opening this URL in your browser|Please authorize this client by visiting):?\b/i;
+const OAUTH_AUTHORIZATION_FOLLOWUP_PATTERN = /\b(?:Browser launch failed|copy the URL above manually)\b/i;
 
 function extractOneTimeAuthNotice(buffer: string): string {
-  if (!OAUTH_AUTHORIZATION_URL_PATTERN.test(buffer)) return '';
-
   const lines = buffer.split(/\r?\n/);
   const keep = new Set<number>();
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!OAUTH_AUTHORIZATION_URL_PATTERN.test(line)) continue;
+  for (let promptIndex = 0; promptIndex < lines.length; promptIndex++) {
+    if (!OAUTH_AUTHORIZATION_PROMPT_PATTERN.test(lines[promptIndex])) continue;
 
-    keep.add(i);
-    for (const neighbor of [i - 2, i - 1, i + 1, i + 2]) {
-      if (neighbor >= 0 && neighbor < lines.length && OAUTH_AUTHORIZATION_NOTICE_PATTERN.test(lines[neighbor])) {
+    const urlIndex = lines
+      .slice(promptIndex + 1, promptIndex + 4)
+      .findIndex((line) => OAUTH_AUTHORIZATION_URL_PATTERN.test(line));
+    if (urlIndex === -1) continue;
+
+    const absoluteUrlIndex = promptIndex + 1 + urlIndex;
+    keep.add(promptIndex);
+    keep.add(absoluteUrlIndex);
+
+    for (const neighbor of [absoluteUrlIndex + 1, absoluteUrlIndex + 2]) {
+      if (neighbor < lines.length && OAUTH_AUTHORIZATION_FOLLOWUP_PATTERN.test(lines[neighbor])) {
         keep.add(neighbor);
       }
     }
