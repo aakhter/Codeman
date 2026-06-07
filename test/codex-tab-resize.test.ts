@@ -59,6 +59,18 @@ describe('Codex tab resize behavior', () => {
     expect(fetchBlock).toContain('fetch(terminalUrl)');
   });
 
+  it('rewrites fetched busy-session buffers even when they match cache', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const fetchDone = source.indexOf('FETCH_DONE:', selectStart);
+    const rewriteBlock = source.slice(fetchDone, source.indexOf('// Update cache', fetchDone));
+
+    expect(selectStart).toBeGreaterThan(-1);
+    expect(fetchDone).toBeGreaterThan(selectStart);
+    expect(rewriteBlock).toContain('const needsRewrite =');
+    expect(rewriteBlock).toContain('sessionIsBusy');
+  });
+
   it('waits for xterm to parse small buffer writes before resolving tab switch restore', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
     const start = source.indexOf('For small buffers, write directly');
