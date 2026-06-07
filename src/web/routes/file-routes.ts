@@ -5,9 +5,7 @@
 
 import { FastifyInstance, type FastifyReply } from 'fastify';
 import { join, basename as pathBasename } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { homedir } from 'node:os';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
@@ -22,11 +20,10 @@ import {
   type AttachmentRecord,
 } from '../../attachment-registry.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
+import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
 import type { EventPort, SessionPort } from '../ports/index.js';
-
-const execFileAsync = promisify(execFile);
 
 const MIME_TYPES: Record<string, string> = {
   png: 'image/png',
@@ -45,8 +42,6 @@ const MIME_TYPES: Record<string, string> = {
   pdf: 'application/pdf',
   json: 'application/json',
 };
-
-const OFFICE_CONVERSION_TIMEOUT_MS = 5 * 60_000;
 
 function sanitizeDownloadName(fileName: string): string {
   return fileName.replace(/["\\\r\n]/g, '_');
@@ -93,25 +88,17 @@ async function serveConvertedPreview(
     return;
   }
 
-  let previewDir: string | undefined;
   try {
-    await fs.stat(resolvedPath);
-
-    previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-preview-'));
-    await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, resolvedPath], {
-      timeout: OFFICE_CONVERSION_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
-    });
-
-    const converted = (await fs.readdir(previewDir)).find((name) => name.toLowerCase().endsWith('.pdf'));
-    if (!converted) {
+    const previewPath = await getOfficePreviewPdfPath(resolvedPath, extension);
+    if (!previewPath) {
       reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document preview conversion failed'));
       return;
     }
 
-    const content = await fs.readFile(join(previewDir, converted));
+    const content = await fs.readFile(previewPath);
     reply.header('Content-Type', 'application/pdf');
-    reply.header('Content-Disposition', `inline; filename="${pathBasename(fileName, `.${extension}`)}.pdf"`);
+    reply.header('Content-Disposition', `inline; filename="${getPreviewPdfDownloadName(fileName, extension)}"`);
+    reply.header('Cache-Control', 'no-cache');
     reply.header('Content-Length', content.length);
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.send(content);
@@ -119,10 +106,6 @@ async function serveConvertedPreview(
     reply
       .code(500)
       .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to generate preview: ${getErrorMessage(err)}`));
-  } finally {
-    if (previewDir) {
-      await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
-    }
   }
 }
 

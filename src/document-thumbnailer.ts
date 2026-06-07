@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { getOfficePreviewPdfPath } from './document-preview-cache.js';
 
 const execFileAsync = promisify(execFile);
 const THUMBNAIL_CONVERSION_TIMEOUT_MS = 5 * 60_000;
@@ -33,7 +34,8 @@ export async function generateFirstPageThumbnail(filePath: string, extension: st
     if (ext === 'docx' || ext === 'pptx') {
       return renderOfficeFirstPage(filePath);
     }
-  } catch {
+  } catch (err) {
+    console.warn(`[Thumbnailer] Failed to generate ${ext} thumbnail for ${filePath}:`, getThumbnailErrorMessage(err));
     return null;
   }
 
@@ -41,24 +43,16 @@ export async function generateFirstPageThumbnail(filePath: string, extension: st
 }
 
 async function renderOfficeFirstPage(filePath: string): Promise<ThumbnailResult | null> {
-  let previewDir: string | undefined;
   try {
-    previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-thumb-office-'));
-    await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, filePath], {
-      timeout: THUMBNAIL_CONVERSION_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
-    });
-
-    const converted = (await fs.readdir(previewDir)).find((name) => name.toLowerCase().endsWith('.pdf'));
-    if (!converted) return null;
-    const thumbnail = await renderPdfFirstPage(join(previewDir, converted));
-    return thumbnail;
-  } catch {
+    const previewPdfPath = await getOfficePreviewPdfPath(filePath, extname(filePath).toLowerCase().replace(/^\./, ''));
+    if (!previewPdfPath) return null;
+    return await renderPdfFirstPage(previewPdfPath);
+  } catch (err) {
+    console.warn(
+      `[Thumbnailer] Failed to convert Office file to PDF for thumbnail (${filePath}):`,
+      getThumbnailErrorMessage(err)
+    );
     return null;
-  } finally {
-    if (previewDir) {
-      await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
-    }
   }
 }
 
@@ -77,11 +71,19 @@ async function renderPdfFirstPage(filePath: string): Promise<ThumbnailResult | n
     );
     const content = await fs.readFile(`${prefix}.png`);
     return { content, contentType: 'image/png' };
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[Thumbnailer] Failed to render PDF first page for thumbnail (${filePath}):`,
+      getThumbnailErrorMessage(err)
+    );
     return null;
   } finally {
     if (previewDir) {
       await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
     }
   }
+}
+
+function getThumbnailErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

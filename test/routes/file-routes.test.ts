@@ -16,7 +16,9 @@ vi.mock('node:fs/promises', () => ({
     readdir: vi.fn(async () => []),
     readFile: vi.fn(async () => 'file content'),
     stat: vi.fn(async () => ({ size: 100, isFile: () => true })),
+    mkdir: vi.fn(async () => undefined),
     mkdtemp: vi.fn(async () => '/tmp/codeman-preview-test'),
+    rename: vi.fn(async () => undefined),
     rm: vi.fn(async () => undefined),
   },
 }));
@@ -50,11 +52,14 @@ import fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { createReadStream, realpathSync } from 'node:fs';
 import { fileStreamManager } from '../../src/file-stream-manager.js';
+import { clearDocumentPreviewCache } from '../../src/document-preview-cache.js';
 
 const mockedReaddir = vi.mocked(fs.readdir);
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedStat = vi.mocked(fs.stat);
+const mockedMkdir = vi.mocked(fs.mkdir);
 const mockedMkdtemp = vi.mocked(fs.mkdtemp);
+const mockedRename = vi.mocked(fs.rename);
 const mockedRm = vi.mocked(fs.rm);
 const mockedExecFile = vi.mocked(execFile);
 const mockedCreateReadStream = vi.mocked(createReadStream);
@@ -67,14 +72,24 @@ describe('file-routes', () => {
   beforeEach(async () => {
     harness = await createRouteTestHarness(registerFileRoutes);
     vi.clearAllMocks();
+    clearDocumentPreviewCache();
 
     // Default: realpathSync returns the path unchanged
     mockedRealpathSync.mockImplementation((p: string) => p as never);
     mockedReaddir.mockResolvedValue([] as never);
     mockedReadFile.mockResolvedValue('file content' as never);
     // Default stat
-    mockedStat.mockResolvedValue({ size: 100, isFile: () => true } as never);
+    mockedStat.mockImplementation(async (path) => {
+      const pathText = String(path);
+      if (pathText.includes('codeman-document-preview-cache') && pathText.endsWith('.pdf')) {
+        throw new Error('ENOENT');
+      }
+
+      return { size: 100, isFile: () => true, mtimeMs: 12345 } as never;
+    });
+    mockedMkdir.mockResolvedValue(undefined as never);
     mockedMkdtemp.mockResolvedValue('/tmp/codeman-preview-test' as never);
+    mockedRename.mockResolvedValue(undefined as never);
     mockedRm.mockResolvedValue(undefined as never);
     mockedExecFile.mockImplementation((_cmd, _args, _options, callback) => {
       callback(null, { stdout: '', stderr: '' });
@@ -522,7 +537,14 @@ describe('file-routes', () => {
   describe('GET /api/sessions/:id/file-preview', () => {
     it('converts large office documents without an app-level source-size cap', async () => {
       const pdf = Buffer.from('%PDF converted');
-      mockedStat.mockResolvedValue({ size: 150 * 1024 * 1024 } as never); // 150MB source
+      mockedStat.mockImplementation(async (path) => {
+        const pathText = String(path);
+        if (pathText.includes('codeman-document-preview-cache') && pathText.endsWith('.pdf')) {
+          throw new Error('ENOENT');
+        }
+
+        return { size: 150 * 1024 * 1024, mtimeMs: 12345, isFile: () => true } as never;
+      });
       mockedReaddir.mockResolvedValue(['large-deck.pdf'] as never);
       mockedReadFile.mockResolvedValue(pdf as never);
 

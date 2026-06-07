@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { generateFirstPageThumbnail } from '../src/document-thumbnailer.js';
+import { clearDocumentPreviewCache } from '../src/document-preview-cache.js';
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn((_cmd, _args, _options, callback) => {
@@ -15,7 +16,9 @@ vi.mock('node:fs/promises', () => ({
     stat: vi.fn(async () => ({ size: 100, isFile: () => true })),
     readFile: vi.fn(async () => Buffer.from('png')),
     readdir: vi.fn(async () => ['converted.pdf']),
+    mkdir: vi.fn(async () => undefined),
     mkdtemp: vi.fn(async () => '/tmp/codeman-thumb-test'),
+    rename: vi.fn(async () => undefined),
     rm: vi.fn(async () => undefined),
   },
 }));
@@ -24,16 +27,28 @@ const mockedExecFile = vi.mocked(execFile);
 const mockedStat = vi.mocked(fs.stat);
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedReaddir = vi.mocked(fs.readdir);
+const mockedMkdir = vi.mocked(fs.mkdir);
 const mockedMkdtemp = vi.mocked(fs.mkdtemp);
+const mockedRename = vi.mocked(fs.rename);
 const mockedRm = vi.mocked(fs.rm);
 
 describe('document-thumbnailer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedStat.mockResolvedValue({ size: 500 * 1024 * 1024, isFile: () => true } as never);
+    clearDocumentPreviewCache();
+    mockedStat.mockImplementation(async (path) => {
+      const pathText = String(path);
+      if (pathText.includes('codeman-document-preview-cache') && pathText.endsWith('.pdf')) {
+        throw new Error('ENOENT');
+      }
+
+      return { size: 500 * 1024 * 1024, mtimeMs: 12345, isFile: () => true } as never;
+    });
     mockedReadFile.mockResolvedValue(Buffer.from('large thumbnail') as never);
     mockedReaddir.mockResolvedValue(['converted.pdf'] as never);
+    mockedMkdir.mockResolvedValue(undefined as never);
     mockedMkdtemp.mockResolvedValue('/tmp/codeman-thumb-test' as never);
+    mockedRename.mockResolvedValue(undefined as never);
     mockedRm.mockResolvedValue(undefined as never);
     mockedExecFile.mockImplementation((_cmd, _args, _options, callback) => {
       callback(null, { stdout: '', stderr: '' });
@@ -56,25 +71,13 @@ describe('document-thumbnailer', () => {
     );
   });
 
-  it('keeps the converted Office PDF until the first page thumbnail is rendered', async () => {
-    let officePreviewDirRemoved = false;
-
+  it('renders Office thumbnails from the cached converted PDF after conversion cleanup', async () => {
     mockedMkdtemp.mockImplementation(async (prefix) =>
-      String(prefix).includes('codeman-thumb-office-')
-        ? '/tmp/codeman-thumb-office-test'
+      String(prefix).includes('codeman-document-preview-cache')
+        ? '/tmp/codeman-document-preview-cache/work-test'
         : '/tmp/codeman-thumb-pdf-test'
     );
-    mockedRm.mockImplementation(async (path) => {
-      if (path === '/tmp/codeman-thumb-office-test') {
-        officePreviewDirRemoved = true;
-      }
-    });
-    mockedExecFile.mockImplementation((cmd, _args, _options, callback) => {
-      if (cmd === 'pdftoppm' && officePreviewDirRemoved) {
-        callback(new Error('converted PDF was removed before rasterization'));
-        return {} as never;
-      }
-
+    mockedExecFile.mockImplementation((_cmd, _args, _options, callback) => {
       callback(null, { stdout: '', stderr: '' });
       return {} as never;
     });
@@ -85,5 +88,9 @@ describe('document-thumbnailer', () => {
       content: Buffer.from('large thumbnail'),
       contentType: 'image/png',
     });
+    const pdftoppmCall = mockedExecFile.mock.calls.find(([cmd]) => cmd === 'pdftoppm');
+    expect(pdftoppmCall?.[1]).toEqual(
+      expect.arrayContaining([expect.stringContaining('codeman-document-preview-cache')])
+    );
   });
 });
