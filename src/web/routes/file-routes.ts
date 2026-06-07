@@ -279,7 +279,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
         jpeg: 'image/jpeg',
         gif: 'image/gif',
         webp: 'image/webp',
-        svg: 'image/svg+xml',
         ico: 'image/x-icon',
         bmp: 'image/bmp',
         mp4: 'video/mp4',
@@ -293,19 +292,21 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
       };
 
       const content = await fs.readFile(resolvedPath);
-      if (download === 'true') {
-        const rawBasename = filePath!.split('/').pop() || 'download';
-        // Sanitize filename for Content-Disposition header (prevent header injection)
-        const basename = rawBasename.replace(/["\\\r\n]/g, '_');
+      const rawBasename = filePath!.split('/').pop() || 'download';
+      // Sanitize filename for Content-Disposition header (prevent header injection)
+      const basename = rawBasename.replace(/["\\\r\n]/g, '_');
+      if (download === 'true' || ext === 'svg') {
         reply.raw.writeHead(200, {
-          'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+          'Content-Type': ext === 'svg' ? 'application/octet-stream' : mimeTypes[ext] || 'application/octet-stream',
           'Content-Disposition': `attachment; filename="${basename}"`,
           'Content-Length': content.length,
+          'X-Content-Type-Options': 'nosniff',
         });
         reply.raw.end(content);
         return;
       }
       reply.header('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+      reply.header('X-Content-Type-Options', 'nosniff');
       reply.send(content);
     } catch (err) {
       reply

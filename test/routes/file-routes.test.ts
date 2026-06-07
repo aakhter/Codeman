@@ -305,6 +305,22 @@ describe('file-routes', () => {
       expect(res.headers['content-type']).toBe('image/png');
     });
 
+    it('serves workspace SVG as an untrusted attachment instead of inline image/svg+xml', async () => {
+      const content = Buffer.from('<svg><script>alert("xss")</script></svg>');
+      mockedReadFile.mockResolvedValue(content as never);
+      mockedStat.mockResolvedValue({ size: content.length } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=malicious.svg`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('application/octet-stream');
+      expect(res.headers['content-disposition']).toContain('attachment; filename="malicious.svg"');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+    });
+
     it('rejects path traversal in raw file serving', async () => {
       mockedRealpathSync.mockReturnValue('/etc/shadow' as never);
 
