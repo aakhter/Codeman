@@ -80,6 +80,15 @@ const safeEnvOverridesSchema = z
     }
   );
 
+// ========== Effort Level ==========
+
+/**
+ * Claude CLI effort level for new sessions. Injected as a `--settings` soft default
+ * (NOT the CLAUDE_CODE_EFFORT_LEVEL env var, which would hard-lock the session and
+ * block in-session `/effort` switching). `ultracode` enables dynamic workflow orchestration.
+ */
+const effortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']).optional();
+
 // ========== Session Routes ==========
 
 /**
@@ -158,6 +167,8 @@ export const CreateSessionSchema = z.object({
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']).optional(),
   name: z.string().max(100).optional(),
   envOverrides: safeEnvOverridesSchema,
+  /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
+  effort: effortLevelSchema,
   /** Model override to write to .claude/settings.local.json (e.g., "opus[1m]"). Empty string clears. */
   modelOverride: z.string().max(50).optional(),
   openCodeConfig: OpenCodeConfigSchema,
@@ -218,6 +229,8 @@ export const QuickStartSchema = z.object({
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
   envOverrides: safeEnvOverridesSchema,
+  /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
+  effort: effortLevelSchema,
 });
 
 // ========== Hook Events ==========
@@ -584,6 +597,8 @@ export const RalphLoopStartSchema = z.object({
   maxIterations: z.number().int().min(0).max(1000).nullable().default(10),
   enableRespawn: z.boolean().default(false),
   envOverrides: safeEnvOverridesSchema,
+  /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
+  effort: effortLevelSchema,
   planItems: z
     .array(
       z.object({

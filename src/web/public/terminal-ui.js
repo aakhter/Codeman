@@ -1340,7 +1340,9 @@ Object.assign(CodemanApp.prototype, {
       // Match by path (not basename) so linked/renamed cases still resolve correctly.
       const matchingCase = (this.cases || []).find((c) => c.path === workingDir);
       const caseName = matchingCase?.name || workingDir.split('/').pop() || '';
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const globalSettings = this.loadAppSettingsFromStorage();
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
+      const effort = this.getEffortSetting(globalSettings);
       const createRes = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1349,6 +1351,7 @@ Object.assign(CodemanApp.prototype, {
           name,
           resumeSessionId: sessionId,
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(effort ? { effort } : {}),
         }),
       });
       const createData = await createRes.json();

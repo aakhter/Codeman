@@ -1032,10 +1032,9 @@ Object.assign(CodemanApp.prototype, {
     const enabledItems = config.generatedPlan?.filter(i => i.enabled);
 
     try {
-      const envOverrides = this.buildEnvOverrides(
-        this.getCaseSettings(config.caseName),
-        this.loadAppSettingsFromStorage()
-      );
+      const ralphGlobalSettings = this.loadAppSettingsFromStorage();
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(config.caseName), ralphGlobalSettings);
+      const effort = this.getEffortSetting(ralphGlobalSettings);
       const res = await fetch('/api/ralph-loop/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1047,6 +1046,7 @@ Object.assign(CodemanApp.prototype, {
           enableRespawn: config.enableRespawn,
           planItems: enabledItems?.length ? enabledItems : undefined,
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(effort ? { effort } : {}),
         }),
       });
       const data = await res.json();

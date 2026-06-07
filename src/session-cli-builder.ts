@@ -8,7 +8,8 @@
  * @module session-cli-builder
  */
 
-import type { ClaudeMode } from './types.js';
+import type { ClaudeMode, EffortLevel } from './types.js';
+import { isEffortLevel } from './types.js';
 import { getAugmentedPath } from './utils/index.js';
 
 /**
@@ -32,22 +33,42 @@ function buildPermissionArgs(claudeMode: ClaudeMode, allowedTools?: string): str
 }
 
 /**
+ * Build the CLI args carrying the effort level as a SOFT default (switchable
+ * in-session via /effort). The CLAUDE_CODE_EFFORT_LEVEL env var is deliberately
+ * avoided — it hard-locks effort and blocks in-session `/effort` switching.
+ *
+ * Two carriers are needed because neither covers all levels:
+ * - regular levels (incl. `max`) → `--effort <level>` (the settings `effortLevel`
+ *   key is enum(["low","medium","high","xhigh"]) with .catch(undefined), so `max`
+ *   would be SILENTLY dropped there)
+ * - `ultracode` → `--settings '{"ultracode":true}'` (its own boolean settings key,
+ *   claude >= 2.1.154; rejected by the --effort flag)
+ */
+export function buildEffortCliArgs(effort?: EffortLevel): string[] {
+  if (!effort || !isEffortLevel(effort)) return [];
+  return effort === 'ultracode' ? ['--settings', '{"ultracode":true}'] : ['--effort', effort];
+}
+
+/**
  * Build args for an interactive Claude CLI session (direct PTY, non-mux fallback).
  *
  * @param sessionId - The Codeman session ID (passed as --session-id to Claude)
  * @param claudeMode - Permission mode for the CLI
  * @param model - Optional model override (e.g., 'opus', 'sonnet')
  * @param allowedTools - Optional comma-separated allowed tools list
+ * @param effort - Optional effort level, injected via --settings (overridable in-session)
  * @returns Array of CLI arguments
  */
 export function buildInteractiveArgs(
   sessionId: string,
   claudeMode: ClaudeMode,
   model?: string,
-  allowedTools?: string
+  allowedTools?: string,
+  effort?: EffortLevel
 ): string[] {
   const args = [...buildPermissionArgs(claudeMode, allowedTools), '--session-id', sessionId];
   if (model) args.push('--model', model);
+  args.push(...buildEffortCliArgs(effort));
   return args;
 }
 

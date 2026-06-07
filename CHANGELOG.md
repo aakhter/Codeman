@@ -1,5 +1,22 @@
 # aicodeman
 
+## 0.8.1
+
+### Patch Changes
+
+- Thinking Effort now flows as a soft default the user can override in-session (PR #104, by @TeigenZhang).
+
+  Previously Codeman carried the effort setting as the `CLAUDE_CODE_EFFORT_LEVEL` env var, which Claude Code treats as a hard override — it locked effort for the whole session and rejected in-session `/effort` switching (including switching to `ultracode`). Effort is now injected at spawn time as a CLI soft default that `/effort` can still change freely in either direction:
+  - Regular levels (`low`/`medium`/`high`/`xhigh`/`max`) are passed via `claude --effort <level>` (the settings `effortLevel` key silently drops `max`, so the flag is used instead).
+  - `ultracode` (xhigh effort + standing dynamic-workflow orchestration) is passed via `claude --settings '{"ultracode":true}'`, since the `--effort` flag rejects it.
+
+  Details:
+  - New `effort` field on the create-session, quick-start, and Ralph-loop request schemas; threaded through `Session._effort` to both spawn paths (tmux `buildSpawnCommand` and direct-PTY `buildInteractiveArgs`), persisted in `SessionState.effort`, and restored on reboot recovery.
+  - `buildEffortCliArgs()` is the single, allowlist-validated source for both carriers (injection-safe).
+  - Settings UI adds an "Ultracode (multi-agent workflows)" option to the Thinking Effort dropdown; the frontend no longer emits `CLAUDE_CODE_EFFORT_LEVEL`.
+  - Legacy migration: sessions persisted with the old env var are auto-migrated into the new `effort` field, and the stale tmux env var is unset so respawned panes are no longer locked.
+  - Adds `test/effort-injection.test.ts` (13 cases) covering carrier mapping, injection guards, args building, and constructor migration.
+
 ## 0.8.0
 
 ### Minor Changes

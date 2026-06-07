@@ -42,6 +42,21 @@ export type ClaudeMode = 'dangerously-skip-permissions' | 'normal' | 'allowedToo
 /** Session mode: which CLI backend a session runs */
 export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini';
 
+/**
+ * Valid Claude CLI effort levels (claude >= 2.1.154).
+ * `ultracode` = xhigh effort + standing dynamic-workflow orchestration; it is a
+ * separate `ultracode` settings key rather than an `effortLevel` value.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const;
+
+/** Claude CLI effort level for new sessions (soft default, switchable via /effort in-session) */
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/** Type guard: is the string a valid EffortLevel? */
+export function isEffortLevel(value: string | undefined): value is EffortLevel {
+  return value !== undefined && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
 /** OpenCode session configuration */
 export interface OpenCodeConfig {
   /** Model identifier (e.g., "anthropic/claude-sonnet-4-5", "openai/gpt-5.2", "ollama/codellama") */
@@ -171,6 +186,8 @@ export interface SessionState {
   geminiConfig?: GeminiConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
+  /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
+  effort?: EffortLevel;
 }
 
 /**

@@ -271,8 +271,16 @@ export function registerRalphRoutes(
       );
     }
 
-    const { caseName, taskDescription, completionPhrase, maxIterations, enableRespawn, planItems, envOverrides } =
-      parseBody(RalphLoopStartSchema, req.body);
+    const {
+      caseName,
+      taskDescription,
+      completionPhrase,
+      maxIterations,
+      enableRespawn,
+      planItems,
+      envOverrides,
+      effort,
+    } = parseBody(RalphLoopStartSchema, req.body);
 
     const casePath = join(CASES_DIR, caseName);
 
@@ -318,6 +326,7 @@ export function registerRalphRoutes(
       claudeMode: rlClaudeModeConfig.claudeMode,
       allowedTools: rlClaudeModeConfig.allowedTools,
       envOverrides,
+      effort,
     });
 
     // Configure Ralph tracker

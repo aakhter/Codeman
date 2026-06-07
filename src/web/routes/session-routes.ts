@@ -419,6 +419,7 @@ export function registerSessionRoutes(
       geminiConfig: mode === 'gemini' ? body.geminiConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
+      effort: body.effort,
     });
 
     ctx.addSession(session);
@@ -1223,6 +1224,7 @@ export function registerSessionRoutes(
       codexConfig,
       geminiConfig,
       envOverrides,
+      effort,
     } = parseBody(QuickStartSchema, req.body);
 
     // Check OpenCode availability if requested
@@ -1337,6 +1339,7 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? codexConfig : undefined,
       geminiConfig: mode === 'gemini' ? geminiConfig : undefined,
       envOverrides,
+      effort,
     });
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting

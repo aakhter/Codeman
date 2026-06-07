@@ -56,7 +56,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 0.8.0 (must match `package.json`)
+**Version**: 0.8.1 (must match `package.json`)
 
 ## Project Overview
 
@@ -95,6 +95,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 - **Package ≠ product name** — npm: `aicodeman`, product: **Codeman**. Release renames tags accordingly
 - **Global regex `lastIndex`** — Shared `g`-flag patterns in loops must reset `lastIndex = 0` first, or use the `execPattern()` helper in `utils/regex-patterns.ts` (resets automatically)
 - **`envOverrides` flow `CLAUDE_CODE_*` / `OPENCODE_*` env vars** — Set via `POST /api/sessions { envOverrides }`, stored on `Session._envOverrides`, exported by `tmux-manager.buildEnvExports()` at spawn time, persisted in `SessionState.envOverrides`. **Do NOT** write these to `<case>/.claude/settings.local.json` — that's the old path and creates UI/disk drift
+- **Effort is NOT an env var** — never carry effort as `CLAUDE_CODE_EFFORT_LEVEL`: the env var hard-locks effort and blocks in-session `/effort` switching (incl. ultracode). It flows as the dedicated `effort` payload field → `Session._effort` → `claude --effort <level>` for regular levels incl. `max` (the settings `effortLevel` key is `enum(["low","medium","high","xhigh"]).catch(undefined)` — `max` gets SILENTLY dropped there), or `claude --settings '{"ultracode":true}'` for ultracode (rejected by `--effort`). Both are soft defaults the user can override anytime. Legacy env-var entries are auto-migrated by the Session constructor and unset from tmux sessions in `applyEnvOverrides()`. See `buildEffortCliArgs()` in `session-cli-builder.ts`, tests in `test/effort-injection.test.ts`
 - **Dual-CLI prefix discipline** — Codeman supports both Claude Code and OpenCode (`claude-cli-resolver.ts` / `opencode-cli-resolver.ts`); env-var prefix is CLI-specific (`CLAUDE_CODE_*` vs `OPENCODE_*`) and the allowlist in `schemas.ts` enforces this. When adding settings, decide which CLI(s) it applies to and gate the env export accordingly — don't blindly forward both prefixes. See `docs/opencode-integration.md` for the OpenCode resolver design
 - **Zod `.optional()` rejects `null`** — accepts `undefined` only. When the frontend builds a request body with `JSON.stringify`, an explicit `null` field is preserved on the wire and fails validation with `INVALID_INPUT`. Convert `null` → `undefined` before stringifying (e.g. `field: value ?? undefined`), or declare the schema `.nullish()`. Real bugs caused: 0.6.4 (`durationMinutes` for ∞ respawn), and the same shape pattern hit `opusContext1mEnabled` in 0.6.3
 - **`xterm-zerolag-input` is duplicated** — the local-echo overlay lives in BOTH `packages/xterm-zerolag-input/src/` (published to npm as a standalone library for external consumers — see README "Published Packages") AND inline inside `src/web/public/app.js` (runtime copy the web UI actually loads, since the page ships as plain JS without a bundler). Any change to overlay behavior MUST be applied to both, or dev and prod diverge — and a public API break in the package warrants a separate version bump for `xterm-zerolag-input` in the changeset. Always test on mobile after touching it. See `docs/local-echo-overlay-plan.md`.

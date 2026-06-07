@@ -16,6 +16,7 @@ import type {
   OpenCodeConfig,
   CodexConfig,
   GeminiConfig,
+  EffortLevel,
 } from './types.js';
 
 /**
@@ -67,8 +68,10 @@ export interface CreateSessionOptions {
   geminiConfig?: GeminiConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
-  /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EFFORT_LEVEL). Ephemeral — not written to disk. */
+  /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Ephemeral — not written to disk. */
   envOverrides?: Record<string, string>;
+  /** Claude CLI effort level, injected as a `--settings` soft default (overridable via /effort in-session) */
+  effort?: EffortLevel;
 }
 
 /** Options for respawning a dead pane. */
@@ -87,6 +90,8 @@ export interface RespawnPaneOptions {
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */
   envOverrides?: Record<string, string>;
+  /** Claude CLI effort level (preserved across respawns, injected via `--settings`) */
+  effort?: EffortLevel;
 }
 
 /**

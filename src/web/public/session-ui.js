@@ -22,10 +22,22 @@ Object.assign(CodemanApp.prototype, {
     if (caseSettings?.agentTeams || globalSettings?.agentTeamsEnabled) {
       env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
     }
-    if (globalSettings?.thinkingEffort) {
-      env.CLAUDE_CODE_EFFORT_LEVEL = globalSettings.thinkingEffort;
-    }
+    // NOTE: thinkingEffort is intentionally NOT emitted as CLAUDE_CODE_EFFORT_LEVEL —
+    // the env var hard-locks effort and blocks in-session /effort switching (e.g.,
+    // ultracode). It flows as the dedicated `effort` payload field instead, which the
+    // backend injects as a `--settings` soft default. See getEffortSetting().
     return env;
+  },
+
+  /**
+   * Resolve the effort level for new sessions from global settings.
+   * Returns a valid effort string or undefined (= no override, CLI default).
+   * Sent as the `effort` payload field — backend turns it into `claude --settings ...`.
+   */
+  getEffortSetting(globalSettings) {
+    const effort = globalSettings?.thinkingEffort;
+    const valid = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
+    return valid.includes(effort) ? effort : undefined;
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -343,6 +355,7 @@ Object.assign(CodemanApp.prototype, {
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(caseSettings, globalSettings);
       const hasEnvOverrides = Object.keys(envOverrides).length > 0;
+      const effort = this.getEffortSetting(globalSettings);
       const useOpus1m = caseSettings.opusContext1m || globalSettings.opusContext1mEnabled;
       const modelOverride = useOpus1m ? 'opus[1m]' : '';
 
@@ -355,6 +368,7 @@ Object.assign(CodemanApp.prototype, {
           body: JSON.stringify({
             workingDir, name,
             ...(hasEnvOverrides ? { envOverrides } : {}),
+            ...(effort ? { effort } : {}),
             ...(modelOverride !== undefined ? { modelOverride } : {}),
           })
         }).then(r => r.json())
@@ -544,7 +558,8 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
 
-      // Quick-start with opencode mode (auto-allow tools by default)
+      // Quick-start with opencode mode (auto-allow tools by default).
+      // No `effort` field — it's Claude-specific (OpenCode has no /effort).
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
       const res = await fetch('/api/quick-start', {
         method: 'POST',
