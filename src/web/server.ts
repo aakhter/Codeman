@@ -41,7 +41,6 @@ import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { homedir, hostname as getHostname } from 'node:os';
 import { EventEmitter } from 'node:events';
-import { isIP } from 'node:net';
 import { Session, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionState } from '../types.js';
 import { RespawnController, RespawnConfig } from '../respawn-controller.js';
@@ -102,6 +101,7 @@ import { SseEvent } from './sse-events.js';
 import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders } from './middleware/auth.js';
 import { installRouteErrorHandler } from './route-error-handler.js';
+import { isExplicitlyEnabled, isLoopbackBindHost } from './network-auth-policy.js';
 import {
   registerPushRoutes,
   registerTeamRoutes,
@@ -121,26 +121,6 @@ import {
 } from './routes/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-const EXPLICIT_TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
-
-function isExplicitlyEnabled(value: string | undefined): boolean {
-  return value !== undefined && EXPLICIT_TRUE_VALUES.has(value.trim().toLowerCase());
-}
-
-function isLoopbackBindHost(host: string): boolean {
-  const normalized = host
-    .trim()
-    .toLowerCase()
-    .replace(/^\[(.*)\]$/, '$1');
-  if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') {
-    return true;
-  }
-  if (isIP(normalized) === 4 && normalized.startsWith('127.')) {
-    return true;
-  }
-  return normalized.startsWith('::ffff:127.');
-}
 
 // Bounded, predictable shape for SSE client identifiers: alphanumerics, `_`, `-`.
 // Length range covers crypto.randomUUID() (36 chars) plus any short stable IDs,
