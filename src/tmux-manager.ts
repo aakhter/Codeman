@@ -167,6 +167,21 @@ export function parsePaneList(output: string): Map<string, number> {
   return result;
 }
 
+/**
+ * Resolve a target pane id from `tmux list-panes -F '#{pane_id}:#{pane_active}'`.
+ * Prefers the active pane and falls back to the first valid pane.
+ */
+export function resolveActivePaneTarget(output: string): string | null {
+  const panes = output
+    .split('\n')
+    .map((line) => {
+      const [paneId, active] = line.split(':');
+      return { paneId, active: active === '1' };
+    })
+    .filter((pane) => SAFE_PANE_TARGET_PATTERN.test(pane.paneId));
+  return panes.find((pane) => pane.active)?.paneId ?? panes[0]?.paneId ?? null;
+}
+
 export function formatPaneSnapshot(
   lines: string[],
   geometry: { cols: number; rows: number; cursorX: number; cursorY: number }
@@ -1908,6 +1923,32 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return buffer;
     } catch (err) {
       console.error('[TmuxManager] Failed to capture pane buffer:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Capture the active pane for a tmux session.
+   *
+   * Pane ids are not stable across respawns or restores, so callers should not
+   * assume the first pane remains `%0`.
+   */
+  captureActivePaneBuffer(muxName: string): string | null {
+    if (IS_TEST_MODE) return '';
+    if (!isValidMuxName(muxName)) {
+      console.error('[TmuxManager] Invalid session name in captureActivePaneBuffer:', muxName);
+      return null;
+    }
+
+    try {
+      const output = execSync(`${this.tmux()} list-panes -t ${shellescape(muxName)} -F '#{pane_id}:#{pane_active}'`, {
+        encoding: 'utf-8',
+        timeout: EXEC_TIMEOUT_MS,
+      }).trim();
+      const target = resolveActivePaneTarget(output);
+      return target ? this.capturePaneBuffer(muxName, target) : null;
+    } catch (err) {
+      console.error('[TmuxManager] Failed to resolve active pane for capture:', err);
       return null;
     }
   }

@@ -8,7 +8,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TmuxManager, buildCodexCommand, formatPaneSnapshot, parsePaneList } from '../src/tmux-manager.js';
+import {
+  TmuxManager,
+  buildCodexCommand,
+  formatPaneSnapshot,
+  parsePaneList,
+  resolveActivePaneTarget,
+} from '../src/tmux-manager.js';
 import { execSync } from 'node:child_process';
 
 // ============================================================================
@@ -165,6 +171,12 @@ describe('TmuxManager (unit)', () => {
 
       expect(snapshot).toBe(`\x1b[1;1H${'x'.repeat(9)}\x1b[2;1Hnext line\x1b[2;3H`);
       expect(snapshot).not.toContain('\n');
+    });
+  });
+
+  describe('resolveActivePaneTarget', () => {
+    it('selects the active pane instead of assuming pane zero', () => {
+      expect(resolveActivePaneTarget('%1:0\n%18:1\n')).toBe('%18');
     });
   });
 
