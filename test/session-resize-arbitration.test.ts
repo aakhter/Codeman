@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
 
 type ResizeableSessionInternals = {
-  ptyProcess: { resize: (cols: number, rows: number) => void };
+  ptyProcess: { resize: (cols: number, rows: number) => void } | null;
   _ptyCols: number;
   _ptyRows: number;
   _mux: { resizeWindow?: (muxName: string, cols: number, rows: number) => boolean } | null;
@@ -47,5 +47,20 @@ describe('Session resize arbitration', () => {
 
     expect(resizeWindow).toHaveBeenCalledWith('codeman-abc12345', 120, 40);
     expect(resize).toHaveBeenCalledWith(120, 40);
+  });
+
+  it('treats resize on an already-closed PTY as a no-op', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    const resize = vi.fn(() => {
+      throw new Error('pty already closed');
+    });
+    const internals = session as unknown as ResizeableSessionInternals;
+    internals.ptyProcess = { resize };
+    internals._ptyCols = 160;
+    internals._ptyRows = 48;
+
+    expect(() => session.resize(120, 40, { viewportType: 'desktop' })).not.toThrow();
+    expect(resize).toHaveBeenCalledWith(120, 40);
+    expect(internals.ptyProcess).toBeNull();
   });
 });

@@ -244,12 +244,22 @@ function sanitizePaneLineStyles(line: string): string {
 
     const end = findEscapeEnd(line, i);
     const sequence = line.slice(i, end + 1);
-    if (/^\x1b\[[0-9;:]*m$/.test(sequence)) {
+    if (isSgrSequence(sequence)) {
       result += sequence;
     }
     i = end;
   }
   return result;
+}
+
+function isSgrSequence(sequence: string): boolean {
+  return (
+    sequence.length >= 3 &&
+    sequence.charCodeAt(0) === 27 &&
+    sequence[1] === '[' &&
+    sequence.endsWith('m') &&
+    /^[0-9;:]*$/.test(sequence.slice(2, -1))
+  );
 }
 
 function isZeroWidthCodePoint(codePoint: number): boolean {
@@ -372,7 +382,7 @@ function truncatePaneLineByVisibleColumns(line: string, maxColumns: number): str
     if (line[i] === '\x1b') {
       const end = findEscapeEnd(line, i);
       const sequence = line.slice(i, end + 1);
-      if (/^\x1b\[[0-9;:]*m$/.test(sequence)) {
+      if (isSgrSequence(sequence)) {
         result += sequence;
         sawSgr = true;
       }

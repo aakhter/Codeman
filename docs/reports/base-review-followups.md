@@ -50,6 +50,8 @@ Project lint/format scripts only cover TypeScript, while `src/web/public` is a l
 
 `npm run lint` fails on intentional ANSI-control regexes in `src/tmux-manager.ts`. Add targeted `eslint-disable no-control-regex` comments or move the regex to a named constant with a local disable.
 
+Status on 2026-06-07: fixed in the current working tree by replacing the tmux SGR control-regex check with a small character-code helper. Fresh `npm run lint` passes.
+
 ### 7. Large Core Modules
 
 Further split central files:
@@ -74,9 +76,10 @@ Passing:
 
 Failing:
 
-- `npm run lint` due to two `no-control-regex` findings in `src/tmux-manager.ts`
 - `npm audit --audit-level=moderate` due to dependency vulnerabilities
 
-Not run:
+Fresh verification on 2026-06-07:
 
-- Full `npm test`, because repo guidance warns against bare full-suite runs in managed Codeman/tmux sessions.
+- `npm test`: 105 test files passed, 1 skipped; 3028 tests passed, 11 skipped.
+- `npm run lint`
+- `npm run typecheck`

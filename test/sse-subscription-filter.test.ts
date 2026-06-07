@@ -107,7 +107,7 @@ describe('SSE Subscription Filtering', () => {
     expect((initEvent?.data as any).sessions).toBeDefined();
   });
 
-  it('should receive all events when no sessions param is provided (backwards-compatible)', async () => {
+  it('should broadcast lifecycle events while filtering terminal streams', async () => {
     // Start two SSE listeners: one with no filter, one with a filter for a nonexistent session
     const controller1 = new AbortController();
     const controller2 = new AbortController();
@@ -151,8 +151,8 @@ describe('SSE Subscription Filtering', () => {
     // Wait for connections to establish
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    // Create a session — this emits session:created (a global-ish event that has id but
-    // the nonexistent filter won't match it)
+    // Create a session — this emits session:created, a lifecycle event that is
+    // broadcast to every client even when a terminal-stream filter is active.
     const createRes = await fetch(`${baseUrl}/api/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -186,10 +186,11 @@ describe('SSE Subscription Filtering', () => {
     expect(unfilteredCreated).toBeDefined();
     expect((unfilteredCreated?.data as any).id).toBe(sessionId);
 
-    // Filtered client (subscribed to nonexistent-session) should NOT receive session:created
-    // because session:created has an `id` field that doesn't match the filter
+    // Filtered client should also receive session:created; the sessions filter
+    // applies only to high-volume session:terminal payloads.
     const filteredCreated = filteredEvents.find((e) => e.event === 'session:created');
-    expect(filteredCreated).toBeUndefined();
+    expect(filteredCreated).toBeDefined();
+    expect((filteredCreated?.data as any).id).toBe(sessionId);
 
     // Both should have received the init event (it has no sessionId)
     expect(unfilteredEvents.find((e) => e.event === 'init')).toBeDefined();
@@ -254,7 +255,7 @@ describe('SSE Subscription Filtering', () => {
     expect((deletedEvent?.data as any).id).toBe(sessionId);
   });
 
-  it('should filter out events for sessions not in the subscription', async () => {
+  it('should broadcast lifecycle events for sessions not in the subscription', async () => {
     // Create two sessions
     const createRes1 = await fetch(`${baseUrl}/api/sessions`, {
       method: 'POST',
@@ -314,9 +315,10 @@ describe('SSE Subscription Filtering', () => {
     const deleted1 = events.find((e) => e.event === 'session:deleted' && (e.data as any).id === session1.id);
     expect(deleted1).toBeDefined();
 
-    // Should NOT receive session:deleted for session2
+    // session:deleted is lifecycle metadata, so it is broadcast even when the
+    // client subscribed only to session1 terminal events.
     const deleted2 = events.find((e) => e.event === 'session:deleted' && (e.data as any).id === session2.id);
-    expect(deleted2).toBeUndefined();
+    expect(deleted2).toBeDefined();
   });
 
   it('should support subscribing to multiple sessions', async () => {

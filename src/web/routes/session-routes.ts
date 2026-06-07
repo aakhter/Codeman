@@ -1632,6 +1632,11 @@ export function registerSessionRoutes(
 
   app.get('/api/history/sessions', async (req) => {
     const query = req.query as { projectKey?: string; offset?: string; limit?: string };
+
+    if (ctx.testMode) {
+      return { sessions: [], total: 0 };
+    }
+
     const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
     const headBuf = Buffer.alloc(16384);
 

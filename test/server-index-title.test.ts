@@ -33,7 +33,7 @@ const indexHtmlPath = join(__dirname, '..', 'src', 'web', 'public', 'index.html'
 const rawTemplate = readFileSync(indexHtmlPath, 'utf-8');
 
 function render(host?: string): string {
-  const server = new WebServer(0, false, true, host);
+  const server = new WebServer(0, false, true, '127.0.0.1', host);
   return (server as unknown as { renderIndexHtml: () => string }).renderIndexHtml();
 }
 
