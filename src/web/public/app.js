@@ -3074,7 +3074,11 @@ class CodemanApp {
 
       this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
-      const res = await fetch(`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
+      const terminalUrl =
+        session?.mode === 'shell'
+          ? `/api/sessions/${sessionId}/terminal`
+          : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      const res = await fetch(terminalUrl);
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
