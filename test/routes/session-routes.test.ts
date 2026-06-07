@@ -365,6 +365,29 @@ describe('session-routes', () => {
       );
     });
 
+    it('does not preserve incidental OAuth URL mentions from Codex history', async () => {
+      const authUrl =
+        'https://auth.atlassian.com/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A35547%2Fcallback%2Fxyz';
+      harness.ctx._session.terminalBuffer =
+        'Root cause: URLs like ' +
+        authUrl +
+        ' could be present in history but missing from browser-rendered terminal replay.\n' +
+        "+        'Authorize `atlassian` by opening this URL in your browser:\\n' +\n";
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+        () => 'visible tmux pane only\n› current prompt'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.terminalBuffer).toBe('visible tmux pane only\n› current prompt');
+    });
+
     it('preserves accumulated history before a live mux pane snapshot for non-Codex sessions', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'claude';
