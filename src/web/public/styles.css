@@ -7205,6 +7205,42 @@ kbd {
   pointer-events: auto;
 }
 
+.attachment-thumbnail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #20202a;
+  border: 1px solid var(--border-light);
+}
+
+.attachment-thumbnail-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attachment-thumbnail-fallback {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  inset: 0;
+  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: #20202a;
+}
+
+.attachment-thumbnail-fallback.visible {
+  display: flex;
+}
+
 .attachment-type-badge {
   display: flex;
   align-items: center;

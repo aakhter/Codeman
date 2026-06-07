@@ -66,6 +66,11 @@ describe('CLI Command Parsing', () => {
         description: 'Overall status',
       },
       {
+        name: 'attach',
+        aliases: [],
+        description: 'Show attachment card',
+      },
+      {
         name: 'reset',
         aliases: [],
         description: 'Reset all state',
@@ -353,6 +358,16 @@ describe('CLI Command Parsing', () => {
       const help = webCommand!.helpInformation();
       expect(help).toContain('--allow-unauthenticated-network');
       expect(help).toMatch(/without\s+CODEMAN_PASSWORD/);
+    });
+
+    it('documents the real attach command for explicit attachment cards', () => {
+      const attachCommand = program.commands.find((command) => command.name() === 'attach');
+      expect(attachCommand).toBeDefined();
+
+      const help = attachCommand!.helpInformation();
+      expect(help).toContain('Usage: codeman attach');
+      expect(help).toContain('--session');
+      expect(help).toContain('--url');
     });
 
     it('should format properly', () => {

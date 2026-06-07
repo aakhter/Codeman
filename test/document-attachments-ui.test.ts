@@ -27,15 +27,31 @@ describe('document attachment UI wiring', () => {
   });
 
   it('supports opening attachment cards in the existing preview overlay by session id', () => {
-    expect(panelsJs).toContain('openFilePreview(filePath, sessionId = this.activeSessionId)');
-    expect(panelsJs).toContain('openAttachmentInNewTab(sessionId, filePath)');
+    expect(panelsJs).toContain('openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null)');
+    expect(panelsJs).toContain('openAttachmentInNewTab(sessionId, filePath, attachmentId = null)');
     expect(panelsJs).toContain('file-preview?path=');
   });
 
   it('adds stable attachment card and document preview styling hooks', () => {
     expect(stylesCss).toContain('.attachment-card-stack');
     expect(stylesCss).toContain('.attachment-card');
+    expect(stylesCss).toContain('.attachment-thumbnail');
+    expect(stylesCss).toContain('.attachment-thumbnail-fallback');
     expect(stylesCss).toContain('.document-preview-frame');
     expect(stylesCss).toContain('.document-preview-image');
+  });
+
+  it('renders first-page thumbnails on attachment cards with a badge fallback', () => {
+    expect(panelsJs).toContain('thumbnailUrl');
+    expect(panelsJs).toContain('attachment-thumbnail');
+    expect(panelsJs).toContain('attachment-thumbnail-fallback');
+    expect(panelsJs).toContain('attachment-thumbnail-img');
+    expect(panelsJs).toContain('attachmentThumbnailImg.onerror');
+  });
+
+  it('uses attachment-id routes for explicitly registered live attachments', () => {
+    expect(panelsJs).toContain('attachmentId');
+    expect(panelsJs).toContain('/attachments/${encodeURIComponent(attachmentId)}/raw');
+    expect(panelsJs).toContain('/attachments/${encodeURIComponent(attachmentId)}/preview');
   });
 });

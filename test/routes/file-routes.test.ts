@@ -321,6 +321,104 @@ describe('file-routes', () => {
     });
   });
 
+  // ========== POST /api/sessions/:id/attachments ==========
+
+  describe('POST /api/sessions/:id/attachments', () => {
+    it('registers a live external attachment and broadcasts an attachment card event', async () => {
+      mockedRealpathSync.mockImplementation((p: string) => p as never);
+      mockedStat.mockResolvedValue({ size: 4096, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/decks/board-update.pdf' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.attachmentId).toMatch(/^att_/);
+      expect(body.data.fileName).toBe('board-update.pdf');
+      expect(body.data.filePath).toBe('board-update.pdf');
+      expect(body.data.attachmentType).toBe('pdf');
+      expect(body.data.previewUrl).toBe(
+        `/api/sessions/${harness.ctx._sessionId}/attachments/${body.data.attachmentId}/preview`
+      );
+      expect(body.data.thumbnailUrl).toBe(
+        `/api/sessions/${harness.ctx._sessionId}/attachments/${body.data.attachmentId}/thumbnail`
+      );
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('attachment:detected', expect.objectContaining(body.data));
+    });
+
+    it('rejects unsupported external attachment types', async () => {
+      mockedStat.mockResolvedValue({ size: 1024, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/archive.zip' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Unsupported attachment type');
+    });
+
+    it('serves registered live external attachments by attachment id', async () => {
+      const content = Buffer.from('%PDF-1.7');
+      mockedReadFile.mockResolvedValue(content as never);
+      mockedStat.mockResolvedValue({ size: content.length, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/decks/board-update.pdf' },
+      });
+      const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+      const rawRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/raw`,
+      });
+
+      expect(rawRes.statusCode).toBe(200);
+      expect(rawRes.headers['content-type']).toBe('application/pdf');
+      expect(rawRes.body).toBe(content.toString());
+    });
+
+    it('rejects unknown attachment ids instead of accepting arbitrary browser paths', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/att_missing/raw`,
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('serves PNG thumbnails directly for registered external image attachments', async () => {
+      const png = Buffer.from('fake png');
+      mockedReadFile.mockResolvedValue(png as never);
+      mockedStat.mockResolvedValue({ size: png.length, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/images/diagram.png' },
+      });
+      const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+      const thumbRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/thumbnail`,
+      });
+
+      expect(thumbRes.statusCode).toBe(200);
+      expect(thumbRes.headers['content-type']).toBe('image/png');
+      expect(thumbRes.body).toBe(png.toString());
+    });
+  });
+
   // ========== GET /api/sessions/:id/file-raw ==========
 
   describe('GET /api/sessions/:id/file-raw', () => {

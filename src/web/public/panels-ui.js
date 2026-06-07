@@ -2741,7 +2741,7 @@ Object.assign(CodemanApp.prototype, {
     this.saveAppSettingsToStorage(settings);
   },
 
-  async openFilePreview(filePath, sessionId = this.activeSessionId) {
+  async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null) {
     if (!sessionId || !filePath) return;
 
     const overlay = this.$('filePreviewOverlay');
@@ -2758,7 +2758,10 @@ Object.assign(CodemanApp.prototype, {
     footerEl.textContent = '';
 
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`);
+      const metadataUrl = attachmentId
+        ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
+        : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
+      const res = await fetch(metadataUrl);
       if (!res.ok) throw new Error('Failed to load file');
 
       const result = await res.json();
@@ -2793,7 +2796,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="binary-message">
             Binary file (${this.formatFileSize(data.size)})<br>
             Cannot preview<br><br>
-            <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab('${escapeHtml(sessionId)}', '${escapeHtml(filePath)}')">Open</button>
+            <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab('${escapeHtml(sessionId)}', '${escapeHtml(filePath)}', ${attachmentId ? `'${escapeHtml(attachmentId)}'` : 'null'})">Open</button>
           </div>
         `;
         footerEl.textContent = data.extension || 'binary';
@@ -2823,8 +2826,10 @@ Object.assign(CodemanApp.prototype, {
     img.style.transform = `scale(${this.filePreviewZoom})`;
   },
 
-  openAttachmentInNewTab(sessionId, filePath) {
-    const url = `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+  openAttachmentInNewTab(sessionId, filePath, attachmentId = null) {
+    const url = attachmentId
+      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
+      : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
     window.open(url, '_blank');
   },
 
@@ -3063,12 +3068,24 @@ Object.assign(CodemanApp.prototype, {
   },
 
   addAttachmentCard(attachmentEvent) {
-    const { sessionId, relativePath, fileName, timestamp, size, attachmentType, extension } = attachmentEvent;
+    const {
+      sessionId,
+      relativePath,
+      fileName,
+      timestamp,
+      size,
+      attachmentType,
+      extension,
+      attachmentId,
+      rawUrl,
+      previewUrl,
+      thumbnailUrl,
+    } = attachmentEvent;
     const filePath = relativePath || fileName;
-    const attachmentId = `${sessionId}-${timestamp}-${fileName}`;
+    const cardId = attachmentId || `${sessionId}-${timestamp}-${fileName}`;
 
-    if (this.attachmentCards.has(attachmentId)) {
-      const existing = this.attachmentCards.get(attachmentId);
+    if (this.attachmentCards.has(cardId)) {
+      const existing = this.attachmentCards.get(cardId);
       existing.element.focus?.();
       return;
     }
@@ -3082,16 +3099,28 @@ Object.assign(CodemanApp.prototype, {
     const stack = this.ensureAttachmentCardStack();
     const session = this.sessions.get(sessionId);
     const sessionName = session?.name || sessionId.substring(0, 8);
-    const rawUrl = `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
-    const downloadUrl = `${rawUrl}&download=true`;
+    const attachmentRawUrl = rawUrl || (attachmentId
+      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
+      : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`);
+    const attachmentPreviewUrl = previewUrl || (attachmentId
+      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/preview`
+      : null);
+    const attachmentThumbnailUrl = thumbnailUrl || (attachmentId
+      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/thumbnail`
+      : `/api/sessions/${sessionId}/file-thumbnail?path=${encodeURIComponent(filePath)}`);
+    const downloadUrl = attachmentId ? `${attachmentRawUrl}?download=true` : `${attachmentRawUrl}&download=true`;
     const typeLabel = (extension || attachmentType || 'file').toUpperCase();
 
     const card = document.createElement('article');
     card.className = `attachment-card attachment-${escapeHtml(attachmentType || 'file')}`;
     card.tabIndex = 0;
-    card.dataset.attachmentId = attachmentId;
+    card.dataset.attachmentId = cardId;
+    card.dataset.previewUrl = attachmentPreviewUrl || '';
     card.innerHTML = `
-      <div class="attachment-type-badge">${escapeHtml(typeLabel)}</div>
+      <div class="attachment-thumbnail">
+        ${attachmentThumbnailUrl ? `<img class="attachment-thumbnail-img" src="${escapeHtml(attachmentThumbnailUrl)}" alt="">` : ''}
+        <div class="attachment-thumbnail-fallback ${attachmentThumbnailUrl ? '' : 'visible'}">${escapeHtml(typeLabel)}</div>
+      </div>
       <div class="attachment-card-main">
         <div class="attachment-file-name" title="${escapeHtml(filePath)}">${escapeHtml(fileName)}</div>
         <div class="attachment-file-meta">
@@ -3107,18 +3136,26 @@ Object.assign(CodemanApp.prototype, {
       <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
     `;
 
+    const attachmentThumbnailImg = card.querySelector('.attachment-thumbnail-img');
+    if (attachmentThumbnailImg) {
+      attachmentThumbnailImg.onerror = () => {
+        attachmentThumbnailImg.remove();
+        card.querySelector('.attachment-thumbnail-fallback')?.classList.add('visible');
+      };
+    }
+
     card.querySelector('.attachment-preview-btn')?.addEventListener('click', () => {
-      this.openFilePreview(filePath, sessionId);
+      this.openFilePreview(filePath, sessionId, attachmentId || null);
     });
     card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
-      this.openAttachmentInNewTab(sessionId, filePath);
+      this.openAttachmentInNewTab(sessionId, filePath, attachmentId || null);
     });
     card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
-      this.closeAttachmentCard(attachmentId);
+      this.closeAttachmentCard(cardId);
     });
 
     stack.prepend(card);
-    this.attachmentCards.set(attachmentId, { element: card, sessionId, filePath });
+    this.attachmentCards.set(cardId, { element: card, sessionId, filePath });
   },
 
   closeAttachmentCard(attachmentId) {

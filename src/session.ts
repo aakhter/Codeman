@@ -83,6 +83,7 @@ import {
 } from './session-cli-builder.js';
 import { SessionAutoOps } from './session-auto-ops.js';
 import { SessionTaskCache } from './session-task-cache.js';
+import { parseAttachmentMagicLinks } from './attachment-magic.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -298,6 +299,9 @@ export class Session extends EventEmitter {
 
   // Image watcher setting (per-session toggle)
   private _imageWatcherEnabled: boolean = false;
+
+  // Explicit attachment magic links already emitted from terminal output.
+  private _attachmentMagicSeen = new Set<string>();
 
   // Flicker filter setting (per-session toggle, applied on frontend)
   private _flickerFilterEnabled: boolean = false;
@@ -1143,6 +1147,18 @@ export class Session extends EventEmitter {
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
     }
+
+    const attachmentPaths = parseAttachmentMagicLinks(data);
+    for (const attachmentPath of attachmentPaths) {
+      if (this._attachmentMagicSeen.has(attachmentPath)) continue;
+      this._attachmentMagicSeen.add(attachmentPath);
+      if (this._attachmentMagicSeen.size > 200) {
+        const oldest = this._attachmentMagicSeen.values().next().value;
+        if (oldest) this._attachmentMagicSeen.delete(oldest);
+      }
+      this.emit('attachmentRequested', { sessionId: this.id, path: attachmentPath, timestamp: Date.now() });
+    }
+
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
     this._lastActivityAt = Date.now();

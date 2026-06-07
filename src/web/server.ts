@@ -58,6 +58,7 @@ import {
   type SubagentToolResult,
 } from '../subagent-watcher.js';
 import { imageWatcher } from '../image-watcher.js';
+import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
 import { TranscriptWatcher } from '../transcript-watcher.js';
 import { TeamWatcher } from '../team-watcher.js';
 import { TunnelManager } from '../tunnel-manager.js';
@@ -413,7 +414,13 @@ export class WebServer extends EventEmitter {
     // Store handlers for cleanup on shutdown
     this.imageWatcherHandlers = {
       detected: (event: ImageDetectedEvent) => this.broadcast(SseEvent.ImageDetected, event),
-      attachmentDetected: (event: AttachmentDetectedEvent) => this.broadcast(SseEvent.AttachmentDetected, event),
+      attachmentDetected: (event: AttachmentDetectedEvent) =>
+        this.broadcast(SseEvent.AttachmentDetected, {
+          ...event,
+          source: event.source || 'detected',
+          thumbnailUrl:
+            event.thumbnailUrl || buildFileThumbnailRoute(event.sessionId, event.relativePath || event.fileName),
+        }),
       error: (error: Error, sessionId?: string) => {
         console.error(`[ImageWatcher] Error${sessionId ? ` for ${sessionId}` : ''}:`, error.message);
       },
@@ -977,6 +984,8 @@ export class WebServer extends EventEmitter {
       session.removeAllListeners();
       // Close any active file streams for this session
       fileStreamManager.closeSessionStreams(sessionId);
+      // Drop live external attachment registrations for this session
+      attachmentRegistry.clearSession(sessionId);
       // Stop watching for images in this session's directory
       imageWatcher.unwatchSession(sessionId);
       // Clean up pasted images directory for this session
@@ -1071,7 +1080,14 @@ export class WebServer extends EventEmitter {
         }
       },
       getStore: () => this.store,
+      registerAttachment: this.registerAttachment.bind(this),
     };
+  }
+
+  private async registerAttachment(sessionId: string, filePath: string): Promise<void> {
+    if (!this.sessions.has(sessionId)) return;
+    const event = await registerExternalAttachment(sessionId, filePath);
+    this.broadcast(SseEvent.AttachmentDetected, event);
   }
 
   private setupRespawnListeners(sessionId: string, controller: RespawnController): void {

@@ -3,7 +3,7 @@
  * Provides directory listing, file content preview, raw file serving, and tail streaming.
  */
 
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, type FastifyReply } from 'fastify';
 import { join, basename as pathBasename } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -11,12 +11,170 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
+import {
+  AttachmentRegistrationError,
+  attachmentRecordToEvent,
+  attachmentRegistry,
+  buildFileThumbnailRoute,
+  isSupportedAttachmentExtension,
+  registerExternalAttachment,
+  type AttachmentRecord,
+} from '../../attachment-registry.js';
+import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
-import type { SessionPort } from '../ports/index.js';
+import { SseEvent } from '../sse-events.js';
+import type { EventPort, SessionPort } from '../ports/index.js';
 
 const execFileAsync = promisify(execFile);
 
-export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void {
+const MIME_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  ico: 'image/x-icon',
+  bmp: 'image/bmp',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  pdf: 'application/pdf',
+  json: 'application/json',
+};
+
+const MAX_RAW_FILE_SIZE = 50 * 1024 * 1024;
+const MAX_PREVIEW_SOURCE_SIZE = 50 * 1024 * 1024;
+
+function sanitizeDownloadName(fileName: string): string {
+  return fileName.replace(/["\\\r\n]/g, '_');
+}
+
+async function serveRawFile(
+  reply: FastifyReply,
+  resolvedPath: string,
+  fileName: string,
+  extension: string,
+  download?: boolean
+): Promise<void> {
+  const stat = await fs.stat(resolvedPath);
+  if (stat.size > MAX_RAW_FILE_SIZE) {
+    reply
+      .code(400)
+      .send(
+        createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_RAW_FILE_SIZE / 1024 / 1024}MB limit)`
+        )
+      );
+    return;
+  }
+
+  const content = await fs.readFile(resolvedPath);
+  const safeName = sanitizeDownloadName(fileName);
+  if (download || extension === 'svg') {
+    reply.raw.writeHead(200, {
+      'Content-Type':
+        extension === 'svg' ? 'application/octet-stream' : MIME_TYPES[extension] || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${safeName}"`,
+      'Content-Length': content.length,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    reply.raw.end(content);
+    return;
+  }
+
+  reply.header('Content-Type', MIME_TYPES[extension] || 'application/octet-stream');
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.send(content);
+}
+
+async function serveConvertedPreview(
+  reply: FastifyReply,
+  resolvedPath: string,
+  fileName: string,
+  extension: string
+): Promise<void> {
+  if (extension !== 'docx' && extension !== 'pptx') {
+    reply
+      .code(400)
+      .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Preview is not supported for this file type'));
+    return;
+  }
+
+  let previewDir: string | undefined;
+  try {
+    const stat = await fs.stat(resolvedPath);
+    if (stat.size > MAX_PREVIEW_SOURCE_SIZE) {
+      reply
+        .code(400)
+        .send(
+          createErrorResponse(
+            ApiErrorCode.INVALID_INPUT,
+            `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_PREVIEW_SOURCE_SIZE / 1024 / 1024}MB limit)`
+          )
+        );
+      return;
+    }
+
+    previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-preview-'));
+    await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, resolvedPath], {
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+
+    const converted = (await fs.readdir(previewDir)).find((name) => name.toLowerCase().endsWith('.pdf'));
+    if (!converted) {
+      reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document preview conversion failed'));
+      return;
+    }
+
+    const content = await fs.readFile(join(previewDir, converted));
+    reply.header('Content-Type', 'application/pdf');
+    reply.header('Content-Disposition', `inline; filename="${pathBasename(fileName, `.${extension}`)}.pdf"`);
+    reply.header('Content-Length', content.length);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.send(content);
+  } catch (err) {
+    reply
+      .code(500)
+      .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to generate preview: ${getErrorMessage(err)}`));
+  } finally {
+    if (previewDir) {
+      await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
+async function serveThumbnail(reply: FastifyReply, resolvedPath: string, extension: string): Promise<void> {
+  const thumbnail = await generateFirstPageThumbnail(resolvedPath, extension);
+  if (!thumbnail) {
+    reply.code(204).send();
+    return;
+  }
+
+  reply.header('Content-Type', thumbnail.contentType);
+  reply.header('Cache-Control', 'no-cache');
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.send(thumbnail.content);
+}
+
+function getAttachmentOr404(
+  reply: FastifyReply,
+  sessionId: string,
+  attachmentId: string
+): AttachmentRecord | undefined {
+  const record = attachmentRegistry.get(sessionId, attachmentId);
+  if (!record) {
+    reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Attachment not found'));
+    return undefined;
+  }
+  return record;
+}
+
+export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & EventPort): void {
   // File tree listing
   app.get('/api/sessions/:id/files', async (req) => {
     const { id } = req.params as { id: string };
@@ -212,6 +370,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
                   ? 'presentation'
                   : 'binary';
         const previewUrl = ext === 'docx' || ext === 'pptx' ? officePreviewUrl : rawUrl;
+        const thumbnailUrl = isSupportedAttachmentExtension(ext) ? buildFileThumbnailRoute(id, filePath) : undefined;
         return {
           success: true,
           data: {
@@ -221,6 +380,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
             extension: ext,
             url: rawUrl,
             previewUrl,
+            thumbnailUrl,
           },
         };
       }
@@ -258,6 +418,94 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
     }
   });
 
+  // Register a live external file as an explicit attachment card.
+  app.post('/api/sessions/:id/attachments', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    findSessionOrFail(ctx, id);
+    const body = (req.body || {}) as { path?: string };
+
+    if (!body.path || typeof body.path !== 'string') {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing attachment path'));
+      return;
+    }
+
+    try {
+      const event = await registerExternalAttachment(id, body.path);
+      ctx.broadcast(SseEvent.AttachmentDetected, event);
+      return { success: true, data: event };
+    } catch (err) {
+      if (err instanceof AttachmentRegistrationError) {
+        reply.code(err.statusCode).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message));
+        return;
+      }
+      return reply
+        .code(500)
+        .send(
+          createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register attachment: ${getErrorMessage(err)}`)
+        );
+    }
+  });
+
+  app.get('/api/sessions/:id/attachments/:attachmentId', async (req, reply) => {
+    const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+    findSessionOrFail(ctx, id);
+    const record = getAttachmentOr404(reply, id, attachmentId);
+    if (!record) return;
+    const event = attachmentRecordToEvent(record);
+    return {
+      success: true,
+      data: {
+        path: record.fileName,
+        size: record.size,
+        type: record.attachmentType,
+        extension: record.extension,
+        url: event.rawUrl,
+        previewUrl: event.previewUrl,
+        thumbnailUrl: event.thumbnailUrl,
+        attachmentId: record.attachmentId,
+        fileName: record.fileName,
+      },
+    };
+  });
+
+  app.get('/api/sessions/:id/attachments/:attachmentId/raw', async (req, reply) => {
+    const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+    const { download } = req.query as { download?: string };
+    findSessionOrFail(ctx, id);
+    const record = getAttachmentOr404(reply, id, attachmentId);
+    if (!record) return;
+
+    try {
+      await serveRawFile(reply, record.filePath, record.fileName, record.extension, download === 'true');
+    } catch (err) {
+      reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read file: ${getErrorMessage(err)}`));
+    }
+  });
+
+  app.get('/api/sessions/:id/attachments/:attachmentId/preview', async (req, reply) => {
+    const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+    findSessionOrFail(ctx, id);
+    const record = getAttachmentOr404(reply, id, attachmentId);
+    if (!record) return;
+
+    if (record.extension === 'pdf' || record.extension === 'png') {
+      reply.redirect(`/api/sessions/${id}/attachments/${encodeURIComponent(attachmentId)}/raw`);
+      return;
+    }
+
+    await serveConvertedPreview(reply, record.filePath, record.fileName, record.extension);
+  });
+
+  app.get('/api/sessions/:id/attachments/:attachmentId/thumbnail', async (req, reply) => {
+    const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+    findSessionOrFail(ctx, id);
+    const record = getAttachmentOr404(reply, id, attachmentId);
+    if (!record) return;
+    await serveThumbnail(reply, record.filePath, record.extension);
+  });
+
   // Serve raw file content (for images/binary files)
   app.get('/api/sessions/:id/file-raw', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -278,57 +526,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
     const { resolvedPath } = validated;
 
     try {
-      // Validate file size before reading (DoS protection - prevent memory exhaustion)
-      const MAX_RAW_FILE_SIZE = 50 * 1024 * 1024; // 50MB for raw files
-      const stat = await fs.stat(resolvedPath);
-      if (stat.size > MAX_RAW_FILE_SIZE) {
-        reply
-          .code(400)
-          .send(
-            createErrorResponse(
-              ApiErrorCode.INVALID_INPUT,
-              `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_RAW_FILE_SIZE / 1024 / 1024}MB limit)`
-            )
-          );
-        return;
-      }
-
       const ext = filePath.split('.').pop()?.toLowerCase() || '';
-      const mimeTypes: Record<string, string> = {
-        png: 'image/png',
-        jpg: 'image/jpeg',
-        jpeg: 'image/jpeg',
-        gif: 'image/gif',
-        webp: 'image/webp',
-        ico: 'image/x-icon',
-        bmp: 'image/bmp',
-        mp4: 'video/mp4',
-        webm: 'video/webm',
-        mov: 'video/quicktime',
-        mp3: 'audio/mpeg',
-        wav: 'audio/wav',
-        ogg: 'audio/ogg',
-        pdf: 'application/pdf',
-        json: 'application/json',
-      };
-
-      const content = await fs.readFile(resolvedPath);
       const rawBasename = filePath!.split('/').pop() || 'download';
-      // Sanitize filename for Content-Disposition header (prevent header injection)
-      const basename = rawBasename.replace(/["\\\r\n]/g, '_');
-      if (download === 'true' || ext === 'svg') {
-        reply.raw.writeHead(200, {
-          'Content-Type': ext === 'svg' ? 'application/octet-stream' : mimeTypes[ext] || 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${basename}"`,
-          'Content-Length': content.length,
-          'X-Content-Type-Options': 'nosniff',
-        });
-        reply.raw.end(content);
-        return;
-      }
-      reply.header('Content-Type', mimeTypes[ext] || 'application/octet-stream');
-      reply.header('X-Content-Type-Options', 'nosniff');
-      reply.send(content);
+      await serveRawFile(reply, resolvedPath, rawBasename, ext, download === 'true');
     } catch (err) {
       reply
         .code(500)
@@ -361,58 +561,34 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
       return;
     }
 
-    if (ext !== 'docx' && ext !== 'pptx') {
-      reply
-        .code(400)
-        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Preview is not supported for this file type'));
+    await serveConvertedPreview(reply, resolvedPath, filePath, ext);
+  });
+
+  app.get('/api/sessions/:id/file-thumbnail', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: filePath } = req.query as { path?: string };
+    const session = findSessionOrFail(ctx, id);
+
+    if (!filePath) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
       return;
     }
 
-    let previewDir: string | undefined;
-    try {
-      const stat = await fs.stat(resolvedPath);
-      const MAX_PREVIEW_SOURCE_SIZE = 50 * 1024 * 1024;
-      if (stat.size > MAX_PREVIEW_SOURCE_SIZE) {
-        reply
-          .code(400)
-          .send(
-            createErrorResponse(
-              ApiErrorCode.INVALID_INPUT,
-              `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_PREVIEW_SOURCE_SIZE / 1024 / 1024}MB limit)`
-            )
-          );
-        return;
-      }
-
-      previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-preview-'));
-      await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, resolvedPath], {
-        timeout: 30_000,
-        maxBuffer: 1024 * 1024,
-      });
-
-      const converted = (await fs.readdir(previewDir)).find((name) => name.toLowerCase().endsWith('.pdf'));
-      if (!converted) {
-        reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document preview conversion failed'));
-        return;
-      }
-
-      const content = await fs.readFile(join(previewDir, converted));
-      reply.header('Content-Type', 'application/pdf');
-      reply.header('Content-Disposition', `inline; filename="${pathBasename(filePath, `.${ext}`)}.pdf"`);
-      reply.header('Content-Length', content.length);
-      reply.header('X-Content-Type-Options', 'nosniff');
-      reply.send(content);
-    } catch (err) {
-      reply
-        .code(500)
-        .send(
-          createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to generate preview: ${getErrorMessage(err)}`)
-        );
-    } finally {
-      if (previewDir) {
-        await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
-      }
+    const validated = validateSessionFilePath(session.workingDir, filePath);
+    if (!validated) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
+      return;
     }
+
+    const ext = filePath.split('.').pop()?.toLowerCase() || '';
+    if (!isSupportedAttachmentExtension(ext)) {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Thumbnail is not supported for this file type'));
+      return;
+    }
+
+    await serveThumbnail(reply, validated.resolvedPath, ext);
   });
 
   // Stream file content via tail -f (SSE endpoint)

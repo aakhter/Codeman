@@ -86,4 +86,14 @@ export interface AttachmentDetectedEvent {
   timestamp: number;
   /** File size in bytes */
   size: number;
+  /** Registered attachment id for explicit live external attachments */
+  attachmentId?: string;
+  /** Source of the attachment card request */
+  source?: 'detected' | 'external';
+  /** Raw file route for explicit attachments */
+  rawUrl?: string;
+  /** Inline preview route for explicit attachments */
+  previewUrl?: string;
+  /** First-page thumbnail route for card previews */
+  thumbnailUrl?: string;
 }
