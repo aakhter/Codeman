@@ -339,6 +339,32 @@ describe('session-routes', () => {
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
+    it('preserves one-time OAuth authorization URLs from Codex history after the live pane snapshot', async () => {
+      const authUrl =
+        'https://auth.atlassian.com/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A35547%2Fcallback%2Fxyz';
+      harness.ctx._session.terminalBuffer =
+        'Authorize `atlassian` by opening this URL in your browser:\n' +
+        authUrl +
+        '\n(Browser launch failed; please copy the URL above manually.)\n';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+        () => 'visible tmux pane only\n› current prompt'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.terminalBuffer).toContain(authUrl);
+      expect(body.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.terminalBuffer.indexOf(authUrl)).toBeGreaterThan(
+        body.terminalBuffer.indexOf('visible tmux pane only')
+      );
+    });
+
     it('preserves accumulated history before a live mux pane snapshot for non-Codex sessions', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'claude';
