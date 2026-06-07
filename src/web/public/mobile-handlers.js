@@ -255,10 +255,9 @@ const KeyboardHandler = {
     if (heightDiff > 150 && !this.keyboardVisible) {
       this.keyboardVisible = true;
       document.body.classList.add('keyboard-visible');
-      // Restore --app-height: MobileDetection's resize listener fires before ours
-      // and may have already shrunk it for the keyboard viewport change.
-      // Use initialViewportHeight (captured before keyboard opened).
-      document.documentElement.style.setProperty('--app-height', `${this.initialViewportHeight}px`);
+      // While the keyboard is open, size the app to the visual viewport so
+      // xterm's bottom row and cursor sit above the OS keyboard.
+      document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
       this.onKeyboardShow();
     }
     // Keyboard hidden (viewport grew back close to initial)
@@ -277,6 +276,8 @@ const KeyboardHandler = {
     // state changes, orientation changes, and other viewport shifts
     if (!this.keyboardVisible) {
       this.initialViewportHeight = currentHeight;
+    } else {
+      document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
     }
 
     this.updateLayoutForKeyboard();
@@ -322,14 +323,13 @@ const KeyboardHandler = {
         cjkInput.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
       }
 
-      // Shrink main content area so terminal doesn't extend behind keyboard.
-      // Use stable keyboard height (not scroll-dependent) for padding.
-      // 84px = toolbar (40px) + accessory bar (44px). Add room for the
-      // visible CJK input row when enabled.
+      // Reserve only Codeman's visible controls. The OS keyboard is outside
+      // the visual viewport; adding its height here creates a large blank area
+      // above the mobile toolbar on iPhone.
       const keyboardHeight = this.initialViewportHeight - (window.visualViewport.height || window.innerHeight);
       if (main && keyboardHeight > 0) {
         const cjkInputHeight = cjkInput?.classList.contains('cjk-input-visible') ? 44 : 0;
-        main.style.paddingBottom = `${keyboardHeight + 84 + cjkInputHeight}px`;
+        main.style.paddingBottom = `${84 + cjkInputHeight}px`;
       }
     } else {
       this.resetLayout();

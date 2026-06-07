@@ -263,6 +263,32 @@ describe('Virtual Keyboard', () => {
       expect(newPx).toBeGreaterThan(initialPx);
     });
 
+    it('does not reserve the keyboard height as visible terminal dead space', async () => {
+      await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
+      await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
+
+      const layout = await page.evaluate(() => {
+        const main = document.querySelector('.main') as HTMLElement | null;
+        const appEl = document.querySelector('.app') as HTMLElement | null;
+        const terminalWrap = document.querySelector('.terminal-wrap') as HTMLElement | null;
+        const toolbar = document.querySelector('.toolbar') as HTMLElement | null;
+        const accessory = document.querySelector('.keyboard-accessory-bar') as HTMLElement | null;
+        return {
+          appHeight: appEl?.getBoundingClientRect().height ?? 0,
+          mainPaddingBottom: main ? parseFloat(main.style.paddingBottom || '0') : 0,
+          terminalHeight: terminalWrap?.getBoundingClientRect().height ?? 0,
+          toolbarHeight: toolbar?.getBoundingClientRect().height ?? 0,
+          accessoryHeight: accessory?.getBoundingClientRect().height ?? 0,
+          visualViewportHeight: window.visualViewport?.height ?? window.innerHeight,
+        };
+      });
+
+      expect(layout.appHeight).toBeLessThanOrEqual(layout.visualViewportHeight + 2);
+      expect(layout.mainPaddingBottom).toBeLessThan(KEYBOARD.TYPICAL_IOS_HEIGHT);
+      expect(layout.mainPaddingBottom).toBeGreaterThanOrEqual(layout.toolbarHeight + layout.accessoryHeight - 4);
+      expect(layout.terminalHeight).toBeGreaterThan(160);
+    });
+
     it('resetLayout clears transforms on hide', async () => {
       await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
       await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
