@@ -279,7 +279,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
         jpeg: 'image/jpeg',
         gif: 'image/gif',
         webp: 'image/webp',
-        svg: 'image/svg+xml',
         ico: 'image/x-icon',
         bmp: 'image/bmp',
         mp4: 'video/mp4',
@@ -293,19 +292,21 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
       };
 
       const content = await fs.readFile(resolvedPath);
-      if (download === 'true') {
-        const rawBasename = filePath!.split('/').pop() || 'download';
-        // Sanitize filename for Content-Disposition header (prevent header injection)
-        const basename = rawBasename.replace(/["\\\r\n]/g, '_');
+      const rawBasename = filePath!.split('/').pop() || 'download';
+      // Sanitize filename for Content-Disposition header (prevent header injection)
+      const basename = rawBasename.replace(/["\\\r\n]/g, '_');
+      if (download === 'true' || ext === 'svg') {
         reply.raw.writeHead(200, {
-          'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+          'Content-Type': ext === 'svg' ? 'application/octet-stream' : mimeTypes[ext] || 'application/octet-stream',
           'Content-Disposition': `attachment; filename="${basename}"`,
           'Content-Length': content.length,
+          'X-Content-Type-Options': 'nosniff',
         });
         reply.raw.end(content);
         return;
       }
       reply.header('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+      reply.header('X-Content-Type-Options', 'nosniff');
       reply.send(content);
     } catch (err) {
       reply
@@ -382,8 +383,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
     return { success: closed };
   });
 
-  // Standalone file download -- any readable path on the filesystem.
-  // Protected by auth middleware (CODEMAN_PASSWORD) and a sensitive-path blocklist.
+  // Session-scoped file download.
+  // Uses the same realpath-based workspace boundary as file preview/raw routes;
+  // the sensitive-path blocklist remains defense-in-depth, not the primary boundary.
   const SENSITIVE_PATTERNS: RegExp[] = [
     /^\/etc\/shadow$/,
     /^\/etc\/gshadow$/,
@@ -402,29 +404,25 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
   }
 
   app.get('/api/download', async (req, reply) => {
-    const { path: filePath } = req.query as { path?: string };
+    const { path: filePath, sessionId } = req.query as { path?: string; sessionId?: string };
 
     if (!filePath) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
       return;
     }
 
-    // Require absolute path
-    if (!filePath.startsWith('/')) {
-      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path must be absolute'));
+    if (!sessionId) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing sessionId parameter'));
       return;
     }
 
-    // Resolve to canonical path (follow symlinks, normalize ..)
-    let resolvedPath: string;
-    try {
-      resolvedPath = join(filePath); // normalize
-      const { realpathSync } = await import('node:fs');
-      resolvedPath = realpathSync(resolvedPath);
-    } catch {
+    const session = findSessionOrFail(ctx, sessionId);
+    const validated = validateSessionFilePath(session.workingDir, filePath);
+    if (!validated) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
       return;
     }
+    const { resolvedPath } = validated;
 
     // Check sensitive path blocklist
     if (isSensitivePath(resolvedPath)) {
@@ -435,8 +433,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
     try {
       const stat = await fs.stat(resolvedPath);
 
-      if (stat.isDirectory()) {
-        reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path is a directory'));
+      if (!stat.isFile()) {
+        reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path is not a file'));
         return;
       }
 

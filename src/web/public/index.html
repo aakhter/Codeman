@@ -106,6 +106,7 @@
           </div>
         </div>
         <button class="btn-icon-header btn-response-viewer-header" onclick="app.toggleResponseViewer()" title="View last response" aria-label="View last response"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        <button class="btn-icon-header btn-away-digest" onclick="app.openAwayDigest()" title="Away Digest" aria-label="Open away digest"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></button>
         <button class="btn-icon-header btn-notifications" onclick="app.toggleNotifications()" title="Notifications" aria-label="Toggle notifications">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span class="notification-badge" id="notifBadge" style="display:none;">0</span>
@@ -303,7 +304,7 @@
             <h3 class="history-title">Resume Conversation</h3>
             <div class="history-list" id="historyList"></div>
           </div>
-          <p class="welcome-hint">Or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to start</p>
+          <p class="welcome-hint">Choose a tool to start</p>
           <button class="welcome-ralph-link" onclick="app.showRalphWizard()">Start Ralph Loop &rarr;</button>
         </div>
       </div>
@@ -372,7 +373,7 @@
         <!-- Run AI -->
         <div class="toolbar-group">
           <div class="run-btn-group">
-            <button class="btn-toolbar btn-run" id="runBtn" onclick="app.run()" title="Run (Ctrl+Enter)">
+            <button class="btn-toolbar btn-run" id="runBtn" onclick="app.run()" title="Run selected AI backend">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               <span id="runBtnLabel">Run</span>
             </button>
@@ -515,17 +516,46 @@
           <button class="modal-close" onclick="app.closeHelp()" aria-label="Close help">&times;</button>
         </div>
         <div class="modal-body">
-          <div class="shortcuts-grid">
-            <div><kbd>Ctrl</kbd>+<kbd>W</kbd></div><div>Close Session</div>
-            <div><kbd>Option</kbd>+<kbd>[</kbd> / <kbd>Option</kbd>+<kbd>]</kbd></div><div>Previous / Next Session</div>
-            <div><kbd>Option</kbd>+<kbd>1-9</kbd></div><div>Switch to Tab N</div>
-            <div><kbd>Ctrl</kbd>+<kbd>L</kbd></div><div>Clear Terminal</div>
-            <div><kbd>Ctrl</kbd>+<kbd>+</kbd></div><div>Increase Font</div>
-            <div><kbd>Ctrl</kbd>+<kbd>-</kbd></div><div>Decrease Font</div>
-            <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Help</div>
-            <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd></div><div>Voice Input</div>
-            <div><kbd>Escape</kbd></div><div>Close Panels</div>
-          </div>
+          <section class="shortcut-section">
+            <h4>Session</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>W</kbd></div><div>Close Session</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Tab</kbd></div><div>Next Session</div>
+              <div><kbd>Option</kbd>+<kbd>[</kbd> / <kbd>Option</kbd>+<kbd>]</kbd></div><div>Previous / Next Session</div>
+              <div><kbd>Option</kbd>+<kbd>1-9</kbd></div><div>Switch to Tab N</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Tabs</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>{</kbd></div><div>Move Active Tab Left</div>
+              <div><kbd>Ctrl</kbd>+<kbd>}</kbd></div><div>Move Active Tab Right</div>
+              <div><kbd>ArrowLeft</kbd></div><div>Focus Previous Tab</div>
+              <div><kbd>ArrowRight</kbd></div><div>Focus Next Tab</div>
+              <div><kbd>Home</kbd></div><div>Focus First Tab</div>
+              <div><kbd>End</kbd></div><div>Focus Last Tab</div>
+              <div><kbd>Enter</kbd> / <kbd>Space</kbd></div><div>Activate Focused Tab</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Terminal</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>L</kbd></div><div>Clear Terminal</div>
+              <div><kbd>Ctrl</kbd>+<kbd>+</kbd></div><div>Increase Font</div>
+              <div><kbd>Ctrl</kbd>+<kbd>-</kbd></div><div>Decrease Font</div>
+              <div><kbd>Shift</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd></div><div>Voice Input</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Panels</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Help</div>
+              <div><kbd>Ctrl</kbd>+<kbd>/</kbd></div><div>Show Help</div>
+              <div><kbd>Escape</kbd></div><div>Close Panels</div>
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -1764,6 +1794,44 @@
       </div>
       <div class="notif-drawer-list" id="notifList"></div>
       <div class="notif-drawer-empty" id="notifEmpty">No notifications</div>
+    </div>
+
+    <!-- Away Digest Modal -->
+    <div class="modal" id="awayDigestModal">
+      <div class="modal-backdrop" onclick="app.closeAwayDigest()"></div>
+      <div class="modal-content away-digest-modal">
+        <div class="modal-header">
+          <h3>Away Digest</h3>
+          <div class="modal-header-actions">
+            <button class="btn-toolbar btn-sm" onclick="app.loadAwayDigest()" title="Refresh away digest">&#x21BB; Refresh</button>
+            <button class="modal-close" onclick="app.closeAwayDigest()" aria-label="Close away digest">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="away-digest-ranges" role="group" aria-label="Away digest range">
+            <button class="filter-btn active" data-away-range="since-last-visit" onclick="app.setAwayDigestRange('since-last-visit')">Since last visit</button>
+            <button class="filter-btn" data-away-range="1h" onclick="app.setAwayDigestRange('1h')">Last hour</button>
+            <button class="filter-btn" data-away-range="today" onclick="app.setAwayDigestRange('today')">Today</button>
+            <button class="filter-btn" data-away-range="24h" onclick="app.setAwayDigestRange('24h')">24h</button>
+            <button class="filter-btn" data-away-range="custom" onclick="app.setAwayDigestRange('custom')">Custom</button>
+          </div>
+          <div class="away-digest-custom-range" id="awayDigestCustomRange">
+            <label>
+              Since
+              <input type="datetime-local" id="awayDigestCustomSince">
+            </label>
+            <label>
+              Until
+              <input type="datetime-local" id="awayDigestCustomUntil">
+            </label>
+          </div>
+          <div class="away-digest-summary" id="awayDigestSummary"></div>
+          <div class="away-digest-freshness" id="awayDigestFreshness"></div>
+          <div class="away-digest-sections" id="awayDigestSections">
+            <p class="empty-message">Open the digest to load recent activity</p>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Token Stats Modal -->

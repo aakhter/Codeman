@@ -85,12 +85,40 @@ function expectNoVulnerablePicomatch(lock: PackageLock): void {
   }
 }
 
+function expectNoVulnerableBraceExpansion(lock: PackageLock): void {
+  const versions = lockedVersions(lock, 'brace-expansion');
+  expect(versions, 'brace-expansion should be present in package-lock.json').not.toHaveLength(0);
+  for (const version of versions) {
+    const major = Number(version.split('.')[0]);
+    if (major === 1) {
+      expect(
+        compareVersions(version, '1.1.13'),
+        `brace-expansion@${version} should be >= 1.1.13`
+      ).toBeGreaterThanOrEqual(0);
+    } else if (major === 4) {
+      expect(
+        compareVersions(version, '5.0.5'),
+        `brace-expansion@${version} should not remain on vulnerable 4.x`
+      ).toBeGreaterThanOrEqual(0);
+    } else if (major === 5) {
+      expect(compareVersions(version, '5.0.6'), `brace-expansion@${version} should be >= 5.0.6`).toBeGreaterThanOrEqual(
+        0
+      );
+    }
+  }
+}
+
 describe('dependency security policy', () => {
   it('keeps direct security-sensitive dependency ranges on patched versions', () => {
     const rootPackage = readJson<PackageLockPackage>('package.json');
     const xtermPackage = readJson<PackageLockPackage>('packages/xterm-zerolag-input/package.json');
 
+    expect(rootPackage.dependencies?.['@fastify/static']).toBe('^9.1.3');
     expect(rootPackage.dependencies?.fastify).toBe('^5.8.5');
+    expect(rootPackage.dependencies?.uuid).toBe('^14.0.0');
+    expect(rootPackage.devDependencies?.['@remotion/cli']).toBe('4.0.473');
+    expect(rootPackage.devDependencies?.remotion).toBe('4.0.473');
+    expect(rootPackage.devDependencies?.['@remotion/transitions']).toBe('4.0.473');
     expect(rootPackage.devDependencies?.vitest).toBe('^4.1.8');
     expect(rootPackage.devDependencies?.['@vitest/coverage-v8']).toBe('^4.1.8');
     expect(xtermPackage.devDependencies?.vitest).toBe('^4.1.8');
@@ -102,9 +130,14 @@ describe('dependency security policy', () => {
     expectEveryLockedVersionAtLeast(lock, 'vitest', '4.1.0');
     expectEveryLockedVersionAtLeast(lock, '@vitest/coverage-v8', '4.1.0');
     expectEveryLockedVersionAtLeast(lock, 'fastify', '5.8.5');
+    expectEveryLockedVersionAtLeast(lock, '@fastify/static', '9.1.3');
+    expectEveryLockedVersionAtLeast(lock, 'ip-address', '10.2.0');
+    expectEveryLockedVersionAtLeast(lock, 'uuid', '14.0.0');
+    expectEveryLockedVersionAtLeast(lock, 'ws', '8.20.1');
     expectEveryLockedVersionAtLeast(lock, 'fast-uri', '3.1.2');
     expectEveryLockedVersionAtLeast(lock, 'basic-ftp', '5.3.1');
     expectEveryLockedVersionAtLeast(lock, 'flatted', '3.4.2');
+    expectNoVulnerableBraceExpansion(lock);
     expectNoVulnerableVite(lock);
     expectNoVulnerablePicomatch(lock);
   });
@@ -114,6 +147,7 @@ describe('dependency security policy', () => {
 
     expect(lock.packages['']?.devDependencies?.vitest).toBe('^4.1.8');
     expectEveryLockedVersionAtLeast(lock, 'vitest', '4.1.0');
+    expectEveryLockedVersionAtLeast(lock, 'ws', '8.20.1');
     expectNoVulnerableVite(lock);
     expectNoVulnerablePicomatch(lock);
   });
