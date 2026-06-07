@@ -2035,6 +2035,8 @@ body {
   will-change: contents;
 }
 .terminal-container .xterm {
+  width: 100%;
+  min-width: 0;
   height: 100%;
   padding: 0;
 }
