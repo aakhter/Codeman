@@ -234,7 +234,7 @@ export class WebServer extends EventEmitter {
   private _orchestratorLoop: import('../orchestrator-loop.js').OrchestratorLoop | null = null;
   private readonly titleHostname: string;
   private readonly windowTitle: string;
-  private readonly indexHtmlTemplate: string;
+  private readonly indexHtmlPath: string;
   private _pasteImageGcStop: (() => void) | null = null;
   private _eventLoopMonitor: EventLoopMonitorHandle | null = null;
   private teamWatcherHandlers: {
@@ -258,7 +258,7 @@ export class WebServer extends EventEmitter {
     this.testMode = testMode;
     this.titleHostname = titleHostname || getHostname();
     this.windowTitle = `codeman:${this.titleHostname}`;
-    this.indexHtmlTemplate = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
+    this.indexHtmlPath = join(__dirname, 'public', 'index.html');
 
     if (https) {
       const { key, cert } = getOrCreateSelfSignedCert();
@@ -988,10 +988,8 @@ export class WebServer extends EventEmitter {
   }
 
   private renderIndexHtml(): string {
-    return this.indexHtmlTemplate.replace(
-      '<title>Codeman</title>',
-      `<title>${escapeHtmlText(this.windowTitle)}</title>`
-    );
+    const indexHtmlTemplate = readFileSync(this.indexHtmlPath, 'utf-8');
+    return indexHtmlTemplate.replace('<title>Codeman</title>', `<title>${escapeHtmlText(this.windowTitle)}</title>`);
   }
 
   private async setupSessionListeners(session: Session): Promise<void> {
