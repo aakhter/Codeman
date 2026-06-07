@@ -945,7 +945,9 @@ export function registerSessionRoutes(
 
     const muxName = session.muxName;
     const liveMuxBuffer =
-      muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName, '0') : null;
+      muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
+        ? ctx.mux.captureActivePaneBuffer(muxName)
+        : null;
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
         ? session.terminalBufferLength > 0
