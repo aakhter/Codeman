@@ -236,10 +236,6 @@ function findEscapeEnd(text: string, start: number): number {
   return Math.min(start + 1, text.length - 1);
 }
 
-function isSgrSequence(sequence: string): boolean {
-  return sequence.startsWith('\x1b[') && sequence.endsWith('m') && /^[0-9;:]*$/.test(sequence.slice(2, -1));
-}
-
 function sanitizePaneLineStyles(line: string): string {
   let result = '';
   for (let i = 0; i < line.length; i++) {
