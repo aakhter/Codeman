@@ -2862,6 +2862,13 @@ class CodemanApp {
     this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
   }
 
+  _shouldFocusTerminalForTabSwitch() {
+    if (typeof MobileDetection === 'undefined' || !MobileDetection.isTouchDevice()) {
+      return true;
+    }
+    return typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
+  }
+
   async selectSession(sessionId, options = {}) {
     const forceReload = options?.forceReload === true;
     if (this.activeSessionId === sessionId && !forceReload) return;
@@ -2881,7 +2888,8 @@ class CodemanApp {
     // programmatic focus() within the user-gesture call stack (e.g. tab click).
     // After the first await the gesture context is lost and focus() is silently
     // ignored, leaving the keyboard unable to send input to the terminal.
-    if (this.terminal) this.terminal.focus();
+    const shouldFocusTerminal = this._shouldFocusTerminalForTabSwitch();
+    if (shouldFocusTerminal && this.terminal) this.terminal.focus();
 
     const _selStart = performance.now();
     const _selName = this.sessions.get(sessionId)?.name || sessionId.slice(0,8);
@@ -3066,7 +3074,11 @@ class CodemanApp {
 
       this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
-      const res = await fetch(`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
+      const terminalUrl =
+        session?.mode === 'shell'
+          ? `/api/sessions/${sessionId}/terminal`
+          : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      const res = await fetch(terminalUrl);
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
@@ -3221,7 +3233,7 @@ class CodemanApp {
       });
 
       _crashDiag.log('FOCUS');
-      this.terminal.focus();
+      if (shouldFocusTerminal && this.terminal) this.terminal.focus();
       this.scrollToLastNonEmptyLine();
       this._clearTerminalLoadState(sessionId, selectGen);
       _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);

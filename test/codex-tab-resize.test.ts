@@ -45,6 +45,20 @@ describe('Codex tab resize behavior', () => {
     expect(source.slice(snapshotDone, snapshotBlockEnd)).not.toContain('return;');
   });
 
+  it('fetches full terminal history for shell session reloads', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", selectStart);
+    const fetchBlock = source.slice(fetchStart, source.indexOf('const data = await res.json();', fetchStart));
+
+    expect(selectStart).toBeGreaterThan(-1);
+    expect(fetchStart).toBeGreaterThan(selectStart);
+    expect(fetchBlock).toContain("session?.mode === 'shell'");
+    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal`');
+    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
+    expect(fetchBlock).toContain('fetch(terminalUrl)');
+  });
+
   it('waits for xterm to parse small buffer writes before resolving tab switch restore', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
     const start = source.indexOf('For small buffers, write directly');
@@ -110,5 +124,18 @@ describe('Codex tab resize behavior', () => {
     expect(source).toContain("aria-busy=\"${loadState ? 'true' : 'false'}\"");
     expect(styles).toContain('.session-tab.tab-loading');
     expect(styles).toContain('.tab-load-spinner');
+  });
+
+  it('does not force terminal focus on touch tab switches when the keyboard was closed', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const selectBlock = source.slice(selectStart, source.indexOf('// Shared cleanup', selectStart));
+
+    expect(source).toContain('_shouldFocusTerminalForTabSwitch()');
+    expect(source).toContain('MobileDetection.isTouchDevice()');
+    expect(source).toContain('KeyboardHandler.keyboardVisible');
+    expect(selectBlock).toContain('const shouldFocusTerminal = this._shouldFocusTerminalForTabSwitch();');
+    expect(selectBlock).toContain('if (shouldFocusTerminal && this.terminal) this.terminal.focus();');
+    expect(selectBlock).not.toContain('if (this.terminal) this.terminal.focus();');
   });
 });
