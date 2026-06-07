@@ -3091,6 +3091,7 @@ class CodemanApp {
         }
       }
       const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
+      let restoredSnapshot = false;
       if (snapshot && !sessionIsBusy && session?.mode === 'codex') {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');

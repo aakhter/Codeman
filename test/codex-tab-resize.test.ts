@@ -75,6 +75,22 @@ describe('Codex tab resize behavior', () => {
     expect(postSnapshotRestore).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
   });
 
+  it('declares the snapshot-restore flag before selectSession uses it', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const declaration = source.indexOf('let restoredSnapshot = false;', selectStart);
+    const snapshotBranch = source.indexOf("if (snapshot && !sessionIsBusy && session?.mode === 'codex')", selectStart);
+    const rewriteDecision = source.indexOf(
+      'restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer',
+      selectStart
+    );
+
+    expect(selectStart).toBeGreaterThan(-1);
+    expect(declaration).toBeGreaterThan(selectStart);
+    expect(declaration).toBeLessThan(snapshotBranch);
+    expect(declaration).toBeLessThan(rewriteDecision);
+  });
+
   it('forces replay after clearing a busy tab even when the fetched frame matches cache', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const cacheRestore = source.indexOf('Instant cache restore');
