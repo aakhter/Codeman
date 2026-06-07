@@ -640,6 +640,16 @@ describe('session-routes', () => {
       expect(Array.isArray(body.sessions)).toBe(true);
     });
 
+    it('does not expose local Claude history while running in test mode', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/history/sessions',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body).toEqual({ sessions: [], total: 0 });
+    });
+
     it('sessions have required fields', async () => {
       const res = await harness.app.inject({
         method: 'GET',

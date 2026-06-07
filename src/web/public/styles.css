@@ -2442,6 +2442,7 @@ body {
 
 .history-show-more {
   width: 100%;
+  min-height: var(--touch-target-min);
   padding: 0.5rem;
   margin-top: 0.25rem;
   background: rgba(255, 255, 255, 0.04);
@@ -2531,7 +2532,8 @@ body {
   color: var(--text-muted);
   font-size: 0.75rem;
   cursor: pointer;
-  padding: 0.25rem 0;
+  min-height: var(--touch-target-min);
+  padding: 0.25rem 0.5rem;
   margin-top: 0.25rem;
   transition: color 0.15s ease;
 }

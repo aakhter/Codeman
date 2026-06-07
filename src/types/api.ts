@@ -9,6 +9,7 @@
  * - ApiResponse<T> — discriminated union envelope (success with data or error with code)
  * - ApiErrorCode — enum of standard error codes with user-friendly messages
  * - HookEventType — union of Claude Code hook event names (idle_prompt, stop, etc.)
+ * - createSuccessResponse() — factory for consistent success responses
  * - createErrorResponse() — factory for consistent error responses
  * - getErrorMessage() — safe extraction from unknown catch values
  * - CaseInfo, QuickStartResponse — case folder metadata types
@@ -69,6 +70,15 @@ export type ApiResponse<T = unknown> =
   | { success: false; error: string; errorCode: ApiErrorCode };
 
 /**
+ * Creates a standardized success response
+ * @param data Optional success payload
+ * @returns Formatted success response
+ */
+export function createSuccessResponse<T>(data?: T): ApiResponse<T> {
+  return data === undefined ? { success: true } : { success: true, data };
+}
+
+/**
  * Creates a standardized error response
  * @param code Error code
  * @param details Optional detailed error message
@@ -117,7 +127,7 @@ export interface CaseInfo {
  * @param value The value to check
  * @returns True if the value is an Error instance
  */
-function isError(value: unknown): value is Error {
+export function isError(value: unknown): value is Error {
   return value instanceof Error;
 }
 

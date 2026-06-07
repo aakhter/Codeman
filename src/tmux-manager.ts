@@ -258,6 +258,16 @@ function sanitizePaneLineStyles(line: string): string {
   return result;
 }
 
+function isSgrSequence(sequence: string): boolean {
+  return (
+    sequence.length >= 3 &&
+    sequence.charCodeAt(0) === 27 &&
+    sequence[1] === '[' &&
+    sequence.endsWith('m') &&
+    /^[0-9;:]*$/.test(sequence.slice(2, -1))
+  );
+}
+
 function isZeroWidthCodePoint(codePoint: number): boolean {
   return (
     codePoint === 0x00ad ||

@@ -24,11 +24,12 @@ vi.mock('node:fs', async (importOriginal) => {
     ...orig,
     existsSync: vi.fn(() => true),
     statSync: vi.fn(() => ({ size: 1024 })),
+    realpathSync: vi.fn((path) => String(path)),
   };
 });
 
 import { FileStreamManager } from '../src/file-stream-manager.js';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 
 /**
  * Creates a mock ChildProcess-like EventEmitter with stdout/stderr streams.
@@ -51,6 +52,7 @@ describe('FileStreamManager', () => {
     mockSpawn.mockReset();
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(statSync).mockReturnValue({ size: 1024 } as ReturnType<typeof statSync>);
+    vi.mocked(realpathSync).mockImplementation((path) => String(path));
   });
 
   afterEach(() => {
@@ -92,11 +94,9 @@ describe('FileStreamManager', () => {
         onError: vi.fn(),
       });
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'tail',
-        ['-f', '-n', '50', expect.stringContaining('/var/log/app.log')],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-      );
+      expect(mockSpawn).toHaveBeenCalledWith('tail', ['-f', '-n', '50', expect.stringContaining('/var/log/app.log')], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
     });
 
     it('should use custom lines parameter', async () => {
@@ -113,11 +113,7 @@ describe('FileStreamManager', () => {
         onError: vi.fn(),
       });
 
-      expect(mockSpawn).toHaveBeenCalledWith(
-        'tail',
-        ['-f', '-n', '100', expect.any(String)],
-        expect.any(Object),
-      );
+      expect(mockSpawn).toHaveBeenCalledWith('tail', ['-f', '-n', '100', expect.any(String)], expect.any(Object));
     });
 
     it('should reject when file does not exist', async () => {
@@ -448,7 +444,7 @@ describe('FileStreamManager', () => {
       expect(result.success).toBe(true);
     });
 
-    it('should allow paths in /tmp', async () => {
+    it('should reject paths in /tmp', async () => {
       const proc = createMockProcess();
       mockSpawn.mockReturnValue(proc);
 
@@ -461,7 +457,8 @@ describe('FileStreamManager', () => {
         onError: vi.fn(),
       });
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('allowed log directories');
     });
 
     it('should handle stat errors gracefully', async () => {

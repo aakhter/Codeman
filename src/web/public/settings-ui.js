@@ -1378,8 +1378,8 @@ Object.assign(CodemanApp.prototype, {
         showProjectInsights: false,
         showFileBrowser: false,
         showSubagents: false,
-        // Feature toggles - keep tracking on even on mobile
-        subagentTrackingEnabled: true,
+        // Feature toggles - keep background-heavy tracking off on mobile
+        subagentTrackingEnabled: false,
         subagentActiveTabOnly: true, // Only show subagents for active tab
         imageWatcherEnabled: false,
         ralphTrackerEnabled: false,

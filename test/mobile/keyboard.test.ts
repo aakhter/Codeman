@@ -284,12 +284,13 @@ describe('Virtual Keyboard', () => {
       expect(mainPadding).toBe('');
     });
 
-    it('accessory bar has 7 action buttons', async () => {
-      const count = await page.evaluate(() => {
-        const buttons = document.querySelectorAll('.keyboard-accessory-bar [data-action]');
-        return buttons.length;
+    it('accessory bar has the simple-mode action buttons', async () => {
+      const actions = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('.keyboard-accessory-bar [data-action]')).map(
+          (button) => (button as HTMLElement).dataset.action
+        );
       });
-      expect(count).toBe(7);
+      expect(actions).toEqual(['scroll-up', 'scroll-down', 'init', 'clear', 'paste', 'dismiss']);
     });
 
     it('double-tap confirm on /clear button', async () => {
@@ -323,27 +324,6 @@ describe('Virtual Keyboard', () => {
         return btn?.textContent?.trim();
       });
       expect(text).toBe('Tap again');
-    });
-
-    it('double-tap confirm on /compact button', async () => {
-      await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
-      await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
-
-      await page.evaluate(`
-        if (typeof app !== 'undefined') app.activeSessionId = 'test-session';
-      `);
-
-      await page.evaluate(() => {
-        const btn = document.querySelector('[data-action="compact"]') as HTMLElement;
-        btn?.click();
-      });
-      await page.waitForTimeout(100);
-
-      const confirming = await page.evaluate(() => {
-        const btn = document.querySelector('[data-action="compact"]');
-        return btn?.classList.contains('confirming') ?? false;
-      });
-      expect(confirming).toBe(true);
     });
 
     it('double-tap expires after 2s', async () => {

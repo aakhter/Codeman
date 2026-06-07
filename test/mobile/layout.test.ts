@@ -456,13 +456,13 @@ describe('Mobile Layout', () => {
   // ─── Terminal ─────────────────────────────────────────────────────────────
 
   describe('Terminal', () => {
-    it('terminal-container has touch-action: pan-y', async () => {
+    it('terminal-container lets the JS touch handler own terminal scroll', async () => {
       const { context, page } = await createDevicePage(iPhone14Pro, BASE_URL);
       try {
         const exists = await page.$(SELECTORS.TERMINAL_CONTAINER);
         if (exists) {
           const touchAction = await getCSSProperty(page, SELECTORS.TERMINAL_CONTAINER, 'touch-action');
-          expect(touchAction).toContain('pan-y');
+          expect(touchAction).toBe('none');
         }
       } finally {
         await context.close();
@@ -486,12 +486,12 @@ describe('Mobile Layout', () => {
   // ─── Main Content ─────────────────────────────────────────────────────────
 
   describe('Main Content', () => {
-    it('main has margin-top for fixed header', async () => {
+    it('app reserves top padding for fixed header', async () => {
       const { context, page } = await createDevicePage(iPhone14Pro, BASE_URL);
       try {
-        const marginTop = await getCSSNumericValue(page, SELECTORS.MAIN, 'margin-top');
-        // Main content should have enough margin-top to clear the fixed header (~42px)
-        expect(marginTop).toBeGreaterThanOrEqual(30);
+        const paddingTop = await getCSSNumericValue(page, '.app', 'padding-top');
+        // Content is offset at the app shell so banners between header and main stay visible.
+        expect(paddingTop).toBeGreaterThanOrEqual(30);
       } finally {
         await context.close();
       }

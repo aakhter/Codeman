@@ -2482,7 +2482,11 @@ export class Session extends EventEmitter {
       if (this._mux && this._muxSession) {
         this._mux.resizeWindow?.(this._muxSession.muxName, cols, rows);
       }
-      this.ptyProcess.resize(cols, rows);
+      try {
+        this.ptyProcess.resize(cols, rows);
+      } catch {
+        this.ptyProcess = null;
+      }
     }
   }
 

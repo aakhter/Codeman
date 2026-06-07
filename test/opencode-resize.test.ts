@@ -264,12 +264,14 @@ describe('OpenCode close modal text', () => {
     ({ context, page } = await freshPage());
     await navigateAndWait(page);
 
-    // Create a session and mark it as opencode mode
+    // Create a session and mark it as opencode mode in the frontend state.
+    // The close-modal copy depends only on app.sessions mode, not an installed
+    // OpenCode CLI.
     const sessionId = await page.evaluate(async () => {
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workingDir: '/tmp', name: 'oc-close-test', mode: 'opencode' }),
+        body: JSON.stringify({ workingDir: '/tmp', name: 'oc-close-test' }),
       });
       const data = await res.json();
       return data.id ?? data.session?.id;
@@ -277,8 +279,16 @@ describe('OpenCode close modal text', () => {
 
     expect(sessionId).toBeTruthy();
 
-    // Wait for SSE to propagate the session
-    await page.waitForTimeout(500);
+    await page.evaluate(async (sid: string) => {
+      const app = (
+        window as unknown as {
+          app: { selectSession: (id: string) => Promise<void>; sessions: Map<string, { mode?: string }> };
+        }
+      ).app;
+      await app.selectSession(sid);
+      const session = app.sessions.get(sid);
+      if (session) session.mode = 'opencode';
+    }, sessionId);
 
     // Open the close confirmation modal
     await page.evaluate((sid: string) => {
