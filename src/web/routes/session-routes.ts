@@ -84,6 +84,34 @@ const LEADING_WHITESPACE_PATTERN = /^[\s\r\n]+/;
 const ALT_SCREEN_TOGGLE_PATTERN = /\x1b\[\?(?:47|1047|1049)[hl]/g;
 // eslint-disable-next-line no-control-regex
 const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
+const OAUTH_AUTHORIZATION_URL_PATTERN =
+  /https?:\/\/[^\s"'<>]*(?:\/authorize\?|auth\.atlassian\.com\/authorize\?)[^\s"'<>]*/i;
+const OAUTH_AUTHORIZATION_NOTICE_PATTERN =
+  /\b(?:authorize|authorization|opening this URL|copy the URL|browser launch failed)\b/i;
+
+function extractOneTimeAuthNotice(buffer: string): string {
+  if (!OAUTH_AUTHORIZATION_URL_PATTERN.test(buffer)) return '';
+
+  const lines = buffer.split(/\r?\n/);
+  const keep = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!OAUTH_AUTHORIZATION_URL_PATTERN.test(line)) continue;
+
+    keep.add(i);
+    for (const neighbor of [i - 2, i - 1, i + 1, i + 2]) {
+      if (neighbor >= 0 && neighbor < lines.length && OAUTH_AUTHORIZATION_NOTICE_PATTERN.test(lines[neighbor])) {
+        keep.add(neighbor);
+      }
+    }
+  }
+
+  return [...keep]
+    .sort((a, b) => a - b)
+    .map((i) => lines[i])
+    .join('\n')
+    .trim();
+}
 
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
@@ -946,10 +974,16 @@ export function registerSessionRoutes(
     const muxName = session.muxName;
     const liveMuxBuffer =
       muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName) : null;
+    const oneTimeAuthNotice =
+      session.mode === 'codex' && liveMuxBuffer !== null && liveMuxBuffer.length > 0
+        ? extractOneTimeAuthNotice(session.terminalBuffer)
+        : '';
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
         ? session.mode === 'codex'
-          ? liveMuxBuffer
+          ? oneTimeAuthNotice && !liveMuxBuffer.includes(oneTimeAuthNotice)
+            ? `${liveMuxBuffer}\r\n${oneTimeAuthNotice}`
+            : liveMuxBuffer
           : session.terminalBufferLength > 0
             ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
             : liveMuxBuffer
