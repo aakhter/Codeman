@@ -5,12 +5,16 @@
 
 import { FastifyInstance } from 'fastify';
 import { join, basename as pathBasename } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import type { SessionPort } from '../ports/index.js';
+
+const execFileAsync = promisify(execFile);
 
 export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void {
   // File tree listing
@@ -186,20 +190,37 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
         'woff2',
         'ttf',
         'eot',
+        'docx',
+        'pptx',
       ]);
       const imageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
       const videoExts = new Set(['mp4', 'webm', 'mov', 'avi']);
 
       if (raw === 'true' || binaryExts.has(ext)) {
         // Return metadata for binary files
+        const rawUrl = `/api/sessions/${id}/file-raw?path=${encodeURIComponent(filePath)}`;
+        const officePreviewUrl = `/api/sessions/${id}/file-preview?path=${encodeURIComponent(filePath)}`;
+        const type = imageExts.has(ext)
+          ? 'image'
+          : videoExts.has(ext)
+            ? 'video'
+            : ext === 'pdf'
+              ? 'pdf'
+              : ext === 'docx'
+                ? 'document'
+                : ext === 'pptx'
+                  ? 'presentation'
+                  : 'binary';
+        const previewUrl = ext === 'docx' || ext === 'pptx' ? officePreviewUrl : rawUrl;
         return {
           success: true,
           data: {
             path: filePath,
             size: stat.size,
-            type: imageExts.has(ext) ? 'image' : videoExts.has(ext) ? 'video' : 'binary',
+            type,
             extension: ext,
-            url: `/api/sessions/${id}/file-raw?path=${encodeURIComponent(filePath)}`,
+            url: rawUrl,
+            previewUrl,
           },
         };
       }
@@ -312,6 +333,85 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort): void
       reply
         .code(500)
         .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read file: ${getErrorMessage(err)}`));
+    }
+  });
+
+  // Serve converted document previews. DOCX/PPTX are converted to PDF using
+  // LibreOffice when available; PDF/PNG preview directly through file-raw.
+  app.get('/api/sessions/:id/file-preview', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: filePath } = req.query as { path?: string };
+    const session = findSessionOrFail(ctx, id);
+
+    if (!filePath) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
+      return;
+    }
+
+    const validated = validateSessionFilePath(session.workingDir, filePath);
+    if (!validated) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
+      return;
+    }
+    const { resolvedPath } = validated;
+    const ext = filePath.split('.').pop()?.toLowerCase() || '';
+
+    if (ext === 'pdf' || ext === 'png') {
+      reply.redirect(`/api/sessions/${id}/file-raw?path=${encodeURIComponent(filePath)}`);
+      return;
+    }
+
+    if (ext !== 'docx' && ext !== 'pptx') {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Preview is not supported for this file type'));
+      return;
+    }
+
+    let previewDir: string | undefined;
+    try {
+      const stat = await fs.stat(resolvedPath);
+      const MAX_PREVIEW_SOURCE_SIZE = 50 * 1024 * 1024;
+      if (stat.size > MAX_PREVIEW_SOURCE_SIZE) {
+        reply
+          .code(400)
+          .send(
+            createErrorResponse(
+              ApiErrorCode.INVALID_INPUT,
+              `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_PREVIEW_SOURCE_SIZE / 1024 / 1024}MB limit)`
+            )
+          );
+        return;
+      }
+
+      previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-preview-'));
+      await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, resolvedPath], {
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      });
+
+      const converted = (await fs.readdir(previewDir)).find((name) => name.toLowerCase().endsWith('.pdf'));
+      if (!converted) {
+        reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document preview conversion failed'));
+        return;
+      }
+
+      const content = await fs.readFile(join(previewDir, converted));
+      reply.header('Content-Type', 'application/pdf');
+      reply.header('Content-Disposition', `inline; filename="${pathBasename(filePath, `.${ext}`)}.pdf"`);
+      reply.header('Content-Length', content.length);
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.send(content);
+    } catch (err) {
+      reply
+        .code(500)
+        .send(
+          createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to generate preview: ${getErrorMessage(err)}`)
+        );
+    } finally {
+      if (previewDir) {
+        await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   });
 

@@ -92,6 +92,7 @@ import {
   type PersistedRespawnConfig,
   type NiceConfig,
   type ImageDetectedEvent,
+  type AttachmentDetectedEvent,
   DEFAULT_NICE_CONFIG,
 } from '../types.js';
 import { CleanupManager, KeyedDebouncer, StaleExpirationMap, startEventLoopMonitor } from '../utils/index.js';
@@ -225,6 +226,7 @@ export class WebServer extends EventEmitter {
   } | null = null;
   private imageWatcherHandlers: {
     detected: (event: ImageDetectedEvent) => void;
+    attachmentDetected: (event: AttachmentDetectedEvent) => void;
     error: (error: Error, sessionId?: string) => void;
   } | null = null;
   private tunnelManager: TunnelManager = new TunnelManager();
@@ -405,18 +407,20 @@ export class WebServer extends EventEmitter {
 
   /**
    * Set up event listeners for image watcher.
-   * Broadcasts image detection events to SSE clients for auto-popup.
+   * Broadcasts image/document detection events to SSE clients.
    */
   private setupImageWatcherListeners(): void {
     // Store handlers for cleanup on shutdown
     this.imageWatcherHandlers = {
       detected: (event: ImageDetectedEvent) => this.broadcast(SseEvent.ImageDetected, event),
+      attachmentDetected: (event: AttachmentDetectedEvent) => this.broadcast(SseEvent.AttachmentDetected, event),
       error: (error: Error, sessionId?: string) => {
         console.error(`[ImageWatcher] Error${sessionId ? ` for ${sessionId}` : ''}:`, error.message);
       },
     };
 
     imageWatcher.on('image:detected', this.imageWatcherHandlers.detected);
+    imageWatcher.on('attachment:detected', this.imageWatcherHandlers.attachmentDetected);
     imageWatcher.on('image:error', this.imageWatcherHandlers.error);
   }
 
@@ -426,6 +430,7 @@ export class WebServer extends EventEmitter {
   private cleanupImageWatcherListeners(): void {
     if (this.imageWatcherHandlers) {
       imageWatcher.off('image:detected', this.imageWatcherHandlers.detected);
+      imageWatcher.off('attachment:detected', this.imageWatcherHandlers.attachmentDetected);
       imageWatcher.off('image:error', this.imageWatcherHandlers.error);
       this.imageWatcherHandlers = null;
     }

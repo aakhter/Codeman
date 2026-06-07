@@ -321,6 +321,7 @@ const SSE_EVENTS = {
 
   // Images
   IMAGE_DETECTED: 'image:detected',
+  ATTACHMENT_DETECTED: 'attachment:detected',
 
   // Tunnel
   TUNNEL_STARTED: 'tunnel:started',

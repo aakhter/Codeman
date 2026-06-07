@@ -7180,6 +7180,106 @@ kbd {
 
 /* ========== File Preview Overlay ========== */
 
+.attachment-card-stack {
+  position: fixed;
+  right: 18px;
+  bottom: calc(var(--toolbar-height) + 18px);
+  z-index: 1900;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.attachment-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 24px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(19, 19, 22, 0.96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.attachment-type-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  background: #20202a;
+  color: var(--text);
+  border: 1px solid var(--border-light);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.attachment-card-main {
+  min-width: 0;
+}
+
+.attachment-file-name {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-file-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
+.attachment-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.attachment-actions button,
+.attachment-actions a {
+  padding: 3px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+
+.attachment-actions button:hover,
+.attachment-actions a:hover {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.attachment-close-btn {
+  align-self: start;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.attachment-close-btn:hover {
+  color: var(--text);
+}
+
 .file-preview-overlay {
   position: fixed;
   inset: 0;
@@ -7267,6 +7367,41 @@ kbd {
 .file-preview-body video {
   max-width: 100%;
   max-height: 100%;
+}
+
+.document-preview-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  background: rgba(17, 17, 17, 0.92);
+  border-bottom: 1px solid var(--border);
+}
+
+.document-preview-stage {
+  min-height: calc(100% - 42px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  padding: 12px;
+}
+
+.document-preview-image {
+  max-width: 100%;
+  max-height: none;
+  transform-origin: top center;
+  transition: transform 0.12s ease-out;
+}
+
+.document-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #1f1f24;
 }
 
 .file-preview-body .binary-message {

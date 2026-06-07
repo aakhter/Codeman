@@ -250,6 +250,11 @@ Object.assign(CodemanApp.prototype, {
     this.openImagePopup(data);
   },
 
+  _onAttachmentDetected(data) {
+    console.log('[Attachment Detected]', data);
+    this.addAttachmentCard(data);
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Away Digest Modal
@@ -2736,8 +2741,8 @@ Object.assign(CodemanApp.prototype, {
     this.saveAppSettingsToStorage(settings);
   },
 
-  async openFilePreview(filePath) {
-    if (!this.activeSessionId || !filePath) return;
+  async openFilePreview(filePath, sessionId = this.activeSessionId) {
+    if (!sessionId || !filePath) return;
 
     const overlay = this.$('filePreviewOverlay');
     const titleEl = this.$('filePreviewTitle');
@@ -2753,7 +2758,7 @@ Object.assign(CodemanApp.prototype, {
     footerEl.textContent = '';
 
     try {
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`);
+      const res = await fetch(`/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`);
       if (!res.ok) throw new Error('Failed to load file');
 
       const result = await res.json();
@@ -2762,13 +2767,35 @@ Object.assign(CodemanApp.prototype, {
       const data = result.data;
 
       if (data.type === 'image') {
-        bodyEl.innerHTML = `<img src="${data.url}" alt="${escapeHtml(filePath)}">`;
+        this.filePreviewZoom = 1;
+        bodyEl.innerHTML = `
+          <div class="document-preview-toolbar">
+            <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('out')" title="Zoom out">-</button>
+            <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('fit')" title="Fit">Fit</button>
+            <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('in')" title="Zoom in">+</button>
+          </div>
+          <div class="document-preview-stage">
+            <img class="document-preview-image" src="${data.previewUrl || data.url}" alt="${escapeHtml(filePath)}">
+          </div>
+        `;
         footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
       } else if (data.type === 'video') {
         bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
         footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
+      } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
+        const previewUrl =
+          data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
+        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${previewUrl}" title="${escapeHtml(filePath)}"></iframe>`;
+        const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
+        footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`;
       } else if (data.type === 'binary') {
-        bodyEl.innerHTML = `<div class="binary-message">Binary file (${this.formatFileSize(data.size)})<br>Cannot preview</div>`;
+        bodyEl.innerHTML = `
+          <div class="binary-message">
+            Binary file (${this.formatFileSize(data.size)})<br>
+            Cannot preview<br><br>
+            <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab('${escapeHtml(sessionId)}', '${escapeHtml(filePath)}')">Open</button>
+          </div>
+        `;
         footerEl.textContent = data.extension || 'binary';
       } else {
         // Text content
@@ -2781,6 +2808,24 @@ Object.assign(CodemanApp.prototype, {
       console.error('Failed to preview file:', err);
       bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
     }
+  },
+
+  setFilePreviewZoom(action) {
+    const img = document.querySelector('.document-preview-image');
+    if (!img) return;
+    if (action === 'fit') {
+      this.filePreviewZoom = 1;
+    } else if (action === 'in') {
+      this.filePreviewZoom = Math.min(4, (this.filePreviewZoom || 1) + 0.25);
+    } else if (action === 'out') {
+      this.filePreviewZoom = Math.max(0.25, (this.filePreviewZoom || 1) - 0.25);
+    }
+    img.style.transform = `scale(${this.filePreviewZoom})`;
+  },
+
+  openAttachmentInNewTab(sessionId, filePath) {
+    const url = `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+    window.open(url, '_blank');
   },
 
   closeFilePreview() {
@@ -2997,6 +3042,103 @@ Object.assign(CodemanApp.prototype, {
     }
     for (const windowId of toClose) {
       this.closeLogViewerWindow(windowId);
+    }
+  },
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // Attachment Cards (detected documents/images)
+  // ═══════════════════════════════════════════════════════════════
+
+  ensureAttachmentCardStack() {
+    let stack = this.attachmentCardStack || document.getElementById('attachmentCardStack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.id = 'attachmentCardStack';
+      stack.className = 'attachment-card-stack';
+      document.body.appendChild(stack);
+    }
+    this.attachmentCardStack = stack;
+    return stack;
+  },
+
+  addAttachmentCard(attachmentEvent) {
+    const { sessionId, relativePath, fileName, timestamp, size, attachmentType, extension } = attachmentEvent;
+    const filePath = relativePath || fileName;
+    const attachmentId = `${sessionId}-${timestamp}-${fileName}`;
+
+    if (this.attachmentCards.has(attachmentId)) {
+      const existing = this.attachmentCards.get(attachmentId);
+      existing.element.focus?.();
+      return;
+    }
+
+    const MAX_ATTACHMENT_CARDS = 10;
+    if (this.attachmentCards.size >= MAX_ATTACHMENT_CARDS) {
+      const oldestId = this.attachmentCards.keys().next().value;
+      if (oldestId) this.closeAttachmentCard(oldestId);
+    }
+
+    const stack = this.ensureAttachmentCardStack();
+    const session = this.sessions.get(sessionId);
+    const sessionName = session?.name || sessionId.substring(0, 8);
+    const rawUrl = `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+    const downloadUrl = `${rawUrl}&download=true`;
+    const typeLabel = (extension || attachmentType || 'file').toUpperCase();
+
+    const card = document.createElement('article');
+    card.className = `attachment-card attachment-${escapeHtml(attachmentType || 'file')}`;
+    card.tabIndex = 0;
+    card.dataset.attachmentId = attachmentId;
+    card.innerHTML = `
+      <div class="attachment-type-badge">${escapeHtml(typeLabel)}</div>
+      <div class="attachment-card-main">
+        <div class="attachment-file-name" title="${escapeHtml(filePath)}">${escapeHtml(fileName)}</div>
+        <div class="attachment-file-meta">
+          <span>${escapeHtml(sessionName)}</span>
+          <span>${this.formatFileSize(size || 0)}</span>
+        </div>
+        <div class="attachment-actions">
+          <button type="button" class="attachment-preview-btn">Preview</button>
+          <a href="${escapeHtml(downloadUrl)}">Download</a>
+          <button type="button" class="attachment-open-btn">Open</button>
+        </div>
+      </div>
+      <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
+    `;
+
+    card.querySelector('.attachment-preview-btn')?.addEventListener('click', () => {
+      this.openFilePreview(filePath, sessionId);
+    });
+    card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
+      this.openAttachmentInNewTab(sessionId, filePath);
+    });
+    card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
+      this.closeAttachmentCard(attachmentId);
+    });
+
+    stack.prepend(card);
+    this.attachmentCards.set(attachmentId, { element: card, sessionId, filePath });
+  },
+
+  closeAttachmentCard(attachmentId) {
+    const cardData = this.attachmentCards.get(attachmentId);
+    if (!cardData) return;
+    cardData.element.remove();
+    this.attachmentCards.delete(attachmentId);
+    if (this.attachmentCardStack && this.attachmentCards.size === 0) {
+      this.attachmentCardStack.remove();
+      this.attachmentCardStack = null;
+    }
+  },
+
+  closeSessionAttachmentCards(sessionId) {
+    const toClose = [];
+    for (const [attachmentId, data] of this.attachmentCards) {
+      if (data.sessionId === sessionId) toClose.push(attachmentId);
+    }
+    for (const attachmentId of toClose) {
+      this.closeAttachmentCard(attachmentId);
     }
   },
 

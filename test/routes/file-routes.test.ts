@@ -215,6 +215,54 @@ describe('file-routes', () => {
       expect(body.data.url).toContain('file-raw');
     });
 
+    it('returns PDF metadata with an inline preview URL', async () => {
+      mockedStat.mockResolvedValue({ size: 4096 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=report.pdf`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.type).toBe('pdf');
+      expect(body.data.previewUrl).toContain('file-raw');
+      expect(body.data.url).toContain('file-raw');
+    });
+
+    it('returns DOCX metadata with a converted preview URL', async () => {
+      mockedStat.mockResolvedValue({ size: 8192 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=brief.docx`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.type).toBe('document');
+      expect(body.data.previewUrl).toContain('file-preview');
+      expect(body.data.url).toContain('file-raw');
+    });
+
+    it('returns PPTX metadata with a converted preview URL', async () => {
+      mockedStat.mockResolvedValue({ size: 16384 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=deck.pptx`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.type).toBe('presentation');
+      expect(body.data.previewUrl).toContain('file-preview');
+      expect(body.data.url).toContain('file-raw');
+    });
+
     it('rejects path traversal attempts', async () => {
       // realpathSync resolves the symlink to a path outside workingDir
       mockedRealpathSync.mockReturnValue('/etc/passwd' as never);
