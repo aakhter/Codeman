@@ -14,6 +14,7 @@ vi.mock('node:fs/promises', () => ({
   default: {
     stat: vi.fn(),
     mkdir: vi.fn(async () => undefined),
+    copyFile: vi.fn(async () => undefined),
     mkdtemp: vi.fn(async () => '/tmp/codeman-document-preview-cache/work-test'),
     readdir: vi.fn(async () => ['deck.pdf']),
     rename: vi.fn(async () => undefined),
@@ -43,6 +44,14 @@ describe('document-preview-cache', () => {
     mockedRename.mockImplementation(async () => {
       cachedPdfExists = true;
     });
+    mockedExecFile.mockImplementation((cmd, _args, _options, callback) => {
+      if (cmd === 'powershell.exe') {
+        cachedPdfExists = true;
+      }
+
+      setTimeout(() => callback(null, { stdout: '', stderr: '' }), 1);
+      return {} as never;
+    });
   });
 
   it('deduplicates concurrent Office preview conversions and reuses the cached PDF', async () => {
@@ -64,6 +73,35 @@ describe('document-preview-cache', () => {
         'pdf',
         expect.stringMatching(/^-env:UserInstallation=file:/),
       ]),
+      expect.any(Object),
+      expect.any(Function)
+    );
+  });
+
+  it('prefers Microsoft Word for DOCX files on Windows-mounted paths', async () => {
+    const result = await getOfficePreviewPdfPath(
+      '/mnt/c/Users/aakhter/Documents/codeman-inline-viewer-test.docx',
+      'docx'
+    );
+
+    expect(result).toContain('/mnt/c/Users/aakhter/AppData/Local/Temp/codeman-document-preview-cache/');
+    expect(mockedExecFile).toHaveBeenCalledWith(
+      'powershell.exe',
+      expect.arrayContaining(['-NoProfile', '-NonInteractive', '-EncodedCommand']),
+      expect.any(Object),
+      expect.any(Function)
+    );
+    const powerShellCall = mockedExecFile.mock.calls.find(([cmd]) => cmd === 'powershell.exe');
+    const encodedCommand = powerShellCall?.[1]?.at(-1);
+    const decodedCommand = Buffer.from(String(encodedCommand), 'base64').toString('utf16le');
+    expect(decodedCommand).toContain('$source = ');
+    expect(decodedCommand).toContain('C:\\Users\\aakhter\\AppData\\Local\\Temp\\codeman-document-preview-cache\\');
+    expect(decodedCommand).toContain('.docx');
+    expect(decodedCommand).toContain('$output = ');
+    expect(decodedCommand).toContain('.pdf');
+    expect(mockedExecFile).not.toHaveBeenCalledWith(
+      'soffice',
+      expect.any(Array),
       expect.any(Object),
       expect.any(Function)
     );
