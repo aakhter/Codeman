@@ -3090,7 +3090,9 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
-        const needsRewrite = data.terminalBuffer !== cachedBuffer;
+        // Busy sessions skip cache restore and clear the terminal before fetching,
+        // so they must replay the fetched buffer even when it matches cache.
+        const needsRewrite = sessionIsBusy || data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');
