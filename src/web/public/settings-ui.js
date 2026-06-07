@@ -1502,6 +1502,46 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  handleMobileHeaderUtilityToggle(event) {
+    if (event) {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+
+      const now = Date.now();
+      if ((event.type === 'click' || event.type === 'touchend') && this._lastMobileHeaderUtilityPointerAt) {
+        if (now - this._lastMobileHeaderUtilityPointerAt < 500) return;
+      }
+      if (event.type === 'click' && this._lastMobileHeaderUtilityTouchAt) {
+        if (now - this._lastMobileHeaderUtilityTouchAt < 500) return;
+      }
+      if (event.type === 'touchend') {
+        this._lastMobileHeaderUtilityTouchAt = now;
+      }
+      if (event.type === 'pointerup') {
+        this._lastMobileHeaderUtilityPointerAt = now;
+      }
+    }
+
+    this.toggleMobileHeaderUtilities();
+  },
+
+  bindMobileHeaderUtilityToggle() {
+    const toggle = document.getElementById('mobileHeaderUtilityToggle');
+    if (!toggle || this._mobileHeaderUtilityToggleEl === toggle) return;
+
+    if (this._mobileHeaderUtilityToggleEl && this._mobileHeaderUtilityToggleHandler) {
+      this._mobileHeaderUtilityToggleEl.removeEventListener('click', this._mobileHeaderUtilityToggleHandler);
+      this._mobileHeaderUtilityToggleEl.removeEventListener('touchend', this._mobileHeaderUtilityToggleHandler);
+      this._mobileHeaderUtilityToggleEl.removeEventListener('pointerup', this._mobileHeaderUtilityToggleHandler);
+    }
+
+    this._mobileHeaderUtilityToggleEl = toggle;
+    this._mobileHeaderUtilityToggleHandler = (event) => this.handleMobileHeaderUtilityToggle(event);
+    toggle.addEventListener('click', this._mobileHeaderUtilityToggleHandler);
+    toggle.addEventListener('touchend', this._mobileHeaderUtilityToggleHandler, { passive: false });
+    toggle.addEventListener('pointerup', this._mobileHeaderUtilityToggleHandler);
+  },
+
   closeMobileHeaderUtilities() {
     const tray = document.getElementById('headerRight');
     const toggle = document.getElementById('mobileHeaderUtilityToggle');

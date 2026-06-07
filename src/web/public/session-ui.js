@@ -63,6 +63,7 @@ Object.assign(CodemanApp.prototype, {
       console.log('[loadQuickStartCases] Loaded cases:', cases.map(c => c.name), 'lastUsedCase:', lastUsedCase);
 
       const select = document.getElementById('quickStartCase');
+      select?.blur?.();
 
       // Build options - existing cases first, then testcase as fallback if not present
       let options = '';
@@ -1435,6 +1436,9 @@ Object.assign(CodemanApp.prototype, {
         const select = document.getElementById('quickStartCase');
         const currentCase = select.value;
         await this.loadQuickStartCases(currentCase === name ? null : currentCase);
+        if (currentCase === name) {
+          await this.saveLastUsedCase(document.getElementById('quickStartCase')?.value || 'testcase');
+        }
       } else {
         this.showToast(data.error || 'Failed to delete case', 'error');
       }
@@ -1548,7 +1552,12 @@ Object.assign(CodemanApp.prototype, {
         this.cases = (this.cases || []).filter(c => c.name !== name);
         // Refresh mobile picker and dropdown
         this.closeMobileCasePicker();
-        await this.loadQuickStartCases();
+        const select = document.getElementById('quickStartCase');
+        const currentCase = select?.value;
+        await this.loadQuickStartCases(currentCase === name ? null : currentCase);
+        if (currentCase === name) {
+          await this.saveLastUsedCase(document.getElementById('quickStartCase')?.value || 'testcase');
+        }
       } else {
         this.showToast(data.error || 'Failed to delete case', 'error');
       }

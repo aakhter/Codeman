@@ -222,16 +222,29 @@ describe('Virtual Keyboard', () => {
       await context.close();
     });
 
-    it('toolbar slides up via translateY on keyboard show', async () => {
+    it('toolbar remains below terminal when keyboard show shrinks the app viewport', async () => {
       await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
       await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
 
-      const transform = await page.evaluate(() => {
+      const layout = await page.evaluate(() => {
         const toolbar = document.querySelector('.toolbar') as HTMLElement | null;
-        return toolbar?.style.transform ?? '';
+        const accessory = document.querySelector('.keyboard-accessory-bar') as HTMLElement | null;
+        const terminalWrap = document.querySelector('.terminal-wrap') as HTMLElement | null;
+        const toolbarRect = toolbar?.getBoundingClientRect();
+        const accessoryRect = accessory?.getBoundingClientRect();
+        const terminalRect = terminalWrap?.getBoundingClientRect();
+        return {
+          toolbarTransform: toolbar?.style.transform ?? '',
+          accessoryTransform: (accessory as HTMLElement | null)?.style.transform ?? '',
+          toolbarTop: toolbarRect?.top ?? 0,
+          accessoryTop: accessoryRect?.top ?? 0,
+          terminalBottom: terminalRect?.bottom ?? 0,
+        };
       });
-      expect(transform).not.toBe('');
-      expect(transform).toContain('translateY');
+      expect(layout.toolbarTransform).toBe('');
+      expect(layout.accessoryTransform).toBe('');
+      expect(layout.accessoryTop).toBeGreaterThanOrEqual(layout.terminalBottom - 4);
+      expect(layout.toolbarTop).toBeGreaterThan(layout.accessoryTop);
     });
 
     it('accessory bar gets .visible class', async () => {
@@ -261,6 +274,32 @@ describe('Virtual Keyboard', () => {
       });
       const newPx = parseFloat(newPadding) || 0;
       expect(newPx).toBeGreaterThan(initialPx);
+    });
+
+    it('does not reserve the keyboard height as visible terminal dead space', async () => {
+      await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
+      await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);
+
+      const layout = await page.evaluate(() => {
+        const main = document.querySelector('.main') as HTMLElement | null;
+        const appEl = document.querySelector('.app') as HTMLElement | null;
+        const terminalWrap = document.querySelector('.terminal-wrap') as HTMLElement | null;
+        const toolbar = document.querySelector('.toolbar') as HTMLElement | null;
+        const accessory = document.querySelector('.keyboard-accessory-bar') as HTMLElement | null;
+        return {
+          appHeight: appEl?.getBoundingClientRect().height ?? 0,
+          mainPaddingBottom: main ? parseFloat(main.style.paddingBottom || '0') : 0,
+          terminalHeight: terminalWrap?.getBoundingClientRect().height ?? 0,
+          toolbarHeight: toolbar?.getBoundingClientRect().height ?? 0,
+          accessoryHeight: accessory?.getBoundingClientRect().height ?? 0,
+          visualViewportHeight: window.visualViewport?.height ?? window.innerHeight,
+        };
+      });
+
+      expect(layout.appHeight).toBeLessThanOrEqual(layout.visualViewportHeight + 2);
+      expect(layout.mainPaddingBottom).toBeLessThan(KEYBOARD.TYPICAL_IOS_HEIGHT);
+      expect(layout.mainPaddingBottom).toBeGreaterThanOrEqual(layout.toolbarHeight + layout.accessoryHeight - 4);
+      expect(layout.terminalHeight).toBeGreaterThan(160);
     });
 
     it('resetLayout clears transforms on hide', async () => {

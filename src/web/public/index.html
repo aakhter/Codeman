@@ -68,13 +68,13 @@
         <span class="logo" onclick="app.goHome()" title="Go to main page">Codeman</span>
       </div>
 
+      <button class="mobile-header-utility-toggle" id="mobileHeaderUtilityToggle" type="button" aria-label="Toggle header utilities" aria-controls="headerRight" aria-expanded="false" title="Header utilities">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+      </button>
+
       <!-- Session Tabs -->
       <div class="session-tabs" id="sessionTabs" role="tablist" aria-label="Session tabs">
       </div>
-
-      <button class="mobile-header-utility-toggle" id="mobileHeaderUtilityToggle" onclick="app.toggleMobileHeaderUtilities()" aria-label="Toggle header utilities" aria-controls="headerRight" aria-expanded="false" title="Header utilities">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
-      </button>
 
       <div class="header-right mobile-collapsed" id="headerRight">
         <button class="tunnel-indicator" id="tunnelIndicator" style="display: none;" onclick="app.toggleTunnelPanel()" title="Cloudflare Tunnel" aria-label="Tunnel status">
