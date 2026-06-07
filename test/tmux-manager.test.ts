@@ -13,7 +13,7 @@ import {
   buildCodexCommand,
   formatPaneSnapshot,
   parsePaneList,
-  resolveActivePaneTarget,
+  resolveTmuxPaneTarget,
 } from '../src/tmux-manager.js';
 import { execSync } from 'node:child_process';
 
@@ -172,11 +172,73 @@ describe('TmuxManager (unit)', () => {
       expect(snapshot).toBe(`\x1b[1;1H${'x'.repeat(9)}\x1b[2;1Hnext line\x1b[2;3H`);
       expect(snapshot).not.toContain('\n');
     });
+
+    it('preserves SGR color while stripping non-style pane controls', () => {
+      const snapshot = formatPaneSnapshot(['\x1b[32mgreen\x1b[0m\x1b[2K\x1b[10;20Htail'], {
+        cols: 40,
+        rows: 2,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toContain('\x1b[32mgreen\x1b[0m');
+      expect(snapshot).toContain('tail');
+      expect(snapshot).not.toContain('\x1b[2K');
+      expect(snapshot).not.toContain('\x1b[10;20H');
+    });
+
+    it('truncates styled rows by visible columns without cutting SGR escapes', () => {
+      const snapshot = formatPaneSnapshot(['\x1b[31mabcdef\x1b[0m'], {
+        cols: 4,
+        rows: 1,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toBe('\x1b[1;1H\x1b[31mabc\x1b[0m\x1b[1;1H');
+    });
+
+    it('does not let full-width glyphs cross the paint boundary', () => {
+      const snapshot = formatPaneSnapshot(['abc\u754cdef'], {
+        cols: 5,
+        rows: 1,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toBe('\x1b[1;1Habc\x1b[1;1H');
+    });
+
+    it('keeps combining marks attached without consuming a terminal column', () => {
+      const snapshot = formatPaneSnapshot(['a\u0301bc'], {
+        cols: 4,
+        rows: 1,
+        cursorX: 0,
+        cursorY: 0,
+      });
+
+      expect(snapshot).toBe('\x1b[1;1Ha\u0301bc\x1b[1;1H');
+    });
   });
 
-  describe('resolveActivePaneTarget', () => {
-    it('selects the active pane instead of assuming pane zero', () => {
-      expect(resolveActivePaneTarget('%1:0\n%18:1\n')).toBe('%18');
+  describe('resolveTmuxPaneTarget', () => {
+    it('targets the active pane when no explicit pane is requested', () => {
+      expect(resolveTmuxPaneTarget('codeman-abc12345')).toBe('codeman-abc12345');
+      expect(resolveTmuxPaneTarget('codeman-abc12345', 'active')).toBe('codeman-abc12345');
+    });
+
+    it('treats numeric pane targets as pane indexes, not global pane ids', () => {
+      expect(resolveTmuxPaneTarget('codeman-abc12345', '0')).toBe('codeman-abc12345.0');
+      expect(resolveTmuxPaneTarget('codeman-abc12345', '12')).toBe('codeman-abc12345.12');
+    });
+
+    it('preserves explicit tmux pane ids without inventing %0', () => {
+      expect(resolveTmuxPaneTarget('codeman-abc12345', '%3')).toBe('codeman-abc12345.%3');
+    });
+
+    it('rejects invalid session and pane targets', () => {
+      expect(resolveTmuxPaneTarget('codeman-not-hex', '0')).toBeNull();
+      expect(resolveTmuxPaneTarget('codeman-abc12345', 'pane-0')).toBeNull();
     });
   });
 

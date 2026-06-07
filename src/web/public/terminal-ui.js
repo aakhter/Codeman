@@ -443,6 +443,8 @@ Object.assign(CodemanApp.prototype, {
 
     // Generation counter for chunkedTerminalWrite — aborts stale writes on tab switch
     this._chunkedWriteGen = 0;
+    this._bufferLoadSeq = 0;
+    this._bufferLoadOwner = null;
 
     // Handle resize with throttling for performance
     this._resizeTimeout = null;
@@ -1796,21 +1798,18 @@ Object.assign(CodemanApp.prototype, {
    * @param {number} chunkSize - Size of each chunk (default 128KB for smooth 60fps)
    * @returns {Promise<void>} - Resolves when all chunks written
    */
-  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE) {
+  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner) {
     // Generation counter: if a newer chunkedTerminalWrite starts (tab switch),
     // older writes abort instead of continuing to push stale data into the terminal.
     const writeGen = ++this._chunkedWriteGen;
+    const bufferLoadOwner = this._beginBufferLoad(loadOwner);
 
     return new Promise((resolve) => {
       if (!buffer || buffer.length === 0) {
-        this._finishBufferLoad();
+        this._finishBufferLoad(bufferLoadOwner);
         resolve();
         return;
       }
-
-      // Block live SSE writes during buffer load to prevent interleaving
-      this._isLoadingBuffer = true;
-      this._loadBufferQueue = [];
 
       // Strip any DEC 2026 markers that might be in the buffer
       // (from historical SSE data that was stored with markers)
@@ -1819,7 +1818,7 @@ Object.assign(CodemanApp.prototype, {
       const finish = () => {
         // Only finish if we're still the active write — a newer write owns buffer load state
         if (this._chunkedWriteGen === writeGen) {
-          this._finishBufferLoad();
+          this._finishBufferLoad(bufferLoadOwner);
         }
         resolve();
       };
@@ -1855,18 +1854,19 @@ Object.assign(CodemanApp.prototype, {
 
         const _ct0 = performance.now();
         const chunk = cleanBuffer.slice(offset, offset + chunkSize);
-        this.terminal.write(chunk);
+        this.terminal.write(chunk, () => {
+          offset += chunkSize;
+          // Schedule next chunk after xterm has processed this one; rAF if
+          // possible, else setTimeout/Worker fallback so progress doesn't
+          // stall on occluded/unfocused windows.
+          this._safeYield(writeChunk);
+        });
         const _cdt = performance.now() - _ct0;
         _chunkCount++;
         if (_cdt > 50)
           console.warn(
             `[CRASH-DIAG] chunk #${_chunkCount} write took ${_cdt.toFixed(0)}ms (${chunk.length} bytes at offset ${offset})`
           );
-        offset += chunkSize;
-
-        // Schedule next chunk; rAF if possible, else setTimeout/Worker
-        // fallback so progress doesn't stall on occluded/unfocused windows.
-        this._safeYield(writeChunk);
       };
 
       // Start writing
@@ -1884,9 +1884,23 @@ Object.assign(CodemanApp.prototype, {
    * (especially Ink cursor-up redraws), corrupting the terminal display.
    * After unblocking, new SSE/WS events deliver subsequent output normally.
    */
-  _finishBufferLoad() {
+  _beginBufferLoad(owner) {
+    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
+    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    this._bufferLoadOwner = loadOwner;
+    this._isLoadingBuffer = true;
+    this._loadBufferQueue = [];
+    return loadOwner;
+  },
+
+  _finishBufferLoad(owner) {
+    if (owner !== undefined && this._bufferLoadOwner !== owner) {
+      return false;
+    }
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
+    this._bufferLoadOwner = null;
+    return true;
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -1895,6 +1909,31 @@ Object.assign(CodemanApp.prototype, {
 
   clearTerminal() {
     this.terminal.clear();
+  },
+
+  /**
+   * Ask xterm to repaint its current viewport from its in-memory buffer.
+   * This is a local renderer nudge only: it does not send input to tmux/Codex.
+   * Running it now, next frame, and once shortly after covers WebGL/canvas
+   * repaints that were skipped while the browser or app tab was inactive.
+   */
+  _scheduleTerminalRepaint() {
+    if (!this.terminal) return;
+
+    const repaint = () => {
+      if (!this.terminal || !this.terminal.rows) return;
+      try { this.terminal.refresh(0, this.terminal.rows - 1); } catch {}
+    };
+
+    repaint();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(repaint);
+    }
+    this._clearTimer('_terminalRepaintTimer');
+    this._terminalRepaintTimer = setTimeout(() => {
+      this._terminalRepaintTimer = null;
+      repaint();
+    }, 80);
   },
 
   /**

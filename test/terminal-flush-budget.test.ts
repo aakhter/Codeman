@@ -21,6 +21,8 @@ function loadTerminalUiHarness(mode: string) {
     Worker: function Worker(this: any) {
       this.postMessage = () => {};
     },
+    DEC_SYNC_STRIP_RE: /\x1b\[\?2026[hl]/g,
+    TERMINAL_CHUNK_SIZE: 32 * 1024,
   });
 
   const code = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
@@ -34,6 +36,7 @@ function loadTerminalUiHarness(mode: string) {
   app.writeFrameScheduled = false;
   app._wasAtBottomBeforeWrite = false;
   app._workerYield = () => {};
+  app._chunkedWriteGen = 0;
   app.terminal = {
     write: (data: string) => writes.push(data),
     scrollToBottom: () => {},
@@ -63,5 +66,49 @@ describe('terminal flush budget', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]).toHaveLength(64 * 1024);
     expect(app.pendingWrites.join('')).toHaveLength(32 * 1024);
+  });
+
+  it('waits for xterm to process small buffer replays before completing buffer load', async () => {
+    const { app, writes } = loadTerminalUiHarness('codex');
+    let writeDone: (() => void) | undefined;
+    let resolved = false;
+    const finishBufferLoad = vi.fn();
+    app._finishBufferLoad = finishBufferLoad;
+    app.terminal.write = (data: string, callback?: () => void) => {
+      writes.push(data);
+      writeDone = callback;
+    };
+
+    const promise = app.chunkedTerminalWrite('fresh tmux pane frame').then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+
+    expect(writes).toEqual(['fresh tmux pane frame']);
+    expect(writeDone).toBeTypeOf('function');
+    expect(resolved).toBe(false);
+    expect(finishBufferLoad).not.toHaveBeenCalled();
+
+    writeDone?.();
+    await promise;
+
+    expect(resolved).toBe(true);
+    expect(finishBufferLoad).toHaveBeenCalledOnce();
+  });
+
+  it('keeps stale buffer load owners from finishing a newer load', () => {
+    const { app } = loadTerminalUiHarness('codex');
+
+    app._beginBufferLoad('select-1');
+    app._beginBufferLoad('select-2');
+
+    expect(app._finishBufferLoad('select-1')).toBe(false);
+    expect(app._isLoadingBuffer).toBe(true);
+    expect(app._bufferLoadOwner).toBe('select-2');
+
+    expect(app._finishBufferLoad('select-2')).toBe(true);
+    expect(app._isLoadingBuffer).toBe(false);
+    expect(app._bufferLoadOwner).toBe(null);
   });
 });

@@ -30,124 +30,129 @@ describe('Codex tab resize behavior', () => {
     expect(source.slice(cacheRestore, settleDelay)).toContain("session?.mode !== 'shell'");
   });
 
-  it('does not let xterm snapshots skip the fresh terminal buffer fetch', () => {
-    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const start = source.indexOf('xterm snapshot restore');
-    const snapshotCondition = source.match(/if \(snapshot && [^)]+\)/)?.[0] || '';
-    const snapshotDone = source.indexOf('SNAPSHOT_RESTORE_DONE', start);
-    const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", start);
-    const snapshotBlockEnd = source.indexOf('const cachedBuffer = this.terminalBufferCache.get(sessionId);', start);
-
-    expect(start).toBeGreaterThan(-1);
-    expect(snapshotCondition).toContain("session?.mode === 'codex'");
-    expect(fetchStart).toBeGreaterThan(start);
-    expect(snapshotBlockEnd).toBeGreaterThan(snapshotDone);
-    expect(source.slice(snapshotDone, snapshotBlockEnd)).not.toContain('return;');
-  });
-
   it('fetches full terminal history for shell session reloads', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
     const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", selectStart);
-    const fetchBlock = source.slice(fetchStart, source.indexOf('const data = await res.json();', fetchStart));
+    const fetchBlock = source.slice(fetchStart, source.indexOf('const res = await fetch(terminalUrl);', fetchStart));
 
     expect(selectStart).toBeGreaterThan(-1);
     expect(fetchStart).toBeGreaterThan(selectStart);
     expect(fetchBlock).toContain("session?.mode === 'shell'");
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal`');
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
-    expect(fetchBlock).toContain('fetch(terminalUrl)');
   });
 
-  it('rewrites fetched busy-session buffers even when they match cache', () => {
+  it('rejects blank xterm snapshots before saving or restoring them', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
-    const fetchDone = source.indexOf('FETCH_DONE:', selectStart);
-    const rewriteBlock = source.slice(fetchDone, source.indexOf('// Update cache', fetchDone));
+    const helper = source.indexOf('_isUsableXtermSnapshot(snapshot)');
+    const save = source.indexOf('this._xtermSnapshots.set(this.activeSessionId, snapshot)');
+    const restore = source.indexOf('SNAPSHOT_RESTORE:', save);
+    const restoreBlock = source.slice(save, restore);
 
-    expect(selectStart).toBeGreaterThan(-1);
-    expect(fetchDone).toBeGreaterThan(selectStart);
-    expect(rewriteBlock).toContain('const needsRewrite =');
-    expect(rewriteBlock).toContain('sessionIsBusy');
+    expect(helper).toBeGreaterThan(-1);
+    expect(source.slice(save - 250, save)).toContain('this._isUsableXtermSnapshot(snapshot)');
+    expect(restoreBlock).toContain('if (snapshot && !this._isUsableXtermSnapshot(snapshot))');
+    expect(restoreBlock).toContain('persisted && this._isUsableXtermSnapshot(persisted)');
   });
 
-  it('waits for xterm to parse small buffer writes before resolving tab switch restore', () => {
-    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
-    const start = source.indexOf('For small buffers, write directly');
-    const smallWriteBlock = source.slice(start, source.indexOf('// Large buffers', start));
-
-    expect(start).toBeGreaterThan(-1);
-    expect(smallWriteBlock).toContain('this.terminal.write(cleanBuffer, finish)');
-    expect(smallWriteBlock).not.toContain('this.terminal.write(cleanBuffer);\n        finish();');
-  });
-
-  it('lets clicking the active tab force a fresh terminal reload', () => {
+  it('uses xterm snapshots as first paint but still fetches the canonical terminal frame', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
-    const selectSetup = source.slice(selectStart, source.indexOf('// Focus terminal SYNCHRONOUSLY', selectStart));
+    const snapshotRestore = source.indexOf('SNAPSHOT_RESTORE:');
+    const cacheRestore = source.indexOf('Instant cache restore', snapshotRestore);
+    const fetchStart = source.indexOf("FETCH_START'", snapshotRestore);
+    const needsRewrite = source.indexOf('const needsRewrite', fetchStart);
+    const snapshotBlock = source.slice(snapshotRestore, cacheRestore);
+    const postSnapshotRestore = source.slice(snapshotRestore, needsRewrite + 120);
 
-    expect(selectStart).toBeGreaterThan(-1);
-    expect(source).toContain('onclick="app.selectSession(\'${escapeHtml(id)}\', { forceReload: true })"');
-    expect(source).toContain('this.selectSession(sessionId, { forceReload: true });');
-    expect(selectSetup).toContain('this.activeSessionId === sessionId && forceReload');
-    expect(selectSetup).toContain('this.terminalBufferCache?.delete(sessionId)');
-    expect(selectSetup).toContain('this._xtermSnapshots?.delete(sessionId)');
-    expect(selectSetup).toContain('this.activeSessionId = null');
+    expect(snapshotRestore).toBeGreaterThan(-1);
+    expect(cacheRestore).toBeGreaterThan(snapshotRestore);
+    expect(fetchStart).toBeGreaterThan(cacheRestore);
+    expect(needsRewrite).toBeGreaterThan(fetchStart);
+    expect(snapshotBlock).not.toContain('this._finishBufferLoad();');
+    expect(snapshotBlock).not.toContain("Don't fall through to buffer-fetch");
+    expect(postSnapshotRestore).toContain('restoredSnapshot');
+    expect(postSnapshotRestore).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
   });
 
-  it('scrolls replayed buffers to the last non-empty terminal line', () => {
+  it('forces replay after clearing a busy tab even when the fetched frame matches cache', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const cacheRestore = source.indexOf('Instant cache restore');
+    const busyClear = source.indexOf('CACHE_SKIP_BUSY', cacheRestore);
+    const needsRewrite = source.indexOf('const needsRewrite', busyClear);
+    const replayBlock = source.slice(cacheRestore, needsRewrite + 160);
+
+    expect(cacheRestore).toBeGreaterThan(-1);
+    expect(busyClear).toBeGreaterThan(cacheRestore);
+    expect(needsRewrite).toBeGreaterThan(busyClear);
+    expect(replayBlock).toContain('clearedForBusy');
+    expect(replayBlock).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+  });
+
+  it('nudges xterm to repaint after session restore and browser refocus', () => {
     const appSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const terminalSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+    const focus = appSource.indexOf("_crashDiag.log('FOCUS')");
+    const selectDone = appSource.indexOf('SELECT_DONE', focus);
+    const visibilityListener = appSource.indexOf("document.addEventListener('visibilitychange'");
+    const windowFocusListener = appSource.indexOf("window.addEventListener('focus'");
 
-    expect(terminalSource).toContain('scrollToLastNonEmptyLine()');
-    expect(terminalSource).toContain('this.terminal.scrollToLine');
-
-    const rewriteStart = appSource.indexOf('REWRITE: ${');
-    const rewriteBlock = appSource.slice(rewriteStart, appSource.indexOf('// Update cache', rewriteStart));
-    expect(rewriteBlock).toContain('this.scrollToLastNonEmptyLine();');
-    expect(rewriteBlock).not.toContain('this.terminal.scrollToBottom();');
+    expect(focus).toBeGreaterThan(-1);
+    expect(selectDone).toBeGreaterThan(focus);
+    expect(appSource.slice(focus, selectDone)).toContain('this._scheduleTerminalRepaint()');
+    expect(visibilityListener).toBeGreaterThan(-1);
+    expect(appSource.slice(visibilityListener, visibilityListener + 400)).toContain('this._scheduleTerminalRepaint()');
+    expect(windowFocusListener).toBeGreaterThan(-1);
+    expect(appSource.slice(windowFocusListener, windowFocusListener + 300)).toContain(
+      'this._scheduleTerminalRepaint()'
+    );
+    expect(terminalSource).toContain('_scheduleTerminalRepaint()');
+    expect(terminalSource).toContain('this.terminal.refresh(0, this.terminal.rows - 1)');
   });
 
-  it('tracks tab terminal reload state by select generation', () => {
+  it('keeps selectSession buffer-load cleanup scoped to the active generation', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
-    const selectBlock = source.slice(selectStart, source.indexOf('// Shared cleanup', selectStart));
+    const staleHelper = source.slice(
+      source.indexOf('_isStaleSelect(selectGen)'),
+      source.indexOf('return false;', source.indexOf('_isStaleSelect(selectGen)'))
+    );
+    const loadStart = source.indexOf('const bufferLoadOwner = this._beginBufferLoad(selectGen);');
+    const selectDone = source.indexOf('SELECT_DONE', loadStart);
+    const selectBlock = source.slice(loadStart, selectDone);
+    const catchBlock = source.slice(
+      source.indexOf('} catch (err) {', selectDone),
+      source.indexOf("console.error('Failed to load session terminal:'", selectDone)
+    );
 
-    expect(source).toContain('this.terminalLoadStates = new Map();');
-    expect(source).toContain('_setTerminalLoadState(sessionId, selectGen,');
-    expect(source).toContain('_clearTerminalLoadState(sessionId, selectGen)');
-    expect(selectBlock).toContain("this._setTerminalLoadState(sessionId, selectGen, 'fetching')");
-    expect(selectBlock).toContain("this._setTerminalLoadState(sessionId, selectGen, 'replaying')");
-    expect(selectBlock).toContain('this._clearTerminalLoadState(sessionId, selectGen);');
-    expect(selectBlock).toContain("this._setTerminalLoadState(sessionId, selectGen, 'failed')");
-    expect(source).toContain('if (state && state.generation !== selectGen) return;');
+    expect(staleHelper).toContain('this._finishBufferLoad(selectGen)');
+    expect(loadStart).toBeGreaterThan(-1);
+    expect(selectBlock).toContain('this.chunkedTerminalWrite(cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)');
+    expect(selectBlock).toContain(
+      'this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)'
+    );
+    expect(selectBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
+    expect(catchBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
+    expect(selectBlock).not.toContain('this._finishBufferLoad()');
+    expect(catchBlock).not.toContain('this._finishBufferLoad()');
   });
 
-  it('renders terminal loading state on session tabs', () => {
+  it('repaints the terminal after WebGL renderer fallback paths', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const styles = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
+    const contextLoss = source.slice(
+      source.indexOf('this._webglAddon.onContextLoss(() => {'),
+      source.indexOf('this.terminal.loadAddon(this._webglAddon);')
+    );
+    const longTaskFallback = source.slice(
+      source.indexOf("this._disableWebGLSticky('long-tasks');"),
+      source.indexOf('});', source.indexOf("this._disableWebGLSticky('long-tasks');"))
+    );
 
-    expect(source).toContain('const loadState = this.terminalLoadStates.get(id);');
-    expect(source).toContain("tab.classList.toggle('tab-loading'");
-    expect(source).toContain("tab.setAttribute('aria-busy', 'true')");
-    expect(source).toContain('tab.dataset.loadPhase = loadState.phase');
-    expect(source).toContain('tab-load-spinner');
-    expect(source).toContain("${loadState ? ' tab-loading' : ''}");
-    expect(source).toContain("aria-busy=\"${loadState ? 'true' : 'false'}\"");
-    expect(styles).toContain('.session-tab.tab-loading');
-    expect(styles).toContain('.tab-load-spinner');
-  });
+    expect(contextLoss).toContain("this._disableWebGLSticky('context-lost')");
+    expect(contextLoss).toContain('this._disposeWebGLObserver()');
+    expect(contextLoss).toContain('this._webglAddon?.dispose()');
+    expect(contextLoss).toContain('this._scheduleTerminalRepaint()');
 
-  it('does not force terminal focus on touch tab switches when the keyboard was closed', () => {
-    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
-    const selectBlock = source.slice(selectStart, source.indexOf('// Shared cleanup', selectStart));
-
-    expect(source).toContain('_shouldFocusTerminalForTabSwitch()');
-    expect(source).toContain('MobileDetection.isTouchDevice()');
-    expect(source).toContain('KeyboardHandler.keyboardVisible');
-    expect(selectBlock).toContain('const shouldFocusTerminal = this._shouldFocusTerminalForTabSwitch();');
-    expect(selectBlock).toContain('if (shouldFocusTerminal && this.terminal) this.terminal.focus();');
-    expect(selectBlock).not.toContain('if (this.terminal) this.terminal.focus();');
+    expect(longTaskFallback).toContain('this._webglAddon?.dispose()');
+    expect(longTaskFallback).toContain('this._scheduleTerminalRepaint()');
   });
 });

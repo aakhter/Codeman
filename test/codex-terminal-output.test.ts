@@ -102,6 +102,29 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).toContain(resumePickerRedraw);
   });
 
+  it('does not full-clear sparse Codex resume-picker navigation redraws', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    let sparseResumePickerRedraw = '';
+    for (let row = 1; row <= 51; row++) {
+      const col = row % 2 === 0 ? 239 : 27;
+      sparseResumePickerRedraw += `\x1b[${row};${col}H\x1b[K`;
+    }
+    sparseResumePickerRedraw +=
+      '\x1b[21;3H  \x1b[2m9d ago      \x1b[mreview this webex room webexteams://im?space=672465b0-4fcb-11f1-9d54-51475df86e3a\x1b[K' +
+      '\x1b[22;3H\x1b[33m\x1b[1m❯ \x1b[m\x1b[33m\x1b[2m9d ago      \x1b[m\x1b[33mcisco hybrid mesh firewall includes support for smart switch enforcement...\x1b[K' +
+      '\x1b[52;229H\x1b[39m\x1b[2m8\x1b[m';
+
+    handleOutput(session, sparseResumePickerRedraw);
+
+    expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
+    expect(emitted[0]).toContain(sparseResumePickerRedraw);
+  });
+
   it('clears Codex UI rows vacated when the status band moves downward', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;
@@ -171,5 +194,41 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).toContain('\x1b[24;1H\x1b[2K');
     expect(emitted[0].indexOf('\x1b[24;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(spinnerRedraw));
     expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
+  });
+
+  it('does not treat ordinary gpt model mentions as Codex status rows', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    const outputRow = '\x1b[20;1Hnormal output comparing gpt-5 and another model';
+
+    handleOutput(session, outputRow);
+
+    expect(emitted[0]).toContain(outputRow);
+    expect(emitted[0]).not.toContain('\x1b[19;1H\x1b[2K');
+    expect(emitted[0]).not.toContain('\x1b[20;1H\x1b[2K');
+  });
+
+  it('does not erase prompt or status rows during partial Working spinner ticks', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    handleOutput(
+      session,
+      '\x1b[55;1H\x1b[2m• Working (1s)' +
+        '\x1b[56;1H\x1b[1m›\x1b[0m ask' +
+        '\x1b[57;3Hgpt-5.5 xhigh fast · codeman · Working · Context 79% left'
+    );
+    handleOutput(session, '\x1b[55;1H\x1b[2m• Working (2s)');
+
+    expect(emitted[1]).toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[56;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[57;1H\x1b[2K');
   });
 });

@@ -126,8 +126,9 @@ const CTRL_L_PATTERN = /\x0c/g;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 const CODEX_WORKING_STATUS_TEXT_PATTERN = /(?:[•●].{0,8}Working|Working(?:\s|\(|$))/;
+const CODEX_STATUS_LINE_TEXT_PATTERN = /Context \d+% left|Tasks \d+\/\d+/;
 const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = new RegExp(
-  `gpt-[\\w.-]+|Context \\d+% left|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
+  `${CODEX_STATUS_LINE_TEXT_PATTERN.source}|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
 );
 const CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN = /^\s*[›❯](?:\s|$)/;
 
@@ -155,7 +156,7 @@ function ansiCount(params: string, fallback = 1): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function collectCodexUiRows(data: string, maxRows: number): number[] {
+function collectCodexRowText(data: string): Map<number, string> {
   const rowText = new Map<number, string>();
   let row = 1;
   let i = 0;
@@ -200,6 +201,17 @@ function collectCodexUiRows(data: string, maxRows: number): number[] {
     i++;
   }
 
+  return rowText;
+}
+
+function collectCodexPaintedRows(data: string, maxRows: number): number[] {
+  return [...collectCodexRowText(data).entries()]
+    .filter(([r, text]) => r > 3 && r <= maxRows && text.replace(/\s/g, '').length >= 3)
+    .map(([r]) => r);
+}
+
+function collectCodexUiRows(data: string, maxRows: number): number[] {
+  const rowText = collectCodexRowText(data);
   const candidateRows = [...rowText.entries()].filter(([r]) => r > 3 && r <= maxRows);
   const anchorRows = candidateRows.filter(([, text]) => CODEX_UI_ANCHOR_ROW_TEXT_PATTERN.test(text)).map(([r]) => r);
   const rows = new Set(anchorRows);
@@ -1190,17 +1202,20 @@ export class Session extends EventEmitter {
       // post-strip data — codex's upcoming repaint then lands on a clean
       // viewport instead of overlaying stale cells from a prior layout.
       //
-      // Heuristic A — full row-by-row repaint detection:
+      // Heuristic A — dense row-by-row repaint detection:
       //   Codex's response to a missing \x1b[2J is to emit one \x1b[K per
-      //   row (visible in chunks of 63+ K's in the captured log). \x1b[K
-      //   only erases from cursor → EOL, so any cells written further left
-      //   on a row in a prior frame survive as ghosts. When we see ≥20 K's
-      //   (or ≥ ptyRows/2, whichever is larger) in one chunk, codex is
-      //   trying to clear the whole screen — give it a real clear.
+      //   row (visible in chunks of 63+ K's in the captured log). But the
+      //   resume picker also emits one \x1b[K per row during arrow-key
+      //   navigation while repainting only the two rows whose selection
+      //   changed. Full-clearing that sparse frame leaves exactly those two
+      //   rows visible. Only promote K erases to a real clear when the chunk
+      //   also paints enough rows to repopulate the viewport.
       // eslint-disable-next-line no-control-regex
       const kEraseCount = (data.match(/\x1b\[K/g) || []).length;
       const kThreshold = Math.max(20, Math.floor(this._ptyRows / 2));
-      const triggerA = kEraseCount >= kThreshold;
+      const densePaintedRowCount = collectCodexPaintedRows(data, this._ptyRows).length;
+      const densePaintThreshold = Math.max(8, Math.floor(this._ptyRows * 0.2));
+      const triggerA = kEraseCount >= kThreshold && densePaintedRowCount >= densePaintThreshold;
       //
       // Heuristic B — DECSTBM "temp scroll band" transition:
       //   Codex briefly sets the scroll region to a small range (e.g.
@@ -1247,6 +1262,10 @@ export class Session extends EventEmitter {
       // size cache lags behind SIGWINCH). Tracking those would lead C to
       // generate clear sequences past the terminal height and leave the
       // cursor parked near the bottom, breaking the next chunk's DECRI math.
+      const rowTextForRepair = collectCodexRowText(data);
+      const hasStableStatusAnchor = [...rowTextForRepair.values()].some((text) =>
+        CODEX_STATUS_LINE_TEXT_PATTERN.test(text)
+      );
       const cupRows: number[] = [];
       // eslint-disable-next-line no-control-regex
       for (const m of data.matchAll(/\x1b\[(\d+);(\d+)H/g)) {
@@ -1263,6 +1282,7 @@ export class Session extends EventEmitter {
       const MAX_C_DRIFT = 5;
       let prependC = '';
       if (
+        hasStableStatusAnchor &&
         thisFrameBottom !== null &&
         this._codexFrameBottomRow !== null &&
         thisFrameBottom < this._codexFrameBottomRow &&
@@ -1297,7 +1317,9 @@ export class Session extends EventEmitter {
         }
 
         const currentUiBandSet = new Set(currentUiBandRows);
-        const vacatedUiRows = this._codexLastUiBandRows.filter((r) => !currentUiBandSet.has(r));
+        const vacatedUiRows = hasStableStatusAnchor
+          ? this._codexLastUiBandRows.filter((r) => !currentUiBandSet.has(r))
+          : [];
         if (vacatedUiRows.length > 0) {
           prependVacatedUiRows = '\x1b7';
           for (const r of vacatedUiRows) {
@@ -1311,7 +1333,9 @@ export class Session extends EventEmitter {
           prependBottomBand += `\x1b[${r};1H\x1b[2K`;
         }
         prependBottomBand += '\x1b8';
-        this._codexLastUiBandRows = currentUiBandRows;
+        if (hasStableStatusAnchor) {
+          this._codexLastUiBandRows = currentUiBandRows;
+        }
       }
 
       // Track home+erase when it directly follows a user Ctrl+L so internal
@@ -1361,6 +1385,7 @@ export class Session extends EventEmitter {
           console.log(
             `[Session ${this.id}] codex ghost-row repair fired: ` +
               `A=${triggerA} (K=${kEraseCount}/${kThreshold}) ` +
+              `Paint=${densePaintedRowCount}/${densePaintThreshold} ` +
               `B=${triggerB} (last DECSTBM bottom=${this._codexLastDecstbmBottom}) ` +
               `C=${prependC.length > 0} (frame bottom ${this._codexFrameBottomRow}, ${(prependC.length / 8) | 0} rows cleared) ` +
               `Band=${prependBottomBand.length > 0} ` +

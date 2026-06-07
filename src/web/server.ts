@@ -524,9 +524,10 @@ export class WebServer extends EventEmitter {
   }
 
   private async setupRoutes(): Promise<void> {
-    // (Removed leftover hand-rolled multipart/form-data parser from the pre-
-    // fastifyMultipart era — it conflicted with the @fastify/multipart register
-    // below on cold start: "Content type parser 'multipart/form-data' already present".)
+    // Removed leftover hand-rolled multipart/form-data parser from the pre-
+    // fastifyMultipart era. @fastify/multipart owns the parser now; registering
+    // both fails on cold start with "Content type parser 'multipart/form-data'
+    // already present" and breaks paste-image routes that use req.file().
 
     // Enable gzip/brotli compression for all responses.
     // Massive win: 793KB uncompressed → ~120KB compressed for static assets.

@@ -239,3 +239,13 @@ Target: 20 sessions, 50 agent windows at 60fps. Limits in `src/config/`: termina
 ## Scripts & Tunnel
 
 Key scripts: `scripts/tmux-manager.sh` (safe tmux mgmt), `scripts/tunnel.sh start|stop|url` (tunnel). Production services: `scripts/codeman-web.service`, `scripts/codeman-tunnel.service`. **Always set `CODEMAN_PASSWORD`** before exposing via tunnel.
+
+### Local IT15 Runtime
+
+- Treat `/home/aakhter/.codeman/app` as the managed checkout. `codeman-ctl` resolves to `/home/aakhter/repos/claude-config/bin/codeman-ctl`, and the IT15 launcher is `/home/aakhter/.local/bin/codeman-it15`.
+- The managed app is HTTPS on `127.0.0.1:3000`; the recognized command is `node dist/index.js web --host 127.0.0.1 --port 3000 --https`, with logs under `/home/aakhter/.codeman/logs/` and the pid file at `/home/aakhter/.codeman/codeman-it15.pid`.
+- Avoid bare `node dist/index.js web` or `npx codeman web` on port 3000 in this checkout. That starts HTTP, blocks the managed HTTPS app, and makes `codeman-ctl` report the app as stopped while `start` fails with `port 3000 is already in use`.
+- When refreshing dependencies, use `CODEMAN_NO_AUTOSTART=1 npm ci` so `scripts/postinstall.js` does not auto-start the bare HTTP server.
+- From Codex tool sessions, `setsid /home/aakhter/.local/bin/codeman-it15` is the persistent managed start path; direct `codeman-ctl start` may have its background child reaped by the tool runner.
+- Remotes are Bitbucket `origin` and GitHub `upstream` (`https://github.com/Ark0N/Codeman.git`). Local upstream merges should not be pushed unless the user explicitly asks.
+- `/mnt/c/Users/aakhter/codeman-fix` was a stale scratch directory and has been removed; do not treat it as a Codeman checkout.
