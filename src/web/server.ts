@@ -41,6 +41,7 @@ import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { homedir, hostname as getHostname } from 'node:os';
 import { EventEmitter } from 'node:events';
+import { isIP } from 'node:net';
 import { Session, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionState } from '../types.js';
 import { RespawnController, RespawnConfig } from '../respawn-controller.js';
@@ -120,6 +121,26 @@ import {
 } from './routes/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const EXPLICIT_TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
+
+function isExplicitlyEnabled(value: string | undefined): boolean {
+  return value !== undefined && EXPLICIT_TRUE_VALUES.has(value.trim().toLowerCase());
+}
+
+function isLoopbackBindHost(host: string): boolean {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/, '$1');
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') {
+    return true;
+  }
+  if (isIP(normalized) === 4 && normalized.startsWith('127.')) {
+    return true;
+  }
+  return normalized.startsWith('::ffff:127.');
+}
 
 // Bounded, predictable shape for SSE client identifiers: alphanumerics, `_`, `-`.
 // Length range covers crypto.randomUUID() (36 chars) plus any short stable IDs,
@@ -235,6 +256,7 @@ export class WebServer extends EventEmitter {
   private readonly titleHostname: string;
   private readonly windowTitle: string;
   private readonly indexHtmlPath: string;
+  private readonly allowUnauthenticatedNetwork: boolean;
   private _pasteImageGcStop: (() => void) | null = null;
   private _eventLoopMonitor: EventLoopMonitorHandle | null = null;
   private teamWatcherHandlers: {
@@ -248,7 +270,8 @@ export class WebServer extends EventEmitter {
     https: boolean = false,
     testMode: boolean = false,
     host: string = '127.0.0.1',
-    titleHostname?: string
+    titleHostname?: string,
+    allowUnauthenticatedNetwork: boolean = false
   ) {
     super();
     this.setMaxListeners(0);
@@ -256,6 +279,8 @@ export class WebServer extends EventEmitter {
     this.port = port;
     this.https = https;
     this.testMode = testMode;
+    this.allowUnauthenticatedNetwork =
+      allowUnauthenticatedNetwork || isExplicitlyEnabled(process.env.CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK);
     this.titleHostname = titleHostname || getHostname();
     this.windowTitle = `codeman:${this.titleHostname}`;
     this.indexHtmlPath = join(__dirname, 'public', 'index.html');
@@ -1539,6 +1564,13 @@ export class WebServer extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    if (!isLoopbackBindHost(this.host) && !process.env.CODEMAN_PASSWORD && !this.allowUnauthenticatedNetwork) {
+      throw new Error(
+        'Refusing to start Codeman on a non-loopback host without CODEMAN_PASSWORD. ' +
+          'Set CODEMAN_PASSWORD or explicitly allow unauthenticated network access.'
+      );
+    }
+
     await this.setupRoutes();
 
     const lifecycleLog = getLifecycleLog();
@@ -1570,11 +1602,12 @@ export class WebServer extends EventEmitter {
     const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
     console.log(`Codeman web interface running at ${protocol}://${displayHost}:${this.port}`);
 
-    const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1']);
-    if (!loopbackHosts.has(this.host) && !process.env.CODEMAN_PASSWORD) {
+    if (!isLoopbackBindHost(this.host) && !process.env.CODEMAN_PASSWORD && this.allowUnauthenticatedNetwork) {
       console.warn('\n⚠  WARNING: No CODEMAN_PASSWORD set — server is accessible without authentication.');
       console.warn('   Anyone on your network can access and control Claude sessions.');
-      console.warn('   Set CODEMAN_PASSWORD environment variable to enable auth.\n');
+      console.warn(
+        '   This was explicitly allowed by --allow-unauthenticated-network or CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK.\n'
+      );
     }
 
     // Set API URL for child processes (MCP server, spawned sessions)
@@ -2088,9 +2121,10 @@ export async function startWebServer(
   https: boolean = false,
   testMode: boolean = false,
   host: string = '127.0.0.1',
-  titleHostname?: string
+  titleHostname?: string,
+  allowUnauthenticatedNetwork: boolean = false
 ): Promise<WebServer> {
-  const server = new WebServer(port, https, testMode, host, titleHostname);
+  const server = new WebServer(port, https, testMode, host, titleHostname, allowUnauthenticatedNetwork);
   await server.start();
   return server;
 }
