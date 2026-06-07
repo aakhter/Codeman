@@ -111,4 +111,17 @@ describe('terminal flush budget', () => {
     expect(app._isLoadingBuffer).toBe(false);
     expect(app._bufferLoadOwner).toBe(null);
   });
+
+  it('does not snap back to bottom during Codex Working redraws right after the user scrolls up', () => {
+    const { app } = loadTerminalUiHarness('codex');
+    const scrollToBottom = vi.fn();
+    app.terminal.scrollToBottom = scrollToBottom;
+    app._wasAtBottomBeforeWrite = true;
+    app._lastUserScrollUpAt = 0;
+    app.pendingWrites.push('\x1b[55;1H\x1b[2m• Working (6s)');
+
+    app.flushPendingWrites();
+
+    expect(scrollToBottom).not.toHaveBeenCalled();
+  });
 });
