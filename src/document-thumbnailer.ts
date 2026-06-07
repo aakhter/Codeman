@@ -51,7 +51,8 @@ async function renderOfficeFirstPage(filePath: string): Promise<ThumbnailResult 
 
     const converted = (await fs.readdir(previewDir)).find((name) => name.toLowerCase().endsWith('.pdf'));
     if (!converted) return null;
-    return renderPdfFirstPage(join(previewDir, converted));
+    const thumbnail = await renderPdfFirstPage(join(previewDir, converted));
+    return thumbnail;
   } catch {
     return null;
   } finally {
