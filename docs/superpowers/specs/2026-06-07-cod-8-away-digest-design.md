@@ -265,8 +265,8 @@ Mobile/layout tests:
 - No push-notification changes.
 - No automatic file/image preview fetches.
 
-## Review Questions
+## Review Decisions
 
-1. Should "since last visit" update when the modal opens, or only after the user closes it? Recommended: after successful load and close.
-2. Should COD-8 include subagent completions in the first implementation if they are only recent/live, or defer them to the durable event-store follow-up? Recommended: include recent/live with a freshness note.
-3. Should a zero-exit lifecycle event count as completed, or only as informational unless paired with a run-summary completion event? Recommended: informational unless paired with completion evidence.
+1. "Since last visit" updates after a successful load and close, not when the modal opens.
+2. The first implementation includes recent/live subagent completions with a freshness note.
+3. Zero-exit lifecycle events are informational unless paired with stronger completion evidence.
