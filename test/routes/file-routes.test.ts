@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Readable } from 'node:stream';
 import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
 import { registerFileRoutes } from '../../src/web/routes/file-routes.js';
 
@@ -15,7 +16,16 @@ vi.mock('node:fs/promises', () => ({
     readdir: vi.fn(async () => []),
     readFile: vi.fn(async () => 'file content'),
     stat: vi.fn(async () => ({ size: 100, isFile: () => true })),
+    mkdtemp: vi.fn(async () => '/tmp/codeman-preview-test'),
+    rm: vi.fn(async () => undefined),
   },
+}));
+
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn((_cmd, _args, _options, callback) => {
+    callback(null, { stdout: '', stderr: '' });
+    return {};
+  }),
 }));
 
 // Mock realpathSync for symlink resolution
@@ -24,6 +34,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...actual,
     realpathSync: vi.fn((p: string) => p),
+    createReadStream: vi.fn(() => Readable.from([Buffer.from('file content')])),
   };
 });
 
@@ -36,12 +47,17 @@ vi.mock('../../src/file-stream-manager.js', () => ({
 }));
 
 import fs from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { createReadStream, realpathSync } from 'node:fs';
 import { fileStreamManager } from '../../src/file-stream-manager.js';
 
 const mockedReaddir = vi.mocked(fs.readdir);
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedStat = vi.mocked(fs.stat);
+const mockedMkdtemp = vi.mocked(fs.mkdtemp);
+const mockedRm = vi.mocked(fs.rm);
+const mockedExecFile = vi.mocked(execFile);
+const mockedCreateReadStream = vi.mocked(createReadStream);
 const mockedRealpathSync = vi.mocked(realpathSync);
 const mockedFileStreamManager = vi.mocked(fileStreamManager);
 
@@ -54,8 +70,17 @@ describe('file-routes', () => {
 
     // Default: realpathSync returns the path unchanged
     mockedRealpathSync.mockImplementation((p: string) => p as never);
+    mockedReaddir.mockResolvedValue([] as never);
+    mockedReadFile.mockResolvedValue('file content' as never);
     // Default stat
     mockedStat.mockResolvedValue({ size: 100, isFile: () => true } as never);
+    mockedMkdtemp.mockResolvedValue('/tmp/codeman-preview-test' as never);
+    mockedRm.mockResolvedValue(undefined as never);
+    mockedExecFile.mockImplementation((_cmd, _args, _options, callback) => {
+      callback(null, { stdout: '', stderr: '' });
+      return {} as never;
+    });
+    mockedCreateReadStream.mockReturnValue(Readable.from([Buffer.from('file content')]) as never);
   });
 
   afterEach(async () => {
@@ -367,7 +392,7 @@ describe('file-routes', () => {
 
     it('serves registered live external attachments by attachment id', async () => {
       const content = Buffer.from('%PDF-1.7');
-      mockedReadFile.mockResolvedValue(content as never);
+      mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
       mockedStat.mockResolvedValue({ size: content.length, isFile: () => true, mtimeMs: 12345 } as never);
 
       const registerRes = await harness.app.inject({
@@ -384,7 +409,7 @@ describe('file-routes', () => {
 
       expect(rawRes.statusCode).toBe(200);
       expect(rawRes.headers['content-type']).toBe('application/pdf');
-      expect(rawRes.body).toBe(content.toString());
+      expect(mockedCreateReadStream).toHaveBeenCalledWith('/mnt/c/decks/board-update.pdf');
     });
 
     it('rejects unknown attachment ids instead of accepting arbitrary browser paths', async () => {
@@ -440,7 +465,7 @@ describe('file-routes', () => {
 
     it('serves raw file with correct content type', async () => {
       const content = Buffer.from('fake png data');
-      mockedReadFile.mockResolvedValue(content as never);
+      mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
       mockedStat.mockResolvedValue({ size: content.length } as never);
 
       const res = await harness.app.inject({
@@ -453,7 +478,7 @@ describe('file-routes', () => {
 
     it('serves workspace SVG as an untrusted attachment instead of inline image/svg+xml', async () => {
       const content = Buffer.from('<svg><script>alert("xss")</script></svg>');
-      mockedReadFile.mockResolvedValue(content as never);
+      mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
       mockedStat.mockResolvedValue({ size: content.length } as never);
 
       const res = await harness.app.inject({
@@ -478,14 +503,43 @@ describe('file-routes', () => {
       expect(res.statusCode).toBe(404);
     });
 
-    it('rejects overly large raw files', async () => {
+    it('streams large raw files without an app-level size cap', async () => {
+      const content = Buffer.from('large file chunk');
       mockedStat.mockResolvedValue({ size: 100 * 1024 * 1024 } as never); // 100MB
+      mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
 
       const res = await harness.app.inject({
         method: 'GET',
         url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=huge.bin`,
       });
-      expect(res.statusCode).toBe(400);
+      expect(res.statusCode).toBe(200);
+      expect(mockedCreateReadStream).toHaveBeenCalledWith('/tmp/test-workdir/huge.bin');
+    });
+  });
+
+  // ========== GET /api/sessions/:id/file-preview ==========
+
+  describe('GET /api/sessions/:id/file-preview', () => {
+    it('converts large office documents without an app-level source-size cap', async () => {
+      const pdf = Buffer.from('%PDF converted');
+      mockedStat.mockResolvedValue({ size: 150 * 1024 * 1024 } as never); // 150MB source
+      mockedReaddir.mockResolvedValue(['large-deck.pdf'] as never);
+      mockedReadFile.mockResolvedValue(pdf as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-preview?path=large-deck.pptx`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.body).toBe(pdf.toString());
+      expect(mockedExecFile).toHaveBeenCalledWith(
+        'soffice',
+        expect.arrayContaining(['--convert-to', 'pdf']),
+        expect.any(Object),
+        expect.any(Function)
+      );
     });
   });
 
@@ -550,7 +604,7 @@ describe('file-routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.headers['content-disposition']).toContain('filename="report.txt"');
-      expect(res.body).toBe('download content');
+      expect(mockedCreateReadStream).toHaveBeenCalledWith('/tmp/test-workdir/report.txt');
     });
 
     it('rejects absolute paths outside the session working directory', async () => {

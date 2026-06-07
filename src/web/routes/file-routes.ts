@@ -8,6 +8,7 @@ import { join, basename as pathBasename } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
@@ -45,8 +46,7 @@ const MIME_TYPES: Record<string, string> = {
   json: 'application/json',
 };
 
-const MAX_RAW_FILE_SIZE = 50 * 1024 * 1024;
-const MAX_PREVIEW_SOURCE_SIZE = 50 * 1024 * 1024;
+const OFFICE_CONVERSION_TIMEOUT_MS = 5 * 60_000;
 
 function sanitizeDownloadName(fileName: string): string {
   return fileName.replace(/["\\\r\n]/g, '_');
@@ -60,33 +60,22 @@ async function serveRawFile(
   download?: boolean
 ): Promise<void> {
   const stat = await fs.stat(resolvedPath);
-  if (stat.size > MAX_RAW_FILE_SIZE) {
-    reply
-      .code(400)
-      .send(
-        createErrorResponse(
-          ApiErrorCode.INVALID_INPUT,
-          `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_RAW_FILE_SIZE / 1024 / 1024}MB limit)`
-        )
-      );
-    return;
-  }
-
-  const content = await fs.readFile(resolvedPath);
+  const content = createReadStream(resolvedPath);
   const safeName = sanitizeDownloadName(fileName);
   if (download || extension === 'svg') {
-    reply.raw.writeHead(200, {
-      'Content-Type':
-        extension === 'svg' ? 'application/octet-stream' : MIME_TYPES[extension] || 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${safeName}"`,
-      'Content-Length': content.length,
-      'X-Content-Type-Options': 'nosniff',
-    });
-    reply.raw.end(content);
+    reply.header(
+      'Content-Type',
+      extension === 'svg' ? 'application/octet-stream' : MIME_TYPES[extension] || 'application/octet-stream'
+    );
+    reply.header('Content-Disposition', `attachment; filename="${safeName}"`);
+    reply.header('Content-Length', stat.size);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.send(content);
     return;
   }
 
   reply.header('Content-Type', MIME_TYPES[extension] || 'application/octet-stream');
+  reply.header('Content-Length', stat.size);
   reply.header('X-Content-Type-Options', 'nosniff');
   reply.send(content);
 }
@@ -106,22 +95,11 @@ async function serveConvertedPreview(
 
   let previewDir: string | undefined;
   try {
-    const stat = await fs.stat(resolvedPath);
-    if (stat.size > MAX_PREVIEW_SOURCE_SIZE) {
-      reply
-        .code(400)
-        .send(
-          createErrorResponse(
-            ApiErrorCode.INVALID_INPUT,
-            `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${MAX_PREVIEW_SOURCE_SIZE / 1024 / 1024}MB limit)`
-          )
-        );
-      return;
-    }
+    await fs.stat(resolvedPath);
 
     previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-preview-'));
     await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, resolvedPath], {
-      timeout: 30_000,
+      timeout: OFFICE_CONVERSION_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
     });
 
@@ -714,20 +692,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         return;
       }
 
-      // 50MB size limit
-      const MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024;
-      if (stat.size > MAX_DOWNLOAD_SIZE) {
-        reply
-          .code(400)
-          .send(
-            createErrorResponse(
-              ApiErrorCode.INVALID_INPUT,
-              `File too large (${Math.round(stat.size / 1024 / 1024)}MB > 50MB limit)`
-            )
-          );
-        return;
-      }
-
       const ext = filePath.split('.').pop()?.toLowerCase() || '';
       const mimeTypes: Record<string, string> = {
         png: 'image/png',
@@ -747,15 +711,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         tar: 'application/x-tar',
       };
 
-      const filename = pathBasename(resolvedPath);
-      const content = await fs.readFile(resolvedPath);
-      // Bypass Fastify compression — write directly to raw response
-      reply.raw.writeHead(200, {
-        'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': content.length,
-      });
-      reply.raw.end(content);
+      const filename = sanitizeDownloadName(pathBasename(resolvedPath));
+      const content = createReadStream(resolvedPath);
+      reply.header('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      reply.header('Content-Length', stat.size);
+      reply.send(content);
       return;
     } catch (err) {
       reply

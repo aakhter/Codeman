@@ -9,7 +9,7 @@ import { basename, extname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const MAX_THUMBNAIL_SOURCE_SIZE = 50 * 1024 * 1024;
+const THUMBNAIL_CONVERSION_TIMEOUT_MS = 5 * 60_000;
 
 export interface ThumbnailResult {
   content: Buffer;
@@ -20,8 +20,7 @@ export async function generateFirstPageThumbnail(filePath: string, extension: st
   const ext = extension.toLowerCase().replace(/^\./, '');
 
   try {
-    const stat = await fs.stat(filePath);
-    if (stat.size > MAX_THUMBNAIL_SOURCE_SIZE) return null;
+    await fs.stat(filePath);
 
     if (ext === 'png') {
       return { content: await fs.readFile(filePath), contentType: 'image/png' };
@@ -46,7 +45,7 @@ async function renderOfficeFirstPage(filePath: string): Promise<ThumbnailResult 
   try {
     previewDir = await fs.mkdtemp(join(tmpdir(), 'codeman-thumb-office-'));
     await execFileAsync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', previewDir, filePath], {
-      timeout: 30_000,
+      timeout: THUMBNAIL_CONVERSION_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
     });
 
@@ -71,7 +70,7 @@ async function renderPdfFirstPage(filePath: string): Promise<ThumbnailResult | n
       'pdftoppm',
       ['-png', '-singlefile', '-f', '1', '-l', '1', '-scale-to', '520', filePath, prefix],
       {
-        timeout: 30_000,
+        timeout: THUMBNAIL_CONVERSION_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
       }
     );

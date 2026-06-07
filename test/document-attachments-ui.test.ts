@@ -49,6 +49,14 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('attachmentThumbnailImg.onerror');
   });
 
+  it('uses a larger slide-aspect thumbnail space without cropping widescreen slides', () => {
+    expect(stylesCss).toContain('grid-template-columns: 96px minmax(0, 1fr) 24px');
+    expect(stylesCss).toContain('width: 96px');
+    expect(stylesCss).toContain('aspect-ratio: 16 / 9');
+    expect(stylesCss).toContain('height: auto');
+    expect(stylesCss).toContain('object-fit: contain');
+  });
+
   it('uses attachment-id routes for explicitly registered live attachments', () => {
     expect(panelsJs).toContain('attachmentId');
     expect(panelsJs).toContain('/attachments/${encodeURIComponent(attachmentId)}/raw');

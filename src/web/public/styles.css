@@ -7188,13 +7188,13 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(360px, calc(100vw - 32px));
+  width: min(540px, calc(100vw - 32px));
   pointer-events: none;
 }
 
 .attachment-card {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 24px;
+  grid-template-columns: 96px minmax(0, 1fr) 24px;
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -7210,18 +7210,20 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 96px;
+  height: auto;
+  aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 6px;
-  background: #20202a;
+  background: #f8f8fb;
   border: 1px solid var(--border-light);
 }
 
 .attachment-thumbnail-img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
+  object-position: center;
   display: block;
 }
 
