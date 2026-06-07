@@ -72,7 +72,11 @@
       <div class="session-tabs" id="sessionTabs" role="tablist" aria-label="Session tabs">
       </div>
 
-      <div class="header-right">
+      <button class="mobile-header-utility-toggle" id="mobileHeaderUtilityToggle" onclick="app.toggleMobileHeaderUtilities()" aria-label="Toggle header utilities" aria-controls="headerRight" aria-expanded="false" title="Header utilities">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+      </button>
+
+      <div class="header-right mobile-collapsed" id="headerRight">
         <button class="tunnel-indicator" id="tunnelIndicator" style="display: none;" onclick="app.toggleTunnelPanel()" title="Cloudflare Tunnel" aria-label="Tunnel status">
           <span class="tunnel-dot"></span>
         </button>
@@ -1170,6 +1174,27 @@
                 <span class="slider"></span>
               </label>
               <span class="form-hint">Start new Codex sessions with --dangerously-bypass-approvals-and-sandbox</span>
+            </div>
+            <div class="form-section-header">Terminal History</div>
+            <div class="form-row" title="How many rendered terminal lines this browser keeps for the current tab. Higher values let you scroll farther back without reconnecting, but use more browser memory.">
+              <label>Browser Scrollback Lines</label>
+              <input type="number" id="appSettingsTerminalScrollbackLines" min="1000" max="1000000" step="1000" value="100000">
+              <span class="form-hint">Lines retained by xterm in this browser after reload.</span>
+            </div>
+            <div class="form-row" title="How many lines tmux keeps behind each session. Higher values improve reconnect and restore context after browser reloads or server restarts, but use more tmux memory.">
+              <label>tmux History Lines</label>
+              <input type="number" id="appSettingsTmuxHistoryLimit" min="1000" max="1000000" step="1000" value="100000">
+              <span class="form-hint">Lines retained by tmux for reconnects and new panes.</span>
+            </div>
+            <div class="form-row" title="Maximum raw terminal output Codeman keeps per session on the server. Higher values improve reload snapshots and search context, but increase server memory use.">
+              <label>Server Buffer Max MiB</label>
+              <input type="number" id="appSettingsTerminalBufferMaxMiB" min="1" max="128" step="1" value="32">
+              <span class="form-hint">Raw terminal buffer kept per session on the server.</span>
+            </div>
+            <div class="form-row" title="When the server buffer exceeds the max, Codeman trims it down to this size. Lower values free memory sooner; higher values preserve more recent terminal context.">
+              <label>Server Buffer Trim MiB</label>
+              <input type="number" id="appSettingsTerminalBufferTrimMiB" min="1" max="128" step="1" value="24">
+              <span class="form-hint">Size retained after the server buffer exceeds the max.</span>
             </div>
           </div>
           <!-- Models Tab -->

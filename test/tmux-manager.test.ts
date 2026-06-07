@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolve } from 'node:path';
 import {
   TmuxManager,
   buildCodexCommand,
@@ -149,12 +150,31 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('Codex command', () => {
-    it('keeps Codex TUI animations enabled so live Working timer redraws continue', () => {
+    it('launches the native Codex TUI by default', () => {
       const command = buildCodexCommand({ dangerouslyBypassApprovals: true });
 
-      expect(command).toContain('codex --no-alt-screen');
+      expect(command).toMatch(/^codex\b/);
+      expect(command).not.toContain('--no-alt-screen');
       expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
       expect(command).not.toContain('tui.animations=false');
+    });
+
+    it('ignores the explicit hybrid render mode because it is the only Codex renderer', () => {
+      const command = buildCodexCommand({ renderMode: 'hybrid', dangerouslyBypassApprovals: true });
+
+      expect(command).toMatch(/^codex\b/);
+      expect(command).not.toContain('--no-alt-screen');
+      expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
+    });
+  });
+
+  describe('tmux history limit', () => {
+    it('defaults new mux sessions to 100000 lines of history', async () => {
+      const { readFileSync: readActualFileSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+      const source = readActualFileSync(resolve(import.meta.dirname, '../src/tmux-manager.ts'), 'utf8');
+
+      expect(source).toContain('history-limit ${historyLimit}');
+      expect(source).toContain('DEFAULT_TMUX_HISTORY_LIMIT');
     });
   });
 

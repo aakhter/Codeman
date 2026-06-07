@@ -110,6 +110,28 @@ describe('session-routes', () => {
     });
   });
 
+  // ========== PUT /api/sessions/:id/name ==========
+
+  describe('PUT /api/sessions/:id/name', () => {
+    it('persists the renamed session immediately so restart restore keeps the custom name', async () => {
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: `/api/sessions/${harness.ctx._sessionId}/name`,
+        payload: { name: 'Custom restart-safe name' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({ success: true, name: 'Custom restart-safe name' });
+      expect(harness.ctx._session.name).toBe('Custom restart-safe name');
+      expect(harness.ctx.mux.updateSessionName).toHaveBeenCalledWith(
+        harness.ctx._sessionId,
+        'Custom restart-safe name'
+      );
+      expect(harness.ctx.persistSessionStateNow).toHaveBeenCalledWith(harness.ctx._session);
+      expect(harness.ctx.persistSessionState).not.toHaveBeenCalled();
+    });
+  });
+
   // ========== DELETE /api/sessions/:id ==========
 
   describe('DELETE /api/sessions/:id', () => {
@@ -164,7 +186,7 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
       expect(body.name).toBe('new-name');
-      expect(harness.ctx.persistSessionState).toHaveBeenCalled();
+      expect(harness.ctx.persistSessionStateNow).toHaveBeenCalled();
       expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:updated', expect.anything());
     });
 
@@ -319,7 +341,27 @@ describe('session-routes', () => {
       expect(body.terminalBuffer).toBeDefined();
     });
 
-    it('uses the live mux pane snapshot as the canonical Codex replay frame', async () => {
+    it('does not strip VPA-like shell scrollback as Ink redraw bloat', async () => {
+      const shellHistory = Array.from(
+        { length: 3000 },
+        (_, index) => `SHELL_SCROLLBACK_${String(index + 1).padStart(6, '0')} payload payload payload \x1b[1d`
+      ).join('\n');
+      harness.ctx._session.terminalBuffer = shellHistory;
+      harness.ctx._session.mode = 'shell';
+      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(() => null);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.terminalBuffer).toContain('SHELL_SCROLLBACK_000001');
+      expect(body.terminalBuffer).toContain('SHELL_SCROLLBACK_003000');
+    });
+
+    it('preserves accumulated history before the live mux pane snapshot for Codex TUI replay', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
       (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
@@ -333,13 +375,40 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).not.toContain('hello world');
-      expect(body.terminalBuffer).not.toContain('later accumulated history');
-      expect(body.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.terminalBuffer).toContain('hello world');
+      expect(body.terminalBuffer).toContain('later accumulated history');
+      expect(body.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
+      expect(body.terminalBuffer.indexOf('hello world')).toBeLessThan(
+        body.terminalBuffer.indexOf('visible tmux pane only')
+      );
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
-    it('preserves one-time OAuth authorization URLs from Codex history after the live pane snapshot', async () => {
+    it('treats stale Codex scrollback config as TUI replay', async () => {
+      harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
+      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.codexConfig = { renderMode: 'scrollback' } as any;
+      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+        () => 'visible tmux pane only\n› current prompt'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.terminalBuffer).toContain('hello world');
+      expect(body.terminalBuffer).toContain('later accumulated history');
+      expect(body.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
+      expect(body.terminalBuffer.indexOf('hello world')).toBeLessThan(
+        body.terminalBuffer.indexOf('visible tmux pane only')
+      );
+      expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+    });
+
+    it('preserves one-time OAuth authorization URLs in Codex TUI replay history', async () => {
       const authUrl =
         'https://auth.atlassian.com/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A35547%2Fcallback%2Fxyz';
       harness.ctx._session.terminalBuffer =
@@ -360,12 +429,10 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.terminalBuffer).toContain(authUrl);
       expect(body.terminalBuffer).toContain('visible tmux pane only');
-      expect(body.terminalBuffer.indexOf(authUrl)).toBeGreaterThan(
-        body.terminalBuffer.indexOf('visible tmux pane only')
-      );
+      expect(body.terminalBuffer.indexOf(authUrl)).toBeLessThan(body.terminalBuffer.indexOf('visible tmux pane only'));
     });
 
-    it('does not preserve incidental OAuth URL mentions from Codex history', async () => {
+    it('preserves incidental OAuth URL mentions as ordinary Codex TUI history', async () => {
       const authUrl =
         'https://auth.atlassian.com/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A35547%2Fcallback%2Fxyz';
       harness.ctx._session.terminalBuffer =
@@ -385,7 +452,8 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toBe('visible tmux pane only\n› current prompt');
+      expect(body.terminalBuffer).toContain(authUrl);
+      expect(body.terminalBuffer).toContain('visible tmux pane only');
     });
 
     it('preserves accumulated history before a live mux pane snapshot for non-Codex sessions', async () => {

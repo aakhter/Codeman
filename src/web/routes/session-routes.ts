@@ -72,10 +72,9 @@ const LEADING_WHITESPACE_PATTERN = /^[\s\r\n]+/;
  *   (1049 also saves cursor and clears the alt buffer).
  * - CSI 3 J = erase saved lines (scrollback).
  *
- * Codex 0.130.0 still emits `\x1b[?1049h` and clear-scrollback sequences
- * during startup and on each repaint, even when `--no-alt-screen` is set
- * (openai/codex#14277). xterm.js obeys these by switching to the alt
- * buffer (no native scrollback) and wiping saved lines, so the user's
+ * Codex emits `\x1b[?1049h` and clear-scrollback sequences during startup
+ * and on repaint. xterm.js obeys these by switching to the alt buffer
+ * (no native scrollback) and wiping saved lines, so the user's
  * conversation history disappears on every tab switch / pane refresh.
  * Stripping these from the byte stream keeps everything in the main
  * buffer with scrollback intact.
@@ -84,40 +83,6 @@ const LEADING_WHITESPACE_PATTERN = /^[\s\r\n]+/;
 const ALT_SCREEN_TOGGLE_PATTERN = /\x1b\[\?(?:47|1047|1049)[hl]/g;
 // eslint-disable-next-line no-control-regex
 const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
-const OAUTH_AUTHORIZATION_URL_PATTERN =
-  /https?:\/\/[^\s"'<>]*(?:\/authorize\?|auth\.atlassian\.com\/authorize\?)[^\s"'<>]*/i;
-const OAUTH_AUTHORIZATION_PROMPT_PATTERN =
-  /\b(?:Authorize `[^`]+` by opening this URL in your browser|Please authorize this client by visiting):?\b/i;
-const OAUTH_AUTHORIZATION_FOLLOWUP_PATTERN = /\b(?:Browser launch failed|copy the URL above manually)\b/i;
-
-function extractOneTimeAuthNotice(buffer: string): string {
-  const lines = buffer.split(/\r?\n/);
-  const keep = new Set<number>();
-  for (let promptIndex = 0; promptIndex < lines.length; promptIndex++) {
-    if (!OAUTH_AUTHORIZATION_PROMPT_PATTERN.test(lines[promptIndex])) continue;
-
-    const urlIndex = lines
-      .slice(promptIndex + 1, promptIndex + 4)
-      .findIndex((line) => OAUTH_AUTHORIZATION_URL_PATTERN.test(line));
-    if (urlIndex === -1) continue;
-
-    const absoluteUrlIndex = promptIndex + 1 + urlIndex;
-    keep.add(promptIndex);
-    keep.add(absoluteUrlIndex);
-
-    for (const neighbor of [absoluteUrlIndex + 1, absoluteUrlIndex + 2]) {
-      if (neighbor < lines.length && OAUTH_AUTHORIZATION_FOLLOWUP_PATTERN.test(lines[neighbor])) {
-        keep.add(neighbor);
-      }
-    }
-  }
-
-  return [...keep]
-    .sort((a, b) => a - b)
-    .map((i) => lines[i])
-    .join('\n')
-    .trim();
-}
 
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
@@ -404,6 +369,7 @@ export function registerSessionRoutes(
               ? modelConfig?.defaultModel || undefined
               : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
+    const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const session = new Session({
       workingDir,
       mode,
@@ -420,6 +386,11 @@ export function registerSessionRoutes(
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
       effort: body.effort,
+      tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
+      terminalBufferConfig: {
+        maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
+        trimBytes: terminalHistoryConfig.terminalBufferTrimBytes,
+      },
     });
 
     ctx.addSession(session);
@@ -446,7 +417,8 @@ export function registerSessionRoutes(
     session.name = name;
     // Also update the mux session name if applicable
     ctx.mux.updateSessionName(id, session.name);
-    persistAndBroadcastSession(ctx, session);
+    ctx.persistSessionStateNow(session);
+    ctx.broadcast(SseEvent.SessionUpdated, ctx.getSessionStateWithRespawn(session));
     return { success: true, name: session.name };
   });
 
@@ -981,15 +953,12 @@ export function registerSessionRoutes(
     const muxName = session.muxName;
     const liveMuxBuffer =
       muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName) : null;
-    const oneTimeAuthNotice =
-      session.mode === 'codex' && liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? extractOneTimeAuthNotice(session.terminalBuffer)
-        : '';
+    const preserveAccumulatedHistory = session.mode === 'codex';
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? session.mode === 'codex'
-          ? oneTimeAuthNotice && !liveMuxBuffer.includes(oneTimeAuthNotice)
-            ? `${liveMuxBuffer}\r\n${oneTimeAuthNotice}`
+        ? preserveAccumulatedHistory
+          ? session.terminalBufferLength > 0
+            ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
             : liveMuxBuffer
           : session.terminalBufferLength > 0
             ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
@@ -1004,10 +973,9 @@ export function registerSessionRoutes(
     // During long thinking phases, Ink rewrites the same rows thousands of times
     // (500KB+). Without stripping, tail mode returns only spinner frames and
     // the terminal appears empty when switching tabs.
-    let strippedBuffer = stripInkRedrawBloat(rawBuffer);
+    let strippedBuffer = session.mode === 'shell' ? rawBuffer : stripInkRedrawBloat(rawBuffer);
 
     // Strip alt-screen toggles and scrollback-erase from codex byte streams.
-    // Codex 0.130.0 emits these even with --no-alt-screen (openai/codex#14277);
     // xterm.js obeys them by switching to its scrollback-less alt buffer and
     // wiping saved lines, so conversation history disappears on tab switch.
     if (session.mode === 'codex') {
@@ -1326,6 +1294,7 @@ export function registerSessionRoutes(
               ? qsModelConfig?.defaultModel || undefined
               : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
+    const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const session = new Session({
       workingDir: casePath,
       mux: ctx.mux,
@@ -1340,6 +1309,11 @@ export function registerSessionRoutes(
       geminiConfig: mode === 'gemini' ? geminiConfig : undefined,
       envOverrides,
       effort,
+      tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
+      terminalBufferConfig: {
+        maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
+        trimBytes: terminalHistoryConfig.terminalBufferTrimBytes,
+      },
     });
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting

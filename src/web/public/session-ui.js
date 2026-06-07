@@ -613,6 +613,7 @@ Object.assign(CodemanApp.prototype, {
           mode: 'codex',
           codexConfig: {
             dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
+            renderMode: 'hybrid',
           },
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
         })

@@ -509,6 +509,10 @@ body {
   flex-shrink: 0;
 }
 
+.mobile-header-utility-toggle {
+  display: none;
+}
+
 /* Connection Indicator */
 .connection-indicator {
   display: flex;

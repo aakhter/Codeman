@@ -348,6 +348,47 @@ describe('system-routes', () => {
       expect(mockedWriteFile).toHaveBeenCalled();
     });
 
+    it('saves terminal history settings and applies tmux history immediately', async () => {
+      mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/settings',
+        payload: {
+          terminalScrollbackLines: 100000,
+          tmuxHistoryLimit: 100000,
+          terminalBufferMaxBytes: 32 * 1024 * 1024,
+          terminalBufferTrimBytes: 24 * 1024 * 1024,
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).success).toBe(true);
+      const writtenContent = JSON.parse(mockedWriteFile.mock.calls[0][1] as string);
+      expect(writtenContent).toMatchObject({
+        terminalScrollbackLines: 100000,
+        tmuxHistoryLimit: 100000,
+        terminalBufferMaxBytes: 32 * 1024 * 1024,
+        terminalBufferTrimBytes: 24 * 1024 * 1024,
+      });
+      expect(harness.ctx.mux.setHistoryLimit).toHaveBeenCalledWith(100000);
+    });
+
+    it('rejects invalid terminal history settings', async () => {
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/settings',
+        payload: {
+          terminalScrollbackLines: 0,
+          tmuxHistoryLimit: 100000,
+          terminalBufferMaxBytes: 1024,
+          terminalBufferTrimBytes: 2048,
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+
     it('merges with existing settings', async () => {
       mockedReadFile.mockResolvedValue(JSON.stringify({ showCost: true }) as never);
 

@@ -9,6 +9,7 @@
  */
 import { vi } from 'vitest';
 import { MockSession, createMockSession } from './mock-session.js';
+import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
 
 /**
  * Creates a mock context that satisfies all port interfaces.
@@ -76,6 +77,7 @@ export function createMockRouteContext(options?: { sessionId?: string }) {
     getGlobalNiceConfig: vi.fn(async () => undefined),
     getModelConfig: vi.fn(async () => null),
     getClaudeModeConfig: vi.fn(async () => ({})),
+    getTerminalHistoryConfig: vi.fn(async () => resolveTerminalHistoryConfig()),
     getDefaultClaudeMdPath: vi.fn(async () => undefined),
     getLightState: vi.fn(() => ({ sessions: [], status: 'ok' })),
     getLightSessionsState: vi.fn(() => {
@@ -96,6 +98,7 @@ export function createMockRouteContext(options?: { sessionId?: string }) {
       listSessions: vi.fn(() => []),
       getStats: vi.fn(() => ({})),
       updateSessionName: vi.fn(() => true),
+      setHistoryLimit: vi.fn(async () => {}),
       getSession: vi.fn(() => null),
       clearRespawnConfig: vi.fn(),
       updateRespawnConfig: vi.fn(),

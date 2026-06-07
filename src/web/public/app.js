@@ -2935,6 +2935,7 @@ class CodemanApp {
 
   async selectSession(sessionId, options = {}) {
     const forceReload = options?.forceReload === true;
+    this.closeMobileHeaderUtilities?.();
     if (this.activeSessionId === sessionId && !forceReload) return;
     if (this.activeSessionId === sessionId && forceReload) {
       this.terminalBufferCache?.delete(sessionId);

@@ -40,6 +40,7 @@ function loadTerminalUiHarness(mode: string) {
   app.terminal = {
     write: (data: string) => writes.push(data),
     scrollToBottom: () => {},
+    scrollToLine: () => {},
   };
 
   return { app, writes };
@@ -123,5 +124,24 @@ describe('terminal flush budget', () => {
     app.flushPendingWrites();
 
     expect(scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('restores the user scroll position when Codex Working redraws move the viewport', () => {
+    const { app } = loadTerminalUiHarness('codex');
+    const buffer = { viewportY: 40, baseY: 100 };
+    app.terminal.buffer = { active: buffer };
+    app.terminal.write = vi.fn(() => {
+      buffer.viewportY = buffer.baseY;
+    });
+    app.terminal.scrollToLine = vi.fn((line: number) => {
+      buffer.viewportY = line;
+    });
+    app._wasAtBottomBeforeWrite = true;
+    app._lastUserScrollUpAt = 0;
+    app.pendingWrites.push('\x1b[55;1H\x1b[2m• Working (6s)');
+
+    app.flushPendingWrites();
+
+    expect(buffer.viewportY).toBe(40);
   });
 });

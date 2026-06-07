@@ -72,6 +72,8 @@ export interface OpenCodeConfig {
 }
 
 /** Codex (OpenAI CLI) session configuration */
+export type CodexRenderMode = 'hybrid';
+
 export interface CodexConfig {
   /** Model identifier (e.g., "gpt-5", "o4-mini"). Passed via --model. */
   model?: string;
@@ -79,6 +81,8 @@ export interface CodexConfig {
   resumeSessionId?: string;
   /** Bypass approval prompts (passes --dangerously-bypass-approvals-and-sandbox) */
   dangerouslyBypassApprovals?: boolean;
+  /** Browser rendering strategy for Codex sessions. Hybrid TUI is the only supported mode. */
+  renderMode?: CodexRenderMode;
 }
 
 /** Gemini CLI session configuration */

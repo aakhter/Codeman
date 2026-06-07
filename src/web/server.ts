@@ -97,6 +97,7 @@ import {
 import { CleanupManager, KeyedDebouncer, StaleExpirationMap, startEventLoopMonitor } from '../utils/index.js';
 import type { EventLoopMonitorHandle } from '../utils/index.js';
 import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.js';
+import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { SseEvent } from './sse-events.js';
 import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders } from './middleware/auth.js';
@@ -497,6 +498,7 @@ export class WebServer extends EventEmitter {
       getGlobalNiceConfig: this.getGlobalNiceConfig.bind(this),
       getModelConfig: this.getModelConfig.bind(this),
       getClaudeModeConfig: this.getClaudeModeConfig.bind(this),
+      getTerminalHistoryConfig: this.getTerminalHistoryConfig.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
       getLightSessionsState: this.getLightSessionsState.bind(this),
@@ -1152,6 +1154,11 @@ export class WebServer extends EventEmitter {
       return { claudeMode, allowedTools };
     }
     return {};
+  }
+
+  private async getTerminalHistoryConfig() {
+    const settings = await this.readSettings();
+    return resolveTerminalHistoryConfig(settings);
   }
 
   // Helper to get model configuration from settings

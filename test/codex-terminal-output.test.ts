@@ -11,6 +11,34 @@ function handleOutput(session: Session, data: string): void {
 }
 
 describe('Codex terminal output filtering', () => {
+  it('uses configured terminal buffer limits for session stats and trimming', () => {
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      terminalBufferConfig: { maxBytes: 20, trimBytes: 10 },
+    });
+
+    handleOutput(session, '1234567890abcdefghijk');
+
+    expect(session.terminalBuffer).toBe('bcdefghijk');
+    expect(session.toLightDetailedState().bufferStats.maxTerminalBuffer).toBe(20);
+  });
+
+  it('keeps browser scrollback guards but skips Codeman row repair in hybrid render mode', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex', codexConfig: { renderMode: 'hybrid' } });
+    (session as unknown as SessionInternals)._ptyRows = 63;
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+    const hybridRedraw = '\x1b[?1049h\x1b[55;1H\x1b[2m• Working (21s)\x1b[3J\x1b[?1006h\x1b[?1049l';
+
+    handleOutput(session, hybridRedraw);
+
+    expect(emitted[0]).toBe('\x1b[55;1H\x1b[2m• Working (21s)');
+    expect(emitted[0]).not.toContain('\x1b[55;1H\x1b[2K');
+    expect(session.terminalBuffer).toBe(emitted[0]);
+  });
+
   it('preserves Codex erase-display redraws used by the TUI layout engine', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
 
@@ -36,7 +64,7 @@ describe('Codex terminal output filtering', () => {
     expect(session.terminalBuffer).toBe('\x1b[H\x1b[Jredraw after clear');
   });
 
-  it('clears the Codex prompt/status rows without clearing output above them', () => {
+  it('passes native Codex TUI prompt/status redraws through without row repair', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;
 
@@ -58,12 +86,12 @@ describe('Codex terminal output filtering', () => {
     handleOutput(session, bottomBandRedraw);
 
     expect(emitted[0]).not.toContain('\x1b[52;1H\x1b[2K');
-    expect(emitted[0]).toContain('\x1b[60;1H\x1b[2K');
-    expect(emitted[0]).toContain('\x1b[63;1H\x1b[2K');
-    expect(emitted[0].indexOf('\x1b[60;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(bottomBandRedraw));
+    expect(emitted[0]).not.toContain('\x1b[60;1H\x1b[2K');
+    expect(emitted[0]).not.toContain('\x1b[63;1H\x1b[2K');
+    expect(emitted[0]).toContain(bottomBandRedraw);
   });
 
-  it('clears Codex advisory rows even when they are above the terminal bottom', () => {
+  it('passes Codex advisory rows through without row repair', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;
 
@@ -76,8 +104,8 @@ describe('Codex terminal output filtering', () => {
 
     handleOutput(session, advisoryRedraw);
 
-    expect(emitted[0]).toContain('\x1b[55;1H\x1b[2K');
-    expect(emitted[0].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(advisoryRedraw));
+    expect(emitted[0]).not.toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[0]).toContain(advisoryRedraw);
   });
 
   it('does not clear Codex resume-picker rows just because an option is selected', () => {
@@ -125,7 +153,7 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).toContain(sparseResumePickerRedraw);
   });
 
-  it('clears Codex UI rows vacated when the status band moves downward', () => {
+  it('passes Codex UI rows through when the status band moves downward', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;
 
@@ -141,10 +169,10 @@ describe('Codex terminal output filtering', () => {
       '\x1b[58;1H\x1b[2m• Working (2s)\x1b[59;1H\x1b[1m›\x1b[0m ask\x1b[60;3Hgpt-5.5 · Context 79% left'
     );
 
-    expect(emitted[1]).toContain('\x1b[55;1H\x1b[2K');
-    expect(emitted[1]).toContain('\x1b[56;1H\x1b[2K');
-    expect(emitted[1]).toContain('\x1b[57;1H\x1b[2K');
-    expect(emitted[1].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[1].indexOf('\x1b[58;1H'));
+    expect(emitted[1]).not.toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[56;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[57;1H\x1b[2K');
+    expect(emitted[1]).toContain('\x1b[58;1H');
     expect(emitted[1]).not.toContain('\x1b[54;1H\x1b[2K');
   });
 
@@ -164,7 +192,7 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[1]).not.toContain('\x1b[H\x1b[2J');
   });
 
-  it('clears status-only Codex Working redraw rows before writing them', () => {
+  it('passes status-only Codex Working redraw rows through', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;
 
@@ -175,12 +203,12 @@ describe('Codex terminal output filtering', () => {
 
     handleOutput(session, workingRedraw);
 
-    expect(emitted[0]).toContain('\x1b[55;1H\x1b[2K');
-    expect(emitted[0].indexOf('\x1b[55;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(workingRedraw));
+    expect(emitted[0]).not.toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[0]).toContain(workingRedraw);
     expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
   });
 
-  it('clears Codex spinner Working rows that omit elapsed time parentheses', () => {
+  it('passes Codex spinner Working rows that omit elapsed time parentheses through', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 29;
 
@@ -191,8 +219,8 @@ describe('Codex terminal output filtering', () => {
 
     handleOutput(session, spinnerRedraw);
 
-    expect(emitted[0]).toContain('\x1b[24;1H\x1b[2K');
-    expect(emitted[0].indexOf('\x1b[24;1H\x1b[2K')).toBeLessThan(emitted[0].indexOf(spinnerRedraw));
+    expect(emitted[0]).not.toContain('\x1b[24;1H\x1b[2K');
+    expect(emitted[0]).toContain(spinnerRedraw);
     expect(emitted[0]).not.toContain('\x1b[H\x1b[2J');
   });
 
@@ -212,7 +240,7 @@ describe('Codex terminal output filtering', () => {
     expect(emitted[0]).not.toContain('\x1b[20;1H\x1b[2K');
   });
 
-  it('does not erase prompt or status rows during partial Working spinner ticks', () => {
+  it('does not inject row erases during partial Working spinner ticks', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     (session as unknown as SessionInternals)._ptyRows = 63;
 
@@ -227,8 +255,9 @@ describe('Codex terminal output filtering', () => {
     );
     handleOutput(session, '\x1b[55;1H\x1b[2m• Working (2s)');
 
-    expect(emitted[1]).toContain('\x1b[55;1H\x1b[2K');
+    expect(emitted[1]).not.toContain('\x1b[55;1H\x1b[2K');
     expect(emitted[1]).not.toContain('\x1b[56;1H\x1b[2K');
     expect(emitted[1]).not.toContain('\x1b[57;1H\x1b[2K');
+    expect(emitted[1]).toContain('\x1b[55;1H\x1b[2m• Working (2s)');
   });
 });

@@ -59,6 +59,7 @@ import type {
   CreateSessionOptions,
   RespawnPaneOptions,
 } from './mux-interface.js';
+import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 
 // ============================================================================
 // Timing Constants
@@ -536,19 +537,11 @@ function buildOpenCodeCommand(config?: OpenCodeConfig): string {
 /**
  * Build the codex CLI command with appropriate flags.
  *
- * - `--no-alt-screen` keeps codex's TUI in the main buffer so conversation
- *   bytes stay in xterm.js scrollback (openai/codex#14277).
- * - TUI animations stay enabled. Codex's live status line (for example
- *   `Working (31s)`) is driven by those redraw ticks; disabling animations
- *   makes the timer update only when other terminal output arrives.
- *
- * `--no-alt-screen` is codeman-specific (other codex invocations the user
- * runs directly keep their default behavior — they need their own `~/.codex/
- * config.toml` for that). Codeman handles the extra animated redraws with
- * row-repair filtering in Session._handleTerminalOutput.
+ * Codeman launches Codex's native TUI and handles replay/scrollback by
+ * stripping destructive terminal sequences before xterm.js sees them.
  */
 export function buildCodexCommand(config?: CodexConfig): string {
-  const parts = ['codex', '--no-alt-screen'];
+  const parts = ['codex'];
 
   if (config?.dangerouslyBypassApprovals) {
     parts.push('--dangerously-bypass-approvals-and-sandbox');
@@ -1042,6 +1035,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       resumeSessionId,
       envOverrides,
       effort,
+      historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
     } = options;
     const muxName = `codeman-${sessionId.slice(0, 8)}`;
 
@@ -1189,8 +1183,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             /* Already set globally as fallback */
           }),
         // Raise tmux scrollback from its 2000-line default so re-attach preserves
-        // more context. Matches the xterm-side default in constants.js.
-        execAsync(`${this.tmux()} set-option -t "${muxName}" history-limit 50000`, { timeout: EXEC_TIMEOUT_MS })
+        // more context. Defaults match the xterm-side setting.
+        execAsync(`${this.tmux()} set-option -t "${muxName}" history-limit ${historyLimit}`, {
+          timeout: EXEC_TIMEOUT_MS,
+        })
           .then(() => {})
           .catch(() => {
             /* Non-critical — falls back to tmux default */
@@ -1313,6 +1309,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       resumeSessionId,
       envOverrides,
       effort,
+      historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
     } = options;
     const session = this.sessions.get(sessionId);
     if (!session) return null;
@@ -1357,6 +1354,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Re-apply user env overrides before respawn so the new shell inherits them.
       this.applyEnvOverrides(muxName, envOverrides);
+      await execAsync(`${this.tmux()} set-option -t ${shellescape(muxName)} history-limit ${historyLimit}`, {
+        timeout: EXEC_TIMEOUT_MS,
+      }).catch(() => {
+        /* Non-critical — keeps existing tmux history-limit */
+      });
 
       // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
@@ -1567,6 +1569,21 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     session.name = name;
     this.saveSessions();
     return true;
+  }
+
+  async setHistoryLimit(limit: number): Promise<void> {
+    const safeLimit = Number.isSafeInteger(limit) && limit > 0 ? Math.trunc(limit) : DEFAULT_TMUX_HISTORY_LIMIT;
+
+    if (IS_TEST_MODE) {
+      return;
+    }
+
+    const updates = Array.from(this.sessions.values()).map((session) =>
+      execAsync(`${this.tmux()} set-option -t ${shellescape(session.muxName)} history-limit ${safeLimit}`, {
+        timeout: EXEC_TIMEOUT_MS,
+      })
+    );
+    await Promise.allSettled(updates);
   }
 
   /**

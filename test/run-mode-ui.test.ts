@@ -83,9 +83,24 @@ describe('Codex quick start settings', () => {
       /<div class="modal-tab-content hidden" id="settings-codex">([\s\S]*?)<\/div>\s*<!-- Models Tab -->/
     );
     expect(codexTab?.[1]).toContain('appSettingsCodexDangerouslyBypassApprovals');
+    expect(codexTab?.[1]).not.toContain('appSettingsCodexRenderMode');
   });
 
-  it('passes the global Codex bypass setting into quick-start config', async () => {
+  it('renders terminal history settings with scrollback-matched replay defaults', () => {
+    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
+    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
+
+    expect(html).toContain('appSettingsTerminalScrollbackLines');
+    expect(html).toContain('appSettingsTmuxHistoryLimit');
+    expect(html).toContain('appSettingsTerminalBufferMaxMiB');
+    expect(html).toContain('appSettingsTerminalBufferTrimMiB');
+    expect(settingsUi).toContain('terminalScrollbackLines: 100000');
+    expect(settingsUi).toContain('tmuxHistoryLimit: 100000');
+    expect(settingsUi).toContain('terminalBufferMaxBytes: 32 * 1024 * 1024');
+    expect(settingsUi).toContain('terminalBufferTrimBytes: 24 * 1024 * 1024');
+  });
+
+  it('passes global Codex settings into quick-start config for new sessions', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },
     };
@@ -115,7 +130,9 @@ describe('Codex quick start settings', () => {
 
     const app = new (CodemanApp as any)();
     app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
-    app.loadAppSettingsFromStorage = () => ({ codexDangerouslyBypassApprovals: true });
+    app.loadAppSettingsFromStorage = () => ({
+      codexDangerouslyBypassApprovals: true,
+    });
     app.getCaseSettings = () => ({});
     app.buildEnvOverrides = () => ({});
     app.selectSession = async () => {};
@@ -125,7 +142,29 @@ describe('Codex quick start settings', () => {
     expect(requests.find((req) => req.url === '/api/quick-start')?.body).toMatchObject({
       caseName: 'codex-case',
       mode: 'codex',
-      codexConfig: { dangerouslyBypassApprovals: true },
+      codexConfig: { dangerouslyBypassApprovals: true, renderMode: 'hybrid' },
     });
+  });
+});
+
+describe('mobile header utilities', () => {
+  it('renders a mobile utility toggle and collapsible header-right tray without shrinking tabs', () => {
+    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
+    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
+    const mobileCss = readFileSync(resolve(import.meta.dirname, '../src/web/public/mobile.css'), 'utf8');
+
+    expect(html).toContain('id="mobileHeaderUtilityToggle"');
+    expect(html).toContain('onclick="app.toggleMobileHeaderUtilities()"');
+    expect(html).toContain('aria-controls="headerRight"');
+    expect(html).toContain('<div class="header-right mobile-collapsed" id="headerRight">');
+
+    expect(settingsUi).toContain('toggleMobileHeaderUtilities()');
+    expect(settingsUi).toContain('closeMobileHeaderUtilities()');
+
+    expect(mobileCss).toContain('.mobile-header-utility-toggle');
+    expect(mobileCss).toContain('.header-right.mobile-collapsed');
+    expect(mobileCss).toContain('position: absolute');
+    expect(mobileCss).toContain('.session-tabs');
+    expect(mobileCss).toContain('flex: 1');
   });
 });

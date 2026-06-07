@@ -1637,6 +1637,10 @@ Object.assign(CodemanApp.prototype, {
     const activeSession = this.activeSessionId && this.sessions ? this.sessions.get(this.activeSessionId) : null;
     const MAX_FRAME_BYTES = activeSession?.mode === 'codex' ? 32768 : 65536;
     let deferred = false;
+    const preserveViewportY =
+      this._hasRecentUserScrollUp() && this.terminal.buffer?.active
+        ? this.terminal.buffer.active.viewportY
+        : null;
 
     if (_joinedLen <= MAX_FRAME_BYTES) {
       this.terminal.write(joined);
@@ -1652,6 +1656,13 @@ Object.assign(CodemanApp.prototype, {
           this.writeFrameScheduled = false;
         });
       }
+    }
+    if (
+      preserveViewportY !== null &&
+      this.terminal.buffer?.active?.viewportY !== preserveViewportY &&
+      typeof this.terminal.scrollToLine === 'function'
+    ) {
+      this.terminal.scrollToLine(preserveViewportY);
     }
     const bytesThisFrame = deferred ? MAX_FRAME_BYTES : _joinedLen;
     const _dt = performance.now() - _t0;

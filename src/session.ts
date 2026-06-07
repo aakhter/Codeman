@@ -73,6 +73,7 @@ import {
   MAX_LINE_BUFFER_SIZE,
 } from './config/buffer-limits.js';
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
+import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import {
   buildInteractiveArgs,
   buildPromptArgs,
@@ -127,13 +128,6 @@ const CTRL_L_PATTERN = /\x0c/g;
 /** Pattern to split by newlines (CR or LF) */
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
-const CODEX_WORKING_STATUS_TEXT_PATTERN = /(?:[•●].{0,8}Working|Working(?:\s|\(|$))/;
-const CODEX_STATUS_LINE_TEXT_PATTERN = /Context \d+% left|Tasks \d+\/\d+/;
-const CODEX_UI_ANCHOR_ROW_TEXT_PATTERN = new RegExp(
-  `${CODEX_STATUS_LINE_TEXT_PATTERN.source}|Messages.*toolcall|Use /skills|${CODEX_WORKING_STATUS_TEXT_PATTERN.source}`
-);
-const CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN = /^\s*[›❯](?:\s|$)/;
-
 function isExternalCliMode(mode: SessionMode): boolean {
   return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
 }
@@ -151,81 +145,6 @@ function getModeLabel(mode: SessionMode): string {
     case 'claude':
       return 'Claude';
   }
-}
-
-function ansiCount(params: string, fallback = 1): number {
-  const value = parseInt(params.replace(/[?<>=]/g, '').split(';')[0] || '', 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function collectCodexRowText(data: string): Map<number, string> {
-  const rowText = new Map<number, string>();
-  let row = 1;
-  let i = 0;
-
-  while (i < data.length) {
-    const ch = data[i];
-    if (ch === '\x1b') {
-      const next = data[i + 1];
-      if (next === '[') {
-        // eslint-disable-next-line no-control-regex
-        const csi = /^\x1b\[([0-?]*)([ -/]*)([@-~])/.exec(data.slice(i));
-        if (csi) {
-          const params = csi[1] || '';
-          const final = csi[3];
-          if (final === 'H' || final === 'f') {
-            row = ansiCount(params.split(';')[0] || '1');
-          } else if (final === 'd') {
-            row = ansiCount(params);
-          } else if (final === 'A' || final === 'F') {
-            row = Math.max(1, row - ansiCount(params));
-          } else if (final === 'B' || final === 'E' || final === 'e') {
-            row += ansiCount(params);
-          }
-          i += csi[0].length;
-          continue;
-        }
-      } else if (next === '(') {
-        i += 3;
-        continue;
-      } else if (next === 'M') {
-        row = Math.max(1, row - 1);
-        i += 2;
-        continue;
-      }
-    }
-
-    if (ch === '\n') {
-      row++;
-    } else if (ch >= ' ' && ch !== '\x7f') {
-      rowText.set(row, `${rowText.get(row) || ''}${ch}`);
-    }
-    i++;
-  }
-
-  return rowText;
-}
-
-function collectCodexPaintedRows(data: string, maxRows: number): number[] {
-  return [...collectCodexRowText(data).entries()]
-    .filter(([r, text]) => r > 3 && r <= maxRows && text.replace(/\s/g, '').length >= 3)
-    .map(([r]) => r);
-}
-
-function collectCodexUiRows(data: string, maxRows: number): number[] {
-  const rowText = collectCodexRowText(data);
-  const candidateRows = [...rowText.entries()].filter(([r]) => r > 3 && r <= maxRows);
-  const anchorRows = candidateRows.filter(([, text]) => CODEX_UI_ANCHOR_ROW_TEXT_PATTERN.test(text)).map(([r]) => r);
-  const rows = new Set(anchorRows);
-
-  for (const [r, text] of candidateRows) {
-    if (!CODEX_PROMPT_MARKER_ROW_TEXT_PATTERN.test(text)) continue;
-    if (anchorRows.some((anchor) => Math.abs(anchor - r) <= 3)) {
-      rows.add(r);
-    }
-  }
-
-  return [...rows].sort((a, b) => a - b);
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
@@ -347,8 +266,11 @@ export class Session extends EventEmitter {
   private _pid: number | null = null;
   private _status: SessionStatus = 'idle';
   private _currentTaskId: string | null = null;
+  private readonly _terminalBufferMaxSize: number;
+  private readonly _terminalBufferTrimSize: number;
+  private readonly _tmuxHistoryLimit: number;
   // Use BufferAccumulator for hot-path buffers to reduce GC pressure
-  private _terminalBuffer = new BufferAccumulator(MAX_TERMINAL_BUFFER_SIZE, TERMINAL_BUFFER_TRIM_SIZE);
+  private _terminalBuffer: BufferAccumulator;
   private _textOutput = new BufferAccumulator(MAX_TEXT_OUTPUT_SIZE, TEXT_OUTPUT_TRIM_SIZE);
   private _errorBuffer: string = '';
   private _lastActivityAt: number;
@@ -425,22 +347,6 @@ export class Session extends EventEmitter {
   // Debug capture (CODEMAN_CODEX_RAW_LOG=1): set to true after the first
   // write failure so we don't spam the server log.
   private _codexRawLogErrored = false;
-  // Most-recent DECSTBM scroll-region bottom seen in codex output. Used by
-  // the ghost-row repair heuristic to detect the "small region → full region"
-  // transition that causes stacked status bars (see _handleTerminalOutput).
-  private _codexLastDecstbmBottom: number | null = null;
-  // Last contiguous Codex prompt/status band rows we explicitly cleared.
-  // Used to erase rows vacated when the UI band moves down as well as up.
-  private _codexLastUiBandRows: number[] = [];
-  // Deepest CUP row codex hit in the most recent chunk. Used by heuristic C
-  // to detect when codex's persistent-UI band shifts upward (e.g. the MCP
-  // loader finishes and the status bar moves up 2 rows) so we can clear the
-  // rows codex vacated — codex itself doesn't clear them.
-  private _codexFrameBottomRow: number | null = null;
-  // Short-lived marker set when the user sends Ctrl+L to Codex. Codex emits
-  // the same home+erase sequence during idle redraws, so preserve it only when
-  // it directly follows user input.
-  private _codexPendingUserClearUntil = 0;
   private _resumeSessionId: string | undefined;
 
   // Ephemeral env overrides (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Exported by tmux
@@ -519,6 +425,10 @@ export class Session extends EventEmitter {
       envOverrides?: Record<string, string>;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
       effort?: EffortLevel;
+      /** Per-session terminal buffer limits; applies to this server-side session buffer. */
+      terminalBufferConfig?: { maxBytes: number; trimBytes: number };
+      /** tmux history limit for newly created mux sessions. */
+      tmuxHistoryLimit?: number;
     }
   ) {
     super();
@@ -537,6 +447,10 @@ export class Session extends EventEmitter {
     this._name = config.name || '';
     this._resumeSessionId = config.resumeSessionId;
     this._lastActivityAt = this.createdAt;
+    this._terminalBufferMaxSize = config.terminalBufferConfig?.maxBytes ?? MAX_TERMINAL_BUFFER_SIZE;
+    this._terminalBufferTrimSize = config.terminalBufferConfig?.trimBytes ?? TERMINAL_BUFFER_TRIM_SIZE;
+    this._tmuxHistoryLimit = config.tmuxHistoryLimit ?? DEFAULT_TMUX_HISTORY_LIMIT;
+    this._terminalBuffer = new BufferAccumulator(this._terminalBufferMaxSize, this._terminalBufferTrimSize);
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
     this._mux = config.mux || null;
@@ -838,6 +752,11 @@ export class Session extends EventEmitter {
     return this._allowedTools;
   }
 
+  /** Codex CLI configuration for this session. */
+  get codexConfig(): CodexConfig | undefined {
+    return this._codexConfig;
+  }
+
   // Note: _buildPermissionArgs removed — now using buildInteractiveArgs from session-cli-builder.ts
 
   /**
@@ -1064,7 +983,7 @@ export class Session extends EventEmitter {
         terminalBufferSize: this._terminalBuffer.length,
         textOutputSize: this._textOutput.length,
         messageCount: this._messages.length,
-        maxTerminalBuffer: MAX_TERMINAL_BUFFER_SIZE,
+        maxTerminalBuffer: this._terminalBufferMaxSize,
         maxTextOutput: MAX_TEXT_OUTPUT_SIZE,
         maxMessages: MAX_MESSAGES,
       },
@@ -1173,9 +1092,9 @@ export class Session extends EventEmitter {
   }
 
   private _handleTerminalOutput(data: string): void {
-    // Codex 0.130.0 emits sequences that wipe xterm.js scrollback even with
-    // --no-alt-screen (openai/codex#14277), plus mouse-tracking enables that
-    // hijack the scroll wheel so the user can't access scrollback at all:
+    // Codex emits sequences that can wipe xterm.js scrollback, plus
+    // mouse-tracking enables that hijack the scroll wheel so the user can't
+    // access scrollback at all:
     //   - \x1b[?1049h / \x1b[?47h / \x1b[?1047h: switch to alt buffer (no scrollback)
     //   - \x1b[3J: erase scrollback (saved lines)
     //   - \x1b[2J: erase the visible viewport — clears the area where prior
@@ -1216,213 +1135,13 @@ export class Session extends EventEmitter {
         }
       }
 
-      // Ghost-row repair heuristics. Both run on the original (pre-strip)
-      // data because the strips would remove or hide the signals we match on.
-      // If either triggers, we prepend a one-shot \x1b[H\x1b[2J to the
-      // post-strip data — codex's upcoming repaint then lands on a clean
-      // viewport instead of overlaying stale cells from a prior layout.
-      //
-      // Heuristic A — dense row-by-row repaint detection:
-      //   Codex's response to a missing \x1b[2J is to emit one \x1b[K per
-      //   row (visible in chunks of 63+ K's in the captured log). But the
-      //   resume picker also emits one \x1b[K per row during arrow-key
-      //   navigation while repainting only the two rows whose selection
-      //   changed. Full-clearing that sparse frame leaves exactly those two
-      //   rows visible. Only promote K erases to a real clear when the chunk
-      //   also paints enough rows to repopulate the viewport.
-      // eslint-disable-next-line no-control-regex
-      const kEraseCount = (data.match(/\x1b\[K/g) || []).length;
-      const kThreshold = Math.max(20, Math.floor(this._ptyRows / 2));
-      const densePaintedRowCount = collectCodexPaintedRows(data, this._ptyRows).length;
-      const densePaintThreshold = Math.max(8, Math.floor(this._ptyRows * 0.2));
-      const triggerA = kEraseCount >= kThreshold && densePaintedRowCount >= densePaintThreshold;
-      //
-      // Heuristic B — DECSTBM "temp scroll band" transition:
-      //   Codex briefly sets the scroll region to a small range (e.g.
-      //   \x1b[1;8r) to animate a status message scrolling into a confined
-      //   band, then resets to full height (\x1b[1;63r). Rows below the
-      //   temp band are frozen during the trick — they keep the previous
-      //   frame's content. When codex resets to a (near) full region, we
-      //   clear once so the next draws don't sit on top of those frozen
-      //   rows. "Small" = bottom < ptyRows/2, "large" = bottom ≥ 80% of
-      //   ptyRows. Tracks across chunks via _codexLastDecstbmBottom.
-      let triggerB = false;
-      // eslint-disable-next-line no-control-regex
-      const decstbmRe = /\x1b\[(\d+);(\d+)r/g;
-      for (const m of data.matchAll(decstbmRe)) {
-        const bottom = parseInt(m[2], 10);
-        if (Number.isFinite(bottom)) {
-          const isLarge = bottom >= Math.max(this._ptyRows * 0.8, 20);
-          const wasSmall = this._codexLastDecstbmBottom !== null && this._codexLastDecstbmBottom < this._ptyRows * 0.5;
-          if (isLarge && wasSmall) {
-            triggerB = true;
-          }
-          this._codexLastDecstbmBottom = bottom;
-        }
-      }
-
-      // Heuristic C — frame-bottom drift detection:
-      //   Codex's persistent-UI band (status bar, prompt, banner) can shift
-      //   to a new row when transient content above it appears or disappears
-      //   (e.g. the MCP loader takes 2 rows while active, then 0 rows when
-      //   done — the status bar moves up 2 rows). Codex draws the bar at
-      //   the new position but does NOT clear the row it vacated. The old
-      //   draw ghosts.
-      //   Detection: track the maximum CUP row in the bottom region of the
-      //   terminal across chunks. When the new chunk's max row is lower
-      //   (smaller) than the prior chunk's max row, inject erase-line
-      //   sequences for the rows in between BEFORE the chunk so codex's
-      //   new draws land on a clean canvas.
-      // We don't strictly require the row to be in the "bottom half" —
-      // codex's actual row geometry depends on DECSTBM, which can be
-      // larger than _ptyRows. We use a permissive floor: any CUP row > 3
-      // (skip the banner area) is considered.
-      // Only track CUP rows that are within the terminal bounds — codex
-      // sometimes emits CUPs to rows beyond _ptyRows (because its internal
-      // size cache lags behind SIGWINCH). Tracking those would lead C to
-      // generate clear sequences past the terminal height and leave the
-      // cursor parked near the bottom, breaking the next chunk's DECRI math.
-      const rowTextForRepair = collectCodexRowText(data);
-      const hasStableStatusAnchor = [...rowTextForRepair.values()].some((text) =>
-        CODEX_STATUS_LINE_TEXT_PATTERN.test(text)
-      );
-      const cupRows: number[] = [];
-      // eslint-disable-next-line no-control-regex
-      for (const m of data.matchAll(/\x1b\[(\d+);(\d+)H/g)) {
-        const r = parseInt(m[1], 10);
-        if (Number.isFinite(r) && r > 3 && r <= this._ptyRows) cupRows.push(r);
-      }
-      const thisFrameBottom = cupRows.length ? Math.max(...cupRows) : null;
-      // Drift cap: real UI-band shifts (status bar moving when MCP loader
-      // disappears) are 1-5 rows. Larger backward jumps in CUP target are
-      // codex doing normal screen activity (output scroll, prompt area
-      // repaint after !shell completes) — those are NOT stacking events,
-      // and clearing aggressively kills the status bar / breaks DECRI
-      // anchoring on the next chunk.
-      const MAX_C_DRIFT = 5;
-      let prependC = '';
-      if (
-        hasStableStatusAnchor &&
-        thisFrameBottom !== null &&
-        this._codexFrameBottomRow !== null &&
-        thisFrameBottom < this._codexFrameBottomRow &&
-        this._codexFrameBottomRow - thisFrameBottom <= MAX_C_DRIFT
-      ) {
-        for (let r = thisFrameBottom + 1; r <= this._codexFrameBottomRow; r++) {
-          // CUP to row r col 1, then erase entire line (\x1b[2K — both sides
-          // of cursor, unlike \x1b[K which only clears cursor → EOL).
-          prependC += `\x1b[${r};1H\x1b[2K`;
-        }
-        // Restore cursor to (1,1) so the upcoming chunk's relative cursor
-        // moves (DECRI, \r\n) anchor at the top — leaving the cursor at
-        // the cleared-rows region misanchors codex's next draws.
-        if (prependC) prependC += '\x1b[1;1H';
-      }
-      if (thisFrameBottom !== null) {
-        this._codexFrameBottomRow = thisFrameBottom;
-      }
-
-      const promptStatusRows = collectCodexUiRows(data, this._ptyRows);
-      const hasExplicitStatusRow = CODEX_WORKING_STATUS_TEXT_PATTERN.test(data);
-      const promptStatusTop = promptStatusRows.length
-        ? Math.max(4, Math.min(...promptStatusRows) - (hasExplicitStatusRow ? 0 : 1))
-        : null;
-      const promptStatusBottom = promptStatusRows.length ? Math.max(...promptStatusRows) : null;
-      const currentUiBandRows: number[] = [];
-      let prependVacatedUiRows = '';
-      let prependBottomBand = '';
-      if (promptStatusTop !== null && promptStatusBottom !== null) {
-        for (let r = promptStatusTop; r <= promptStatusBottom; r++) {
-          currentUiBandRows.push(r);
-        }
-
-        const currentUiBandSet = new Set(currentUiBandRows);
-        const vacatedUiRows = hasStableStatusAnchor
-          ? this._codexLastUiBandRows.filter((r) => !currentUiBandSet.has(r))
-          : [];
-        if (vacatedUiRows.length > 0) {
-          prependVacatedUiRows = '\x1b7';
-          for (const r of vacatedUiRows) {
-            prependVacatedUiRows += `\x1b[${r};1H\x1b[2K`;
-          }
-          prependVacatedUiRows += '\x1b8';
-        }
-
-        prependBottomBand = '\x1b7';
-        for (let r = promptStatusTop; r <= promptStatusBottom; r++) {
-          prependBottomBand += `\x1b[${r};1H\x1b[2K`;
-        }
-        prependBottomBand += '\x1b8';
-        if (hasStableStatusAnchor) {
-          this._codexLastUiBandRows = currentUiBandRows;
-        }
-      }
-
-      // Track home+erase when it directly follows a user Ctrl+L so internal
-      // frame-position repair state resets with the user's explicit clear.
-      // eslint-disable-next-line no-control-regex
-      const hasHomeErase = /\x1b\[(?:1;1)?H\x1b\[[0-3]?J/.test(data);
-      const preserveUserClear = this._codexPendingUserClearUntil >= Date.now() && hasHomeErase;
-      if (hasHomeErase || this._codexPendingUserClearUntil < Date.now()) {
-        this._codexPendingUserClearUntil = 0;
-      }
-      if (preserveUserClear) {
-        this._codexFrameBottomRow = null;
-        this._codexLastDecstbmBottom = null;
-        this._codexLastUiBandRows = [];
-      }
-
       data = data
         // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '');
-
-      data = data
-        // Keep visible-screen erases (J/0J/1J/2J): Codex relies on them
-        // before scroll-region and reverse-index redraws. Stripping them
-        // leaves stale rows that xterm later scrolls into the active frame.
-        // Strip only 3J, which erases saved scrollback.
+        .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '')
         // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[3J/g, '');
-
-      data = data
+        .replace(/\x1b\[3J/g, '')
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
-
-      // Build the injection prefix from all triggered heuristics, in order:
-      // first the screen-wide clear (A/B), then the per-row vacated-row
-      // clears (C). Heuristic C still runs even when A or B fires — A/B
-      // wipes the viewport but doesn't update _codexFrameBottomRow.
-      let prefix = '';
-      if (triggerA || triggerB) {
-        prefix += '\x1b[H\x1b[2J';
-        if (currentUiBandRows.length === 0) this._codexLastUiBandRows = [];
-      }
-      prefix += prependC;
-      prefix += prependVacatedUiRows;
-      prefix += prependBottomBand;
-      if (prefix) {
-        if (process.env.CODEMAN_CODEX_RAW_LOG === '1') {
-          console.log(
-            `[Session ${this.id}] codex ghost-row repair fired: ` +
-              `A=${triggerA} (K=${kEraseCount}/${kThreshold}) ` +
-              `Paint=${densePaintedRowCount}/${densePaintThreshold} ` +
-              `B=${triggerB} (last DECSTBM bottom=${this._codexLastDecstbmBottom}) ` +
-              `C=${prependC.length > 0} (frame bottom ${this._codexFrameBottomRow}, ${(prependC.length / 8) | 0} rows cleared) ` +
-              `Band=${prependBottomBand.length > 0} ` +
-              `userClear=${preserveUserClear}`
-          );
-        }
-        data = prefix + data;
-      }
-      // NOTE: previously also stripped DECSTBM (\x1b[N;Mr scroll region) so
-      // codex's scrolls flowed into xterm's real scrollback. But removing
-      // DECSTBM made codex's CUP-based redraws drift visually — codex
-      // computes element positions assuming its partial scroll region, and
-      // the full-viewport rendering left the UI squashed into 2-3 visible
-      // rows with content spilling outside. Keeping DECSTBM in the stream
-      // restores correct layout; the trade-off is that /rename, /clear,
-      // and long completions still lose content scrolled off the top of
-      // codex's partial region — recoverable via `codex resume <thread>`.
     }
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
@@ -1461,6 +1180,7 @@ export class Session extends EventEmitter {
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
+            historyLimit: this._tmuxHistoryLimit,
           },
           createSessionOptions: {
             sessionId: this.id,
@@ -1477,6 +1197,7 @@ export class Session extends EventEmitter {
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
+            historyLimit: this._tmuxHistoryLimit,
           },
           spawnErrLabel: 'mux attachment',
         });
@@ -1807,6 +1528,7 @@ export class Session extends EventEmitter {
             mode: 'shell',
             niceConfig: this._niceConfig,
             envOverrides: this._envOverrides,
+            historyLimit: this._tmuxHistoryLimit,
           },
           createSessionOptions: {
             sessionId: this.id,
@@ -1815,6 +1537,7 @@ export class Session extends EventEmitter {
             name: this._name,
             niceConfig: this._niceConfig,
             envOverrides: this._envOverrides,
+            historyLimit: this._tmuxHistoryLimit,
           },
           spawnErrLabel: 'shell mux attachment',
         });
@@ -2420,9 +2143,6 @@ export class Session extends EventEmitter {
    * ```
    */
   write(data: string): void {
-    if (this.mode === 'codex' && data.includes('\x0c')) {
-      this._codexPendingUserClearUntil = Date.now() + 2000;
-    }
     if (this.ptyProcess) {
       this.ptyProcess.write(data);
     }
@@ -2445,9 +2165,6 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
-    if (this.mode === 'codex' && data.includes('\x0c')) {
-      this._codexPendingUserClearUntil = Date.now() + 2000;
-    }
     if (this._mux && this._muxSession) {
       return this._mux.sendInput(this.id, data);
     }

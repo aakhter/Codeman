@@ -333,6 +333,17 @@ Object.assign(CodemanApp.prototype, {
     };
     // Codex CLI settings
     document.getElementById('appSettingsCodexDangerouslyBypassApprovals').checked = settings.codexDangerouslyBypassApprovals ?? false;
+    // Terminal history settings
+    document.getElementById('appSettingsTerminalScrollbackLines').value =
+      settings.terminalScrollbackLines ?? defaults.terminalScrollbackLines;
+    document.getElementById('appSettingsTmuxHistoryLimit').value =
+      settings.tmuxHistoryLimit ?? defaults.tmuxHistoryLimit;
+    document.getElementById('appSettingsTerminalBufferMaxMiB').value = Math.round(
+      (settings.terminalBufferMaxBytes ?? defaults.terminalBufferMaxBytes) / (1024 * 1024)
+    );
+    document.getElementById('appSettingsTerminalBufferTrimMiB').value = Math.round(
+      (settings.terminalBufferTrimBytes ?? defaults.terminalBufferTrimBytes) / (1024 * 1024)
+    );
     // Claude Permissions settings
     document.getElementById('appSettingsAgentTeams').checked = settings.agentTeamsEnabled ?? false;
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
@@ -1136,6 +1147,13 @@ Object.assign(CodemanApp.prototype, {
       allowedTools: document.getElementById('appSettingsAllowedTools').value.trim(),
       // Codex CLI settings
       codexDangerouslyBypassApprovals: document.getElementById('appSettingsCodexDangerouslyBypassApprovals').checked,
+      // Terminal history settings
+      terminalScrollbackLines: parseInt(document.getElementById('appSettingsTerminalScrollbackLines').value, 10) || 100000,
+      tmuxHistoryLimit: parseInt(document.getElementById('appSettingsTmuxHistoryLimit').value, 10) || 100000,
+      terminalBufferMaxBytes:
+        (parseInt(document.getElementById('appSettingsTerminalBufferMaxMiB').value, 10) || 32) * 1024 * 1024,
+      terminalBufferTrimBytes:
+        (parseInt(document.getElementById('appSettingsTerminalBufferTrimMiB').value, 10) || 24) * 1024 * 1024,
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
@@ -1149,6 +1167,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Save to localStorage
     this.saveAppSettingsToStorage(settings);
+    localStorage.setItem('codeman-scrollback', String(settings.terminalScrollbackLines));
     this._updateLocalEchoState();
 
     // Save voice settings to localStorage + include in server payload for cross-device sync
@@ -1364,10 +1383,17 @@ Object.assign(CodemanApp.prototype, {
   // Get default settings based on device type
   // Note: Notification prefs are handled separately by NotificationManager
   getDefaultSettings() {
+    const terminalDefaults = {
+      terminalScrollbackLines: 100000,
+      tmuxHistoryLimit: 100000,
+      terminalBufferMaxBytes: 32 * 1024 * 1024,
+      terminalBufferTrimBytes: 24 * 1024 * 1024,
+    };
     const isMobile = MobileDetection.getDeviceType() === 'mobile';
     if (isMobile) {
       // Mobile defaults: minimal UI for small screens
       return {
+        ...terminalDefaults,
         // Header visibility - hide everything on mobile
         showFontControls: false,
         showSystemStats: false,
@@ -1389,7 +1415,7 @@ Object.assign(CodemanApp.prototype, {
     }
     // Desktop defaults - rely on ?? operators in apply functions
     // This allows desktop to have different defaults without duplication
-    return {};
+    return terminalDefaults;
   },
 
   loadAppSettingsFromStorage() {
@@ -1461,6 +1487,30 @@ Object.assign(CodemanApp.prototype, {
     if (!notifEnabled) {
       const drawer = document.getElementById('notifDrawer');
       if (drawer) drawer.classList.remove('open');
+    }
+  },
+
+  toggleMobileHeaderUtilities() {
+    const tray = document.getElementById('headerRight');
+    const toggle = document.getElementById('mobileHeaderUtilityToggle');
+    if (!tray) return;
+
+    const expanded = tray.classList.toggle('mobile-collapsed') === false;
+    if (toggle) {
+      toggle.classList.toggle('active', expanded);
+      toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    }
+  },
+
+  closeMobileHeaderUtilities() {
+    const tray = document.getElementById('headerRight');
+    const toggle = document.getElementById('mobileHeaderUtilityToggle');
+    if (!tray || tray.classList.contains('mobile-collapsed')) return;
+
+    tray.classList.add('mobile-collapsed');
+    if (toggle) {
+      toggle.classList.remove('active');
+      toggle.setAttribute('aria-expanded', 'false');
     }
   },
 
@@ -1664,6 +1714,9 @@ Object.assign(CodemanApp.prototype, {
           }
         }
         this.saveAppSettingsToStorage(merged);
+        if (merged.terminalScrollbackLines) {
+          localStorage.setItem('codeman-scrollback', String(merged.terminalScrollbackLines));
+        }
 
         // Apply notification prefs from server if present (only if localStorage has none)
         if (notificationPreferences && this.notificationManager) {
