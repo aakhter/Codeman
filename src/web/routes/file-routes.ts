@@ -29,6 +29,8 @@ import {
 import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
+import { documentVersionStore } from '../../document-version-store.js';
+import { wordDiff } from '../../utils/word-diff.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
@@ -303,6 +305,68 @@ async function buildExternalAttachmentRouteItem(
     }
     throw err;
   }
+}
+
+const TEXT_DOC_EXTENSIONS = new Set(['md', 'txt']);
+
+function isTextDocExtension(extension: string): boolean {
+  return TEXT_DOC_EXTENSIONS.has(extension.toLowerCase().replace(/^\./, ''));
+}
+
+/**
+ * Snapshot the current content of a text document into the version store if it
+ * changed (COD-59). Called off the live-preview poll and the document endpoints,
+ * so the authoring loop accumulates a diffable history without a file watcher.
+ */
+async function captureDocumentVersion(sessionId: string, filePath: string, extension: string): Promise<void> {
+  if (!isTextDocExtension(extension)) return;
+  try {
+    const stat = await fs.stat(filePath);
+    const latest = documentVersionStore.latest(sessionId, filePath);
+    if (latest && latest.mtimeMs === (stat.mtimeMs ?? 0) && latest.size === stat.size) return;
+    const content = await fs.readFile(filePath, 'utf-8');
+    documentVersionStore.record(sessionId, filePath, content, stat.mtimeMs ?? 0, stat.size);
+  } catch {
+    // File mid-write or unreadable — skip this capture.
+  }
+}
+
+interface DocumentTarget {
+  filePath: string;
+  extension: string;
+}
+
+/**
+ * Resolve a document request (by attachmentId or workspace-relative path) to an
+ * absolute file path + extension, or send an error response and return undefined.
+ */
+function resolveDocumentTarget(
+  ctx: SessionPort & ConfigPort,
+  reply: FastifyReply,
+  sessionId: string,
+  target: { attachmentId?: string; path?: string }
+): DocumentTarget | undefined {
+  if (target.attachmentId) {
+    const record = attachmentRegistry.get(sessionId, target.attachmentId);
+    if (!record) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Attachment not found'));
+      return undefined;
+    }
+    return { filePath: record.filePath, extension: record.extension };
+  }
+  if (target.path) {
+    const workingDir = getKnownSessionWorkingDir(ctx, sessionId, reply);
+    if (!workingDir) return undefined;
+    const validated = validateSessionFilePath(workingDir, target.path);
+    if (!validated) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
+      return undefined;
+    }
+    const extension = target.path.split('.').pop()?.toLowerCase() || '';
+    return { filePath: validated.resolvedPath, extension };
+  }
+  reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing attachmentId or path'));
+  return undefined;
 }
 
 export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & EventPort & ConfigPort): void {
@@ -637,6 +701,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     } catch {
       // File temporarily unavailable mid-write — keep cached values.
     }
+    // Snapshot revision history off the live-preview poll (COD-59).
+    await captureDocumentVersion(id, record.filePath, record.extension);
     return {
       success: true,
       data: {
@@ -695,6 +761,72 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
     await serveThumbnail(reply, record.filePath, record.extension);
+  });
+
+  // ===== Document revision history (COD-59) =====
+  // Versions are captured off the live-preview poll; these endpoints list them,
+  // diff two versions (word-level), and roll a document back to a prior version.
+  app.get('/api/sessions/:id/documents/versions', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string });
+    if (!target) return;
+    await captureDocumentVersion(id, target.filePath, target.extension);
+    return { success: true, data: { versions: documentVersionStore.list(id, target.filePath) } };
+  });
+
+  app.get('/api/sessions/:id/documents/diff', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const query = req.query as { attachmentId?: string; path?: string; from?: string; to?: string };
+    const target = resolveDocumentTarget(ctx, reply, id, query);
+    if (!target) return;
+    await captureDocumentVersion(id, target.filePath, target.extension);
+    const versions = documentVersionStore.list(id, target.filePath);
+    if (versions.length === 0) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'No versions recorded for this document yet'));
+      return;
+    }
+    // Default: diff the most recent change (previous -> latest).
+    const toId = query.to || versions[versions.length - 1].id;
+    const fromId =
+      query.from || (versions.length >= 2 ? versions[versions.length - 2].id : versions[versions.length - 1].id);
+    const fromVersion = documentVersionStore.get(id, target.filePath, fromId);
+    const toVersion = documentVersionStore.get(id, target.filePath, toId);
+    if (!fromVersion || !toVersion) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Requested version not found'));
+      return;
+    }
+    return {
+      success: true,
+      data: { from: fromId, to: toId, ops: wordDiff(fromVersion.content, toVersion.content) },
+    };
+  });
+
+  app.post('/api/sessions/:id/documents/rollback', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body || {}) as { attachmentId?: string; path?: string; versionId?: string };
+    const target = resolveDocumentTarget(ctx, reply, id, body);
+    if (!target) return;
+    if (!body.versionId) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing versionId'));
+      return;
+    }
+    const version = documentVersionStore.get(id, target.filePath, body.versionId);
+    if (!version) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Requested version not found'));
+      return;
+    }
+    // Restores a prior snapshot of this same document. Writes only content we
+    // previously read from this path; attachment-path containment is governed
+    // separately by COD-53.
+    try {
+      await fs.writeFile(target.filePath, version.content, 'utf-8');
+      documentVersionStore.record(id, target.filePath, version.content, Date.now(), Buffer.byteLength(version.content));
+      return { success: true, data: { restored: body.versionId } };
+    } catch (err) {
+      return reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to roll back: ${getErrorMessage(err)}`));
+    }
   });
 
   // Serve raw file content (for images/binary files)

@@ -7695,6 +7695,56 @@ kbd {
   white-space: inherit;
 }
 
+/* Revision-review (diff) view — COD-59. */
+.document-preview-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(17, 17, 17, 0.6);
+  font-size: 12px;
+}
+
+.document-preview-actions select {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text, #ddd);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+.document-preview-diff {
+  height: calc(100% - 44px);
+  margin: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 16px 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text, #ddd);
+}
+
+.document-preview-diff ins {
+  background: rgba(109, 219, 127, 0.22);
+  color: #b9f3c4;
+  text-decoration: none;
+}
+
+.document-preview-diff del {
+  background: rgba(255, 107, 107, 0.2);
+  color: #ffb3b3;
+  text-decoration: line-through;
+}
+
+.document-changes-btn {
+  margin-left: 8px;
+}
+
 .file-preview-footer {
   padding: 0.35rem 0.75rem;
   font-size: 0.7rem;

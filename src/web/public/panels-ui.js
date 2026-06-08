@@ -2848,11 +2848,15 @@ Object.assign(CodemanApp.prototype, {
       this.filePreviewContent = text;
       if (data.type === 'markdown') {
         bodyEl.innerHTML = `<div class="document-preview-markdown rv-text">${this._renderMarkdown(text)}</div>`;
-        this._bindResponseViewerInteractions?.(bodyEl.firstElementChild);
+        this._bindResponseViewerInteractions?.(bodyEl.querySelector('.document-preview-markdown'));
       } else {
         bodyEl.innerHTML = `<pre class="document-preview-text"><code>${escapeHtml(text)}</code></pre>`;
       }
-      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`;
+      // Revision-history affordance for versioned (attached) documents (COD-59).
+      const changes = attachmentId
+        ? ` <button class="btn-icon-sm document-changes-btn" onclick="app.showDocumentDiff()">Changes</button>`
+        : '';
+      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`)}${changes}`;
     } else if (data.type === 'binary') {
       bodyEl.innerHTML = `
         <div class="binary-message">
@@ -2896,24 +2900,146 @@ Object.assign(CodemanApp.prototype, {
       const sig = this._filePreviewSignature(data);
       if (sig === st.signature) return; // unchanged
       st.signature = sig;
+      // In revision-review mode, keep the diff live as the agent keeps editing.
+      if (st.mode === 'diff') {
+        await this.showDocumentDiff(st.diffFrom);
+        return;
+      }
+      const SCROLLERS = '.document-preview-markdown, .document-preview-text, .document-preview-stage, .document-preview-diff';
       const bodyEl = this.$('filePreviewBody');
-      const prevScroller = bodyEl?.querySelector(
-        '.document-preview-markdown, .document-preview-text, .document-preview-stage'
-      );
-      const prevTop = prevScroller ? prevScroller.scrollTop : 0;
+      const prevTop = bodyEl?.querySelector(SCROLLERS)?.scrollTop || 0;
       await this._renderFilePreviewBody(data, {
         sessionId: st.sessionId,
         filePath: st.filePath,
         attachmentId: st.attachmentId,
       });
-      const newScroller = this.$('filePreviewBody')?.querySelector(
-        '.document-preview-markdown, .document-preview-text, .document-preview-stage'
-      );
+      const newScroller = this.$('filePreviewBody')?.querySelector(SCROLLERS);
       if (newScroller) newScroller.scrollTop = prevTop;
     } catch {
       // File may be momentarily unavailable mid-write \u2014 keep the last good render.
     } finally {
       this._filePreviewPolling = false;
+    }
+  },
+
+  /** Query string identifying the previewed document for the /documents endpoints. */
+  _documentParams() {
+    const st = this.filePreviewState;
+    if (!st) return '';
+    return st.attachmentId
+      ? `attachmentId=${encodeURIComponent(st.attachmentId)}`
+      : `path=${encodeURIComponent(st.filePath)}`;
+  },
+
+  /** Switch the preview into revision-review mode and render the diff (COD-59). */
+  async showDocumentDiff(fromId = null) {
+    const st = this.filePreviewState;
+    if (!st) return;
+    st.mode = 'diff';
+    st.diffFrom = fromId;
+    const sid = st.sessionId;
+    const params = this._documentParams();
+    try {
+      const vres = await fetch(`/api/sessions/${sid}/documents/versions?${params}`);
+      const versions = vres.ok ? (await vres.json()).data?.versions || [] : [];
+      let diff = { ops: [], from: null, to: null };
+      if (versions.length >= 2) {
+        const to = versions[versions.length - 1].id;
+        const from = fromId || versions[versions.length - 2].id;
+        const dres = await fetch(
+          `/api/sessions/${sid}/documents/diff?${params}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+        );
+        if (dres.ok) diff = (await dres.json()).data;
+      }
+      this._renderDocumentDiff(versions, diff);
+    } catch (err) {
+      const bodyEl = this.$('filePreviewBody');
+      if (bodyEl) bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  _renderDocumentDiff(versions, diff) {
+    const bodyEl = this.$('filePreviewBody');
+    const footerEl = this.$('filePreviewFooter');
+    if (!bodyEl) return;
+    const latest = versions[versions.length - 1];
+    const seqOf = (id) => (versions.find((vv) => vv.id === id) || {}).seq || '';
+    const diffHtml = (diff.ops || [])
+      .map((op) => {
+        const v = escapeHtml(op.value);
+        if (op.type === 'insert') return `<ins>${v}</ins>`;
+        if (op.type === 'delete') return `<del>${v}</del>`;
+        return `<span>${v}</span>`;
+      })
+      .join('');
+    const fromSelect =
+      versions.length >= 2
+        ? `<label class="document-diff-from">Compare from
+            <select onchange="app.showDocumentDiff(this.value)">
+              ${versions
+                .slice(0, -1)
+                .map((vv) => `<option value="${escapeHtml(vv.id)}" ${vv.id === diff.from ? 'selected' : ''}>v${vv.seq}</option>`)
+                .join('')}
+            </select> \u2192 v${latest ? latest.seq : ''}</label>`
+        : '';
+    const restoreBtn =
+      diff.from && diff.from !== diff.to
+        ? `<button class="btn-icon-sm" onclick="app.rollbackDocument('${escapeHtml(diff.from)}')">Restore v${seqOf(diff.from)}</button>`
+        : '';
+    const content =
+      versions.length < 2
+        ? `<div class="binary-message">Only one version captured so far \u2014 keep this preview open while the agent edits to build up revision history.</div>`
+        : `<pre class="document-preview-diff">${diffHtml}</pre>`;
+    bodyEl.innerHTML = `
+      <div class="document-preview-actions">
+        <button class="btn-icon-sm" onclick="app.exitDocumentDiff()">\u2190 Back to preview</button>
+        ${fromSelect}
+        ${restoreBtn}
+      </div>
+      ${content}`;
+    if (footerEl) {
+      footerEl.textContent = `${versions.length} version${versions.length === 1 ? '' : 's'} \u2022 additions and deletions vs the selected version`;
+    }
+  },
+
+  /** Leave revision-review mode and re-render the live document. */
+  async exitDocumentDiff() {
+    const st = this.filePreviewState;
+    if (!st) return;
+    st.mode = 'preview';
+    st.diffFrom = null;
+    try {
+      const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      st.signature = this._filePreviewSignature(data);
+      await this._renderFilePreviewBody(data, {
+        sessionId: st.sessionId,
+        filePath: st.filePath,
+        attachmentId: st.attachmentId,
+      });
+    } catch {
+      // Leave the diff in place if the document can't be re-read right now.
+    }
+  },
+
+  /** Restore the document to a prior version, then return to the live preview. */
+  async rollbackDocument(versionId) {
+    const st = this.filePreviewState;
+    if (!st || !versionId) return;
+    const body = st.attachmentId ? { attachmentId: st.attachmentId, versionId } : { path: st.filePath, versionId };
+    try {
+      const res = await fetch(`/api/sessions/${st.sessionId}/documents/rollback`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        this.showToast?.('Document rolled back', 'success');
+        await this.exitDocumentDiff();
+      } else {
+        this.showToast?.('Rollback failed', 'error');
+      }
+    } catch {
+      this.showToast?.('Rollback failed', 'error');
     }
   },
 

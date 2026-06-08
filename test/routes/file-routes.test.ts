@@ -20,6 +20,7 @@ vi.mock('node:fs/promises', () => ({
   default: {
     readdir: vi.fn(async () => []),
     readFile: vi.fn(async () => 'file content'),
+    writeFile: vi.fn(async () => undefined),
     stat: vi.fn(async () => ({ size: 100, isFile: () => true })),
     mkdir: vi.fn(async () => undefined),
     mkdtemp: vi.fn(async () => '/tmp/codeman-preview-test'),
@@ -59,9 +60,11 @@ import { createReadStream, realpathSync } from 'node:fs';
 import { fileStreamManager } from '../../src/file-stream-manager.js';
 import { clearDocumentPreviewCache } from '../../src/document-preview-cache.js';
 import { buildDetectedAttachmentHistoryItem } from '../../src/session-attachment-history.js';
+import { documentVersionStore } from '../../src/document-version-store.js';
 
 const mockedReaddir = vi.mocked(fs.readdir);
 const mockedReadFile = vi.mocked(fs.readFile);
+const mockedWriteFile = vi.mocked(fs.writeFile);
 const mockedStat = vi.mocked(fs.stat);
 const mockedMkdir = vi.mocked(fs.mkdir);
 const mockedMkdtemp = vi.mocked(fs.mkdtemp);
@@ -79,6 +82,7 @@ describe('file-routes', () => {
     harness = await createRouteTestHarness(registerFileRoutes);
     vi.clearAllMocks();
     clearDocumentPreviewCache();
+    documentVersionStore.clearSession(harness.ctx._sessionId);
 
     // Default: realpathSync returns the path unchanged
     mockedRealpathSync.mockImplementation((p: string) => p as never);
@@ -804,6 +808,108 @@ describe('file-routes', () => {
       expect(thumbRes.statusCode).toBe(200);
       expect(thumbRes.headers['content-type']).toBe('image/png');
       expect(thumbRes.body).toBe(png.toString());
+    });
+  });
+
+  // ========== Document revision history (COD-59) ==========
+
+  describe('GET/POST /api/sessions/:id/documents', () => {
+    async function registerMdAttachment(path = '/mnt/c/notes/doc.md') {
+      const reg = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path },
+      });
+      return JSON.parse(reg.body).data.attachmentId as string;
+    }
+    const hitMetadata = (aid: string) =>
+      harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/attachments/${aid}` });
+
+    it('captures versions off the attachment metadata poll and lists them (no content leaked)', async () => {
+      mockedStat.mockResolvedValue({ size: 9, isFile: () => true, mtimeMs: 100 } as never);
+      mockedReadFile.mockResolvedValue('# draft v1' as never);
+      const aid = await registerMdAttachment();
+      await hitMetadata(aid); // captures v1
+
+      mockedStat.mockResolvedValue({ size: 20, isFile: () => true, mtimeMs: 200 } as never);
+      mockedReadFile.mockResolvedValue('# draft v2 rewritten' as never);
+      await hitMetadata(aid); // captures v2
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/versions?attachmentId=${aid}`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.versions).toHaveLength(2);
+      expect(body.data.versions[0]).not.toHaveProperty('content');
+    });
+
+    it('diffs the latest change at word level', async () => {
+      mockedStat.mockResolvedValue({ size: 19, isFile: () => true, mtimeMs: 100 } as never);
+      mockedReadFile.mockResolvedValue('the quick brown fox' as never);
+      const aid = await registerMdAttachment();
+      await hitMetadata(aid);
+
+      mockedStat.mockResolvedValue({ size: 17, isFile: () => true, mtimeMs: 200 } as never);
+      mockedReadFile.mockResolvedValue('the quick red fox' as never);
+      await hitMetadata(aid);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/diff?attachmentId=${aid}`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(
+        body.data.ops.some((o: { type: string; value: string }) => o.type === 'delete' && o.value.includes('brown'))
+      ).toBe(true);
+      expect(
+        body.data.ops.some((o: { type: string; value: string }) => o.type === 'insert' && o.value.includes('red'))
+      ).toBe(true);
+    });
+
+    it('returns 404 diff when no versions have been recorded', async () => {
+      mockedStat.mockResolvedValue({ size: 9, isFile: () => true, mtimeMs: 100 } as never);
+      // .pdf is not a text doc — capture is skipped, so no versions exist
+      const reg = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/notes/slides.pdf' },
+      });
+      const aid = JSON.parse(reg.body).data.attachmentId;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/diff?attachmentId=${aid}`,
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('rolls a document back to a prior version, writing the file', async () => {
+      mockedStat.mockResolvedValue({ size: 4, isFile: () => true, mtimeMs: 100 } as never);
+      mockedReadFile.mockResolvedValue('orig' as never);
+      const aid = await registerMdAttachment();
+      await hitMetadata(aid); // v1 = 'orig'
+
+      mockedStat.mockResolvedValue({ size: 7, isFile: () => true, mtimeMs: 200 } as never);
+      mockedReadFile.mockResolvedValue('changed' as never);
+      await hitMetadata(aid); // v2 = 'changed'
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/rollback`,
+        payload: { attachmentId: aid, versionId: 'v1' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockedWriteFile).toHaveBeenCalledWith('/mnt/c/notes/doc.md', 'orig', 'utf-8');
+    });
+
+    it('returns 400 when neither attachmentId nor path is provided', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/versions`,
+      });
+      expect(res.statusCode).toBe(400);
     });
   });
 

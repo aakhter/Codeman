@@ -93,6 +93,17 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('this._renderMarkdown(');
   });
 
+  it('exposes document revision review — diff + rollback — in the preview (COD-59)', () => {
+    expect(panelsJs).toContain('showDocumentDiff');
+    expect(panelsJs).toContain('exitDocumentDiff');
+    expect(panelsJs).toContain('rollbackDocument');
+    expect(panelsJs).toContain('/documents/diff');
+    expect(panelsJs).toContain('/documents/rollback');
+    // diff is rendered with ins/del runs in a dedicated container
+    expect(panelsJs).toContain('document-preview-diff');
+    expect(stylesCss).toContain('.document-preview-diff');
+  });
+
   it('live-refreshes the open preview when the underlying file changes (COD-58)', () => {
     // Renders via an extracted body renderer (reused by both initial open and refresh).
     expect(panelsJs).toContain('_renderFilePreviewBody');
