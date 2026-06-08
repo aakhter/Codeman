@@ -33,6 +33,8 @@ Use `npm run test:coverage` when coverage matters. Route tests should prefer `ap
 
 Recent history uses Conventional Commit-style subjects, often with Jira keys: `fix(test): COD-25 stabilize mobile visual regression`, `feat: COD-18 add attachment history drawer`, `docs: COD-18 design session attachment history`. The Jira project key is `COD`; use `COD-###` in branch names, commit subjects, and PR titles for Jira-backed work. For multi-PR efforts, create one parent `COD` issue and focused sub-issues per feature/fix PR. Update Jira with branch, PR, commit, and verification before marking work Done. PRs should summarize the problem and approach, link Jira/issues, and include screenshots for UI/mobile changes. Before review, run typecheck, lint, format check, lockfile check, and targeted tests.
 
+For upstream GitHub PRs, do not push branches directly to `Ark0N/Codeman`: GitHub user `aakhter` has read-only permission there. Create upstream PR branches from `upstream/master`, push them to the fork `aakhter/Codeman`, then open PRs against `Ark0N/Codeman:master`. Preserve local work on `origin/local` or another Bitbucket branch when useful, but GitHub PR branches must come from the fork.
+
 ## Security & Configuration Tips
 
 Do not commit secrets, `.env`, runtime state, logs, or files from the parent `~/.codeman/` data directory. Validate new configuration through existing config modules and schemas before wiring it into routes or CLI behavior.
