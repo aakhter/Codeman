@@ -104,6 +104,11 @@ describe('document attachment UI wiring', () => {
     expect(stylesCss).toContain('.document-preview-diff');
   });
 
+  it('offers the Changes (revision) view on .docx previews too (COD-66)', () => {
+    expect(panelsJs).toContain("data.type === 'document' && attachmentId");
+    expect(panelsJs).toContain('document-changes-btn');
+  });
+
   it('live-refreshes the open preview when the underlying file changes (COD-58)', () => {
     // Renders via an extracted body renderer (reused by both initial open and refresh).
     expect(panelsJs).toContain('_renderFilePreviewBody');

@@ -15,9 +15,7 @@ describe('mux-routes', () => {
   beforeEach(async () => {
     // Add mux methods that mux-routes needs but mock-route-context doesn't provide
     harness = await createRouteTestHarness(registerMuxRoutes);
-    harness.ctx.mux.getSessionsWithStats = vi.fn(async () => [
-      { name: 'codeman-abc', pid: 1234, created: Date.now() },
-    ]);
+    harness.ctx.mux.getSessionsWithStats = vi.fn(async () => [{ name: 'codeman-abc', pid: 1234, created: Date.now() }]);
     harness.ctx.mux.isAvailable = vi.fn(() => true);
     harness.ctx.mux.reconcileSessions = vi.fn(async () => ({
       orphaned: [],

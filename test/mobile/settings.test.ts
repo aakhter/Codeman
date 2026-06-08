@@ -5,9 +5,7 @@ import { PORTS, SELECTORS, KEYBOARD, STORAGE_KEYS, BODY_CLASSES, WAIT } from './
 import { createTestServer, stopTestServer } from './helpers/server.js';
 import { createDevicePage, closeAllBrowsers } from './helpers/browser.js';
 import { showKeyboard, hideKeyboard } from './helpers/keyboard-sim.js';
-import {
-  assertVisible, assertHidden, getCSSProperty, getCSSNumericValue,
-} from './helpers/assertions.js';
+import { assertVisible, assertHidden, getCSSProperty, getCSSNumericValue } from './helpers/assertions.js';
 import { REPRESENTATIVE_DEVICES } from './devices.js';
 import type { WebServer } from '../src/web/server.js';
 
@@ -94,9 +92,7 @@ describe('Settings Modal', () => {
       if (gearBox && toolbarBox) {
         // Gear button should be within toolbar's vertical range
         expect(gearBox.y).toBeGreaterThanOrEqual(toolbarBox.y - 5);
-        expect(gearBox.y + gearBox.height).toBeLessThanOrEqual(
-          toolbarBox.y + toolbarBox.height + 5,
-        );
+        expect(gearBox.y + gearBox.height).toBeLessThanOrEqual(toolbarBox.y + toolbarBox.height + 5);
       }
     });
   });
@@ -304,11 +300,14 @@ describe('Settings Modal', () => {
       try {
         // Store a test setting
         await page.evaluate((key) => {
-          localStorage.setItem(key, JSON.stringify({
-            showFontControls: true,
-            showMonitor: true,
-            subagentTrackingEnabled: true,
-          }));
+          localStorage.setItem(
+            key,
+            JSON.stringify({
+              showFontControls: true,
+              showMonitor: true,
+              subagentTrackingEnabled: true,
+            })
+          );
         }, STORAGE_KEYS.SETTINGS_MOBILE);
 
         // Reload page
@@ -335,20 +334,32 @@ describe('Settings Modal', () => {
 
       try {
         // Store both mobile and desktop settings
-        await page.evaluate(({ mobileKey, desktopKey, notifKey }) => {
-          localStorage.setItem(mobileKey, JSON.stringify({ showFontControls: false }));
-          localStorage.setItem(desktopKey, JSON.stringify({ showFontControls: true }));
-          localStorage.setItem(notifKey, JSON.stringify({ mobileNotif: true }));
-        }, {
-          mobileKey: STORAGE_KEYS.SETTINGS_MOBILE,
-          desktopKey: STORAGE_KEYS.SETTINGS_DESKTOP,
-          notifKey: STORAGE_KEYS.NOTIFICATION_PREFS_MOBILE,
-        });
+        await page.evaluate(
+          ({ mobileKey, desktopKey, notifKey }) => {
+            localStorage.setItem(mobileKey, JSON.stringify({ showFontControls: false }));
+            localStorage.setItem(desktopKey, JSON.stringify({ showFontControls: true }));
+            localStorage.setItem(notifKey, JSON.stringify({ mobileNotif: true }));
+          },
+          {
+            mobileKey: STORAGE_KEYS.SETTINGS_MOBILE,
+            desktopKey: STORAGE_KEYS.SETTINGS_DESKTOP,
+            notifKey: STORAGE_KEYS.NOTIFICATION_PREFS_MOBILE,
+          }
+        );
 
         // Verify they are independent
-        const mobile = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) || '{}'), STORAGE_KEYS.SETTINGS_MOBILE);
-        const desktop = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) || '{}'), STORAGE_KEYS.SETTINGS_DESKTOP);
-        const notif = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) || '{}'), STORAGE_KEYS.NOTIFICATION_PREFS_MOBILE);
+        const mobile = await page.evaluate(
+          (key) => JSON.parse(localStorage.getItem(key) || '{}'),
+          STORAGE_KEYS.SETTINGS_MOBILE
+        );
+        const desktop = await page.evaluate(
+          (key) => JSON.parse(localStorage.getItem(key) || '{}'),
+          STORAGE_KEYS.SETTINGS_DESKTOP
+        );
+        const notif = await page.evaluate(
+          (key) => JSON.parse(localStorage.getItem(key) || '{}'),
+          STORAGE_KEYS.NOTIFICATION_PREFS_MOBILE
+        );
 
         expect(mobile.showFontControls).toBe(false);
         expect(desktop.showFontControls).toBe(true);

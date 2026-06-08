@@ -66,7 +66,14 @@ describe('TmuxManager restart recovery (test mode safety)', () => {
       mode: 'claude',
       attached: false,
       name: 'Recovery Test',
-      respawnConfig: { enabled: true, idleTimeoutMs: 10000, updatePrompt: 'continue', interStepDelayMs: 2000, sendClear: false, sendInit: true },
+      respawnConfig: {
+        enabled: true,
+        idleTimeoutMs: 10000,
+        updatePrompt: 'continue',
+        interStepDelayMs: 2000,
+        sendClear: false,
+        sendInit: true,
+      },
     });
 
     const result = await manager.reconcileSessions();
@@ -101,9 +108,7 @@ describe('TmuxManager restart recovery (test mode safety)', () => {
     await manager.reconcileSessions();
 
     // Verify no tmux commands were executed
-    const tmuxCalls = mockedExecSync.mock.calls.filter(
-      ([cmd]) => typeof cmd === 'string' && cmd.includes('tmux')
-    );
+    const tmuxCalls = mockedExecSync.mock.calls.filter(([cmd]) => typeof cmd === 'string' && cmd.includes('tmux'));
     expect(tmuxCalls).toHaveLength(0);
   });
 
@@ -155,9 +160,7 @@ describe('TmuxManager restart recovery (test mode safety)', () => {
     expect(manager.getSession('kill-me')).toBeUndefined();
 
     // Verify no real kill commands were executed
-    const killCalls = mockedExecSync.mock.calls.filter(
-      ([cmd]) => typeof cmd === 'string' && cmd.includes('kill')
-    );
+    const killCalls = mockedExecSync.mock.calls.filter(([cmd]) => typeof cmd === 'string' && cmd.includes('kill'));
     expect(killCalls).toHaveLength(0);
   });
 });

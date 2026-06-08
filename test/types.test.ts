@@ -359,7 +359,12 @@ describe('types utility functions', () => {
 
     describe('TaskStatus', () => {
       it('should support all status values', () => {
-        const statuses: Array<'pending' | 'running' | 'completed' | 'failed'> = ['pending', 'running', 'completed', 'failed'];
+        const statuses: Array<'pending' | 'running' | 'completed' | 'failed'> = [
+          'pending',
+          'running',
+          'completed',
+          'failed',
+        ];
         expect(statuses).toHaveLength(4);
       });
     });

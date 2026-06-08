@@ -102,14 +102,17 @@ describe('generateClaudeMd', () => {
   describe('custom template', () => {
     it('should use custom template when provided and exists', () => {
       const templatePath = join(testDir, 'custom-template.md');
-      writeFileSync(templatePath, `
+      writeFileSync(
+        templatePath,
+        `
 # [PROJECT_NAME]
 
 Description: [PROJECT_DESCRIPTION]
 Date: [DATE]
 
 Custom content here.
-      `);
+      `
+      );
 
       const result = generateClaudeMd('my-project', 'Test desc', templatePath);
 
@@ -120,11 +123,14 @@ Custom content here.
 
     it('should replace all placeholder occurrences', () => {
       const templatePath = join(testDir, 'multi-placeholder.md');
-      writeFileSync(templatePath, `
+      writeFileSync(
+        templatePath,
+        `
 [PROJECT_NAME] is a project.
 The name is [PROJECT_NAME].
 About [PROJECT_NAME]: [PROJECT_DESCRIPTION]
-      `);
+      `
+      );
 
       const result = generateClaudeMd('awesome-app', 'Cool stuff', templatePath);
 

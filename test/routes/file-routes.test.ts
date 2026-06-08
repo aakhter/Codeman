@@ -904,6 +904,59 @@ describe('file-routes', () => {
       expect(mockedWriteFile).toHaveBeenCalledWith('/mnt/c/notes/doc.md', 'orig', 'utf-8');
     });
 
+    it('versions a .docx via raw bytes + pandoc text, diffs the prose, and rolls back losslessly (COD-66)', async () => {
+      const pandocStdout = (text: string) =>
+        mockedExecFile.mockImplementation((cmd, _args, _opts, cb) => {
+          (cb as (e: unknown, r: unknown) => void)(null, {
+            stdout: String(cmd).includes('pandoc') ? text : '',
+            stderr: '',
+          });
+          return {} as never;
+        });
+
+      // v1: bytes + extracted prose
+      mockedStat.mockResolvedValue({ size: 100, isFile: () => true, mtimeMs: 100 } as never);
+      mockedReadFile.mockResolvedValue(Buffer.from('DOCXBYTES-1') as never);
+      pandocStdout('# Brief\n\nThe plan is good.');
+      const reg = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/docs/brief.docx' },
+      });
+      const aid = JSON.parse(reg.body).data.attachmentId;
+      await hitMetadata(aid); // capture v1
+
+      // v2: new bytes + revised prose
+      mockedStat.mockResolvedValue({ size: 130, isFile: () => true, mtimeMs: 200 } as never);
+      mockedReadFile.mockResolvedValue(Buffer.from('DOCXBYTES-2-longer') as never);
+      pandocStdout('# Brief\n\nThe plan is excellent and ready.');
+      await hitMetadata(aid); // capture v2
+
+      const vres = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/versions?attachmentId=${aid}`,
+      });
+      expect(JSON.parse(vres.body).data.versions).toHaveLength(2);
+
+      // Prose diff comes from the pandoc-extracted text, not the bytes.
+      const dres = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/diff?attachmentId=${aid}`,
+      });
+      const ops = JSON.parse(dres.body).data.ops as { type: string; value: string }[];
+      expect(ops.some((o) => o.type === 'delete' && o.value.includes('good'))).toBe(true);
+      expect(ops.some((o) => o.type === 'insert' && o.value.includes('excellent'))).toBe(true);
+
+      // Rollback writes the RAW bytes of v1 (byte-perfect), not text.
+      const rb = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/rollback`,
+        payload: { attachmentId: aid, versionId: 'v1' },
+      });
+      expect(rb.statusCode).toBe(200);
+      expect(mockedWriteFile).toHaveBeenCalledWith('/mnt/c/docs/brief.docx', Buffer.from('DOCXBYTES-1'));
+    });
+
     it('returns 400 when neither attachmentId nor path is provided', async () => {
       const res = await harness.app.inject({
         method: 'GET',

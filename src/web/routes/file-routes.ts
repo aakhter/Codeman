@@ -30,6 +30,7 @@ import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } fro
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
 import { documentVersionStore } from '../../document-version-store.js';
+import { extractDocumentText, isBinaryDocExtension, isDiffableDocExtension } from '../../document-text-extract.js';
 import { wordDiff } from '../../utils/word-diff.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
@@ -307,25 +308,27 @@ async function buildExternalAttachmentRouteItem(
   }
 }
 
-const TEXT_DOC_EXTENSIONS = new Set(['md', 'txt']);
-
-function isTextDocExtension(extension: string): boolean {
-  return TEXT_DOC_EXTENSIONS.has(extension.toLowerCase().replace(/^\./, ''));
-}
-
 /**
- * Snapshot the current content of a text document into the version store if it
- * changed (COD-59). Called off the live-preview poll and the document endpoints,
- * so the authoring loop accumulates a diffable history without a file watcher.
+ * Snapshot a document into the version store if it changed (COD-59/COD-66).
+ * Called off the live-preview poll and the document endpoints, so the authoring
+ * loop accumulates a diffable history without a file watcher. Text docs (md/txt)
+ * store their UTF-8 content; binary docs (docx) store raw bytes for byte-perfect
+ * rollback plus pandoc-extracted text for the word diff.
  */
 async function captureDocumentVersion(sessionId: string, filePath: string, extension: string): Promise<void> {
-  if (!isTextDocExtension(extension)) return;
+  if (!isDiffableDocExtension(extension)) return;
   try {
     const stat = await fs.stat(filePath);
     const latest = documentVersionStore.latest(sessionId, filePath);
     if (latest && latest.mtimeMs === (stat.mtimeMs ?? 0) && latest.size === stat.size) return;
-    const content = await fs.readFile(filePath, 'utf-8');
-    documentVersionStore.record(sessionId, filePath, content, stat.mtimeMs ?? 0, stat.size);
+    if (isBinaryDocExtension(extension)) {
+      const raw = await fs.readFile(filePath); // Buffer
+      const text = await extractDocumentText(filePath, extension);
+      documentVersionStore.record(sessionId, filePath, text, stat.mtimeMs ?? 0, stat.size, raw);
+    } else {
+      const content = await fs.readFile(filePath, 'utf-8');
+      documentVersionStore.record(sessionId, filePath, content, stat.mtimeMs ?? 0, stat.size);
+    }
   } catch {
     // File mid-write or unreadable — skip this capture.
   }
@@ -817,10 +820,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
     // Restores a prior snapshot of this same document. Writes only content we
     // previously read from this path; attachment-path containment is governed
-    // separately by COD-53.
+    // separately by COD-53. Binary docs (docx) restore byte-perfect from raw.
     try {
-      await fs.writeFile(target.filePath, version.content, 'utf-8');
-      documentVersionStore.record(id, target.filePath, version.content, Date.now(), Buffer.byteLength(version.content));
+      if (version.raw) {
+        await fs.writeFile(target.filePath, version.raw);
+      } else {
+        await fs.writeFile(target.filePath, version.content, 'utf-8');
+      }
+      const restoredSize = version.raw ? version.raw.length : Buffer.byteLength(version.content);
+      documentVersionStore.record(id, target.filePath, version.content, Date.now(), restoredSize, version.raw);
       return { success: true, data: { restored: body.versionId } };
     } catch (err) {
       return reply

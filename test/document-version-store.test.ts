@@ -74,4 +74,27 @@ describe('DocumentVersionStore', () => {
     store.record(S, F, 'b', 2, 2);
     expect(store.latest(S, F)?.content).toBe('b');
   });
+
+  it('records binary versions (raw bytes) and dedups by bytes (COD-66)', () => {
+    const a = Buffer.from('docx-bytes-A');
+    const v1 = store.record(S, F, 'extracted text A', 1, a.length, a);
+    expect(v1?.raw?.equals(a)).toBe(true);
+    // same bytes -> no new version even if the extracted text string differs
+    const again = store.record(S, F, 'different extracted text', 2, a.length, a);
+    expect(again).toBeNull();
+    // different bytes -> new version
+    const b = Buffer.from('docx-bytes-B-longer');
+    const v2 = store.record(S, F, 'extracted text B', 3, b.length, b);
+    expect(v2).not.toBeNull();
+    expect(store.list(S, F)).toHaveLength(2);
+  });
+
+  it('list omits raw bytes; get returns them for rollback (COD-66)', () => {
+    const a = Buffer.from('bytes');
+    store.record(S, F, 'text', 1, a.length, a);
+    const meta = store.list(S, F)[0];
+    expect(meta).not.toHaveProperty('raw');
+    expect(meta).not.toHaveProperty('content');
+    expect(store.get(S, F, meta.id)?.raw?.equals(a)).toBe(true);
+  });
 });

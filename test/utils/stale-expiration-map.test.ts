@@ -79,7 +79,7 @@ describe('StaleExpirationMap', () => {
       expect(map.get('a')).toBe(1);
 
       // Wait for expiration
-      await new Promise(r => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 150));
 
       expect(map.get('a')).toBeUndefined();
       expect(map.has('a')).toBe(false);
@@ -99,7 +99,7 @@ describe('StaleExpirationMap', () => {
       map.set('b', 2);
 
       // Wait for cleanup
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       expect(expired).toContainEqual(['a', 1]);
       expect(expired).toContainEqual(['b', 2]);
@@ -117,11 +117,11 @@ describe('StaleExpirationMap', () => {
       map.set('a', 1);
 
       // Access at 75ms (halfway through TTL)
-      await new Promise(r => setTimeout(r, 75));
-      expect(map.get('a')).toBe(1);  // This refreshes TTL
+      await new Promise((r) => setTimeout(r, 75));
+      expect(map.get('a')).toBe(1); // This refreshes TTL
 
       // Wait another 100ms (entry should still be valid because TTL was refreshed)
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
       expect(map.get('a')).toBe(1);
 
       map.dispose();
@@ -137,11 +137,11 @@ describe('StaleExpirationMap', () => {
       map.set('a', 1);
 
       // Access at 50ms
-      await new Promise(r => setTimeout(r, 50));
-      expect(map.get('a')).toBe(1);  // Does NOT refresh TTL
+      await new Promise((r) => setTimeout(r, 50));
+      expect(map.get('a')).toBe(1); // Does NOT refresh TTL
 
       // Wait another 75ms (entry should be expired)
-      await new Promise(r => setTimeout(r, 75));
+      await new Promise((r) => setTimeout(r, 75));
       expect(map.get('a')).toBeUndefined();
 
       map.dispose();
@@ -159,11 +159,11 @@ describe('StaleExpirationMap', () => {
       map.set('a', 1);
 
       // Peek at 50ms
-      await new Promise(r => setTimeout(r, 50));
-      expect(map.peek('a')).toBe(1);  // Does NOT refresh TTL
+      await new Promise((r) => setTimeout(r, 50));
+      expect(map.peek('a')).toBe(1); // Does NOT refresh TTL
 
       // Wait another 75ms (entry should be expired)
-      await new Promise(r => setTimeout(r, 75));
+      await new Promise((r) => setTimeout(r, 75));
       expect(map.peek('a')).toBeUndefined();
 
       map.dispose();
@@ -178,11 +178,11 @@ describe('StaleExpirationMap', () => {
       map.set('a', 1);
 
       // Touch at 75ms
-      await new Promise(r => setTimeout(r, 75));
+      await new Promise((r) => setTimeout(r, 75));
       expect(map.touch('a')).toBe(true);
 
       // Wait another 100ms (entry should still be valid)
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
       expect(map.has('a')).toBe(true);
 
       map.dispose();
@@ -202,7 +202,7 @@ describe('StaleExpirationMap', () => {
       const map = new StaleExpirationMap<string, number>({ ttlMs: 10000 });
       map.set('a', 1);
 
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 50));
 
       const age = map.getAge('a');
       expect(age).toBeDefined();
@@ -224,7 +224,7 @@ describe('StaleExpirationMap', () => {
       const map = new StaleExpirationMap<string, number>({ ttlMs: 1000 });
       map.set('a', 1);
 
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
 
       const remaining = map.getRemainingTtl('a');
       expect(remaining).toBeDefined();
@@ -244,7 +244,11 @@ describe('StaleExpirationMap', () => {
       map.set('c', 3);
 
       const entries = Array.from(map);
-      expect(entries).toEqual([['a', 1], ['b', 2], ['c', 3]]);
+      expect(entries).toEqual([
+        ['a', 1],
+        ['b', 2],
+        ['c', 3],
+      ]);
 
       map.dispose();
     });
@@ -277,7 +281,7 @@ describe('StaleExpirationMap', () => {
       const expired: string[] = [];
       const map = new StaleExpirationMap<string, number>({
         ttlMs: 50,
-        cleanupIntervalMs: 10000,  // Long interval so automatic cleanup doesn't run
+        cleanupIntervalMs: 10000, // Long interval so automatic cleanup doesn't run
         onExpire: (key) => expired.push(key),
       });
 
@@ -285,7 +289,7 @@ describe('StaleExpirationMap', () => {
       map.set('b', 2);
 
       // Wait for expiration
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
 
       // Manual cleanup
       const removed = map.cleanup();

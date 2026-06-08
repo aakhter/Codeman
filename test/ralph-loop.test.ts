@@ -296,11 +296,7 @@ describe('RalphLoop', () => {
   describe('getStats', () => {
     it('should return complete stats object', async () => {
       const mockRunningTask = { id: '2', status: 'running', isTimedOut: () => false };
-      mockState.taskQueue.tasks = [
-        { id: '1', status: 'pending' },
-        mockRunningTask,
-        { id: '3', status: 'completed' },
-      ];
+      mockState.taskQueue.tasks = [{ id: '1', status: 'pending' }, mockRunningTask, { id: '3', status: 'completed' }];
       mockState.taskQueue.getRunningTasks.mockReturnValue([mockRunningTask]);
 
       await loop.start();

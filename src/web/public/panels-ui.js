@@ -2835,7 +2835,12 @@ Object.assign(CodemanApp.prototype, {
         data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
       bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bust(previewUrl)}" title="${escapeHtml(filePath)}"></iframe>`;
       const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
-      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`;
+      // .docx documents carry a prose revision history too (COD-66).
+      const docChanges =
+        data.type === 'document' && attachmentId
+          ? ` <button class="btn-icon-sm document-changes-btn" onclick="app.showDocumentDiff()">Changes</button>`
+          : '';
+      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`)}${docChanges}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text

@@ -88,11 +88,15 @@ describe('TranscriptWatcher', () => {
       watcher.start(testFile);
 
       // Add user entry
-      const userEntry = { type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: 'test' } };
+      const userEntry = {
+        type: 'user',
+        timestamp: new Date().toISOString(),
+        message: { role: 'user', content: 'test' },
+      };
       appendFileSync(testFile, JSON.stringify(userEntry) + '\n');
 
       // Wait for processing
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       const state = watcher.getState();
       expect(state.entryCount).toBeGreaterThanOrEqual(1);
@@ -110,7 +114,7 @@ describe('TranscriptWatcher', () => {
       appendFileSync(testFile, JSON.stringify(resultEntry) + '\n');
 
       // Wait for processing
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       expect(completeHandler).toHaveBeenCalled();
       const state = watcher.getState();
@@ -130,15 +134,13 @@ describe('TranscriptWatcher', () => {
         timestamp: new Date().toISOString(),
         message: {
           role: 'assistant',
-          content: [
-            { type: 'tool_use', name: 'Read', input: { file_path: '/test.txt' } }
-          ]
-        }
+          content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/test.txt' } }],
+        },
       };
       appendFileSync(testFile, JSON.stringify(assistantEntry) + '\n');
 
       // Wait for processing
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       expect(toolStartHandler).toHaveBeenCalledWith('Read');
       const state = watcher.getState();
@@ -159,15 +161,13 @@ describe('TranscriptWatcher', () => {
         timestamp: new Date().toISOString(),
         message: {
           role: 'assistant',
-          content: [
-            { type: 'tool_use', name: 'AskUserQuestion', input: { question: 'test?' } }
-          ]
-        }
+          content: [{ type: 'tool_use', name: 'AskUserQuestion', input: { question: 'test?' } }],
+        },
       };
       appendFileSync(testFile, JSON.stringify(assistantEntry) + '\n');
 
       // Wait for processing
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       expect(planModeHandler).toHaveBeenCalled();
       const state = watcher.getState();
@@ -182,12 +182,12 @@ describe('TranscriptWatcher', () => {
       const resultEntry = {
         type: 'result',
         timestamp: new Date().toISOString(),
-        error: { type: 'api_error', message: 'Rate limited' }
+        error: { type: 'api_error', message: 'Rate limited' },
       };
       appendFileSync(testFile, JSON.stringify(resultEntry) + '\n');
 
       // Wait for processing
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       const state = watcher.getState();
       expect(state.hasError).toBe(true);
