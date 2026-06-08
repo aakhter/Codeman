@@ -20,7 +20,7 @@ const BASE_URL = `http://localhost:${PORT}`;
 // Thresholds (ms)
 const THRESHOLDS = {
   PAGE_LOAD: 3000, // Full page load including JS init
-  DOMContentLoaded: 1500, // HTML parsed
+  DOMContentLoaded: 1500, // Browser nav timing through deferred script execution
   SSE_CONNECT: 2000, // SSE EventSource open
   TAB_CREATE_API: 200, // POST /api/sessions response
   TAB_RENDER: 300, // Tab element appears in DOM
@@ -88,6 +88,25 @@ async function measure(fn: () => Promise<void>): Promise<number> {
   return performance.now() - start;
 }
 
+type BrowserNavigationTiming = {
+  domInteractive: number;
+  domContentLoadedEventEnd: number;
+  loadEventEnd: number;
+};
+
+/** Get the browser's own navigation timing, excluding Playwright harness overhead. */
+async function getBrowserNavigationTiming(page: Page): Promise<BrowserNavigationTiming> {
+  return page.evaluate(() => {
+    const entry = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+    if (!entry) throw new Error('Navigation timing entry not available');
+    return {
+      domInteractive: entry.domInteractive,
+      domContentLoadedEventEnd: entry.domContentLoadedEventEnd,
+      loadEventEnd: entry.loadEventEnd,
+    };
+  });
+}
+
 /** Get JS heap size in MB (Chromium only) */
 async function getHeapMB(page: Page): Promise<number> {
   const metrics = await page.evaluate(() => {
@@ -123,12 +142,15 @@ describe('Page load performance', () => {
   it('DOMContentLoaded fires within threshold', async () => {
     ({ context, page } = await freshPage());
 
-    const timing = await measure(async () => {
+    const wallTiming = await measure(async () => {
       await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
     });
+    const navigationTiming = await getBrowserNavigationTiming(page);
 
-    console.log(`[page load] DOMContentLoaded: ${timing.toFixed(0)}ms`);
-    expect(timing).toBeLessThan(THRESHOLDS.DOMContentLoaded);
+    console.log(
+      `[page load] DOMContentLoaded: ${navigationTiming.domContentLoadedEventEnd.toFixed(0)}ms (wall ${wallTiming.toFixed(0)}ms)`
+    );
+    expect(navigationTiming.domContentLoadedEventEnd).toBeLessThan(THRESHOLDS.DOMContentLoaded);
   });
 
   it('full app initialization completes within threshold', async () => {
