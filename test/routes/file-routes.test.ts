@@ -432,6 +432,41 @@ describe('file-routes', () => {
       expect(mockedCreateReadStream).toHaveBeenCalledWith('/mnt/c/decks/board-update.pdf');
     });
 
+    it.each([
+      [
+        'docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '/mnt/c/docs/strategy brief.docx',
+        'strategy brief.docx',
+      ],
+      [
+        'pptx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        '/mnt/c/decks/board update.pptx',
+        'board update.pptx',
+      ],
+    ])('serves %s raw attachments with an inline filename for Open', async (_extension, mimeType, path, fileName) => {
+      const content = Buffer.from('office bytes');
+      mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
+      mockedStat.mockResolvedValue({ size: content.length, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path },
+      });
+      const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+      const rawRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/raw`,
+      });
+
+      expect(rawRes.statusCode).toBe(200);
+      expect(rawRes.headers['content-type']).toBe(mimeType);
+      expect(rawRes.headers['content-disposition']).toBe(`inline; filename="${fileName}"`);
+    });
+
     it('serves registered PNG attachment bytes with production compression enabled', async () => {
       const app = Fastify({ logger: false });
       await app.register(fastifyCompress, { threshold: 1024 });

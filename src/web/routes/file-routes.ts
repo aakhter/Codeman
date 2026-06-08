@@ -41,6 +41,8 @@ const MIME_TYPES: Record<string, string> = {
   wav: 'audio/wav',
   ogg: 'audio/ogg',
   pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   json: 'application/json',
 };
 
@@ -93,6 +95,7 @@ async function serveRawFile(
   }
 
   reply.header('Content-Type', MIME_TYPES[extension] || 'application/octet-stream');
+  reply.header('Content-Disposition', `inline; filename="${safeName}"`);
   reply.header('Content-Length', stat.size);
   reply.header('X-Content-Type-Options', 'nosniff');
   sendRawStream(reply, content);
