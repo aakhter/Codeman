@@ -1,5 +1,24 @@
 # aicodeman
 
+## 0.8.3
+
+### Patch Changes
+
+- Live-updating document preview (COD-58): the attachment/file preview now
+  auto-refreshes in place as the agent rewrites the underlying file, instead of
+  showing a one-shot snapshot. Driven by a lightweight mtime+size poll while a
+  preview is open and visible; markdown/text re-fetch content and image/pdf
+  reload via an mtime cache-bust. Scroll position is preserved across refreshes.
+
+  Codex session reliability (COD-43): reconcile/restore now respect tmux
+  `#{pane_dead}` so crashed `remain-on-exit` panes aren't restored as healthy and
+  respawned; `respawnPane()` refuses to respawn into a working directory that no
+  longer exists (preventing a crash loop); and Gemini env forwarding now routes
+  through the dedicated Codeman tmux socket.
+
+  Test hardening (COD-44): session integration tests now create their own
+  isolated working-directory fixtures instead of reusing the shared /tmp.
+
 ## 0.8.2
 
 ### Patch Changes
