@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Fastify hooks, Vitest HTTP integration tests.
 
-**Status:** Implemented and verified on 2026-06-08. Commit and Jira steps pending.
+**Status:** Completed on 2026-06-08. Implementation, verification, commit, push, and Jira transition are complete.
 
 ---
 
@@ -328,7 +328,7 @@ Expected: all pass.
 
 ## Task 4: Commit And Jira
 
-- [ ] **Step 1: Commit**
+- [x] **Step 1: Commit**
 
 Commit implementation and test changes:
 
@@ -337,7 +337,7 @@ git add -- src/web/middleware/auth.ts test/auth-security.test.ts docs/superpower
 git commit -m "fix(auth): COD-21 relax auth lockout recovery"
 ```
 
-- [ ] **Step 2: Update Jira**
+- [x] **Step 2: Update Jira**
 
 Update `COD-21` with:
 
