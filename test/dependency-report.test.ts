@@ -23,11 +23,11 @@ const results: ToolResult[] = [
     installHint: 'sudo apt install tmux',
   },
   {
-    id: 'ffmpeg',
-    label: 'FFmpeg',
-    category: 'media',
+    id: 'libreoffice',
+    label: 'LibreOffice',
+    category: 'office',
     required: false,
-    usedBy: ['video-transcribe-docx'],
+    usedBy: ['document preview', 'thumbnails'],
     status: 'missing',
   },
   {
@@ -35,7 +35,7 @@ const results: ToolResult[] = [
     label: 'MS Office',
     category: 'office',
     required: false,
-    usedBy: ['docx'],
+    usedBy: ['document preview', 'thumbnails'],
     status: 'skipped',
     reason: 'not applicable on linux',
   },
@@ -57,8 +57,8 @@ describe('renderTable', () => {
     expect(out).toContain('CORE');
     expect(out).toContain('Node.js');
     expect(out).toContain('22.22.1');
-    expect(out).toContain('MEDIA');
-    expect(out).toContain('video-transcribe-docx');
+    expect(out).toContain('OFFICE');
+    expect(out).toContain('document preview');
     expect(out).toContain('sudo apt install tmux');
   });
 });

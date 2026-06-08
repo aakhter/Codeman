@@ -8,7 +8,7 @@
  */
 
 export type ProbeEnvironment = 'linux' | 'darwin' | 'win32' | 'wsl';
-export type ToolCategory = 'core' | 'office' | 'documents' | 'media' | 'other';
+export type ToolCategory = 'core' | 'office' | 'other';
 
 /** Resolve a binary on the PATH and read its version. */
 export interface PathResolver {
@@ -57,7 +57,8 @@ export const DEPENDENCY_REGISTRY: ToolDependency[] = [
     id: 'claude',
     label: 'Claude CLI',
     category: 'core',
-    required: true,
+    required: false,
+    usedBy: ['Claude Code sessions (default backend)'],
     resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['claude'], versionArg: '--version' } }],
     installHint: { linux: 'https://docs.claude.com/claude-code', darwin: 'https://docs.claude.com/claude-code' },
   },
@@ -78,11 +79,27 @@ export const DEPENDENCY_REGISTRY: ToolDependency[] = [
     resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['opencode'], versionArg: '--version' } }],
   },
   {
+    id: 'codex',
+    label: 'Codex CLI',
+    category: 'core',
+    required: false,
+    usedBy: ['Codex sessions'],
+    resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['codex'], versionArg: '--version' } }],
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini CLI',
+    category: 'core',
+    required: false,
+    usedBy: ['Gemini sessions'],
+    resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['gemini'], versionArg: '--version' } }],
+  },
+  {
     id: 'libreoffice',
     label: 'LibreOffice',
     category: 'office',
     required: false,
-    usedBy: ['slides', 'spreadsheet', 'docx'],
+    usedBy: ['document preview', 'thumbnails'],
     resolvers: [
       {
         match: ['linux', 'darwin', 'wsl'],
@@ -96,7 +113,7 @@ export const DEPENDENCY_REGISTRY: ToolDependency[] = [
     label: 'MS Office',
     category: 'office',
     required: false,
-    usedBy: ['slides', 'spreadsheet', 'docx'],
+    usedBy: ['document preview', 'thumbnails'],
     resolvers: [
       {
         match: ['wsl', 'win32'],
@@ -107,32 +124,5 @@ export const DEPENDENCY_REGISTRY: ToolDependency[] = [
         },
       },
     ],
-  },
-  {
-    id: 'pandoc',
-    label: 'Pandoc',
-    category: 'documents',
-    required: false,
-    usedBy: ['cisco-pandoc-docx'],
-    resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['pandoc'], versionArg: '--version' } }],
-    installHint: { linux: 'sudo apt install pandoc', darwin: 'brew install pandoc' },
-  },
-  {
-    id: 'ffmpeg',
-    label: 'FFmpeg',
-    category: 'media',
-    required: false,
-    usedBy: ['video-transcribe-docx'],
-    resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['ffmpeg'], versionArg: '-version' } }],
-    installHint: { linux: 'sudo apt install ffmpeg', darwin: 'brew install ffmpeg' },
-  },
-  {
-    id: 'imagemagick',
-    label: 'ImageMagick',
-    category: 'media',
-    required: false,
-    usedBy: ['image-input'],
-    resolvers: [{ match: ALL, resolver: { kind: 'path', bins: ['magick', 'convert'], versionArg: '--version' } }],
-    installHint: { linux: 'sudo apt install imagemagick', darwin: 'brew install imagemagick' },
   },
 ];

@@ -10,7 +10,7 @@
 import type { ProbeEnvironment, ToolCategory } from '../config/dependency-registry.js';
 import type { ToolResult, ToolStatus } from './dependency-checker.js';
 
-const CATEGORY_ORDER: ToolCategory[] = ['core', 'office', 'documents', 'media', 'other'];
+const CATEGORY_ORDER: ToolCategory[] = ['core', 'office', 'other'];
 
 function glyph(r: ToolResult): string {
   if (r.status === 'ok') return '✓';

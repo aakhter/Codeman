@@ -17,11 +17,14 @@ describe('DEPENDENCY_REGISTRY', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it('marks core tools required and skill tools optional', () => {
-    const core = DEPENDENCY_REGISTRY.filter((t) => t.category === 'core');
-    expect(core.length).toBeGreaterThan(0);
-    // core required tools must be required; opencode is core but optional (advisory)
-    expect(core.filter((t) => t.id !== 'opencode').every((t) => t.required)).toBe(true);
+  it('hard-requires only node and tmux; agent CLIs and office are optional', () => {
+    const required = DEPENDENCY_REGISTRY.filter((t) => t.required)
+      .map((t) => t.id)
+      .sort();
+    expect(required).toEqual(['node', 'tmux']);
+    // all four agent CLIs are optional (Codeman runs any of them)
+    const agentClis = ['claude', 'opencode', 'codex', 'gemini'];
+    expect(DEPENDENCY_REGISTRY.filter((t) => agentClis.includes(t.id)).every((t) => t.required === false)).toBe(true);
     const office = DEPENDENCY_REGISTRY.filter((t) => t.category === 'office');
     expect(office.every((t) => t.required === false)).toBe(true);
   });

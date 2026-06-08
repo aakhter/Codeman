@@ -15,13 +15,18 @@ detected as present.
 
 ## Motivation
 
-Codeman's own runtime deps are minimal (Node, Claude CLI, tmux), but many skills
-shell out to optional tools at runtime — LibreOffice / MS Office (docx/pptx/
-spreadsheet skills), pandoc (cisco-pandoc-docx), ffmpeg (video-transcribe-docx),
-imagemagick (image-input), etc. Today a missing tool fails deep inside a session
-with an opaque error. A single preflight report makes environment readiness
-visible up front, and the `usedBy` mapping tells the user *which skill* a missing
-tool would break.
+Codeman shells out to a handful of external tools: the agent CLIs it can drive
+(Claude, OpenCode, Codex, Gemini), tmux for session multiplexing, and
+LibreOffice / MS Office for DOCX→PDF document preview and thumbnails
+(`document-preview-cache.ts`, `document-thumbnailer.ts`). When one is missing,
+failures surface deep inside a session or a preview path with an opaque error. A
+single preflight report makes readiness visible up front, and the `usedBy`
+mapping tells the user *which Codeman feature* a missing tool affects.
+
+Scope note: this checks tools **Codeman itself** uses. Tools that only specific
+Claude Code *skills* invoke (e.g. pandoc, ffmpeg) are intentionally out of scope —
+they vary by which skills are installed and are not a property of the Codeman
+product. Skill-tool discovery remains a possible follow-up.
 
 ## Command surface
 
@@ -54,7 +59,7 @@ entry:
 interface ToolDependency {
   id: string;                 // 'msoffice'
   label: string;              // 'MS Office'
-  category: 'core' | 'office' | 'documents' | 'media' | 'other';
+  category: 'core' | 'office' | 'other';
   required: boolean;          // core deps required; skill deps optional
   usedBy?: string[];          // skills/features that need it (for the report)
   minVersion?: string;        // optional floor; warn if below
@@ -63,9 +68,11 @@ interface ToolDependency {
 }
 ```
 
-Seed entries: **core** → node, claude (and opencode if resolvable), tmux;
-**office** → libreoffice/soffice, msoffice; **documents** → pandoc; **media** →
-ffmpeg, imagemagick. A comment marks `resolvers` as the extension point where
+Seed entries: **core** → node, tmux (hard-required) plus the agent CLIs
+claude, opencode, codex, gemini (all optional — Codeman runs any of them);
+**office** → libreoffice/soffice, msoffice (DOCX→PDF preview & thumbnails). Only
+node and tmux are required; everything else is advisory and never fails the exit
+code. A comment marks `resolvers` as the extension point where
 future skill-driven discovery will merge in dynamically-found deps.
 
 ## Environment-aware probes (incl. WSL)
@@ -114,30 +121,23 @@ deterministic on any CI host.
 ## Example output
 
 ```
-$ codeman doctor
+$ aicodeman doctor
 
-Codeman dependency check — wsl (x64)
+Codeman dependency check — wsl
 
 CORE
-  ✓ node          v22.22.1            /home/.../node
-  ✓ claude        2.1.168             /home/.../claude
-  ○ opencode      not found           (optional — only for OpenCode sessions)
+  ✓ Node.js       22.22.1             /home/.../node
+  ✓ Claude CLI    2.1.168             /home/.../claude   (default backend)
   ✓ tmux          3.4                 /usr/bin/tmux
+  ○ OpenCode CLI  not found           used by: OpenCode sessions
+  ✓ Codex CLI     0.137.0             /home/.../codex
+  ✓ Gemini CLI    0.42.0              /home/.../gemini
 
 OFFICE
-  ✓ libreoffice   24.2.7.2            /usr/bin/soffice
-  ✓ msoffice      16.0.19929          C:\...\Office16\WINWORD.EXE  (via WSL interop)
-                                      used by: slides, spreadsheet, docx
+  ✓ LibreOffice   24.2.7              /usr/bin/libreoffice   used by: document preview, thumbnails
+  ✓ MS Office     16.0.19929          C:\...\Office16\WINWORD.EXE  (via WSL interop)
 
-DOCUMENTS
-  ✓ pandoc        3.9                 /opt/.../pandoc
-
-MEDIA
-  ✗ ffmpeg        not found           used by: video-transcribe-docx
-                                      install: sudo apt install ffmpeg
-  ○ imagemagick   not found           used by: image-input
-
-Summary: 6 ok · 0 core-required missing · 2 skill/optional missing
+Summary: 7 ok · 0 required missing · 1 optional missing
 Exit code: 0
 ```
 

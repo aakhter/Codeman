@@ -629,7 +629,7 @@ program
 program
   .command('doctor')
   .alias('check-deps')
-  .description('Check downstream tool dependencies (tmux, LibreOffice, MS Office, pandoc, ffmpeg, ...)')
+  .description('Check Codeman tool dependencies (Node, Claude CLI, tmux, LibreOffice, MS Office)')
   .option('--json', 'Output structured JSON instead of a table')
   .option('--category <name>', 'Only check one category (core|office|documents|media|other)')
   .action(async (options) => {
