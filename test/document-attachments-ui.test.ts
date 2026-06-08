@@ -80,6 +80,13 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('data-attachment-action="reshow"');
   });
 
+  it('shows CLI-first guidance when the attachment drawer is empty', () => {
+    expect(panelsJs).toContain('No attachments yet');
+    expect(panelsJs).toContain('Show a file here by running:');
+    expect(panelsJs).toContain('codeman attach /absolute/path/to/file.pptx');
+    expect(panelsJs).toContain('Supports .pptx, .docx, .pdf, and .png.');
+  });
+
   it('styles the attachment history as a desktop drawer and mobile sheet', () => {
     expect(stylesCss).toContain('.attachment-history-drawer');
     expect(stylesCss).toContain('.attachment-history-item');

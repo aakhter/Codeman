@@ -3189,7 +3189,14 @@ Object.assign(CodemanApp.prototype, {
 
     subtitle.textContent = `${items.length} ${items.length === 1 ? 'file' : 'files'}`;
     if (items.length === 0) {
-      list.innerHTML = '<div class="attachment-history-empty">No attachments in this session</div>';
+      list.innerHTML = `
+        <div class="attachment-history-empty">
+          <div class="attachment-history-empty-title">No attachments yet</div>
+          <div>Show a file here by running:</div>
+          <code>codeman attach /absolute/path/to/file.pptx</code>
+          <div>Supports .pptx, .docx, .pdf, and .png.</div>
+        </div>
+      `;
       return;
     }
 
