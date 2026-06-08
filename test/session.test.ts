@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { WebServer } from '../src/web/server.js';
 
 const TEST_PORT = 3102;
@@ -6,8 +9,13 @@ const TEST_PORT = 3102;
 describe('Interactive Session Lifecycle', () => {
   let server: WebServer;
   let baseUrl: string;
+  // Own, isolated working-directory fixture instead of the shared /tmp — a
+  // session writes .claude/ and .claude-images/ into its workingDir, so the
+  // test should not pollute /tmp or depend on its contents (COD-44).
+  let testWorkingDir: string;
 
   beforeAll(async () => {
+    testWorkingDir = mkdtempSync(join(tmpdir(), 'codeman-session-test-'));
     server = new WebServer(TEST_PORT, false, true);
     await server.start();
     baseUrl = `http://localhost:${TEST_PORT}`;
@@ -15,6 +23,7 @@ describe('Interactive Session Lifecycle', () => {
 
   afterAll(async () => {
     await server.stop();
+    rmSync(testWorkingDir, { recursive: true, force: true });
   }, 60000); // Extended timeout for cleanup
 
   describe('Session Creation', () => {
@@ -37,13 +46,13 @@ describe('Interactive Session Lifecycle', () => {
       const response = await fetch(`${baseUrl}/api/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workingDir: '/tmp' }),
+        body: JSON.stringify({ workingDir: testWorkingDir }),
       });
 
       const data = await response.json();
 
       expect(data.success).toBe(true);
-      expect(data.session.workingDir).toBe('/tmp');
+      expect(data.session.workingDir).toBe(testWorkingDir);
     });
   });
 

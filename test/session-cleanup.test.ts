@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { WebServer } from '../src/web/server.js';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 const TEST_PORT = 3120;
 const CASES_DIR = join(homedir(), 'codeman-cases');
@@ -17,8 +17,11 @@ describe('Session Cleanup', () => {
   let baseUrl: string;
   const createdCases: string[] = [];
   const createdSessions: string[] = [];
+  // Own, isolated working-directory fixture instead of the shared /tmp (COD-44).
+  let testWorkingDir: string;
 
   beforeAll(async () => {
+    testWorkingDir = mkdtempSync(join(tmpdir(), 'codeman-cleanup-test-'));
     server = new WebServer(TEST_PORT, false, true);
     await server.start();
     baseUrl = `http://localhost:${TEST_PORT}`;
@@ -43,6 +46,7 @@ describe('Session Cleanup', () => {
       } catch {}
     }
     await server.stop();
+    rmSync(testWorkingDir, { recursive: true, force: true });
   }, 60000);
 
   describe('Session Deletion', () => {
@@ -117,7 +121,7 @@ describe('Session Cleanup', () => {
       const sessionRes = await fetch(`${baseUrl}/api/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workingDir: '/tmp' }),
+        body: JSON.stringify({ workingDir: testWorkingDir }),
       });
       const sessionData = await sessionRes.json();
       expect(sessionData.success).toBe(true);
@@ -160,7 +164,7 @@ describe('Session Cleanup', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: 'test cleanup',
-          workingDir: '/tmp',
+          workingDir: testWorkingDir,
           durationMinutes: 1,
         }),
       });
