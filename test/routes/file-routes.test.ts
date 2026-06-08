@@ -7,8 +7,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Readable } from 'node:stream';
+import Fastify from 'fastify';
+import fastifyCookie from '@fastify/cookie';
+import fastifyCompress from '@fastify/compress';
 import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
+import { createMockRouteContext } from '../mocks/index.js';
 import { registerFileRoutes } from '../../src/web/routes/file-routes.js';
+import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 
 // Mock fs/promises for file operations
 vi.mock('node:fs/promises', () => ({
@@ -425,6 +430,42 @@ describe('file-routes', () => {
       expect(rawRes.statusCode).toBe(200);
       expect(rawRes.headers['content-type']).toBe('application/pdf');
       expect(mockedCreateReadStream).toHaveBeenCalledWith('/mnt/c/decks/board-update.pdf');
+    });
+
+    it('serves registered PNG attachment bytes with production compression enabled', async () => {
+      const app = Fastify({ logger: false });
+      await app.register(fastifyCompress, { threshold: 1024 });
+      await app.register(fastifyCookie);
+      const ctx = createMockRouteContext();
+      registerFileRoutes(app, ctx);
+      installRouteErrorHandler(app);
+      await app.ready();
+
+      const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(4096, 1)]);
+      mockedReadFile.mockResolvedValue(png as never);
+      mockedCreateReadStream.mockReturnValue(Readable.from([png]) as never);
+      mockedStat.mockResolvedValue({ size: png.length, isFile: () => true, mtimeMs: 12345 } as never);
+
+      try {
+        const registerRes = await app.inject({
+          method: 'POST',
+          url: `/api/sessions/${ctx._sessionId}/attachments`,
+          payload: { path: '/mnt/c/images/diagram.png' },
+        });
+        const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+        const rawRes = await app.inject({
+          method: 'GET',
+          url: `/api/sessions/${ctx._sessionId}/attachments/${attachmentId}/raw`,
+          headers: { 'accept-encoding': 'gzip, deflate, br' },
+        });
+
+        expect(rawRes.statusCode).toBe(200);
+        expect(rawRes.headers['content-type']).toBe('image/png');
+        expect(rawRes.rawPayload).toEqual(png);
+      } finally {
+        await app.close();
+      }
     });
 
     it('rejects unknown attachment ids instead of accepting arbitrary browser paths', async () => {

@@ -7,6 +7,7 @@ import { FastifyInstance, type FastifyReply } from 'fastify';
 import { join, basename as pathBasename } from 'node:path';
 import { homedir } from 'node:os';
 import { createReadStream } from 'node:fs';
+import type { ReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
@@ -47,6 +48,28 @@ function sanitizeDownloadName(fileName: string): string {
   return fileName.replace(/["\\\r\n]/g, '_');
 }
 
+function sendRawStream(reply: FastifyReply, content: ReadStream): void {
+  const headers = reply.getHeaders();
+  reply.hijack();
+
+  for (const [name, value] of Object.entries(headers)) {
+    if (value !== undefined) {
+      reply.raw.setHeader(name, value);
+    }
+  }
+
+  content.on('error', (err) => {
+    if (reply.raw.headersSent) {
+      reply.raw.destroy(err);
+      return;
+    }
+
+    reply.raw.statusCode = 500;
+    reply.raw.end('Failed to read file');
+  });
+  content.pipe(reply.raw);
+}
+
 async function serveRawFile(
   reply: FastifyReply,
   resolvedPath: string,
@@ -65,14 +88,14 @@ async function serveRawFile(
     reply.header('Content-Disposition', `attachment; filename="${safeName}"`);
     reply.header('Content-Length', stat.size);
     reply.header('X-Content-Type-Options', 'nosniff');
-    reply.send(content);
+    sendRawStream(reply, content);
     return;
   }
 
   reply.header('Content-Type', MIME_TYPES[extension] || 'application/octet-stream');
   reply.header('Content-Length', stat.size);
   reply.header('X-Content-Type-Options', 'nosniff');
-  reply.send(content);
+  sendRawStream(reply, content);
 }
 
 async function serveConvertedPreview(
