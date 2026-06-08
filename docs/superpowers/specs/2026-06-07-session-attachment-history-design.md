@@ -128,7 +128,7 @@ If the same file is attached again, update size, mtime, timestamp, and routes, t
 
 ## UI Details
 
-Add an Attachments button or icon in the session chrome where session-scoped tools already live. It should show a count when history exists. The panel is a drawer/list, not another floating-card stack.
+Add an Attachments paperclip icon to the top header as an active-session tool, near the existing response viewer, away digest, notifications, lifecycle log, and settings controls. It should show a small count badge for the active session when history exists. The panel is a drawer/list, not another floating-card stack, and its contents change when the user switches session tabs.
 
 List states:
 
@@ -137,7 +137,7 @@ List states:
 - Missing file: subdued row, thumbnail fallback, disabled Preview/Download/Open.
 - Available file: same thumbnail treatment as cards.
 
-The drawer should work on desktop and phone. On mobile, it can be a full-height sheet. On desktop, it can be a right-side drawer or session panel section, following existing Codeman panel conventions.
+On desktop, clicking the paperclip opens a right-side drawer over the terminal area. On mobile, the same header utility opens a full-height sheet. The bottom toolbar is intentionally avoided because it is input/run focused and already crowded on phones.
 
 ## Security
 
