@@ -254,7 +254,12 @@ export class SessionManager extends EventEmitter {
     // future reader of state.json.
     const state = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
-    const toStore = envOverrides ? { ...state, __envOverrides: envOverrides } : state;
+    const attachmentHistory = session.getAttachmentHistoryForPersist();
+    const toStore = {
+      ...state,
+      ...(envOverrides ? { __envOverrides: envOverrides } : {}),
+      ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
+    };
     this.store.setSession(session.id, toStore as SessionState);
   }
 

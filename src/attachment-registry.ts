@@ -62,6 +62,15 @@ class AttachmentRegistry {
     return this.recordsBySession.get(sessionId)?.get(attachmentId);
   }
 
+  findByFilePath(sessionId: string, filePath: string): AttachmentRecord | undefined {
+    const records = this.recordsBySession.get(sessionId);
+    if (!records) return undefined;
+    for (const record of records.values()) {
+      if (record.filePath === filePath) return record;
+    }
+    return undefined;
+  }
+
   clearSession(sessionId: string): void {
     this.recordsBySession.delete(sessionId);
   }
@@ -141,6 +150,14 @@ export async function registerExternalAttachment(
   const stat = await fs.stat(resolvedPath);
   if (typeof stat.isFile === 'function' && !stat.isFile()) {
     throw new AttachmentRegistrationError('Attachment path is not a file');
+  }
+
+  const existing = attachmentRegistry.findByFilePath(sessionId, resolvedPath);
+  if (existing) {
+    existing.size = stat.size;
+    existing.mtimeMs = stat.mtimeMs ?? 0;
+    existing.timestamp = Date.now();
+    return attachmentRecordToEvent(existing);
   }
 
   const record: AttachmentRecord = {

@@ -58,6 +58,7 @@ import { execFile } from 'node:child_process';
 import { createReadStream, realpathSync } from 'node:fs';
 import { fileStreamManager } from '../../src/file-stream-manager.js';
 import { clearDocumentPreviewCache } from '../../src/document-preview-cache.js';
+import { buildDetectedAttachmentHistoryItem } from '../../src/session-attachment-history.js';
 
 const mockedReaddir = vi.mocked(fs.readdir);
 const mockedReadFile = vi.mocked(fs.readFile);
@@ -392,7 +393,120 @@ describe('file-routes', () => {
       expect(body.data.thumbnailUrl).toBe(
         `/api/sessions/${harness.ctx._sessionId}/attachments/${body.data.attachmentId}/thumbnail`
       );
+      expect(JSON.stringify(body.data)).not.toContain('/mnt/c/decks/board-update.pdf');
+      expect(harness.ctx._session.upsertAttachmentHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fileName: 'board-update.pdf',
+          extension: 'pdf',
+          externalPath: '/mnt/c/decks/board-update.pdf',
+          source: 'external',
+        })
+      );
+      expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(harness.ctx._session);
       expect(harness.ctx.broadcast).toHaveBeenCalledWith('attachment:detected', expect.objectContaining(body.data));
+    });
+
+    it('lists session attachment history with safe URLs and no external paths', async () => {
+      mockedRealpathSync.mockImplementation((p: string) => p as never);
+      mockedStat.mockResolvedValue({ size: 4096, isFile: () => true, mtimeMs: 12345 } as never);
+      harness.ctx._session.upsertAttachmentHistory({
+        id: 'external:/mnt/c/decks/board-update.pdf',
+        sessionId: harness.ctx._sessionId,
+        fileName: 'board-update.pdf',
+        extension: 'pdf',
+        attachmentType: 'pdf',
+        size: 4096,
+        mtimeMs: 12345,
+        timestamp: 100,
+        source: 'external',
+        externalPath: '/mnt/c/decks/board-update.pdf',
+      });
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.items).toHaveLength(1);
+      expect(body.data.items[0]).toMatchObject({
+        fileName: 'board-update.pdf',
+        source: 'external',
+        missing: false,
+      });
+      expect(body.data.items[0].previewUrl).toContain('/attachments/att_');
+      expect(body.data.items[0].downloadUrl).toContain('download=true');
+      expect(JSON.stringify(body.data)).not.toContain('/mnt/c/decks/board-update.pdf');
+      expect(body.data.count).toBe(1);
+    });
+
+    it('marks missing external history items without returning action URLs', async () => {
+      mockedRealpathSync.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      harness.ctx._session.upsertAttachmentHistory({
+        id: 'external:/mnt/c/decks/missing.pdf',
+        sessionId: harness.ctx._sessionId,
+        fileName: 'missing.pdf',
+        extension: 'pdf',
+        attachmentType: 'pdf',
+        size: 4096,
+        mtimeMs: 12345,
+        timestamp: 100,
+        source: 'external',
+        externalPath: '/mnt/c/decks/missing.pdf',
+      });
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.items[0]).toMatchObject({ fileName: 'missing.pdf', missing: true });
+      expect(body.data.items[0].previewUrl).toBeUndefined();
+      expect(JSON.stringify(body.data)).not.toContain('/mnt/c/decks/missing.pdf');
+    });
+
+    it('lists stopped session workspace attachment history from stored state', async () => {
+      harness.ctx.sessions.clear();
+      const historyItem = buildDetectedAttachmentHistoryItem({
+        sessionId: 'stopped-session',
+        filePath: 'report.pdf',
+        relativePath: 'out/report.pdf',
+        fileName: 'report.pdf',
+        extension: 'pdf',
+        attachmentType: 'pdf',
+        size: 2048,
+        timestamp: 100,
+      });
+      harness.ctx.store.getSession.mockReturnValue({
+        id: 'stopped-session',
+        workingDir: '/tmp/test-workdir',
+        status: 'stopped',
+        pid: null,
+        createdAt: 1,
+        lastActivityAt: 2,
+        currentTaskId: null,
+        attachmentHistory: [historyItem],
+      });
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/sessions/stopped-session/attachments',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.items[0]).toMatchObject({
+        fileName: 'report.pdf',
+        source: 'detected',
+        missing: false,
+      });
+      expect(body.data.items[0].previewUrl).toBe('/api/sessions/stopped-session/file-raw?path=out%2Freport.pdf');
     });
 
     it('rejects unsupported external attachment types', async () => {

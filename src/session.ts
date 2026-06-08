@@ -51,6 +51,7 @@ import {
   type CodexConfig,
   type GeminiConfig,
   type EffortLevel,
+  type SessionAttachmentHistoryItem,
 } from './types.js';
 import type { TerminalMultiplexer, MuxSession } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
@@ -84,6 +85,10 @@ import {
 import { SessionAutoOps } from './session-auto-ops.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { parseAttachmentMagicLinks } from './attachment-magic.js';
+import {
+  sanitizeAttachmentHistory,
+  upsertAttachmentHistory as upsertAttachmentHistoryList,
+} from './session-attachment-history.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -302,6 +307,7 @@ export class Session extends EventEmitter {
 
   // Explicit attachment magic links already emitted from terminal output.
   private _attachmentMagicSeen = new Set<string>();
+  private _attachmentHistory: SessionAttachmentHistoryItem[] = [];
 
   // Flicker filter setting (per-session toggle, applied on frontend)
   private _flickerFilterEnabled: boolean = false;
@@ -429,6 +435,8 @@ export class Session extends EventEmitter {
       envOverrides?: Record<string, string>;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
       effort?: EffortLevel;
+      /** Restored per-session attachment history. May include server-private external paths. */
+      attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Per-session terminal buffer limits; applies to this server-side session buffer. */
       terminalBufferConfig?: { maxBytes: number; trimBytes: number };
       /** tmux history limit for newly created mux sessions. */
@@ -507,6 +515,9 @@ export class Session extends EventEmitter {
     }
     if (config.effort && isEffortLevel(config.effort)) {
       this._effort = config.effort;
+    }
+    if (config.attachmentHistory && config.attachmentHistory.length > 0) {
+      this.restoreAttachmentHistory(config.attachmentHistory);
     }
 
     // Initialize task tracker and forward events (store handlers for cleanup)
@@ -886,6 +897,25 @@ export class Session extends EventEmitter {
     this._flickerFilterEnabled = enabled;
   }
 
+  get attachmentHistory(): SessionAttachmentHistoryItem[] {
+    return sanitizeAttachmentHistory(this._attachmentHistory);
+  }
+
+  upsertAttachmentHistory(item: SessionAttachmentHistoryItem): void {
+    this._attachmentHistory = upsertAttachmentHistoryList(this._attachmentHistory, item);
+  }
+
+  restoreAttachmentHistory(history: SessionAttachmentHistoryItem[] | undefined): void {
+    this._attachmentHistory = [];
+    for (const item of [...(history ?? [])].reverse()) {
+      this.upsertAttachmentHistory(item);
+    }
+  }
+
+  getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] | undefined {
+    return this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined;
+  }
+
   isIdle(): boolean {
     return this._status === 'idle';
   }
@@ -936,6 +966,7 @@ export class Session extends EventEmitter {
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       effort: this._effort,
+      attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
       // envOverrides intentionally NOT on the public SessionState type — they must not
       // leak into SSE / GET /api/sessions broadcasts (schema allows OPENCODE_*, which
       // can carry secrets). For disk persistence, session-manager calls

@@ -9,7 +9,13 @@ import { homedir } from 'node:os';
 import { createReadStream } from 'node:fs';
 import type { ReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
-import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
+import {
+  ApiErrorCode,
+  createErrorResponse,
+  getErrorMessage,
+  type SessionAttachmentHistoryItem,
+  type SessionState,
+} from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
 import {
   AttachmentRegistrationError,
@@ -20,11 +26,12 @@ import {
   registerExternalAttachment,
   type AttachmentRecord,
 } from '../../attachment-registry.js';
+import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
-import type { EventPort, SessionPort } from '../ports/index.js';
+import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
 
 const MIME_TYPES: Record<string, string> = {
   png: 'image/png',
@@ -161,7 +168,142 @@ function getAttachmentOr404(
   return record;
 }
 
-export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & EventPort): void {
+type StoredSessionWithPrivateAttachmentHistory = SessionState & {
+  __attachmentHistory?: SessionAttachmentHistoryItem[];
+};
+
+type AttachmentHistoryRouteItem = Omit<SessionAttachmentHistoryItem, 'externalPath'> & {
+  missing: boolean;
+  rawUrl?: string;
+  url?: string;
+  previewUrl?: string;
+  thumbnailUrl?: string;
+  downloadUrl?: string;
+  attachmentId?: string;
+};
+
+function appendDownloadFlag(url: string): string {
+  return `${url}${url.includes('?') ? '&' : '?'}download=true`;
+}
+
+function getKnownSessionWorkingDir(
+  ctx: SessionPort & ConfigPort,
+  sessionId: string,
+  reply: FastifyReply
+): string | undefined {
+  const liveSession = ctx.sessions.get(sessionId);
+  if (liveSession) return liveSession.workingDir;
+
+  const stored = ctx.store.getSession(sessionId) as StoredSessionWithPrivateAttachmentHistory | undefined;
+  if (stored) return stored.workingDir;
+
+  reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, `Session ${sessionId} not found`));
+  return undefined;
+}
+
+function getSessionAttachmentHistory(
+  ctx: SessionPort & ConfigPort,
+  sessionId: string
+): { workingDir: string; history: SessionAttachmentHistoryItem[] } | undefined {
+  const liveSession = ctx.sessions.get(sessionId);
+  if (liveSession) {
+    return {
+      workingDir: liveSession.workingDir,
+      history: liveSession.getAttachmentHistoryForPersist() ?? liveSession.attachmentHistory ?? [],
+    };
+  }
+
+  const stored = ctx.store.getSession(sessionId) as StoredSessionWithPrivateAttachmentHistory | undefined;
+  if (!stored) return undefined;
+
+  return {
+    workingDir: stored.workingDir,
+    history: stored.__attachmentHistory ?? stored.attachmentHistory ?? [],
+  };
+}
+
+async function buildDetectedAttachmentRouteItem(
+  sessionId: string,
+  workingDir: string,
+  item: SessionAttachmentHistoryItem
+): Promise<AttachmentHistoryRouteItem> {
+  const safe = sanitizeAttachmentHistoryItem(item);
+  if (!item.relativePath) {
+    return { ...safe, missing: true };
+  }
+
+  const validated = validateSessionFilePath(workingDir, item.relativePath);
+  if (!validated) {
+    return { ...safe, missing: true };
+  }
+
+  let size = item.size;
+  let mtimeMs = item.mtimeMs;
+  try {
+    const stat = await fs.stat(validated.resolvedPath);
+    size = stat.size;
+    mtimeMs = stat.mtimeMs ?? mtimeMs;
+  } catch {
+    return { ...safe, missing: true };
+  }
+
+  const encodedPath = encodeURIComponent(item.relativePath);
+  const rawUrl = `/api/sessions/${sessionId}/file-raw?path=${encodedPath}`;
+  const previewUrl =
+    item.extension === 'docx' || item.extension === 'pptx'
+      ? `/api/sessions/${sessionId}/file-preview?path=${encodedPath}`
+      : rawUrl;
+  const thumbnailUrl = isSupportedAttachmentExtension(item.extension)
+    ? buildFileThumbnailRoute(sessionId, item.relativePath)
+    : undefined;
+
+  return {
+    ...safe,
+    size,
+    mtimeMs,
+    missing: false,
+    rawUrl,
+    url: rawUrl,
+    previewUrl,
+    thumbnailUrl,
+    downloadUrl: appendDownloadFlag(rawUrl),
+  };
+}
+
+async function buildExternalAttachmentRouteItem(
+  sessionId: string,
+  item: SessionAttachmentHistoryItem
+): Promise<AttachmentHistoryRouteItem> {
+  const safe = sanitizeAttachmentHistoryItem(item);
+  if (!item.externalPath) {
+    return { ...safe, missing: true };
+  }
+
+  try {
+    const event = await registerExternalAttachment(sessionId, item.externalPath);
+    return {
+      ...safe,
+      fileName: event.fileName,
+      extension: event.extension,
+      attachmentType: event.attachmentType,
+      size: event.size,
+      missing: false,
+      attachmentId: event.attachmentId,
+      rawUrl: event.rawUrl,
+      url: event.rawUrl,
+      previewUrl: event.previewUrl,
+      thumbnailUrl: event.thumbnailUrl,
+      downloadUrl: appendDownloadFlag(event.rawUrl),
+    };
+  } catch (err) {
+    if (err instanceof AttachmentRegistrationError) {
+      return { ...safe, missing: true };
+    }
+    throw err;
+  }
+}
+
+export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & EventPort & ConfigPort): void {
   // File tree listing
   app.get('/api/sessions/:id/files', async (req) => {
     const { id } = req.params as { id: string };
@@ -408,7 +550,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // Register a live external file as an explicit attachment card.
   app.post('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
-    findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id);
     const body = (req.body || {}) as { path?: string };
 
     if (!body.path || typeof body.path !== 'string') {
@@ -418,6 +560,21 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     try {
       const event = await registerExternalAttachment(id, body.path);
+      const record = attachmentRegistry.get(id, event.attachmentId);
+      if (record) {
+        session.upsertAttachmentHistory(
+          buildExternalAttachmentHistoryItem({
+            sessionId: id,
+            externalPath: record.filePath,
+            fileName: record.fileName,
+            extension: record.extension,
+            size: record.size,
+            mtimeMs: record.mtimeMs,
+            timestamp: event.timestamp,
+          })
+        );
+        ctx.persistSessionState(session);
+      }
       ctx.broadcast(SseEvent.AttachmentDetected, event);
       return { success: true, data: event };
     } catch (err) {
@@ -433,9 +590,35 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
   });
 
+  app.get('/api/sessions/:id/attachments', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const sessionHistory = getSessionAttachmentHistory(ctx, id);
+    if (!sessionHistory) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, `Session ${id} not found`));
+      return;
+    }
+
+    const items = await Promise.all(
+      sessionHistory.history.map((item) =>
+        item.source === 'external'
+          ? buildExternalAttachmentRouteItem(id, item)
+          : buildDetectedAttachmentRouteItem(id, sessionHistory.workingDir, item)
+      )
+    );
+
+    return {
+      success: true,
+      data: {
+        items,
+        count: items.length,
+      },
+    };
+  });
+
   app.get('/api/sessions/:id/attachments/:attachmentId', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
     const event = attachmentRecordToEvent(record);
@@ -458,7 +641,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/attachments/:attachmentId/raw', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
     const { download } = req.query as { download?: string };
-    findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
 
@@ -473,7 +657,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
   app.get('/api/sessions/:id/attachments/:attachmentId/preview', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
 
@@ -487,7 +672,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
   app.get('/api/sessions/:id/attachments/:attachmentId/thumbnail', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
     await serveThumbnail(reply, record.filePath, record.extension);
@@ -497,7 +683,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-raw', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath, download } = req.query as { path?: string; download?: string };
-    const session = findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
 
     if (!filePath) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
@@ -505,7 +692,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
 
     // Validate path is within working directory (security: resolve symlinks to prevent traversal)
-    const validated = validateSessionFilePath(session.workingDir, filePath);
+    const validated = validateSessionFilePath(workingDir, filePath);
     if (!validated) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
       return;
@@ -528,14 +715,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-preview', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath } = req.query as { path?: string };
-    const session = findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
 
     if (!filePath) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
       return;
     }
 
-    const validated = validateSessionFilePath(session.workingDir, filePath);
+    const validated = validateSessionFilePath(workingDir, filePath);
     if (!validated) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
       return;
@@ -554,14 +742,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-thumbnail', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath } = req.query as { path?: string };
-    const session = findSessionOrFail(ctx, id);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
 
     if (!filePath) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
       return;
     }
 
-    const validated = validateSessionFilePath(session.workingDir, filePath);
+    const validated = validateSessionFilePath(workingDir, filePath);
     if (!validated) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
       return;

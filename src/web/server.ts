@@ -42,7 +42,7 @@ import { execSync } from 'node:child_process';
 import { homedir, hostname as getHostname } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
-import type { ClaudeMode, SessionState } from '../types.js';
+import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState } from '../types.js';
 import { RespawnController, RespawnConfig } from '../respawn-controller.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import { createMultiplexer } from '../mux-factory.js';
@@ -59,6 +59,10 @@ import {
 } from '../subagent-watcher.js';
 import { imageWatcher } from '../image-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
+import {
+  buildDetectedAttachmentHistoryItem,
+  buildExternalAttachmentHistoryItem,
+} from '../session-attachment-history.js';
 import { TranscriptWatcher } from '../transcript-watcher.js';
 import { TeamWatcher } from '../team-watcher.js';
 import { TunnelManager } from '../tunnel-manager.js';
@@ -414,13 +418,20 @@ export class WebServer extends EventEmitter {
     // Store handlers for cleanup on shutdown
     this.imageWatcherHandlers = {
       detected: (event: ImageDetectedEvent) => this.broadcast(SseEvent.ImageDetected, event),
-      attachmentDetected: (event: AttachmentDetectedEvent) =>
-        this.broadcast(SseEvent.AttachmentDetected, {
+      attachmentDetected: (event: AttachmentDetectedEvent) => {
+        const attachmentEvent = {
           ...event,
           source: event.source || 'detected',
           thumbnailUrl:
             event.thumbnailUrl || buildFileThumbnailRoute(event.sessionId, event.relativePath || event.fileName),
-        }),
+        };
+        const session = this.sessions.get(event.sessionId);
+        if (session) {
+          session.upsertAttachmentHistory(buildDetectedAttachmentHistoryItem(attachmentEvent));
+          this.persistSessionState(session);
+        }
+        this.broadcast(SseEvent.AttachmentDetected, attachmentEvent);
+      },
       error: (error: Error, sessionId?: string) => {
         console.error(`[ImageWatcher] Error${sessionId ? ` for ${sessionId}` : ''}:`, error.message);
       },
@@ -811,7 +822,12 @@ export class WebServer extends EventEmitter {
     // field kept off SessionState to avoid leaking via API broadcasts.
     const base = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
-    const state = (envOverrides ? { ...base, __envOverrides: envOverrides } : base) as SessionState;
+    const attachmentHistory = session.getAttachmentHistoryForPersist();
+    const state = {
+      ...base,
+      ...(envOverrides ? { __envOverrides: envOverrides } : {}),
+      ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
+    } as SessionState;
     const controller = this.respawnControllers.get(session.id);
     if (controller) {
       const config = controller.getConfig();
@@ -1085,8 +1101,24 @@ export class WebServer extends EventEmitter {
   }
 
   private async registerAttachment(sessionId: string, filePath: string): Promise<void> {
-    if (!this.sessions.has(sessionId)) return;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
     const event = await registerExternalAttachment(sessionId, filePath);
+    const record = attachmentRegistry.get(sessionId, event.attachmentId);
+    if (record) {
+      session.upsertAttachmentHistory(
+        buildExternalAttachmentHistoryItem({
+          sessionId,
+          externalPath: record.filePath,
+          fileName: record.fileName,
+          extension: record.extension,
+          size: record.size,
+          mtimeMs: record.mtimeMs,
+          timestamp: event.timestamp,
+        })
+      );
+      this.persistSessionState(session);
+    }
     this.broadcast(SseEvent.AttachmentDetected, event);
   }
 
@@ -1769,6 +1801,9 @@ export class WebServer extends EventEmitter {
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
             const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
+            const savedAttachmentHistory =
+              (savedState as { __attachmentHistory?: SessionAttachmentHistoryItem[] })?.__attachmentHistory ??
+              savedState?.attachmentHistory;
             const session = new Session({
               id: muxSession.sessionId, // Preserve the original session ID
               workingDir: muxSession.workingDir,
@@ -1784,6 +1819,7 @@ export class WebServer extends EventEmitter {
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               envOverrides: savedEnvOverrides,
               effort: savedState?.effort,
+              attachmentHistory: savedAttachmentHistory,
             });
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name

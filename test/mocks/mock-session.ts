@@ -4,6 +4,8 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
+import type { SessionAttachmentHistoryItem } from '../../src/types/session.js';
+import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
 /**
  * Enhanced mock session for testing RespawnController.
@@ -199,6 +201,9 @@ export class MockSession extends EventEmitter {
   /** Currently active tools */
   activeTools: unknown[] = [];
 
+  /** Session attachment history */
+  private _attachmentHistory: SessionAttachmentHistoryItem[] = [];
+
   /** Token tracking */
   inputTokens: number = 0;
   outputTokens: number = 0;
@@ -219,8 +224,21 @@ export class MockSession extends EventEmitter {
       color: this.color,
       mode: this.mode,
       muxName: this._muxName,
+      attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
     };
   }
+
+  get attachmentHistory(): SessionAttachmentHistoryItem[] {
+    return sanitizeAttachmentHistory(this._attachmentHistory);
+  }
+
+  upsertAttachmentHistory = vi.fn((item: SessionAttachmentHistoryItem) => {
+    this._attachmentHistory = upsertAttachmentHistory(this._attachmentHistory, item);
+  });
+
+  getAttachmentHistoryForPersist = vi.fn(() =>
+    this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined
+  );
 
   /** Check if session is busy */
   isBusy = vi.fn(() => false);
