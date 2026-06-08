@@ -29,3 +29,14 @@ export { findClaudeDir, getAugmentedPath } from './claude-cli-resolver.js';
 export { resolveOpenCodeDir } from './opencode-cli-resolver.js';
 export { resolveCodexDir } from './codex-cli-resolver.js';
 export { resolveGeminiDir } from './gemini-cli-resolver.js';
+export {
+  detectEnvironment,
+  extractVersion,
+  compareVersions,
+  checkTool,
+  checkAll,
+  createRealHost,
+} from './dependency-checker.js';
+export type { ProbeHost, ToolResult, ToolStatus } from './dependency-checker.js';
+export { renderTable, renderJson, computeExitCode } from './dependency-report.js';
+export type { DependencyReportJson } from './dependency-report.js';

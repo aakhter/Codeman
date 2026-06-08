@@ -626,4 +626,29 @@ program
     }
   });
 
+program
+  .command('doctor')
+  .alias('check-deps')
+  .description('Check downstream tool dependencies (tmux, LibreOffice, MS Office, pandoc, ffmpeg, ...)')
+  .option('--json', 'Output structured JSON instead of a table')
+  .option('--category <name>', 'Only check one category (core|office|documents|media|other)')
+  .action(async (options) => {
+    const { createRealHost, checkAll } = await import('./utils/dependency-checker.js');
+    const { renderTable, renderJson, computeExitCode } = await import('./utils/dependency-report.js');
+    const { DEPENDENCY_REGISTRY } = await import('./config/dependency-registry.js');
+
+    const host = createRealHost();
+    const registry = options.category
+      ? DEPENDENCY_REGISTRY.filter((t) => t.category === options.category)
+      : DEPENDENCY_REGISTRY;
+    const results = checkAll(registry, host);
+
+    if (options.json) {
+      console.log(JSON.stringify(renderJson(results, host.environment), null, 2));
+    } else {
+      console.log(renderTable(results, host.environment));
+    }
+    process.exit(computeExitCode(results));
+  });
+
 export { program };
