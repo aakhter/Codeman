@@ -1,5 +1,23 @@
 # aicodeman
 
+## 0.8.2
+
+### Patch Changes
+
+- Add `.md` and `.txt` support to attachment cards and previews (COD-46).
+  Markdown attachments render through the existing sanitized client path
+  (`marked` + HTML sanitizer, no unsafe inline HTML) and plain-text
+  attachments render as escaped, whitespace-preserving text. `codeman
+attach` and the `codeman://attach` magic link now accept md/txt, files
+  are served with `text/markdown` / `text/plain`, previews stream from raw
+  bytes, and thumbnails fall back to a type badge. Auto-detection is
+  unchanged (explicit-attach only) so routine notes files don't spam cards.
+
+  Add the `codeman doctor` dependency check (COD-45): a read-only command
+  that reports whether the external tools Codeman actually uses are
+  present, with `--json` and `--category` filters and a non-zero exit when
+  a required dependency is missing.
+
 ## 0.8.1
 
 ### Patch Changes
