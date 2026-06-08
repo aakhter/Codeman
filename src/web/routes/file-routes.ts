@@ -432,14 +432,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-content', async (req) => {
     const { id } = req.params as { id: string };
     const { path: filePath, lines, raw } = req.query as { path?: string; lines?: string; raw?: string };
-    const session = findSessionOrFail(ctx, id);
+    const workingDir = getSessionAttachmentHistory(ctx, id)?.workingDir ?? findSessionOrFail(ctx, id).workingDir;
 
     if (!filePath) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
     }
 
     // Validate path is within working directory (security: resolve symlinks to prevent traversal)
-    const validated = validateSessionFilePath(session.workingDir, filePath);
+    const validated = validateSessionFilePath(workingDir, filePath);
     if (!validated) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
     }

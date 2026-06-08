@@ -261,6 +261,32 @@ describe('file-routes', () => {
       expect(body.data.url).toContain('file-raw');
     });
 
+    it('returns binary metadata for stored stopped sessions', async () => {
+      harness.ctx.sessions.clear();
+      harness.ctx.store.getSession.mockReturnValue({
+        id: 'stopped-session',
+        workingDir: '/tmp/test-workdir',
+        status: 'stopped',
+        pid: null,
+        createdAt: 1,
+        lastActivityAt: 2,
+        currentTaskId: null,
+        attachmentHistory: [],
+      });
+      mockedStat.mockResolvedValue({ size: 2048 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/sessions/stopped-session/file-content?path=out/report.pdf',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.type).toBe('pdf');
+      expect(body.data.previewUrl).toBe('/api/sessions/stopped-session/file-raw?path=out%2Freport.pdf');
+    });
+
     it('returns PDF metadata with an inline preview URL', async () => {
       mockedStat.mockResolvedValue({ size: 4096 } as never);
 

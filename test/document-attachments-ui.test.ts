@@ -3,10 +3,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const publicDir = join(process.cwd(), 'src/web/public');
+const indexHtml = readFileSync(join(publicDir, 'index.html'), 'utf-8');
 const constantsJs = readFileSync(join(publicDir, 'constants.js'), 'utf-8');
 const appJs = readFileSync(join(publicDir, 'app.js'), 'utf-8');
 const panelsJs = readFileSync(join(publicDir, 'panels-ui.js'), 'utf-8');
 const stylesCss = readFileSync(join(publicDir, 'styles.css'), 'utf-8');
+const mobileCss = readFileSync(join(publicDir, 'mobile.css'), 'utf-8');
 
 describe('document attachment UI wiring', () => {
   it('registers a dedicated attachment detected SSE event', () => {
@@ -61,5 +63,28 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('attachmentId');
     expect(panelsJs).toContain('/attachments/${encodeURIComponent(attachmentId)}/raw');
     expect(panelsJs).toContain('/attachments/${encodeURIComponent(attachmentId)}/preview');
+  });
+
+  it('adds a header paperclip trigger and badge for session attachment history', () => {
+    expect(indexHtml).toContain('id="attachmentsHistoryBtn"');
+    expect(indexHtml).toContain('onclick="app.toggleAttachmentHistory()"');
+    expect(indexHtml).toContain('id="attachmentHistoryBadge"');
+    expect(appJs).toContain('this.attachmentHistoryCounts = new Map()');
+  });
+
+  it('loads a historical attachment drawer with card recovery actions', () => {
+    expect(panelsJs).toContain('toggleAttachmentHistory()');
+    expect(panelsJs).toContain('loadAttachmentHistory(sessionId = this.activeSessionId)');
+    expect(panelsJs).toContain('/api/sessions/${sessionId}/attachments');
+    expect(panelsJs).toContain('reshowAttachmentCard(itemId)');
+    expect(panelsJs).toContain('data-attachment-action="reshow"');
+  });
+
+  it('styles the attachment history as a desktop drawer and mobile sheet', () => {
+    expect(stylesCss).toContain('.attachment-history-drawer');
+    expect(stylesCss).toContain('.attachment-history-item');
+    expect(stylesCss).toContain('.attachment-history-thumb');
+    expect(mobileCss).toContain('.attachment-history-drawer');
+    expect(mobileCss).toContain('height: 100dvh');
   });
 });
