@@ -42,6 +42,7 @@ import {
   type CodexConfig,
   type GeminiConfig,
   type EffortLevel,
+  type SessionRemote,
 } from './types.js';
 import { buildEffortCliArgs } from './session-cli-builder.js';
 import {
@@ -60,6 +61,7 @@ import type {
   RespawnPaneOptions,
 } from './mux-interface.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
+import { defaultRemoteCommandForMode, remoteSshTarget } from './remote-hosts.js';
 
 // ============================================================================
 // Timing Constants
@@ -715,6 +717,15 @@ function buildSpawnCommand(options: {
   return '$SHELL';
 }
 
+export function buildRemoteLaunchCommand(options: { mode: SessionMode; remote: SessionRemote }): string {
+  const { mode, remote } = options;
+  const modeCommand = remote.commands?.[mode] || defaultRemoteCommandForMode(mode);
+  const args = ['ssh', '-o', 'BatchMode=yes', '-t'];
+  if (remote.port) args.push('-p', String(remote.port));
+  args.push(remoteSshTarget(remote), `cd ${shellescape(remote.remotePath)} && ${modeCommand}`);
+  return args.map((arg) => shellescape(arg)).join(' ');
+}
+
 /**
  * Set sensitive environment variables on a tmux session via setenv.
  * These are inherited by panes but not visible in ps output or tmux history.
@@ -1108,6 +1119,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       effort,
       truecolorEnabled,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
+      remote,
     } = options;
     const muxName = `codeman-${sessionId.slice(0, 8)}`;
 
@@ -1126,6 +1138,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         pid: 99999,
         createdAt: Date.now(),
         workingDir,
+        remote,
         mode,
         attached: false,
         name,
@@ -1170,7 +1183,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     try {
       // Build the full command to run inside tmux
-      const fullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
+      const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
+      const fullCmd = remote ? buildRemoteLaunchCommand({ mode, remote }) : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
@@ -1223,7 +1237,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Replace the shell with the actual command (no echo in terminal). Keep
       // pane launch in /tmp, then cd inside bash against the current mount table.
-      const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
+      const launchCmd = remote ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
       execSync(
         `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
         {
@@ -1296,6 +1310,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         pid,
         createdAt: Date.now(),
         workingDir,
+        remote,
         mode,
         attached: false,
         name,
@@ -1381,6 +1396,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       effort,
       truecolorEnabled,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
+      remote,
     } = options;
     const session = this.sessions.get(sessionId);
     if (!session) return null;
@@ -1415,7 +1431,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     });
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);
-    const fullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
+    const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
+    const fullCmd = remote ? buildRemoteLaunchCommand({ mode, remote }) : localFullCmd;
 
     try {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn
@@ -1439,7 +1456,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         /* Non-critical — keeps existing tmux history-limit */
       });
 
-      const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
+      // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
+      const launchCmd = remote ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
       await execAsync(
         `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
         {
