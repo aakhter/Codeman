@@ -7667,6 +7667,34 @@ kbd {
   color: var(--text-muted);
 }
 
+/* Rendered Markdown and plain-text attachment previews share the overlay body.
+   Markdown reuses the `.rv-text` prose styling; text keeps monospace with
+   preserved whitespace. */
+.document-preview-markdown {
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 16px 20px;
+}
+
+.document-preview-text {
+  height: 100%;
+  margin: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 16px 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text, #ddd);
+}
+
+.document-preview-text code {
+  white-space: inherit;
+}
+
 .file-preview-footer {
   padding: 0.35rem 0.75rem;
   font-size: 0.7rem;

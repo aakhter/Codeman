@@ -216,7 +216,7 @@ program
   .action(async (filePath, options) => {
     const extension = String(filePath).split('.').pop()?.toLowerCase() || '';
     if (!isAbsolute(filePath) || !isSupportedAttachmentExtension(extension)) {
-      console.error(chalk.red('✗ attach requires an absolute path to a png, pdf, docx, or pptx file'));
+      console.error(chalk.red('✗ attach requires an absolute path to a png, pdf, docx, pptx, md, or txt file'));
       process.exit(1);
     }
 

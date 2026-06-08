@@ -51,6 +51,8 @@ const MIME_TYPES: Record<string, string> = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   json: 'application/json',
+  md: 'text/markdown',
+  txt: 'text/plain',
 };
 
 function sanitizeDownloadName(fileName: string): string {
@@ -662,7 +664,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
 
-    if (record.extension === 'pdf' || record.extension === 'png') {
+    // Only Office formats need server-side conversion; PDF/PNG and text formats
+    // (md/txt) preview directly from their raw bytes.
+    if (record.extension !== 'docx' && record.extension !== 'pptx') {
       reply.redirect(`/api/sessions/${id}/attachments/${encodeURIComponent(attachmentId)}/raw`);
       return;
     }
@@ -731,7 +735,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const { resolvedPath } = validated;
     const ext = filePath.split('.').pop()?.toLowerCase() || '';
 
-    if (ext === 'pdf' || ext === 'png') {
+    // Only Office formats need server-side conversion; PDF/PNG and text formats
+    // (md/txt) preview directly from their raw bytes.
+    if (ext !== 'docx' && ext !== 'pptx') {
       reply.redirect(`/api/sessions/${id}/file-raw?path=${encodeURIComponent(filePath)}`);
       return;
     }

@@ -12,7 +12,7 @@ import fs from 'node:fs/promises';
 import { basename, extname, isAbsolute } from 'node:path';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
 
-const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set(['png', 'pdf', 'docx', 'pptx']);
+const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set(['png', 'pdf', 'docx', 'pptx', 'md', 'txt']);
 
 export type AttachmentSource = 'detected' | 'external';
 
@@ -87,6 +87,8 @@ export function getAttachmentType(extension: string): AttachmentDetectedType {
   if (normalized === 'png') return 'image';
   if (normalized === 'pdf') return 'pdf';
   if (normalized === 'pptx') return 'presentation';
+  if (normalized === 'md') return 'markdown';
+  if (normalized === 'txt') return 'text';
   return 'document';
 }
 

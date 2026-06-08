@@ -23,6 +23,14 @@ describe('attachment magic links', () => {
     expect(links).toEqual(['/tmp/report.pdf', '/tmp/brief.docx']);
   });
 
+  it('accepts markdown and plain-text magic paths', () => {
+    const links = parseAttachmentMagicLinks(
+      ['codeman://attach?path=/tmp/notes.md', 'codeman://attach?path=/tmp/run.txt'].join('\n')
+    );
+
+    expect(links).toEqual(['/tmp/notes.md', '/tmp/run.txt']);
+  });
+
   it('rejects relative or unsupported magic paths', () => {
     const links = parseAttachmentMagicLinks(
       [

@@ -84,7 +84,13 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('No attachments yet');
     expect(panelsJs).toContain('Show a file here by running:');
     expect(panelsJs).toContain('codeman attach /absolute/path/to/file.pptx');
-    expect(panelsJs).toContain('Supports .pptx, .docx, .pdf, and .png.');
+    expect(panelsJs).toContain('Supports .pptx, .docx, .pdf, .png, .md, and .txt.');
+  });
+
+  it('previews markdown attachments as sanitized HTML and text attachments as preformatted text', () => {
+    expect(panelsJs).toContain("data.type === 'markdown'");
+    expect(panelsJs).toContain("data.type === 'text'");
+    expect(panelsJs).toContain('this._renderMarkdown(');
   });
 
   it('styles the attachment history as a desktop drawer and mobile sheet', () => {

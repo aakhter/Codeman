@@ -2803,6 +2803,22 @@ Object.assign(CodemanApp.prototype, {
         bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${previewUrl}" title="${escapeHtml(filePath)}"></iframe>`;
         const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
         footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`;
+      } else if (data.type === 'markdown' || data.type === 'text') {
+        // Fetch the raw text and render it client-side. Markdown goes through the
+        // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
+        // is HTML-escaped into a <pre> so whitespace is preserved without inline HTML.
+        const rawUrl =
+          data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+        const textRes = await fetch(rawUrl);
+        if (!textRes.ok) throw new Error('Failed to load file');
+        const text = await textRes.text();
+        if (data.type === 'markdown') {
+          bodyEl.innerHTML = `<div class="document-preview-markdown rv-text">${this._renderMarkdown(text)}</div>`;
+          this._bindResponseViewerInteractions?.(bodyEl.firstElementChild);
+        } else {
+          bodyEl.innerHTML = `<pre class="document-preview-text"><code>${escapeHtml(text)}</code></pre>`;
+        }
+        footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`;
       } else if (data.type === 'binary') {
         bodyEl.innerHTML = `
           <div class="binary-message">
@@ -3194,7 +3210,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="attachment-history-empty-title">No attachments yet</div>
           <div>Show a file here by running:</div>
           <code>codeman attach /absolute/path/to/file.pptx</code>
-          <div>Supports .pptx, .docx, .pdf, and .png.</div>
+          <div>Supports .pptx, .docx, .pdf, .png, .md, and .txt.</div>
         </div>
       `;
       return;

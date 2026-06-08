@@ -643,6 +643,93 @@ describe('file-routes', () => {
       }
     });
 
+    it.each([
+      ['/mnt/c/notes/readme.md', 'readme.md', 'markdown', 'md'],
+      ['/mnt/c/notes/run.txt', 'run.txt', 'text', 'txt'],
+    ])('registers %s as a previewable text attachment', async (path, fileName, attachmentType, extension) => {
+      mockedStat.mockResolvedValue({ size: 512, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.fileName).toBe(fileName);
+      expect(body.data.extension).toBe(extension);
+      expect(body.data.attachmentType).toBe(attachmentType);
+    });
+
+    it.each([
+      ['/mnt/c/notes/readme.md', 'readme.md', 'text/markdown'],
+      ['/mnt/c/notes/run.txt', 'run.txt', 'text/plain'],
+    ])('serves %s raw with a text content type and inline disposition', async (path, fileName, mimeType) => {
+      const content = Buffer.from('# hello');
+      mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
+      mockedStat.mockResolvedValue({ size: content.length, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path },
+      });
+      const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+      const rawRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/raw`,
+      });
+
+      expect(rawRes.statusCode).toBe(200);
+      expect(rawRes.headers['content-type']).toBe(mimeType);
+      expect(rawRes.headers['content-disposition']).toBe(`inline; filename="${fileName}"`);
+    });
+
+    it.each([['/mnt/c/notes/readme.md'], ['/mnt/c/notes/run.txt']])(
+      'redirects %s preview to the raw text endpoint',
+      async (path) => {
+        mockedStat.mockResolvedValue({ size: 64, isFile: () => true, mtimeMs: 12345 } as never);
+
+        const registerRes = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+          payload: { path },
+        });
+        const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+        const previewRes = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/preview`,
+        });
+
+        expect(previewRes.statusCode).toBe(302);
+        expect(previewRes.headers['location']).toContain(`/attachments/${attachmentId}/raw`);
+      }
+    );
+
+    it.each([['/mnt/c/notes/readme.md'], ['/mnt/c/notes/run.txt']])(
+      'returns a 204 fallback-badge thumbnail for %s',
+      async (path) => {
+        mockedStat.mockResolvedValue({ size: 64, isFile: () => true, mtimeMs: 12345 } as never);
+
+        const registerRes = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+          payload: { path },
+        });
+        const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+        const thumbRes = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/thumbnail`,
+        });
+
+        expect(thumbRes.statusCode).toBe(204);
+      }
+    );
+
     it('rejects unknown attachment ids instead of accepting arbitrary browser paths', async () => {
       const res = await harness.app.inject({
         method: 'GET',
