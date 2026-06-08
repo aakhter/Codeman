@@ -131,6 +131,10 @@ export function buildMuxAttachEnv(): Record<string, string | undefined> {
     TERM: 'xterm-256color',
     COLORTERM: undefined,
     CLAUDECODE: undefined,
+    // The server can be launched from inside tmux; attach clients must not
+    // inherit that parent tmux context.
+    TMUX: undefined,
+    TMUX_PANE: undefined,
   };
 }
 

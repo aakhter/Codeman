@@ -677,14 +677,14 @@ function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): void {
  * Set sensitive environment variables for Codex on a tmux session via setenv.
  * Codex (OpenAI CLI) needs OPENAI_API_KEY; we also forward CODEX_* keys.
  */
-function setCodexEnvVars(muxName: string): void {
+function setCodexEnvVars(tmuxCmd: string, muxName: string): void {
   const sensitiveVars = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
   for (const key of sensitiveVars) {
     const val = process.env[key];
     if (val) {
       const escaped = val.replace(/'/g, "'\\''");
       try {
-        execSync(`tmux setenv -t '${muxName}' ${key} '${escaped}'`, {
+        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
           encoding: 'utf8',
           timeout: EXEC_TIMEOUT_MS,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -1005,7 +1005,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * appear in the bash command line.
    */
   private _configureCodex(muxName: string): void {
-    setCodexEnvVars(muxName);
+    setCodexEnvVars(this.tmux(), muxName);
   }
 
   /**

@@ -166,6 +166,33 @@ describe('TmuxManager (unit)', () => {
       expect(command).not.toContain('--no-alt-screen');
       expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
     });
+
+    it('sets Codex env vars on the dedicated Codeman tmux socket', () => {
+      const originalCodexHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = '/tmp/codex-home';
+
+      try {
+        (
+          manager as unknown as {
+            _configureCodex(muxName: string): void;
+          }
+        )._configureCodex('codeman-abc12345');
+
+        expect(mockedExecSync).toHaveBeenCalledWith(
+          "tmux -L 'codeman' setenv -t 'codeman-abc12345' CODEX_HOME '/tmp/codex-home'",
+          expect.objectContaining({ timeout: expect.any(Number) })
+        );
+        expect(
+          mockedExecSync.mock.calls.some(([cmd]) => typeof cmd === 'string' && cmd.startsWith('tmux setenv'))
+        ).toBe(false);
+      } finally {
+        if (originalCodexHome === undefined) {
+          delete process.env.CODEX_HOME;
+        } else {
+          process.env.CODEX_HOME = originalCodexHome;
+        }
+      }
+    });
   });
 
   describe('tmux history limit', () => {
