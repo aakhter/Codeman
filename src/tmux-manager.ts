@@ -26,7 +26,7 @@ import { execSync, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, mkdirSync } from 'node:fs';
 import { writeFile, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -133,7 +133,7 @@ const SAFE_TMUX_SOCKET_PATTERN = /^[a-zA-Z0-9_.-]+$/;
 const PANE_LIST_SEP = '|';
 
 /** Format string for `tmux list-panes -F`. Keep in sync with {@link parsePaneList}. */
-const PANE_LIST_FORMAT = `#{session_name}${PANE_LIST_SEP}#{pane_pid}`;
+const PANE_LIST_FORMAT = `#{session_name}${PANE_LIST_SEP}#{pane_pid}${PANE_LIST_SEP}#{pane_dead}`;
 
 /**
  * 构建 pane 启动前的 nofile 修复命令。
@@ -149,11 +149,16 @@ export function buildNofileLimitCommand(targetLimit = CLAUDE_CODE_NOFILE_LIMIT):
 }
 
 /**
- * Parse the output of `tmux list-panes -a -F '#{session_name}|#{pane_pid}'`
- * into a Map of session-name → pane pid. Exported for unit testing.
+ * Parse the output of `tmux list-panes -a -F '#{session_name}|#{pane_pid}|#{pane_dead}'`
+ * into a Map of session-name → pane pid, counting only *live* panes. Exported for
+ * unit testing.
  *
  * - Skips empty lines and lines without the separator.
  * - Skips entries with a non-numeric pid or empty name.
+ * - Skips dead panes (`#{pane_dead}=1`): with `remain-on-exit on`, tmux keeps a
+ *   crashed pane visible. Treating it as alive would let reconcile/restore bring
+ *   a dead Codex session back as "healthy" and respawn it into a crash loop
+ *   (COD-43). A missing third field (legacy 2-field output) is treated as live.
  */
 export function parsePaneList(output: string): Map<string, number> {
   const result = new Map<string, number>();
@@ -162,12 +167,30 @@ export function parsePaneList(output: string): Map<string, number> {
     const sep = line.indexOf(PANE_LIST_SEP);
     if (sep === -1) continue;
     const name = line.slice(0, sep);
-    const pid = parseInt(line.slice(sep + 1), 10);
-    if (name && !Number.isNaN(pid)) {
+    const rest = line.slice(sep + 1);
+    const sep2 = rest.indexOf(PANE_LIST_SEP);
+    const pidStr = sep2 === -1 ? rest : rest.slice(0, sep2);
+    const dead = sep2 !== -1 && rest.slice(sep2 + 1) === '1';
+    const pid = parseInt(pidStr, 10);
+    if (name && !Number.isNaN(pid) && !dead) {
       result.set(name, pid);
     }
   }
   return result;
+}
+
+/**
+ * True when `dir` exists and is a directory. Used to avoid respawning a tmux
+ * pane into a working directory that no longer exists — the saved cwd of a
+ * crashed session can be deleted, and `cd` into it makes `respawn-pane` exit
+ * immediately, producing a crash loop (COD-43).
+ */
+export function isUsableWorkingDir(dir: string): boolean {
+  try {
+    return existsSync(dir) && statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -701,7 +724,7 @@ function setCodexEnvVars(tmuxCmd: string, muxName: string): void {
  * Gemini Pro/Ultra users usually authenticate via cached Google login; these
  * variables cover API-key and Vertex AI paths without putting secrets in ps.
  */
-function setGeminiEnvVars(muxName: string): void {
+function setGeminiEnvVars(tmuxCmd: string, muxName: string): void {
   const sensitiveVars = [
     'GEMINI_API_KEY',
     'GEMINI_MODEL',
@@ -716,7 +739,7 @@ function setGeminiEnvVars(muxName: string): void {
     if (val) {
       const escaped = val.replace(/'/g, "'\\''");
       try {
-        execSync(`tmux setenv -t '${muxName}' ${key} '${escaped}'`, {
+        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
           encoding: 'utf8',
           timeout: EXEC_TIMEOUT_MS,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -1012,7 +1035,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Configure Gemini-specific environment on a tmux session.
    */
   private _configureGemini(muxName: string): void {
-    setGeminiEnvVars(muxName);
+    setGeminiEnvVars(this.tmux(), muxName);
   }
 
   /**
@@ -1316,6 +1339,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const muxName = session.muxName;
 
     if (!isValidMuxName(muxName) || !isValidPath(workingDir)) return null;
+
+    // Don't respawn into a working directory that no longer exists — `cd` into a
+    // deleted cwd makes respawn-pane exit immediately and crash-loop (COD-43).
+    // Fail clearly so callers can surface/prune the dead session.
+    if (!IS_TEST_MODE && !isUsableWorkingDir(workingDir)) {
+      console.error(`[TmuxManager] Refusing to respawn ${muxName}: working directory missing: ${workingDir}`);
+      return null;
+    }
 
     // Resolve CLI binary directory based on mode
     const { pathExport } = this.buildPathExport(mode);

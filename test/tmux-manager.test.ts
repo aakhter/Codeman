@@ -13,10 +13,12 @@ import {
   TmuxManager,
   buildCodexCommand,
   formatPaneSnapshot,
+  isUsableWorkingDir,
   parsePaneList,
   resolveTmuxPaneTarget,
 } from '../src/tmux-manager.js';
 import { execSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
 
 // ============================================================================
 // Unit Tests (mocked)
@@ -42,6 +44,7 @@ vi.mock('node:fs', async () => {
   return {
     ...actual,
     existsSync: vi.fn().mockReturnValue(false),
+    statSync: vi.fn(),
     readFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     writeFile: vi.fn((_path: string, _data: string, cb: (err: Error | null) => void) => cb(null)),
@@ -625,5 +628,53 @@ describe('parsePaneList', () => {
     // future tmux ever appended extra fields.
     const result = parsePaneList('codeman-aaaa|1234|extra-field');
     expect(result.get('codeman-aaaa')).toBe(1234);
+  });
+
+  it('excludes dead panes (remain-on-exit) and keeps live panes', () => {
+    // tmux keeps a crashed pane visible with remain-on-exit; #{pane_dead}=1.
+    // Such panes must NOT count as alive, or reconcile restores a dead Codex
+    // session as healthy and respawns it into a crash loop (COD-43).
+    const out = 'codeman-aaaa|100|0\ncodeman-bbbb|200|1\ncodeman-cccc|300|0';
+    const result = parsePaneList(out);
+    expect(result.size).toBe(2);
+    expect(result.get('codeman-aaaa')).toBe(100);
+    expect(result.get('codeman-cccc')).toBe(300);
+    expect(result.has('codeman-bbbb')).toBe(false);
+  });
+
+  it('treats a missing dead-flag field as live (backward compatible)', () => {
+    // Legacy 2-field output (no #{pane_dead}) must still parse as alive.
+    const result = parsePaneList('codeman-aaaa|1234');
+    expect(result.get('codeman-aaaa')).toBe(1234);
+  });
+});
+
+describe('isUsableWorkingDir', () => {
+  const mockedExistsSync = vi.mocked(existsSync);
+  const mockedStatSync = vi.mocked(statSync);
+
+  it('is false when the directory does not exist', () => {
+    mockedExistsSync.mockReturnValue(false);
+    expect(isUsableWorkingDir('/tmp/cod43-gone')).toBe(false);
+  });
+
+  it('is true when the path exists and is a directory', () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedStatSync.mockReturnValue({ isDirectory: () => true } as never);
+    expect(isUsableWorkingDir('/tmp/real-dir')).toBe(true);
+  });
+
+  it('is false when the path exists but is not a directory', () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedStatSync.mockReturnValue({ isDirectory: () => false } as never);
+    expect(isUsableWorkingDir('/tmp/some-file')).toBe(false);
+  });
+
+  it('is false when statSync throws (e.g. race on removal)', () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedStatSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+    expect(isUsableWorkingDir('/tmp/racy')).toBe(false);
   });
 });
