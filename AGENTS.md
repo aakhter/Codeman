@@ -13,6 +13,7 @@ This is a TypeScript ESM Node app. Runtime code lives in `src/`; Fastify wiring 
 - `npm run lint` / `npm run lint:fix`: check or fix ESLint issues in `src/**/*.ts`.
 - `npm run format:check` / `npm run format`: check or apply Prettier formatting.
 - `npm run check:lockfile`: verify workspace lockfile consistency.
+- `codeman doctor` (alias `check-deps`): report on downstream tool dependencies (tmux, LibreOffice, MS Office, pandoc, ffmpeg, ...). Environment-aware (detects WSL and resolves Windows-side apps via interop). `--json` for machine output; non-zero exit if a required dep is missing. Dev: `npx tsx src/index.ts doctor`.
 
 ## Coding Style & Naming Conventions
 

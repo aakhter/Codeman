@@ -90,6 +90,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | Continuous typecheck | `tsc --noEmit --watch` |
 | Test coverage | `npm run test:coverage` |
 | Dead-code sweep | `npm run knip` (config in `knip.json`) |
+| Check tool deps | `npx tsx src/index.ts doctor` (`--json` machine output; `--category <name>` filter; non-zero exit if a required dep missing) |
 | Production start | `npm run start` |
 | Production logs | `journalctl --user -u codeman-web -f` |
 
