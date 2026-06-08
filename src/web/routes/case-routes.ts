@@ -341,6 +341,26 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
 
+    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+    const remoteCase = remoteCases.find((item) => item.name === name);
+    if (remoteCase) {
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      return {
+        name,
+        path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
+        hasClaudeMd: false,
+        location: 'remote',
+        remote: {
+          hostId: host.id,
+          hostLabel: host.label,
+          host: host.host,
+          username: host.username,
+          path: remoteCase.remotePath,
+        },
+      };
+    }
+
     const casePath = await resolveCasePath(name);
 
     if (!existsSync(casePath)) {
