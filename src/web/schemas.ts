@@ -173,6 +173,10 @@ const GeminiConfigSchema = z
   .optional();
 
 export const CreateSessionSchema = z.object({
+  caseName: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
+    .optional(),
   workingDir: safePathSchema.optional(),
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']).optional(),
   name: z.string().max(100).optional(),

@@ -22,9 +22,27 @@ import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
+const remoteStore = vi.hoisted(() => ({
+  hosts: [] as Array<{
+    id: string;
+    label: string;
+    host: string;
+    username: string;
+    commands?: Record<string, string>;
+  }>,
+  cases: [] as Array<{ name: string; type: 'remote'; hostId: string; remotePath: string }>,
+}));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
   return { ...actual, execFile };
+});
+vi.mock('../../src/remote-hosts.js', async (orig) => {
+  const actual = await orig<typeof import('../../src/remote-hosts.js')>();
+  return {
+    ...actual,
+    readRemoteHosts: vi.fn(async () => remoteStore.hosts),
+    readRemoteCases: vi.fn(async () => remoteStore.cases),
+  };
 });
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
@@ -77,6 +95,8 @@ describe('session-routes', () => {
   let harness: LocalHarness;
 
   beforeEach(async () => {
+    remoteStore.hosts = [];
+    remoteStore.cases = [];
     harness = await createEnvelopeHarness(registerSessionRoutes);
   });
 
@@ -817,6 +837,37 @@ describe('session-routes', () => {
   // ========== POST /api/sessions (with resumeSessionId) ==========
 
   describe('POST /api/sessions with resumeSessionId', () => {
+    it('creates session from a remote case without local stat validation', async () => {
+      remoteStore.hosts = [
+        {
+          id: 'gpu-box',
+          label: 'GPU Box',
+          host: '10.0.0.42',
+          username: 'ubuntu',
+          commands: { codex: 'exec codx personal' },
+        },
+      ];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'shell', name: 'Remote Shell' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.session.workingDir).toBe('/home/ubuntu/work');
+      expect(body.session.remote).toMatchObject({
+        hostId: 'gpu-box',
+        host: '10.0.0.42',
+        username: 'ubuntu',
+        remotePath: '/home/ubuntu/work',
+        commands: { codex: 'exec codx personal' },
+      });
+    });
+
     it('creates session with valid resumeSessionId', async () => {
       const res = await harness.app.inject({
         method: 'POST',

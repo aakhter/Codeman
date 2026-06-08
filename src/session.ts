@@ -52,6 +52,7 @@ import {
   type GeminiConfig,
   type EffortLevel,
   type SessionAttachmentHistoryItem,
+  type SessionRemote,
 } from './types.js';
 import type { TerminalMultiplexer, MuxSession } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
@@ -275,6 +276,7 @@ export class Session extends EventEmitter {
   private readonly _terminalBufferMaxSize: number;
   private readonly _terminalBufferTrimSize: number;
   private readonly _tmuxHistoryLimit: number;
+  private readonly _remote?: SessionRemote;
   // Use BufferAccumulator for hot-path buffers to reduce GC pressure
   private _terminalBuffer: BufferAccumulator;
   private _textOutput = new BufferAccumulator(MAX_TEXT_OUTPUT_SIZE, TEXT_OUTPUT_TRIM_SIZE);
@@ -448,6 +450,8 @@ export class Session extends EventEmitter {
       terminalBufferConfig?: { maxBytes: number; trimBytes: number };
       /** tmux history limit for newly created mux sessions. */
       tmuxHistoryLimit?: number;
+      /** Remote execution metadata for sessions launched through SSH inside local tmux. */
+      remote?: SessionRemote;
     }
   ) {
     super();
@@ -469,6 +473,7 @@ export class Session extends EventEmitter {
     this._terminalBufferMaxSize = config.terminalBufferConfig?.maxBytes ?? MAX_TERMINAL_BUFFER_SIZE;
     this._terminalBufferTrimSize = config.terminalBufferConfig?.trimBytes ?? TERMINAL_BUFFER_TRIM_SIZE;
     this._tmuxHistoryLimit = config.tmuxHistoryLimit ?? DEFAULT_TMUX_HISTORY_LIMIT;
+    this._remote = config.remote;
     this._terminalBuffer = new BufferAccumulator(this._terminalBufferMaxSize, this._terminalBufferTrimSize);
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
@@ -944,6 +949,7 @@ export class Session extends EventEmitter {
       pid: this.pid,
       status: this._status,
       workingDir: this.workingDir,
+      remote: this._remote,
       currentTaskId: this._currentTaskId,
       createdAt: this.createdAt,
       lastActivityAt: this._lastActivityAt,
@@ -1241,6 +1247,7 @@ export class Session extends EventEmitter {
             effort: this._effort,
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
+            remote: this._remote,
           },
           createSessionOptions: {
             sessionId: this.id,
@@ -1259,6 +1266,7 @@ export class Session extends EventEmitter {
             effort: this._effort,
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
+            remote: this._remote,
           },
           spawnErrLabel: 'mux attachment',
         });
@@ -1591,6 +1599,7 @@ export class Session extends EventEmitter {
             envOverrides: this._envOverrides,
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
+            remote: this._remote,
           },
           createSessionOptions: {
             sessionId: this.id,
@@ -1601,6 +1610,7 @@ export class Session extends EventEmitter {
             envOverrides: this._envOverrides,
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
+            remote: this._remote,
           },
           spawnErrLabel: 'shell mux attachment',
         });
