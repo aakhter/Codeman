@@ -247,6 +247,30 @@ describe('file-routes', () => {
       expect(body.data.extension).toBe('ts');
     });
 
+    it('includes mtimeMs in text file metadata (freshness signal for live preview)', async () => {
+      const fileContent = 'draft v1';
+      mockedReadFile.mockResolvedValue(fileContent as never);
+      mockedStat.mockResolvedValue({ size: fileContent.length, mtimeMs: 555 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=draft.md`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.mtimeMs).toBe(555);
+    });
+
+    it('includes mtimeMs in binary file metadata', async () => {
+      mockedStat.mockResolvedValue({ size: 1024, mtimeMs: 777 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=logo.png`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.mtimeMs).toBe(777);
+    });
+
     it('returns binary metadata for image files', async () => {
       mockedStat.mockResolvedValue({ size: 1024 } as never);
 
@@ -729,6 +753,27 @@ describe('file-routes', () => {
         expect(thumbRes.statusCode).toBe(204);
       }
     );
+
+    it('returns a fresh mtimeMs/size for a registered attachment (freshness signal for live preview)', async () => {
+      mockedStat.mockResolvedValue({ size: 4096, isFile: () => true, mtimeMs: 999 } as never);
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/notes/readme.md' },
+      });
+      const attachmentId = JSON.parse(registerRes.body).data.attachmentId;
+
+      // The file changes on disk after registration — the metadata endpoint must re-stat.
+      mockedStat.mockResolvedValue({ size: 5000, isFile: () => true, mtimeMs: 1234 } as never);
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.mtimeMs).toBe(1234);
+      expect(body.data.size).toBe(5000);
+    });
 
     it('rejects unknown attachment ids instead of accepting arbitrary browser paths', async () => {
       const res = await harness.app.inject({

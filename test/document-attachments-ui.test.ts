@@ -93,6 +93,18 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('this._renderMarkdown(');
   });
 
+  it('live-refreshes the open preview when the underlying file changes (COD-58)', () => {
+    // Renders via an extracted body renderer (reused by both initial open and refresh).
+    expect(panelsJs).toContain('_renderFilePreviewBody');
+    // Polls a cheap metadata signature and re-renders in place on change.
+    expect(panelsJs).toContain('_pollFilePreview');
+    expect(panelsJs).toContain('mtimeMs');
+    // Polling is torn down when the preview closes (no leaked interval).
+    const closeStart = panelsJs.indexOf('closeFilePreview()');
+    const closeBody = panelsJs.slice(closeStart, closeStart + 400);
+    expect(closeBody).toContain('_stopFilePreviewPolling');
+  });
+
   it('styles the attachment history as a desktop drawer and mobile sheet', () => {
     expect(stylesCss).toContain('.attachment-history-drawer');
     expect(stylesCss).toContain('.attachment-history-item');

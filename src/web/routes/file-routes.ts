@@ -507,6 +507,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           data: {
             path: filePath,
             size: stat.size,
+            mtimeMs: stat.mtimeMs,
             type,
             extension: ext,
             url: rawUrl,
@@ -539,6 +540,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           path: filePath,
           content: displayContent,
           size: stat.size,
+          mtimeMs: stat.mtimeMs,
           totalLines: allLines.length,
           truncated: truncatedContent,
           extension: ext,
@@ -624,11 +626,23 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
     const event = attachmentRecordToEvent(record);
+    // Re-stat so the live preview poller sees current size/mtime as the agent
+    // rewrites the underlying file (COD-58). Fall back to the cached record on error.
+    let size = record.size;
+    let mtimeMs = record.mtimeMs;
+    try {
+      const stat = await fs.stat(record.filePath);
+      size = stat.size;
+      mtimeMs = stat.mtimeMs ?? mtimeMs;
+    } catch {
+      // File temporarily unavailable mid-write — keep cached values.
+    }
     return {
       success: true,
       data: {
         path: record.fileName,
-        size: record.size,
+        size,
+        mtimeMs,
         type: record.attachmentType,
         extension: record.extension,
         url: event.rawUrl,

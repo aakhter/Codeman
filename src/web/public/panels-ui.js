@@ -2763,81 +2763,157 @@ Object.assign(CodemanApp.prototype, {
 
     if (!overlay || !bodyEl) return;
 
+    // Stop any previous live-refresh poller before switching documents.
+    this._stopFilePreviewPolling();
+
     // Show overlay with loading state
     overlay.classList.add('visible');
     titleEl.textContent = filePath;
     bodyEl.innerHTML = '<div class="binary-message">Loading...</div>';
     footerEl.textContent = '';
 
+    const metadataUrl = attachmentId
+      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
+      : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
+    this.filePreviewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null };
+
     try {
-      const metadataUrl = attachmentId
-        ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
-        : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
-      const res = await fetch(metadataUrl);
-      if (!res.ok) throw new Error('Failed to load file');
-
-      const result = await res.json();
-      if (!result.success) throw new Error(result.error || 'Failed to load file');
-
-      const data = result.data;
-
-      if (data.type === 'image') {
-        this.filePreviewZoom = 1;
-        bodyEl.innerHTML = `
-          <div class="document-preview-toolbar">
-            <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('out')" title="Zoom out">-</button>
-            <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('fit')" title="Fit">Fit</button>
-            <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('in')" title="Zoom in">+</button>
-          </div>
-          <div class="document-preview-stage">
-            <img class="document-preview-image" src="${data.previewUrl || data.url}" alt="${escapeHtml(filePath)}">
-          </div>
-        `;
-        footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
-      } else if (data.type === 'video') {
-        bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
-        footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
-      } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
-        const previewUrl =
-          data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
-        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${previewUrl}" title="${escapeHtml(filePath)}"></iframe>`;
-        const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
-        footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`;
-      } else if (data.type === 'markdown' || data.type === 'text') {
-        // Fetch the raw text and render it client-side. Markdown goes through the
-        // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
-        // is HTML-escaped into a <pre> so whitespace is preserved without inline HTML.
-        const rawUrl =
-          data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
-        const textRes = await fetch(rawUrl);
-        if (!textRes.ok) throw new Error('Failed to load file');
-        const text = await textRes.text();
-        if (data.type === 'markdown') {
-          bodyEl.innerHTML = `<div class="document-preview-markdown rv-text">${this._renderMarkdown(text)}</div>`;
-          this._bindResponseViewerInteractions?.(bodyEl.firstElementChild);
-        } else {
-          bodyEl.innerHTML = `<pre class="document-preview-text"><code>${escapeHtml(text)}</code></pre>`;
-        }
-        footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`;
-      } else if (data.type === 'binary') {
-        bodyEl.innerHTML = `
-          <div class="binary-message">
-            Binary file (${this.formatFileSize(data.size)})<br>
-            Cannot preview<br><br>
-            <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab('${escapeHtml(sessionId)}', '${escapeHtml(filePath)}', ${attachmentId ? `'${escapeHtml(attachmentId)}'` : 'null'})">Open</button>
-          </div>
-        `;
-        footerEl.textContent = data.extension || 'binary';
-      } else {
-        // Text content
-        this.filePreviewContent = data.content;
-        bodyEl.innerHTML = `<pre><code>${escapeHtml(data.content)}</code></pre>`;
-        const truncNote = data.truncated ? ` (showing 500/${data.totalLines} lines)` : '';
-        footerEl.textContent = `${data.totalLines} lines \u2022 ${this.formatFileSize(data.size)}${truncNote}`;
-      }
+      const data = await this._fetchFilePreviewMetadata(metadataUrl);
+      this.filePreviewState.signature = this._filePreviewSignature(data);
+      await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId });
+      // Auto-refresh the open preview as the agent rewrites the file (COD-58).
+      this._startFilePreviewPolling();
     } catch (err) {
       console.error('Failed to preview file:', err);
       bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  async _fetchFilePreviewMetadata(metadataUrl) {
+    const res = await fetch(metadataUrl);
+    if (!res.ok) throw new Error('Failed to load file');
+    const result = await res.json();
+    if (!result.success) throw new Error(result.error || 'Failed to load file');
+    return result.data;
+  },
+
+  /** Cheap change signal: file mtime + size. Re-render only when it changes. */
+  _filePreviewSignature(data) {
+    return `${data?.mtimeMs ?? ''}:${data?.size ?? ''}`;
+  },
+
+  /**
+   * Render the preview body for the given metadata. Used both for the initial
+   * open and for live-refresh, so it must be idempotent and not assume a loading
+   * state. Markdown/plain-text re-fetch raw content; image/pdf get an mtime
+   * cache-bust so a rewritten file actually reloads.
+   */
+  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId }) {
+    const bodyEl = this.$('filePreviewBody');
+    const footerEl = this.$('filePreviewFooter');
+    if (!bodyEl) return;
+    const bust = (url) => (data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url);
+
+    if (data.type === 'image') {
+      this.filePreviewZoom = 1;
+      bodyEl.innerHTML = `
+        <div class="document-preview-toolbar">
+          <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('out')" title="Zoom out">-</button>
+          <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('fit')" title="Fit">Fit</button>
+          <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('in')" title="Zoom in">+</button>
+        </div>
+        <div class="document-preview-stage">
+          <img class="document-preview-image" src="${bust(data.previewUrl || data.url)}" alt="${escapeHtml(filePath)}">
+        </div>
+      `;
+      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
+    } else if (data.type === 'video') {
+      bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
+      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
+    } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
+      const previewUrl =
+        data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
+      bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bust(previewUrl)}" title="${escapeHtml(filePath)}"></iframe>`;
+      const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
+      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`;
+    } else if (data.type === 'markdown' || data.type === 'text') {
+      // Fetch the raw text and render it client-side. Markdown goes through the
+      // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
+      // is HTML-escaped into a <pre> so whitespace is preserved without inline HTML.
+      const rawUrl =
+        data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+      const textRes = await fetch(bust(rawUrl));
+      if (!textRes.ok) throw new Error('Failed to load file');
+      const text = await textRes.text();
+      this.filePreviewContent = text;
+      if (data.type === 'markdown') {
+        bodyEl.innerHTML = `<div class="document-preview-markdown rv-text">${this._renderMarkdown(text)}</div>`;
+        this._bindResponseViewerInteractions?.(bodyEl.firstElementChild);
+      } else {
+        bodyEl.innerHTML = `<pre class="document-preview-text"><code>${escapeHtml(text)}</code></pre>`;
+      }
+      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`;
+    } else if (data.type === 'binary') {
+      bodyEl.innerHTML = `
+        <div class="binary-message">
+          Binary file (${this.formatFileSize(data.size)})<br>
+          Cannot preview<br><br>
+          <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab('${escapeHtml(sessionId)}', '${escapeHtml(filePath)}', ${attachmentId ? `'${escapeHtml(attachmentId)}'` : 'null'})">Open</button>
+        </div>
+      `;
+      footerEl.textContent = data.extension || 'binary';
+    } else {
+      // Text content (workspace file-content path)
+      this.filePreviewContent = data.content;
+      bodyEl.innerHTML = `<pre><code>${escapeHtml(data.content)}</code></pre>`;
+      const truncNote = data.truncated ? ` (showing 500/${data.totalLines} lines)` : '';
+      footerEl.textContent = `${data.totalLines} lines \u2022 ${this.formatFileSize(data.size)}${truncNote}`;
+    }
+  },
+
+  _startFilePreviewPolling() {
+    this._stopFilePreviewPolling(true);
+    // Light cadence: a metadata stat every 1.5s while the preview is open and visible.
+    this._filePreviewPollTimer = setInterval(() => this._pollFilePreview(), 1500);
+  },
+
+  _stopFilePreviewPolling(keepState = false) {
+    if (this._filePreviewPollTimer) {
+      clearInterval(this._filePreviewPollTimer);
+      this._filePreviewPollTimer = null;
+    }
+    if (!keepState) this.filePreviewState = null;
+  },
+
+  async _pollFilePreview() {
+    const st = this.filePreviewState;
+    const overlay = this.$('filePreviewOverlay');
+    if (!st || !overlay || !overlay.classList.contains('visible') || document.hidden) return;
+    if (this._filePreviewPolling) return; // don't overlap slow fetches
+    this._filePreviewPolling = true;
+    try {
+      const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      const sig = this._filePreviewSignature(data);
+      if (sig === st.signature) return; // unchanged
+      st.signature = sig;
+      const bodyEl = this.$('filePreviewBody');
+      const prevScroller = bodyEl?.querySelector(
+        '.document-preview-markdown, .document-preview-text, .document-preview-stage'
+      );
+      const prevTop = prevScroller ? prevScroller.scrollTop : 0;
+      await this._renderFilePreviewBody(data, {
+        sessionId: st.sessionId,
+        filePath: st.filePath,
+        attachmentId: st.attachmentId,
+      });
+      const newScroller = this.$('filePreviewBody')?.querySelector(
+        '.document-preview-markdown, .document-preview-text, .document-preview-stage'
+      );
+      if (newScroller) newScroller.scrollTop = prevTop;
+    } catch {
+      // File may be momentarily unavailable mid-write \u2014 keep the last good render.
+    } finally {
+      this._filePreviewPolling = false;
     }
   },
 
@@ -2862,6 +2938,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   closeFilePreview() {
+    this._stopFilePreviewPolling();
     const overlay = this.$('filePreviewOverlay');
     if (overlay) {
       overlay.classList.remove('visible');
