@@ -1,5 +1,16 @@
 # aicodeman
 
+## 0.8.4
+
+### Patch Changes
+
+- Document revision review + rollback (COD-59): versioned document previews
+  (attached .md/.txt) now have a "Changes" view showing a prose word-level diff
+  of what the agent changed (additions/deletions highlighted), a from-version
+  selector, and one-click rollback to a prior version. Snapshots are captured off
+  the live-preview poll while a preview is open; history is in-memory per server
+  run.
+
 ## 0.8.3
 
 ### Patch Changes
