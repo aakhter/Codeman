@@ -30,6 +30,7 @@ import { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { SessionPort } from '../ports/session-port.js';
 import { MAX_INPUT_LENGTH } from '../../config/terminal-limits.js';
+import { isAllowedRequestHost, isAllowedRequestOrigin, type HostPolicy } from '../network-auth-policy.js';
 
 /** Micro-batch interval for terminal output (ms). Short enough for low latency,
  *  long enough to group Ink's rapid cursor-up redraw sequences into single frames. */
@@ -58,8 +59,19 @@ const MAX_WS_PER_SESSION = 5;
 /** Track active WS connections per session for connection limiting. */
 const sessionWsCount = new Map<string, number>();
 
-export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort): void {
+export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHostPolicy: () => HostPolicy): void {
   app.get<{ Params: { id: string } }>('/ws/sessions/:id/terminal', { websocket: true }, (socket: WebSocket, req) => {
+    // Reject cross-site WebSocket hijacking (CSWSH) and DNS-rebinding before doing
+    // anything: the upgrade must come from an allowed Host and (when the browser
+    // sends one — it always does for WS) a same-site Origin. Writing to this socket
+    // injects keystrokes into a --dangerously-skip-permissions agent, so this gate
+    // matters even on the default no-password install. See security review H5.
+    const policy = getHostPolicy();
+    if (!isAllowedRequestHost(req.headers.host, policy) || !isAllowedRequestOrigin(req.headers.origin, policy)) {
+      socket.close(4003, 'Forbidden');
+      return;
+    }
+
     const { id } = req.params;
     const session = ctx.sessions.get(id);
 

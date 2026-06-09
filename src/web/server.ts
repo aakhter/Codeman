@@ -36,10 +36,11 @@ import fastifyMultipart from '@fastify/multipart';
 import { startPasteImageGc } from './paste-image-gc.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
-import { homedir, hostname as getHostname } from 'node:os';
+import { hostname as getHostname } from 'node:os';
+import { dataPath } from '../config/instance.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState } from '../types.js';
@@ -89,6 +90,8 @@ import {
   type RespawnWiringDeps,
 } from './respawn-event-wiring.js';
 
+import { reconcileUpdateOnBoot } from './self-update.js';
+
 // Load version from package.json
 const require = createRequire(import.meta.url);
 const { version: APP_VERSION } = require('../../package.json');
@@ -106,9 +109,9 @@ import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.j
 import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { SseEvent } from './sse-events.js';
 import type { ScheduledRun } from './ports/index.js';
-import { registerAuthMiddleware, registerSecurityHeaders } from './middleware/auth.js';
+import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
 import { installRouteErrorHandler } from './route-error-handler.js';
-import { isExplicitlyEnabled, isLoopbackBindHost } from './network-auth-policy.js';
+import { isExplicitlyEnabled, isLoopbackBindHost, buildHostPolicy, type HostPolicy } from './network-auth-policy.js';
 import {
   registerPushRoutes,
   registerTeamRoutes,
@@ -154,7 +157,7 @@ import {
  * Certs are stored in ~/.codeman/certs/ and reused across restarts.
  */
 function getOrCreateSelfSignedCert(): { key: string; cert: string } {
-  const certsDir = join(homedir(), '.codeman', 'certs');
+  const certsDir = dataPath('certs');
   const keyPath = join(certsDir, 'server.key');
   const certPath = join(certsDir, 'server.crt');
 
@@ -243,7 +246,7 @@ export class WebServer extends EventEmitter {
   private _orchestratorLoop: import('../orchestrator-loop.js').OrchestratorLoop | null = null;
   private readonly titleHostname: string;
   private readonly windowTitle: string;
-  private readonly indexHtmlPath: string;
+  private readonly indexHtmlTemplate: string;
   private readonly allowUnauthenticatedNetwork: boolean;
   private _pasteImageGcStop: (() => void) | null = null;
   private _eventLoopMonitor: EventLoopMonitorHandle | null = null;
@@ -271,7 +274,7 @@ export class WebServer extends EventEmitter {
       allowUnauthenticatedNetwork || isExplicitlyEnabled(process.env.CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK);
     this.titleHostname = titleHostname || getHostname();
     this.windowTitle = `codeman:${this.titleHostname}`;
-    this.indexHtmlPath = join(__dirname, 'public', 'index.html');
+    this.indexHtmlTemplate = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
 
     if (https) {
       const { key, cert } = getOrCreateSelfSignedCert();
@@ -553,6 +556,14 @@ export class WebServer extends EventEmitter {
     };
   }
 
+  /**
+   * Current Host/Origin allowlist policy. Read per request so a tunnel started at
+   * runtime (PUT /api/settings) is reflected without a restart.
+   */
+  private getHostPolicy(): HostPolicy {
+    return buildHostPolicy(this.host, this.tunnelManager.getUrl());
+  }
+
   private async setupRoutes(): Promise<void> {
     // Removed leftover hand-rolled multipart/form-data parser from the pre-
     // fastifyMultipart era. @fastify/multipart owns the parser now; registering
@@ -568,6 +579,11 @@ export class WebServer extends EventEmitter {
 
     // Cookie plugin (needed for auth session tokens)
     await this.app.register(fastifyCookie);
+
+    // Anti-DNS-rebinding Host allowlist + cross-site (CSRF) Origin guard. Registered
+    // before auth so forged cross-site / rebound requests are rejected up front, even
+    // on the default no-password install. See docs/reports/security-review-2026-06-09.md.
+    registerHostGuard(this.app, () => this.getHostPolicy());
 
     // Auth middleware (Basic Auth + session cookies + rate limiting)
     const authState = registerAuthMiddleware(this.app, this.https);
@@ -595,10 +611,30 @@ export class WebServer extends EventEmitter {
     // Security headers + CORS
     registerSecurityHeaders(this.app, this.https);
     this.app.get('/', async (_req, reply) => {
-      return reply.header('Cache-Control', 'no-cache').type('text/html; charset=utf-8').send(this.renderIndexHtml());
+      return reply
+        .header('Cache-Control', 'no-cache')
+        .type('text/html; charset=utf-8')
+        .send(await this.renderIndexHtml());
     });
     this.app.get('/index.html', async (_req, reply) => {
-      return reply.header('Cache-Control', 'no-cache').type('text/html; charset=utf-8').send(this.renderIndexHtml());
+      return reply
+        .header('Cache-Control', 'no-cache')
+        .type('text/html; charset=utf-8')
+        .send(await this.renderIndexHtml());
+    });
+    // Detached single-session window (undock). Serves the same SPA shell but
+    // flags the client into "solo mode" for one session. Auth applies normally
+    // (the popup carries the dashboard's cookie on navigation). We serve 200
+    // even for an unknown id — the client renders a friendly "session
+    // unavailable" state, which also covers a session that ends while its
+    // detached window is still open. Registered before the static plugin so the
+    // explicit route wins over the '/' static prefix.
+    this.app.get('/session/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      return reply
+        .header('Cache-Control', 'no-cache')
+        .type('text/html; charset=utf-8')
+        .send(await this.renderIndexHtml(id));
     });
     // Service worker must never be cached — browsers check for SW updates on navigation
     this.app.get('/sw.js', async (_req, reply) => {
@@ -700,24 +736,28 @@ export class WebServer extends EventEmitter {
     // parseBody. Shared with the route test harness so test behavior matches prod.
     installRouteErrorHandler(this.app);
 
-    // Crash diagnostics beacon — frontend POSTs breadcrumbs, GET to read them
+    // Crash diagnostics beacon — frontend POSTs breadcrumbs, GET to read them.
+    // text/plain is used ONLY by this beacon (navigator.sendBeacon sends text/plain).
+    // Keep the body as a RAW STRING and parse it inside the handler — a global
+    // text/plain -> JSON parser would let a cross-site "simple request" (no CORS
+    // preflight) submit JSON to any route. See security review C2.
     let _crashBreadcrumbs = '';
     this.app.addContentTypeParser('text/plain;charset=UTF-8', { parseAs: 'string' }, (_req, body, done) => {
-      try {
-        done(null, JSON.parse(body as string));
-      } catch {
-        done(null, { data: body });
-      }
+      done(null, body);
     });
     this.app.addContentTypeParser('text/plain', { parseAs: 'string' }, (_req, body, done) => {
-      try {
-        done(null, JSON.parse(body as string));
-      } catch {
-        done(null, { data: body });
-      }
+      done(null, body);
     });
     this.app.post('/api/crash-diag', (req, reply) => {
-      _crashBreadcrumbs = String((req.body as { data?: string })?.data || '');
+      const raw = typeof req.body === 'string' ? req.body : '';
+      let data = raw;
+      try {
+        const parsed = JSON.parse(raw) as { data?: unknown };
+        if (parsed && typeof parsed.data === 'string') data = parsed.data;
+      } catch {
+        /* not JSON — treat the raw beacon text as the breadcrumbs */
+      }
+      _crashBreadcrumbs = String(data || '');
       reply.code(204).send();
     });
     this.app.get('/api/crash-diag', (_req, reply) => {
@@ -740,7 +780,7 @@ export class WebServer extends EventEmitter {
     registerPlanRoutes(this.app, ctx);
     registerClipboardRoutes(this.app, ctx);
     registerOrchestratorRoutes(this.app, ctx);
-    registerWsRoutes(this.app, ctx);
+    registerWsRoutes(this.app, ctx, () => this.getHostPolicy());
   }
 
   /**
@@ -1025,9 +1065,100 @@ export class WebServer extends EventEmitter {
     this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
   }
 
-  private renderIndexHtml(): string {
-    const indexHtmlTemplate = readFileSync(this.indexHtmlPath, 'utf-8');
-    return indexHtmlTemplate.replace('<title>Codeman</title>', `<title>${escapeHtmlText(this.windowTitle)}</title>`);
+  private async renderIndexHtml(soloSessionId?: string): Promise<string> {
+    let html = this.indexHtmlTemplate.replace(
+      '<title>Codeman</title>',
+      `<title>${escapeHtmlText(this.windowTitle)}</title>`
+    );
+    // Cache-bust same-origin module scripts + stylesheets so a normal reload
+    // always serves the latest (static assets carry a 1-year immutable cache).
+    html = this.cacheBustAssets(html);
+    // Per-user App-Settings flags, read server-side so the page renders in the
+    // right initial state on every normal reload (the client apply* functions
+    // only run on save). Read FRESH (bypass the 2s cache): a setting toggled
+    // moments ago triggers a reload here, and the cached value would render the
+    // pre-toggle state (e.g. the gesture bundle wouldn't inject until a 2nd
+    // reload). Skipped for solo popups (their header differs).
+    const settings: Record<string, unknown> = soloSessionId ? {} : await this.readSettings(true);
+    // Multi-monitor header button: carries the `btn-multimonitor--hidden` class
+    // in the template by default (App Settings → Display → "Header Displays");
+    // reveal by stripping that class when the user enabled it. Matching a unique
+    // class token (not user-facing copy) keeps this robust against template edits.
+    if (settings.showMultiMonitorButton === true) {
+      html = html.replace(' btn-multimonitor--hidden', '');
+    }
+    // Detached single-session ("solo") window: inject the target session id so
+    // the client can enter solo mode even if a (network-first) service worker
+    // later serves a cached shell. The client primarily detects solo mode from
+    // the /session/:id URL path; this global is a belt-and-suspenders fallback.
+    // The id is gated to JSON + <-escaped so it can't break out of the inline
+    // <script> (ids are UUIDs in practice, but defense-in-depth is cheap).
+    if (soloSessionId) {
+      const safeId = JSON.stringify(soloSessionId).replace(/</g, '\\u003c');
+      html = html.replace('</head>', `<script>window.__CODEMAN_SOLO__=${safeId};</script>\n</head>`);
+    }
+    // Gesture-control overlay (Phase 5): dashboard only (not solo popups, which
+    // have no tab strip). `CODEMAN_GESTURE=1` makes the feature *available* on
+    // this instance (it also widens CSP + serves the assets); the per-user
+    // `gestureControlEnabled` setting (App Settings → Input, default OFF) is the
+    // actual on/off. We expose `__codemanGestureAvailable` so the settings UI can
+    // show the toggle only when the feature is available, and inject the bundle
+    // (served same-origin from /gesture/, so 'self' covers it) only when enabled.
+    if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
+      html = html.replace('</head>', `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
+      if (settings.gestureControlEnabled === true) {
+        const v = this.gestureBundleVersion();
+        html = html.replace(
+          '</head>',
+          `<script type="module" src="/gesture/gesture-codeman.js${v}"></script>\n</head>`
+        );
+      }
+    }
+    return html;
+  }
+
+  /** mtime memo for asset cache-busting (keyed by absolute path). A full index
+   *  render does one stat per script/link tag (~25-30); without this each `/`,
+   *  `/index.html` and `/session/:id` hit would re-stat them all. A 1s TTL keeps
+   *  a burst of renders cheap while still picking up an edited/redeployed file
+   *  within a second (no server restart needed). */
+  private _assetVersionMemo = new Map<string, { v: number; ts: number }>();
+  private assetVersion(absPath: string): number | null {
+    const now = Date.now();
+    const hit = this._assetVersionMemo.get(absPath);
+    if (hit && now - hit.ts < 1000) return hit.v;
+    try {
+      const v = Math.floor(statSync(absPath).mtimeMs);
+      this._assetVersionMemo.set(absPath, { v, ts: now });
+      return v;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Cache-busting query for the gesture bundle: its mtime (memoized, see
+   *  assetVersion). The bundle is served from /gesture/ with a 1-year cache, so
+   *  without a version that changes on redeploy the browser would keep running a
+   *  stale bundle forever. Empty string if the file is missing. */
+  private gestureBundleVersion(): string {
+    const v = this.assetVersion(join(__dirname, 'public', 'gesture', 'gesture-codeman.js'));
+    return v === null ? '' : `?v=${v}`;
+  }
+
+  /** Append ?v=<mtime> to every same-origin .js/.css reference in the page so a
+   *  normal reload always serves the latest. Codeman's static assets are sent
+   *  with `Cache-Control: max-age=1y, immutable` and the script/link tags carry
+   *  no version, so without this an edited module (panels-ui.js, styles.css, …)
+   *  stays cached until a manual hard refresh. mtime is memoized (1s TTL) so a
+   *  changed file is picked up with no server restart. External URLs (have a
+   *  `:` scheme), already-versioned refs (have a `?`), and refs with no matching
+   *  file on disk are left untouched. */
+  private cacheBustAssets(html: string): string {
+    const publicDir = join(__dirname, 'public');
+    return html.replace(/(\s(?:src|href)=")([^"?:]+\.(?:js|css))(")/g, (full, pre, ref, post) => {
+      const v = this.assetVersion(join(publicDir, ref));
+      return v === null ? full : `${pre}${ref}?v=${v}${post}`;
+    });
   }
 
   private async setupSessionListeners(session: Session): Promise<void> {
@@ -1154,7 +1285,7 @@ export class WebServer extends EventEmitter {
 
   // Helper to get custom CLAUDE.md template path from settings
   private async getDefaultClaudeMdPath(): Promise<string | undefined> {
-    const settingsPath = join(homedir(), '.codeman', 'settings.json');
+    const settingsPath = dataPath('settings.json');
 
     try {
       const content = await fs.readFile(settingsPath, 'utf-8');
@@ -1172,13 +1303,16 @@ export class WebServer extends EventEmitter {
 
   // Read ~/.codeman/settings.json once and return the parsed object.
   // Cached for 2s to avoid redundant reads during session creation bursts.
+  // The settings PUT route writes the file without invalidating this cache, so
+  // callers that must observe a just-saved value (e.g. renderIndexHtml on a
+  // post-save reload) pass forceFresh=true to bypass the cache.
   private _settingsCache: { data: Record<string, unknown>; ts: number } | null = null;
-  private async readSettings(): Promise<Record<string, unknown>> {
+  private async readSettings(forceFresh = false): Promise<Record<string, unknown>> {
     const now = Date.now();
-    if (this._settingsCache && now - this._settingsCache.ts < 2000) {
+    if (!forceFresh && this._settingsCache && now - this._settingsCache.ts < 2000) {
       return this._settingsCache.data;
     }
-    const settingsPath = join(homedir(), '.codeman', 'settings.json');
+    const settingsPath = dataPath('settings.json');
     try {
       const content = await fs.readFile(settingsPath, 'utf-8');
       const data = JSON.parse(content) as Record<string, unknown>;
@@ -1617,6 +1751,13 @@ export class WebServer extends EventEmitter {
     lifecycleLog.log({ event: 'server_started', sessionId: '*' });
     await lifecycleLog.trimIfNeeded();
 
+    // If a self-update restarted us into this process, finalize its status file
+    // (flip the persisted "restarting" marker → completed/failed based on the
+    // version we actually booted). No-op on a normal boot. See web/self-update.ts.
+    if (!this.testMode) {
+      reconcileUpdateOnBoot();
+    }
+
     // Restore mux sessions BEFORE accepting connections
     // This prevents race conditions where clients connect before state is ready
     // CRITICAL: Skip in test mode to prevent tests from picking up user sessions
@@ -1642,12 +1783,37 @@ export class WebServer extends EventEmitter {
     const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
     console.log(`Codeman web interface running at ${protocol}://${displayHost}:${this.port}`);
 
-    if (!isLoopbackBindHost(this.host) && !process.env.CODEMAN_PASSWORD && this.allowUnauthenticatedNetwork) {
-      console.warn('\n⚠  WARNING: No CODEMAN_PASSWORD set — server is accessible without authentication.');
-      console.warn('   Anyone on your network can access and control Claude sessions.');
-      console.warn(
-        '   This was explicitly allowed by --allow-unauthenticated-network or CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK.\n'
-      );
+    // Anti-DNS-rebinding Host allowlist is always on. Localhost, any bare IP, the
+    // bind host, *.ts.net / *.trycloudflare.com / *.cfargotunnel.com, and the active
+    // managed tunnel are accepted automatically; add any other domain you front this
+    // with (e.g. a custom reverse-proxy host) via CODEMAN_ALLOWED_HOSTS=host1,.suffix.
+    const extraAllowed = (process.env.CODEMAN_ALLOWED_HOSTS || '').trim();
+    if (extraAllowed) {
+      console.log(`   Host allowlist also accepts: ${extraAllowed}`);
+    }
+
+    // Codeman binds loopback (127.0.0.1) by default, which is safe out of the box.
+    // If the user opts into a non-loopback bind (e.g. --host 0.0.0.0) WITHOUT a
+    // password we no longer refuse to start — that surprised people whose setups
+    // "just worked" before. Instead we start and warn loudly, pointing at the ways
+    // to secure it. --allow-unauthenticated-network just acknowledges the risk (a
+    // terser note). See docs/security-architecture.md.
+    if (!isLoopbackBindHost(this.host) && !process.env.CODEMAN_PASSWORD) {
+      if (this.allowUnauthenticatedNetwork) {
+        console.warn(
+          `\n⚠  Codeman is reachable WITHOUT a password on ${displayHost}:${this.port} ` +
+            '(explicitly allowed). Anyone who can reach it can control your Claude sessions.\n'
+        );
+      } else {
+        console.warn(`\n⚠  WARNING: Codeman is bound to a non-loopback host (${this.host}) with NO password.`);
+        console.warn(`   Anyone who can reach ${displayHost}:${this.port} can control your Claude sessions.`);
+        console.warn('   Secure it with ONE of:');
+        console.warn('     • set CODEMAN_PASSWORD=<password>   (HTTP Basic auth), or');
+        console.warn('     • bind loopback only: --host 127.0.0.1, then front it with an');
+        console.warn('       authenticated tunnel (cloudflared) or `tailscale serve`, or');
+        console.warn('     • keep this bind and accept the risk: --allow-unauthenticated-network');
+        console.warn('   See docs/security-architecture.md for details.\n');
+      }
     }
 
     // Set API URL for child processes (MCP server, spawned sessions)
@@ -1701,7 +1867,7 @@ export class WebServer extends EventEmitter {
     // Tunnel only starts when user clicks the toggle in the UI — never on boot.
     // Reset persisted tunnelEnabled so the UI toggle reflects actual state.
     if (await this.isTunnelEnabled()) {
-      const settingsPath = join(homedir(), '.codeman', 'settings.json');
+      const settingsPath = dataPath('settings.json');
       try {
         const content = await fs.readFile(settingsPath, 'utf-8');
         const settings = JSON.parse(content);
@@ -1722,7 +1888,7 @@ export class WebServer extends EventEmitter {
    * Check if subagent tracking is enabled in settings (default: true)
    */
   private async isSubagentTrackingEnabled(): Promise<boolean> {
-    const settingsPath = join(homedir(), '.codeman', 'settings.json');
+    const settingsPath = dataPath('settings.json');
     try {
       const content = await fs.readFile(settingsPath, 'utf-8');
       const settings = JSON.parse(content);
@@ -1740,7 +1906,7 @@ export class WebServer extends EventEmitter {
    * Check if image watcher is enabled in settings (default: false)
    */
   private async isImageWatcherEnabled(): Promise<boolean> {
-    const settingsPath = join(homedir(), '.codeman', 'settings.json');
+    const settingsPath = dataPath('settings.json');
     try {
       const content = await fs.readFile(settingsPath, 'utf-8');
       const settings = JSON.parse(content);
@@ -1758,7 +1924,7 @@ export class WebServer extends EventEmitter {
    * Check if Cloudflare tunnel is enabled in settings (default: false)
    */
   private async isTunnelEnabled(): Promise<boolean> {
-    const settingsPath = join(homedir(), '.codeman', 'settings.json');
+    const settingsPath = dataPath('settings.json');
     try {
       const content = await fs.readFile(settingsPath, 'utf-8');
       const settings = JSON.parse(content);
