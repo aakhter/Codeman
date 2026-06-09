@@ -29,6 +29,17 @@ vi.mock('node:child_process', async () => {
   const actual = await vi.importActual('node:child_process');
   return {
     ...actual,
+    exec: vi.fn((_cmd: string, optionsOrCallback?: unknown, maybeCallback?: unknown) => {
+      const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+      if (typeof callback === 'function') {
+        setImmediate(() => callback(null, '', ''));
+      }
+      return {
+        on: vi.fn(),
+        kill: vi.fn(),
+        pid: 12345,
+      };
+    }),
     execSync: vi.fn(),
     spawn: vi.fn(() => ({
       unref: vi.fn(),
@@ -48,6 +59,15 @@ vi.mock('node:fs', async () => {
     readFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     writeFile: vi.fn((_path: string, _data: string, cb: (err: Error | null) => void) => cb(null)),
+  };
+});
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual('node:fs/promises');
+  return {
+    ...actual,
+    writeFile: vi.fn(() => Promise.resolve()),
+    rename: vi.fn(() => Promise.resolve()),
   };
 });
 
@@ -561,6 +581,95 @@ describe('TmuxManager (unit)', () => {
       // No error thrown
       manager.stopStatsCollection();
       // No error thrown
+    });
+  });
+
+  describe('tmux launch cwd hardening', () => {
+    async function importWithTmuxCommandsEnabled(): Promise<typeof TmuxManager> {
+      const originalVitest = process.env.VITEST;
+      vi.resetModules();
+      delete process.env.VITEST;
+      const module = await import('../src/tmux-manager.js');
+      if (originalVitest === undefined) {
+        delete process.env.VITEST;
+      } else {
+        process.env.VITEST = originalVitest;
+      }
+      return module.TmuxManager;
+    }
+
+    beforeEach(() => {
+      mockedExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === 'string' && cmd.includes('which tmux')) {
+          return '/usr/bin/tmux\n';
+        }
+        if (typeof cmd === 'string' && cmd.includes('display-message') && cmd.includes('#{pane_pid}')) {
+          return '4242\n';
+        }
+        return '';
+      });
+    });
+
+    it('starts new tmux sessions from /tmp and cd-bounces into the requested workspace', async () => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+
+      try {
+        const session = await nonTestManager.createSession({
+          sessionId: 'abc12345-1234-5678-90ab-cdef12345678',
+          workingDir: '/mnt/gdrive/project with spaces',
+          mode: 'shell',
+        });
+
+        expect(session.workingDir).toBe('/mnt/gdrive/project with spaces');
+        expect(session.pid).toBe(4242);
+
+        const newSessionCall = mockedExecSync.mock.calls.find(
+          ([cmd]) => typeof cmd === 'string' && cmd.includes(' new-session ')
+        );
+        expect(newSessionCall?.[0]).toBe(`tmux -L 'codeman' new-session -ds "codeman-abc12345" -c /tmp`);
+        expect(newSessionCall?.[1]).toEqual(expect.objectContaining({ cwd: '/tmp' }));
+
+        const respawnCall = mockedExecSync.mock.calls.find(
+          ([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane ')
+        );
+        expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abc12345"`);
+        expect(respawnCall?.[0]).toContain('cd \\"/mnt/gdrive/project with spaces\\" &&');
+      } finally {
+        nonTestManager.destroy();
+      }
+    });
+
+    it('respawns existing panes from /tmp and cd-bounces into the requested workspace', async () => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      nonTestManager.registerSession({
+        sessionId: 'respawn1234',
+        muxName: 'codeman-abcd1234',
+        pid: 1000,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'shell',
+        attached: false,
+      });
+
+      try {
+        const pid = await nonTestManager.respawnPane({
+          sessionId: 'respawn1234',
+          workingDir: '/mnt/gdrive/project',
+          mode: 'shell',
+        });
+
+        expect(pid).toBe(4242);
+        const { exec: currentExec } = await import('node:child_process');
+        const respawnCall = vi
+          .mocked(currentExec)
+          .mock.calls.find(([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane '));
+        expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abcd1234"`);
+        expect(respawnCall?.[0]).toContain('cd \\"/mnt/gdrive/project\\" &&');
+      } finally {
+        nonTestManager.destroy();
+      }
     });
   });
 });

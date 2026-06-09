@@ -1,6 +1,6 @@
 {
   "name": "aicodeman",
-  "version": "0.8.4",
+  "version": "0.9.7",
   "description": "The missing control plane for AI coding agents - run 20 autonomous agents with real-time monitoring and session persistence",
   "type": "module",
   "main": "dist/index.js",
@@ -11,6 +11,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "build": "node scripts/build.mjs",
+    "build:gesture": "node scripts/build-gesture-bundle.mjs",
     "start": "NODE_COMPILE_CACHE=${HOME}/.codeman/compile-cache node dist/index.js",
     "dev": "tsx src/index.ts web",
     "web": "node dist/index.js web",

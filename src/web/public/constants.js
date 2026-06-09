@@ -11,7 +11,7 @@
  * @globals {function} getEventCoords - Unified mouse/touch coordinate extractor
  * @globals {function} escapeHtml - XSS-safe HTML escaping
  * @globals {object} CodemanTabOverflow - Tab overflow layout policy helper
- * @globals {object} SSE_EVENTS - Centralized SSE event type constants (~73 event types)
+ * @globals {object} SSE_EVENTS - Centralized SSE event type constants (120 event types; must match backend src/web/sse-events.ts)
  * @globals {Array} BUILTIN_RESPAWN_PRESETS - Built-in respawn configuration presets
  *
  * @dependency None (first in load order)
@@ -255,27 +255,45 @@ const SSE_EVENTS = {
   SESSION_IDLE: 'session:idle',
   SESSION_WORKING: 'session:working',
   SESSION_AUTO_CLEAR: 'session:autoClear',
+  SESSION_AUTO_COMPACT: 'session:autoCompact',
   SESSION_CLI_INFO: 'session:cliInfo',
+  SESSION_MESSAGE: 'session:message',
+  SESSION_INTERACTIVE: 'session:interactive',
+  SESSION_RUNNING: 'session:running',
 
   // Scheduled runs
   SCHEDULED_CREATED: 'scheduled:created',
   SCHEDULED_UPDATED: 'scheduled:updated',
   SCHEDULED_COMPLETED: 'scheduled:completed',
   SCHEDULED_STOPPED: 'scheduled:stopped',
+  SCHEDULED_LOG: 'scheduled:log',
+  SCHEDULED_DELETED: 'scheduled:deleted',
 
   // Respawn
   RESPAWN_STARTED: 'respawn:started',
   RESPAWN_STOPPED: 'respawn:stopped',
   RESPAWN_STATE_CHANGED: 'respawn:stateChanged',
   RESPAWN_CYCLE_STARTED: 'respawn:cycleStarted',
+  RESPAWN_CYCLE_COMPLETED: 'respawn:cycleCompleted',
   RESPAWN_BLOCKED: 'respawn:blocked',
-  RESPAWN_AUTO_ACCEPT_SENT: 'respawn:autoAcceptSent',
+  RESPAWN_STEP_SENT: 'respawn:stepSent',
+  RESPAWN_STEP_COMPLETED: 'respawn:stepCompleted',
   RESPAWN_DETECTION_UPDATE: 'respawn:detectionUpdate',
+  RESPAWN_AUTO_ACCEPT_SENT: 'respawn:autoAcceptSent',
+  RESPAWN_AI_CHECK_STARTED: 'respawn:aiCheckStarted',
+  RESPAWN_AI_CHECK_COMPLETED: 'respawn:aiCheckCompleted',
+  RESPAWN_AI_CHECK_FAILED: 'respawn:aiCheckFailed',
+  RESPAWN_AI_CHECK_COOLDOWN: 'respawn:aiCheckCooldown',
+  RESPAWN_PLAN_CHECK_STARTED: 'respawn:planCheckStarted',
+  RESPAWN_PLAN_CHECK_COMPLETED: 'respawn:planCheckCompleted',
+  RESPAWN_PLAN_CHECK_FAILED: 'respawn:planCheckFailed',
   RESPAWN_TIMER_STARTED: 'respawn:timerStarted',
   RESPAWN_TIMER_CANCELLED: 'respawn:timerCancelled',
   RESPAWN_TIMER_COMPLETED: 'respawn:timerCompleted',
-  RESPAWN_ERROR: 'respawn:error',
   RESPAWN_ACTION_LOG: 'respawn:actionLog',
+  RESPAWN_LOG: 'respawn:log',
+  RESPAWN_ERROR: 'respawn:error',
+  RESPAWN_CONFIG_UPDATED: 'respawn:configUpdated',
 
   // Tasks
   TASK_CREATED: 'task:created',
@@ -301,6 +319,12 @@ const SSE_EVENTS = {
   SESSION_BASH_TOOL_START: 'session:bashToolStart',
   SESSION_BASH_TOOL_END: 'session:bashToolEnd',
   SESSION_BASH_TOOLS_UPDATE: 'session:bashToolsUpdate',
+
+  // Session: Plan
+  SESSION_PLAN_TASK_UPDATE: 'session:planTaskUpdate',
+  SESSION_PLAN_CHECKPOINT: 'session:planCheckpoint',
+  SESSION_PLAN_ROLLBACK: 'session:planRollback',
+  SESSION_PLAN_TASK_ADDED: 'session:planTaskAdded',
 
   // Hooks (Claude Code hook events)
   HOOK_IDLE_PROMPT: 'hook:idle_prompt',
@@ -352,6 +376,18 @@ const SSE_EVENTS = {
   ORCHESTRATOR_TASK_FAILED: 'orchestrator:taskFailed',
   ORCHESTRATOR_COMPLETED: 'orchestrator:completed',
   ORCHESTRATOR_ERROR: 'orchestrator:error',
+
+  // Teams (agent teams)
+  TEAM_CREATED: 'team:created',
+  TEAM_UPDATED: 'team:updated',
+  TEAM_REMOVED: 'team:removed',
+  TEAM_TASK_UPDATED: 'team:taskUpdated',
+
+  // Transcript
+  TRANSCRIPT_COMPLETE: 'transcript:complete',
+  TRANSCRIPT_PLAN_MODE: 'transcript:plan_mode',
+  TRANSCRIPT_TOOL_START: 'transcript:tool_start',
+  TRANSCRIPT_TOOL_END: 'transcript:tool_end',
 
   // Clipboard
   CLIPBOARD_WRITE: 'clipboard:write',

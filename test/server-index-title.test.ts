@@ -32,36 +32,38 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const indexHtmlPath = join(__dirname, '..', 'src', 'web', 'public', 'index.html');
 const rawTemplate = readFileSync(indexHtmlPath, 'utf-8');
 
-function render(host?: string): string {
+async function render(host?: string): Promise<string> {
+  // 4th arg is the bind host; the title hostname is the 5th arg.
   const server = new WebServer(0, false, true, '127.0.0.1', host);
-  return (server as unknown as { renderIndexHtml: () => string }).renderIndexHtml();
+  // renderIndexHtml is async (it reads settings.json for the gesture bundle).
+  return (server as unknown as { renderIndexHtml: () => Promise<string> }).renderIndexHtml();
 }
 
 describe('WebServer index.html <title> templating (#82)', () => {
-  it('substitutes the bare <title>Codeman</title> with codeman:<host>', () => {
-    const html = render('laptop');
+  it('substitutes the bare <title>Codeman</title> with codeman:<host>', async () => {
+    const html = await render('laptop');
     expect(html).toContain('<title>codeman:laptop</title>');
     expect(html).not.toContain('<title>Codeman</title>');
   });
 
-  it('defaults to os.hostname() when no titleHostname is supplied', () => {
-    const html = render();
+  it('defaults to os.hostname() when no titleHostname is supplied', async () => {
+    const html = await render();
     const expected = `<title>codeman:${osHostname()}</title>`;
     expect(html).toContain(expected);
   });
 
-  it('treats an empty-string titleHostname as "not supplied" and falls back to os.hostname()', () => {
+  it('treats an empty-string titleHostname as "not supplied" and falls back to os.hostname()', async () => {
     // CLI normally guarantees a non-empty string, but the constructor's
     // `titleHostname || getHostname()` guard makes empty fall through —
     // pin that behavior so a future refactor doesn't accidentally ship
     // a `<title>codeman:</title>` to users.
-    const html = render('');
+    const html = await render('');
     expect(html).toMatch(/<title>codeman:.+<\/title>/);
     expect(html).not.toContain('<title>codeman:</title>');
   });
 
-  it('HTML-escapes < > & in the hostname so it cannot break out of the title tag', () => {
-    const html = render('<script>alert(1)</script>');
+  it('HTML-escapes < > & in the hostname so it cannot break out of the title tag', async () => {
+    const html = await render('<script>alert(1)</script>');
     expect(html).toContain('<title>codeman:&lt;script&gt;alert(1)&lt;/script&gt;</title>');
     // The raw closing </title> from the injected payload must NOT appear
     // outside the actual title element — escape-then-substitute prevents
@@ -69,16 +71,18 @@ describe('WebServer index.html <title> templating (#82)', () => {
     expect(html).not.toContain('<script>alert(1)</script></title>');
   });
 
-  it('escapes an ampersand without double-encoding existing entities', () => {
+  it('escapes an ampersand without double-encoding existing entities', async () => {
     // The escaper replaces & first, then < and >. A hostname that already
     // contains a literal `&` should render as `&amp;` once, not `&amp;amp;`.
-    const html = render('a&b');
+    const html = await render('a&b');
     expect(html).toContain('<title>codeman:a&amp;b</title>');
     expect(html).not.toContain('&amp;amp;');
   });
 
-  it('only substitutes the <title> tag — the rest of the template is byte-for-byte identical', () => {
-    const html = render('laptop');
+  it('only substitutes the <title> tag — the rest of the template is identical (modulo asset cache-busting)', async () => {
+    // renderIndexHtml also appends ?v=<mtime> cache-bust params to same-origin
+    // .js/.css refs; strip them so the title remains the only other change.
+    const html = (await render('laptop')).replace(/(\.(?:js|css))\?v=[^"]*/g, '$1');
     const beforeTitle = rawTemplate.split('<title>Codeman</title>')[0];
     const afterTitle = rawTemplate.split('<title>Codeman</title>')[1];
     expect(html.startsWith(beforeTitle)).toBe(true);
@@ -88,8 +92,8 @@ describe('WebServer index.html <title> templating (#82)', () => {
     expect(html.length - rawTemplate.length).toBe(expectedDelta);
   });
 
-  it('replaces the <title> placeholder exactly once', () => {
-    const html = render('laptop');
+  it('replaces the <title> placeholder exactly once', async () => {
+    const html = await render('laptop');
     // Defense against a future regression where the template gains a
     // second `<title>Codeman</title>` (e.g. inside a <noscript>) and only
     // the first gets templated — would leave a stale literal in the served
@@ -100,9 +104,9 @@ describe('WebServer index.html <title> templating (#82)', () => {
     expect(occurrencesOfOld).toBe(0);
   });
 
-  it('two WebServer instances on different hostnames render distinct titles', () => {
-    const htmlA = render('host-a');
-    const htmlB = render('host-b');
+  it('two WebServer instances on different hostnames render distinct titles', async () => {
+    const htmlA = await render('host-a');
+    const htmlB = await render('host-b');
     expect(htmlA).toContain('<title>codeman:host-a</title>');
     expect(htmlB).toContain('<title>codeman:host-b</title>');
     expect(htmlA).not.toContain('host-b');

@@ -5,7 +5,11 @@
 <h2 align="center">The missing control plane for AI coding agents</h2>
 
 <p align="center">
-  <em>Agent Visualization &bull; Zero-Lag Input Overlay &bull; Mobile-First UI &bull; Respawn Controller &bull; Multi-Session Dashboard </em>
+  <em>Agent Visualization &bull; Zero-Lag Input &bull; Mobile-First UI &bull; Hardened Security</em>
+</p>
+
+<p align="center">
+  <strong>English</strong> &bull; <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -13,7 +17,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-18%2B-22c55e?style=flat-square&logo=node.js&logoColor=white" alt="Node.js 18+"></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.9-3b82f6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5.9"></a>
   <a href="https://fastify.dev/"><img src="https://img.shields.io/badge/Fastify-5.x-1e3a5f?style=flat-square&logo=fastify&logoColor=white" alt="Fastify"></a>
-  <img src="https://img.shields.io/badge/Tests-1435%20total-22c55e?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-2861%20total-22c55e?style=flat-square" alt="Tests">
 </p>
 
 <p align="center">
@@ -34,7 +38,7 @@ You'll need at least one AI coding CLI installed — [Claude Code](https://docs.
 
 ```bash
 codeman web
-# Open http://localhost:3000 — press Ctrl+Enter to start your first session
+# Open http://localhost:3000 and start your first session
 ```
 
 <details>
@@ -177,6 +181,8 @@ Watch background agents work in real-time. Codeman monitors agent activity and d
 - **Auto-behavior** — windows auto-open on spawn, auto-minimize on completion, tab badge shows "AGENT" or "AGENTS (n)" count
 - **Nested agents** — supports 3-level hierarchies (lead session -> teammate agents -> sub-subagents)
 
+**Agent Teams** — first-class support for Claude Code's native multi-agent teams (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). `TeamWatcher` polls `~/.claude/teams/`, matches teammates to their lead session, and surfaces them as live subagent windows with **team-aware idle detection** — so the Respawn Controller won't fire while teammates are still working. See [`docs/agent-teams/`](docs/agent-teams/).
+
 ---
 
 ## Zero-Lag Input Overlay
@@ -211,6 +217,20 @@ WATCHING → IDLE DETECTED → SEND UPDATE → /clear → /init → CONTINUE →
 - **Circuit breaker** — prevents respawn thrashing when Claude is stuck (CLOSED -> HALF_OPEN -> OPEN states, tracks consecutive no-progress and repeated errors)
 - **Health scoring** — 0-100 health score with component scores for cycle success, circuit breaker state, iteration progress, and stuck recovery
 - **Built-in presets** — `solo-work` (3s idle, 60min), `subagent-workflow` (45s, 240min), `team-lead` (90s, 480min), `ralph-todo` (8s, 480min), `overnight-autonomous` (10s, 480min)
+
+---
+
+## Orchestrator Loop
+
+Beyond single-session respawn, the **Orchestrator** turns a high-level goal into a phased plan and drives it to completion across multiple agents — a state machine that runs `idle → planning → approval → executing → verifying → (replanning) → completed`.
+
+- **Plan, then execute** — generates a phased plan from your goal and pauses for approval before touching anything; reject with feedback to regenerate
+- **Per-phase verification gates** — each phase is verified before the next begins; on failure the orchestrator replans instead of barreling ahead
+- **Multi-agent execution** — fans phases out to team agents / a task queue, coordinating work too big for one session
+- **Crash-safe** — full state persists under the `orchestrator` key in `state.json`, so it survives restarts
+- **Driven from the UI or API** — the Orchestrator panel, or `POST /api/orchestrator/start` → `/approve` → `/status` (10 endpoints)
+
+> Distinct from Ralph (a single-session autonomous loop): the orchestrator coordinates multi-phase, multi-agent execution. Full design: [`docs/orchestrator-loop-architecture.md`](docs/orchestrator-loop-architecture.md).
 
 ---
 
@@ -267,6 +287,20 @@ Terminal-based AI agents (Claude Code's Ink, OpenCode's Bubble Tea) redraw the s
 ```
 PTY Output → 16ms Server Batch → DEC 2026 Wrap → SSE → Client rAF → xterm.js (60fps)
 ```
+
+---
+
+## More Features
+
+- **Self-update** — git-clone installs under systemd/launchd update in place from **App Settings → Updates**: it detects the latest release, auto-stashes a dirty tree, and streams build progress across the service restart (npm installs report as non-updatable)
+- **Dual-CLI** — run **Claude Code** or **OpenCode** per session; env-var prefixes auto-gate (`CLAUDE_CODE_*` vs `OPENCODE_*`). See [`docs/opencode-integration.md`](docs/opencode-integration.md)
+- **Effort & Ultracode** — set a per-session default effort (`low`–`max`) or enable **ultracode** (dynamic multi-agent workflows). Soft defaults only — switchable anytime with `/effort` in-session. Extended-thinking budget is configurable too
+- **Voice input** — dictate prompts with Deepgram Nova-3 (Web Speech API fallback): toggle recording, auto-silence stop, live level meter (`Ctrl+Shift+V`)
+- **Image input** — paste or drag-and-drop images straight into a session
+- **Gesture control** *(opt-in)* — a MediaPipe hand-tracking overlay to grab/drag session windows and pinch buttons, hands-free. Enable with `CODEMAN_GESTURE=1` + App Settings → Display
+- **Multi-monitor span** *(macOS)* — one click opens a browser window maximized across all displays, so floating agent/gesture panels can cross the physical seam
+- **CJK / IME input** — full composition support for Chinese / Japanese / Korean
+- **OS notifications & hostname-aware titles** — desktop alerts and tab titles are prefixed `codeman:<host>` so multi-host setups stay unambiguous
 
 ---
 
@@ -391,6 +425,41 @@ When someone authenticates via QR, the desktop shows a notification toast with t
 
 ---
 
+## Security
+
+Codeman launches sessions with `--dangerously-skip-permissions`, so the web UI is by design a remote-code-execution surface for whoever can reach it — the whole security model exists to control *who* that is. Recent hardening (v0.9.0 + v0.9.5) closes the browser-driven attack paths that bite self-hosted dev tools. Full model: [`docs/security-architecture.md`](docs/security-architecture.md).
+
+### Network & access
+
+- **Loopback by default** — binds `127.0.0.1`, reachable only from the same machine, so the no-password default is safe out of the box. Binding a non-loopback host without `CODEMAN_PASSWORD` *starts but prints a loud warning* with three concrete fixes (set a password, loopback + an authenticated tunnel, or explicitly acknowledge with `--allow-unauthenticated-network`)
+- **Optional auth, real sessions** — HTTP Basic via `CODEMAN_USERNAME` (default `admin`) / `CODEMAN_PASSWORD`. Success issues an opaque 256-bit `codeman_session` cookie (`randomBytes(32)`) — validated server-side, not client-signed, so it can't be forged offline (24h TTL, auto-extend, device-context audit log)
+- **Per-IP rate limiting** — 10 failed attempts → `429` with `Retry-After` (15-min decay). A valid cookie or correct password recovers *immediately* even while an attacker hammers the same IP — important because all tunnel traffic shares one loopback IP. QR auth has its own separate limiter
+
+### Always-on browser hardening (v0.9.5)
+
+These run for **every** request — before auth, even on the default no-password loopback install:
+
+- **Host-header allowlist → blocks DNS rebinding.** A custom domain rebound to `127.0.0.1` is rejected with `403 host not allowed` before any handler runs. Allowed: `localhost`, any IP literal, the bind host, `.ts.net` / `.trycloudflare.com` / `.cfargotunnel.com`, the active managed tunnel, and `CODEMAN_ALLOWED_HOSTS` (add custom reverse-proxy domains here — comma-separated; exact host or leading-dot `.suffix` for subdomains)
+- **Cross-site Origin / CSRF guard.** On state-changing methods (`POST`/`PUT`/`PATCH`/`DELETE`) the `Origin` must pass the same allowlist, else `403 cross-site request blocked`. A *missing* Origin is allowed (so `curl`, the CLI, and Claude Code hooks keep working); only a present-but-foreign or opaque `null` origin is rejected
+- **Raw `text/plain` bodies.** The global parser no longer JSON-parses `text/plain`, closing the CORS "simple request" CSRF vector where a cross-site `fetch` could smuggle JSON into a write route with no preflight
+- **WebSocket origin validation.** The terminal WS upgrade runs the same Host + Origin check and closes with code `4003` on failure (anti-CSWSH)
+- **XSS-escaped agent output.** AI-derived strings (tool names, command arguments, subagent descriptions) are HTML-escaped at every injection site before rendering in the subagent / activity panels
+
+### Input, files & headers
+
+- **Schema-validated inputs** — every API body is checked with Zod v4 schemas; a `CLAUDE_CODE_*` / `OPENCODE_*` env-prefix allowlist gates which settings each CLI can receive
+- **Path containment** — file routes `realpath` before boundary checks (no TOCTOU); `..`, absolute paths, and symlinks resolving outside the working dir are rejected. Caps: 10 MB text preview / 50 MB raw & download; `/api/download` blocklists sensitive paths (`.env`, `*credentials*`, `~/.ssh/`, `.aws/credentials`). SVG/HTML is served `octet-stream` + `nosniff` + attachment so it downloads rather than executes
+- **Security headers** — `Content-Security-Policy` (`default-src 'self'`, every exception enumerated), `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, HSTS over HTTPS, and CORS reflected **only** for `localhost` / `127.0.0.1` / `::1`
+
+### Supply chain & isolation
+
+- **Pinned & verified deps** — security-sensitive transitive deps are forced to patched versions via npm `overrides`; lockfile integrity is checked on every commit/PR (all entries resolve to `registry.npmjs.org` with `sha512` hashes). Public assets are NUL-byte-scanned and `node --check`-validated in CI
+- **Multi-instance isolation** — `CODEMAN_INSTANCE` scopes both the tmux socket (`-L codeman-<name>`) and data dir (`~/.codeman-<name>`) so two instances never attach each other's live sessions
+
+> Mobile login uses single-use, 60-second QR tokens — see [QR Code Authentication](#qr-code-authentication) above for the full design (it addresses all 6 flaws from USENIX Security 2025's QR-login study).
+
+---
+
 ## SSH Alternative (`sc`)
 
 If you prefer SSH (Termius, Blink, etc.), the `sc` command is a thumb-friendly session chooser:
@@ -407,23 +476,27 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 
 ## Keyboard Shortcuts
 
+> Ctrl bindings also accept Cmd on macOS.
+
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+Enter` | Quick-start session |
-| `Ctrl+W` | Close session |
-| `Option+[` / `Option+]` | Previous / next session |
-| `Option+1`-`Option+9` | Switch to tab N |
+| `Ctrl/Cmd+W` | Kill active session |
+| `Ctrl/Cmd+Tab` | Next session |
+| `Alt+1`–`Alt+9` | Switch to tab N |
 | `Ctrl+Shift+{` / `Ctrl+Shift+}` | Move active tab left / right |
-| `Ctrl+K` | Kill all sessions |
-| `Ctrl+L` | Clear terminal |
+| `Ctrl/Cmd+L` | Clear terminal |
 | `Ctrl+Shift+R` | Restore terminal size |
 | `Ctrl+Shift+V` | Toggle voice input |
-| `Ctrl/Cmd +/-` | Font size |
-| `Escape` | Close panels |
+| `Ctrl/Cmd +` / `-` | Font size |
+| `Ctrl/Cmd+?` | Keyboard help |
+| `Shift+Enter` | Insert newline (sent to terminal) |
+| `Escape` | Close panels & modals |
 
 ---
 
 ## API
+
+REST over Fastify — **~140 handlers across 15 route modules**, plus an SSE stream and a WebSocket terminal channel. A representative subset:
 
 ### Sessions
 | Method | Endpoint | Description |
@@ -446,6 +519,14 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 | `GET` | `/api/sessions/:id/ralph-state` | Get loop state + todos |
 | `POST` | `/api/sessions/:id/ralph-config` | Configure tracking |
 
+### Orchestrator
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/orchestrator/start` | Start orchestration from a goal |
+| `POST` | `/api/orchestrator/approve` | Approve the generated plan |
+| `GET` | `/api/orchestrator/status` | Current phase + progress |
+| `POST` | `/api/orchestrator/stop` | Stop and clean up |
+
 ### Subagents
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -460,6 +541,8 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 | `GET` | `/api/events` | SSE stream |
 | `GET` | `/api/status` | Full app state |
 | `POST` | `/api/hook-event` | Hook callbacks |
+| `GET` | `/api/system/update/check` | Check for a new release |
+| `POST` | `/api/system/update` | Self-update (git-clone installs) |
 | `POST` | `/api/clipboard` | Push text to all connected browsers (`{text}`) |
 | `GET` | `/api/sessions/:id/run-summary` | Timeline + stats |
 
@@ -481,11 +564,13 @@ flowchart TB
             S1["Session (PTY)"]
             S2["Session (PTY)"]
             RC["Respawn Controller"]
+            ORC["Orchestrator Loop"]
         end
 
         subgraph Detection["Detection Layer"]
             RT["Ralph Tracker"]
             SW["Subagent Watcher<br/><small>~/.claude/projects/*/subagents</small>"]
+            TW["Team Watcher<br/><small>~/.claude/teams/*</small>"]
         end
 
         subgraph Persistence["Persistence Layer"]
@@ -505,14 +590,17 @@ flowchart TB
     SM --> S1
     SM --> S2
     SM --> RC
+    SM --> ORC
     SM --> SS
     S1 --> RT
     S1 --> SCR
     S2 --> SCR
     RC --> SCR
+    ORC --> SCR
     SCR --> CLI
     SW --> BG
     SW --> SSE
+    TW --> SSE
 ```
 
 ---
@@ -537,13 +625,13 @@ The codebase went through a comprehensive 7-phase refactoring that eliminated go
 | Phase | What changed | Impact |
 |-------|-------------|--------|
 | **Performance** | Cached endpoints, SSE adaptive batching, buffer chunking | Sub-16ms terminal latency |
-| **Route extraction** | `server.ts` split into 13 domain route modules + auth middleware + port interfaces | **−60%** server.ts LOC (6,736 → 2,697) |
-| **Domain splitting** | `types.ts` → 14 domain files, `ralph-tracker` → 7 files, `respawn-controller` → 5 files, `session` → 6 files | No more god files |
-| **Frontend modules** | `app.js` → 9 extracted modules (constants, mobile, voice, notifications, keyboard, CJK input, API, Ralph wizard, subagent windows) | **−24%** app.js LOC (15.2K → 11.5K) |
-| **Config consolidation** | ~70 scattered magic numbers → 9 domain-focused config files | Zero cross-file duplicates |
+| **Route extraction** | `server.ts` split into 15 domain route modules + auth middleware + port interfaces | **−67%** server.ts LOC (6,736 → 2,254) |
+| **Domain splitting** | `types.ts` → 16 domain files, `ralph-tracker` → 7 files, `respawn-controller` → 5 files, `session` → 6 files | No more god files |
+| **Frontend modules** | `app.js` → 18 extracted modules across infra, domain & feature layers | app.js core down to **~3.4K LOC** |
+| **Config consolidation** | ~70 scattered magic numbers → 10 domain-focused config files | Zero cross-file duplicates |
 | **Test infrastructure** | Shared mock library, 12 route test files, consolidated MockSession | Testable route handlers via `app.inject()` |
 
-Full details: [`docs/code-structure-findings.md`](docs/code-structure-findings.md)
+Full details: [`docs/archive/code-structure-findings.md`](docs/archive/code-structure-findings.md)
 
 ---
 

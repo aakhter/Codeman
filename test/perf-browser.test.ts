@@ -174,12 +174,10 @@ describe('Page load performance', () => {
     const timing = await measure(async () => {
       await page.waitForFunction(
         () => {
-          const app = (
-            window as unknown as {
-              app?: { _connectionStatus?: string; eventSource?: EventSource };
-            }
-          ).app;
-          return app?._connectionStatus === 'connected' && app.eventSource?.readyState === EventSource.OPEN;
+          const indicator = document.getElementById('connectionIndicator');
+          if (!indicator) return false;
+          const dot = document.getElementById('connectionDot');
+          return dot?.classList.contains('connected') || indicator.style.display === 'none';
         },
         { timeout: 5000 }
       );
@@ -659,36 +657,35 @@ describe('Subagent window simulation', () => {
       return app.sessions.get(sid)?.claudeSessionId || 'fake-claude-session';
     }, sessionId);
 
-    const timing = await page.evaluate(
-      ({ agentId, cSessionId }: { agentId: string; cSessionId: string }) => {
-        const start = performance.now();
-        const app = (
-          window as unknown as {
-            app: {
-              subagents: Map<string, Record<string, unknown>>;
-              openSubagentWindow: (id: string) => void;
-            };
-          }
-        ).app;
-        // Inject fake agent data
-        app.subagents.set(agentId, {
-          agentId,
-          sessionId: cSessionId,
-          status: 'active',
-          description: 'Performance test agent',
-          startedAt: Date.now(),
-          lastActivityAt: Date.now(),
-          toolCallCount: 0,
-          entryCount: 0,
-          fileSize: 0,
-        });
-        app.openSubagentWindow(agentId);
-        return performance.now() - start;
-      },
-      { agentId: 'perf-agent-1', cSessionId: claudeSessionId }
-    );
-
-    await page.waitForSelector('.subagent-window', { timeout: 3000 });
+    const timing = await measure(async () => {
+      await page.evaluate(
+        ({ agentId, cSessionId }: { agentId: string; cSessionId: string }) => {
+          const app = (
+            window as unknown as {
+              app: {
+                subagents: Map<string, Record<string, unknown>>;
+                openSubagentWindow: (id: string) => void;
+              };
+            }
+          ).app;
+          // Inject fake agent data
+          app.subagents.set(agentId, {
+            agentId,
+            sessionId: cSessionId,
+            status: 'active',
+            description: 'Performance test agent',
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+            toolCallCount: 0,
+            entryCount: 0,
+            fileSize: 0,
+          });
+          app.openSubagentWindow(agentId);
+        },
+        { agentId: 'perf-agent-1', cSessionId: claudeSessionId }
+      );
+      await page.waitForSelector('.subagent-window', { timeout: 3000 });
+    });
 
     console.log(`[subagent window] open: ${timing.toFixed(0)}ms`);
     expect(timing).toBeLessThan(THRESHOLDS.SUBAGENT_WINDOW_OPEN);
@@ -702,11 +699,7 @@ describe('Subagent window simulation', () => {
 
     const timing = await measure(async () => {
       await page.evaluate(() => {
-        const app = (
-          window as unknown as {
-            app: { closeSubagentWindow: (id: string) => void };
-          }
-        ).app;
+        const app = (window as unknown as { app: { closeSubagentWindow: (id: string) => void } }).app;
         app.closeSubagentWindow('perf-agent-1');
       });
       // Wait for element to become hidden (display: none)

@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { StaleExpirationMap } from '../../utils/index.js';
 import type { AuthSessionRecord } from '../ports/auth-port.js';
+import { isAllowedRequestHost, isAllowedRequestOrigin, type HostPolicy } from '../network-auth-policy.js';
 import {
   AUTH_SESSION_TTL_MS,
   MAX_AUTH_SESSIONS,
@@ -157,17 +158,62 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean): Au
   return state;
 }
 
+/** Methods that don't change server state and so skip the cross-site Origin check. */
+const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Register the anti-DNS-rebinding Host allowlist + cross-site (CSRF) Origin guard.
+ *
+ * This protects the API even on the default no-password install, where there is no
+ * cookie/credential to gate on. It must be registered BEFORE the auth middleware so
+ * forged cross-site or DNS-rebound requests are rejected up front. `getPolicy` is
+ * evaluated per request so a tunnel started at runtime is reflected immediately.
+ *
+ * - Every request: the `Host` header must be in the allowlist (blocks DNS rebinding,
+ *   where a custom domain is rebound to 127.0.0.1 but still sends its own name).
+ * - State-changing methods: the `Origin` (when the client sends one — i.e. a browser)
+ *   must be same-site (blocks cross-site CSRF, including the text/plain simple-request
+ *   trick). Non-browser clients (curl, Claude Code hooks) omit Origin and pass.
+ *
+ * WebSocket upgrades are validated separately in the ws route handler.
+ */
+export function registerHostGuard(app: FastifyInstance, getPolicy: () => HostPolicy): void {
+  app.addHook('onRequest', (req, reply, done) => {
+    const policy = getPolicy();
+    if (!isAllowedRequestHost(req.headers.host, policy)) {
+      reply.code(403).send('Forbidden: host not allowed');
+      return;
+    }
+    if (!SAFE_HTTP_METHODS.has(req.method) && !isAllowedRequestOrigin(req.headers.origin, policy)) {
+      reply.code(403).send('Forbidden: cross-site request blocked');
+      return;
+    }
+    done();
+  });
+}
+
 /**
  * Register security headers and CORS middleware on every response.
  */
 export function registerSecurityHeaders(app: FastifyInstance, https: boolean): void {
+  // Gesture-control overlay (opt-in via CODEMAN_GESTURE=1) runs MediaPipe, which
+  // needs WebAssembly eval (script-src) and blob workers (worker-src). Its wasm
+  // runtime + model are self-hosted under /gesture/ (same-origin, covered by
+  // 'self'), so no CDN connect-src entries are needed. OFF by default so the
+  // production CSP is byte-for-byte unchanged.
+  const gesture = process.env.CODEMAN_GESTURE === '1';
+  const scriptSrc =
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net" + (gesture ? " 'wasm-unsafe-eval'" : '');
+  const connectSrc = "connect-src 'self' wss://api.deepgram.com";
+  const workerSrc = gesture ? "; worker-src 'self' blob:" : '';
+  const csp =
+    `default-src 'self'; ${scriptSrc}; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; ` +
+    `img-src 'self' data: blob:; ${connectSrc}; font-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'${workerSrc}`;
+
   app.addHook('onRequest', (req, reply, done) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'SAMEORIGIN');
-    reply.header(
-      'Content-Security-Policy',
-      "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob:; connect-src 'self' wss://api.deepgram.com; font-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'"
-    );
+    reply.header('Content-Security-Policy', csp);
     if (https) {
       reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     }

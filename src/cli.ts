@@ -577,7 +577,7 @@ program
   .command('web')
   .description('Start the web interface')
   .option('-H, --host <host>', 'Host to bind to', process.env.CODEMAN_HOST || '127.0.0.1')
-  .option('-p, --port <port>', 'Port to listen on', '3000')
+  .option('-p, --port <port>', 'Port to listen on (env: CODEMAN_PORT)', process.env.CODEMAN_PORT || '3000')
   .option('--https', 'Enable HTTPS with self-signed certificate (only needed for remote access, not localhost)')
   .option('--title-hostname <hostname>', 'Override the hostname shown in the browser title')
   .option(

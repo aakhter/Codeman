@@ -313,6 +313,20 @@ if (isGlobalInstall) {
 }
 
 // ----------------------------------------------------------------------------
+// 4b. Fetch gesture-overlay runtime assets (MediaPipe wasm + model) for dev mode
+//     (src/web/public/gesture/). Opt-in feature (CODEMAN_GESTURE=1); non-fatal.
+//     Large binaries kept out of git; the build copies them into dist/.
+// ----------------------------------------------------------------------------
+
+if (!isGlobalInstall) {
+    try {
+        execSync(`node "${join(import.meta.dirname, 'fetch-gesture-assets.mjs')}"`, { stdio: 'inherit' });
+    } catch {
+        // Non-fatal — the gesture overlay is opt-in.
+    }
+}
+
+// ----------------------------------------------------------------------------
 // 5. Install git pre-commit hook (format check)
 // ----------------------------------------------------------------------------
 
@@ -446,3 +460,16 @@ if (process.env.CI || process.env.CODEMAN_NO_AUTOSTART) {
         }
     }
 }
+
+// ----------------------------------------------------------------------------
+// Security note — printed on every install path
+// ----------------------------------------------------------------------------
+
+console.log(colors.bold('Security:'));
+console.log(colors.dim('  Codeman binds ') + colors.cyan('127.0.0.1') + colors.dim(' (this machine only) — no password needed by default.'));
+console.log(colors.dim('  To reach it from another device, do ONE of:'));
+console.log(colors.dim('    • ') + colors.cyan('tailscale serve') + colors.dim(' / ') + colors.cyan('cloudflared tunnel') + colors.dim('   (recommended), or'));
+console.log(colors.dim('    • ') + colors.cyan('codeman web --host 0.0.0.0') + colors.dim('  AND set ') + colors.cyan('CODEMAN_PASSWORD'));
+console.log(colors.dim('  A non-loopback bind without a password still starts, but warns loudly.'));
+console.log(colors.dim('  Details: docs/security-architecture.md'));
+console.log('');

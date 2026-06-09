@@ -1,52 +1,127 @@
 # aicodeman
 
-## 0.8.4
+## 0.9.7
 
 ### Patch Changes
 
-- Document revision review + rollback (COD-59): versioned document previews
-  (attached .md/.txt) now have a "Changes" view showing a prose word-level diff
-  of what the agent changed (additions/deletions highlighted), a from-version
-  selector, and one-click rollback to a prior version. Snapshots are captured off
-  the live-preview poll while a preview is open; history is in-memory per server
-  run.
+- Fix installer failure on corrupt puppeteer cache + add Simplified Chinese README.
+  - **Installer / self-update reliability**: The universal installer (`install.sh`) and the in-app self-updater (`scripts/self-update.sh`) now set `PUPPETEER_SKIP_DOWNLOAD=1` before `npm install`. `puppeteer` is a devDependency used only by `scripts/browser-comparison.mjs`; its ~150MB `chrome-headless-shell` download is never needed to build or run Codeman. Previously, a partially-downloaded browser cache (folder present, executable missing) made puppeteer refuse to re-download and abort `npm install`, which failed the entire install/update — most visibly on macOS (`mac_arm`). The download is now skipped on both paths; callers can still opt back in with `PUPPETEER_SKIP_DOWNLOAD=0`.
+  - **Docs**: Added a Simplified Chinese translation of the README (`README.zh-CN.md`) with an English/中文 language switcher in `README.md`. Refreshed the README and documented the v0.9.5 security hardening (Host-header/DNS-rebinding guard, cross-site Origin/CSRF guard, anti-CSWSH WebSocket validation).
 
-## 0.8.3
+## 0.9.6
 
 ### Patch Changes
 
-- Live-updating document preview (COD-58): the attachment/file preview now
-  auto-refreshes in place as the agent rewrites the underlying file, instead of
-  showing a one-shot snapshot. Driven by a lightweight mtime+size poll while a
-  preview is open and visible; markdown/text re-fetch content and image/pdf
-  reload via an mtime cache-bust. Scroll position is preserved across refreshes.
+- Self-updater: show live progress during the slow steps so an update no longer looks frozen.
+  - The detached update runner (`scripts/self-update.sh`) now emits a heartbeat every few seconds during `npm install` and `npm run build`, refreshing the update status with the latest output line (full output is still written to the update log).
+  - App Settings → Updates now shows the live status message plus a ticking elapsed-time counter during non-terminal phases, instead of only a static phase label.
 
-  Codex session reliability (COD-43): reconcile/restore now respect tmux
-  `#{pane_dead}` so crashed `remain-on-exit` panes aren't restored as healthy and
-  respawned; `respawnPane()` refuses to respawn into a working directory that no
-  longer exists (preventing a crash loop); and Gemini env forwarding now routes
-  through the dedicated Codeman tmux socket.
+  This takes effect when updating _from_ a build that includes it — the detached runner script and the polling UI are both the from-version's copies.
 
-  Test hardening (COD-44): session integration tests now create their own
-  isolated working-directory fixtures instead of reusing the shared /tmp.
+## 0.9.5
+
+### Patch Changes
+
+- Security hardening from the 2026-06-09 adversarial review — close the remote-exploit paths that affected the default (loopback + no-password) configuration. Full report: `docs/reports/security-review-2026-06-09.md`.
+  - **Anti-DNS-rebinding Host allowlist (always on).** A new request guard rejects requests whose `Host` is a custom domain rebound to a loopback/LAN address — previously a website the operator merely visited could DNS-rebind to `127.0.0.1` and drive the entire API (arbitrary command execution, since sessions run `--dangerously-skip-permissions`). The allowlist accepts `localhost`, any bare IP literal, the bind host, `*.ts.net` / `*.trycloudflare.com` / `*.cfargotunnel.com`, the active managed tunnel, and anything in the new `CODEMAN_ALLOWED_HOSTS` env var (comma-separated; `host` or leading-dot `.suffix`).
+  - **Cross-site (CSRF) Origin guard on all state-changing requests.** Forged cross-site requests are rejected; a missing `Origin` is allowed so `curl`/CLI automation and Claude Code hooks keep working. This closes the previously CSRF-triggerable self-update, session create/input, and settings/tunnel-toggle endpoints.
+  - **`text/plain` body parser no longer JSON-parses every request body** (which let a cross-site "simple request" submit JSON with no CORS preflight). The crash-diagnostics beacon now parses its own body.
+  - **WebSocket terminal upgrade now validates `Origin`/`Host`** (blocks cross-site WebSocket hijacking that could inject keystrokes into a running agent).
+  - **Stored-XSS fix:** AI-/transcript-derived fields (tool name, tool detail, tool id, hook text) in the subagent activity panel are now HTML-escaped.
+
+  Operational note: if you front Codeman with a custom reverse-proxy domain, allow it via `CODEMAN_ALLOWED_HOSTS=host,.suffix`. Setting `CODEMAN_PASSWORD` also fully mitigates these via the existing auth hook.
+
+## 0.9.4
+
+### Patch Changes
+
+- In-app self-updater, plus the SSE-registry and security-doc changes since 0.9.3.
+
+  **New: update Codeman from the web UI (App Settings → Updates).** A "Check for updates" button asks the server to query GitHub for the latest tagged release (falling back to `git ls-remote`) and shows its release notes; "Update now" then runs the full `git checkout <tag>` → `npm install` → `npm run build` → restart cycle and streams live progress that survives the service restart (the browser polls a status file across the connection drop).
+  - **Channel:** latest tagged release (e.g. `codeman@0.9.4`), not bleeding-edge master.
+  - **Dirty working trees are auto-stashed** (`git stash`, left for you to `git stash pop`) instead of discarded.
+  - **Cross-platform restart**, detected from the running process: systemd (`systemctl --user restart codeman-web`) on Linux, launchd (`launchctl kickstart`) on macOS, or a printed manual command otherwise.
+  - **Survives its own restart:** the updater runs detached in a transient `systemd-run --user --scope` (Linux) or `setsid` session (macOS), so the restart it triggers cannot kill the build mid-flight.
+  - **Safety:** build failure rolls back to the pre-update commit (never restarts into a half-built `dist/`); the pre-restart status marker is reconciled on boot with an update-id + freshness guard so a normal reboot is not misreported as a completed update; concurrent updates are rejected (409); the runner script is staged outside the repo so `git checkout` cannot corrupt it mid-run; release tags are strictly validated before reaching the shell; `CODEMAN_DISABLE_SELF_UPDATE=1` disables the feature; non-git (npm-global) installs are detected and pointed at `npm i -g aicodeman@latest`.
+  - New endpoints: `GET /api/system/update/check`, `POST /api/system/update`, `GET /api/system/update/status`.
+
+  **Also in this release:**
+  - Sync the frontend `SSE_EVENTS` registry (`constants.js`) with the backend `sse-events.ts` so every broadcast event has a matching frontend entry.
+  - Expand `docs/security-architecture.md` with the trust model, CSP detail, and a source-file map.
+
+## 0.9.3
+
+### Patch Changes
+
+- Installer security notice + clarify gesture control stays opt-in and default-off.
+  - **Installer:** `install.sh` now prints the network-security notice as the final block of both the fresh install (one-line `curl … | bash`) and the update flow, so it stays visible to the user: Codeman binds `127.0.0.1` by default (no password needed), and the safe ways to reach it remotely (`tailscale serve` / tunnel, or `--host 0.0.0.0` + `CODEMAN_PASSWORD`), noting a non-loopback bind without a password still starts but warns loudly.
+  - **Gesture control** is **disabled by default** and is enabled only by the per-user toggle at App Settings → Display → Input → Gesture Control (`gestureControlEnabled`, default `false`). Setting `CODEMAN_GESTURE=1` on the server only makes the feature _available_ (CSP widening + same-origin `/gesture/` assets); it does **not** turn the overlay on. There is no default-on path — the bundle is injected only when a user explicitly enables the setting.
+
+## 0.9.2
+
+### Patch Changes
+
+- Vendor the gesture-control source into the repo for in-tree development.
+
+  The hand-tracking overlay's source (previously the standalone `Ark0N/codeman-gesture-control` repo) now lives at `packages/gesture-control/` as the `codeman-gesture-control` workspace package: the transport-agnostic gesture core (`src/gesture/*` — MediaPipe GestureRecognizer → One-Euro-filtered cursor → pinch state machine), the Codeman consumer entry (`src/codeman/entry.ts`, maps grab/drag/drop onto real session tabs + toolbar buttons), and a standalone vite playground for iterating on gesture feel.
+  - New `npm run build:gesture` (`scripts/build-gesture-bundle.mjs`) esbuild-bundles `entry.ts` into the served `src/web/public/gesture/gesture-codeman.js`; `scripts/build.mjs` now reruns it on every production build so the served bundle always reflects current source. The MediaPipe wasm + model stay runtime-loaded from same-origin `/gesture/` (unchanged).
+  - Added `@mediapipe/tasks-vision@0.10.21` as the package dependency (kept in sync with `fetch-gesture-assets.mjs`). The playground uses vite 7 (no known advisories).
+
+  No change to the shipped app behavior — gesture control remains opt-in (`CODEMAN_GESTURE=1` + the App Settings → Input toggle). This release just makes the overlay developable inside the Codeman repo.
+
+## 0.9.1
+
+### Patch Changes
+
+- Multi-monitor & settings UX fixes.
+  - **Multi-monitor button (remote servers):** the "span displays" button spawns `scripts/span-codeman.sh` server-side, so on a non-macOS Codeman server it can't open a window on your machine. The non-macOS API error now explains this and points to running the script locally on your Mac with the remote server URL; the script header documents the same remote-client workflow.
+  - **App Settings modal:** stop the modal overflowing horizontally on narrow viewports.
+  - **systemd:** sync the `codeman-web.service` template with the deployed unit.
+
+## 0.9.0
+
+### Minor Changes
+
+- Security hardening release: network-bind policy, auth lockout recovery, download/SVG hardening, dependency & supply-chain fixes, tmux launch reliability, and a full security-architecture doc.
+
+  **Network binding (COD-29, #107):**
+  - The web server now defaults to binding `127.0.0.1` (loopback) instead of `0.0.0.0`, so a fresh install is reachable only from the same machine and needs no password. New `--host` / `-H` / `CODEMAN_HOST` flag to choose the bind host.
+  - Binding a non-loopback host **without** `CODEMAN_PASSWORD` no longer refuses to start — it **starts and prints a loud warning** with the three ways to secure it (set `CODEMAN_PASSWORD`, bind loopback + an authenticated tunnel / `tailscale serve`, or acknowledge with `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1`). This keeps Codeman "just working" for new users while making remote exposure a guided, explicit choice. Host classification lives in the new `src/web/network-auth-policy.ts` (handles `127.0.0.0/8`, `::1`, `::ffff:127.*`, bracketed IPv6).
+  - A post-install security note now explains the loopback default and how to expose safely.
+
+  **Authentication (COD-29, #107):**
+  - Auth lockout now recovers gracefully: the per-IP rate-limit (`429`) check runs **after** the cookie/credential checks, so a valid session cookie or correct password is never locked out by a prior attacker's failures from the same IP (important behind a shared-IP tunnel). Wrong credentials are still counted and still hit the limit, and a `Retry-After` header is returned.
+
+  **Downloads & content-type hardening (COD-29, #107):**
+  - New session-scoped `POST /api/download` route: realpath-bounded to the session working dir, a sensitive-path blocklist (`/etc/shadow`, `~/.ssh/`, `.env`, `*credentials*`, …), `isFile()` + 50 MB cap, forced `attachment`.
+  - Workspace `.svg` files are served as `application/octet-stream` + `attachment` + `nosniff` (closes a stored-XSS-via-SVG vector); `nosniff` now applies to all `file-raw` responses.
+
+  **Dependencies & supply chain (COD-28, #106):**
+  - Bumped security-sensitive deps to patched versions (`@fastify/static` 9, `fastify` 5.8, `uuid` 14, `vitest` 4.1, …) and added `overrides` for patched transitives (`picomatch`, `basic-ftp`, `fast-uri`, `flatted`); `npm audit` goes from 7 advisories to 0.
+  - New `npm run check:public-assets` (`scripts/check-public-assets.mjs`): scans `src/web/public/**` for literal NUL bytes and runs `node --check` on every `.js` file, plus a Prettier pass on maintained files. Removed literal NUL placeholders from `app.js`. Added `test/dependency-security.test.ts` and `test/frontend-public-tooling.test.ts`.
+
+  **tmux launch reliability (COD-31, #110):**
+  - New tmux sessions and respawns launch from a stable `/tmp` and `cd` into the workspace inside the pane, avoiding `new-session` crashes when a FUSE/rclone-mounted workspace has a transient mount blip at launch. The `cd "<dir>" && <cmd>` form is fail-safe (the CLI never runs in `/tmp`) and the path is validated + double-quoted.
+
+  **Test stability (COD-30, #108):**
+  - Cleared leaked auth env in the Vitest setup, corrected stale route status-code / SSE-lifecycle expectations to match shipped behavior, updated the mobile keyboard accessory expectations, and measured DOMContentLoaded via browser navigation timing. Also fixed the `WebServer` title tests for the new `host` constructor arg + async `renderIndexHtml`.
+
+  **Docs:**
+  - New `docs/security-architecture.md` documenting the full model (network binding, auth pipeline, the tunnel `req.ip` caveat, file-serving hardening, supply-chain, multi-instance isolation, security headers, and recommended secure setups). CLAUDE.md updated accordingly.
 
 ## 0.8.2
 
 ### Patch Changes
 
-- Add `.md` and `.txt` support to attachment cards and previews (COD-46).
-  Markdown attachments render through the existing sanitized client path
-  (`marked` + HTML sanitizer, no unsafe inline HTML) and plain-text
-  attachments render as escaped, whitespace-preserving text. `codeman
-attach` and the `codeman://attach` magic link now accept md/txt, files
-  are served with `text/markdown` / `text/plain`, previews stream from raw
-  bytes, and thumbnails fall back to a type badge. Auto-detection is
-  unchanged (explicit-attach only) so routine notes files don't spam cards.
-
-  Add the `codeman doctor` dependency check (COD-45): a read-only command
-  that reports whether the external tools Codeman actually uses are
-  present, with `--json` and `--category` filters and a non-zero exit when
-  a required dependency is missing.
+- Session detach/undock, opt-in gesture-control overlay, multi-monitor spanning, new App-Settings toggles, and asset cache-busting.
+  - **Session detach/undock + instance isolation (#103):** Detach a session into its own solo (popup) window from the tab strip. Adds multi-instance isolation primitives in `src/config/instance.ts` (`getDataDir()`/`dataPath()`/`DEFAULT_TMUX_SOCKET`) keyed off `CODEMAN_INSTANCE`, so a beta can run side-by-side with prod without discovering/attaching to prod's live tmux sessions or clobbering its `state.json`. `CODEMAN_INSTANCE` defaults to the production layout (`~/.codeman`, `-L codeman`, port 3000), so master installs are unaffected. Adds `scripts/run-beta.sh` (`CODEMAN_INSTANCE=beta` + `CODEMAN_PORT=5000`). The legacy `~/.claudeman` migration is now scoped to the default instance only. Hardened detach edge cases. Tests: `test/config/instance.test.ts`.
+  - **Gesture-control overlay (Phase 5, opt-in via `CODEMAN_GESTURE=1`):** Camera hand-tracking overlay (self-hosted MediaPipe — wasm + model fetched at install/build via `scripts/fetch-gesture-assets.mjs` rather than committed). `CODEMAN_GESTURE=1` makes the feature _available_ (CSP widening + `/gesture/` assets + `window.__codemanGestureAvailable`); the per-user **Gesture Control (beta)** toggle (App Settings → Display → Input, default OFF) is the actual on/off and reloads the page to inject/remove the bundle. Dashboard-only (not solo popups). Labeled "(beta)" (#109).
+  - **Multi-monitor button:** Header button (opt-in via App Settings → Display → Header Displays) that POSTs `/api/system/span-displays` to spawn `scripts/span-codeman.sh` — a maximized browser `--app` window sized to the union of all displays, so the gesture layer's floating panels can drag across the physical monitor seam. Tests: `test/routes/system-span-displays.test.ts`.
+  - **New App-Settings toggles (#105):** Gesture control and the multi-monitor button are both opt-in (default OFF), with live show/hide on save.
+  - **Asset cache-busting:** `renderIndexHtml` appends `?v=<mtime>` to every same-origin `.js`/`.css` reference; `index.html` is served `no-cache`, so a normal reload picks up edited modules/styles without a hard refresh. Tests: `test/render-index-html.test.ts`.
+  - **Gesture Control toggle placement:** the toggle now lives inside the existing **Input** settings section (alongside Local Echo / CJK Input / Extended Keyboard Bar) instead of a duplicate "Input" section; only the toggle itself is hidden when `CODEMAN_GESTURE=1` is unset, leaving the rest of the section intact.
+  - **Service env:** `scripts/codeman-web.service` now sets `CODEMAN_GESTURE=1` so the gesture feature is available on the local install (still gated behind the default-OFF per-user toggle).
+  - **Docs:** CLAUDE.md updated for the orchestrator loop, multi-monitor/span-displays, cache-busting, gesture/multi-monitor toggles, and structural-count fixes.
 
 ## 0.8.1
 

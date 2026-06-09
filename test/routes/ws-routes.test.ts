@@ -84,7 +84,7 @@ describe('ws-routes', () => {
     await app.register(fastifyWebsocket);
 
     ctx = createMockRouteContext({ sessionId: 'ws-test-session' });
-    registerWsRoutes(app, ctx as never);
+    registerWsRoutes(app, ctx as never, () => ({ bindHost: '127.0.0.1', allowedHosts: [], tunnelHost: null }));
 
     await app.listen({ port: PORT, host: '127.0.0.1' });
   });

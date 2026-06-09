@@ -5,7 +5,7 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * ~117 event constants organized by category:
+ * 120 event constants organized by category:
  * - **Core** (1): init
  * - **Session lifecycle** (17): created, updated, deleted, terminal, idle, working, ...
  * - **Session: Ralph** (6): ralphLoopUpdate, todoUpdate, completionDetected, ...
@@ -13,7 +13,7 @@
  * - **Session: Plan** (4): planTaskUpdate, planCheckpoint, planRollback, planTaskAdded
  * - **Tasks** (4): created, completed, failed, updated
  * - **Mux** (4): created, killed, died, statsUpdated
- * - **Respawn** (17): stateChanged, cycleStarted, aiCheck*, timer*, log, ...
+ * - **Respawn** (24): stateChanged, cycleStarted/Completed, step*, aiCheck*, planCheck*, timer*, log, ...
  * - **Subagents** (7): discovered, updated, tool_call, tool_result, progress, message, completed
  * - **Scheduled** (6): created, updated, completed, stopped, log, deleted
  * - **Teams** (4): created, updated, removed, taskUpdated
@@ -22,7 +22,9 @@
  * - **Tunnel** (7): started, stopped, progress, error, qrRotated, qrRegenerated, qrAuthUsed
  * - **Image** (1): detected
  * - **Hooks** (6): idle_prompt, permission_prompt, elicitation_dialog, stop, teammate_idle, task_completed
- * - **Cases** (2): created, linked
+ * - **Orchestrator** (12): stateChanged, planProgress, planReady, phase*, verification, task*, completed, error
+ * - **Clipboard** (1): write
+ * - **Cases** (4): created, linked, deleted, order-changed
  *
  * Naming convention: `domain:action` (e.g., `session:created`, `respawn:stateChanged`)
  *

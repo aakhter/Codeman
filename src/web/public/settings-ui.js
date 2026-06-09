@@ -312,6 +312,14 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowProjectInsights').checked = settings.showProjectInsights ?? defaults.showProjectInsights ?? false;
     document.getElementById('appSettingsShowFileBrowser').checked = settings.showFileBrowser ?? defaults.showFileBrowser ?? false;
     document.getElementById('appSettingsShowSubagents').checked = settings.showSubagents ?? defaults.showSubagents ?? false;
+    document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
+    // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
+    // but is only available when the instance runs with CODEMAN_GESTURE=1 (server sets
+    // window.__codemanGestureAvailable). Hide just this item otherwise so the toggle
+    // can't promise something that won't work.
+    const gestureItem = document.getElementById('appSettingsGestureControlItem');
+    if (gestureItem) gestureItem.style.display = window.__codemanGestureAvailable ? '' : 'none';
+    document.getElementById('appSettingsGestureControl').checked = settings.gestureControlEnabled ?? defaults.gestureControlEnabled ?? false;
     document.getElementById('appSettingsSubagentTracking').checked = settings.subagentTrackingEnabled ?? defaults.subagentTrackingEnabled ?? true;
     document.getElementById('appSettingsSubagentActiveTabOnly').checked = settings.subagentActiveTabOnly ?? defaults.subagentActiveTabOnly ?? true;
     document.getElementById('appSettingsImageWatcherEnabled').checked = settings.imageWatcherEnabled ?? defaults.imageWatcherEnabled ?? false;
@@ -435,6 +443,9 @@ Object.assign(CodemanApp.prototype, {
     providerEl.textContent = providerName;
     providerEl.className = 'voice-provider-status' + (providerName.startsWith('Deepgram') ? ' active' : '');
 
+    // Updates section — show current version, reset transient result/progress UI.
+    this._initUpdatesSection();
+
     // Reset to first tab and wire up tab switching
     this.switchSettingsTab('settings-display');
     const modal = document.getElementById('appSettingsModal');
@@ -468,6 +479,187 @@ Object.assign(CodemanApp.prototype, {
       this.activeFocusTrap.deactivate();
       this.activeFocusTrap = null;
     }
+  },
+
+  // ───────────────────────────────────────────────────────────────
+  // Self-Update (App Settings → Updates). Backend: src/web/self-update.ts.
+  // ───────────────────────────────────────────────────────────────
+
+  /** Friendly label for an in-flight update phase. */
+  _updatePhaseText(phase) {
+    return {
+      queued: 'Queued…',
+      preparing: 'Preparing…',
+      stashing: 'Stashing local changes…',
+      fetching: 'Fetching release…',
+      checkout: 'Checking out release…',
+      installing: 'Installing dependencies…',
+      building: 'Building…',
+      restarting: 'Restarting Codeman…',
+    }[phase] || phase;
+  },
+
+  /** Populate the version row and clear transient UI when the modal opens. */
+  _initUpdatesSection() {
+    const verEl = this.$('updateCurrentVersion');
+    if (verEl) verEl.textContent = (this.$('versionDisplay')?.textContent || '').trim() || '—';
+    for (const id of ['updateResult', 'updateActionRow', 'updateNotes', 'updateProgress']) {
+      const el = this.$(id);
+      if (el) el.style.display = 'none';
+    }
+    this._updateCheck = null;
+  },
+
+  _setUpdateResult(html) {
+    const el = this.$('updateResult');
+    if (el) { el.style.display = 'block'; el.innerHTML = html; }
+  },
+
+  _setUpdateProgress(html) {
+    const el = this.$('updateProgress');
+    if (el) { el.style.display = 'block'; el.innerHTML = html; }
+  },
+
+  /** Manual "Check for updates" — asks the server to query GitHub. */
+  async checkForUpdate() {
+    const btn = this.$('updateCheckBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    const data = await this._apiJson('/api/system/update/check');
+    if (btn) { btn.disabled = false; btn.textContent = 'Check now'; }
+
+    const actionRow = this.$('updateActionRow');
+    const notes = this.$('updateNotes');
+    if (actionRow) actionRow.style.display = 'none';
+    if (notes) notes.style.display = 'none';
+
+    if (!data) {
+      this._setUpdateResult('Could not check for updates. Try again later.');
+      return;
+    }
+    this._updateCheck = data;
+    const verEl = this.$('updateCurrentVersion');
+    if (verEl && data.currentVersion) verEl.textContent = `v${data.currentVersion}`;
+
+    if (data.installKind && data.installKind !== 'git') {
+      this._setUpdateResult(
+        `This install can't update itself (${escapeHtml(data.installKind)}). Update with <code>npm i -g aicodeman@latest</code>.`
+      );
+      return;
+    }
+    if (data.selfUpdateEnabled === false) {
+      this._setUpdateResult('In-app updates are disabled on this server (CODEMAN_DISABLE_SELF_UPDATE=1).');
+      return;
+    }
+    if (data.error && !data.updateAvailable) {
+      this._setUpdateResult(escapeHtml(data.error));
+      return;
+    }
+    if (data.updateAvailable && data.latestVersion) {
+      this._setUpdateResult(
+        `Update available: <strong>v${escapeHtml(data.latestVersion)}</strong> &nbsp;(current v${escapeHtml(data.currentVersion || '')})`
+      );
+      const label = this.$('updateActionLabel');
+      if (label) label.textContent = `Update to v${data.latestVersion}`;
+      if (actionRow) actionRow.style.display = 'flex';
+      const nowBtn = this.$('updateNowBtn');
+      if (nowBtn) { nowBtn.disabled = false; nowBtn.textContent = 'Update now'; }
+      if (notes && data.notes) {
+        notes.style.display = 'block';
+        notes.textContent = data.notes;
+      }
+    } else {
+      this._setUpdateResult(`You're up to date (v${escapeHtml(data.currentVersion || '')}).`);
+    }
+  },
+
+  /** Start the update, then poll status across the service restart. */
+  async startSelfUpdate() {
+    const target = this._updateCheck?.latestVersion ? `v${this._updateCheck.latestVersion}` : 'the latest release';
+    if (!confirm(`Update Codeman to ${target}? The server will restart and this page will reload.`)) return;
+
+    const btn = this.$('updateNowBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+    const res = await this._apiPost('/api/system/update', {});
+    if (!res || !res.ok) {
+      let msg = 'Failed to start the update.';
+      try { const j = await res.json(); if (j?.error?.message) msg = j.error.message; } catch {}
+      this._setUpdateProgress(`<span style="color:var(--danger,#e5534b)">${escapeHtml(msg)}</span>`);
+      if (btn) { btn.disabled = false; btn.textContent = 'Update now'; }
+      return;
+    }
+    const actionRow = this.$('updateActionRow');
+    if (actionRow) actionRow.style.display = 'none';
+    const notes = this.$('updateNotes');
+    if (notes) notes.style.display = 'none';
+    this._setUpdateProgress('Starting update…');
+    this._pollUpdateStatus();
+  },
+
+  _stopUpdatePolling() {
+    if (this._updatePollTimer) { clearInterval(this._updatePollTimer); this._updatePollTimer = null; }
+  },
+
+  /**
+   * Poll the status file every 1.5s. Survives the connection drop while the
+   * server restarts (fetch throws → "restarting"), then reads the reconciled
+   * terminal state from the freshly-booted server.
+   */
+  _pollUpdateStatus() {
+    this._stopUpdatePolling();
+    const terminal = new Set(['completed', 'completed-needs-manual-restart', 'failed', 'idle']);
+    const poll = async () => {
+      let data = null;
+      try {
+        const res = await fetch('/api/system/update/status');
+        if (res.ok) data = await res.json();
+      } catch { /* server restarting — keep polling */ }
+
+      if (!data) {
+        this._setUpdateProgress('↻ Restarting Codeman…');
+        return;
+      }
+      if (!terminal.has(data.phase)) {
+        // Prefer the live status message — the updater's heartbeat enriches it with
+        // the latest npm/build output line so a slow step doesn't look frozen — and
+        // fall back to the static phase label. Append total elapsed so the counter
+        // keeps ticking between heartbeats: a clear "still working" signal.
+        const label = (data.message && data.message.trim()) ? data.message.trim() : this._updatePhaseText(data.phase);
+        let elapsed = '';
+        if (data.startedAt) {
+          const secs = Math.max(0, Math.round((Date.now() - data.startedAt) / 1000));
+          elapsed = ` <span style="color:var(--text-secondary)">· ${secs}s</span>`;
+        }
+        this._setUpdateProgress(`<span class="tunnel-spinner"></span> ${escapeHtml(label)}${elapsed}`);
+        return;
+      }
+      this._stopUpdatePolling();
+      if (data.phase === 'completed') {
+        let html = `<span style="color:var(--success,#3fb950)">✓ Updated to v${escapeHtml(data.toVersion || '')}. Reloading…</span>`;
+        if (data.stashRef) {
+          html += `<br><span style="color:var(--text-secondary)">Local changes stashed as <code>${escapeHtml(data.stashRef)}</code> — run <code>git stash pop</code> to restore.</span>`;
+        }
+        this._setUpdateProgress(html);
+        setTimeout(() => location.reload(), 2500);
+      } else if (data.phase === 'completed-needs-manual-restart') {
+        this._setUpdateProgress(
+          `Update staged. Restart Codeman to apply:<br><code>${escapeHtml(data.manualRestartCommand || 'restart codeman web')}</code>`
+        );
+      } else if (data.phase === 'failed') {
+        let html = `<span style="color:var(--danger,#e5534b)">✗ ${escapeHtml(data.message || 'Update failed')}.</span>`;
+        if (data.error) html += `<br><span style="color:var(--text-secondary)">${escapeHtml(data.error)}</span>`;
+        html += `<br><span style="color:var(--text-secondary)">The previous version is still running.</span>`;
+        if (data.stashRef) {
+          html += `<br><span style="color:var(--text-secondary)">Local changes stashed as <code>${escapeHtml(data.stashRef)}</code>.</span>`;
+        }
+        this._setUpdateProgress(html);
+        const nowBtn = this.$('updateNowBtn');
+        const actionRow = this.$('updateActionRow');
+        if (nowBtn) { nowBtn.disabled = false; nowBtn.textContent = 'Try again'; }
+        if (actionRow) actionRow.style.display = 'flex';
+      }
+    };
+    poll();
+    this._updatePollTimer = setInterval(poll, 1500);
   },
 
   async loadTunnelStatus() {
@@ -1120,6 +1312,9 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async saveAppSettings() {
+    // Gesture overlay is injected at page render (server-side), so a change to it
+    // only takes effect on reload — remember the prior value to decide below.
+    const _prevGestureEnabled = (this.loadAppSettingsFromStorage().gestureControlEnabled ?? false) === true;
     const settings = {
       defaultClaudeMdPath: document.getElementById('appSettingsClaudeMdPath').value.trim(),
       defaultWorkingDir: document.getElementById('appSettingsDefaultDir').value.trim(),
@@ -1134,6 +1329,8 @@ Object.assign(CodemanApp.prototype, {
       showProjectInsights: document.getElementById('appSettingsShowProjectInsights').checked,
       showFileBrowser: document.getElementById('appSettingsShowFileBrowser').checked,
       showSubagents: document.getElementById('appSettingsShowSubagents').checked,
+      showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
+      gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
       subagentTrackingEnabled: document.getElementById('appSettingsSubagentTracking').checked,
       subagentActiveTabOnly: document.getElementById('appSettingsSubagentActiveTabOnly').checked,
       imageWatcherEnabled: document.getElementById('appSettingsImageWatcherEnabled').checked,
@@ -1296,6 +1493,18 @@ Object.assign(CodemanApp.prototype, {
     }
 
     this.closeAppSettings();
+
+    // The gesture overlay is injected at page render (server reads
+    // gestureControlEnabled from settings.json), so a change only takes effect on
+    // reload. Reload when it actually changed — the server PUT above already
+    // persisted the new value.
+    if (settings.gestureControlEnabled !== _prevGestureEnabled) {
+      this.showToast(
+        settings.gestureControlEnabled ? 'Enabling gesture control — reloading…' : 'Disabling gesture control — reloading…',
+        'info'
+      );
+      setTimeout(() => location.reload(), 400);
+    }
   },
 
   // Load model configuration from server for the settings modal
@@ -1404,6 +1613,9 @@ Object.assign(CodemanApp.prototype, {
         showProjectInsights: false,
         showFileBrowser: false,
         showSubagents: false,
+        showMultiMonitorButton: false,
+        // Input
+        gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile
         subagentTrackingEnabled: false,
         subagentActiveTabOnly: true, // Only show subagents for active tab
@@ -1477,13 +1689,24 @@ Object.assign(CodemanApp.prototype, {
       lifecycleBtn.style.display = showLifecycleLog ? '' : 'none';
     }
 
-    // Hide notification bell when notifications are disabled
-    const notifEnabled = this.notificationManager?.preferences?.enabled ?? true;
+    // Multi-monitor button — hidden by default (App Settings → Display → "Header
+    // Displays"). The server renders the correct initial state on every reload;
+    // this handles a live toggle from a settings save (no reload). Toggle the
+    // marker class (matches the server-side reveal) rather than an inline style.
+    const showMultiMonitorButton = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
+    const multiMonitorBtn = document.querySelector('.btn-multimonitor');
+    if (multiMonitorBtn) {
+      multiMonitorBtn.classList.toggle('btn-multimonitor--hidden', !showMultiMonitorButton);
+    }
+
+    // Notification bell is retired (notifications live in Settings → Notifications
+    // + the drawer); keep it hidden regardless of the notification-enabled state.
     const notifBtn = document.querySelector('.btn-notifications');
     if (notifBtn) {
-      notifBtn.style.display = notifEnabled ? '' : 'none';
+      notifBtn.style.display = 'none';
     }
     // Close the drawer if notifications got disabled while it's open
+    const notifEnabled = this.notificationManager?.preferences?.enabled ?? true;
     if (!notifEnabled) {
       const drawer = document.getElementById('notifDrawer');
       if (drawer) drawer.classList.remove('open');
