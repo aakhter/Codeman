@@ -104,20 +104,33 @@ describe('document attachment UI wiring', () => {
     expect(stylesCss).toContain('.document-preview-diff');
   });
 
-  it('lets you annotate a selected passage and send it to the session (COD-60)', () => {
+  it('collects selected-passage annotations into a review tray with two send modes (COD-60/69)', () => {
     expect(panelsJs).toContain('commentOnSelection');
-    expect(panelsJs).toContain('sendAnnotation');
     expect(panelsJs).toContain('window.getSelection');
-    expect(panelsJs).toContain('annotation-popover');
-    // posts the instruction to the session input endpoint, single-line via mux
+    // composer adds to a tray instead of sending immediately
+    expect(panelsJs).toContain('addAnnotation');
+    expect(panelsJs).toContain('annotation-tray');
+    // two send modes: consolidated prompt, or a written review file
+    expect(panelsJs).toContain('sendAnnotationsAsPrompt');
+    expect(panelsJs).toContain('saveAnnotationsToReviewFile');
+    expect(panelsJs).toContain('/documents/review');
     expect(panelsJs).toContain('/input');
     expect(panelsJs).toContain('useMux');
-    expect(stylesCss).toContain('.annotation-popover');
+    expect(stylesCss).toContain('.annotation-tray');
   });
 
-  it('offers the Changes (revision) view on .docx previews too (COD-66)', () => {
-    expect(panelsJs).toContain("data.type === 'document' && attachmentId");
-    expect(panelsJs).toContain('document-changes-btn');
+  it('offers a PDF/HTML/Changes view switcher with annotation on .docx previews (COD-66/68)', () => {
+    expect(panelsJs).toContain('switchDocxView');
+    expect(panelsJs).toContain('document-view-switch');
+    expect(panelsJs).toContain('document-preview-html');
+    expect(panelsJs).toContain('/documents/html');
+    expect(stylesCss).toContain('.document-preview-html');
+  });
+
+  it('makes the preview overlay resizable and persists the size (COD-67)', () => {
+    expect(stylesCss).toContain('resize: both');
+    expect(panelsJs).toContain('_restorePreviewSize');
+    expect(panelsJs).toContain('codeman.filePreviewSize');
   });
 
   it('live-refreshes the open preview when the underlying file changes (COD-58)', () => {

@@ -30,7 +30,12 @@ import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } fro
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
 import { documentVersionStore } from '../../document-version-store.js';
-import { extractDocumentText, isBinaryDocExtension, isDiffableDocExtension } from '../../document-text-extract.js';
+import {
+  convertDocxToHtml,
+  extractDocumentText,
+  isBinaryDocExtension,
+  isDiffableDocExtension,
+} from '../../document-text-extract.js';
 import { wordDiff } from '../../utils/word-diff.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
@@ -834,6 +839,62 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return reply
         .code(500)
         .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to roll back: ${getErrorMessage(err)}`));
+    }
+  });
+
+  // Selectable HTML rendering of a .docx for the annotatable preview view (COD-68).
+  app.get('/api/sessions/:id/documents/html', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string });
+    if (!target) return;
+    if (target.extension.toLowerCase().replace(/^\./, '') !== 'docx') {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'HTML view is only available for .docx'));
+      return;
+    }
+    try {
+      const html = await convertDocxToHtml(target.filePath);
+      return { success: true, data: { html } };
+    } catch (err) {
+      return reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to render HTML: ${getErrorMessage(err)}`));
+    }
+  });
+
+  // Write collected annotations to a markdown review file in the workspace (COD-69).
+  app.post('/api/sessions/:id/documents/review', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body || {}) as {
+      attachmentId?: string;
+      path?: string;
+      annotations?: { passage?: string; note?: string }[];
+    };
+    const target = resolveDocumentTarget(ctx, reply, id, body);
+    if (!target) return;
+    const annotations = Array.isArray(body.annotations) ? body.annotations.filter((a) => a && a.note) : [];
+    if (annotations.length === 0) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No annotations provided'));
+      return;
+    }
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    if (!workingDir) return;
+    const docName = pathBasename(target.filePath);
+    const reviewName = `codeman-review-${docName.replace(/[^a-zA-Z0-9._-]/g, '_')}.md`;
+    const md =
+      `# Review comments for ${docName}\n\n` +
+      annotations
+        .map((a, i) => `${i + 1}. In "${(a.passage || '').replace(/\s+/g, ' ').trim()}":\n   ${(a.note || '').trim()}`)
+        .join('\n\n') +
+      '\n';
+    try {
+      await fs.writeFile(join(workingDir, reviewName), md, 'utf-8');
+      return { success: true, data: { path: reviewName, count: annotations.length } };
+    } catch (err) {
+      return reply
+        .code(500)
+        .send(
+          createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to write review file: ${getErrorMessage(err)}`)
+        );
     }
   });
 

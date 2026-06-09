@@ -2768,6 +2768,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Show overlay with loading state
     overlay.classList.add('visible');
+    this._restorePreviewSize();
     titleEl.textContent = filePath;
     bodyEl.innerHTML = '<div class="binary-message">Loading...</div>';
     footerEl.textContent = '';
@@ -2775,7 +2776,9 @@ Object.assign(CodemanApp.prototype, {
     const metadataUrl = attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
       : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
-    this.filePreviewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null };
+    this.filePreviewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
+    this._annotations = [];
+    this._closeAnnotationTray();
 
     try {
       const data = await this._fetchFilePreviewMetadata(metadataUrl);
@@ -2831,16 +2834,39 @@ Object.assign(CodemanApp.prototype, {
       bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
-      const previewUrl =
-        data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
-      bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bust(previewUrl)}" title="${escapeHtml(filePath)}"></iframe>`;
+      const st = this.filePreviewState;
+      // .docx supports a view switcher: rendered PDF (default), selectable HTML, and Changes (COD-68).
+      const isDocx = data.type === 'document' && !!attachmentId;
+      const view = isDocx ? st?.docxView || 'pdf' : 'pdf';
+      if (isDocx && view === 'html') {
+        let html = '';
+        try {
+          const r = await fetch(`/api/sessions/${sessionId}/documents/html?${this._documentParams()}`);
+          if (r.ok) html = (await r.json()).data?.html || '';
+        } catch {
+          /* fall through to empty */
+        }
+        const safe = typeof this._sanitizeHtml === 'function' ? this._sanitizeHtml(html) : escapeHtml(html);
+        bodyEl.innerHTML = `<div class="document-preview-html rv-text">${safe}</div>`;
+      } else {
+        const previewUrl =
+          data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
+        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bust(previewUrl)}" title="${escapeHtml(filePath)}"></iframe>`;
+      }
       const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
-      // .docx documents carry a prose revision history too (COD-66).
-      const docChanges =
-        data.type === 'document' && attachmentId
-          ? ` <button class="btn-icon-sm document-changes-btn" onclick="app.showDocumentDiff()">Changes</button>`
+      const switcher = isDocx
+        ? ` <span class="document-view-switch">` +
+          `<button class="btn-icon-sm ${view === 'pdf' ? 'active' : ''}" onclick="app.switchDocxView('pdf')">PDF</button>` +
+          `<button class="btn-icon-sm ${view === 'html' ? 'active' : ''}" onclick="app.switchDocxView('html')">HTML</button>` +
+          `<button class="btn-icon-sm" onclick="app.switchDocxView('changes')">Changes</button>` +
+          `</span>`
+        : '';
+      // Comment is available on the selectable HTML view (COD-68/69).
+      const comment =
+        isDocx && view === 'html'
+          ? ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`
           : '';
-      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${label} \u2022 browser controls provide page/zoom navigation`)}${docChanges}`;
+      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${label}`)}${switcher}${comment}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
@@ -3002,6 +3028,7 @@ Object.assign(CodemanApp.prototype, {
         <button class="btn-icon-sm" onclick="app.exitDocumentDiff()">\u2190 Back to preview</button>
         ${fromSelect}
         ${restoreBtn}
+        <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>
       </div>
       ${content}`;
     if (footerEl) {
@@ -3050,7 +3077,30 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  /** Capture the selected passage in the preview and open the annotation composer (COD-60). */
+  /** Switch the .docx preview between PDF, selectable HTML, and Changes views (COD-68). */
+  async switchDocxView(view) {
+    const st = this.filePreviewState;
+    if (!st) return;
+    if (view === 'changes') {
+      await this.showDocumentDiff();
+      return;
+    }
+    st.mode = 'preview';
+    st.docxView = view;
+    try {
+      const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      st.signature = this._filePreviewSignature(data);
+      await this._renderFilePreviewBody(data, {
+        sessionId: st.sessionId,
+        filePath: st.filePath,
+        attachmentId: st.attachmentId,
+      });
+    } catch {
+      /* keep current view on error */
+    }
+  },
+
+  /** Capture the selected passage in the preview and open the annotation composer (COD-60/69). */
   commentOnSelection() {
     const bodyEl = this.$('filePreviewBody');
     const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection() : null;
@@ -3069,19 +3119,17 @@ Object.assign(CodemanApp.prototype, {
 
   _openAnnotationPopover(passage) {
     this._closeAnnotationPopover();
-    const st = this.filePreviewState;
-    const sessionName = (st && (this.sessions.get(st.sessionId)?.name || st.sessionId.slice(0, 8))) || 'session';
     const shortPassage = passage.length > 240 ? `${passage.slice(0, 240)}…` : passage;
     const pop = document.createElement('div');
     pop.className = 'annotation-popover';
     pop.id = 'annotationPopover';
     pop.innerHTML = `
-      <div class="annotation-popover-title">Comment on selection → ${escapeHtml(sessionName)}</div>
+      <div class="annotation-popover-title">Add comment on selection</div>
       <blockquote class="annotation-quote">${escapeHtml(shortPassage)}</blockquote>
       <textarea class="annotation-note" rows="3" placeholder="e.g. tighten this; make it less formal; add a citation"></textarea>
       <div class="annotation-popover-actions">
         <button type="button" class="btn-icon-sm" onclick="app._closeAnnotationPopover()">Cancel</button>
-        <button type="button" class="btn-icon-sm annotation-send" onclick="app.sendAnnotation()">Send to session</button>
+        <button type="button" class="btn-icon-sm annotation-send" onclick="app.addAnnotation()">Add to review</button>
       </div>`;
     document.body.appendChild(pop);
     this._annotationPassage = passage;
@@ -3093,36 +3141,127 @@ Object.assign(CodemanApp.prototype, {
     this._annotationPassage = null;
   },
 
-  /** Build a single-line revision instruction from the passage + note and send it to the session. */
-  async sendAnnotation() {
-    const st = this.filePreviewState;
+  /** Add the composed {passage, note} to the review tray (COD-69). */
+  addAnnotation() {
     const pop = document.getElementById('annotationPopover');
-    if (!st || !pop) return;
+    if (!pop) return;
     const note = (pop.querySelector('.annotation-note')?.value || '').trim();
     if (!note) {
       this.showToast?.('Add a note first', 'info');
       return;
     }
-    const passage = (this._annotationPassage || '').replace(/\s+/g, ' ').trim();
-    const shortPassage = passage.length > 280 ? `${passage.slice(0, 280)}…` : passage;
+    this._annotations = this._annotations || [];
+    this._annotations.push({ passage: (this._annotationPassage || '').replace(/\s+/g, ' ').trim(), note });
+    this._closeAnnotationPopover();
+    this._renderAnnotationTray();
+  },
+
+  removeAnnotation(index) {
+    if (!this._annotations) return;
+    this._annotations.splice(index, 1);
+    this._renderAnnotationTray();
+  },
+
+  _closeAnnotationTray() {
+    document.getElementById('annotationTray')?.remove();
+  },
+
+  clearAnnotations() {
+    this._annotations = [];
+    this._closeAnnotationTray();
+  },
+
+  _renderAnnotationTray() {
+    this._closeAnnotationTray();
+    const items = this._annotations || [];
+    if (!items.length) return;
+    const tray = document.createElement('div');
+    tray.className = 'annotation-tray';
+    tray.id = 'annotationTray';
+    const rows = items
+      .map((a, i) => {
+        const snippet = a.passage.length > 80 ? `${a.passage.slice(0, 80)}…` : a.passage;
+        return `<li class="annotation-tray-item">
+            <button class="annotation-tray-remove" title="Remove" onclick="app.removeAnnotation(${i})">×</button>
+            <div class="annotation-tray-passage">“${escapeHtml(snippet)}”</div>
+            <div class="annotation-tray-note">${escapeHtml(a.note)}</div>
+          </li>`;
+      })
+      .join('');
+    tray.innerHTML = `
+      <div class="annotation-tray-title">Review comments (${items.length})</div>
+      <ul class="annotation-tray-list">${rows}</ul>
+      <div class="annotation-tray-actions">
+        <button type="button" class="btn-icon-sm" onclick="app.clearAnnotations()">Clear</button>
+        <button type="button" class="btn-icon-sm" onclick="app.saveAnnotationsToReviewFile()">Save to review file</button>
+        <button type="button" class="btn-icon-sm annotation-send" onclick="app.sendAnnotationsAsPrompt()">Send as prompt</button>
+      </div>`;
+    document.body.appendChild(tray);
+  },
+
+  _annotationTargetBody() {
+    const st = this.filePreviewState;
+    return st && st.attachmentId ? { attachmentId: st.attachmentId } : { path: st?.filePath };
+  },
+
+  /** Send all collected annotations as one consolidated single-line instruction (COD-69). */
+  async sendAnnotationsAsPrompt() {
+    const st = this.filePreviewState;
+    const items = this._annotations || [];
+    if (!st || !items.length) return;
     const fileName = (st.filePath || '').split('/').pop() || 'the document';
-    // writeViaMux is single-line — collapse all whitespace into one line.
-    const message = `In ${fileName}, revise this passage: "${shortPassage}" — ${note}`.replace(/\s+/g, ' ').trim();
+    const list = items
+      .map((a, i) => {
+        const p = a.passage.length > 160 ? `${a.passage.slice(0, 160)}…` : a.passage;
+        return `(${i + 1}) "${p}" — ${a.note}`;
+      })
+      .join('; ');
+    const message = `Please apply these edits to ${fileName}: ${list}`.replace(/\s+/g, ' ').trim();
+    if (await this._postSessionInput(st.sessionId, message)) {
+      this.showToast?.(`Sent ${items.length} comment${items.length === 1 ? '' : 's'} to the session`, 'success');
+      this.clearAnnotations();
+    }
+  },
+
+  /** Write the collected annotations to a review file and ask the agent to apply it (COD-69). */
+  async saveAnnotationsToReviewFile() {
+    const st = this.filePreviewState;
+    const items = this._annotations || [];
+    if (!st || !items.length) return;
     try {
-      const res = await fetch(`/api/sessions/${st.sessionId}/input`, {
+      const res = await fetch(`/api/sessions/${st.sessionId}/documents/review`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ input: message, useMux: true }),
+        body: JSON.stringify({ ...this._annotationTargetBody(), annotations: items }),
       });
-      if (res.ok) {
-        const sessionName = this.sessions.get(st.sessionId)?.name || st.sessionId.slice(0, 8);
-        this.showToast?.(`Sent to ${sessionName}`, 'success');
-        this._closeAnnotationPopover();
-      } else {
-        this.showToast?.('Failed to send to session', 'error');
+      if (!res.ok) {
+        this.showToast?.('Failed to write review file', 'error');
+        return;
+      }
+      const reviewPath = (await res.json()).data?.path;
+      const fileName = (st.filePath || '').split('/').pop() || 'the document';
+      const message = `Please apply the review comments in ${reviewPath} to ${fileName}.`;
+      if (await this._postSessionInput(st.sessionId, message)) {
+        this.showToast?.(`Saved ${items.length} comments to ${reviewPath} and asked the agent to apply them`, 'success');
+        this.clearAnnotations();
       }
     } catch {
+      this.showToast?.('Failed to write review file', 'error');
+    }
+  },
+
+  async _postSessionInput(sessionId, input) {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/input`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ input, useMux: true }),
+      });
+      if (!res.ok) this.showToast?.('Failed to send to session', 'error');
+      return res.ok;
+    } catch {
       this.showToast?.('Failed to send to session', 'error');
+      return false;
     }
   },
 
@@ -3146,9 +3285,41 @@ Object.assign(CodemanApp.prototype, {
     window.open(url, '_blank');
   },
 
+  /** Restore the persisted preview size and keep saving it as the user resizes (COD-67). */
+  _restorePreviewSize() {
+    const win = this.$('filePreviewOverlay')?.querySelector('.file-preview-window');
+    if (!win) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem('codeman.filePreviewSize') || 'null');
+      if (saved && saved.w && saved.h) {
+        win.style.width = `${saved.w}px`;
+        win.style.height = `${saved.h}px`;
+      }
+    } catch {
+      /* ignore corrupt setting */
+    }
+    if (!this._filePreviewResizeObs && typeof ResizeObserver !== 'undefined') {
+      this._filePreviewResizeObs = new ResizeObserver(() => {
+        clearTimeout(this._filePreviewResizeSaveTimer);
+        this._filePreviewResizeSaveTimer = setTimeout(() => {
+          try {
+            localStorage.setItem(
+              'codeman.filePreviewSize',
+              JSON.stringify({ w: Math.round(win.offsetWidth), h: Math.round(win.offsetHeight) })
+            );
+          } catch {
+            /* storage full / unavailable */
+          }
+        }, 300);
+      });
+      this._filePreviewResizeObs.observe(win);
+    }
+  },
+
   closeFilePreview() {
     this._stopFilePreviewPolling();
     this._closeAnnotationPopover();
+    this._closeAnnotationTray();
     const overlay = this.$('filePreviewOverlay');
     if (overlay) {
       overlay.classList.remove('visible');

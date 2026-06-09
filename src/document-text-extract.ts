@@ -33,6 +33,18 @@ export async function extractDocumentText(filePath: string, extension: string): 
   return '';
 }
 
+/**
+ * Render a `.docx` to an HTML fragment via pandoc, for a selectable, annotatable
+ * preview view (COD-68). The fragment is sanitized client-side before insertion.
+ */
+export async function convertDocxToHtml(filePath: string): Promise<string> {
+  const { stdout } = await execFileAsync('pandoc', ['-f', 'docx', '-t', 'html', '--wrap=none', filePath], {
+    timeout: PANDOC_TIMEOUT_MS,
+    maxBuffer: PANDOC_MAX_BUFFER,
+  });
+  return stdout;
+}
+
 /** True when a document extension supports text-based revision diffing. */
 export function isDiffableDocExtension(extension: string): boolean {
   const ext = extension.toLowerCase().replace(/^\./, '');

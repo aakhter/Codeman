@@ -957,6 +957,59 @@ describe('file-routes', () => {
       expect(mockedWriteFile).toHaveBeenCalledWith('/mnt/c/docs/brief.docx', Buffer.from('DOCXBYTES-1'));
     });
 
+    it('renders a .docx as HTML via pandoc, and rejects HTML view for non-docx (COD-68)', async () => {
+      mockedStat.mockResolvedValue({ size: 100, isFile: () => true, mtimeMs: 100 } as never);
+      mockedExecFile.mockImplementation((cmd, _args, _opts, cb) => {
+        (cb as (e: unknown, r: unknown) => void)(null, {
+          stdout: String(cmd).includes('pandoc') ? '<h1>Brief</h1><p>Body text.</p>' : '',
+          stderr: '',
+        });
+        return {} as never;
+      });
+      const reg = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/docs/brief.docx' },
+      });
+      const aid = JSON.parse(reg.body).data.attachmentId;
+      const ok = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/html?attachmentId=${aid}`,
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(JSON.parse(ok.body).data.html).toContain('<h1>Brief</h1>');
+
+      const mdAid = await registerMdAttachment('/mnt/c/notes/note.md');
+      const bad = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/html?attachmentId=${mdAid}`,
+      });
+      expect(bad.statusCode).toBe(400);
+    });
+
+    it('writes collected annotations to a workspace review file, and rejects empty reviews (COD-69)', async () => {
+      mockedStat.mockResolvedValue({ size: 5, isFile: () => true, mtimeMs: 1 } as never);
+      const aid = await registerMdAttachment('/mnt/c/notes/doc.md');
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/review`,
+        payload: { attachmentId: aid, annotations: [{ passage: 'the intro paragraph', note: 'tighten it' }] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data.path).toContain('codeman-review-');
+      const reviewCall = mockedWriteFile.mock.calls.find((c) => String(c[0]).includes('codeman-review-'));
+      expect(reviewCall).toBeDefined();
+      expect(String(reviewCall?.[1])).toContain('tighten it');
+
+      const empty = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/review`,
+        payload: { attachmentId: aid, annotations: [] },
+      });
+      expect(empty.statusCode).toBe(400);
+    });
+
     it('returns 400 when neither attachmentId nor path is provided', async () => {
       const res = await harness.app.inject({
         method: 'GET',
