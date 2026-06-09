@@ -7745,6 +7745,68 @@ kbd {
   margin-left: 8px;
 }
 
+/* Inline annotation composer — COD-60. */
+.annotation-popover {
+  position: fixed;
+  top: 84px;
+  right: 40px;
+  width: min(440px, 92vw);
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated, #1c1c22);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.annotation-popover-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #ddd);
+}
+
+.annotation-quote {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent, #7aa2ff);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted, #aaa);
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.annotation-note {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text, #ddd);
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.annotation-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.annotation-send {
+  background: var(--accent, #7aa2ff);
+  color: #fff;
+  border-color: var(--accent, #7aa2ff);
+}
+
 .file-preview-footer {
   padding: 0.35rem 0.75rem;
   font-size: 0.7rem;

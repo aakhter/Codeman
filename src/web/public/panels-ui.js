@@ -2861,7 +2861,9 @@ Object.assign(CodemanApp.prototype, {
       const changes = attachmentId
         ? ` <button class="btn-icon-sm document-changes-btn" onclick="app.showDocumentDiff()">Changes</button>`
         : '';
-      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`)}${changes}`;
+      // Annotate a selected passage and send it back to the session (COD-60).
+      const comment = ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`;
+      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`)}${changes}${comment}`;
     } else if (data.type === 'binary') {
       bodyEl.innerHTML = `
         <div class="binary-message">
@@ -3048,6 +3050,82 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /** Capture the selected passage in the preview and open the annotation composer (COD-60). */
+  commentOnSelection() {
+    const bodyEl = this.$('filePreviewBody');
+    const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection() : null;
+    const text = sel ? String(sel).trim() : '';
+    let withinPreview = false;
+    if (sel && sel.rangeCount && bodyEl) {
+      const node = sel.getRangeAt(0).commonAncestorContainer;
+      withinPreview = bodyEl.contains(node.nodeType === 1 ? node : node.parentNode);
+    }
+    if (!text || !withinPreview) {
+      this.showToast?.('Select some text in the document first', 'info');
+      return;
+    }
+    this._openAnnotationPopover(text);
+  },
+
+  _openAnnotationPopover(passage) {
+    this._closeAnnotationPopover();
+    const st = this.filePreviewState;
+    const sessionName = (st && (this.sessions.get(st.sessionId)?.name || st.sessionId.slice(0, 8))) || 'session';
+    const shortPassage = passage.length > 240 ? `${passage.slice(0, 240)}…` : passage;
+    const pop = document.createElement('div');
+    pop.className = 'annotation-popover';
+    pop.id = 'annotationPopover';
+    pop.innerHTML = `
+      <div class="annotation-popover-title">Comment on selection → ${escapeHtml(sessionName)}</div>
+      <blockquote class="annotation-quote">${escapeHtml(shortPassage)}</blockquote>
+      <textarea class="annotation-note" rows="3" placeholder="e.g. tighten this; make it less formal; add a citation"></textarea>
+      <div class="annotation-popover-actions">
+        <button type="button" class="btn-icon-sm" onclick="app._closeAnnotationPopover()">Cancel</button>
+        <button type="button" class="btn-icon-sm annotation-send" onclick="app.sendAnnotation()">Send to session</button>
+      </div>`;
+    document.body.appendChild(pop);
+    this._annotationPassage = passage;
+    setTimeout(() => pop.querySelector('.annotation-note')?.focus(), 0);
+  },
+
+  _closeAnnotationPopover() {
+    document.getElementById('annotationPopover')?.remove();
+    this._annotationPassage = null;
+  },
+
+  /** Build a single-line revision instruction from the passage + note and send it to the session. */
+  async sendAnnotation() {
+    const st = this.filePreviewState;
+    const pop = document.getElementById('annotationPopover');
+    if (!st || !pop) return;
+    const note = (pop.querySelector('.annotation-note')?.value || '').trim();
+    if (!note) {
+      this.showToast?.('Add a note first', 'info');
+      return;
+    }
+    const passage = (this._annotationPassage || '').replace(/\s+/g, ' ').trim();
+    const shortPassage = passage.length > 280 ? `${passage.slice(0, 280)}…` : passage;
+    const fileName = (st.filePath || '').split('/').pop() || 'the document';
+    // writeViaMux is single-line — collapse all whitespace into one line.
+    const message = `In ${fileName}, revise this passage: "${shortPassage}" — ${note}`.replace(/\s+/g, ' ').trim();
+    try {
+      const res = await fetch(`/api/sessions/${st.sessionId}/input`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ input: message, useMux: true }),
+      });
+      if (res.ok) {
+        const sessionName = this.sessions.get(st.sessionId)?.name || st.sessionId.slice(0, 8);
+        this.showToast?.(`Sent to ${sessionName}`, 'success');
+        this._closeAnnotationPopover();
+      } else {
+        this.showToast?.('Failed to send to session', 'error');
+      }
+    } catch {
+      this.showToast?.('Failed to send to session', 'error');
+    }
+  },
+
   setFilePreviewZoom(action) {
     const img = document.querySelector('.document-preview-image');
     if (!img) return;
@@ -3070,6 +3148,7 @@ Object.assign(CodemanApp.prototype, {
 
   closeFilePreview() {
     this._stopFilePreviewPolling();
+    this._closeAnnotationPopover();
     const overlay = this.$('filePreviewOverlay');
     if (overlay) {
       overlay.classList.remove('visible');

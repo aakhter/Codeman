@@ -104,6 +104,17 @@ describe('document attachment UI wiring', () => {
     expect(stylesCss).toContain('.document-preview-diff');
   });
 
+  it('lets you annotate a selected passage and send it to the session (COD-60)', () => {
+    expect(panelsJs).toContain('commentOnSelection');
+    expect(panelsJs).toContain('sendAnnotation');
+    expect(panelsJs).toContain('window.getSelection');
+    expect(panelsJs).toContain('annotation-popover');
+    // posts the instruction to the session input endpoint, single-line via mux
+    expect(panelsJs).toContain('/input');
+    expect(panelsJs).toContain('useMux');
+    expect(stylesCss).toContain('.annotation-popover');
+  });
+
   it('offers the Changes (revision) view on .docx previews too (COD-66)', () => {
     expect(panelsJs).toContain("data.type === 'document' && attachmentId");
     expect(panelsJs).toContain('document-changes-btn');
