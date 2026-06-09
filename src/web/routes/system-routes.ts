@@ -6,11 +6,13 @@
 
 import { FastifyInstance } from 'fastify';
 import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import { homedir, totalmem, freemem, loadavg, cpus } from 'node:os';
-import { execSync } from 'node:child_process';
+import { totalmem, freemem, loadavg, cpus } from 'node:os';
+import { execSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { dataPath } from '../../config/instance.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage, type NiceConfig } from '../../types.js';
 import {
   ConfigUpdateSchema,
@@ -39,6 +41,7 @@ import {
   SETTINGS_PATH,
 } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
+import { getInstallInfo, checkForUpdate, startUpdate, getUpdateStatusForApi } from '../self-update.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
@@ -48,7 +51,7 @@ import { resolveTerminalHistoryConfig } from '../../config/terminal-history.js';
 // Maximum screenshot upload size (10MB)
 const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024;
 // Screenshots directory
-const SCREENSHOTS_DIR = join(homedir(), '.codeman', 'screenshots');
+const SCREENSHOTS_DIR = dataPath('screenshots');
 
 /** Cached CPU count — doesn't change at runtime */
 const CPU_COUNT = cpus().length;
@@ -105,23 +108,33 @@ function getSystemStats(): {
   }
 }
 
+/**
+ * Build the URL the spanning browser window should open, pinned to localhost.
+ * Takes only a digits-only port from the (untrusted) Host header so nothing
+ * attacker-controllable reaches the launched browser; falls back to the default
+ * port when the header is absent/odd. Exported for unit testing.
+ */
+export function resolveSpanUrl(hostHeader: string | undefined, fallbackPort = '3000'): string {
+  const hostPort = String(hostHeader ?? '').split(':')[1] ?? '';
+  const port = /^\d+$/.test(hostPort) ? hostPort : fallbackPort;
+  return `http://localhost:${port}`;
+}
+
 export function registerSystemRoutes(
   app: FastifyInstance,
   ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort
 ): void {
-  const windowStatesPath = join(homedir(), '.codeman', 'subagent-window-states.json');
-  const parentMapPath = join(homedir(), '.codeman', 'subagent-parents.json');
+  const windowStatesPath = dataPath('subagent-window-states.json');
+  const parentMapPath = dataPath('subagent-parents.json');
 
   // ═══════════════════════════════════════════════════════════════
   // System Status & Health
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== Status ==========
-
+  // ========== Status ===
   app.get('/api/status', async () => ctx.getLightState());
 
-  // ========== Tunnel ==========
-
+  // ========== Tunnel ===
   app.get('/api/tunnel/status', async () => ctx.tunnelManager.getStatus());
 
   app.get('/api/tunnel/info', async () => {
@@ -166,8 +179,7 @@ export function registerSystemRoutes(
   // Authentication (QR auth, session revocation)
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== QR Auth Route ==========
-
+  // ========== QR Auth Route ===
   app.get('/q/:code', async (req, reply) => {
     const shortCode = (req.params as { code: string }).code;
     const authPassword = process.env.CODEMAN_PASSWORD;
@@ -232,15 +244,13 @@ export function registerSystemRoutes(
     return reply.redirect('/');
   });
 
-  // ========== QR Regeneration ==========
-
+  // ========== QR Regeneration ===
   app.post('/api/tunnel/qr/regenerate', async () => {
     ctx.tunnelManager.regenerateQrToken();
     return { success: true };
   });
 
-  // ========== Auth Session Revocation ==========
-
+  // ========== Auth Session Revocation ===
   app.post('/api/auth/revoke', async (req) => {
     const result = RevokeSessionSchema.safeParse(req.body);
     if (result.success && result.data.sessionToken) {
@@ -254,10 +264,83 @@ export function registerSystemRoutes(
 
   // ═══════════════════════════════════════════════════════════════
   // CLI Integrations (OpenCode, Codex, Gemini)
+  // Multi-monitor: span Codeman across all displays
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== OpenCode ==========
+  // Spawn scripts/span-codeman.sh, which opens a fresh, maximized browser --app
+  // window sized to the union of all displays — so in-page floating session
+  // panels can be dragged across the physical monitor seam. macOS only; needs
+  // the one-time "Displays have separate Spaces" OFF prerequisite (see script).
+  app.post('/api/system/span-displays', async (req, reply) => {
+    // macOS only: the launcher uses osascript + Finder desktop bounds and Chrome
+    // --app geometry flags. Fail clearly elsewhere instead of spawning a bash
+    // that errors out invisibly (the toast would otherwise lie "Opening…").
+    if (process.platform !== 'darwin') {
+      return reply
+        .code(400)
+        .send(
+          createErrorResponse(
+            ApiErrorCode.INVALID_INPUT,
+            'Multi-monitor spanning runs on the Codeman server, which is not macOS. ' +
+              'If your monitors are on a remote Mac, run scripts/span-codeman.sh locally on that Mac with this server URL — see the script header for details.'
+          )
+        );
+    }
+    // Resolve the bundled launcher relative to this module (works from src/ and dist/).
+    const scriptPath = join(dirname(fileURLToPath(import.meta.url)), '../../../scripts/span-codeman.sh');
+    if (!existsSync(scriptPath)) {
+      return reply.code(500).send(createErrorResponse(ApiErrorCode.INTERNAL_ERROR, 'span-codeman.sh not found'));
+    }
+    // Point the spanning window at THIS server (localhost + sanitized port).
+    const url = resolveSpanUrl(req.headers.host);
+    try {
+      const child = spawn('bash', [scriptPath, url], { detached: true, stdio: 'ignore' });
+      child.on('error', (err) => app.log.error({ err }, 'span-displays launch failed'));
+      child.unref();
+      return { success: true, url };
+    } catch (err) {
+      return reply.code(500).send(createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err)));
+    }
+  });
 
+  // ═══════════════════════════════════════════════════════════════
+  // Self-Update (App Settings → Updates)
+  // ═══════════════════════════════════════════════════════════════
+
+  // Install info + whether a newer release exists. Manual, user-triggered.
+  app.get('/api/system/update/check', async () => {
+    const check = await checkForUpdate();
+    const info = getInstallInfo();
+    return { ...info, ...check };
+  });
+
+  // Poll target for update progress — survives the restart the update triggers.
+  app.get('/api/system/update/status', async () => getUpdateStatusForApi());
+
+  // Kick off a detached update to the latest release. Returns immediately; the
+  // browser then polls /api/system/update/status across the service restart.
+  app.post('/api/system/update', async (_req, reply) => {
+    const result = await startUpdate();
+    if (result.ok) {
+      return { success: true, updateId: result.updateId, toTag: result.toTag, toVersion: result.toVersion };
+    }
+    const map = {
+      'in-flight': { http: 409, api: ApiErrorCode.ALREADY_EXISTS },
+      'up-to-date': { http: 409, api: ApiErrorCode.ALREADY_EXISTS },
+      'not-git': { http: 400, api: ApiErrorCode.INVALID_INPUT },
+      disabled: { http: 403, api: ApiErrorCode.INVALID_INPUT },
+      'bad-tag': { http: 400, api: ApiErrorCode.INVALID_INPUT },
+      error: { http: 500, api: ApiErrorCode.INTERNAL_ERROR },
+    } as const;
+    const m = map[result.code];
+    return reply.code(m.http).send(createErrorResponse(m.api, result.message));
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // CLI Integrations (OpenCode)
+  // ═══════════════════════════════════════════════════════════════
+
+  // ========== OpenCode ===
   app.get('/api/opencode/status', async () => {
     const { isOpenCodeAvailable, resolveOpenCodeDir } = await import('../../utils/opencode-cli-resolver.js');
     return {
@@ -266,8 +349,7 @@ export function registerSystemRoutes(
     };
   });
 
-  // ========== Codex ==========
-
+  // ========== Codex ===
   app.get('/api/codex/status', async () => {
     const { isCodexAvailable, resolveCodexDir } = await import('../../utils/codex-cli-resolver.js');
     return {
@@ -276,8 +358,7 @@ export function registerSystemRoutes(
     };
   });
 
-  // ========== Gemini ==========
-
+  // ========== Gemini ===
   app.get('/api/gemini/status', async () => {
     const { isGeminiAvailable, resolveGeminiDir } = await import('../../utils/gemini-cli-resolver.js');
     return {
@@ -290,8 +371,7 @@ export function registerSystemRoutes(
   // State & Lifecycle (cleanup, lifecycle log, stats)
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== State & Lifecycle ==========
-
+  // ========== State & Lifecycle ===
   app.post('/api/cleanup-state', async () => {
     const activeSessionIds = new Set(ctx.sessions.keys());
     const result = ctx.store.cleanupStaleSessions(activeSessionIds);
@@ -319,8 +399,7 @@ export function registerSystemRoutes(
     return { success: true, entries };
   });
 
-  // ========== Stats ==========
-
+  // ========== Stats ===
   function collectActiveTokens(): Record<string, { inputTokens?: number; outputTokens?: number; totalCost?: number }> {
     const tokens: Record<string, { inputTokens?: number; outputTokens?: number; totalCost?: number }> = {};
     for (const [sessionId, session] of ctx.sessions) {
@@ -405,8 +484,7 @@ export function registerSystemRoutes(
   // Configuration & Settings (config, settings, model config, CPU priority)
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== Config ==========
-
+  // ========== Config ===
   app.get('/api/config', async () => {
     return { success: true, config: ctx.store.getConfig() };
   });
@@ -417,8 +495,7 @@ export function registerSystemRoutes(
     return { success: true, config: ctx.store.getConfig() };
   });
 
-  // ========== Debug/Memory ==========
-
+  // ========== Debug/Memory ===
   app.get('/api/debug/memory', async () => {
     const mem = process.memoryUsage();
     const subagentStats = subagentWatcher.getStats();
@@ -472,14 +549,12 @@ export function registerSystemRoutes(
     };
   });
 
-  // ========== System Stats ==========
-
+  // ========== System Stats ===
   app.get('/api/system/stats', async () => {
     return getSystemStats();
   });
 
-  // ========== Settings ==========
-
+  // ========== Settings ===
   app.get('/api/settings', async () => {
     return readJsonConfig(SETTINGS_PATH, 'settings', {});
   });
@@ -540,8 +615,7 @@ export function registerSystemRoutes(
     }
   });
 
-  // ========== Model Configuration ==========
-
+  // ========== Model Configuration ===
   app.get('/api/execution/model-config', async () => {
     const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'model config', {});
     return { success: true, data: settings.modelConfig || {} };
@@ -573,8 +647,7 @@ export function registerSystemRoutes(
     }
   });
 
-  // ========== CPU Priority ==========
-
+  // ========== CPU Priority ===
   app.get('/api/sessions/:id/cpu-limit', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id);
@@ -605,8 +678,7 @@ export function registerSystemRoutes(
   // Subagent Management (window states, parents, monitoring, transcripts)
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== Subagent Window State Persistence ==========
-
+  // ========== Subagent Window State Persistence ===
   app.get('/api/subagent-window-states', async () => {
     return readJsonConfig(windowStatesPath, 'subagent window states', { minimized: {}, open: [] });
   });
@@ -625,8 +697,7 @@ export function registerSystemRoutes(
     }
   });
 
-  // ========== Subagent Parent Associations ==========
-
+  // ========== Subagent Parent Associations ===
   app.get('/api/subagent-parents', async () => {
     return readJsonConfig(parentMapPath, 'subagent parent map', {});
   });
@@ -645,8 +716,7 @@ export function registerSystemRoutes(
     }
   });
 
-  // ========== Subagent Monitoring ==========
-
+  // ========== Subagent Monitoring ===
   app.get('/api/subagents', async (req) => {
     const { minutes } = req.query as { minutes?: string };
     const subagents = minutes
@@ -713,8 +783,7 @@ export function registerSystemRoutes(
   // Screenshots (upload, list, serve)
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== Screenshots ==========
-
+  // ========== Screenshots ===
   app.post('/api/screenshots', async (req, reply) => {
     const contentType = req.headers['content-type'] ?? '';
     if (!contentType.includes('multipart/form-data')) {
