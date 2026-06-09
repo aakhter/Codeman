@@ -1632,10 +1632,12 @@ Object.assign(CodemanApp.prototype, {
     if (_joinedLen > 16384) _crashDiag.log(`FLUSH: ${(_joinedLen / 1024).toFixed(0)}KB`);
 
     // Per-frame byte budget to prevent main thread blocking.
-    // Codex produces dense synchronized TUI redraws, so use a smaller first
-    // frame to reduce xterm/WebGL stalls without slowing other modes.
+    // Every agent TUI (codex, claude/Ink, opencode, gemini) emits dense
+    // synchronized redraws during thinking/high-effort phases, so use a smaller
+    // first frame to keep per-frame xterm/WebGL stalls short. Only plain shell
+    // output (linear cat/paste, no redraw churn) keeps the larger budget.
     const activeSession = this.activeSessionId && this.sessions ? this.sessions.get(this.activeSessionId) : null;
-    const MAX_FRAME_BYTES = activeSession?.mode === 'codex' ? 32768 : 65536;
+    const MAX_FRAME_BYTES = activeSession?.mode === 'shell' ? 65536 : 32768;
     let deferred = false;
     const preserveViewportY =
       this._hasRecentUserScrollUp() && this.terminal.buffer?.active

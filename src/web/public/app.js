@@ -3390,10 +3390,12 @@ class CodemanApp {
 
       // xterm snapshot restore: if we have a serialized xterm state from a
       // previous visit to this session, restore the user's exact prior view
-      // (viewport + scrollback + colors). Skips the server buffer replay
-      // which, for codex sessions, ends up showing only the latest TUI
-      // frame (the idle welcome banner) because codex doesn't include
-      // earlier conversation in its current redraw.
+      // (viewport + scrollback + colors) for an instant first paint. For codex
+      // this is also a correctness fix — its byte-stream replay shows only the
+      // latest TUI frame (the idle welcome banner) because codex doesn't include
+      // earlier conversation in its current redraw. For claude/opencode/gemini
+      // the replay is already complete, so the snapshot is purely a faster,
+      // scroll-preserving first paint before the canonical fetch reconciles.
       //
       // Try in-memory first (fast); fall back to localStorage so snapshots
       // survive tab discards / browser reloads.
@@ -3418,7 +3420,7 @@ class CodemanApp {
       }
       const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
       let restoredSnapshot = false;
-      if (snapshot && !sessionIsBusy && session?.mode === 'codex') {
+      if (snapshot && !sessionIsBusy && session?.mode !== 'shell') {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');
         this._resetTerminalForReplay();

@@ -954,16 +954,15 @@ export function registerSessionRoutes(
     const muxName = session.muxName;
     const liveMuxBuffer =
       muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName) : null;
-    const preserveAccumulatedHistory = session.mode === 'codex';
+    // All tmux-backed modes prepend the accumulated byte history (cleared, then
+    // the live pane) so tab-switch replay shows full scrollback rather than just
+    // the current pane. Codex converged on this path in 18ce518 ("default codex
+    // to hybrid tui"), so the former per-mode gate is now a single behavior.
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? preserveAccumulatedHistory
-          ? session.terminalBufferLength > 0
-            ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
-            : liveMuxBuffer
-          : session.terminalBufferLength > 0
-            ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
-            : liveMuxBuffer
+        ? session.terminalBufferLength > 0
+          ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
+          : liveMuxBuffer
         : session.terminalBuffer;
     const tailBytes = query.tail ? parseInt(query.tail, 10) : 0;
     const fullSize = rawBuffer.length;
