@@ -762,11 +762,6 @@ describe('isUsableWorkingDir', () => {
   const mockedExistsSync = vi.mocked(existsSync);
   const mockedStatSync = vi.mocked(statSync);
 
-  it('is false when the directory does not exist', () => {
-    mockedExistsSync.mockReturnValue(false);
-    expect(isUsableWorkingDir('/tmp/cod43-gone')).toBe(false);
-  });
-
   it('is true when the path exists and is a directory', () => {
     mockedExistsSync.mockReturnValue(true);
     mockedStatSync.mockReturnValue({ isDirectory: () => true } as never);
@@ -779,11 +774,34 @@ describe('isUsableWorkingDir', () => {
     expect(isUsableWorkingDir('/tmp/some-file')).toBe(false);
   });
 
-  it('is false when statSync throws (e.g. race on removal)', () => {
+  // Reconcile COD-43 (refuse missing cwd) with upstream's FUSE cd-bounce: refuse
+  // only a real deletion (dir gone, parent healthy); tolerate a transient mount
+  // blip (dir AND parent unreachable) so the pane's cd-bounce can recover.
+  it('refuses (false) when the dir is gone but its parent is a healthy directory — a real deletion (COD-43)', () => {
+    mockedExistsSync.mockImplementation((p) => p === '/home/u/parent');
+    mockedStatSync.mockReturnValue({ isDirectory: () => true } as never);
+    expect(isUsableWorkingDir('/home/u/parent/gone')).toBe(false);
+  });
+
+  it('proceeds (true) when the dir AND its parent are unreachable — a transient FUSE/mount blip', () => {
+    mockedExistsSync.mockReturnValue(false);
+    expect(isUsableWorkingDir('/mnt/gdrive/project')).toBe(true);
+  });
+
+  it('proceeds (true) when statSync throws on both dir and parent (mount EIO)', () => {
     mockedExistsSync.mockReturnValue(true);
     mockedStatSync.mockImplementation(() => {
-      throw new Error('ENOENT');
+      throw new Error('EIO');
     });
-    expect(isUsableWorkingDir('/tmp/racy')).toBe(false);
+    expect(isUsableWorkingDir('/mnt/gdrive/racy')).toBe(true);
+  });
+
+  it('refuses (false) on a removal race when the parent is still healthy', () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedStatSync.mockImplementation((p) => {
+      if (String(p).endsWith('/racy')) throw new Error('ENOENT');
+      return { isDirectory: () => true } as never;
+    });
+    expect(isUsableWorkingDir('/home/u/racy')).toBe(false);
   });
 });

@@ -28,8 +28,8 @@ import { promisify } from 'node:util';
 const execAsync = promisify(exec);
 import { existsSync, statSync, readFileSync, mkdirSync } from 'node:fs';
 import { writeFile, rename } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { dirname } from 'node:path';
+import { dataPath, DEFAULT_TMUX_SOCKET } from './config/instance.js';
 import {
   ProcessStats,
   PersistedRespawnConfig,
@@ -83,6 +83,9 @@ const GRACEFUL_SHUTDOWN_WAIT_MS = 100;
 /** Default stats collection interval (2 seconds) */
 const DEFAULT_STATS_INTERVAL_MS = 2000;
 
+/** Stable cwd for tmux server/pane launch; actual session cwd is reached inside the pane. */
+const TMUX_LAUNCH_CWD = '/tmp';
+
 /** Claude Code native macOS recommendation for avoiding low nofile startup failures. */
 export const CLAUDE_CODE_NOFILE_LIMIT = 2147483646;
 
@@ -102,7 +105,7 @@ export const CLAUDE_CODE_NOFILE_LIMIT = 2147483646;
 const IS_TEST_MODE = !!process.env.VITEST;
 
 /** Path to persisted mux session metadata */
-const MUX_SESSIONS_FILE = join(homedir(), '.codeman', 'mux-sessions.json');
+const MUX_SESSIONS_FILE = dataPath('mux-sessions.json');
 
 /** Regex to validate tmux session names (only allow safe characters) */
 const SAFE_MUX_NAME_PATTERN = /^codeman-[a-f0-9-]+$/;
@@ -113,8 +116,9 @@ const LEGACY_MUX_NAME_PATTERN = /^claudeman-[a-f0-9-]+$/;
 /** Regex to validate tmux pane targets (e.g., "%3" pane ids, "0" pane indexes, or active pane). */
 const SAFE_PANE_TARGET_PATTERN = /^(%\d+|\d+|active)$/;
 
-/** Dedicated tmux socket for new Codeman-owned sessions. */
-const DEFAULT_CODEMAN_TMUX_SOCKET = 'codeman';
+/** Dedicated tmux socket for new Codeman-owned sessions (instance-scoped:
+ *  `codeman` for prod, `codeman-beta` on the beta branch). */
+const DEFAULT_CODEMAN_TMUX_SOCKET = DEFAULT_TMUX_SOCKET;
 
 /** Regex to validate tmux socket names passed to `tmux -L`. */
 const SAFE_TMUX_SOCKET_PATTERN = /^[a-zA-Z0-9_.-]+$/;
@@ -180,17 +184,41 @@ export function parsePaneList(output: string): Map<string, number> {
 }
 
 /**
- * True when `dir` exists and is a directory. Used to avoid respawning a tmux
- * pane into a working directory that no longer exists — the saved cwd of a
- * crashed session can be deleted, and `cd` into it makes `respawn-pane` exit
- * immediately, producing a crash loop (COD-43).
+ * Whether it's safe to (re)spawn a tmux pane into `dir`.
+ *
+ * Reconciles two protections:
+ *  - COD-43: don't respawn into a *deleted* cwd — `cd` into it makes
+ *    `respawn-pane` exit immediately and crash-loop. So refuse a real deletion.
+ *  - FUSE/rclone hardening: a transient mount blip can make a perfectly valid
+ *    workspace momentarily unreachable; refusing there would defeat the pane's
+ *    `/tmp` + `cd`-bounce recovery, which reaches the path via the live mount
+ *    table once the blip clears.
+ *
+ * Distinguisher: a real deletion leaves the *parent* a healthy directory; a
+ * mount blip takes the parent down too. So refuse only when `dir` is missing
+ * but its parent is a healthy directory; otherwise allow the respawn to proceed.
  */
 export function isUsableWorkingDir(dir: string): boolean {
+  // Present → usable iff it's actually a directory (a file cwd is unusable).
   try {
-    return existsSync(dir) && statSync(dir).isDirectory();
+    if (existsSync(dir)) {
+      return statSync(dir).isDirectory();
+    }
   } catch {
-    return false;
+    // existsSync said present but statSync threw (removal race or mount EIO) —
+    // fall through to the parent check to classify it.
   }
+  // `dir` is missing/vanished. Healthy parent ⇒ real deletion ⇒ refuse.
+  // Parent also unreachable ⇒ transient mount blip ⇒ let cd-bounce recover.
+  try {
+    const parent = dirname(dir);
+    if (parent && parent !== dir && existsSync(parent) && statSync(parent).isDirectory()) {
+      return false;
+    }
+  } catch {
+    /* parent unreachable → treat as a transient blip */
+  }
+  return true;
 }
 
 /**
@@ -1132,12 +1160,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // (Production uses systemd which has a clean env, but dev/test may be nested.)
       const cleanEnv = { ...process.env };
       delete cleanEnv.TMUX;
-      // Use -c /tmp so the tmux server's cwd never settles on a FUSE mount path.
-      // If a FUSE mount (e.g. rclone gdrive) blips later, the server's namespace
-      // cache goes stale and getcwd() fails ("Transport endpoint is not connected").
-      // The actual workingDir is reached by respawn-pane below via cd bounce.
-      execSync(`${this.tmux()} new-session -ds ${shellescape(muxName)} -c /tmp`, {
-        cwd: '/tmp',
+      // Start the tmux server from a stable local cwd so FUSE/rclone workspace
+      // blips do not poison tmux's long-lived getcwd state.
+      execSync(`${this.tmux()} new-session -ds "${muxName}" -c ${TMUX_LAUNCH_CWD}`, {
+        cwd: TMUX_LAUNCH_CWD,
         timeout: EXEC_TIMEOUT_MS,
         stdio: 'ignore',
         env: cleanEnv,
@@ -1172,13 +1198,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // so secret values stay off the bash command line. Must run before respawn-pane.
       this.applyEnvOverrides(muxName, envOverrides);
 
-      // Replace the shell with the actual command (no echo in terminal).
-      // Use -c /tmp + shell cd bounce: the shell starts in /tmp (resolves cleanly)
-      // then cds into workingDir via the current kernel mount table, sidestepping
-      // any stale dentry cache the tmux server may hold for FUSE paths.
+      // Replace the shell with the actual command (no echo in terminal). Keep
+      // pane launch in /tmp, then cd inside bash against the current mount table.
       const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
       execSync(
-        `${this.tmux()} respawn-pane -k -c /tmp -t ${shellescape(muxName)} bash -c ${JSON.stringify(launchCmd)}`,
+        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
         {
           timeout: EXEC_TIMEOUT_MS,
           stdio: 'ignore',
@@ -1391,10 +1415,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         /* Non-critical — keeps existing tmux history-limit */
       });
 
-      // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       const launchCmd = `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
       await execAsync(
-        `${this.tmux()} respawn-pane -k -c /tmp -t ${shellescape(muxName)} bash -c ${JSON.stringify(launchCmd)}`,
+        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
         {
           timeout: EXEC_TIMEOUT_MS,
         }
