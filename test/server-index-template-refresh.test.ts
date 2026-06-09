@@ -27,7 +27,7 @@ describe('WebServer index.html template freshness', () => {
 
     template = '<html><head><title>Codeman</title></head><body><script src="app.new.js"></script></body></html>';
 
-    const html = (server as unknown as { renderIndexHtml: () => string }).renderIndexHtml();
+    const html = await (server as unknown as { renderIndexHtml: () => Promise<string> }).renderIndexHtml();
     expect(html).toContain('app.new.js');
     expect(html).not.toContain('app.old.js');
     expect(html).toContain('<title>codeman:fresh-host</title>');

@@ -246,7 +246,7 @@ export class WebServer extends EventEmitter {
   private _orchestratorLoop: import('../orchestrator-loop.js').OrchestratorLoop | null = null;
   private readonly titleHostname: string;
   private readonly windowTitle: string;
-  private readonly indexHtmlTemplate: string;
+  private readonly indexHtmlPath: string;
   private readonly allowUnauthenticatedNetwork: boolean;
   private _pasteImageGcStop: (() => void) | null = null;
   private _eventLoopMonitor: EventLoopMonitorHandle | null = null;
@@ -274,7 +274,7 @@ export class WebServer extends EventEmitter {
       allowUnauthenticatedNetwork || isExplicitlyEnabled(process.env.CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK);
     this.titleHostname = titleHostname || getHostname();
     this.windowTitle = `codeman:${this.titleHostname}`;
-    this.indexHtmlTemplate = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
+    this.indexHtmlPath = join(__dirname, 'public', 'index.html');
 
     if (https) {
       const { key, cert } = getOrCreateSelfSignedCert();
@@ -1066,7 +1066,10 @@ export class WebServer extends EventEmitter {
   }
 
   private async renderIndexHtml(soloSessionId?: string): Promise<string> {
-    let html = this.indexHtmlTemplate.replace(
+    // Read the template fresh each render so a rebuilt index.html (e.g. after a
+    // deploy) is picked up without a restart; cacheBustAssets handles the ?v= on
+    // referenced js/css. (Re-reading a small file per render is negligible.)
+    let html = readFileSync(this.indexHtmlPath, 'utf-8').replace(
       '<title>Codeman</title>',
       `<title>${escapeHtmlText(this.windowTitle)}</title>`
     );
@@ -1738,13 +1741,9 @@ export class WebServer extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    if (!isLoopbackBindHost(this.host) && !process.env.CODEMAN_PASSWORD && !this.allowUnauthenticatedNetwork) {
-      throw new Error(
-        'Refusing to start Codeman on a non-loopback host without CODEMAN_PASSWORD. ' +
-          'Set CODEMAN_PASSWORD or explicitly allow unauthenticated network access.'
-      );
-    }
-
+    // Non-loopback bind without a password no longer refuses to start (0.9.0):
+    // it starts and warns loudly at the listen point below. See the bind-policy
+    // warning block further down + docs/security-architecture.md.
     await this.setupRoutes();
 
     const lifecycleLog = getLifecycleLog();
