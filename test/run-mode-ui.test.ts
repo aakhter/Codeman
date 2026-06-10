@@ -208,4 +208,76 @@ describe('mobile header utilities', () => {
     expect(mobileCss).toContain('.session-tabs');
     expect(mobileCss).toContain('flex: 1');
   });
+
+  it('closes the open header utility tray via closeAllPanels (the Escape path)', () => {
+    // Build a minimal tray + toggle that track the collapsed/active state the
+    // real DOM would carry, then load settings-ui.js into a vm sandbox and drive
+    // closeAllPanels() — the aggregator wired to the global Escape handler.
+    // Real DOM ships the tray collapsed (index.html: header-right mobile-collapsed).
+    const trayClasses = new Set<string>(['mobile-collapsed']);
+    const toggleClasses = new Set<string>();
+    const toggleAttrs: Record<string, string> = { 'aria-expanded': 'false' };
+
+    const tray = {
+      classList: {
+        add: (c: string) => trayClasses.add(c),
+        remove: (c: string) => trayClasses.delete(c),
+        contains: (c: string) => trayClasses.has(c),
+        toggle: (c: string) => (trayClasses.has(c) ? (trayClasses.delete(c), false) : (trayClasses.add(c), true)),
+      },
+    };
+    const toggle = {
+      classList: {
+        add: (c: string) => toggleClasses.add(c),
+        remove: (c: string) => toggleClasses.delete(c),
+        toggle: (c: string, force?: boolean) => {
+          const on = force ?? !toggleClasses.has(c);
+          if (on) toggleClasses.add(c);
+          else toggleClasses.delete(c);
+          return on;
+        },
+      },
+      setAttribute: (k: string, v: string) => {
+        toggleAttrs[k] = v;
+      },
+    };
+
+    const elements: Record<string, any> = {
+      headerRight: tray,
+      mobileHeaderUtilityToggle: toggle,
+      // closeAllPanels also touches monitorPanel/subagentsPanel — provide stubs.
+      monitorPanel: { classList: { remove: () => {} } },
+      subagentsPanel: { classList: { remove: () => {} } },
+    };
+
+    const CodemanApp = function CodemanApp(this: any) {};
+    const context = vm.createContext({
+      CodemanApp,
+      VoiceInput: {},
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      console,
+    });
+    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
+    vm.runInContext(settingsUi, context, { filename: 'settings-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    // Stub the other panel-closers closeAllPanels calls so we isolate the tray.
+    app.closeSessionOptions = () => {};
+    app.closeAppSettings = () => {};
+    app.cancelCloseSession = () => {};
+    app.closeTokenStats = () => {};
+
+    // Open the tray (toggle removes mobile-collapsed and marks the toggle active).
+    app.toggleMobileHeaderUtilities();
+    expect(trayClasses.has('mobile-collapsed')).toBe(false);
+    expect(toggleClasses.has('active')).toBe(true);
+    expect(toggleAttrs['aria-expanded']).toBe('true');
+
+    // Escape -> closeAllPanels() must collapse the tray and reset the toggle.
+    app.closeAllPanels();
+    expect(trayClasses.has('mobile-collapsed')).toBe(true);
+    expect(toggleClasses.has('active')).toBe(false);
+    expect(toggleAttrs['aria-expanded']).toBe('false');
+  });
 });
