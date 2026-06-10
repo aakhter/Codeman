@@ -4819,6 +4819,38 @@ body.solo-mode .btn-lifecycle-log {
   font-weight: 500;
 }
 
+/* COD-88: The Session Options modal is the tallest on the Context tab. On
+   tablet+ widths, widen it and flow the Context tab into two columns so it
+   needs far less vertical scrolling (mobile stays single-column). The .modal-lg
+   class on the modal-content already caps height at 85vh with a scrollable body
+   so nothing clips off-screen at any width. */
+@media (min-width: 680px) {
+  #sessionOptionsModal .modal-content.modal-lg {
+    max-width: min(92vw, 720px);
+  }
+  #sessionOptionsModal #context-tab {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.25rem 1rem;
+    align-items: start;
+  }
+  /* Section headers, the token-management card group, and full-width switch
+     rows span both columns; simple form rows pack two-up. */
+  #sessionOptionsModal #context-tab .form-section-header,
+  #sessionOptionsModal #context-tab .context-settings-grid,
+  #sessionOptionsModal #context-tab .form-row-switch {
+    grid-column: 1 / -1;
+  }
+  /* Token-management cards sit side by side rather than stacked. */
+  #sessionOptionsModal #context-tab .context-settings-grid {
+    flex-direction: row;
+  }
+  #sessionOptionsModal #context-tab .context-settings-grid .context-setting {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 .context-setting-header .input-suffix-sm {
   flex-shrink: 0;
 }
