@@ -3738,6 +3738,8 @@ Object.assign(CodemanApp.prototype, {
     if (!item || item.missing) return;
     const path = item.relativePath || item.fileName;
     this.openFilePreview(path, item.sessionId, item.attachmentId || null);
+    // COD-72: close the drawer so the preview window is unobstructed
+    this.closeAttachmentHistory();
   },
 
   openAttachmentHistoryItem(itemId) {
