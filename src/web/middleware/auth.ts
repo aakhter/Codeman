@@ -19,6 +19,7 @@ import {
   AUTH_FAILURE_MAX,
   AUTH_FAILURE_WINDOW_MS,
 } from '../../config/auth-config.js';
+import { getHookSecret, HOOK_SECRET_HEADER } from '../../config/hook-secret.js';
 
 // Auth session cookie name
 export const AUTH_COOKIE_NAME = 'codeman_session';
@@ -34,9 +35,20 @@ interface AuthState {
  * Register HTTP Basic Auth middleware with session cookies and rate limiting.
  * Only active when CODEMAN_PASSWORD is set.
  *
+ * @param getTunnelRunning - returns true while a managed tunnel is active. Used
+ *   to gate the `/api/hook-event` localhost bypass: when a tunnel is up, tunneled
+ *   internet traffic reaches the loopback origin with `req.ip === 127.0.0.1`, so
+ *   the bypass additionally requires the shared hook secret (COD-54). When no
+ *   tunnel is running (loopback-only, the normal case) the plain localhost bypass
+ *   is kept so already-deployed (pre-secret) hooks + the loop channel keep working.
+ *   Optional; defaults to "no tunnel" (unchanged behavior) when omitted.
  * @returns AuthState for lifecycle management (dispose on server stop)
  */
-export function registerAuthMiddleware(app: FastifyInstance, https: boolean): AuthState {
+export function registerAuthMiddleware(
+  app: FastifyInstance,
+  https: boolean,
+  getTunnelRunning: () => boolean = () => false
+): AuthState {
   const state: AuthState = {
     authSessions: null,
     authFailures: null,
@@ -78,13 +90,44 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean): Au
   }
 
   app.addHook('onRequest', (req, reply, done) => {
-    // Hook events come from local Claude Code hooks (curl from localhost) — no auth headers available.
-    // Safe: validated by HookEventSchema, only triggers broadcasts.
-    // Security: restrict bypass to localhost only — prevents forged hook events via tunnel/LAN.
+    // Hook events come from local Claude Code hooks (curl from localhost) — no
+    // Basic-Auth credentials available. Validated downstream by HookEventSchema.
+    //
+    // COD-54: the bare localhost bypass is unsafe while a tunnel is running, because
+    // `cloudflared --url http://127.0.0.1:port` proxies internet traffic INTO the
+    // loopback origin, so a tunneled request arrives with req.ip === 127.0.0.1 and
+    // would pass. So:
+    //   - tunnel running → bypass requires the shared hook secret (local hooks present
+    //     it via the X-Codeman-Hook-Secret header; internet traffic can't know it),
+    //   - tunnel not running (loopback-only, the normal case) → keep the plain
+    //     localhost bypass so already-deployed (pre-secret) hooks + the loop's own
+    //     credential-less hook channel keep working.
     if (req.url === '/api/hook-event' && req.method === 'POST') {
       const ip = req.ip;
-      if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') {
-        done();
+      const isLoopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      if (isLoopback) {
+        if (!getTunnelRunning()) {
+          // Loopback-only: unchanged behavior.
+          done();
+          return;
+        }
+        // Tunnel up: require the shared secret (constant-time compare).
+        const presented = Buffer.from(req.headers[HOOK_SECRET_HEADER.toLowerCase()]?.toString() ?? '');
+        const expected = Buffer.from(getHookSecret());
+        if (presented.length === expected.length && timingSafeEqual(presented, expected)) {
+          done();
+          return;
+        }
+        // Wrong/absent secret while tunneled — treat as a failed auth attempt so the
+        // per-IP rate limiter (below) throttles brute-force/abuse of this route.
+        const hookIp = req.ip;
+        const hookFailures = authFailures.get(hookIp) ?? 0;
+        if (hookFailures >= AUTH_FAILURE_MAX) {
+          sendAuthRateLimit(reply, hookIp);
+          return;
+        }
+        authFailures.set(hookIp, hookFailures + 1);
+        reply.code(401).send('Unauthorized: hook secret required');
         return;
       }
       // Non-localhost hook requests fall through to normal auth

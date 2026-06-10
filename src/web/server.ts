@@ -585,8 +585,10 @@ export class WebServer extends EventEmitter {
     // on the default no-password install. See docs/reports/security-review-2026-06-09.md.
     registerHostGuard(this.app, () => this.getHostPolicy());
 
-    // Auth middleware (Basic Auth + session cookies + rate limiting)
-    const authState = registerAuthMiddleware(this.app, this.https);
+    // Auth middleware (Basic Auth + session cookies + rate limiting).
+    // The tunnel-running probe gates the /api/hook-event localhost bypass (COD-54):
+    // while a tunnel is up, the bypass requires the shared hook secret.
+    const authState = registerAuthMiddleware(this.app, this.https, () => this.tunnelManager.isRunning());
     if (authState) {
       this.authSessions = authState.authSessions;
       this.authFailures = authState.authFailures;

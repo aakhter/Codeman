@@ -29,6 +29,7 @@ import { join } from 'node:path';
 
 import type { HookEventType } from './types.js';
 import { HOOK_TIMEOUT_MS } from './config/auth-config.js';
+import { getHookSecret, HOOK_SECRET_HEADER } from './config/hook-secret.js';
 
 /**
  * Generates the hooks section for .claude/settings.local.json
@@ -39,6 +40,13 @@ import { HOOK_TIMEOUT_MS } from './config/auth-config.js';
  * per case directory.
  */
 export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
+  // Per-instance shared secret (COD-54). Baked into the generated command so the
+  // header is presented regardless of shell env propagation. The auth middleware
+  // requires it for the /api/hook-event localhost bypass while a tunnel is running,
+  // which closes the loopback hole that a cloudflared --url http://127.0.0.1 tunnel
+  // would otherwise open to internet traffic.
+  const hookSecret = getHookSecret();
+
   // Read Claude Code's stdin JSON and forward it as the data field.
   // Falls back to empty object if stdin is unavailable or malformed.
   const curlCmd = (event: HookEventType) =>
@@ -46,6 +54,7 @@ export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
     `printf '{"event":"${event}","sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$HOOK_DATA" | ` +
     `curl -s -X POST "$CODEMAN_API_URL/api/hook-event" ` +
     `-H 'Content-Type: application/json' ` +
+    `-H '${HOOK_SECRET_HEADER}: ${hookSecret}' ` +
     `--data @- ` +
     `2>/dev/null || true`;
 
