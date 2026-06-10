@@ -7524,6 +7524,29 @@ kbd {
   pointer-events: none;
 }
 
+.attachment-clear-all {
+  align-self: flex-end;
+  padding: 3px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  background: rgba(19, 19, 22, 0.96);
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.attachment-clear-all:hover {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.attachment-clear-all[hidden] {
+  display: none;
+}
+
 .attachment-card {
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr) 24px;

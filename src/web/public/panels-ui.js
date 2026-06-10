@@ -3880,6 +3880,31 @@ Object.assign(CodemanApp.prototype, {
 
     stack.prepend(card);
     this.attachmentCards.set(cardId, { element: card, sessionId, filePath });
+    this._refreshAttachmentClearAll();
+  },
+
+  // Centralized show/hide for the stack's "Clear all" control. Both addAttachmentCard and
+  // closeAttachmentCard call this so the control appears on the 2nd card and hides at <=1.
+  // The control lives as a header inside #attachmentCardStack; it's created lazily and only
+  // ever shown when >=2 cards are present (absent/hidden at 0 and 1 card).
+  _refreshAttachmentClearAll() {
+    const stack = this.attachmentCardStack;
+    if (!stack) return;
+    let control = stack.querySelector('.attachment-clear-all');
+    if (this.attachmentCards.size < 2) {
+      if (control) control.hidden = true;
+      return;
+    }
+    if (!control) {
+      control = document.createElement('button');
+      control.type = 'button';
+      control.className = 'attachment-clear-all';
+      control.textContent = 'Clear all';
+      control.title = 'Dismiss all attachment cards';
+      control.addEventListener('click', () => this.closeAllAttachmentCards());
+      stack.prepend(control);
+    }
+    control.hidden = false;
   },
 
   closeAttachmentCard(attachmentId) {
@@ -3890,6 +3915,17 @@ Object.assign(CodemanApp.prototype, {
     if (this.attachmentCardStack && this.attachmentCards.size === 0) {
       this.attachmentCardStack.remove();
       this.attachmentCardStack = null;
+    } else {
+      this._refreshAttachmentClearAll();
+    }
+  },
+
+  // Dismiss every attachment card at once. Reuses the per-card close path so there are no
+  // leaked DOM nodes or stale map entries; the per-card teardown drops the #attachmentCardStack
+  // container once the map empties (so we don't double-remove it here).
+  closeAllAttachmentCards() {
+    for (const attachmentId of [...this.attachmentCards.keys()]) {
+      this.closeAttachmentCard(attachmentId);
     }
   },
 
