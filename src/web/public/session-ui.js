@@ -732,6 +732,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('modalAutoCompactPrompt').value = session.autoCompactPrompt ?? '';
     document.getElementById('modalAutoClearEnabled').checked = session.autoClearEnabled ?? false;
     document.getElementById('modalAutoClearThreshold').value = session.autoClearThreshold ?? 140000;
+
+    // Populate auto-resume on usage limit (token pause control)
+    document.getElementById('modalAutoResumeEnabled').checked = session.autoResumeEnabled ?? false;
+    this.updateAutoResumeStatus(sessionId);
     document.getElementById('modalImageWatcherEnabled').checked = session.imageWatcherEnabled ?? true;
     document.getElementById('modalFlickerFilterEnabled').checked = session.flickerFilterEnabled ?? false;
 
@@ -849,6 +853,39 @@ Object.assign(CodemanApp.prototype, {
         threshold: parseInt(document.getElementById('modalAutoClearThreshold').value) || 140000
       });
     } catch { /* silent */ }
+  },
+
+  async autoSaveAutoResume() {
+    if (!this.editingSessionId) return;
+    const enabled = document.getElementById('modalAutoResumeEnabled').checked;
+    try {
+      await this._apiPost(`/api/sessions/${this.editingSessionId}/auto-resume`, { enabled });
+      const session = this.sessions.get(this.editingSessionId);
+      if (session) {
+        session.autoResumeEnabled = enabled;
+        if (!enabled) session.autoResumeAt = undefined;
+      }
+      this.updateAutoResumeStatus(this.editingSessionId);
+      this.showToast(`Auto-resume on usage limit ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    } catch (err) {
+      this.showToast('Failed to toggle auto-resume: ' + err.message, 'error');
+    }
+  },
+
+  // Show "resumes at HH:MM" in the session options modal while a usage-limit
+  // pause is armed for the session being edited
+  updateAutoResumeStatus(sessionId) {
+    const el = document.getElementById('autoResumeStatus');
+    if (!el || this.editingSessionId !== sessionId) return;
+    const session = this.sessions.get(sessionId);
+    if (session?.autoResumeAt && session.autoResumeAt > Date.now()) {
+      const at = new Date(session.autoResumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      el.textContent = `Usage limit pause active — resumes at ${at}`;
+      el.classList.add('active');
+    } else {
+      el.textContent = '';
+      el.classList.remove('active');
+    }
   },
 
   async toggleSessionImageWatcher() {

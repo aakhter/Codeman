@@ -518,6 +518,11 @@ export const AutoCompactSchema = z.object({
   prompt: z.string().max(10000).optional(),
 });
 
+/** POST /api/sessions/:id/auto-resume */
+export const AutoResumeSchema = z.object({
+  enabled: z.boolean(),
+});
+
 /** POST /api/sessions/:id/image-watcher */
 export const ImageWatcherSchema = z.object({
   enabled: z.boolean(),

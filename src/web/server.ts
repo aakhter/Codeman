@@ -41,6 +41,7 @@ import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { hostname as getHostname } from 'node:os';
 import { dataPath } from '../config/instance.js';
+import { getHookSecret } from '../config/hook-secret.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState } from '../types.js';
@@ -261,6 +262,7 @@ export class WebServer extends EventEmitter {
   private authSessions: StaleExpirationMap<string, import('./ports/auth-port.js').AuthSessionRecord> | null = null;
   private authFailures: StaleExpirationMap<string, number> | null = null;
   private qrAuthFailures: StaleExpirationMap<string, number> | null = null;
+  private hookSecretFailures: StaleExpirationMap<string, number> | null = null;
   private pushStore: PushSubscriptionStore = new PushSubscriptionStore();
   private teamWatcher: TeamWatcher = new TeamWatcher();
   private _orchestratorLoop: import('../orchestrator-loop.js').OrchestratorLoop | null = null;
@@ -636,6 +638,7 @@ export class WebServer extends EventEmitter {
       this.authSessions = authState.authSessions;
       this.authFailures = authState.authFailures;
       this.qrAuthFailures = authState.qrAuthFailures;
+      this.hookSecretFailures = authState.hookSecretFailures;
     }
 
     // WebSocket support (terminal I/O — low-latency bidirectional channel)
@@ -1892,6 +1895,10 @@ export class WebServer extends EventEmitter {
       this.host === '0.0.0.0' || this.host === 'localhost' || this.host === '::1' ? '127.0.0.1' : this.host;
     process.env.CODEMAN_API_URL = `${protocol}://${apiHost}:${this.port}`;
 
+    // Ensure the COD-54 hook secret exists on disk before any session exports
+    // $CODEMAN_HOOK_SECRET_FILE — hook curls cat that path at execution time.
+    getHookSecret();
+
     // Start scheduled runs cleanup timer
     this.cleanup.setInterval(
       () => {
@@ -2075,6 +2082,12 @@ export class WebServer extends EventEmitter {
               // Auto-clear
               if (savedState.autoClearEnabled !== undefined || savedState.autoClearThreshold !== undefined) {
                 session.setAutoClear(savedState.autoClearEnabled ?? false, savedState.autoClearThreshold);
+              }
+              // Auto-resume on usage limit (re-arms a pending schedule; an
+              // overdue one fires shortly after boot — the limit footer won't
+              // reprint on its own, so the pause would otherwise stall)
+              if (savedState.autoResumeEnabled) {
+                session.restoreAutoResume(true, savedState.autoResumeAt);
               }
               // Token tracking
               if (
@@ -2386,6 +2399,10 @@ export class WebServer extends EventEmitter {
     if (this.qrAuthFailures) {
       this.qrAuthFailures.dispose();
       this.qrAuthFailures = null;
+    }
+    if (this.hookSecretFailures) {
+      this.hookSecretFailures.dispose();
+      this.hookSecretFailures = null;
     }
     this.activePlanOrchestrators.clear();
     this.cleaningUp.clear();

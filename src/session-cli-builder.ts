@@ -11,6 +11,7 @@
 import type { ClaudeMode, EffortLevel } from './types.js';
 import { isEffortLevel } from './types.js';
 import { getAugmentedPath } from './utils/index.js';
+import { dataPath } from './config/instance.js';
 
 /**
  * Build Claude CLI permission flags based on the configured mode.
@@ -116,6 +117,8 @@ export function buildClaudeEnv(sessionId: string, truecolorEnabled?: boolean): R
     CODEMAN_MUX: '1',
     CODEMAN_SESSION_ID: sessionId,
     CODEMAN_API_URL: process.env.CODEMAN_API_URL || 'http://127.0.0.1:3000',
+    // Path only (not the secret value) — hook curls cat it at execution time (COD-54)
+    CODEMAN_HOOK_SECRET_FILE: dataPath('hook-secret'),
   };
 }
 
@@ -158,5 +161,7 @@ export function buildShellEnv(sessionId: string): Record<string, string | undefi
     CODEMAN_MUX: '1',
     CODEMAN_SESSION_ID: sessionId,
     CODEMAN_API_URL: process.env.CODEMAN_API_URL || 'http://127.0.0.1:3000',
+    // Path only (not the secret value) — hook curls cat it at execution time (COD-54)
+    CODEMAN_HOOK_SECRET_FILE: dataPath('hook-secret'),
   };
 }

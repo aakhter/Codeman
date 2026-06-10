@@ -15,6 +15,9 @@
 (function (global) {
   const TERMINAL_QUERY_RESPONSE_PATTERN = /^\x1b\[[\?>=]?[\d;]*[cnR]$/;
   const TERMINAL_OSC_RESPONSE_PATTERN = /^\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\)$/;
+  // Grace window after a manual scroll-up gesture during which sticky-scroll is
+  // suppressed, so high-frequency Codex status redraws don't snap the viewport
+  // back to the bottom while the user is inspecting earlier output.
   const USER_SCROLL_STICKY_SUPPRESS_MS = 1500;
 
   function isTerminalQueryResponse(data) {
@@ -885,7 +888,11 @@ Object.assign(CodemanApp.prototype, {
 
         // Pattern 1: Commands with file paths (tail -f, cat, head, grep pattern, etc.)
         // Handles: tail -f /path, grep pattern /path, cat -n /path
-        const cmdPattern = /(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]*\s+)*(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
+        // ⚠ The arg group must stay linear-time: `(?:[^\s\/]*\s+)*` (empty-matchable
+        // token, unbounded) backtracks exponentially on lines with a trigger word
+        // followed by multi-space runs (e.g. wrapped heredoc/table output) — froze
+        // the whole tab on hover. Non-empty token + bounded reps is O(n).
+        const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
         // Pattern 2: Paths with common extensions
         const extPattern =
@@ -1406,6 +1413,9 @@ Object.assign(CodemanApp.prototype, {
     return buffer.viewportY >= buffer.baseY - 2;
   },
 
+  // Record manual scroll gestures so sticky-scroll can give an upward scroll a
+  // short grace window (see _hasRecentUserScrollUp). A downward scroll that
+  // lands back at the bottom clears the suppression immediately.
   _noteTerminalUserScroll(lines) {
     if (lines < 0) {
       this._lastUserScrollUpAt = performance.now();
@@ -1675,17 +1685,17 @@ Object.assign(CodemanApp.prototype, {
     if (_joinedLen > 16384) _crashDiag.log(`FLUSH: ${(_joinedLen / 1024).toFixed(0)}KB`);
 
     // Per-frame byte budget to prevent main thread blocking.
-    // Every agent TUI (codex, claude/Ink, opencode, gemini) emits dense
-    // synchronized redraws during thinking/high-effort phases, so use a smaller
-    // first frame to keep per-frame xterm/WebGL stalls short. Only plain shell
-    // output (linear cat/paste, no redraw churn) keeps the larger budget.
+    // Large writes (141KB+) can freeze Chrome for 2+ minutes.
+    // Codex's TUI emits dense synchronized redraws during thinking/high-effort
+    // phases, so it gets a smaller first frame to keep per-frame xterm/WebGL
+    // stalls short; other modes keep the larger 64KB budget.
     const activeSession = this.activeSessionId && this.sessions ? this.sessions.get(this.activeSessionId) : null;
-    const MAX_FRAME_BYTES = activeSession?.mode === 'shell' ? 65536 : 32768;
+    const MAX_FRAME_BYTES = activeSession?.mode === 'codex' ? 32768 : 65536;
     let deferred = false;
+    // If the user recently scrolled up, remember the viewport so we can restore
+    // it after the write — Codex status redraws would otherwise jump it.
     const preserveViewportY =
-      this._hasRecentUserScrollUp() && this.terminal.buffer?.active
-        ? this.terminal.buffer.active.viewportY
-        : null;
+      this._hasRecentUserScrollUp() && this.terminal.buffer?.active ? this.terminal.buffer.active.viewportY : null;
 
     if (_joinedLen <= MAX_FRAME_BYTES) {
       this.terminal.write(joined);

@@ -378,7 +378,10 @@ Object.assign(CodemanApp.prototype, {
     prompt += `Output \`<promise>${config.completionPhrase}</promise>\` when done\n\n`;
 
     prompt += '## If Stuck\n';
-    prompt += 'Output `<promise>BLOCKED</promise>` with explanation';
+    prompt += 'Output `<promise>BLOCKED</promise>` with explanation\n\n';
+
+    prompt += '## Status Reporting\n';
+    prompt += '• End every response with a `RALPH_STATUS` block (parsed by Codeman)';
 
     // Show preview with highlighting (escape first, then apply formatting)
     const escapedPrompt = escapeHtml(prompt);

@@ -179,6 +179,10 @@ export interface SessionState {
   autoCompactThreshold?: number;
   /** Auto-compact prompt */
   autoCompactPrompt?: string;
+  /** Auto-resume on usage limit enabled */
+  autoResumeEnabled?: boolean;
+  /** Pending usage-limit auto-resume fire time (epoch ms), if armed */
+  autoResumeAt?: number;
   /** Image watcher enabled for this session */
   imageWatcherEnabled?: boolean;
   /** Total cost in USD */

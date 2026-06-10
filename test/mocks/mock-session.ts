@@ -240,6 +240,15 @@ export class MockSession extends EventEmitter {
     this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined
   );
 
+  /** Auto-resume on usage limit (token pause control) */
+  autoResumeEnabled: boolean = false;
+  autoResumeAt: number | null = null;
+  isLimitPaused: boolean = false;
+  setAutoResume = vi.fn((enabled: boolean) => {
+    this.autoResumeEnabled = enabled;
+    if (!enabled) this.autoResumeAt = null;
+  });
+
   /** Check if session is busy */
   isBusy = vi.fn(() => false);
 
@@ -257,6 +266,7 @@ export class MockSession extends EventEmitter {
   /** Stubs for the desktop sizing claims used by resize arbitration */
   claimDesktopSizing = vi.fn();
   releaseDesktopSizing = vi.fn();
+  noteDesktopActivity = vi.fn();
 
   /** Stub for runPrompt */
   runPrompt = vi.fn(async () => {});

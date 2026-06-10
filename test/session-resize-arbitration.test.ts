@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
+
+/** Must exceed Session.DESKTOP_CLAIM_IDLE_MS (90s) */
+const PAST_IDLE_MS = 91_000;
 
 type ResizeableSessionInternals = {
   ptyProcess: { resize: (cols: number, rows: number) => void };
@@ -108,5 +111,65 @@ describe('Session resize arbitration', () => {
     session.resize(100, 30);
 
     expect(resize).toHaveBeenCalledWith(100, 30);
+  });
+
+  describe('idle-desktop override (whoever is active wins)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('lets a mobile client take the pane once the desktop claim goes idle', () => {
+      vi.useFakeTimers();
+      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+      const resize = attachFakePty(session, 160, 48);
+
+      session.claimDesktopSizing(Symbol('desktop-conn'));
+      session.resize(48, 28, { viewportType: 'mobile' });
+      expect(resize).not.toHaveBeenCalled(); // fresh claim → ignored
+
+      vi.advanceTimersByTime(PAST_IDLE_MS);
+      session.resize(48, 28, { viewportType: 'mobile' });
+      expect(resize).toHaveBeenCalledWith(48, 28); // idle desktop → applied
+    });
+
+    it('keeps blocking mobile while the desktop stays active via typed input', () => {
+      vi.useFakeTimers();
+      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+      const resize = attachFakePty(session, 160, 48);
+
+      session.claimDesktopSizing(Symbol('desktop-conn'));
+      vi.advanceTimersByTime(PAST_IDLE_MS - 10_000);
+      session.noteDesktopActivity(); // user typed on desktop
+      vi.advanceTimersByTime(20_000); // idle since claim, but not since input
+
+      session.resize(48, 28, { viewportType: 'mobile' });
+      expect(resize).not.toHaveBeenCalled();
+    });
+
+    it('re-asserts the desktop layout on desktop input after a mobile override', () => {
+      vi.useFakeTimers();
+      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+      const resize = attachFakePty(session, 160, 48);
+
+      session.resize(208, 45, { viewportType: 'desktop' }); // desktop sizes the pane
+      session.claimDesktopSizing(Symbol('desktop-conn'));
+      vi.advanceTimersByTime(PAST_IDLE_MS);
+
+      session.resize(48, 28, { viewportType: 'mobile' }); // phone takes over
+      expect(resize).toHaveBeenLastCalledWith(48, 28);
+
+      session.noteDesktopActivity(); // desktop user types again
+      expect(resize).toHaveBeenLastCalledWith(208, 45); // layout restored
+    });
+
+    it('does not re-assert when no mobile override happened', () => {
+      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+      const resize = attachFakePty(session, 160, 48);
+
+      session.resize(208, 45, { viewportType: 'desktop' });
+      resize.mockClear();
+      session.noteDesktopActivity();
+      expect(resize).not.toHaveBeenCalled();
+    });
   });
 });

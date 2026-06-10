@@ -285,6 +285,63 @@ describe('session-routes', () => {
     });
   });
 
+  // ========== POST /api/sessions/:id/auto-resume ==========
+
+  describe('POST /api/sessions/:id/auto-resume', () => {
+    it('enables auto-resume on usage limit', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/auto-resume`,
+        payload: { enabled: true },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.autoResume.enabled).toBe(true);
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId)!;
+      expect(session.setAutoResume).toHaveBeenCalledWith(true);
+      expect(harness.ctx.persistSessionState).toHaveBeenCalled();
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:updated', expect.anything());
+    });
+
+    it('disables auto-resume', async () => {
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId)!;
+      session.autoResumeEnabled = true;
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/auto-resume`,
+        payload: { enabled: false },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.autoResume.enabled).toBe(false);
+      expect(session.setAutoResume).toHaveBeenCalledWith(false);
+    });
+
+    it('rejects invalid body', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/auto-resume`,
+        payload: { enabled: 'yes' },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe(ApiErrorCode.INVALID_INPUT);
+    });
+
+    it('returns 404 for unknown session', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/nonexistent/auto-resume',
+        payload: { enabled: true },
+      });
+      expect(res.statusCode).toBe(404);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+    });
+  });
+
   // ========== POST /api/sessions/:id/input ==========
 
   describe('POST /api/sessions/:id/input', () => {
@@ -485,7 +542,9 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain(authUrl);
       expect(body.data.terminalBuffer).toContain('visible tmux pane only');
-      expect(body.data.terminalBuffer.indexOf(authUrl)).toBeLessThan(body.data.terminalBuffer.indexOf('visible tmux pane only'));
+      expect(body.data.terminalBuffer.indexOf(authUrl)).toBeLessThan(
+        body.data.terminalBuffer.indexOf('visible tmux pane only')
+      );
     });
 
     it('preserves incidental OAuth URL mentions as ordinary Codex TUI history', async () => {

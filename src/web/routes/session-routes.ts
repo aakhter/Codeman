@@ -29,6 +29,7 @@ import {
   ResizeSchema,
   AutoClearSchema,
   AutoCompactSchema,
+  AutoResumeSchema,
   ImageWatcherSchema,
   FlickerFilterSchema,
   QuickRunSchema,
@@ -72,17 +73,23 @@ const LEADING_WHITESPACE_PATTERN = /^[\s\r\n]+/;
  *   (1049 also saves cursor and clears the alt buffer).
  * - CSI 3 J = erase saved lines (scrollback).
  *
- * Codex emits `\x1b[?1049h` and clear-scrollback sequences during startup
- * and on repaint. xterm.js obeys these by switching to the alt buffer
- * (no native scrollback) and wiping saved lines, so the user's
- * conversation history disappears on every tab switch / pane refresh.
- * Stripping these from the byte stream keeps everything in the main
- * buffer with scrollback intact.
+ * Codex emits `\x1b[?1049h` and clear-scrollback sequences during startup and
+ * on repaint. xterm.js obeys them by switching to the alt buffer (no native
+ * scrollback) and wiping saved lines, so the user's conversation history
+ * disappears on every tab switch / pane refresh. Stripping these from the
+ * replayed byte stream keeps everything in the main buffer with scrollback
+ * intact. Mirrors the live-stream strip in Session._handleTerminalOutput.
  */
 // eslint-disable-next-line no-control-regex
 const ALT_SCREEN_TOGGLE_PATTERN = /\x1b\[\?(?:47|1047|1049)[hl]/g;
 // eslint-disable-next-line no-control-regex
 const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
+// Mouse-tracking enables (X10/button/any-event/UTF-8/SGR/alt-scroll) — once on,
+// xterm.js forwards wheel events to the app instead of scrolling the viewport.
+// Live streams are stripped at the source, but buffers persisted BEFORE that
+// strip existed can still carry them; strip on replay for parity.
+// eslint-disable-next-line no-control-regex
+const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g;
 
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
@@ -982,7 +989,10 @@ export function registerSessionRoutes(
     // xterm.js obeys them by switching to its scrollback-less alt buffer and
     // wiping saved lines, so conversation history disappears on tab switch.
     if (session.mode === 'codex') {
-      strippedBuffer = strippedBuffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '').replace(ERASE_SCROLLBACK_PATTERN, '');
+      strippedBuffer = strippedBuffer
+        .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
+        .replace(ERASE_SCROLLBACK_PATTERN, '')
+        .replace(MOUSE_TRACKING_PATTERN, '');
     }
 
     if (tailBytes > 0 && strippedBuffer.length > tailBytes) {
@@ -1065,6 +1075,27 @@ export function registerSessionRoutes(
           enabled: session.autoCompactEnabled,
           threshold: session.autoCompactThreshold,
           prompt: session.autoCompactPrompt,
+        },
+      },
+    };
+  });
+
+  // ========== Auto-Resume (usage-limit pause) ==========
+
+  app.post('/api/sessions/:id/auto-resume', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(AutoResumeSchema, req.body, 'Invalid request body');
+    const session = findSessionOrFail(ctx, id);
+
+    session.setAutoResume(body.enabled);
+    persistAndBroadcastSession(ctx, session);
+
+    return {
+      success: true,
+      data: {
+        autoResume: {
+          enabled: session.autoResumeEnabled,
+          resumeAt: session.autoResumeAt ?? undefined,
         },
       },
     };

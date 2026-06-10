@@ -14,6 +14,7 @@ import { execSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { dataPath } from '../../config/instance.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage, type NiceConfig } from '../../types.js';
+import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
 import {
   ConfigUpdateSchema,
   SettingsUpdateSchema,
@@ -47,7 +48,6 @@ import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
 import { AUTH_SESSION_TTL_MS } from '../../config/auth-config.js';
 import { resolveTerminalHistoryConfig } from '../../config/terminal-history.js';
-import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
 
 // Maximum screenshot upload size (10MB)
 const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024;

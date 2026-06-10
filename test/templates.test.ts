@@ -68,24 +68,6 @@ describe('generateClaudeMd', () => {
       expect(result).toContain('conventional commits');
     });
 
-    it('should include Ralph Loop section with slash commands', () => {
-      const result = generateClaudeMd('my-project');
-
-      expect(result).toContain('## Ralph Loop');
-      expect(result).toContain('/ralph-loop:ralph-loop');
-      expect(result).toContain('/ralph-loop:cancel-ralph');
-    });
-
-    it('should include the RALPH_STATUS contract parsed by ralph-status-parser', () => {
-      const result = generateClaudeMd('my-project');
-
-      expect(result).toContain('---RALPH_STATUS---');
-      expect(result).toContain('---END_RALPH_STATUS---');
-      expect(result).toContain('STATUS: IN_PROGRESS | COMPLETE | BLOCKED');
-      expect(result).toContain('EXIT_SIGNAL: false | true');
-      expect(result).toContain('completion phrase');
-    });
-
     it('should stay under the 200-line CLAUDE.md guidance', () => {
       const result = generateClaudeMd('my-project');
 
@@ -99,6 +81,10 @@ describe('generateClaudeMd', () => {
       expect(result).not.toContain('TodoWrite');
       expect(result).not.toContain('## Planning Mode');
       expect(result).not.toContain('[TECHNOLOGIES_USED]');
+      // Ralph loop instructions live in the loop prompt (wizard) and plugin,
+      // not in every project's CLAUDE.md
+      expect(result).not.toContain('RALPH_STATUS');
+      expect(result).not.toContain('/ralph-loop:');
     });
   });
 

@@ -144,6 +144,42 @@ describe('RespawnController', () => {
     });
   });
 
+  describe('Usage-limit pause guard', () => {
+    it('blocks the cycle while the session is paused on a usage limit', async () => {
+      let cycleStarted = false;
+      let blockedReason: string | null = null;
+      controller.on('respawnCycleStarted', () => {
+        cycleStarted = true;
+      });
+      controller.on('respawnBlocked', (data: { reason: string }) => {
+        blockedReason = data.reason;
+      });
+
+      session.isLimitPaused = true;
+      controller.start();
+      session.simulateCompletionMessage();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(cycleStarted).toBe(false);
+      expect(blockedReason).toBe('usage_limit');
+      expect(controller.state).toBe('watching');
+    });
+
+    it('cycles normally when the pause is not active', async () => {
+      let cycleStarted = false;
+      controller.on('respawnCycleStarted', () => {
+        cycleStarted = true;
+      });
+
+      session.isLimitPaused = false;
+      controller.start();
+      session.simulateCompletionMessage();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(cycleStarted).toBe(true);
+    });
+  });
+
   describe('Respawn Cycle', () => {
     it('should start cycle when completion message detected and confirmed', async () => {
       let cycleStarted = false;

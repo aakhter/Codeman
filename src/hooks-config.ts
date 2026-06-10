@@ -3,8 +3,9 @@
  *
  * Generates `.claude/settings.local.json` with hook definitions that POST
  * to Codeman's `/api/hook-event` endpoint when Claude Code fires hooks.
- * Uses `$CODEMAN_API_URL` and `$CODEMAN_SESSION_ID` env vars (set on every
- * managed session) so the config is static per case directory.
+ * Uses `$CODEMAN_API_URL`, `$CODEMAN_SESSION_ID`, and `$CODEMAN_HOOK_SECRET_FILE`
+ * env vars (set on every managed session) so the config is static per case
+ * directory and free of secret values.
  *
  * Key exports:
  * - `generateHooksConfig()` — returns hooks object for settings.local.json
@@ -29,7 +30,6 @@ import { join } from 'node:path';
 
 import type { HookEventType } from './types.js';
 import { HOOK_TIMEOUT_MS } from './config/auth-config.js';
-import { getHookSecret, HOOK_SECRET_HEADER } from './config/hook-secret.js';
 
 /**
  * Generates the hooks section for .claude/settings.local.json
@@ -40,21 +40,20 @@ import { getHookSecret, HOOK_SECRET_HEADER } from './config/hook-secret.js';
  * per case directory.
  */
 export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
-  // Per-instance shared secret (COD-54). Baked into the generated command so the
-  // header is presented regardless of shell env propagation. The auth middleware
-  // requires it for the /api/hook-event localhost bypass while a tunnel is running,
-  // which closes the loopback hole that a cloudflared --url http://127.0.0.1 tunnel
-  // would otherwise open to internet traffic.
-  const hookSecret = getHookSecret();
-
   // Read Claude Code's stdin JSON and forward it as the data field.
   // Falls back to empty object if stdin is unavailable or malformed.
+  // COD-54: present the per-instance hook secret so the bypass keeps working while
+  // a tunnel is running. The value is read from the secret file AT EXECUTION TIME
+  // (path via $CODEMAN_HOOK_SECRET_FILE, set in every managed session's env), so it
+  // never lands in this config and rotation needs no respawn. If the var/file is
+  // missing the header is empty — the middleware then allows the request only on
+  // the plain loopback bypass (tunnel down), same as pre-secret behavior.
   const curlCmd = (event: HookEventType) =>
     `HOOK_DATA=$(cat 2>/dev/null || echo '{}'); ` +
     `printf '{"event":"${event}","sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$HOOK_DATA" | ` +
     `curl -s -X POST "$CODEMAN_API_URL/api/hook-event" ` +
     `-H 'Content-Type: application/json' ` +
-    `-H '${HOOK_SECRET_HEADER}: ${hookSecret}' ` +
+    `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
     `--data @- ` +
     `2>/dev/null || true`;
 

@@ -1,15 +1,25 @@
 /**
- * @fileoverview Auto-compact and auto-clear automation for Session.
+ * @fileoverview Auto-compact, auto-clear, and auto-resume automation for Session.
  *
  * Monitors token counts and triggers /compact or /clear commands when
  * configurable thresholds are reached. Waits for Claude to be idle
  * before sending commands, with retry logic and mutual exclusion
  * (compact and clear never run simultaneously).
  *
+ * Also implements auto-resume on usage limit ("token pause" control):
+ * when enabled and Claude stops on a usage-limit message ("5-hour limit
+ * reached ∙ resets 8pm" and friends — see usage-limit-patterns.ts), a timer
+ * is armed for the parsed reset time plus a safety buffer, then Escape
+ * (dismisses the rate-limit options dialog if open) and a "continue" prompt
+ * are sent so work resumes automatically. If the session is still limited,
+ * the fresh limit message re-arms the scheduler — that retry loop is the
+ * safety net for clock skew and parse imprecision.
+ *
  * @module session-auto-ops
  */
 
 import { EventEmitter } from 'node:events';
+import { detectUsageLimitPause } from './usage-limit-patterns.js';
 
 // ============================================================================
 // Timing Constants
@@ -78,6 +88,28 @@ async function executeWhenIdle(
   }
 }
 
+// ============================================================================
+// Auto-resume (usage-limit pause) constants
+// ============================================================================
+
+/** Safety buffer after the stated reset time before resuming (2 minutes) */
+const RESUME_BUFFER_MS = 2 * 60_000;
+
+/** Minimum delay before an overdue resume fires (lets output settle) */
+const RESUME_MIN_DELAY_MS = 5_000;
+
+/** Retry interval when the reset time is stale/past (5 minutes) */
+const RESUME_RETRY_MS = 5 * 60_000;
+
+/** Re-detections scheduling within this window of the current schedule are ignored */
+const RESUME_DEDUP_TOLERANCE_MS = 90_000;
+
+/** Delay between Escape (dialog dismiss) and the resume prompt */
+const RESUME_ESC_DELAY_MS = 600;
+
+/** Prompt sent to resume work after the limit resets */
+const RESUME_PROMPT = 'continue';
+
 /** Minimum valid threshold for auto-clear/compact (1000 tokens) */
 const MIN_AUTO_THRESHOLD = 1000;
 
@@ -130,6 +162,16 @@ export class SessionAutoOps extends EventEmitter {
   private _autoClearEnabled: boolean = false;
   private _isClearing: boolean = false;
   private _autoClearTimer: NodeJS.Timeout | null = null;
+
+  // Auto-resume (usage-limit pause) state
+  private _autoResumeEnabled: boolean = false;
+  private _autoResumeTimer: NodeJS.Timeout | null = null;
+  /** Esc→continue gap timer; detections must NOT cancel a resume in flight */
+  private _resumeFollowupTimer: NodeJS.Timeout | null = null;
+  /** When the scheduled resume fires (epoch ms), null when not armed */
+  private _autoResumeAt: number | null = null;
+  private _limitPaused: boolean = false;
+  private _resumeAttempts: number = 0;
 
   private readonly callbacks: AutoOpsCallbacks;
 
@@ -204,6 +246,145 @@ export class SessionAutoOps extends EventEmitter {
       } else {
         this._autoClearThreshold = threshold;
       }
+    }
+  }
+
+  // ============================================================================
+  // Auto-resume (usage-limit pause) — getters/setters
+  // ============================================================================
+
+  get autoResumeEnabled(): boolean {
+    return this._autoResumeEnabled;
+  }
+
+  /** When the scheduled resume fires (epoch ms), or null when not armed. */
+  get autoResumeAt(): number | null {
+    return this._autoResumeAt;
+  }
+
+  /** True while the session is believed to be paused on a usage limit. */
+  get isLimitPaused(): boolean {
+    return this._limitPaused;
+  }
+
+  setAutoResume(enabled: boolean): void {
+    this._autoResumeEnabled = enabled;
+    if (!enabled) {
+      this._cancelAutoResume('disabled');
+    }
+  }
+
+  /**
+   * Restore auto-resume state after a Codeman restart. A persisted pending
+   * schedule is re-armed; an overdue one fires shortly after boot (the limit
+   * footer won't reprint on its own, so without this the pause would stall).
+   */
+  restoreAutoResume(enabled: boolean, resumeAt?: number): void {
+    this._autoResumeEnabled = enabled;
+    if (!enabled || !resumeAt) return;
+    const now = Date.now();
+    this._scheduleResume(Math.max(resumeAt, now + RESUME_MIN_DELAY_MS), resumeAt, 'restored');
+  }
+
+  // ============================================================================
+  // Auto-resume — detection and scheduling
+  // ============================================================================
+
+  /**
+   * Scan cleaned terminal output for a usage-limit pause message and (re)arm
+   * the resume schedule. Called from the session's throttled parser path.
+   */
+  processCleanData(cleanData: string): void {
+    if (!this._autoResumeEnabled || this.callbacks.isStopped()) return;
+    // A resume is in flight (Esc sent, continue pending): output from our own
+    // Escape can redraw the stale limit footer — don't let it re-arm and
+    // cancel the continue. Fresh evidence arrives after the prompt is sent.
+    if (this._resumeFollowupTimer) return;
+
+    const detection = detectUsageLimitPause(cleanData);
+    if (!detection) return;
+
+    const now = Date.now();
+    const overdue = detection.resetAt <= now;
+    const fireAt = overdue
+      ? now + RESUME_RETRY_MS // stale reset time → gentle retry loop
+      : Math.max(detection.resetAt + RESUME_BUFFER_MS, now + RESUME_MIN_DELAY_MS);
+
+    if (this._autoResumeTimer && this._autoResumeAt !== null) {
+      // Already armed: the footer redraws constantly, so ignore re-detections
+      // that land on (or later than) the current schedule. Only an EARLIER
+      // parsed time replaces it — an overdue retry never preempts a real one.
+      if (overdue || fireAt >= this._autoResumeAt - RESUME_DEDUP_TOLERANCE_MS) return;
+    }
+
+    this._scheduleResume(fireAt, detection.resetAt, detection.matched);
+  }
+
+  /**
+   * Claude started working — the limit is lifted (or the user resumed
+   * manually), so any pending auto-resume is obsolete.
+   */
+  notifyWorking(): void {
+    this._resumeAttempts = 0;
+    if (!this._limitPaused && !this._autoResumeTimer && !this._resumeFollowupTimer) return;
+    this._cancelAutoResume('working');
+  }
+
+  private _scheduleResume(fireAt: number, resetAt: number, matched: string): void {
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
+    this._limitPaused = true;
+    this._autoResumeAt = fireAt;
+    const delay = Math.max(fireAt - Date.now(), 0);
+    console.log(
+      `[SessionAutoOps ${this.callbacks.getSessionId()}] Usage-limit pause detected ("${matched.slice(0, 60)}"), auto-resume in ${Math.round(delay / 60000)}min`
+    );
+    this._autoResumeTimer = setTimeout(() => void this._fireResume(), delay);
+    this.emit('limitPauseScheduled', { resetAt, resumeAt: fireAt, matched });
+  }
+
+  private async _fireResume(): Promise<void> {
+    this._autoResumeTimer = null;
+    if (!this._autoResumeEnabled || this.callbacks.isStopped()) return;
+
+    if (this.callbacks.isWorking()) {
+      // Session resumed on its own (or via the user) — nothing to do.
+      this._cancelAutoResume('working');
+      return;
+    }
+
+    this._resumeAttempts++;
+    const attempt = this._resumeAttempts;
+    this._limitPaused = false; // optimistic: a fresh limit message re-arms us
+    this._autoResumeAt = null;
+
+    // Escape first: dismisses the rate-limit options dialog if Claude opened
+    // one (harmless at an idle prompt), then the resume prompt after a beat.
+    await this.callbacks.writeCommand('\x1b');
+    this._resumeFollowupTimer = setTimeout(() => {
+      this._resumeFollowupTimer = null;
+      if (this.callbacks.isStopped()) return;
+      void this.callbacks.writeCommand(`${RESUME_PROMPT}\r`);
+      this.emit('limitResume', { attempt });
+    }, RESUME_ESC_DELAY_MS);
+  }
+
+  private _cancelAutoResume(reason: 'disabled' | 'working' | 'stopped'): void {
+    const wasArmed = this._autoResumeTimer !== null || this._resumeFollowupTimer !== null || this._limitPaused;
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
+    if (this._resumeFollowupTimer) {
+      clearTimeout(this._resumeFollowupTimer);
+      this._resumeFollowupTimer = null;
+    }
+    this._limitPaused = false;
+    this._autoResumeAt = null;
+    if (wasArmed && reason !== 'stopped') {
+      this.emit('limitResumeCancelled', { reason });
     }
   }
 
@@ -321,5 +502,7 @@ export class SessionAutoOps extends EventEmitter {
       this._autoClearTimer = null;
     }
     this._isClearing = false;
+
+    this._cancelAutoResume('stopped');
   }
 }

@@ -304,8 +304,16 @@ const KeyboardHandler = {
       // translate up so it sits at the bottom of the visual viewport.
       // This formula accounts for iOS scrolling the visual viewport (offsetTop)
       // when the user types in xterm's hidden textarea.
-      const appEl = document.querySelector('.app');
-      const layoutHeight = appEl?.getBoundingClientRect().bottom || window.innerHeight;
+      //
+      // MUST measure against the LAYOUT viewport (window.innerHeight): the
+      // bars are position:fixed, which anchors to the layout viewport — on
+      // iOS that keeps its full height while the keyboard is open. Measuring
+      // the shrunken .app instead (its height tracks --app-height = visual
+      // viewport) made the offset compute to 0 on iOS, leaving the toolbar
+      // and accessory bar behind the OS keyboard (0.9.8 regression). On
+      // Android the layout viewport itself shrinks with the keyboard, so
+      // innerHeight === visualBottom and the offset is naturally 0 there.
+      const layoutHeight = window.innerHeight;
       const visualBottom = window.visualViewport.offsetTop + window.visualViewport.height;
       const keyboardOffset = Math.max(0, layoutHeight - visualBottom);
 

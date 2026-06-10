@@ -203,6 +203,9 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_IDLE, '_onSessionIdle'],
   [SSE_EVENTS.SESSION_WORKING, '_onSessionWorking'],
   [SSE_EVENTS.SESSION_AUTO_CLEAR, '_onSessionAutoClear'],
+  [SSE_EVENTS.SESSION_LIMIT_PAUSE_SCHEDULED, '_onSessionLimitPauseScheduled'],
+  [SSE_EVENTS.SESSION_LIMIT_RESUME, '_onSessionLimitResume'],
+  [SSE_EVENTS.SESSION_LIMIT_RESUME_CANCELLED, '_onSessionLimitResumeCancelled'],
   [SSE_EVENTS.SESSION_CLI_INFO, '_onSessionCliInfo'],
 
   // Scheduled runs
@@ -641,7 +644,6 @@ class CodemanApp {
     // Apply keyboard bar mode from settings
     const _kbSettings = this.loadAppSettingsFromStorage();
     if (_kbSettings.extendedKeyboardBar) KeyboardAccessoryBar.setMode('extended');
-    this.bindMobileHeaderUtilityToggle?.();
     this.applyHeaderVisibilitySettings();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
@@ -1870,6 +1872,33 @@ class CodemanApp {
     this._notifySession(data.sessionId, 'info', 'auto-clear', 'Auto-Cleared', `Context reset at ${(data.tokens || 0).toLocaleString()} tokens`);
   }
 
+  _onSessionLimitPauseScheduled(data) {
+    const session = this.sessions.get(data.sessionId);
+    if (session) session.autoResumeAt = data.resumeAt;
+    const at = new Date(data.resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (data.sessionId === this.activeSessionId) {
+      this.showToast(`Usage limit reached — auto-resume at ${at}`, 'warning');
+    }
+    this._notifySession(data.sessionId, 'warning', 'limit-pause', 'Usage Limit Reached', `Auto-resume scheduled for ${at}`);
+    this.updateAutoResumeStatus(data.sessionId);
+  }
+
+  _onSessionLimitResume(data) {
+    const session = this.sessions.get(data.sessionId);
+    if (session) session.autoResumeAt = undefined;
+    if (data.sessionId === this.activeSessionId) {
+      this.showToast('Usage limit reset — work resumed automatically', 'success');
+    }
+    this._notifySession(data.sessionId, 'info', 'limit-resume', 'Auto-Resumed', 'Usage limit reset — continuing work');
+    this.updateAutoResumeStatus(data.sessionId);
+  }
+
+  _onSessionLimitResumeCancelled(data) {
+    const session = this.sessions.get(data.sessionId);
+    if (session) session.autoResumeAt = undefined;
+    this.updateAutoResumeStatus(data.sessionId);
+  }
+
   _onSessionCliInfo(data) {
     const session = this.sessions.get(data.sessionId);
     if (session) {
@@ -1951,6 +1980,7 @@ class CodemanApp {
         // selectSession's earlier resizes ran before this WS existed, so they
         // went over HTTP, which never claims (see ws-routes sizingToken).
         this.sendResize(sessionId)?.catch?.(() => {});
+        this._startMobileResizeRetry(sessionId);
       }
     };
 
@@ -1981,6 +2011,7 @@ class CodemanApp {
         reason: event.reason || '',
         at: new Date().toISOString(),
       };
+      this._stopMobileResizeRetry();
 
       // Reconnect on unexpected close (server restart, network blip, ping timeout).
       // Don't reconnect if we intentionally disconnected (_disconnectWs nulls onclose)
@@ -2011,6 +2042,7 @@ class CodemanApp {
   _disconnectWs() {
     this._clearTimer('_wsReconnectTimer');
     this._wsReconnectAttempts = 0;
+    this._stopMobileResizeRetry();
     if (this._ws) {
       this._ws.onclose = null; // Prevent re-entrant cleanup
       this._ws.close();
@@ -2019,6 +2051,41 @@ class CodemanApp {
       this._wsReady = false;
       this._wsState = 'disconnected';
       this._updateConnectionIndicator();
+    }
+  }
+
+  /**
+   * Small-viewport claim-idle retry. While a desktop sizing claim is "hot",
+   * the server ignores this device's resize (Session.DESKTOP_CLAIM_IDLE_MS),
+   * and the single resize sent on attach is deduped client-side — without a
+   * retry, a phone that attached under an active desktop would render a
+   * desktop-width stream forever. Re-send the current dims periodically (a
+   * server-side no-op once the pane already matches) so the pane reflows to
+   * this device shortly after the desktop goes idle. Visible-tab only: a
+   * phone in a pocket must not steal the pane from an active desktop.
+   */
+  _startMobileResizeRetry(sessionId) {
+    this._stopMobileResizeRetry();
+    const type =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : 'desktop';
+    if (type === 'desktop') return;
+    this._mobileResizeRetryTimer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (!this._wsReady || this._wsSessionId !== sessionId) return;
+      // Same guard as throttledResize: while the virtual keyboard is up, a
+      // fit()+SIGWINCH at the shrunken row count makes Ink re-render garbage
+      // and shifts the accessory toolbar mid-typing. Retry after it closes.
+      if (typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible) return;
+      this.sendResize(sessionId)?.catch?.(() => {});
+    }, MOBILE_RESIZE_RETRY_MS);
+  }
+
+  _stopMobileResizeRetry() {
+    if (this._mobileResizeRetryTimer) {
+      clearInterval(this._mobileResizeRetryTimer);
+      this._mobileResizeRetryTimer = null;
     }
   }
 
@@ -2334,7 +2401,6 @@ class CodemanApp {
     KeyboardHandler.cleanup();
     MobileDetection.init();
     KeyboardHandler.init();
-    this.bindMobileHeaderUtilityToggle?.();
     // Clear tab alerts
     this.tabAlerts.clear();
     this.attachmentHistoryCounts.clear();

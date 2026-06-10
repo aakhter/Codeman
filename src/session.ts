@@ -83,6 +83,7 @@ import {
   buildShellEnv,
 } from './session-cli-builder.js';
 import { SessionAutoOps } from './session-auto-ops.js';
+import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { parseAttachmentMagicLinks } from './attachment-magic.js';
 import {
@@ -285,6 +286,9 @@ export class Session extends EventEmitter {
   private _messages: ClaudeMessage[] = [];
   private _lineBuffer: string = '';
   private _lineBufferFlushTimer: NodeJS.Timeout | null = null;
+  // Codex only: trailing partial CSI held back so sequences split across PTY
+  // chunks can't slip past the alt-screen/scrollback strip (see _handleTerminalOutput)
+  private _codexSeqCarry: string = '';
   private resolvePromise: ((value: { result: string; cost: number }) => void) | null = null;
   private rejectPromise: ((reason: Error) => void) | null = null;
   private _promptResolved: boolean = false; // Guard against race conditions in runPrompt
@@ -586,6 +590,9 @@ export class Session extends EventEmitter {
       this._totalOutputTokens = 0;
       this.emit('autoClear', data);
     });
+    this._autoOps.on('limitPauseScheduled', (data) => this.emit('limitPauseScheduled', data));
+    this._autoOps.on('limitResume', (data) => this.emit('limitResume', data));
+    this._autoOps.on('limitResumeCancelled', (data) => this.emit('limitResumeCancelled', data));
   }
 
   get status(): SessionStatus {
@@ -891,6 +898,39 @@ export class Session extends EventEmitter {
     this._autoOps.setAutoCompact(enabled, threshold, prompt);
   }
 
+  get autoResumeEnabled(): boolean {
+    return this._autoOps.autoResumeEnabled;
+  }
+
+  /** When the scheduled usage-limit auto-resume fires (epoch ms), or null. */
+  get autoResumeAt(): number | null {
+    return this._autoOps.autoResumeAt;
+  }
+
+  /** True while the session is paused on a Claude usage limit (auto-resume armed). */
+  get isLimitPaused(): boolean {
+    return this._autoOps.isLimitPaused;
+  }
+
+  setAutoResume(enabled: boolean): void {
+    this._autoOps.setAutoResume(enabled);
+    // Users typically enable this WHILE a session already sits paused — the
+    // limit footer won't reprint on its own, so scan the recent buffer once.
+    // Only a future reset time counts: stale scrollback must not arm a resume.
+    if (enabled && !isExternalCliMode(this.mode)) {
+      const tail = this._terminalBuffer.value.slice(-8192).replace(ANSI_ESCAPE_PATTERN_FULL, '');
+      const detection = detectUsageLimitPause(tail);
+      if (detection && detection.resetAt > Date.now()) {
+        this._autoOps.processCleanData(tail);
+      }
+    }
+  }
+
+  /** Restore auto-resume state (and a pending schedule) after Codeman restart. */
+  restoreAutoResume(enabled: boolean, resumeAt?: number): void {
+    this._autoOps.restoreAutoResume(enabled, resumeAt);
+  }
+
   get imageWatcherEnabled(): boolean {
     return this._imageWatcherEnabled;
   }
@@ -954,6 +994,8 @@ export class Session extends EventEmitter {
       autoCompactEnabled: this._autoOps.autoCompactEnabled,
       autoCompactThreshold: this._autoOps.autoCompactThreshold,
       autoCompactPrompt: this._autoOps.autoCompactPrompt,
+      autoResumeEnabled: this._autoOps.autoResumeEnabled,
+      autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
       imageWatcherEnabled: this._imageWatcherEnabled,
       totalCost: this._totalCost,
       inputTokens: this._totalInputTokens,
@@ -1182,6 +1224,21 @@ export class Session extends EventEmitter {
         }
       }
 
+      // Reassemble sequences split across PTY chunk boundaries first: a chunk
+      // ending mid-sequence ('\x1b[?104' now, '9h' next) would slip past the
+      // strip below and leave xterm stuck in the scrollback-less alt buffer
+      // until the next buffer replay. Hold back an incomplete digit-only CSI
+      // tail (≤7 chars — the longest strippable intro is '\x1b[?1049') and
+      // prepend it to the next chunk; complete sequences are never held.
+      data = this._codexSeqCarry + data;
+      this._codexSeqCarry = '';
+      // eslint-disable-next-line no-control-regex
+      const splitTail = data.match(/\x1b(?:\[\??[0-9]{0,4})?$/);
+      if (splitTail) {
+        this._codexSeqCarry = splitTail[0];
+        data = data.slice(0, -splitTail[0].length);
+        if (!data) return;
+      }
       data = data
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '')
@@ -1410,6 +1467,7 @@ export class Session extends EventEmitter {
           this._isWorking = true;
           this._status = 'busy';
           this.emit('working');
+          this._autoOps.notifyWorking();
         }
         this._awaitingIdleConfirmation = false;
         if (this.activityTimeout) clearTimeout(this.activityTimeout);
@@ -1516,6 +1574,11 @@ export class Session extends EventEmitter {
       this._bashToolParser.processCleanData(getCleanData());
     }
 
+    // Usage-limit pause detection (auto-resume on usage limit)
+    if (this._autoOps.autoResumeEnabled) {
+      this._autoOps.processCleanData(getCleanData());
+    }
+
     // Parse token count from status line (e.g., "123.4k tokens" or "5234 tokens")
     if (rawData.includes('token')) {
       this.parseTokensFromStatusLine(getCleanData());
@@ -1544,6 +1607,7 @@ export class Session extends EventEmitter {
         this._isWorking = true;
         this._status = 'busy';
         this.emit('working');
+        this._autoOps.notifyWorking();
         this._awaitingIdleConfirmation = false;
         if (this.activityTimeout) clearTimeout(this.activityTimeout);
       }
@@ -1829,6 +1893,7 @@ export class Session extends EventEmitter {
     this._errorBuffer = '';
     this._messages = [];
     this._lineBuffer = '';
+    this._codexSeqCarry = '';
     this._lastActivityAt = Date.now();
   }
 
@@ -2260,9 +2325,29 @@ export class Session extends EventEmitter {
    */
   private _desktopSizeClaims = new Set<symbol>();
 
+  /**
+   * A desktop sizing claim only blocks small-viewport resizes while the
+   * desktop is RECENTLY ACTIVE (claim registration or typed input within this
+   * window). An abandoned-but-connected desktop tab (left open at home, screen
+   * locked) must not hold a phone's view hostage: without this, the phone
+   * renders a desktop-width stream in a narrow xterm — mid-word wraps, tmux
+   * dot-fill, and Ink overdraw soup (the 0.9.8–0.9.12 mobile regression).
+   */
+  private static readonly DESKTOP_CLAIM_IDLE_MS = 90_000;
+
+  /** Last evidence of a live desktop user (claim registered / typed input). */
+  private _lastDesktopActivityAt = 0;
+
+  /** Last desktop-typed dimensions, for re-asserting after a mobile override. */
+  private _lastDesktopDims: { cols: number; rows: number } | null = null;
+
+  /** True while a small viewport reflowed the pane past an idle desktop claim. */
+  private _mobileSizeOverride = false;
+
   /** Register a live desktop sizing claim (see _desktopSizeClaims). */
   claimDesktopSizing(token: symbol): void {
     this._desktopSizeClaims.add(token);
+    this._lastDesktopActivityAt = Date.now();
   }
 
   /** Release a desktop sizing claim when its connection goes away. */
@@ -2271,22 +2356,46 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * Record desktop user activity (typed input over a claim-holding socket).
+   * If a phone reflowed the pane while the desktop was idle, the desktop
+   * layout is restored — "whoever is actively using the session wins".
+   */
+  noteDesktopActivity(): void {
+    this._lastDesktopActivityAt = Date.now();
+    if (this._mobileSizeOverride && this._lastDesktopDims) {
+      this._mobileSizeOverride = false;
+      this.resize(this._lastDesktopDims.cols, this._lastDesktopDims.rows, { viewportType: 'desktop' });
+    }
+  }
+
+  /**
    * Resizes the PTY terminal dimensions.
    * Skips the resize if dimensions haven't changed to avoid triggering
    * unnecessary Ink full-screen redraws (visible flicker on tab switch).
    *
-   * Arbitration: while a desktop connection holds a sizing claim, resizes from
-   * small viewports (mobile/tablet) are ignored entirely — shrink AND grow
-   * would both reflow the desktop view. Without a desktop connected, small
-   * viewports control the PTY size freely.
+   * Arbitration: while a desktop connection holds a sizing claim AND has been
+   * active within DESKTOP_CLAIM_IDLE_MS, resizes from small viewports
+   * (mobile/tablet) are ignored — shrink AND grow would both reflow the
+   * desktop view. Once the desktop goes idle, a phone may take the pane (the
+   * desktop re-asserts its size on its next typed input via
+   * noteDesktopActivity). Without a desktop connected, small viewports
+   * control the PTY size freely.
    *
    * @param cols - Number of columns (width in characters)
    * @param rows - Number of rows (height in lines)
    */
   resize(cols: number, rows: number, options: { viewportType?: ResizeViewportType } = {}): void {
     const isSmallViewport = options.viewportType === 'mobile' || options.viewportType === 'tablet';
+    if (options.viewportType === 'desktop') {
+      this._lastDesktopDims = { cols, rows };
+      this._lastDesktopActivityAt = Date.now();
+      this._mobileSizeOverride = false;
+    }
     if (isSmallViewport && this._desktopSizeClaims.size > 0) {
-      return;
+      if (Date.now() - this._lastDesktopActivityAt < Session.DESKTOP_CLAIM_IDLE_MS) {
+        return;
+      }
+      this._mobileSizeOverride = true;
     }
     if (this.ptyProcess && (cols !== this._ptyCols || rows !== this._ptyRows)) {
       this._ptyCols = cols;
