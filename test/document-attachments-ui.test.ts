@@ -140,7 +140,7 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('_pollFilePreview');
     expect(panelsJs).toContain('mtimeMs');
     // Polling is torn down when the preview closes (no leaked interval).
-    const closeStart = panelsJs.indexOf('closeFilePreview()');
+    const closeStart = panelsJs.indexOf('closeFilePreview() {');
     const closeBody = panelsJs.slice(closeStart, closeStart + 400);
     expect(closeBody).toContain('_stopFilePreviewPolling');
   });

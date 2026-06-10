@@ -20,7 +20,7 @@ describe('Codex tab resize behavior', () => {
     const start = source.indexOf('Load terminal buffer for this session');
     const snapshotRestore = source.indexOf('xterm snapshot restore', start);
     const cacheRestore = source.indexOf('Instant cache restore', start);
-    const settleDelay = source.indexOf('setTimeout(resolve, 400)', start);
+    const settleDelay = source.indexOf('setTimeout(resolve, TUI_REDRAW_SETTLE_MS)', start);
 
     expect(start).toBeGreaterThan(-1);
     expect(snapshotRestore).toBeGreaterThan(start);
@@ -79,7 +79,7 @@ describe('Codex tab resize behavior', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
     const declaration = source.indexOf('let restoredSnapshot = false;', selectStart);
-    const snapshotBranch = source.indexOf("if (snapshot && !sessionIsBusy && session?.mode === 'codex')", selectStart);
+    const snapshotBranch = source.indexOf("if (snapshot && !sessionIsBusy && session?.mode !== 'shell')", selectStart);
     const rewriteDecision = source.indexOf(
       'restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer',
       selectStart

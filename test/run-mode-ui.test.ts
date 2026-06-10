@@ -154,9 +154,14 @@ describe('case selector refresh', () => {
         requests.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined });
         if (url === '/api/cases/deleted-case')
           return { json: async () => ({ success: true, data: { name: 'deleted-case' } }) };
-        if (url === '/api/settings') return { ok: true, json: async () => ({ lastUsedCase: 'deleted-case' }) };
-        if (url === '/api/cases') return { json: async () => [{ name: 'kept-case', path: '/tmp/kept-case' }] };
-        if (url === '/api/cases/kept-case') return { json: async () => ({ path: '/tmp/kept-case' }) };
+        // The server's preSerialization hook wraps bare payloads as { success, data },
+        // so the frontend reads `.data` off every JSON response — mirror that here.
+        if (url === '/api/settings')
+          return { ok: true, json: async () => ({ success: true, data: { lastUsedCase: 'deleted-case' } }) };
+        if (url === '/api/cases')
+          return { json: async () => ({ success: true, data: [{ name: 'kept-case', path: '/tmp/kept-case' }] }) };
+        if (url === '/api/cases/kept-case')
+          return { json: async () => ({ success: true, data: { path: '/tmp/kept-case' } }) };
         if (url === '/api/settings' && init?.method === 'PUT') return { json: async () => ({ success: true }) };
         throw new Error(`unexpected fetch: ${url}`);
       },

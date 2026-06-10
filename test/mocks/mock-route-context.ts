@@ -78,6 +78,7 @@ export function createMockRouteContext(options?: { sessionId?: string }) {
     getModelConfig: vi.fn(async () => null),
     getClaudeModeConfig: vi.fn(async () => ({})),
     getTerminalHistoryConfig: vi.fn(async () => resolveTerminalHistoryConfig()),
+    getTruecolorEnabled: vi.fn(async () => false),
     getDefaultClaudeMdPath: vi.fn(async () => undefined),
     getLightState: vi.fn(() => ({ sessions: [], status: 'ok' })),
     getLightSessionsState: vi.fn(() => {

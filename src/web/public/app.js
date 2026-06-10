@@ -3511,7 +3511,7 @@ class CodemanApp {
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
         const needsRewrite =
-          restoredSnapshot || clearedForBusy || sessionIsBusy || data.terminalBuffer !== cachedBuffer;
+          restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');
