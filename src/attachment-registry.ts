@@ -10,7 +10,8 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { basename, extname, isAbsolute } from 'node:path';
-import { isSensitivePath } from './web/sensitive-path.js';
+import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from './config/attachment-guard.js';
+import { validateSessionFilePath } from './web/route-helpers.js';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
 
 const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set(['png', 'pdf', 'docx', 'pptx', 'md', 'txt']);
@@ -130,9 +131,21 @@ export function attachmentRecordToEvent(record: AttachmentRecord): AttachmentReg
   };
 }
 
+/** Options for {@link registerExternalAttachment}. */
+export interface RegisterExternalAttachmentOptions {
+  /**
+   * The registering session's working directory. Required only to enforce
+   * workspace confinement when that mode is enabled
+   * (`attachmentConfineToWorkspace` / `CODEMAN_ATTACHMENT_CONFINE`); ignored in
+   * the default blocklist mode.
+   */
+  sessionWorkingDir?: string;
+}
+
 export async function registerExternalAttachment(
   sessionId: string,
-  requestedPath: string
+  requestedPath: string,
+  options: RegisterExternalAttachmentOptions = {}
 ): Promise<AttachmentRegistrationResult> {
   if (!requestedPath || !isAbsolute(requestedPath)) {
     throw new AttachmentRegistrationError('Attachment path must be an absolute local path');
@@ -145,11 +158,26 @@ export async function registerExternalAttachment(
     throw new AttachmentRegistrationError('Attachment file not found', 404);
   }
 
-  // COD-53: block sensitive host files up front (symlinks already resolved
-  // above). Cross-workspace attachment stays allowed — this is a blocklist,
-  // not workspace confinement — so codeman-publish and the ~/.codeman review
-  // loop keep working.
-  if (isSensitivePath(resolvedPath)) {
+  // COD-53: enforce the active attachment-guard policy on the symlink-resolved
+  // path before doing anything else.
+  const guard = await loadAttachmentGuardConfig();
+
+  if (guard.confineToWorkspace) {
+    // Strict mode (opt-in, default OFF): the file MUST resolve inside the
+    // session's workspace. Strictly more restrictive than the blocklist —
+    // breaks cross-workspace attachment, which is why it is off by default.
+    const workingDir = options.sessionWorkingDir;
+    if (!workingDir || !validateSessionFilePath(workingDir, resolvedPath)) {
+      throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+    }
+  }
+
+  // Blocklist (DEFAULT, also applied alongside confinement as defense in
+  // depth): pre-populated secret locations + the /root and /etc trees + any
+  // operator-configured extra trees. Symlinks are already resolved above.
+  // Cross-workspace attachment of non-blocked files stays allowed, so
+  // codeman-publish and the ~/.codeman review loop keep working.
+  if (isBlockedAttachmentPath(resolvedPath, guard.blockedTrees)) {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
 

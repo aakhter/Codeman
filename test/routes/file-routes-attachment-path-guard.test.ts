@@ -72,6 +72,9 @@ describe('file-routes attachment path guard (COD-53)', () => {
   afterEach(async () => {
     await harness.app.close();
     attachmentRegistry.clearSession(harness.ctx._sessionId);
+    // Reset attachment-guard env knobs so one test can't leak into the next.
+    delete process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS;
+    delete process.env.CODEMAN_ATTACHMENT_CONFINE;
   });
 
   // ===== BLOCK: registration rejects a sensitive path =====
@@ -192,5 +195,130 @@ describe('file-routes attachment path guard (COD-53)', () => {
 
     expect(rawRes.statusCode).toBe(200);
     expect(rawRes.headers['content-type']).toBe('text/markdown');
+  });
+
+  // ===== BLOCK (broadened defaults): /root and /etc trees =====
+
+  it('rejects registering a file anywhere under /root by default', async () => {
+    // /root is the root account home — blocked as a whole tree by default,
+    // even for an ordinary-looking note with a supported extension.
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: '/root/secret-notes.md' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+  });
+
+  it('rejects registering a file anywhere under /etc by default', async () => {
+    // The whole /etc tree is blocked by default (not just /etc/shadow).
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: '/etc/codeman/config-dump.txt' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+  });
+
+  it('does not block a lookalike sibling dir like /etcetera (separator-aware)', async () => {
+    // The /etc tree block must be path-separator-aware so an unrelated
+    // /etcetera/... path is NOT caught by accident.
+    mockedStat.mockResolvedValue({ size: 10, isFile: () => true, mtimeMs: 5 } as never);
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: '/etcetera/notes.md' },
+    });
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  // ===== CONFIG: extend the blocked set via env =====
+
+  it('rejects a path added via the extra-blocked-paths config', async () => {
+    process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS = '/srv/secrets,/data/private';
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: '/srv/secrets/keys.pdf' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+  });
+
+  it('still allows a normal path NOT in the configured blocked set', async () => {
+    process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS = '/srv/secrets,/data/private';
+    mockedStat.mockResolvedValue({ size: 20, isFile: () => true, mtimeMs: 5 } as never);
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: '/srv/public/report.pdf' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.fileName).toBe('report.pdf');
+  });
+
+  // ===== CONFINEMENT MODE ON (opt-in) =====
+
+  it('confinement ON: rejects a file OUTSIDE the session workspace', async () => {
+    process.env.CODEMAN_ATTACHMENT_CONFINE = '1';
+    // Mock session workspace is /tmp/test-workdir; this file resolves elsewhere.
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: '/home/someone/elsewhere/report.pdf' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+  });
+
+  it('confinement ON: allows a file INSIDE the session workspace', async () => {
+    process.env.CODEMAN_ATTACHMENT_CONFINE = '1';
+    // Mock session workspace is /tmp/test-workdir (see MockSession).
+    const insidePath = '/tmp/test-workdir/docs/report.pdf';
+    mockedRealpathSync.mockReturnValue(insidePath as never);
+    mockedStat.mockResolvedValue({ size: 30, isFile: () => true, mtimeMs: 5 } as never);
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: insidePath },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.fileName).toBe('report.pdf');
+  });
+
+  // ===== CONFINEMENT OFF (default) regression: legit cross-workspace attach =====
+
+  it('confinement OFF (default): legit cross-workspace attach still succeeds', async () => {
+    // No CODEMAN_ATTACHMENT_CONFINE set → default OFF. A ~/.codeman review-card
+    // file lives OUTSIDE the /tmp/test-workdir session workspace and must still
+    // attach (protects codeman-publish + the loop's review-card channel).
+    mockedStat.mockResolvedValue({ size: 64, isFile: () => true, mtimeMs: 5 } as never);
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      payload: { path: `${homedir()}/.codeman/jira-autoloop-questions.md` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.fileName).toBe('jira-autoloop-questions.md');
   });
 });

@@ -38,6 +38,7 @@ import {
 import { wordDiff } from '../../utils/word-diff.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
 import { isSensitivePath } from '../sensitive-path.js';
+import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
 import { SseEvent } from '../sse-events.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
 
@@ -180,21 +181,36 @@ function getAttachmentOr404(
 
 /**
  * COD-53 defense-in-depth: refuse to stream a record whose underlying path is
- * on the sensitive-file blocklist, even though registration already blocks
- * them. Guards against records that predate the guard or were crafted to point
- * at a sensitive file. Resolves symlinks before the check so a record pointing
- * at a symlink that now resolves to a sensitive target is also caught; if the
- * path can't be resolved (deleted/unreadable) the raw check still rejects on
- * the stored path. Returns true and sends a 403 when blocked.
+ * blocked by the active attachment-guard policy, even though registration
+ * already blocks them. Guards against records that predate the guard or were
+ * crafted to point at a sensitive file. Resolves symlinks before the check so a
+ * record pointing at a symlink that now resolves to a sensitive target is also
+ * caught; if the path can't be resolved (deleted/unreadable) the check still
+ * runs on the stored path. Uses the broadened blocklist (secret locations +
+ * `/root`/`/etc` trees + operator extras); when workspace confinement is
+ * enabled it additionally rejects any record outside the session workspace.
+ * Returns true and sends a 403 when blocked.
  */
-function rejectIfSensitiveRecord(reply: FastifyReply, record: AttachmentRecord): boolean {
+async function rejectIfSensitiveRecord(
+  reply: FastifyReply,
+  record: AttachmentRecord,
+  sessionWorkingDir?: string
+): Promise<boolean> {
   let pathToCheck = record.filePath;
   try {
     pathToCheck = realpathSync(record.filePath);
   } catch {
     // Fall back to the stored (already realpath-resolved at registration) path.
   }
-  if (isSensitivePath(pathToCheck) || isSensitivePath(record.filePath)) {
+
+  const guard = await loadAttachmentGuardConfig();
+
+  const blocked =
+    isBlockedAttachmentPath(pathToCheck, guard.blockedTrees) ||
+    isBlockedAttachmentPath(record.filePath, guard.blockedTrees) ||
+    (guard.confineToWorkspace && (!sessionWorkingDir || !validateSessionFilePath(sessionWorkingDir, pathToCheck)));
+
+  if (blocked) {
     reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
     return true;
   }
@@ -305,7 +321,8 @@ async function buildDetectedAttachmentRouteItem(
 
 async function buildExternalAttachmentRouteItem(
   sessionId: string,
-  item: SessionAttachmentHistoryItem
+  item: SessionAttachmentHistoryItem,
+  sessionWorkingDir?: string
 ): Promise<AttachmentHistoryRouteItem> {
   const safe = sanitizeAttachmentHistoryItem(item);
   if (!item.externalPath) {
@@ -313,7 +330,7 @@ async function buildExternalAttachmentRouteItem(
   }
 
   try {
-    const event = await registerExternalAttachment(sessionId, item.externalPath);
+    const event = await registerExternalAttachment(sessionId, item.externalPath, { sessionWorkingDir });
     return {
       ...safe,
       fileName: event.fileName,
@@ -658,7 +675,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
 
     try {
-      const event = await registerExternalAttachment(id, body.path);
+      const event = await registerExternalAttachment(id, body.path, { sessionWorkingDir: session.workingDir });
       const record = attachmentRegistry.get(id, event.attachmentId);
       if (record) {
         session.upsertAttachmentHistory(
@@ -700,7 +717,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const items = await Promise.all(
       sessionHistory.history.map((item) =>
         item.source === 'external'
-          ? buildExternalAttachmentRouteItem(id, item)
+          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.workingDir)
           : buildDetectedAttachmentRouteItem(id, sessionHistory.workingDir, item)
       )
     );
@@ -720,7 +737,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (rejectIfSensitiveRecord(reply, record)) return;
+    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
     const event = attachmentRecordToEvent(record);
     // Re-stat so the live preview poller sees current size/mtime as the agent
     // rewrites the underlying file (COD-58). Fall back to the cached record on error.
@@ -759,7 +776,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (rejectIfSensitiveRecord(reply, record)) return;
+    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
 
     try {
       await serveRawFile(reply, record.filePath, record.fileName, record.extension, download === 'true');
@@ -776,7 +793,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (rejectIfSensitiveRecord(reply, record)) return;
+    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
 
     // Only Office formats need server-side conversion; PDF/PNG and text formats
     // (md/txt) preview directly from their raw bytes.
@@ -794,7 +811,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (rejectIfSensitiveRecord(reply, record)) return;
+    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
     await serveThumbnail(reply, record.filePath, record.extension);
   });
 
@@ -1108,7 +1125,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
     const { resolvedPath } = validated;
 
-    // Check sensitive path blocklist
+    // Check sensitive path blocklist. NOTE (COD-53): this deliberately uses the
+    // base `isSensitivePath` blocklist, NOT the broadened attachment blocklist
+    // (which adds the /root + /etc trees). /api/download is already confined to
+    // the session workspace by validateSessionFilePath above, so the broadened
+    // trees are unnecessary here and changing this would alter download
+    // behavior. See cod-53-security-review.md "Configuration".
     if (isSensitivePath(resolvedPath)) {
       reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
       return;
