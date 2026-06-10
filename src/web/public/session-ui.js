@@ -763,11 +763,14 @@ Object.assign(CodemanApp.prototype, {
     // back to the deterministic codeman-<first8> derivation only if unavailable.
     const _muxEl = document.getElementById('modalMuxName');
     const _muxIdEl = document.getElementById('modalMuxSessionId');
+    const _muxCmdEl = document.getElementById('modalMuxAttachCmd');
     if (_muxEl) {
       const cached = (this.muxSessions || []).find(m => m && m.sessionId === sessionId);
       const muxName = (session.muxName || cached?.muxName || `codeman-${String(sessionId).slice(0, 8)}`);
       _muxEl.textContent = muxName;
       _muxEl.title = muxName;
+      // Spell out the full attach command with the real session name (copy-pasteable).
+      if (_muxCmdEl) _muxCmdEl.textContent = `tmux attach -t ${muxName}`;
     }
     if (_muxIdEl) {
       _muxIdEl.textContent = sessionId;
