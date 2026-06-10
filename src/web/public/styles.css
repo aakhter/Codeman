@@ -7867,6 +7867,101 @@ kbd {
   white-space: inherit;
 }
 
+/* COD-62 — outline sidebar + reading view + word count.
+   The layout makes #filePreviewBody the single scroll container: the prose grows
+   naturally (no nested scroller) so scrollIntoView + the IntersectionObserver
+   (root = #filePreviewBody) behave correctly. */
+.document-preview-layout {
+  display: flex;
+  align-items: flex-start;
+  min-height: 100%;
+}
+
+.document-preview-layout > .document-preview-markdown {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  overflow: visible;
+}
+
+/* Outline sidebar: hidden by default, revealed when the layout is .outline-open. */
+.document-outline {
+  display: none;
+  position: sticky;
+  top: 0;
+  flex: 0 0 220px;
+  align-self: stretch;
+  max-height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 14px 10px 14px 16px;
+  border-right: 1px solid var(--border, #2a2a2a);
+  background: var(--bg-secondary, #161616);
+  font-size: 12px;
+}
+
+.document-preview-layout.outline-open > .document-outline {
+  display: block;
+}
+
+.document-outline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.document-outline-item {
+  margin: 0;
+}
+
+.document-outline-l2 .document-outline-link {
+  padding-left: 14px;
+}
+.document-outline-l3 .document-outline-link {
+  padding-left: 26px;
+}
+.document-outline-l4 .document-outline-link {
+  padding-left: 38px;
+}
+.document-outline-l5 .document-outline-link {
+  padding-left: 50px;
+}
+.document-outline-l6 .document-outline-link {
+  padding-left: 62px;
+}
+
+.document-outline-link {
+  display: block;
+  padding: 4px 6px;
+  border-radius: 4px;
+  color: var(--text-secondary, #9aa0a6);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-outline-link:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text, #ddd);
+}
+
+.document-outline-link.active {
+  color: var(--accent, #4a9eff);
+  background: var(--bg-hover, rgba(74, 158, 255, 0.12));
+  font-weight: 600;
+}
+
+/* Reading view: constrain to a comfortable measure and center it. Applies to both
+   the markdown prose and the plain-text <pre>. */
+.document-preview-markdown.reading-view,
+.document-preview-text.reading-view {
+  max-width: 72ch;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.75;
+}
+
 /* Revision-review (diff) view — COD-59. */
 .document-preview-actions {
   display: flex;

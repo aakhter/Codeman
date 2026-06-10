@@ -2880,19 +2880,57 @@ Object.assign(CodemanApp.prototype, {
       if (!textRes.ok) throw new Error('Failed to load file');
       const text = await textRes.text();
       this.filePreviewContent = text;
+      // Reset any prior outline scroll-spy before re-rendering (no observer leaks).
+      this._teardownOutlineScrollSpy();
+      // Restore persisted client-only view prefs (COD-62).
+      this.readingViewActive = this._readPreviewPref('codeman.preview.readingView');
+      const outlineOpenPref = this._readPreviewPref('codeman.preview.outlineOpen');
+      let outlineBtn = '';
+      let prose;
       if (data.type === 'markdown') {
-        bodyEl.innerHTML = `<div class="document-preview-markdown rv-text">${this._renderMarkdown(text)}</div>`;
-        this._bindResponseViewerInteractions?.(bodyEl.querySelector('.document-preview-markdown'));
+        // Render prose first, then build the outline from the SANITIZED DOM and
+        // wrap both in a flex layout so the outline sidebar sits beside the prose.
+        const proseHtml = `<div class="document-preview-markdown rv-text${
+          this.readingViewActive ? ' reading-view' : ''
+        }">${this._renderMarkdown(text)}</div>`;
+        bodyEl.innerHTML = proseHtml;
+        prose = bodyEl.querySelector('.document-preview-markdown');
+        const nav = this._buildDocumentOutline(prose);
+        const layout = document.createElement('div');
+        layout.className = 'document-preview-layout';
+        if (nav && outlineOpenPref) layout.classList.add('outline-open');
+        if (nav) layout.appendChild(nav);
+        layout.appendChild(prose);
+        bodyEl.innerHTML = '';
+        bodyEl.appendChild(layout);
+        this._bindResponseViewerInteractions?.(prose);
+        if (nav) {
+          this._setupOutlineScrollSpy(nav, prose);
+          outlineBtn = ` <button class="btn-icon-sm document-outline-btn${
+            outlineOpenPref ? ' active' : ''
+          }" onclick="app.toggleDocumentOutline()">Outline</button>`;
+        }
       } else {
-        bodyEl.innerHTML = `<pre class="document-preview-text"><code>${escapeHtml(text)}</code></pre>`;
+        bodyEl.innerHTML = `<pre class="document-preview-text${
+          this.readingViewActive ? ' reading-view' : ''
+        }"><code>${escapeHtml(text)}</code></pre>`;
+        prose = bodyEl.querySelector('.document-preview-text');
       }
+      // Reading-view toggle (constrained measure) for both markdown and text.
+      const readingBtn = ` <button class="btn-icon-sm document-reading-btn${
+        this.readingViewActive ? ' active' : ''
+      }" onclick="app.toggleReadingView()">Reading view</button>`;
+      // Word count + reading time from the rendered prose textContent (COD-62).
+      const meta = this._formatReadingMeta(this._countWords(prose?.textContent || ''));
       // Revision-history affordance for versioned (attached) documents (COD-59).
       const changes = attachmentId
         ? ` <button class="btn-icon-sm document-changes-btn" onclick="app.showDocumentDiff()">Changes</button>`
         : '';
       // Annotate a selected passage and send it back to the session (COD-60).
       const comment = ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`;
-      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type}`)}${changes}${comment}`;
+      footerEl.innerHTML = `${escapeHtml(
+        `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type} \u2022 ${meta}`
+      )}${outlineBtn}${readingBtn}${changes}${comment}`;
     } else if (data.type === 'binary') {
       bodyEl.innerHTML = `
         <div class="binary-message">
@@ -3324,6 +3362,7 @@ Object.assign(CodemanApp.prototype, {
 
   closeFilePreview() {
     this._stopFilePreviewPolling();
+    this._teardownOutlineScrollSpy();
     this._closeAnnotationPopover();
     this._closeAnnotationTray();
     const overlay = this.$('filePreviewOverlay');
@@ -3341,6 +3380,152 @@ Object.assign(CodemanApp.prototype, {
         this.showToast('Failed to copy', 'error');
       });
     }
+  },
+
+  // ───────────────────────── Document preview: outline / reading view / word count (COD-62) ─────────
+
+  /** Collapse whitespace and count words, dropping empties. Pure. */
+  _countWords(text) {
+    if (!text) return 0;
+    return text
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0).length;
+  },
+
+  /** Format the footer reading meta: "1,234 words · ~6 min read" (200 wpm, min 1 min). Pure. */
+  _formatReadingMeta(words) {
+    const minutes = Math.max(1, Math.round(words / 200));
+    return `${words.toLocaleString()} words · ~${minutes} min read`;
+  },
+
+  /** Slugify heading text into a DOM id; dedupe via the provided used-id set. */
+  _slugifyHeading(text, used) {
+    let base =
+      String(text || '')
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '') || 'section';
+    let id = base;
+    let i = 1;
+    while (used.has(id)) id = `${base}-${i++}`;
+    used.add(id);
+    return id;
+  },
+
+  /**
+   * Build a nested outline <nav> from the already-rendered+sanitized prose container.
+   * Assigns stable ids to headings that lack one. Returns null when fewer than 2 headings.
+   * Heading text is read via textContent only (never innerHTML).
+   */
+  _buildDocumentOutline(prose) {
+    if (!prose) return null;
+    const headings = [...prose.querySelectorAll('h1,h2,h3,h4,h5,h6')];
+    if (headings.length < 2) return null;
+    const used = new Set();
+    // Seed with existing ids so generated ones never collide.
+    headings.forEach((h) => {
+      if (h.id) used.add(h.id);
+    });
+    const nav = document.createElement('nav');
+    nav.className = 'document-outline';
+    nav.id = 'documentOutline';
+    const list = document.createElement('ul');
+    list.className = 'document-outline-list';
+    headings.forEach((h) => {
+      if (!h.id) h.id = this._slugifyHeading(h.textContent, used);
+      const level = Number(h.tagName.slice(1)) || 1;
+      const li = document.createElement('li');
+      li.className = `document-outline-item document-outline-l${level}`;
+      const a = document.createElement('a');
+      a.className = 'document-outline-link';
+      a.href = `#${h.id}`;
+      a.dataset.outlineTarget = h.id;
+      a.textContent = h.textContent || '';
+      li.appendChild(a);
+      list.appendChild(li);
+    });
+    nav.appendChild(list);
+    nav.addEventListener('click', (e) => {
+      const link = e.target.closest('a[data-outline-target]');
+      if (!link) return;
+      e.preventDefault();
+      const target = prose.querySelector(`#${CSS.escape(link.dataset.outlineTarget)}`);
+      if (target) target.scrollIntoView({ block: 'start' });
+    });
+    return nav;
+  },
+
+  /** (Re)create the scroll-spy IntersectionObserver tying headings to nav entries. */
+  _setupOutlineScrollSpy(nav, prose) {
+    this._teardownOutlineScrollSpy();
+    const scroller = this.$('filePreviewBody');
+    if (!nav || !prose || !scroller || typeof IntersectionObserver === 'undefined') return;
+    const headings = [...prose.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter((h) => h.id);
+    const linkFor = (id) => nav.querySelector(`a[data-outline-target="${CSS.escape(id)}"]`);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((en) => en.isIntersecting);
+        if (!visible) return;
+        nav.querySelectorAll('a.active').forEach((a) => a.classList.remove('active'));
+        const link = linkFor(visible.target.id);
+        if (link) link.classList.add('active');
+      },
+      { root: scroller, rootMargin: '0px 0px -70% 0px', threshold: 0 }
+    );
+    headings.forEach((h) => observer.observe(h));
+    this._documentOutlineObserver = observer;
+  },
+
+  _teardownOutlineScrollSpy() {
+    if (this._documentOutlineObserver) {
+      this._documentOutlineObserver.disconnect();
+      this._documentOutlineObserver = null;
+    }
+  },
+
+  _readPreviewPref(key) {
+    try {
+      return localStorage.getItem(key) === '1';
+    } catch {
+      return false;
+    }
+  },
+
+  _writePreviewPref(key, on) {
+    try {
+      localStorage.setItem(key, on ? '1' : '0');
+    } catch {
+      /* jsdom / private mode */
+    }
+  },
+
+  /** Toggle the outline sidebar open/closed and persist the preference. */
+  toggleDocumentOutline() {
+    const layout = this.$('filePreviewBody')?.querySelector('.document-preview-layout');
+    const nav = this.$('documentOutline');
+    if (!layout || !nav) return;
+    const open = !layout.classList.contains('outline-open');
+    layout.classList.toggle('outline-open', open);
+    const btn = this.$('filePreviewFooter')?.querySelector('.document-outline-btn');
+    if (btn) btn.classList.toggle('active', open);
+    this._writePreviewPref('codeman.preview.outlineOpen', open);
+  },
+
+  /** Toggle reading-view (constrained measure) on the prose container and persist it. */
+  toggleReadingView() {
+    const overlay = this.$('filePreviewOverlay');
+    const prose = overlay?.querySelector('.document-preview-markdown, .document-preview-text');
+    if (!prose) return;
+    const on = !this.readingViewActive;
+    this.readingViewActive = on;
+    prose.classList.toggle('reading-view', on);
+    const btn = this.$('filePreviewFooter')?.querySelector('.document-reading-btn');
+    if (btn) btn.classList.toggle('active', on);
+    this._writePreviewPref('codeman.preview.readingView', on);
   },
 
   getFileIcon(ext) {
