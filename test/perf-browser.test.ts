@@ -69,7 +69,7 @@ async function createSession(page: Page, name: string): Promise<string> {
       body: JSON.stringify({ workingDir: '/tmp', name: n }),
     });
     const data = await res.json();
-    return data.id ?? data.session?.id;
+    return data.data?.session?.id ?? data.id ?? data.session?.id;
   }, name);
   return result as string;
 }
