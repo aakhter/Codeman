@@ -55,6 +55,47 @@ function readCodemanEnv(): Record<string, string> {
   }
 }
 
+/** Minimal shape of a `/api/mux-sessions` row used by the `mux` command. */
+interface MuxRow {
+  sessionId: string;
+  muxName: string;
+  name?: string;
+  mode?: string;
+  attached?: boolean;
+  pid?: number;
+}
+
+/**
+ * Render the tmux <-> Codeman session mapping as an aligned text table.
+ *
+ * Pure helper (no IO) so it can be unit-tested in isolation. Columns:
+ * Display name | tmux session (muxName) | sessionId | mode | status.
+ */
+export function formatMuxTable(rows: MuxRow[]): string {
+  if (!rows || rows.length === 0) {
+    return 'No tmux/Codeman sessions found on the running instance.';
+  }
+
+  const headers = ['Display name', 'tmux session', 'sessionId', 'mode', 'status'];
+  const cells = rows.map((r) => [
+    r.name || '(unnamed)',
+    r.muxName || '',
+    r.sessionId || '',
+    r.mode || '',
+    r.attached ? 'attached' : 'detached',
+  ]);
+
+  const widths = headers.map((h, i) => Math.max(h.length, ...cells.map((row) => row[i].length)));
+  const renderRow = (vals: string[]): string =>
+    vals
+      .map((v, i) => v.padEnd(widths[i]))
+      .join('  ')
+      .trimEnd();
+  const separator = widths.map((w) => '-'.repeat(w)).join('  ');
+
+  return [renderRow(headers), separator, ...cells.map(renderRow)].join('\n');
+}
+
 async function postAttachment(apiUrl: string, sessionId: string, filePath: string): Promise<boolean> {
   const envFile = readCodemanEnv();
   const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
@@ -228,6 +269,85 @@ program
     }
 
     console.log(makeAttachmentMagicLink(filePath));
+  });
+
+/**
+ * GET /api/mux-sessions from a running instance, mirroring the attach
+ * command's transport (rejectUnauthorized: false, optional Basic auth from
+ * the local .codeman/.env so localhost works without explicit creds).
+ * Resolves the `data.sessions` array, or rejects on connection/non-200 errors.
+ */
+async function fetchMuxSessions(apiUrl: string): Promise<MuxRow[]> {
+  const envFile = readCodemanEnv();
+  const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
+  const password = process.env.CODEMAN_PASSWORD || envFile.CODEMAN_PASSWORD;
+  const url = new URL('/api/mux-sessions', apiUrl);
+  const transport = url.protocol === 'https:' ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (password) {
+      headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+    }
+
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        method: 'GET',
+        path: `${url.pathname}${url.search}`,
+        rejectUnauthorized: false,
+        headers,
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`HTTP ${res.statusCode ?? '???'}${body ? `: ${body.slice(0, 200)}` : ''}`));
+            return;
+          }
+          try {
+            const parsed = JSON.parse(body) as { data?: { sessions?: MuxRow[] }; sessions?: MuxRow[] };
+            // Response is the { success, data } envelope; data is { sessions, muxAvailable }.
+            const sessions = parsed?.data?.sessions ?? parsed?.sessions ?? [];
+            resolve(Array.isArray(sessions) ? sessions : []);
+          } catch (err) {
+            reject(new Error(`Invalid JSON response: ${getErrorMessage(err)}`));
+          }
+        });
+      }
+    );
+    req.on('error', (err) => reject(err));
+    req.end();
+  });
+}
+
+program
+  .command('mux')
+  .alias('mux-sessions')
+  .description('List the tmux↔Codeman session mapping from the running instance')
+  .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
+  .option('--json', 'Output the raw mux-sessions array as JSON')
+  .action(async (options) => {
+    const apiUrl = options.url || process.env.CODEMAN_API_URL || 'https://127.0.0.1:3000';
+    let rows: MuxRow[];
+    try {
+      rows = await fetchMuxSessions(apiUrl);
+    } catch (err) {
+      console.error(chalk.red(`✗ Failed to reach Codeman at ${apiUrl}: ${getErrorMessage(err)}`));
+      console.error(chalk.gray('  Is the Codeman web server running? Try --url to point at the right instance.'));
+      process.exit(1);
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(rows, null, 2));
+      return;
+    }
+
+    console.log(formatMuxTable(rows));
   });
 
 // ============ Task Commands ============

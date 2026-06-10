@@ -757,6 +757,22 @@ Object.assign(CodemanApp.prototype, {
       s.classList.toggle('selected', s.dataset.color === currentColor);
     });
 
+    // Show the tmux session name for this tab (COD-70) so the user can map a
+    // Codeman tab -> its tmux session. Prefer the real muxName from the cached
+    // /api/mux-sessions list (handles legacy claudeman-/restored- names); fall
+    // back to the deterministic codeman-<first8> derivation only if unavailable.
+    const _muxEl = document.getElementById('modalMuxName');
+    const _muxIdEl = document.getElementById('modalMuxSessionId');
+    if (_muxEl) {
+      const cached = (this.muxSessions || []).find(m => m && m.sessionId === sessionId);
+      const muxName = (session.muxName || cached?.muxName || `codeman-${String(sessionId).slice(0, 8)}`);
+      _muxEl.textContent = muxName;
+      _muxEl.title = muxName;
+    }
+    if (_muxIdEl) {
+      _muxIdEl.textContent = sessionId;
+    }
+
     // Initialize respawn preset dropdown
     this.renderPresetDropdown();
     document.getElementById('respawnPresetSelect').value = '';
