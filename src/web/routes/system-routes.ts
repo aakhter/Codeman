@@ -47,6 +47,7 @@ import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
 import { AUTH_SESSION_TTL_MS } from '../../config/auth-config.js';
 import { resolveTerminalHistoryConfig } from '../../config/terminal-history.js';
+import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
 
 // Maximum screenshot upload size (10MB)
 const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024;
@@ -561,6 +562,26 @@ export function registerSystemRoutes(
 
   app.put('/api/settings', async (req) => {
     const settings = parseBody(SettingsUpdateSchema, req.body, 'Invalid settings') as Record<string, unknown>;
+
+    // COD-55: enabling the Cloudflare tunnel publishes the whole app (full terminal
+    // control = effectively RCE) to a public *.trycloudflare.com URL. Because the
+    // tunnel binds to loopback, server.ts's non-loopback bind guard never trips, and
+    // with no CODEMAN_PASSWORD the auth middleware is inactive — so the tunnel URL is
+    // unauthenticated. Refuse to start a tunnel unless auth is configured OR the
+    // operator has acknowledged unauthenticated-network exposure. A public tunnel is
+    // higher-stakes than a LAN bind, so this is REFUSE (vs the bind guard's warn).
+    // Guard runs BEFORE persisting so a refused tunnelEnabled:true is not saved.
+    if (settings.tunnelEnabled === true && !ctx.tunnelManager.isRunning() && !isUnauthenticatedNetworkAcknowledged()) {
+      const msg =
+        'Refusing to start the Cloudflare tunnel without authentication: it would publish ' +
+        'full terminal control to a public URL with no password. Set CODEMAN_PASSWORD to ' +
+        'require login, or set CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1 to acknowledge an ' +
+        'unauthenticated public tunnel.';
+      throw Object.assign(new Error(msg), {
+        statusCode: 403,
+        body: createErrorResponse(ApiErrorCode.OPERATION_FAILED, msg),
+      });
+    }
 
     try {
       const dir = dirname(SETTINGS_PATH);

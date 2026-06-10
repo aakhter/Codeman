@@ -845,11 +845,18 @@ Object.assign(CodemanApp.prototype, {
     btn.disabled = true;
     try {
       const newEnabled = !isActive;
-      await fetch('/api/settings', {
+      const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tunnelEnabled: newEnabled }),
       });
+      // COD-55: server refuses an unauthenticated public tunnel (403). Surface it.
+      if (newEnabled && (await this._handleTunnelEnableRefusal(res))) {
+        this._dismissTunnelConnecting();
+        this._updateWelcomeTunnelBtn(false);
+        btn.disabled = false;
+        return;
+      }
       if (newEnabled) {
         this._showTunnelConnecting();
         // Poll tunnel status as fallback in case SSE event is missed
@@ -1147,13 +1154,40 @@ Object.assign(CodemanApp.prototype, {
     return `${Math.floor(hrs / 24)}d ago`;
   },
 
+  /**
+   * COD-55: detect the server's refusal to start an unauthenticated public tunnel.
+   * The PUT /api/settings route returns a 4xx with { success:false, error } when no
+   * CODEMAN_PASSWORD is set and the unauthenticated-network opt-in is not acknowledged.
+   * Shows the server's (actionable) message as an error toast.
+   * @param {Response|null} res - the fetch Response from the settings PUT
+   * @returns {Promise<boolean>} true if the tunnel-enable was refused (caller should abort)
+   */
+  async _handleTunnelEnableRefusal(res) {
+    if (!res || res.ok) return false;
+    let message = 'Tunnel refused: set CODEMAN_PASSWORD before exposing Codeman publicly.';
+    try {
+      const body = await res.json();
+      if (body && body.error) message = body.error;
+    } catch {
+      /* non-JSON body — use the default message */
+    }
+    this._dismissTunnelConnecting?.();
+    this.showToast(message, 'error');
+    return true;
+  },
+
   async _tunnelPanelToggle(enable) {
     try {
-      await fetch('/api/settings', {
+      const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tunnelEnabled: enable }),
       });
+      // COD-55: server refuses an unauthenticated public tunnel (403). Surface it.
+      if (enable && (await this._handleTunnelEnableRefusal(res))) {
+        this.closeTunnelPanel();
+        return;
+      }
       if (enable) {
         this._updateTunnelIndicator(false);
         const indicator = document.getElementById('tunnelIndicator');
@@ -1476,7 +1510,24 @@ Object.assign(CodemanApp.prototype, {
     // Strip device-specific keys — localEchoEnabled/cjkInputEnabled are per-platform
     const { localEchoEnabled: _leo, cjkInputEnabled: _cjk, extendedKeyboardBar: _ekb, ...serverSettings } = settings;
     try {
-      await this._apiPut('/api/settings', { ...serverSettings, notificationPreferences: notifPrefsToSave, voiceSettings });
+      const res = await this._apiPut('/api/settings', {
+        ...serverSettings,
+        notificationPreferences: notifPrefsToSave,
+        voiceSettings,
+      });
+
+      // COD-55: the server refuses an unauthenticated public tunnel with a 403 — which
+      // rejects the WHOLE settings PUT. Surface the message and revert the tunnel toggle
+      // (in the UI + localStorage) so it doesn't look enabled. Other settings persisted
+      // to localStorage above still apply locally.
+      if (settings.tunnelEnabled && (await this._handleTunnelEnableRefusal(res))) {
+        settings.tunnelEnabled = false;
+        this.saveAppSettingsToStorage(settings);
+        const cb = document.getElementById('appSettingsTunnelEnabled');
+        if (cb) cb.checked = false;
+        this.closeAppSettings();
+        return;
+      }
 
       // Save model configuration separately
       await this.saveModelConfigFromSettings();

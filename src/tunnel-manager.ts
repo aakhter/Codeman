@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { isUnauthenticatedNetworkAcknowledged } from './web/network-auth-policy.js';
 import {
   QR_TOKEN_TTL_MS,
   QR_TOKEN_GRACE_MS,
@@ -134,6 +135,20 @@ export class TunnelManager extends EventEmitter {
   start(localPort: number, https: boolean): void {
     if (this.process) {
       return; // Already running
+    }
+
+    // COD-55 defense-in-depth: a tunnel publishes the app to a public URL. Refuse to
+    // spawn cloudflared unless authentication is configured (CODEMAN_PASSWORD) or
+    // unauthenticated-network exposure is explicitly acknowledged. The PUT /api/settings
+    // route guards this too (with a 403 the UI surfaces); this is a second line of
+    // defense for any other caller (incl. the auto-restart path). See network-auth-policy.
+    if (!isUnauthenticatedNetworkAcknowledged()) {
+      this.emit(
+        'error',
+        'Refusing to start the tunnel without authentication. Set CODEMAN_PASSWORD, or ' +
+          'CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1 to acknowledge an unauthenticated public tunnel.'
+      );
+      return;
     }
 
     // Cancel any pending restart — we're starting fresh
