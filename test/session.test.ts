@@ -37,9 +37,9 @@ describe('Interactive Session Lifecycle', () => {
       const data = await response.json();
 
       expect(data.success).toBe(true);
-      expect(data.session.id).toBeDefined();
-      expect(data.session.workingDir).toBeDefined();
-      expect(data.session.status).toBe('idle');
+      expect(data.data.session.id).toBeDefined();
+      expect(data.data.session.workingDir).toBeDefined();
+      expect(data.data.session.status).toBe('idle');
     });
 
     it('should create session with custom working directory', async () => {
@@ -52,7 +52,7 @@ describe('Interactive Session Lifecycle', () => {
       const data = await response.json();
 
       expect(data.success).toBe(true);
-      expect(data.session.workingDir).toBe(testWorkingDir);
+      expect(data.data.session.workingDir).toBe(testWorkingDir);
     });
   });
 
@@ -65,14 +65,14 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       // Get the session
       const response = await fetch(`${baseUrl}/api/sessions/${sessionId}`);
       const data = await response.json();
 
-      expect(data.id).toBe(sessionId);
-      expect(data.status).toBeDefined();
+      expect(data.data.id).toBe(sessionId);
+      expect(data.data.status).toBeDefined();
     });
 
     it('should return error for non-existent session', async () => {
@@ -92,7 +92,7 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       // Delete the session
       const response = await fetch(`${baseUrl}/api/sessions/${sessionId}`, {
@@ -128,7 +128,7 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       // Get output
       const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/output`);
@@ -150,14 +150,14 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       // Get terminal buffer
       const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/terminal`);
       const data = await response.json();
 
-      expect(data).toHaveProperty('terminalBuffer');
-      expect(data).toHaveProperty('status');
+      expect(data.data).toHaveProperty('terminalBuffer');
+      expect(data.data).toHaveProperty('status');
     });
   });
 
@@ -170,7 +170,7 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       // Start interactive mode
       const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/interactive`, {
@@ -200,7 +200,7 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       await fetch(`${baseUrl}/api/sessions/${sessionId}/interactive`, {
         method: 'POST',
@@ -230,7 +230,7 @@ describe('Interactive Session Lifecycle', () => {
         body: JSON.stringify({}),
       });
       const createData = await createRes.json();
-      const sessionId = createData.session.id;
+      const sessionId = createData.data.session.id;
 
       await fetch(`${baseUrl}/api/sessions/${sessionId}/interactive`, {
         method: 'POST',

@@ -242,6 +242,21 @@ export function resolveTmuxPaneTarget(muxName: string, paneTarget?: string): str
   return `${muxName}.${paneTarget}`;
 }
 
+/**
+ * Pick the active pane id from `tmux list-panes -F '#{pane_id}:#{pane_active}'`
+ * output (lines like `%0:1`). Returns the pane id whose active flag is 1.
+ */
+export function resolveActivePaneTarget(output: string): string | null {
+  for (const line of output.split('\n')) {
+    const sep = line.indexOf(':');
+    if (sep === -1) continue;
+    const paneId = line.slice(0, sep).trim();
+    const active = line.slice(sep + 1).trim();
+    if (paneId && active === '1') return paneId;
+  }
+  return null;
+}
+
 type GraphemeSegmenter = {
   segment(input: string): Iterable<{ segment: string }>;
 };
@@ -1160,8 +1175,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // (Production uses systemd which has a clean env, but dev/test may be nested.)
       const cleanEnv = { ...process.env };
       delete cleanEnv.TMUX;
-      // Start the tmux server from a stable local cwd so FUSE/rclone workspace
-      // blips do not poison tmux's long-lived getcwd state.
+      // Create the session on the dedicated socket (${this.tmux()} = `tmux -L <socket>`),
+      // launched in TMUX_LAUNCH_CWD (/tmp) rather than the real workingDir: a FUSE/rclone
+      // mount that isn't ready yet makes `getcwd` fail and breaks the spawn (see #110). The
+      // pane cd's into workingDir below via respawn-pane.
       execSync(`${this.tmux()} new-session -ds "${muxName}" -c ${TMUX_LAUNCH_CWD}`, {
         cwd: TMUX_LAUNCH_CWD,
         timeout: EXEC_TIMEOUT_MS,
@@ -1435,6 +1452,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
   private sessionExists(muxName: string): boolean {
     if (IS_TEST_MODE) return false;
+    if (!isValidMuxName(muxName)) return false;
 
     try {
       execSync(`${this.tmux()} has-session -t "${muxName}" 2>/dev/null`, {
@@ -1575,13 +1593,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       }
     }
 
-    // Strategy 3: Kill tmux session by name
-    try {
-      execSync(`${this.tmux()} kill-session -t "${session.muxName}" 2>/dev/null`, {
-        timeout: EXEC_TIMEOUT_MS,
-      });
-    } catch {
-      // Session may already be dead
+    // Strategy 3: Kill tmux session by name (guard the name before it reaches the shell)
+    if (isValidMuxName(session.muxName)) {
+      try {
+        execSync(`${this.tmux()} kill-session -t "${session.muxName}" 2>/dev/null`, {
+          timeout: EXEC_TIMEOUT_MS,
+        });
+      } catch {
+        // Session may already be dead
+      }
     }
 
     // Strategy 4: Direct kill by PID as final fallback
@@ -1696,6 +1716,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     for (const [sessionName, pid] of active) {
       if (!sessionName.startsWith('codeman-') && !sessionName.startsWith('claudeman-')) continue;
+      // Only admit names that pass the safe-name pattern. A foreign process on the
+      // shared `tmux -L codeman` socket could create a `codeman-…` session whose name
+      // contains shell metacharacters; rejecting it here keeps it out of this.sessions
+      // and away from the name-interpolating tmux call sites (M1).
+      if (!isValidMuxName(sessionName)) {
+        console.warn(`[TmuxManager] Skipping discovered tmux session with unsafe name: ${sessionName}`);
+        continue;
+      }
       if (knownMuxNames.has(sessionName)) continue;
 
       const fragment = sessionName.replace(/^(?:codeman|claudeman)-/, '');
@@ -2254,6 +2282,32 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   }
 
   /**
+   * Capture the active pane for a tmux session.
+   *
+   * Pane ids are not stable across respawns or restores, so callers should not
+   * assume the first pane remains `%0`.
+   */
+  captureActivePaneBuffer(muxName: string): string | null {
+    if (IS_TEST_MODE) return '';
+    if (!isValidMuxName(muxName)) {
+      console.error('[TmuxManager] Invalid session name in captureActivePaneBuffer:', muxName);
+      return null;
+    }
+
+    try {
+      const output = execSync(`${this.tmux()} list-panes -t ${shellescape(muxName)} -F '#{pane_id}:#{pane_active}'`, {
+        encoding: 'utf-8',
+        timeout: EXEC_TIMEOUT_MS,
+      }).trim();
+      const target = resolveActivePaneTarget(output);
+      return target ? this.capturePaneBuffer(muxName, target) : null;
+    } catch (err) {
+      console.error('[TmuxManager] Failed to resolve active pane for capture:', err);
+      return null;
+    }
+  }
+
+  /**
    * Start piping pane output to a file using tmux pipe-pane.
    * Only pipes output direction (-O) to avoid echoing input.
    */
@@ -2340,16 +2394,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return false;
     }
 
-    try {
-      execSync(`${this.tmux()} resize-window -t ${shellescape(muxName)} -x ${cols} -y ${rows}`, {
-        timeout: EXEC_TIMEOUT_MS,
-        stdio: 'ignore',
-      });
-      return true;
-    } catch (err) {
-      console.error('[TmuxManager] Failed to resize tmux window:', err);
-      return false;
-    }
+    // Fire-and-forget: this runs on the interactive resize path (WS {t:'z'} and
+    // HTTP /resize), so use a non-blocking exec — a slow/hung tmux must not stall
+    // the Fastify event loop while other sessions' input/SSE are served. The sole
+    // caller (Session.resize) ignores the result, and under `window-size manual`
+    // the subsequent ptyProcess.resize is subordinate to this authoritative size.
+    exec(
+      `${this.tmux()} resize-window -t ${shellescape(muxName)} -x ${cols} -y ${rows}`,
+      { timeout: EXEC_TIMEOUT_MS },
+      (err) => {
+        if (err) console.error('[TmuxManager] Failed to resize tmux window:', err);
+      }
+    );
+    return true;
   }
 
   isAvailable(): boolean {

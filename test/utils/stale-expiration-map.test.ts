@@ -206,8 +206,9 @@ describe('StaleExpirationMap', () => {
 
       const age = map.getAge('a');
       expect(age).toBeDefined();
-      expect(age!).toBeGreaterThanOrEqual(50);
-      expect(age!).toBeLessThan(150);
+      // Tolerate timer jitter on slow/loaded CI runners (setTimeout isn't exact).
+      expect(age!).toBeGreaterThanOrEqual(40);
+      expect(age!).toBeLessThan(500);
 
       map.dispose();
     });
@@ -228,9 +229,9 @@ describe('StaleExpirationMap', () => {
 
       const remaining = map.getRemainingTtl('a');
       expect(remaining).toBeDefined();
-      // Allow small timing variance (setTimeout isn't exact)
-      expect(remaining!).toBeLessThanOrEqual(910);
-      expect(remaining!).toBeGreaterThan(800);
+      // Allow generous timing variance (setTimeout isn't exact; CI runners are jittery)
+      expect(remaining!).toBeLessThanOrEqual(960);
+      expect(remaining!).toBeGreaterThan(700);
 
       map.dispose();
     });

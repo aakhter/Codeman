@@ -11,13 +11,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolve } from 'node:path';
 import {
   TmuxManager,
-  buildCodexCommand,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
+  resolveActivePaneTarget,
   resolveTmuxPaneTarget,
 } from '../src/tmux-manager.js';
-import { execSync } from 'node:child_process';
+import { execSync, exec } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 
 // ============================================================================
@@ -74,6 +74,7 @@ vi.mock('node:fs/promises', async () => {
 describe('TmuxManager (unit)', () => {
   let manager: TmuxManager;
   const mockedExecSync = vi.mocked(execSync);
+  const mockedExec = vi.mocked(exec);
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -141,26 +142,16 @@ describe('TmuxManager (unit)', () => {
     it('resizes the tmux window when Codeman accepts a desktop resize', () => {
       expect(manager.resizeWindow('codeman-abc12345', 140, 42)).toBe(true);
 
-      expect(mockedExecSync).toHaveBeenCalledWith(
+      // Non-blocking exec (not execSync) on the interactive resize hot path.
+      expect(mockedExec).toHaveBeenCalledWith(
         "tmux -L 'codeman' resize-window -t 'codeman-abc12345' -x 140 -y 42",
-        expect.objectContaining({ stdio: 'ignore' })
+        expect.objectContaining({ timeout: expect.any(Number) }),
+        expect.any(Function)
       );
     });
   });
 
   describe('environment exports', () => {
-    it('advertises truecolor for Codex sessions', () => {
-      const exports = (
-        manager as unknown as {
-          buildEnvExports(sessionId: string, muxName: string, mode: string): string[];
-        }
-      ).buildEnvExports('session-1', 'codeman-abc12345', 'codex');
-
-      expect(exports).toContain('export COLORTERM=truecolor');
-      expect(exports).toContain('unset NO_COLOR');
-      expect(exports).not.toContain('unset COLORTERM');
-    });
-
     it('keeps COLORTERM unset for OpenCode sessions', () => {
       const exports = (
         manager as unknown as {
@@ -169,62 +160,6 @@ describe('TmuxManager (unit)', () => {
       ).buildEnvExports('session-1', 'codeman-abc12345', 'opencode');
 
       expect(exports).toContain('unset COLORTERM');
-    });
-  });
-
-  describe('Codex command', () => {
-    it('launches the native Codex TUI by default', () => {
-      const command = buildCodexCommand({ dangerouslyBypassApprovals: true });
-
-      expect(command).toMatch(/^codex\b/);
-      expect(command).not.toContain('--no-alt-screen');
-      expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
-      expect(command).not.toContain('tui.animations=false');
-    });
-
-    it('ignores the explicit hybrid render mode because it is the only Codex renderer', () => {
-      const command = buildCodexCommand({ renderMode: 'hybrid', dangerouslyBypassApprovals: true });
-
-      expect(command).toMatch(/^codex\b/);
-      expect(command).not.toContain('--no-alt-screen');
-      expect(command).toContain('--dangerously-bypass-approvals-and-sandbox');
-    });
-
-    it('sets Codex env vars on the dedicated Codeman tmux socket', () => {
-      const originalCodexHome = process.env.CODEX_HOME;
-      process.env.CODEX_HOME = '/tmp/codex-home';
-
-      try {
-        (
-          manager as unknown as {
-            _configureCodex(muxName: string): void;
-          }
-        )._configureCodex('codeman-abc12345');
-
-        expect(mockedExecSync).toHaveBeenCalledWith(
-          "tmux -L 'codeman' setenv -t 'codeman-abc12345' CODEX_HOME '/tmp/codex-home'",
-          expect.objectContaining({ timeout: expect.any(Number) })
-        );
-        expect(
-          mockedExecSync.mock.calls.some(([cmd]) => typeof cmd === 'string' && cmd.startsWith('tmux setenv'))
-        ).toBe(false);
-      } finally {
-        if (originalCodexHome === undefined) {
-          delete process.env.CODEX_HOME;
-        } else {
-          process.env.CODEX_HOME = originalCodexHome;
-        }
-      }
-    });
-  });
-
-  describe('tmux history limit', () => {
-    it('defaults new mux sessions to 100000 lines of history', async () => {
-      const { readFileSync: readActualFileSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
-      const source = readActualFileSync(resolve(import.meta.dirname, '../src/tmux-manager.ts'), 'utf8');
-
-      expect(source).toContain('history-limit ${historyLimit}');
-      expect(source).toContain('DEFAULT_TMUX_HISTORY_LIMIT');
     });
   });
 
@@ -309,6 +244,12 @@ describe('TmuxManager (unit)', () => {
     it('rejects invalid session and pane targets', () => {
       expect(resolveTmuxPaneTarget('codeman-not-hex', '0')).toBeNull();
       expect(resolveTmuxPaneTarget('codeman-abc12345', 'pane-0')).toBeNull();
+    });
+  });
+
+  describe('resolveActivePaneTarget', () => {
+    it('selects the active pane instead of assuming pane zero', () => {
+      expect(resolveActivePaneTarget('%1:0\n%18:1\n')).toBe('%18');
     });
   });
 

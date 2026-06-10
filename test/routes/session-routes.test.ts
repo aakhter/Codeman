@@ -3,10 +3,22 @@
  *
  * Uses app.inject() (Fastify's built-in test helper) — no real HTTP ports needed.
  * Port: N/A (app.inject doesn't open ports)
+ *
+ * These tests assert the UNIFORM response envelope (stable HTTP contract):
+ *   success -> 2xx, { success: true, data: <payload> }
+ *   error   -> 4xx/5xx, { success: false, error, errorCode }
+ * The production server applies this via a preSerialization hook (server.ts).
+ * The shared route harness doesn't install it, so we build a local harness here
+ * that mirrors production: the same preSerialization envelope hook + the shared
+ * route error handler, so assertions match the real wire format.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
+import Fastify, { type FastifyInstance } from 'fastify';
+import fastifyCookie from '@fastify/cookie';
+import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
+import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
+import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
@@ -17,11 +29,55 @@ vi.mock('node:child_process', async (orig) => {
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 
+interface LocalHarness {
+  app: FastifyInstance;
+  ctx: MockRouteContext;
+}
+
+/**
+ * Build a Fastify instance that mirrors production's uniform-envelope behavior
+ * (server.ts preSerialization hook) so the test wire format matches the contract:
+ * bare payloads become { success: true, data }, and { success:false } error
+ * envelopes get the conventional HTTP status from their errorCode.
+ */
+async function createEnvelopeHarness(
+  registerFn: (app: FastifyInstance, ctx: MockRouteContext) => void
+): Promise<LocalHarness> {
+  const app = Fastify({ logger: false });
+  await app.register(fastifyCookie);
+
+  const ctx = createMockRouteContext();
+  registerFn(app, ctx);
+
+  // Mirror production uniform response envelope (server.ts).
+  app.addHook('preSerialization', (req, reply, payload: unknown, done) => {
+    if (!req.url.startsWith('/api')) return done(null, payload);
+    if (payload === null || typeof payload !== 'object') return done(null, payload);
+    if (Buffer.isBuffer(payload) || typeof (payload as { pipe?: unknown }).pipe === 'function') {
+      return done(null, payload);
+    }
+    const p = payload as { success?: unknown; errorCode?: unknown };
+    if (p.success === false) {
+      if (reply.statusCode === 200 && typeof p.errorCode === 'string') {
+        reply.code(httpStatusForErrorCode(p.errorCode as ApiErrorCode));
+      }
+      return done(null, payload);
+    }
+    if (p.success === true) return done(null, payload);
+    return done(null, { success: true, data: payload });
+  });
+
+  installRouteErrorHandler(app);
+  await app.ready();
+
+  return { app, ctx };
+}
+
 describe('session-routes', () => {
-  let harness: RouteTestHarness;
+  let harness: LocalHarness;
 
   beforeEach(async () => {
-    harness = await createRouteTestHarness(registerSessionRoutes);
+    harness = await createEnvelopeHarness(registerSessionRoutes);
   });
 
   afterEach(async () => {
@@ -73,15 +129,15 @@ describe('session-routes', () => {
       const res = await harness.app.inject({ method: 'GET', url: '/api/sessions' });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(Array.isArray(body)).toBe(true);
-      expect(body).toHaveLength(1);
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.data).toHaveLength(1);
     });
 
     it('returns empty array when no sessions', async () => {
       harness.ctx.sessions.clear();
       const res = await harness.app.inject({ method: 'GET', url: '/api/sessions' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual([]);
+      expect(JSON.parse(res.body).data).toEqual([]);
     });
   });
 
@@ -95,7 +151,7 @@ describe('session-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.id).toBe(harness.ctx._sessionId);
+      expect(body.data.id).toBe(harness.ctx._sessionId);
     });
 
     it('returns error for unknown session', async () => {
@@ -121,7 +177,7 @@ describe('session-routes', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toMatchObject({ success: true, name: 'Custom restart-safe name' });
+      expect(JSON.parse(res.body)).toMatchObject({ success: true, data: { name: 'Custom restart-safe name' } });
       expect(harness.ctx._session.name).toBe('Custom restart-safe name');
       expect(harness.ctx.mux.updateSessionName).toHaveBeenCalledWith(
         harness.ctx._sessionId,
@@ -151,7 +207,7 @@ describe('session-routes', () => {
         method: 'DELETE',
         url: '/api/sessions/nonexistent',
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -185,7 +241,7 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      expect(body.name).toBe('new-name');
+      expect(body.data.name).toBe('new-name');
       expect(harness.ctx.persistSessionStateNow).toHaveBeenCalled();
       expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:updated', expect.anything());
     });
@@ -214,7 +270,7 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      expect(body.color).toBe('blue');
+      expect(body.data.color).toBe('blue');
     });
 
     it('rejects invalid color', async () => {
@@ -223,7 +279,7 @@ describe('session-routes', () => {
         url: `/api/sessions/${harness.ctx._sessionId}/color`,
         payload: { color: 'neon-rainbow' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -338,7 +394,7 @@ describe('session-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toBeDefined();
+      expect(body.data.terminalBuffer).toBeDefined();
     });
 
     it('does not strip VPA-like shell scrollback as Ink redraw bloat', async () => {
@@ -357,8 +413,8 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain('SHELL_SCROLLBACK_000001');
-      expect(body.terminalBuffer).toContain('SHELL_SCROLLBACK_003000');
+      expect(body.data.terminalBuffer).toContain('SHELL_SCROLLBACK_000001');
+      expect(body.data.terminalBuffer).toContain('SHELL_SCROLLBACK_003000');
     });
 
     it('preserves accumulated history before the live mux pane snapshot for Codex TUI replay', async () => {
@@ -375,11 +431,11 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain('hello world');
-      expect(body.terminalBuffer).toContain('later accumulated history');
-      expect(body.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
-      expect(body.terminalBuffer.indexOf('hello world')).toBeLessThan(
-        body.terminalBuffer.indexOf('visible tmux pane only')
+      expect(body.data.terminalBuffer).toContain('hello world');
+      expect(body.data.terminalBuffer).toContain('later accumulated history');
+      expect(body.data.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
+      expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
+        body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
@@ -399,11 +455,11 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain('hello world');
-      expect(body.terminalBuffer).toContain('later accumulated history');
-      expect(body.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
-      expect(body.terminalBuffer.indexOf('hello world')).toBeLessThan(
-        body.terminalBuffer.indexOf('visible tmux pane only')
+      expect(body.data.terminalBuffer).toContain('hello world');
+      expect(body.data.terminalBuffer).toContain('later accumulated history');
+      expect(body.data.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
+      expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
+        body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
@@ -427,9 +483,9 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain(authUrl);
-      expect(body.terminalBuffer).toContain('visible tmux pane only');
-      expect(body.terminalBuffer.indexOf(authUrl)).toBeLessThan(body.terminalBuffer.indexOf('visible tmux pane only'));
+      expect(body.data.terminalBuffer).toContain(authUrl);
+      expect(body.data.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.data.terminalBuffer.indexOf(authUrl)).toBeLessThan(body.data.terminalBuffer.indexOf('visible tmux pane only'));
     });
 
     it('preserves incidental OAuth URL mentions as ordinary Codex TUI history', async () => {
@@ -452,8 +508,8 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain(authUrl);
-      expect(body.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.data.terminalBuffer).toContain(authUrl);
+      expect(body.data.terminalBuffer).toContain('visible tmux pane only');
     });
 
     it('preserves accumulated history before a live mux pane snapshot for non-Codex sessions', async () => {
@@ -470,12 +526,12 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain('hello world');
-      expect(body.terminalBuffer).toContain('later accumulated history');
-      expect(body.terminalBuffer).toContain('visible tmux pane only');
-      expect(body.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
-      expect(body.terminalBuffer.indexOf('hello world')).toBeLessThan(
-        body.terminalBuffer.indexOf('visible tmux pane only')
+      expect(body.data.terminalBuffer).toContain('hello world');
+      expect(body.data.terminalBuffer).toContain('later accumulated history');
+      expect(body.data.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.data.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
+      expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
+        body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
@@ -494,8 +550,8 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.terminalBuffer).toContain('visible restored tmux pane');
-      expect(body.terminalBuffer).toContain('› current prompt');
+      expect(body.data.terminalBuffer).toContain('visible restored tmux pane');
+      expect(body.data.terminalBuffer).toContain('› current prompt');
       expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
@@ -553,7 +609,7 @@ describe('session-routes', () => {
         url: `/api/sessions/${harness.ctx._sessionId}/run`,
         payload: { prompt: 'test' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(409);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -589,7 +645,7 @@ describe('session-routes', () => {
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(409);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -615,7 +671,7 @@ describe('session-routes', () => {
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/shell`,
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(409);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
@@ -704,8 +760,8 @@ describe('session-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body).toHaveProperty('sessions');
-      expect(Array.isArray(body.sessions)).toBe(true);
+      expect(body.data).toHaveProperty('sessions');
+      expect(Array.isArray(body.data.sessions)).toBe(true);
     });
 
     it('does not expose local Claude history while running in test mode', async () => {
@@ -715,7 +771,8 @@ describe('session-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body).toEqual({ sessions: [], total: 0 });
+      expect(body.success).toBe(true);
+      expect(body.data).toEqual({ sessions: [], total: 0 });
     });
 
     it('sessions have required fields', async () => {
@@ -724,7 +781,7 @@ describe('session-routes', () => {
         url: '/api/history/sessions',
       });
       const body = JSON.parse(res.body);
-      for (const session of body.sessions) {
+      for (const session of body.data.sessions) {
         expect(session).toHaveProperty('sessionId');
         expect(session).toHaveProperty('workingDir');
         expect(session).toHaveProperty('projectKey');
@@ -741,7 +798,7 @@ describe('session-routes', () => {
         url: '/api/history/sessions',
       });
       const body = JSON.parse(res.body);
-      const dates = body.sessions.map((s: { lastModified: string }) => new Date(s.lastModified).getTime());
+      const dates = body.data.sessions.map((s: { lastModified: string }) => new Date(s.lastModified).getTime());
       for (let i = 1; i < dates.length; i++) {
         expect(dates[i - 1]).toBeGreaterThanOrEqual(dates[i]);
       }
@@ -753,7 +810,7 @@ describe('session-routes', () => {
         url: '/api/history/sessions',
       });
       const body = JSON.parse(res.body);
-      expect(body.sessions.length).toBeLessThanOrEqual(50);
+      expect(body.data.sessions.length).toBeLessThanOrEqual(50);
     });
   });
 
@@ -774,7 +831,7 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      expect(body.session).toBeDefined();
+      expect(body.data.session).toBeDefined();
     });
 
     it('rejects invalid resumeSessionId format', async () => {

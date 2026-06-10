@@ -211,7 +211,7 @@ describe('Hook Event API', () => {
       body: JSON.stringify({}),
     });
     const createData = await createRes.json();
-    testSessionId = createData.session.id;
+    testSessionId = createData.data.session.id;
   });
 
   afterAll(async () => {
@@ -393,7 +393,7 @@ describe('Hook Data Sanitization', () => {
       body: JSON.stringify({}),
     });
     const createData = await createRes.json();
-    testSessionId = createData.session.id;
+    testSessionId = createData.data.session.id;
   });
 
   afterAll(async () => {

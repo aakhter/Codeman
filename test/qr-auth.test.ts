@@ -628,9 +628,9 @@ describe('QR SVG Endpoint (GET /api/tunnel/qr)', () => {
       });
       expect(res.status).toBe(200);
       const data = await res.json();
-      expect(data.authEnabled).toBe(true);
-      expect(data.svg).toContain('<svg');
-      expect(data.svg).toContain('</svg>');
+      expect(data.data.authEnabled).toBe(true);
+      expect(data.data.svg).toContain('<svg');
+      expect(data.data.svg).toContain('</svg>');
     } finally {
       tm.stopTokenRotation();
       simulateTunnelStopped(tm);
@@ -650,9 +650,9 @@ describe('QR SVG Endpoint (GET /api/tunnel/qr)', () => {
       });
       expect(res.status).toBe(200);
       const data = await res.json();
-      expect(data.authEnabled).toBe(false);
-      expect(data.svg).toContain('<svg');
-      expect(data.svg).toContain('</svg>');
+      expect(data.data.authEnabled).toBe(false);
+      expect(data.data.svg).toContain('<svg');
+      expect(data.data.svg).toContain('</svg>');
     } finally {
       process.env.CODEMAN_PASSWORD = savedPass;
       simulateTunnelStopped(tm);
@@ -706,8 +706,8 @@ describe('QR SVG Endpoint (GET /api/tunnel/qr)', () => {
       });
       expect(res.status).toBe(200);
       const data = await res.json();
-      expect(data.svg).toContain('<svg');
-      expect(data.authEnabled).toBe(false);
+      expect(data.data.svg).toContain('<svg');
+      expect(data.data.authEnabled).toBe(false);
     } finally {
       process.env.CODEMAN_PASSWORD = savedPass;
       simulateTunnelStopped(tm);
@@ -729,7 +729,7 @@ describe('QR SVG Endpoint (GET /api/tunnel/qr)', () => {
       });
       const data2 = await res2.json();
 
-      expect(data1.svg).toBe(data2.svg);
+      expect(data1.data.svg).toBe(data2.data.svg);
     } finally {
       tm.stopTokenRotation();
       simulateTunnelStopped(tm);
@@ -753,7 +753,7 @@ describe('QR SVG Endpoint (GET /api/tunnel/qr)', () => {
       });
       const data2 = await res2.json();
 
-      expect(data1.svg).not.toBe(data2.svg);
+      expect(data1.data.svg).not.toBe(data2.data.svg);
     } finally {
       tm.stopTokenRotation();
       simulateTunnelStopped(tm);

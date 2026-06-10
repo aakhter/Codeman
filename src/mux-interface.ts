@@ -227,4 +227,7 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /** Capture a pane's current tmux buffer with ANSI escape codes preserved. */
   capturePaneBuffer?(muxName: string, paneTarget?: string): string | null;
+
+  /** Capture the active pane's current tmux buffer with ANSI escape codes preserved. */
+  captureActivePaneBuffer?(muxName: string): string | null;
 }

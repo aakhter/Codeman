@@ -666,7 +666,7 @@ class CodemanApp {
     // Fetch tunnel status for header indicator (desktop only)
     this.loadTunnelStatus();
     // Share a single settings fetch between both consumers
-    const settingsPromise = fetch('/api/settings').then(r => r.ok ? r.json() : null).catch(() => null);
+    const settingsPromise = fetch('/api/settings').then(r => r.ok ? r.json() : null).then(env => env?.data ?? null).catch(() => null);
     this.loadQuickStartCases(null, settingsPromise);
     this._initRunMode();
     this.setupEventListeners();
@@ -766,6 +766,22 @@ class CodemanApp {
     if (!this._webglLongTaskObserver) return;
     try { this._webglLongTaskObserver.disconnect(); } catch {}
     this._webglLongTaskObserver = null;
+  }
+
+  /**
+   * Repaint the full terminal viewport after a renderer swap (WebGL → canvas/DOM).
+   * Scheduled on the next frame so it lands after the addon teardown settles, and
+   * debounced so the context-loss and long-task fallback paths can't double-fire.
+   * No-ops safely if the terminal isn't ready.
+   */
+  _scheduleTerminalRepaint() {
+    if (this._terminalRepaintScheduled) return;
+    this._terminalRepaintScheduled = true;
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(cb, 0);
+    raf(() => {
+      this._terminalRepaintScheduled = false;
+      try { this.terminal?.refresh(0, this.terminal.rows - 1); } catch {}
+    });
   }
 
   _disableWebGLSticky(reason) {
@@ -1638,13 +1654,13 @@ class CodemanApp {
     try {
       // Source 1: Transcript JSONL (best quality — clean structured text from Claude)
       const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response`);
-      const data = await res.json();
+      const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
 
       // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
       if (!lastResponse) {
         const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
-        const termData = await termRes.json();
+        const termData = (await termRes.json())?.data ?? {};
         if (termData.terminalBuffer) {
           lastResponse = this._cleanTerminalBuffer(termData.terminalBuffer);
         }
@@ -1674,7 +1690,7 @@ class CodemanApp {
     if (moreBtn) moreBtn.textContent = '...';
     try {
       const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response?context=full`);
-      const data = await res.json();
+      const data = (await res.json())?.data ?? {};
       const messages = data.messages || [];
       const body = document.getElementById('responseViewerBody');
       const title = document.getElementById('responseViewerTitle');
@@ -1725,7 +1741,7 @@ class CodemanApp {
     if (this._isLoadingBuffer) return;
     try {
       const res = await fetch(`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
-      const data = await res.json();
+      const data = (await res.json())?.data ?? {};
       if (data.terminalBuffer) {
         this.terminal.clear();
         this.terminal.reset();
@@ -1755,7 +1771,7 @@ class CodemanApp {
       // Fetch buffer, clear terminal, write buffer, resize (no Ctrl+L needed)
       try {
         const res = await fetch(`/api/sessions/${data.id}/terminal`);
-        const termData = await res.json();
+        const termData = (await res.json())?.data ?? {};
 
         this.terminal.clear();
         this.terminal.reset();
@@ -2515,7 +2531,7 @@ class CodemanApp {
     try {
       const res = await fetch('/api/status');
       const data = await res.json();
-      this.handleInit(data);
+      this.handleInit(data?.data ?? {});
     } catch (err) {
       console.error('Failed to load state:', err);
     }
@@ -2542,7 +2558,7 @@ class CodemanApp {
 
   renderSessionTabs() {
     // Don't re-render while user is typing in the inline rename input
-    if (this._activeRename) return;
+    if (this._inlineRenameActive) return;
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
   }
 
@@ -2780,7 +2796,7 @@ class CodemanApp {
   }
 
   _fullRenderSessionTabs() {
-    if (this._activeRename) return;
+    if (this._inlineRenameActive) return;
     const container = this.$('sessionTabs');
 
     // Clean up any orphaned dropdowns before re-rendering
@@ -3379,7 +3395,7 @@ class CodemanApp {
       // a small region with empty rows below the status bar.
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
-      await this.sendResize(sessionId, { forceHttp: true }).catch(() => {});
+      const dimsChanged = await this.sendResize(sessionId, { forceHttp: true }).catch(() => false);
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
@@ -3447,7 +3463,10 @@ class CodemanApp {
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');
         this._resetTerminalForReplay();
         await this.chunkedTerminalWrite(cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
-        if (this._isStaleSelect(selectGen)) return;
+        if (this._isStaleSelect(selectGen)) {
+          this._clearTerminalLoadState(sessionId, selectGen);
+          return;
+        }
         this.terminal.scrollToBottom();
         _crashDiag.log('CACHE_DONE');
       } else if (sessionIsBusy) {
@@ -3458,12 +3477,12 @@ class CodemanApp {
       }
 
       // Give TUI sessions a short chance to redraw after resize before the
-      // fresh buffer fetch captures the live mux pane. Snapshot restore still
-      // falls through this path, but it has already provided an immediate first
-      // paint so the wait is not a blank-screen delay. Shell sessions do not
-      // need this delay, so terminal content can appear immediately there.
-      if (session?.mode !== 'shell') {
-        await new Promise((resolve) => setTimeout(resolve, 400));
+      // fresh buffer fetch. Only needed when the resize actually changed
+      // dimensions (a real SIGWINCH → Ink redraw); a same-size tab switch sent
+      // no resize, so waiting would just add latency. Shell sessions never need
+      // it, so terminal content can appear immediately when switching shells.
+      if (session?.mode !== 'shell' && dimsChanged) {
+        await new Promise((resolve) => setTimeout(resolve, TUI_REDRAW_SETTLE_MS));
         if (this._isStaleSelect(selectGen)) {
           this._clearTerminalLoadState(sessionId, selectGen);
           return;
@@ -3481,14 +3500,15 @@ class CodemanApp {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
       }
-      const data = await res.json();
+      const data = (await res.json())?.data ?? {};
       _crashDiag.log(`FETCH_DONE: ${data.terminalBuffer ? (data.terminalBuffer.length/1024).toFixed(0) + 'KB' : 'empty'} truncated=${data.truncated}`);
 
       if (data.terminalBuffer) {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
-        const needsRewrite = restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
+        const needsRewrite =
+          restoredSnapshot || clearedForBusy || sessionIsBusy || data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');
@@ -3499,7 +3519,10 @@ class CodemanApp {
           }
           // Use chunked write for large buffers to avoid UI jank
           await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
-          if (this._isStaleSelect(selectGen)) return;
+          if (this._isStaleSelect(selectGen)) {
+            this._clearTerminalLoadState(sessionId, selectGen);
+            return;
+          }
           // Ensure terminal is scrolled to bottom after buffer load
           this.terminal.scrollToBottom();
         }

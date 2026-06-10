@@ -72,7 +72,7 @@ describe('mux-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
+      expect(body.killed).toBe(true);
       expect(harness.ctx.mux.killSession).toHaveBeenCalledWith('codeman-abc');
     });
 
@@ -85,7 +85,7 @@ describe('mux-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(false);
+      expect(body.killed).toBe(false);
     });
   });
 
@@ -117,7 +117,7 @@ describe('mux-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
+      expect(body).toEqual({});
       expect(harness.ctx.mux.startStatsCollection).toHaveBeenCalled();
     });
   });
@@ -132,7 +132,7 @@ describe('mux-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
+      expect(body).toEqual({});
       expect(harness.ctx.mux.stopStatsCollection).toHaveBeenCalled();
     });
   });

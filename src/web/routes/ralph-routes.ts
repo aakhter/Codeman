@@ -111,7 +111,7 @@ export function registerRalphRoutes(
       state: session.ralphLoopState,
     });
 
-    return { success: true };
+    return {};
   });
 
   // Reset circuit breaker for Ralph tracker
@@ -120,7 +120,7 @@ export function registerRalphRoutes(
     const session = findSessionOrFail(ctx, id);
 
     session.ralphTracker.resetCircuitBreaker();
-    return { success: true };
+    return {};
   });
 
   // Get Ralph status block and circuit breaker state

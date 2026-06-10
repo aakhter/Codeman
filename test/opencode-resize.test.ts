@@ -109,7 +109,7 @@ describe('OpenCode session initial resize', () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-resize-test' }),
       });
       const data = await res.json();
-      return data.id ?? data.session?.id;
+      return data.data?.session?.id ?? data.id ?? data.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -154,7 +154,7 @@ describe('OpenCode session initial resize', () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-earlyret-test' }),
       });
       const data = await res.json();
-      return data.id ?? data.session?.id;
+      return data.data?.session?.id ?? data.id ?? data.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -205,7 +205,7 @@ describe('OpenCode session initial resize', () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-refresh-test' }),
       });
       const data = await res.json();
-      return data.id ?? data.session?.id;
+      return data.data?.session?.id ?? data.id ?? data.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -274,7 +274,7 @@ describe('OpenCode close modal text', () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-close-test' }),
       });
       const data = await res.json();
-      return data.id ?? data.session?.id;
+      return data.data?.session?.id ?? data.id ?? data.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -324,7 +324,7 @@ describe('OpenCode close modal text', () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'cc-close-test' }),
       });
       const data = await res.json();
-      return data.id ?? data.session?.id;
+      return data.data?.session?.id ?? data.id ?? data.session?.id;
     });
 
     expect(sessionId).toBeTruthy();

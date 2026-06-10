@@ -101,7 +101,6 @@ describe('COD-55 tunnel password guard (PUT /api/settings tunnelEnabled)', () =>
     });
 
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body).success).toBe(true);
     expect(tunnel.start).toHaveBeenCalledTimes(1);
   });
 
@@ -115,7 +114,6 @@ describe('COD-55 tunnel password guard (PUT /api/settings tunnelEnabled)', () =>
     });
 
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body).success).toBe(true);
     expect(tunnel.start).toHaveBeenCalledTimes(1);
   });
 

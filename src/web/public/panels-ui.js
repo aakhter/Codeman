@@ -542,7 +542,7 @@ Object.assign(CodemanApp.prototype, {
       const response = await fetch('/api/token-stats');
       const data = await response.json();
       if (data.success) {
-        this.renderTokenStats(data);
+        this.renderTokenStats(data.data);
         document.getElementById('tokenStatsModal').classList.add('active');
       } else {
         this.showToast('Failed to load token stats', 'error');
@@ -4050,7 +4050,7 @@ Object.assign(CodemanApp.prototype, {
     try {
       const res = await fetch('/api/mux-sessions');
       const data = await res.json();
-      this.muxSessions = data.sessions || [];
+      this.muxSessions = data.data?.sessions || [];
       this.renderMuxSessions();
     } catch (err) {
       console.error('Failed to load mux sessions:', err);
@@ -4278,8 +4278,8 @@ Object.assign(CodemanApp.prototype, {
       const res = await fetch('/api/mux-sessions/reconcile', { method: 'POST' });
       const data = await res.json();
 
-      if (data.dead && data.dead.length > 0) {
-        this.showToast(`Found ${data.dead.length} dead mux session(s)`, 'warning');
+      if (data.data?.dead && data.data.dead.length > 0) {
+        this.showToast(`Found ${data.data.dead.length} dead mux session(s)`, 'warning');
         await this.loadMuxSessions();
       } else {
         this.showToast('All mux sessions are alive', 'success');
@@ -4389,7 +4389,7 @@ Object.assign(CodemanApp.prototype, {
     try {
       const res = await fetch('/api/system/stats');
       const stats = await res.json();
-      this.updateSystemStatsDisplay(stats);
+      this.updateSystemStatsDisplay(stats.data);
     } catch (err) {
       // Silently fail - system stats are not critical
     }

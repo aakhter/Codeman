@@ -964,7 +964,7 @@ Object.assign(CodemanApp.prototype, {
   async _fetchHistorySessions() {
     const res = await fetch('/api/history/sessions');
     const data = await res.json();
-    const sessions = data.sessions || [];
+    const sessions = data.data?.sessions || [];
     if (sessions.length === 0) return [];
 
     const byProject = new Map();
@@ -1142,7 +1142,7 @@ Object.assign(CodemanApp.prototype, {
       // Prefer already-loaded this.cases to avoid an extra request.
       const casesPromise = Array.isArray(this.cases) && this.cases.length > 0
         ? Promise.resolve(this.cases)
-        : fetch('/api/cases').then((r) => (r.ok ? r.json() : [])).catch(() => []);
+        : fetch('/api/cases').then((r) => (r.ok ? r.json() : null)).then((d) => d?.data || []).catch(() => []);
       const [allSessions, cases] = await Promise.all([
         this._fetchHistorySessions(30),
         casesPromise,
@@ -1269,8 +1269,8 @@ Object.assign(CodemanApp.prototype, {
       const url = `/api/history/sessions?projectKey=${encodeURIComponent(projectKey)}&offset=${offset}&limit=${limit}`;
       const res = await fetch(url);
       const data = await res.json();
-      const sessions = data.sessions || [];
-      state.total = typeof data.total === 'number' ? data.total : sessions.length + offset;
+      const sessions = data.data?.sessions || [];
+      state.total = typeof data.data?.total === 'number' ? data.data.total : sessions.length + offset;
 
       if (offset === 0 && sessions.length === 0) {
         const empty = document.createElement('div');
@@ -1357,7 +1357,7 @@ Object.assign(CodemanApp.prototype, {
       const createData = await createRes.json();
       if (!createData.success) throw new Error(createData.error);
 
-      const newSessionId = createData.session.id;
+      const newSessionId = createData.data.session.id;
 
       // Start interactive
       await fetch(`/api/sessions/${newSessionId}/interactive`, { method: 'POST' });
@@ -2108,7 +2108,13 @@ Object.assign(CodemanApp.prototype, {
     // terminal size matches what we report to the server PTY.
     if (this.fitAddon) this.fitAddon.fit();
     const dims = this.getTerminalDimensions();
-    if (!dims) return;
+    if (!dims) return false;
+    // Did the dimensions actually change since the last resize we sent? Callers
+    // use this to skip work (e.g. the post-resize TUI-redraw settle) when no
+    // real SIGWINCH was triggered — switching tabs at the same browser size is
+    // a no-op on the server and needs no redraw grace.
+    const prev = this._lastResizeDims;
+    const changed = !prev || prev.cols !== dims.cols || prev.rows !== dims.rows;
     // Update _lastResizeDims so the throttledResize handler won't redundantly
     // clear the terminal for the same dimensions (which would blank the screen
     // without a subsequent Ink redraw to repaint it).
@@ -2125,7 +2131,7 @@ Object.assign(CodemanApp.prototype, {
     if (!options.forceHttp && this._wsReady && this._wsSessionId === sessionId) {
       try {
         this._ws.send(JSON.stringify({ t: 'z', c: dims.cols, r: dims.rows, v: viewportType }));
-        return;
+        return changed;
       } catch {
         // Fall through to HTTP POST
       }
@@ -2135,6 +2141,7 @@ Object.assign(CodemanApp.prototype, {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...dims, viewportType }),
     });
+    return changed;
   },
 
   /**

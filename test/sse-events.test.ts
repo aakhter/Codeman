@@ -153,12 +153,13 @@ describe('SSE Events', () => {
   describe('GET /api/status', () => {
     it('should return full state', async () => {
       const response = await fetch(`${baseUrl}/api/status`);
-      const data = await response.json();
+      const body = await response.json();
 
-      expect(data).toHaveProperty('sessions');
-      expect(data).toHaveProperty('scheduledRuns');
-      expect(data).toHaveProperty('respawnStatus');
-      expect(data).toHaveProperty('timestamp');
+      expect(body.success).toBe(true);
+      expect(body.data).toHaveProperty('sessions');
+      expect(body.data).toHaveProperty('scheduledRuns');
+      expect(body.data).toHaveProperty('respawnStatus');
+      expect(body.data).toHaveProperty('timestamp');
     });
 
     it('should include active sessions', async () => {
@@ -170,9 +171,9 @@ describe('SSE Events', () => {
       });
 
       const response = await fetch(`${baseUrl}/api/status`);
-      const data = await response.json();
+      const body = await response.json();
 
-      expect(data.sessions.length).toBeGreaterThan(0);
+      expect(body.data.sessions.length).toBeGreaterThan(0);
     });
   });
 });
@@ -224,7 +225,7 @@ describe('SSE Event Types', () => {
       const createData = await createRes.json();
 
       // Delete it
-      await fetch(`${baseUrl}/api/sessions/${createData.session.id}`, {
+      await fetch(`${baseUrl}/api/sessions/${createData.data.session.id}`, {
         method: 'DELETE',
       });
 
@@ -242,7 +243,7 @@ describe('SSE Event Types', () => {
       const sessionDeleted = events.find((e) => e.event === 'session:deleted');
 
       expect(sessionDeleted).toBeDefined();
-      expect((sessionDeleted?.data as any).id).toBe(createData.session.id);
+      expect((sessionDeleted?.data as any).id).toBe(createData.data.session.id);
     });
   });
 
