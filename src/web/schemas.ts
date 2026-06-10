@@ -331,6 +331,8 @@ export const SettingsUpdateSchema = z
     tabTwoRows: z.boolean().optional(),
     agentTeamsEnabled: z.boolean().optional(),
     opusContext1mEnabled: z.boolean().optional(),
+    // Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75); default off
+    truecolorEnabled: z.boolean().optional(),
     thinkingEffort: z.string().max(20).optional(),
     // UI visibility
     showFontControls: z.boolean().optional(),

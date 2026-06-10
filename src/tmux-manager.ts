@@ -972,11 +972,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * via `tmux setenv` so secret values (e.g., OPENCODE_API_KEY) never appear in the bash
    * command line (visible in `ps`). This also sidesteps shell-metachar injection via keys.
    */
-  private buildEnvExports(sessionId: string, muxName: string, mode: SessionMode): string[] {
+  private buildEnvExports(sessionId: string, muxName: string, mode: SessionMode, truecolorEnabled?: boolean): string[] {
+    // COLORTERM is unset for Claude/other non-codex sessions by default to avoid
+    // tmux→PTY→xterm.js color glitches (an empirical rendering choice). The
+    // `truecolorEnabled` app setting (COD-75) lets the user opt those sessions
+    // into 24-bit truecolor. Codex always gets truecolor.
+    const colorTermExport = mode === 'codex' || truecolorEnabled ? 'export COLORTERM=truecolor' : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
-      mode === 'codex' ? 'export COLORTERM=truecolor' : 'unset COLORTERM',
+      colorTermExport,
       ...(mode === 'codex' ? ['unset NO_COLOR'] : []),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
@@ -1101,6 +1106,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       resumeSessionId,
       envOverrides,
       effort,
+      truecolorEnabled,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
     } = options;
     const muxName = `codeman-${sessionId.slice(0, 8)}`;
@@ -1144,7 +1150,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
     }
 
-    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode).join(' && ');
+    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled).join(' && ');
 
     const baseCmd = buildSpawnCommand({
       mode,
@@ -1373,6 +1379,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       resumeSessionId,
       envOverrides,
       effort,
+      truecolorEnabled,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
     } = options;
     const session = this.sessions.get(sessionId);
@@ -1392,7 +1399,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Resolve CLI binary directory based on mode
     const { pathExport } = this.buildPathExport(mode);
 
-    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode).join(' && ');
+    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled).join(' && ');
 
     const baseCmd = buildSpawnCommand({
       mode,

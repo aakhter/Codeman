@@ -551,6 +551,7 @@ export class WebServer extends EventEmitter {
       getModelConfig: this.getModelConfig.bind(this),
       getClaudeModeConfig: this.getClaudeModeConfig.bind(this),
       getTerminalHistoryConfig: this.getTerminalHistoryConfig.bind(this),
+      getTruecolorEnabled: this.getTruecolorEnabled.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
       getLightSessionsState: this.getLightSessionsState.bind(this),
@@ -1410,6 +1411,13 @@ export class WebServer extends EventEmitter {
   private async getTerminalHistoryConfig() {
     const settings = await this.readSettings();
     return resolveTerminalHistoryConfig(settings);
+  }
+
+  // COD-75: whether new Claude/non-codex sessions opt into COLORTERM=truecolor.
+  // App-level setting from settings.json; default off (COLORTERM unset).
+  private async getTruecolorEnabled(): Promise<boolean> {
+    const settings = await this.readSettings();
+    return settings.truecolorEnabled === true;
   }
 
   // Helper to get model configuration from settings

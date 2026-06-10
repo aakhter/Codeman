@@ -368,6 +368,11 @@ export class Session extends EventEmitter {
   // the CLAUDE_CODE_EFFORT_LEVEL env var, which would hard-lock the session.
   private _effort: EffortLevel | undefined;
 
+  // COLORTERM=truecolor opt-in (COD-75). App-level setting resolved from settings.json
+  // at session creation; threaded into the tmux env exports and the direct-PTY env.
+  // Default off → COLORTERM is unset (avoids tmux→PTY→xterm.js color glitches).
+  private _truecolorEnabled: boolean = false;
+
   // Session color for visual differentiation
   private _color: import('./types.js').SessionColor = 'default';
 
@@ -435,6 +440,8 @@ export class Session extends EventEmitter {
       envOverrides?: Record<string, string>;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
       effort?: EffortLevel;
+      /** Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75 app setting; default off). */
+      truecolorEnabled?: boolean;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Per-session terminal buffer limits; applies to this server-side session buffer. */
@@ -515,6 +522,9 @@ export class Session extends EventEmitter {
     }
     if (config.effort && isEffortLevel(config.effort)) {
       this._effort = config.effort;
+    }
+    if (config.truecolorEnabled !== undefined) {
+      this._truecolorEnabled = config.truecolorEnabled;
     }
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
@@ -1117,7 +1127,7 @@ export class Session extends EventEmitter {
         cols: ptyCols,
         rows: ptyRows,
         cwd: this.workingDir,
-        env: buildMuxAttachEnv(),
+        env: buildMuxAttachEnv(this._truecolorEnabled),
       });
     } catch (spawnErr) {
       console.error(`[Session] Failed to spawn PTY for ${options.spawnErrLabel}:`, spawnErr);
@@ -1229,6 +1239,7 @@ export class Session extends EventEmitter {
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
+            truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
           },
           createSessionOptions: {
@@ -1246,6 +1257,7 @@ export class Session extends EventEmitter {
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
+            truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
           },
           spawnErrLabel: 'mux attachment',
@@ -1331,7 +1343,7 @@ export class Session extends EventEmitter {
           rows: 40,
           cwd: this.workingDir,
           // Merge envOverrides after buildClaudeEnv so user settings shadow defaults.
-          env: { ...buildClaudeEnv(this.id), ...(this._envOverrides ?? {}) },
+          env: { ...buildClaudeEnv(this.id, this._truecolorEnabled), ...(this._envOverrides ?? {}) },
         });
       } catch (spawnErr) {
         console.error('[Session] Failed to spawn Claude PTY:', spawnErr);
@@ -1577,6 +1589,7 @@ export class Session extends EventEmitter {
             mode: 'shell',
             niceConfig: this._niceConfig,
             envOverrides: this._envOverrides,
+            truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
           },
           createSessionOptions: {
@@ -1586,6 +1599,7 @@ export class Session extends EventEmitter {
             name: this._name,
             niceConfig: this._niceConfig,
             envOverrides: this._envOverrides,
+            truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
           },
           spawnErrLabel: 'shell mux attachment',
@@ -1723,7 +1737,7 @@ export class Session extends EventEmitter {
             rows: 40,
             cwd: this.workingDir,
             // Merge envOverrides after buildClaudeEnv so user settings shadow defaults.
-            env: { ...buildClaudeEnv(this.id), ...(this._envOverrides ?? {}) },
+            env: { ...buildClaudeEnv(this.id, this._truecolorEnabled), ...(this._envOverrides ?? {}) },
           });
         } catch (spawnErr) {
           console.error('[Session] Failed to spawn Claude PTY for runPrompt:', spawnErr);

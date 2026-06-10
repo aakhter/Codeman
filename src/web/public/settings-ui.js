@@ -355,6 +355,7 @@ Object.assign(CodemanApp.prototype, {
     // Claude Permissions settings
     document.getElementById('appSettingsAgentTeams').checked = settings.agentTeamsEnabled ?? false;
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
+    document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
     document.getElementById('appSettingsThinkingEffort').value = settings.thinkingEffort ?? '';
     // CPU Priority settings
     const niceSettings = settings.nice || {};
@@ -1399,6 +1400,7 @@ Object.assign(CodemanApp.prototype, {
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
+      truecolorEnabled: document.getElementById('appSettingsTruecolor').checked,
       thinkingEffort: document.getElementById('appSettingsThinkingEffort').value,
       // CPU Priority settings
       nice: {
@@ -1676,6 +1678,8 @@ Object.assign(CodemanApp.prototype, {
         showFileBrowser: false,
         showSubagents: false,
         showMultiMonitorButton: false,
+        // Truecolor opt-in (COD-75) — off by default
+        truecolorEnabled: false,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile

@@ -72,6 +72,8 @@ export interface CreateSessionOptions {
   envOverrides?: Record<string, string>;
   /** Claude CLI effort level, injected as a `--settings` soft default (overridable via /effort in-session) */
   effort?: EffortLevel;
+  /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75). Default off → `unset COLORTERM`. Codex is always truecolor. */
+  truecolorEnabled?: boolean;
   /** tmux history-limit to set for this session. */
   historyLimit?: number;
 }
@@ -94,6 +96,8 @@ export interface RespawnPaneOptions {
   envOverrides?: Record<string, string>;
   /** Claude CLI effort level (preserved across respawns, injected via `--settings`) */
   effort?: EffortLevel;
+  /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75, preserved across respawns). Default off. */
+  truecolorEnabled?: boolean;
   /** tmux history-limit to set for this session after respawn. */
   historyLimit?: number;
 }

@@ -17,6 +17,8 @@ export interface ConfigPort {
   getModelConfig(): Promise<{ defaultModel?: string; agentTypeOverrides?: Record<string, string> } | null>;
   getClaudeModeConfig(): Promise<{ claudeMode?: ClaudeMode; allowedTools?: string }>;
   getTerminalHistoryConfig(): Promise<TerminalHistoryConfig>;
+  /** COD-75: whether new Claude/non-codex sessions opt into COLORTERM=truecolor (settings.json, default off). */
+  getTruecolorEnabled(): Promise<boolean>;
   getDefaultClaudeMdPath(): Promise<string | undefined>;
   getLightState(): unknown;
   getLightSessionsState(): unknown[];

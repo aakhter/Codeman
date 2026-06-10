@@ -98,16 +98,19 @@ export function buildPromptArgs(prompt: string, model?: string): string[] {
  * - Codeman session identification vars
  *
  * @param sessionId - The Codeman session ID
+ * @param truecolorEnabled - When true, set COLORTERM=truecolor (COD-75 opt-in);
+ *   otherwise leave COLORTERM unset (default — avoids tmux→PTY→xterm.js glitches).
+ *   Must mirror buildEnvExports() so the tmux and direct-PTY paths agree.
  * @returns Environment variables object for pty.spawn
  */
-export function buildClaudeEnv(sessionId: string): Record<string, string | undefined> {
+export function buildClaudeEnv(sessionId: string, truecolorEnabled?: boolean): Record<string, string | undefined> {
   return {
     ...process.env,
     LANG: 'en_US.UTF-8',
     LC_ALL: 'en_US.UTF-8',
     PATH: getAugmentedPath(),
     TERM: 'xterm-256color',
-    COLORTERM: undefined,
+    COLORTERM: truecolorEnabled ? 'truecolor' : undefined,
     CLAUDECODE: undefined,
     // Inform Claude it's running within Codeman (helps prevent self-termination)
     CODEMAN_MUX: '1',
@@ -121,15 +124,17 @@ export function buildClaudeEnv(sessionId: string): Record<string, string | undef
  * Lighter than buildClaudeEnv — no PATH augmentation or Codeman vars needed
  * since the mux session already has those set.
  *
+ * @param truecolorEnabled - When true, set COLORTERM=truecolor (COD-75 opt-in);
+ *   otherwise leave COLORTERM unset. Mirrors buildEnvExports() so both paths agree.
  * @returns Environment variables object for pty.spawn
  */
-export function buildMuxAttachEnv(): Record<string, string | undefined> {
+export function buildMuxAttachEnv(truecolorEnabled?: boolean): Record<string, string | undefined> {
   return {
     ...process.env,
     LANG: 'en_US.UTF-8',
     LC_ALL: 'en_US.UTF-8',
     TERM: 'xterm-256color',
-    COLORTERM: undefined,
+    COLORTERM: truecolorEnabled ? 'truecolor' : undefined,
     CLAUDECODE: undefined,
     // The server can be launched from inside tmux; attach clients must not
     // inherit that parent tmux context.
