@@ -272,16 +272,29 @@ program
   });
 
 /**
- * GET /api/mux-sessions from a running instance, mirroring the attach
+ * Unwrap the `{ success, data }` API envelope. Returns `body.data` when the
+ * body looks like an envelope (has a `data` field), otherwise the body as-is.
+ * Pure + defensive: `data` may be an object or a list. Exported for tests.
+ */
+export function unwrapEnvelope(body: unknown): unknown {
+  if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
+    return (body as { data: unknown }).data;
+  }
+  return body;
+}
+
+/**
+ * GET an arbitrary JSON path from a running instance, mirroring the attach
  * command's transport (rejectUnauthorized: false, optional Basic auth from
  * the local .codeman/.env so localhost works without explicit creds).
- * Resolves the `data.sessions` array, or rejects on connection/non-200 errors.
+ * Resolves the unwrapped `{ success, data }` envelope (or the parsed body when
+ * there is no envelope), or rejects on connection / non-2xx / invalid-JSON.
  */
-async function fetchMuxSessions(apiUrl: string): Promise<MuxRow[]> {
+async function fetchServerJson(apiUrl: string, path: string): Promise<unknown> {
   const envFile = readCodemanEnv();
   const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
   const password = process.env.CODEMAN_PASSWORD || envFile.CODEMAN_PASSWORD;
-  const url = new URL('/api/mux-sessions', apiUrl);
+  const url = new URL(path, apiUrl);
   const transport = url.protocol === 'https:' ? https : http;
 
   return new Promise((resolve, reject) => {
@@ -310,10 +323,7 @@ async function fetchMuxSessions(apiUrl: string): Promise<MuxRow[]> {
             return;
           }
           try {
-            const parsed = JSON.parse(body) as { data?: { sessions?: MuxRow[] }; sessions?: MuxRow[] };
-            // Response is the { success, data } envelope; data is { sessions, muxAvailable }.
-            const sessions = parsed?.data?.sessions ?? parsed?.sessions ?? [];
-            resolve(Array.isArray(sessions) ? sessions : []);
+            resolve(unwrapEnvelope(JSON.parse(body)));
           } catch (err) {
             reject(new Error(`Invalid JSON response: ${getErrorMessage(err)}`));
           }
@@ -325,6 +335,119 @@ async function fetchMuxSessions(apiUrl: string): Promise<MuxRow[]> {
   });
 }
 
+/**
+ * GET /api/mux-sessions from a running instance and resolve the `sessions`
+ * array. Thin wrapper over {@link fetchServerJson}; the unwrapped `data` is
+ * `{ sessions, muxAvailable }` (or, defensively, a bare array).
+ */
+async function fetchMuxSessions(apiUrl: string): Promise<MuxRow[]> {
+  const data = await fetchServerJson(apiUrl, '/api/mux-sessions');
+  const sessions = Array.isArray(data) ? data : ((data as { sessions?: MuxRow[] })?.sessions ?? []);
+  return Array.isArray(sessions) ? (sessions as MuxRow[]) : [];
+}
+
+/**
+ * Resolve the Codeman API base URL with instance scoping: explicit `--url`
+ * wins, then `CODEMAN_API_URL`, then `https://127.0.0.1:<CODEMAN_PORT|3000>`.
+ */
+function resolveApiUrl(optionUrl?: string): string {
+  return optionUrl || process.env.CODEMAN_API_URL || `https://127.0.0.1:${process.env.CODEMAN_PORT || '3000'}`;
+}
+
+/** Minimal session shape rendered by `status`/`ls` (live or stored). */
+interface SessionRow {
+  id?: string;
+  status?: string;
+  workingDir?: string;
+}
+
+/** Aggregated, render-ready summary of a `/api/status` payload. */
+export interface StatusSummary {
+  active: number;
+  idle: number;
+  busy: number;
+  tasks: { total: number; running: number; completed: number; failed: number };
+  ralphActive: boolean;
+}
+
+/** Coerce a `/api/status` payload (or a bare sessions array) into a session list. */
+function extractSessions(payload: unknown): SessionRow[] {
+  if (Array.isArray(payload)) return payload as SessionRow[];
+  const sessions = (payload as { sessions?: unknown })?.sessions;
+  return Array.isArray(sessions) ? (sessions as SessionRow[]) : [];
+}
+
+/**
+ * Summarize a live `/api/status` payload into session/task counts and ralph
+ * state. Pure + defensive: counts are derived from `sessions[]` (each session
+ * carries `status`, `taskStats`, `ralphLoop`); accepts either the full status
+ * object or a bare sessions array. Exported for tests.
+ */
+export function summarizeStatus(payload: unknown): StatusSummary {
+  const sessions = extractSessions(payload);
+  const tasks = { total: 0, running: 0, completed: 0, failed: 0 };
+  let idle = 0;
+  let busy = 0;
+  let ralphActive = false;
+
+  for (const s of sessions) {
+    if (s?.status === 'idle') idle++;
+    else if (s?.status === 'busy') busy++;
+    const ts = (s as { taskStats?: typeof tasks })?.taskStats;
+    if (ts) {
+      tasks.total += ts.total ?? 0;
+      tasks.running += ts.running ?? 0;
+      tasks.completed += ts.completed ?? 0;
+      tasks.failed += ts.failed ?? 0;
+    }
+    const ralph = (s as { ralphLoop?: { active?: boolean } })?.ralphLoop;
+    if (ralph?.active) ralphActive = true;
+  }
+
+  // "active" = sessions that aren't stopped (live sessions are all non-stopped).
+  const active = sessions.filter((s) => s?.status !== 'stopped').length;
+  return { active, idle, busy, tasks, ralphActive };
+}
+
+/**
+ * Render a list of sessions as indented rows (`<shortId> <status> <workingDir>`),
+ * or a `(none)` placeholder when empty. Pure; exported for tests.
+ */
+export function formatSessionRows(sessions: SessionRow[]): string {
+  if (!sessions || sessions.length === 0) {
+    return '  (none)';
+  }
+  return sessions
+    .map((s) => {
+      const id = (s.id || '').slice(0, 8);
+      const status =
+        s.status === 'idle'
+          ? chalk.green('idle')
+          : s.status === 'busy'
+            ? chalk.yellow('busy')
+            : chalk.red(s.status || 'unknown');
+      return `  ${chalk.cyan(id)} ${status} ${s.workingDir || ''}`.trimEnd();
+    })
+    .join('\n');
+}
+
+/**
+ * Choose which session list to render: the live list when present, else the
+ * persisted (stored) sessions as an offline fallback. Returns the chosen rows
+ * and an `offline` flag so the caller can label the output. Pure; exported for
+ * tests. `stored` is the `getStoredSessions()` map keyed by session id.
+ */
+export function selectSessionSource(
+  live: SessionRow[] | null | undefined,
+  stored: Record<string, SessionRow>
+): { sessions: SessionRow[]; offline: boolean } {
+  if (live && live.length > 0) {
+    return { sessions: live, offline: false };
+  }
+  const storedRows = Object.values(stored || {});
+  return { sessions: storedRows, offline: true };
+}
+
 program
   .command('mux')
   .alias('mux-sessions')
@@ -332,7 +455,7 @@ program
   .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
   .option('--json', 'Output the raw mux-sessions array as JSON')
   .action(async (options) => {
-    const apiUrl = options.url || process.env.CODEMAN_API_URL || 'https://127.0.0.1:3000';
+    const apiUrl = resolveApiUrl(options.url);
     let rows: MuxRow[];
     try {
       rows = await fetchMuxSessions(apiUrl);
@@ -589,44 +712,65 @@ function printStats(stats: ReturnType<ReturnType<typeof getRalphLoop>['getStats'
 program
   .command('status')
   .description('Show overall status')
-  .action(() => {
-    const manager = getSessionManager();
-    const queue = getTaskQueue();
-    const loop = getRalphLoop();
+  .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
+  .action(async (options) => {
+    const apiUrl = resolveApiUrl(options.url);
 
-    const sessions = manager.getAllSessions();
-    const stored = manager.getStoredSessions();
-    const storedValues = Object.values(stored);
-    const taskCounts = queue.getCount();
-    const loopStatus = loop.status;
-
-    // Use live sessions if available, otherwise fall back to stored state
-    const activeCount = sessions.length || storedValues.filter((s) => s.status !== 'stopped').length;
-    const idleCount = sessions.length
-      ? sessions.filter((s) => s.isIdle()).length
-      : storedValues.filter((s) => s.status === 'idle').length;
-    const busyCount = sessions.length
-      ? sessions.filter((s) => s.isBusy()).length
-      : storedValues.filter((s) => s.status === 'busy').length;
+    // Try the running web server first — the long-lived server owns the live
+    // sessions; an in-process singleton in this short-lived CLI never sees them.
+    let summary: StatusSummary;
+    let ralphLabel: string;
+    let offline = false;
+    try {
+      const statusPayload = await fetchServerJson(apiUrl, '/api/status');
+      summary = summarizeStatus(statusPayload);
+      ralphLabel = summary.ralphActive ? chalk.green('active') : chalk.gray('idle');
+    } catch {
+      // Server unreachable — fall back to the persisted state on disk.
+      offline = true;
+      const queue = getTaskQueue();
+      const loop = getRalphLoop();
+      const stored = getSessionManager().getStoredSessions();
+      const storedValues = Object.values(stored);
+      const taskCounts = queue.getCount();
+      const loopStatus = loop.status;
+      summary = {
+        active: storedValues.filter((s) => s.status !== 'stopped').length,
+        idle: storedValues.filter((s) => s.status === 'idle').length,
+        busy: storedValues.filter((s) => s.status === 'busy').length,
+        tasks: {
+          total: taskCounts.total,
+          running: taskCounts.running,
+          completed: taskCounts.completed,
+          failed: taskCounts.failed,
+        },
+        ralphActive: loopStatus === 'running',
+      };
+      const statusColor = loopStatus === 'running' ? chalk.green : loopStatus === 'paused' ? chalk.yellow : chalk.gray;
+      ralphLabel = statusColor(loopStatus);
+    }
 
     console.log(chalk.bold('\nCodeman Status'));
     console.log('─'.repeat(40));
+    if (offline) {
+      console.log(
+        chalk.dim(`(offline — showing last persisted state from state.json; server at ${apiUrl} unreachable)`)
+      );
+    }
 
     console.log(chalk.bold('\nSessions:'));
-    console.log(`  Active: ${activeCount}`);
-    console.log(`  Idle: ${idleCount}`);
-    console.log(`  Busy: ${busyCount}`);
+    console.log(`  Active: ${summary.active}`);
+    console.log(`  Idle: ${summary.idle}`);
+    console.log(`  Busy: ${summary.busy}`);
 
     console.log(chalk.bold('\nTasks:'));
-    console.log(`  Total: ${taskCounts.total}`);
-    console.log(`  Pending: ${taskCounts.pending}`);
-    console.log(`  Running: ${taskCounts.running}`);
-    console.log(`  Completed: ${taskCounts.completed}`);
-    console.log(`  Failed: ${taskCounts.failed}`);
+    console.log(`  Total: ${summary.tasks.total}`);
+    console.log(`  Running: ${summary.tasks.running}`);
+    console.log(`  Completed: ${summary.tasks.completed}`);
+    console.log(`  Failed: ${summary.tasks.failed}`);
 
-    const statusColor = loopStatus === 'running' ? chalk.green : loopStatus === 'paused' ? chalk.yellow : chalk.gray;
     console.log(chalk.bold('\nRalph Loop:'));
-    console.log(`  Status: ${statusColor(loopStatus)}`);
+    console.log(`  Status: ${ralphLabel}`);
     console.log('');
   });
 
@@ -665,30 +809,35 @@ program
   .command('list')
   .alias('ls')
   .description('List all sessions (shorthand)')
-  .action(() => {
-    const manager = getSessionManager();
-    const sessions = manager.getAllSessions();
-    const stored = manager.getStoredSessions();
+  .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
+  .action(async (options) => {
+    const apiUrl = resolveApiUrl(options.url);
 
-    if (sessions.length === 0 && Object.keys(stored).length === 0) {
+    // Query the running server first; only fall back to persisted state on disk
+    // when it's unreachable (the CLI process has no view of live sessions).
+    let live: SessionRow[] | null = null;
+    let offline = false;
+    try {
+      live = extractSessions(await fetchServerJson(apiUrl, '/api/sessions'));
+    } catch {
+      offline = true;
+    }
+
+    const stored = offline ? getSessionManager().getStoredSessions() : {};
+    const { sessions, offline: usedStored } = selectSessionSource(live, stored);
+
+    if (sessions.length === 0) {
       console.log(chalk.yellow('No sessions found'));
       return;
     }
 
-    console.log(chalk.bold('\nActive Sessions:'));
-    if (sessions.length === 0) {
-      console.log('  (none)');
-    } else {
-      for (const session of sessions) {
-        const status =
-          session.status === 'idle'
-            ? chalk.green('idle')
-            : session.status === 'busy'
-              ? chalk.yellow('busy')
-              : chalk.red(session.status);
-        console.log(`  ${chalk.cyan(session.id.slice(0, 8))} ${status} ${session.workingDir}`);
-      }
+    console.log(chalk.bold(`\n${usedStored ? 'Sessions' : 'Active Sessions'}:`));
+    if (usedStored) {
+      console.log(
+        chalk.dim(`(offline — showing last persisted state from state.json; server at ${apiUrl} unreachable)`)
+      );
     }
+    console.log(formatSessionRows(sessions));
     console.log('');
   });
 
