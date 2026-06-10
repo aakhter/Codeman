@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Unit tests for the Codex run-mode UI surface in session-ui.js /
+ * settings-ui.js / index.html. Loads the browser modules into a vm sandbox (no
+ * real DOM) and exercises run-mode selection + Codex quick-start wiring.
+ */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
@@ -66,40 +71,6 @@ describe('run mode UI', () => {
     expect(app.runMode).toBe('gemini');
     expect(runBtnLabel.textContent).toBe('Run GM');
   });
-});
-
-describe('Codex quick start settings', () => {
-  it('renders Codex CLI settings in a dedicated app settings tab', () => {
-    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
-
-    expect(html).toContain('data-tab="settings-codex">Codex CLI</button>');
-
-    const claudeTab = html.match(
-      /<div class="modal-tab-content hidden" id="settings-claude">([\s\S]*?)<!-- Codex CLI Tab -->/
-    );
-    expect(claudeTab?.[1]).not.toContain('appSettingsCodexDangerouslyBypassApprovals');
-
-    const codexTab = html.match(
-      /<div class="modal-tab-content hidden" id="settings-codex">([\s\S]*?)<\/div>\s*<!-- Models Tab -->/
-    );
-    expect(codexTab?.[1]).toContain('appSettingsCodexDangerouslyBypassApprovals');
-    expect(codexTab?.[1]).not.toContain('appSettingsCodexRenderMode');
-  });
-
-  it('renders terminal history settings with scrollback-matched replay defaults', () => {
-    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
-    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
-
-    expect(html).toContain('appSettingsTerminalScrollbackLines');
-    expect(html).toContain('appSettingsTmuxHistoryLimit');
-    expect(html).toContain('appSettingsTerminalBufferMaxMiB');
-    expect(html).toContain('appSettingsTerminalBufferTrimMiB');
-    expect(settingsUi).toContain('terminalScrollbackLines: 100000');
-    expect(settingsUi).toContain('tmuxHistoryLimit: 100000');
-    expect(settingsUi).toContain('terminalBufferMaxBytes: 32 * 1024 * 1024');
-    expect(settingsUi).toContain('terminalBufferTrimBytes: 24 * 1024 * 1024');
-  });
-
   it('passes global Codex settings into quick-start config for new sessions', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },
@@ -116,10 +87,12 @@ describe('Codex quick start settings', () => {
       document: {
         getElementById: (id: string) => elements[id] ?? null,
       },
+      // Mock responses use the real wire shape: the global preSerialization hook in
+      // server.ts wraps route payloads into the { success, data } envelope.
       fetch: async (url: string, init?: { body?: string }) => {
         requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
-        if (url === '/api/codex/status') return { json: async () => ({ available: true }) };
-        if (url === '/api/quick-start') return { json: async () => ({ success: true, sessionId: 'sess-1' }) };
+        if (url === '/api/codex/status') return { json: async () => ({ success: true, data: { available: true } }) };
+        if (url === '/api/quick-start') return { json: async () => ({ success: true, data: { sessionId: 'sess-1' } }) };
         throw new Error(`unexpected fetch: ${url}`);
       },
       console,

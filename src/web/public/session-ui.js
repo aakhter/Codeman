@@ -358,7 +358,8 @@ Object.assign(CodemanApp.prototype, {
       const hasEnvOverrides = Object.keys(envOverrides).length > 0;
       const effort = this.getEffortSetting(globalSettings);
       const useOpus1m = caseSettings.opusContext1m || globalSettings.opusContext1mEnabled;
-      const modelOverride = useOpus1m ? 'opus[1m]' : '';
+      // Explicit Claude Model choice (App Settings) wins over the legacy 1M Opus toggle.
+      const modelOverride = globalSettings.claudeModel || (useOpus1m ? 'opus[1m]' : '');
 
       // Step 1: Create all sessions in parallel
       this.terminal.writeln(`\x1b[90m Creating ${tabCount} session(s)...\x1b[0m`);
@@ -597,7 +598,7 @@ Object.assign(CodemanApp.prototype, {
 
     try {
       const statusRes = await fetch('/api/codex/status');
-      const status = await statusRes.json();
+      const status = (await statusRes.json()).data;
       if (!status.available) {
         this.terminal.writeln('\x1b[1;31m Codex CLI not found.\x1b[0m');
         this.terminal.writeln('\x1b[90m Install with: npm install -g @openai/codex\x1b[0m');
@@ -622,8 +623,8 @@ Object.assign(CodemanApp.prototype, {
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Codex');
 
-      if (data.sessionId) {
-        await this.selectSession(data.sessionId);
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
       }
 
       this.terminal.focus();
@@ -642,7 +643,7 @@ Object.assign(CodemanApp.prototype, {
 
     try {
       const statusRes = await fetch('/api/gemini/status');
-      const status = await statusRes.json();
+      const status = (await statusRes.json()).data;
       if (!status.available) {
         this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
         this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
@@ -663,8 +664,8 @@ Object.assign(CodemanApp.prototype, {
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
 
-      if (data.sessionId) {
-        await this.selectSession(data.sessionId);
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
       }
 
       this.terminal.focus();

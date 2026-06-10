@@ -1,5 +1,19 @@
 # aicodeman
 
+## 0.9.9
+
+### Patch Changes
+
+- Codex (OpenAI CLI) run mode, Claude Model picker, and response-viewer button now opt-in.
+
+  **Codex (OpenAI CLI) run mode** (#114): new `codex` session mode alongside Claude Code and OpenCode. Sessions launch the Codex CLI via tmux with secrets injected through `tmux setenv` (`OPENAI_API_KEY`/`CODEX_API_KEY`/`CODEX_HOME` — never on the command line). Supports `--model`, `resume <id>`, and `--dangerously-bypass-approvals-and-sandbox` via the `codexConfig` payload or the new App Settings → Codex CLI tab (`codexDangerouslyBypassApprovals`). Availability surfaced at `GET /api/codex/status` with an install hint when the binary is missing. Frontend gets a "Run CX" run-mode option; Respawn/Ralph options stay Claude-only (session options open on the Summary tab for external-CLI sessions). `CODEX_*` env prefix added to the env-override allowlist.
+
+  **Claude Model picker**: App Settings → Claude CLI gains a "Claude Model" select (`claudeModel` setting) that pins the model for new Claude sessions via the case's `.claude/settings.local.json` — e.g. Fable 5 (1M context), Fable 5, Opus (1M), Opus, Sonnet, Haiku. It takes precedence over the legacy 1M Opus Context toggle. Fable 5 also added to the orchestrator default/phase model dropdowns.
+
+  **Response-viewer (eye) header button is now hidden by default** — existing users who relied on it can re-enable it under App Settings → Display → Response Viewer (`showResponseViewer`, per-device setting). A new Display toggle controls its visibility.
+
+  Also: tests made immune to a set `CODEMAN_GESTURE` env var; CLAUDE.md documents the Codex run mode and the eye-button toggle.
+
 ## 0.9.8
 
 ### Patch Changes

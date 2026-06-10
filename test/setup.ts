@@ -14,6 +14,10 @@ import { afterEach, vi } from 'vitest';
 
 delete process.env.CODEMAN_PASSWORD;
 delete process.env.CODEMAN_USERNAME;
+// Gesture availability changes renderIndexHtml output (injects the
+// __codemanGestureAvailable flag), breaking byte-identity assertions
+// (test/server-index-title.test.ts) when the shell exports CODEMAN_GESTURE=1.
+delete process.env.CODEMAN_GESTURE;
 
 afterEach(() => {
   vi.clearAllMocks();

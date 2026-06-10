@@ -1088,8 +1088,8 @@ body.solo-mode .btn-lifecycle-log {
 }
 
 .session-tab .tab-mode.codex {
-  background: rgba(251, 146, 60, 0.2);
-  color: #fb923c;
+  background: rgba(168, 85, 247, 0.2);
+  color: #a855f7;
 }
 
 /* Timer Banner - Compact */
@@ -2811,17 +2811,17 @@ body.solo-mode .btn-lifecycle-log {
 /* Codex mode colors */
 .btn-toolbar.btn-run.mode-codex,
 .btn-toolbar.btn-run-gear.mode-codex {
-  background: linear-gradient(135deg, #2a1a05 0%, #3a2208 50%, #4a2c0a 100%);
-  border-color: rgba(251, 146, 60, 0.5);
-  color: #fdba74;
+  background: linear-gradient(135deg, #2a0a3e 0%, #350b4d 50%, #400d5e 100%);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #d8b4fe;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 .btn-toolbar.btn-run.mode-codex:hover,
 .btn-toolbar.btn-run-gear.mode-codex:hover {
-  background: linear-gradient(135deg, #4a2c0a 0%, #6b3f0e 50%, #8a5210 100%);
-  box-shadow: 0 0 12px rgba(251, 146, 60, 0.35), 0 2px 8px rgba(251, 146, 60, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  border-color: rgba(253, 186, 116, 0.6);
-  color: #fed7aa;
+  background: linear-gradient(135deg, #400d5e 0%, #581c87 50%, #6b21a8 100%);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.35), 0 2px 8px rgba(168, 85, 247, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(192, 132, 252, 0.6);
+  color: #e9d5ff;
 }
 
 /* Gemini mode colors */
@@ -2892,7 +2892,7 @@ body.solo-mode .btn-lifecycle-log {
 }
 .run-mode-dot.claude { background: #3b82f6; }
 .run-mode-dot.opencode { background: #10b981; }
-.run-mode-dot.codex { background: #fb923c; }
+.run-mode-dot.codex { background: #a855f7; }
 .run-mode-dot.gemini { background: #8ab4f8; }
 
 .run-mode-sep {
@@ -9090,6 +9090,12 @@ kbd {
 
 .btn-response-viewer-header {
   display: inline-flex !important;
+}
+
+/* "Response Viewer" header toggle (App Settings → Display) — must out-specify
+   the inline-flex !important above */
+.btn-response-viewer-header.btn-response-viewer-header--hidden {
+  display: none !important;
 }
 
 .response-viewer {

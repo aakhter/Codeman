@@ -350,6 +350,10 @@ export const SettingsUpdateSchema = z
     // Claude CLI settings
     claudeMode: z.string().max(50).optional(),
     allowedTools: z.string().max(2000).optional(),
+    /** Model for new Claude sessions (e.g. "claude-fable-5[1m]", "opus[1m]"); takes precedence over opusContext1mEnabled */
+    claudeModel: z.string().max(50).optional(),
+    /** Hide/show the response-viewer (eye) header button */
+    showResponseViewer: z.boolean().optional(),
     // Codex CLI settings
     codexDangerouslyBypassApprovals: z.boolean().optional(),
     // Terminal history and retention
