@@ -3247,6 +3247,9 @@ Object.assign(CodemanApp.prototype, {
       if (await this._postSessionInput(st.sessionId, message)) {
         this.showToast?.(`Saved ${items.length} comments to ${reviewPath} and asked the agent to apply them`, 'success');
         this.clearAnnotations();
+        // COD-74: close the preview window and surface the prompt to the user.
+        this.closeFilePreview();
+        this.terminal?.focus();
       }
     } catch {
       this.showToast?.('Failed to write review file', 'error');
