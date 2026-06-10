@@ -20,11 +20,6 @@ html.mobile-init .file-browser-panel {
   display: none !important;
 }
 
-.history-item-expand {
-  min-width: 44px;
-  min-height: 44px;
-}
-
 /* ============================================================================
    iOS Zoom Prevention (all mobile/tablet sizes)
    iOS Safari ignores user-scalable=no since iOS 10.
@@ -356,45 +351,19 @@ html.mobile-init .file-browser-panel {
   }
 }
 
-/* 431-480px devices are classified as tablets by JS, but large phones in this
-   range are still too narrow for the desktop-style tablet header and toolbar. */
-@media (max-width: 480px) and (min-width: 431px) {
-  .header-brand,
-  .case-select-group,
-  .version-display,
-  .toolbar-center,
-  .toolbar-right,
-  .tab-count-group {
-    display: none !important;
-  }
-
-  .toolbar-left,
-  .toolbar-left .toolbar-group {
-    min-width: 0;
-  }
-
-  .toolbar-left .toolbar-group {
-    gap: 0.35rem;
-  }
-
-  .btn-toolbar {
-    min-width: 0;
-    padding: 0.35rem 0.6rem;
-  }
-
-  .btn-toolbar.btn-shell {
-    max-width: 76px;
-    overflow: hidden;
-  }
-}
-
 /* ============================================================================
    Phone Breakpoint (<430px)
    ============================================================================ */
 @media (max-width: 430px) {
-  /* Hide brand on phones to keep fixed header actions and tabs in view. */
+  /* Compact header brand on phones — acts as home button */
   .header-brand {
-    display: none;
+    padding-right: 0.25rem;
+    margin-right: 0.2rem;
+    border-right: none;
+  }
+
+  .header-brand .logo {
+    font-size: 0.7rem;
   }
 
   /* Font controls - compact on phones, visibility controlled by JS */
@@ -442,10 +411,6 @@ html.mobile-init .file-browser-panel {
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     contain: none;
     z-index: 1200;
-  }
-
-  .header {
-    overflow: visible;
   }
 
   /* iOS safe area adjustment for fixed header - header extends into notch area */
@@ -525,17 +490,7 @@ html.mobile-init .file-browser-panel {
     position: relative;
     z-index: 2;
     flex-shrink: 0;
-  }
-
-  .mobile-header-utility-toggle svg {
-    width: 14px;
-    height: 14px;
-  }
-
-  .mobile-header-utility-toggle.active,
-  .mobile-header-utility-toggle:active {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text);
+    border-left: none;
   }
 
   /* Smaller header buttons on mobile */
@@ -548,6 +503,12 @@ html.mobile-init .file-browser-panel {
   .btn-icon-header svg {
     width: 12px;
     height: 12px;
+  }
+
+  /* Hide header settings gear and lifecycle log on mobile - settings moved to toolbar */
+  .btn-icon-header.btn-settings,
+  .btn-icon-header.btn-lifecycle-log {
+    display: none !important;
   }
 
   /* Mobile voice input button in toolbar — initially hidden via inline style,
@@ -564,7 +525,7 @@ html.mobile-init .file-browser-panel {
     color: #93c5fd;
     cursor: pointer;
     flex-shrink: 0;
-    order: 6; /* After upload, before settings gear */
+    order: 5; /* Between Run Shell and settings gear */
   }
 
   .btn-voice-mobile svg {
@@ -608,7 +569,7 @@ html.mobile-init .file-browser-panel {
     font-size: 0.85rem;
     cursor: pointer;
     flex-shrink: 0;
-    order: 7; /* Far right */
+    order: 6; /* Far right */
     position: relative;
   }
 
@@ -758,9 +719,10 @@ html.mobile-init .file-browser-panel {
     bottom: calc(var(--safe-area-bottom) + 40px);
   }
 
-  /* Desktop-centered inputs overlap the compact phone toolbar. */
+  /* Show case selector in center */
   .toolbar-center {
-    display: none !important;
+    display: flex !important;
+    align-items: center;
   }
 
   .toolbar-center .btn-toolbar.btn-voice {
@@ -884,34 +846,6 @@ html.mobile-init .file-browser-panel {
     border-color: rgba(16, 185, 129, 0.5);
   }
 
-  /* Codex mode colors on mobile */
-  .btn-toolbar.btn-run.mode-codex,
-  .btn-toolbar.btn-run-gear.mode-codex {
-    background: #2a1a05;
-    border-color: rgba(251, 146, 60, 0.3);
-    color: #fdba74;
-  }
-
-  .btn-toolbar.btn-run.mode-codex:active,
-  .btn-toolbar.btn-run-gear.mode-codex:active {
-    background: #4a2c0a;
-    border-color: rgba(251, 146, 60, 0.5);
-  }
-
-  /* Gemini mode colors on mobile */
-  .btn-toolbar.btn-run.mode-gemini,
-  .btn-toolbar.btn-run-gear.mode-gemini {
-    background: #10243f;
-    border-color: rgba(96, 165, 250, 0.3);
-    color: #dbeafe;
-  }
-
-  .btn-toolbar.btn-run.mode-gemini:active,
-  .btn-toolbar.btn-run-gear.mode-gemini:active {
-    background: #174ea6;
-    border-color: rgba(96, 165, 250, 0.5);
-  }
-
   /* Run mode dropdown menu — positioned above toolbar on mobile */
   .run-mode-menu {
     bottom: 100%;
@@ -987,27 +921,6 @@ html.mobile-init .file-browser-panel {
   .btn-toolbar.btn-shell::after {
     content: "Shell";
     font-size: 0.65rem;
-  }
-
-  .btn-upload-mobile {
-    display: flex !important;
-    flex: 0 0 auto;
-    width: 26px;
-    height: 26px;
-    min-width: 26px !important;
-    padding: 0 !important;
-    align-items: center;
-    justify-content: center;
-    background: rgba(59, 130, 246, 0.12);
-    color: #93c5fd;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    border-radius: 4px;
-    order: 5;
-  }
-
-  .btn-upload-mobile svg {
-    width: 13px;
-    height: 13px;
   }
 
   /* Mobile case button - visible on mobile */
@@ -1388,44 +1301,6 @@ html.mobile-init .file-browser-panel {
     min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-  }
-
-  .away-digest-modal {
-    width: 100%;
-    max-width: 100%;
-    height: 100%;
-    max-height: 100%;
-  }
-
-  .away-digest-ranges {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.4rem;
-  }
-
-  .away-digest-ranges .filter-btn {
-    min-height: 38px;
-    padding: 0.4rem 0.5rem;
-  }
-
-  .away-digest-custom-range,
-  .away-digest-custom-range.active {
-    grid-template-columns: 1fr;
-  }
-
-  .away-digest-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.5rem;
-  }
-
-  .away-digest-item {
-    grid-template-columns: 1fr;
-    gap: 0.5rem;
-  }
-
-  .away-digest-action {
-    width: 100%;
-    min-height: 38px;
   }
 
   .modal-footer,
@@ -1978,47 +1853,6 @@ html.mobile-init .file-browser-panel {
     padding-left: var(--safe-area-left);
     padding-right: var(--safe-area-right);
     padding-bottom: var(--safe-area-bottom);
-  }
-
-  .attachment-history-drawer {
-    top: 0;
-    bottom: 0;
-    width: 100%;
-    max-width: 100%;
-    height: 100vh;
-    height: 100dvh;
-    border-left: none;
-    border-radius: 0;
-    padding-top: var(--safe-area-top);
-    padding-left: var(--safe-area-left);
-    padding-right: var(--safe-area-right);
-    padding-bottom: var(--safe-area-bottom);
-  }
-
-  .attachment-history-header {
-    padding: 12px;
-  }
-
-  .attachment-history-list {
-    padding: 6px;
-  }
-
-  .attachment-history-item {
-    grid-template-columns: 104px minmax(0, 1fr);
-    gap: 8px;
-    padding: 8px 6px;
-  }
-
-  .attachment-history-thumb {
-    width: 104px;
-  }
-
-  .attachment-history-actions {
-    gap: 4px;
-  }
-
-  .attachment-history-actions button {
-    padding: 4px 7px;
   }
 
   /* Scroll margin for inputs - helps with keyboard visibility */

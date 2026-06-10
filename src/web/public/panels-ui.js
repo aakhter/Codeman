@@ -671,6 +671,9 @@ Object.assign(CodemanApp.prototype, {
     panel.classList.toggle('open');
 
     if (panel.classList.contains('open')) {
+      // applyMonitorVisibility() sets inline display:none when the "Show Monitor"
+      // setting is off — clear it so transient opens (session-tab task badge) work
+      panel.style.display = '';
       // Load screens and start stats collection
       await this.loadMuxSessions();
       await fetch('/api/mux-sessions/stats/start', { method: 'POST' });

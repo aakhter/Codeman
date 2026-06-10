@@ -4,7 +4,7 @@
  * Defines two exports:
  *
  * - KeyboardAccessoryBar (singleton object) — Quick action buttons shown above the virtual
- *   keyboard on mobile: arrow up/down, /init, /clear, paste, and dismiss.
+ *   keyboard on mobile: arrow up/down, /init, /clear, paste, Esc, and dismiss.
  *   The paste button opens a dialog that handles both text paste and image attach
  *   (native picker + best-effort image paste, routed through app._uploadAndInsertImages).
  *   Destructive actions (/clear) require double-tap confirmation (2s amber state).
@@ -37,7 +37,7 @@ const KeyboardAccessoryBar = {
   element: null,
   _mode: 'simple', // 'simple' or 'extended'
 
-  /** HTML for simple mode: arrows, commands, paste, dismiss */
+  /** HTML for simple mode: arrows, commands, paste, Esc, dismiss */
   _simpleButtons: `
       <button class="accessory-btn accessory-btn-arrow" data-action="scroll-up" title="Arrow up">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -57,6 +57,7 @@ const KeyboardAccessoryBar = {
           <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
         </svg>
       </button>
+      <button class="accessory-btn" data-action="esc" title="Escape">Esc</button>
       <button class="accessory-btn accessory-btn-dismiss" data-action="dismiss" title="Dismiss keyboard">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
           <path d="M19 9l-7 7-7-7"/>

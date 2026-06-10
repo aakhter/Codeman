@@ -525,11 +525,30 @@ Object.assign(CodemanApp.prototype, {
               this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
             }
             this._lastResizeDims = { cols, rows };
-            fetch(`/api/sessions/${this.activeSessionId}/resize`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ cols, rows }),
-            }).catch(() => {});
+            // Typed + WS-first like sendResize: the viewport type feeds resize
+            // arbitration (a phone rotating must not bypass a desktop claim),
+            // and a desktop window narrowing past the tablet breakpoint must
+            // send a typed WS frame so its stale desktop claim is released.
+            const viewportType =
+              typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+                ? MobileDetection.getDeviceType()
+                : 'desktop';
+            let sentViaWs = false;
+            if (this._wsReady && this._wsSessionId === this.activeSessionId) {
+              try {
+                this._ws.send(JSON.stringify({ t: 'z', c: cols, r: rows, v: viewportType }));
+                sentViaWs = true;
+              } catch {
+                // Fall through to HTTP POST
+              }
+            }
+            if (!sentViaWs) {
+              fetch(`/api/sessions/${this.activeSessionId}/resize`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cols, rows, viewportType }),
+              }).catch(() => {});
+            }
           }
         }
         // Update subagent connection lines and local echo at new dimensions
@@ -1584,7 +1603,22 @@ Object.assign(CodemanApp.prototype, {
 
     if (text === '\x7f') {
       const source = this._localEchoOverlay.removeChar();
-      if (source === 'flushed') this._sendInputAsync(sessionId, text);
+      if (source === 'flushed') {
+        // Sync app-level flushed Maps (per-session state for tab switching),
+        // mirroring the onData backspace path — otherwise switching tabs away
+        // and back restores a stale, too-long flushed overlay.
+        const { count, text: flushedText } = this._localEchoOverlay.getFlushed();
+        if (this._flushedOffsets?.has(sessionId)) {
+          if (count === 0) {
+            this._flushedOffsets.delete(sessionId);
+            this._flushedTexts?.delete(sessionId);
+          } else {
+            this._flushedOffsets.set(sessionId, count);
+            this._flushedTexts?.set(sessionId, flushedText);
+          }
+        }
+        this._sendInputAsync(sessionId, text);
+      }
       return;
     }
 
@@ -1598,6 +1632,15 @@ Object.assign(CodemanApp.prototype, {
       this._flushedTexts?.delete(sessionId);
       if (pending) this._sendInputAsync(sessionId, pending);
       setTimeout(() => this._sendInputAsync(sessionId, '\r'), pending ? 80 : 0);
+      return;
+    }
+
+    // Multi-byte escape sequence (arrow/Home/End from a hardware keyboard on
+    // the composer) — forward to the PTY without touching overlay state,
+    // mirroring the onData path. Appending it to pending text would type raw
+    // ESC bytes into the prompt on the next Enter.
+    if (text.length > 1 && text.charCodeAt(0) === 27) {
+      this._sendInputAsync(sessionId, text);
       return;
     }
 

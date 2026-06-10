@@ -308,7 +308,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowTokenCount').checked = settings.showTokenCount ?? defaults.showTokenCount ?? true;
     document.getElementById('appSettingsShowCost').checked = settings.showCost ?? defaults.showCost ?? false;
     document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? true;
-    document.getElementById('appSettingsShowMonitor').checked = settings.showMonitor ?? defaults.showMonitor ?? true;
+    document.getElementById('appSettingsShowMonitor').checked = settings.showMonitor ?? defaults.showMonitor ?? false;
     document.getElementById('appSettingsShowProjectInsights').checked = settings.showProjectInsights ?? defaults.showProjectInsights ?? false;
     document.getElementById('appSettingsShowFileBrowser').checked = settings.showFileBrowser ?? defaults.showFileBrowser ?? false;
     document.getElementById('appSettingsShowSubagents').checked = settings.showSubagents ?? defaults.showSubagents ?? false;
@@ -1864,7 +1864,7 @@ Object.assign(CodemanApp.prototype, {
   applyMonitorVisibility() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
-    const showMonitor = settings.showMonitor ?? defaults.showMonitor ?? true;
+    const showMonitor = settings.showMonitor ?? defaults.showMonitor ?? false;
     const showSubagents = settings.showSubagents ?? defaults.showSubagents ?? false;
     const showFileBrowser = settings.showFileBrowser ?? defaults.showFileBrowser ?? false;
 
