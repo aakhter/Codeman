@@ -88,9 +88,55 @@ jobs:
 
       - name: Run unit & integration tests
         # Excludes the browser-driven mobile suite (test/mobile/**); see config/vitest.ci.config.ts.
+        # The mobile suite runs in the separate, non-blocking `mobile` job below.
         # Safe in CI: TmuxManager no-ops all shell commands under VITEST (test/setup.ts).
         run: npm run test:ci
 
-# Note: The browser-driven mobile suite (test/mobile/**) is excluded from CI —
-# it needs a live server + chromium + environment-specific PNG baselines.
-# Run it locally/manually. All other tests run via the `test` job above.
+  mobile:
+    name: Mobile suite (allow-fail)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING (COD-83): the browser-driven mobile suite needs chromium and
+    # compares DPR-aware PNG baselines + some env-sensitive geometry that render
+    # differently across machines. Marking the job continue-on-error keeps those
+    # environment diffs from reddening the build while still running the suite and
+    # surfacing diffs (uploaded as artifacts) for human review. Behavioral coverage
+    # is advisory here until/unless a pinned canonical CI env is introduced.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install tmux
+        run: |
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y tmux
+          fi
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run mobile suite (non-blocking)
+        # Each test file starts an in-process WebServer on its own port (helpers/server.ts);
+        # no build needed (vitest transforms src). Visual diffs are written next to baselines.
+        run: npm run test:mobile
+
+      - name: Upload visual-regression diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-visual-diffs
+          path: |
+            test/mobile/snapshots/*.actual.png
+            test/mobile/snapshots/*.diff.png
+          if-no-files-found: ignore
+          retention-days: 14

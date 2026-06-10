@@ -21,6 +21,7 @@
     "test:watch": "vitest --config config/vitest.config.ts",
     "test:coverage": "vitest run --config config/vitest.config.ts --coverage",
     "test:ci": "vitest run --config config/vitest.ci.config.ts",
+    "test:mobile": "vitest run --config test/mobile/vitest.config.ts",
     "check:frontend-syntax": "node scripts/check-frontend-syntax.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --config config/eslint.config.js 'src/**/*.ts'",
