@@ -332,6 +332,42 @@ describe('StateStore', () => {
     });
   });
 
+  describe('circuit breaker recovery (COD-50)', () => {
+    it('recovers via HALF_OPEN trial write after the cooldown', () => {
+      // Fake timers are already active (beforeEach). The store loads cleanly
+      // while testFilePath does not exist yet.
+      const store = new StateStore(testFilePath);
+
+      // Force every write to fail: make the destination a DIRECTORY so the
+      // atomic rename(tempPath, testFilePath) fails with EISDIR while the temp
+      // write succeeds. Real fs, deterministic — no mocks.
+      rmSync(testFilePath, { recursive: true, force: true });
+      mkdirSync(testFilePath, { recursive: true });
+
+      // 3 consecutive failed saves trip the breaker open.
+      for (let i = 0; i < 3; i++) {
+        store.setSession(`s${i}`, createMockSessionState(`s${i}`));
+        store.saveNow();
+      }
+
+      // Fix the fs so writes *could* succeed, but stay within the cooldown
+      // window. A latched breaker (bug) and a cooling-down breaker (fix) both
+      // skip here, so the file must NOT be recreated yet.
+      rmSync(testFilePath, { recursive: true, force: true });
+      store.setSession('within', createMockSessionState('within'));
+      store.saveNow();
+      expect(existsSync(testFilePath)).toBe(false); // still cooling down -> skipped
+
+      // Advance past the 30s cooldown. The fixed breaker must allow a HALF_OPEN
+      // trial write, which now succeeds and recovers persistence. The buggy
+      // (permanently latched) breaker never writes again.
+      vi.advanceTimersByTime(30_000 + 1);
+      store.setSession('after', createMockSessionState('after'));
+      store.saveNow();
+      expect(existsSync(testFilePath)).toBe(true); // recovered via trial write
+    });
+  });
+
   describe('global stats', () => {
     it('should initialize global stats with zero values', () => {
       const store = new StateStore(testFilePath);

@@ -68,6 +68,9 @@ const SAVE_DEBOUNCE_MS = 500;
 /** Maximum consecutive save failures before circuit breaker opens */
 const MAX_CONSECUTIVE_FAILURES = 3;
 
+/** How long the circuit breaker stays open before allowing a HALF_OPEN trial write (ms) */
+const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
+
 export class StateStore {
   private state: AppState;
   private filePath: string;
@@ -85,6 +88,7 @@ export class StateStore {
   // Circuit breaker for save failures (prevents hammering disk on persistent errors)
   private consecutiveSaveFailures: number = 0;
   private circuitBreakerOpen: boolean = false;
+  private circuitBreakerOpenedAt: number | null = null;
 
   // Guard against concurrent saveNowAsync() calls (debounce can race with in-flight write)
   private _saveInFlight: Promise<void> | null = null;
@@ -137,6 +141,22 @@ export class StateStore {
       console.log('[StateStore] Circuit breaker CLOSED - save succeeded');
       this.circuitBreakerOpen = false;
     }
+    this.circuitBreakerOpenedAt = null;
+  }
+
+  /**
+   * True if the breaker is open and still cooling down (skip the write).
+   * If the cooldown has elapsed, returns false to allow ONE trial write (HALF_OPEN).
+   */
+  private _circuitBreakerShouldSkipSave(): boolean {
+    if (!this.circuitBreakerOpen) return false;
+    const openedAt = this.circuitBreakerOpenedAt ?? 0;
+    if (Date.now() - openedAt < CIRCUIT_BREAKER_COOLDOWN_MS) {
+      console.warn('[StateStore] Circuit breaker open - cooling down, skipping save');
+      return true;
+    }
+    console.warn('[StateStore] Circuit breaker HALF_OPEN - attempting trial write');
+    return false;
   }
 
   private ensureDir(): void {
@@ -292,6 +312,7 @@ export class StateStore {
         if (this.consecutiveSaveFailures >= MAX_CONSECUTIVE_FAILURES) {
           console.error('[StateStore] Circuit breaker OPEN - serialization failing repeatedly');
           this.circuitBreakerOpen = true;
+          this.circuitBreakerOpenedAt = Date.now();
         }
         return null;
       }
@@ -304,9 +325,9 @@ export class StateStore {
       return;
     }
 
-    // Circuit breaker: stop attempting writes after too many failures
-    if (this.circuitBreakerOpen) {
-      console.warn('[StateStore] Circuit breaker open - skipping save (too many consecutive failures)');
+    // Circuit breaker: stop attempting writes while cooling down. After the
+    // cooldown elapses, allow ONE trial write (HALF_OPEN) to test recovery.
+    if (this._circuitBreakerShouldSkipSave()) {
       return;
     }
 
@@ -350,10 +371,13 @@ export class StateStore {
         // Temp file may not exist
       }
 
-      // Check circuit breaker threshold
+      // Check circuit breaker threshold. Re-stamp openedAt on every failure
+      // (including a failed HALF_OPEN trial) so each failure restarts the
+      // cooldown window instead of retrying on every subsequent save.
       if (this.consecutiveSaveFailures >= MAX_CONSECUTIVE_FAILURES) {
         console.error('[StateStore] Circuit breaker OPEN - writes failing repeatedly');
         this.circuitBreakerOpen = true;
+        this.circuitBreakerOpenedAt = Date.now();
       }
     }
   }
@@ -369,8 +393,7 @@ export class StateStore {
       return;
     }
 
-    if (this.circuitBreakerOpen) {
-      console.warn('[StateStore] Circuit breaker open - skipping save (too many consecutive failures)');
+    if (this._circuitBreakerShouldSkipSave()) {
       return;
     }
 
@@ -408,6 +431,7 @@ export class StateStore {
       if (this.consecutiveSaveFailures >= MAX_CONSECUTIVE_FAILURES) {
         console.error('[StateStore] Circuit breaker OPEN - writes failing repeatedly');
         this.circuitBreakerOpen = true;
+        this.circuitBreakerOpenedAt = Date.now();
       }
     }
   }
@@ -426,6 +450,7 @@ export class StateStore {
         console.log('[StateStore] Successfully recovered state from backup');
         // Reset circuit breaker after successful recovery
         this.circuitBreakerOpen = false;
+        this.circuitBreakerOpenedAt = null;
         this.consecutiveSaveFailures = 0;
         return true;
       }
@@ -440,6 +465,7 @@ export class StateStore {
    */
   resetCircuitBreaker(): void {
     this.circuitBreakerOpen = false;
+    this.circuitBreakerOpenedAt = null;
     this.consecutiveSaveFailures = 0;
     console.log('[StateStore] Circuit breaker manually reset');
   }
