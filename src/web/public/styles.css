@@ -7858,8 +7858,23 @@ kbd {
   text-decoration: line-through;
 }
 
-.document-changes-btn {
+/* COD-73: give the standalone Changes/Comment controls real button affordance
+   (the base .btn-icon-sm is borderless/transparent, so they read as plain text). */
+.document-changes-btn,
+.document-comment-btn {
   margin-left: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.document-changes-btn:hover,
+.document-comment-btn:hover {
+  border-color: var(--accent, #7aa2ff);
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.08));
+  color: var(--text);
 }
 
 /* Inline annotation composer — COD-60. */
