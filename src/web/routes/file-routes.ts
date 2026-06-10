@@ -28,6 +28,12 @@ import {
 import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
+import {
+  buildTextExportHtml,
+  classifyExportBranch,
+  convertHtmlToPdf,
+  isSupportedExportFormat,
+} from '../../document-pdf-export.js';
 import { documentVersionStore } from '../../document-version-store.js';
 import {
   convertDocxToHtml,
@@ -151,6 +157,15 @@ async function serveConvertedPreview(
       .code(500)
       .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to generate preview: ${getErrorMessage(err)}`));
   }
+}
+
+async function sendPdfDownload(reply: FastifyReply, content: Buffer, downloadName: string): Promise<void> {
+  reply.header('Content-Type', 'application/pdf');
+  reply.header('Content-Disposition', `attachment; filename="${sanitizeDownloadName(downloadName)}"`);
+  reply.header('Cache-Control', 'no-cache');
+  reply.header('Content-Length', content.length);
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.send(content);
 }
 
 async function serveThumbnail(reply: FastifyReply, resolvedPath: string, extension: string): Promise<void> {
@@ -902,6 +917,86 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return reply
         .code(500)
         .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to render HTML: ${getErrorMessage(err)}`));
+    }
+  });
+
+  // One-click PDF export of the open document (COD-61). GET (so a browser link
+  // can download it) + Content-Disposition: attachment, mirroring the
+  // file-raw/file-preview download pattern (the ticket said POST — deviation
+  // noted). PDF is the only supported format today (DOCX/templates deferred).
+  // docx/pptx reuse the LibreOffice preview-PDF cache; md/markdown/txt are
+  // rendered to HTML server-side (pandoc, else vendored marked) then converted
+  // HTML→PDF via the same soffice invocation.
+  app.get('/api/sessions/:id/documents/export', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const query = req.query as { attachmentId?: string; path?: string; format?: string };
+
+    if (!isSupportedExportFormat(query.format)) {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only PDF export is supported (format=pdf)'));
+      return;
+    }
+
+    const target = resolveDocumentTarget(ctx, reply, id, query);
+    if (!target) return;
+
+    // Resolve symlinks before the sensitive-path guard so a symlink pointing at
+    // a secret target is also caught (COD-53 ordering requirement).
+    let realPath = target.filePath;
+    try {
+      realPath = realpathSync(target.filePath);
+    } catch {
+      // Unreadable/deleted — check the stored path; conversion below will 500 if truly gone.
+    }
+    if (isSensitivePath(realPath)) {
+      reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
+      return;
+    }
+
+    const branch = classifyExportBranch(target.extension);
+    if (branch === 'unsupported') {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'PDF export is not supported for this file type'));
+      return;
+    }
+
+    const fileName = pathBasename(realPath);
+    const downloadName = getPreviewPdfDownloadName(fileName, target.extension);
+
+    try {
+      if (branch === 'office') {
+        // Reuse the existing docx/pptx → PDF preview cache.
+        const previewPath = await getOfficePreviewPdfPath(realPath, target.extension);
+        if (!previewPath) {
+          reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document conversion to PDF failed'));
+          return;
+        }
+        const content = await fs.readFile(previewPath);
+        await sendPdfDownload(reply, content, downloadName);
+        return;
+      }
+
+      // text branch: md/markdown/txt → standalone HTML → soffice HTML→PDF.
+      const raw = await fs.readFile(realPath, 'utf-8');
+      const { html } = await buildTextExportHtml(raw, target.extension, fileName);
+      const pdfPath = await convertHtmlToPdf(html);
+      if (!pdfPath) {
+        reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document conversion to PDF failed'));
+        return;
+      }
+      try {
+        const content = await fs.readFile(pdfPath);
+        await sendPdfDownload(reply, content, downloadName);
+      } finally {
+        // convertHtmlToPdf returns a path inside a per-call work dir; remove it.
+        await fs.rm(join(pdfPath, '..'), { recursive: true, force: true }).catch(() => {});
+      }
+    } catch (err) {
+      reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to export PDF: ${getErrorMessage(err)}`));
     }
   });
 

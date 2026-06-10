@@ -2869,7 +2869,13 @@ Object.assign(CodemanApp.prototype, {
         isDocx && view === 'html'
           ? ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`
           : '';
-      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${label}`)}${switcher}${comment}`;
+      // One-click PDF export of the open document (COD-61). docx/pptx reuse the
+      // LibreOffice preview-PDF cache server-side; raw PDFs are already PDFs but
+      // the control downloads them consistently via the export endpoint.
+      const exportPdf = this._renderExportPdfControl();
+      footerEl.innerHTML = `${escapeHtml(
+        `${this.formatFileSize(data.size)} \u2022 ${label}`
+      )}${switcher}${comment}${exportPdf}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
@@ -2931,9 +2937,11 @@ Object.assign(CodemanApp.prototype, {
       // User-configured one-click authoring actions (COD-64). Only shown when the
       // user has configured at least one action AND there's a session to send to.
       const authoring = this._renderAuthoringControl();
+      // One-click PDF export of the open document (COD-61).
+      const exportPdf = this._renderExportPdfControl();
       footerEl.innerHTML = `${escapeHtml(
         `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type} \u2022 ${meta}`
-      )}${outlineBtn}${readingBtn}${changes}${comment}${authoring}`;
+      )}${outlineBtn}${readingBtn}${changes}${comment}${authoring}${exportPdf}`;
     } else if (data.type === 'binary') {
       bodyEl.innerHTML = `
         <div class="binary-message">
@@ -3006,6 +3014,46 @@ Object.assign(CodemanApp.prototype, {
     return st.attachmentId
       ? `attachmentId=${encodeURIComponent(st.attachmentId)}`
       : `path=${encodeURIComponent(st.filePath)}`;
+  },
+
+  /**
+   * Render the "Export PDF" footer control (COD-61), or '' when the document
+   * isn't exportable. Server supports docx/pptx (cached LibreOffice PDF) and
+   * md/markdown/txt (HTML→PDF); other types (incl. already-PDF) are skipped.
+   */
+  _renderExportPdfControl() {
+    const st = this.filePreviewState;
+    if (!st || (!st.filePath && !st.attachmentId)) return '';
+    const ext = (st.filePath || '').split('.').pop()?.toLowerCase() || '';
+    const exportable = ['docx', 'pptx', 'md', 'markdown', 'mdown', 'txt', 'text'];
+    // attachmentId-only previews (no path) still expose the control; the server
+    // resolves the extension from the attachment record and 400s if unsupported.
+    if (st.filePath && !exportable.includes(ext)) return '';
+    return ` <button class="btn-icon-sm document-export-btn" onclick="app.exportDocumentPdf()" title="Download a PDF of this document">Export PDF</button>`;
+  },
+
+  /** Download a PDF of the open document via the export endpoint (COD-61). */
+  exportDocumentPdf() {
+    const st = this.filePreviewState;
+    if (!st || !st.sessionId) {
+      this.showToast?.('No document to export', 'error');
+      return;
+    }
+    const params = this._documentParams();
+    if (!params) {
+      this.showToast?.('No document to export', 'error');
+      return;
+    }
+    const url = `/api/sessions/${st.sessionId}/documents/export?${params}&format=pdf`;
+    // Trigger a download via a temporary anchor so a server error (which returns
+    // a JSON envelope, not a PDF) doesn't navigate the SPA away.
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   },
 
   /** Switch the preview into revision-review mode and render the diff (COD-59). */
