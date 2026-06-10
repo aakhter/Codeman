@@ -2928,9 +2928,12 @@ Object.assign(CodemanApp.prototype, {
         : '';
       // Annotate a selected passage and send it back to the session (COD-60).
       const comment = ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`;
+      // User-configured one-click authoring actions (COD-64). Only shown when the
+      // user has configured at least one action AND there's a session to send to.
+      const authoring = this._renderAuthoringControl();
       footerEl.innerHTML = `${escapeHtml(
         `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type} \u2022 ${meta}`
-      )}${outlineBtn}${readingBtn}${changes}${comment}`;
+      )}${outlineBtn}${readingBtn}${changes}${comment}${authoring}`;
     } else if (data.type === 'binary') {
       bodyEl.innerHTML = `
         <div class="binary-message">
@@ -3306,6 +3309,115 @@ Object.assign(CodemanApp.prototype, {
     } catch {
       this.showToast?.('Failed to send to session', 'error');
       return false;
+    }
+  },
+
+  // ── Authoring actions (COD-64) ───────────────────────────────────────────
+  // User-configured one-click actions surfaced in the document preview footer.
+  // Each action sends a templated single-line instruction to the open document's
+  // agent session. Ships empty — the user authors these in App Settings → Authoring.
+
+  /** Read the user's configured authoring actions from the cached app-settings store. */
+  _authoringActions() {
+    const list = this.loadAppSettingsFromStorage?.().authoringActions;
+    return Array.isArray(list) ? list : [];
+  },
+
+  /**
+   * Build the instruction sent to the agent: replace every `{path}` in the template
+   * with the document path; if the template has no `{path}`, append ` <path>`. Pure;
+   * kept single-line (writeViaMux is single-line only).
+   */
+  buildActionInstruction(template, path) {
+    const t = String(template ?? '');
+    const p = String(path ?? '');
+    const out = t.includes('{path}') ? t.split('{path}').join(p) : `${t} ${p}`;
+    return out.replace(/\s+/g, ' ').trim();
+  },
+
+  /**
+   * Normalize editor rows into the persisted shape: trim label/instruction, drop
+   * rows missing either, assign a stable id when absent, and cap at 20. Pure.
+   */
+  normalizeAuthoringActions(rows) {
+    if (!Array.isArray(rows)) return [];
+    const out = [];
+    for (const row of rows) {
+      const label = String(row?.label ?? '').trim();
+      const instruction = String(row?.instruction ?? '').trim();
+      if (!label || !instruction) continue;
+      const id = String(row?.id ?? '').trim() || this._newAuthoringActionId();
+      out.push({ id, label, instruction });
+      if (out.length >= 20) break;
+    }
+    return out;
+  },
+
+  /** Short, stable id for a new authoring action (crypto.randomUUID with fallback). */
+  _newAuthoringActionId() {
+    try {
+      const uuid = globalThis.crypto?.randomUUID?.();
+      if (uuid) return `act-${uuid.slice(0, 8)}`;
+    } catch {
+      /* ignore */
+    }
+    return `act-${Math.random().toString(36).slice(2, 10)}`;
+  },
+
+  /** Footer control: an "Authoring ▾" button revealing the configured actions. */
+  _renderAuthoringControl() {
+    const actions = this._authoringActions();
+    if (!actions.length || !this.filePreviewState?.sessionId) return '';
+    const items = actions
+      .map(
+        (a) =>
+          `<button class="authoring-action-item" onclick="app.runAuthoringAction('${escapeHtml(a.id)}')">${escapeHtml(
+            a.label
+          )}</button>`
+      )
+      .join('');
+    return (
+      ` <span class="document-authoring-wrap">` +
+      `<button class="btn-icon-sm document-authoring-btn" onclick="app.toggleAuthoringMenu(event)">Authoring ▾</button>` +
+      `<div class="authoring-action-menu" hidden>${items}</div>` +
+      `</span>`
+    );
+  },
+
+  /** Toggle the authoring actions dropdown open/closed. */
+  toggleAuthoringMenu(event) {
+    event?.stopPropagation?.();
+    const wrap = event?.currentTarget?.closest?.('.document-authoring-wrap');
+    const menu = wrap?.querySelector('.authoring-action-menu');
+    if (!menu) return;
+    const open = menu.hasAttribute('hidden');
+    if (open) {
+      menu.removeAttribute('hidden');
+      const close = (e) => {
+        if (!wrap.contains(e.target)) {
+          menu.setAttribute('hidden', '');
+          document.removeEventListener('click', close, true);
+        }
+      };
+      document.addEventListener('click', close, true);
+    } else {
+      menu.setAttribute('hidden', '');
+    }
+  },
+
+  /** Look up an action by id, interpolate the path, and send it to the session. */
+  async runAuthoringAction(actionId) {
+    const st = this.filePreviewState;
+    const action = this._authoringActions().find((a) => a.id === actionId);
+    if (!action) return;
+    if (!st?.sessionId) {
+      this.showToast?.('No active session for this document', 'error');
+      return;
+    }
+    const instruction = this.buildActionInstruction(action.instruction, st.filePath || '');
+    if (!instruction) return;
+    if (await this._postSessionInput(st.sessionId, instruction)) {
+      this.showToast?.(`Sent "${action.label}" to the session`, 'success');
     }
   },
 

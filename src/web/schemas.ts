@@ -433,6 +433,21 @@ export const SettingsUpdateSchema = z
       )
       .max(20)
       .optional(),
+    // COD-64: user-configured one-click "authoring actions" surfaced as a menu in
+    // the document preview. Each action sends a (templated) single-line instruction
+    // to the open document's agent session; `{path}` in the instruction is replaced
+    // with the document path. Ships EMPTY by default — no skill names baked in here
+    // (the user authors these, e.g. labels like "Tighten prose" / "Narrative review").
+    authoringActions: z
+      .array(
+        z.object({
+          id: z.string().max(100),
+          label: z.string().min(1).max(60),
+          instruction: z.string().min(1).max(2000),
+        })
+      )
+      .max(20)
+      .optional(),
   })
   .strict()
   .superRefine((settings, ctx) => {

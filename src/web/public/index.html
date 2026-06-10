@@ -975,6 +975,7 @@
           <button class="modal-tab-btn" data-tab="settings-claude">Claude CLI</button>
           <button class="modal-tab-btn" data-tab="settings-codex">Codex CLI</button>
           <button class="modal-tab-btn" data-tab="settings-models">Models</button>
+          <button class="modal-tab-btn" data-tab="settings-authoring">Authoring</button>
           <button class="modal-tab-btn" data-tab="settings-paths">Paths</button>
           <button class="modal-tab-btn" data-tab="settings-notifications">Notifications</button>
           <button class="modal-tab-btn" data-tab="settings-voice">Voice</button>
@@ -1394,6 +1395,13 @@
               <input type="text" id="appSettingsDefaultDir" placeholder="~/projects">
               <span class="form-hint">Default directory for new sessions.</span>
             </div>
+          </div>
+          <!-- Authoring Tab (COD-64) -->
+          <div class="modal-tab-content hidden" id="settings-authoring">
+            <div class="form-section-header">Authoring Actions</div>
+            <p class="form-hint" style="margin: 0 0 12px 0;">One-click actions shown in the document preview. Clicking one sends its instruction to the open document's agent session. Use <code>{path}</code> in the instruction for the document path (e.g. "Tighten the prose in {path}"); if omitted, the path is appended.</p>
+            <div id="authoringActionsList" class="authoring-actions-editor"></div>
+            <button type="button" class="btn-secondary btn-sm" onclick="app.addAuthoringActionRow()">+ Add action</button>
           </div>
           <!-- Notifications Tab -->
           <div class="modal-tab-content hidden" id="settings-notifications">

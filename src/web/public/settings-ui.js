@@ -359,6 +359,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
     document.getElementById('appSettingsThinkingEffort').value = settings.thinkingEffort ?? '';
+    // Authoring actions editor (COD-64) — render the saved rows into the list
+    this.renderAuthoringActions(settings.authoringActions || []);
     // CPU Priority settings
     const niceSettings = settings.nice || {};
     document.getElementById('appSettingsNiceEnabled').checked = niceSettings.enabled ?? false;
@@ -1359,6 +1361,73 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  // ── Authoring actions editor (COD-64) ────────────────────────────────────
+
+  /** Render the saved authoring actions as editable rows in the App Settings modal. */
+  renderAuthoringActions(actions) {
+    const list = document.getElementById('authoringActionsList');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const action of actions || []) this._appendAuthoringActionRow(action);
+  },
+
+  /** Append one editor row (label + instruction + remove) for an action. */
+  _appendAuthoringActionRow(action = {}) {
+    const list = document.getElementById('authoringActionsList');
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'authoring-action-row';
+    row.dataset.id = action.id || this._newAuthoringActionId();
+    const label = document.createElement('input');
+    label.type = 'text';
+    label.className = 'authoring-action-label';
+    label.placeholder = 'Label (e.g. Tighten prose)';
+    label.maxLength = 60;
+    label.value = action.label || '';
+    const instruction = document.createElement('input');
+    instruction.type = 'text';
+    instruction.className = 'authoring-action-instruction';
+    instruction.placeholder = 'Instruction (use {path} for the document path)';
+    instruction.maxLength = 2000;
+    instruction.value = action.instruction || '';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn-icon-sm authoring-action-remove';
+    remove.textContent = '×';
+    remove.title = 'Remove action';
+    remove.onclick = () => row.remove();
+    row.append(label, instruction, remove);
+    list.appendChild(row);
+  },
+
+  /** Add a fresh blank authoring-action row. */
+  addAuthoringActionRow() {
+    this._appendAuthoringActionRow({});
+  },
+
+  /** Generate a stable id for a new authoring action (delegates to the shared helper). */
+  _newAuthoringActionId() {
+    try {
+      const uuid = globalThis.crypto?.randomUUID?.();
+      if (uuid) return `act-${uuid.slice(0, 8)}`;
+    } catch {
+      /* ignore */
+    }
+    return `act-${Math.random().toString(36).slice(2, 10)}`;
+  },
+
+  /** Read the editor rows back and normalize them (drop blanks, trim, cap 20). */
+  readAuthoringActionsFromEditor() {
+    const list = document.getElementById('authoringActionsList');
+    if (!list) return [];
+    const rows = Array.from(list.querySelectorAll('.authoring-action-row')).map((row) => ({
+      id: row.dataset.id,
+      label: row.querySelector('.authoring-action-label')?.value || '',
+      instruction: row.querySelector('.authoring-action-instruction')?.value || '',
+    }));
+    return this.normalizeAuthoringActions(rows);
+  },
+
   async saveAppSettings() {
     // Gesture overlay is injected at page render (server-side), so a change to it
     // only takes effect on reload — remember the prior value to decide below.
@@ -1411,6 +1480,8 @@ Object.assign(CodemanApp.prototype, {
         enabled: document.getElementById('appSettingsNiceEnabled').checked,
         niceValue: parseInt(document.getElementById('appSettingsNiceValue').value) || 10,
       },
+      // Authoring actions (COD-64) — read editor rows, drop blanks, cap 20
+      authoringActions: this.readAuthoringActionsFromEditor(),
     };
 
     // Save to localStorage
