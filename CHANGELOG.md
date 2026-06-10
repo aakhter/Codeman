@@ -1,5 +1,15 @@
 # aicodeman
 
+## 0.9.10
+
+### Patch Changes
+
+- Self-update now restarts automatically on headless Macs supervised by a system LaunchDaemon.
+
+  New `launchd-daemon` supervisor kind: when Codeman runs under a bootstrapped, KeepAlive system-level LaunchDaemon (`/Library/LaunchDaemons/com.codeman.web.plist` — the right setup for headless Macs, where LaunchAgents never start because there is no GUI login), the updater no longer ends with "Update staged — restart Codeman to apply". It restarts rootlessly: the update script kills the server PID (passed via `--server-pid`) and launchd respawns it on the freshly built `dist/`. Detection is conservative — the daemon must be bootstrapped in the system domain AND have `KeepAlive` enabled.
+
+  Also fixed: a lingering "restart Codeman to apply" status. After a manual restart of a staged update, boot reconciliation now flips `completed-needs-manual-restart` to `completed` once the running version matches the staged target, so the Updates tab stops showing the stale instruction.
+
 ## 0.9.9
 
 ### Patch Changes
