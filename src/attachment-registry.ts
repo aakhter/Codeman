@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { basename, extname, isAbsolute } from 'node:path';
+import { isSensitivePath } from './web/sensitive-path.js';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
 
 const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set(['png', 'pdf', 'docx', 'pptx', 'md', 'txt']);
@@ -142,6 +143,14 @@ export async function registerExternalAttachment(
     resolvedPath = realpathSync(requestedPath);
   } catch {
     throw new AttachmentRegistrationError('Attachment file not found', 404);
+  }
+
+  // COD-53: block sensitive host files up front (symlinks already resolved
+  // above). Cross-workspace attachment stays allowed — this is a blocklist,
+  // not workspace confinement — so codeman-publish and the ~/.codeman review
+  // loop keep working.
+  if (isSensitivePath(resolvedPath)) {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
 
   const extension = extname(resolvedPath).toLowerCase().replace(/^\./, '');
