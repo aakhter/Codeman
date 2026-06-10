@@ -1376,30 +1376,27 @@ class CodemanApp {
   // Response Viewer — native-scroll panel for reading full Claude responses
   // ═══════════════════════════════════════════════════════════════
 
-  /** Strip dangerous elements and attributes from HTML (XSS prevention) */
+  /**
+   * Sanitize markdown-rendered HTML before innerHTML assignment (XSS / mXSS prevention).
+   *
+   * COD-56: delegates to DOMPurify (Cure53) via sanitize-html.js — an allowlist sanitizer that
+   * is the industry standard for mXSS defense. It replaces the previous hand-rolled DENYLIST,
+   * which never stripped `svg`/`math` (foreign-namespace mXSS vectors) or `style` (CSS-based
+   * vectors) and admitted any tag/attr it didn't explicitly name. The allowlist config lives in
+   * sanitize-html.js and permits only what markdown rendering produces.
+   *
+   * Fallback: if DOMPurify failed to load, fail CLOSED by escaping the entire string into a
+   * single text node rather than serving the raw (unsanitized) HTML.
+   */
   _sanitizeHtml(html) {
-    const tpl = document.createElement('template');
-    tpl.innerHTML = html;  // Safe: this is a sanitizer that strips dangerous content before use
-    const frag = tpl.content;
-    for (const el of frag.querySelectorAll('script, iframe, object, embed, form, base, meta, link, style')) {
-      el.remove();
+    if (typeof window !== 'undefined' && typeof window.sanitizeMarkdownHtml === 'function') {
+      return window.sanitizeMarkdownHtml(html);
     }
-    for (const el of frag.querySelectorAll('*')) {
-      for (const attr of [...el.attributes]) {
-        const name = attr.name.toLowerCase();
-        if (name.startsWith('on')) {
-          el.removeAttribute(attr.name);
-        } else if (['href', 'src', 'action', 'xlink:href', 'formaction'].includes(name)) {
-          const val = attr.value.replace(/\s/g, '').toLowerCase();
-          if (val.startsWith('javascript:') || val.startsWith('vbscript:') || val.startsWith('data:text/html')) {
-            el.removeAttribute(attr.name);
-          }
-        }
-      }
-    }
-    const div = document.createElement('div');
-    div.appendChild(frag);
-    return div.innerHTML;
+    // Fail closed: DOMPurify unavailable — never return un-sanitized HTML.
+    return String(html == null ? '' : html)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
   }
 
   /**
