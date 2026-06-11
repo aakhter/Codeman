@@ -120,7 +120,8 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('ssh');
       expect(command).toContain('BatchMode=yes');
       expect(command).toContain('ubuntu@10.0.0.42');
-      expect(command).toContain("cd '\\''/home/ubuntu/work'\\''");
+      expect(command).toContain('/home/ubuntu/work');
+      expect(command).toContain('bash -lc');
       expect(command).toContain('exec codx personal');
     });
 

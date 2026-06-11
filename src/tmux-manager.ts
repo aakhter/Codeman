@@ -722,7 +722,8 @@ export function buildRemoteLaunchCommand(options: { mode: SessionMode; remote: S
   const modeCommand = remote.commands?.[mode] || defaultRemoteCommandForMode(mode);
   const args = ['ssh', '-o', 'BatchMode=yes', '-t'];
   if (remote.port) args.push('-p', String(remote.port));
-  args.push(remoteSshTarget(remote), `cd ${shellescape(remote.remotePath)} && ${modeCommand}`);
+  const remoteCommand = `cd ${shellescape(remote.remotePath)} && ${modeCommand}`;
+  args.push(remoteSshTarget(remote), `bash -lc ${shellescape(remoteCommand)}`);
   return args.map((arg) => shellescape(arg)).join(' ');
 }
 

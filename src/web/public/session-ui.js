@@ -73,7 +73,7 @@ Object.assign(CodemanApp.prototype, {
 
       cases.forEach(c => {
         const baseLabel = c.location === 'remote' && c.remote
-          ? `${c.name} @ ${c.remote.hostLabel}`
+          ? `${c.name} @ ${c.remote.hostId}`
           : c.name;
         const displayName = baseLabel.length > maxNameLength
           ? baseLabel.substring(0, maxNameLength) + '…'
@@ -1242,7 +1242,6 @@ Object.assign(CodemanApp.prototype, {
       'remoteCaseName',
       'remoteCasePath',
       'remoteHostId',
-      'remoteHostLabel',
       'remoteHostAddress',
       'remoteHostUsername',
       'remoteHostCodexCommand',
@@ -1412,12 +1411,11 @@ Object.assign(CodemanApp.prototype, {
     const name = document.getElementById('remoteCaseName').value.trim();
     const remotePath = document.getElementById('remoteCasePath').value.trim();
     const hostId = document.getElementById('remoteHostId').value.trim();
-    const label = document.getElementById('remoteHostLabel').value.trim();
     const host = document.getElementById('remoteHostAddress').value.trim();
     const username = document.getElementById('remoteHostUsername').value.trim();
     const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
 
-    if (!name || !remotePath || !hostId || !label || !host || !username) {
+    if (!name || !remotePath || !hostId || !host || !username) {
       this.showToast('Please complete all required remote fields', 'error');
       return;
     }
@@ -1433,7 +1431,7 @@ Object.assign(CodemanApp.prototype, {
     try {
       const hostPayload = {
         id: hostId,
-        label,
+        label: hostId,
         host,
         username,
         ...(codexCommand ? { commands: { codex: codexCommand } } : {}),

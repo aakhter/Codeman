@@ -143,14 +143,19 @@ describe('case selector refresh', () => {
         if (url === '/api/cases/gpu-work') {
           return {
             json: async () => ({
-              name: 'gpu-work',
-              path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
-              location: 'remote',
-              remote: { hostId: 'gpu-box', hostLabel: 'GPU Box', path: '/home/ubuntu/work' },
+              success: true,
+              data: {
+                name: 'gpu-work',
+                path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
+                location: 'remote',
+                remote: { hostId: 'gpu-box', path: '/home/ubuntu/work' },
+              },
             }),
           };
         }
-        if (url === '/api/sessions') return { json: async () => ({ success: true, session: { id: 'sess-1' } }) };
+        if (url === '/api/sessions') {
+          return { json: async () => ({ success: true, data: { session: { id: 'sess-1' } } }) };
+        }
         if (url === '/api/sessions/sess-1/shell') return { json: async () => ({ success: true }) };
         throw new Error(`unexpected fetch: ${url}`);
       },

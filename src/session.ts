@@ -194,6 +194,10 @@ export function queryTmuxWindowSize(muxName: string, socket: string): { cols: nu
   return { cols: DEFAULT_PTY_COLS, rows: DEFAULT_PTY_ROWS };
 }
 
+export function resolveMuxAttachCwd(workingDir: string, remote?: SessionRemote): string {
+  return remote ? '/tmp' : workingDir;
+}
+
 /**
  * Represents a JSON message from Claude CLI's stream-json output format.
  * Messages are newline-delimited JSON objects parsed from PTY output.
@@ -1132,7 +1136,7 @@ export class Session extends EventEmitter {
         name: 'xterm-256color',
         cols: ptyCols,
         rows: ptyRows,
-        cwd: this.workingDir,
+        cwd: resolveMuxAttachCwd(this.workingDir, this._remote),
         env: buildMuxAttachEnv(this._truecolorEnabled),
       });
     } catch (spawnErr) {
