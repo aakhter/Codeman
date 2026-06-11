@@ -5,11 +5,7 @@
 <h2 align="center">Mission control for AI coding agents</h2>
 
 <p align="center">
-  <em>Claude Code &bull; OpenCode &bull; Codex &mdash; One Dashboard &bull; Any Device</em>
-</p>
-
-<p align="center">
-  <strong>English</strong> &bull; <a href="README.zh-CN.md">简体中文</a>
+  <em>Claude Code &bull; OpenCode &bull; Codex &bull; Terminal - One Dashboard &bull; Any Device</em>
 </p>
 
 <p align="center">
@@ -18,6 +14,10 @@
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.9-3b82f6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5.9"></a>
   <a href="https://fastify.dev/"><img src="https://img.shields.io/badge/Fastify-5.x-1e3a5f?style=flat-square&logo=fastify&logoColor=white" alt="Fastify"></a>
   <img src="https://img.shields.io/badge/Tests-1435%20total-22c55e?style=flat-square" alt="Tests">
+</p>
+
+<p align="center">
+  <strong>English</strong> &bull; <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
