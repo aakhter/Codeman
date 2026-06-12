@@ -980,13 +980,18 @@ export function registerSessionRoutes(
     const query = req.query as { tail?: string };
     const session = findSessionOrFail(ctx, id);
 
+    // Prepend the live tmux pane buffer so tab-switch replay shows the current
+    // on-screen frame, not just the accumulated byte history. This matters for
+    // TUI modes (codex/opencode) that repaint only their latest frame: the
+    // accumulated buffer alone replays as the idle banner. We clear the viewport
+    // (`\x1b[H\x1b[2J`) between the history and the live pane so they don't
+    // overlap. `captureActivePaneBuffer` is a no-op ('') under test mode and
+    // returns null when unavailable, in which case we fall back to history.
     const muxName = session.muxName;
     const liveMuxBuffer =
-      muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName) : null;
-    // All tmux-backed modes prepend the accumulated byte history (cleared, then
-    // the live pane) so tab-switch replay shows full scrollback rather than just
-    // the current pane. Codex converged on this path in 18ce518 ("default codex
-    // to hybrid tui"), so the former per-mode gate is now a single behavior.
+      muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
+        ? ctx.mux.captureActivePaneBuffer(muxName)
+        : null;
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
         ? session.terminalBufferLength > 0

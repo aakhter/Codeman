@@ -82,7 +82,7 @@ interface SessionListenerDeps {
 }
 
 /**
- * Creates all 25 session listener handlers, capturing dependencies via closure.
+ * Creates all 26 session listener handlers, capturing dependencies via closure.
  * Call `attachSessionListeners()` after to wire them to the session.
  */
 export function createSessionListeners(session: Session, deps: SessionListenerDeps): SessionListenerRefs {

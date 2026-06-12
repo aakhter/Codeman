@@ -3190,16 +3190,84 @@ class CodemanApp {
    * terminal write queue, IME composition, and local echo flush.
    * @param {string} newSessionId - The session being switched TO.
    */
+  _isUsableXtermSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'string' || snapshot.length < 8) return false;
+    const visibleText = snapshot
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[()][0-2A-Z]/g, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+      .trim();
+    return visibleText.length >= 3;
+  }
+
+  /**
+   * Persist one xterm snapshot to localStorage, bounded to a fixed key budget
+   * regardless of how many sessions are live, and resilient to quota errors.
+   * The previous inline version only pruned snapshots for sessions that no
+   * longer existed AND pruned only after a successful setItem — so once the
+   * quota filled (e.g. >10 live sessions at the 20-session target) the write
+   * threw before the prune could run, permanently disabling persistence.
+   */
+  _persistXtermSnapshot(key, snapshot) {
+    const PREFIX = 'codeman-xs-';
+    const MAX_KEYS = 10;
+    const others = () => Object.keys(localStorage).filter((k) => k.startsWith(PREFIX) && k !== key);
+    try {
+      // Evict down to the budget before writing a NEW key, dead sessions first
+      // then oldest. (Overwriting an existing key doesn't grow the key count.)
+      if (localStorage.getItem(key) === null) {
+        const live = new Set(Array.from(this.sessions?.keys?.() || []));
+        const pool = others().sort(
+          (a, b) =>
+            Number(live.has(a.slice(PREFIX.length))) - Number(live.has(b.slice(PREFIX.length)))
+        );
+        while (pool.length >= MAX_KEYS) localStorage.removeItem(pool.shift());
+      }
+      try {
+        localStorage.setItem(key, snapshot);
+      } catch (_quota) {
+        // Quota exceeded: drop other snapshots one at a time and retry so a full
+        // quota can't permanently disable persistence.
+        for (const victim of others()) {
+          localStorage.removeItem(victim);
+          try {
+            localStorage.setItem(key, snapshot);
+            return;
+          } catch (_again) {
+            /* keep evicting */
+          }
+        }
+        try { localStorage.removeItem(key); } catch {}
+      }
+    } catch (_unavailable) {
+      /* localStorage unavailable (Safari private mode / disabled) — in-memory only */
+    }
+  }
+
   _cleanupPreviousSession(newSessionId) {
     // Snapshot the OUTGOING session's xterm rendered state (viewport + scrollback +
     // colors/attrs) before the terminal gets cleared/reset. Lets us restore the
     // exact view on switch-back rather than replaying codex's byte stream, which
     // drops earlier conversation from each TUI redraw and ends up showing only
     // the latest (idle) frame.
-    if (this.activeSessionId && this._serializeAddon && this._xtermSnapshots) {
+    // Shell sessions are never restored from a snapshot (restore is gated on
+    // mode !== 'shell'), so skip the serialize() + cache slot + localStorage
+    // quota for them. Unknown/undefined mode still snapshots, matching restore.
+    const outgoingSession = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
+    if (
+      this.activeSessionId &&
+      outgoingSession?.mode !== 'shell' &&
+      this._serializeAddon &&
+      this._xtermSnapshots
+    ) {
       try {
         const snapshot = this._serializeAddon.serialize({ scrollback: 1000 });
         if (this._isUsableXtermSnapshot(snapshot)) {
+          // Delete-before-set so re-touching a session moves it to the end of
+          // the Map's insertion order — otherwise eviction is FIFO and can drop
+          // the most-recently-used session instead of the least.
+          this._xtermSnapshots.delete(this.activeSessionId);
           this._xtermSnapshots.set(this.activeSessionId, snapshot);
           // Cap in-memory snapshot cache at 20 entries; evict oldest on overflow.
           if (this._xtermSnapshots.size > 20) {
@@ -3208,27 +3276,11 @@ class CodemanApp {
           }
           // Persist to localStorage so the snapshot survives tab discard /
           // browser reload (Chrome discards inactive tabs after idle periods,
-          // wiping in-memory state). Cap per-snapshot at 256KB and limit total
-          // to 10 sessions; codex buffer-replay produces a visual mess of
-          // stacked banner redraws when no snapshot exists, so persistence
-          // matters more here than for claude.
+          // wiping in-memory state). Cap per-snapshot at 256KB; codex
+          // buffer-replay produces a visual mess of stacked banner redraws when
+          // no snapshot exists, so persistence matters more here than for claude.
           if (snapshot.length < 256 * 1024) {
-            try {
-              localStorage.setItem(`codeman-xs-${this.activeSessionId}`, snapshot);
-              // LRU eviction: keep at most 10 snapshot keys
-              const keys = Object.keys(localStorage).filter((k) => k.startsWith('codeman-xs-'));
-              if (keys.length > 10) {
-                // Drop ones not in the current sessions map (stale)
-                const liveIds = new Set(Array.from(this.sessions?.keys?.() || []));
-                for (const k of keys) {
-                  if (!liveIds.has(k.slice('codeman-xs-'.length))) {
-                    localStorage.removeItem(k);
-                  }
-                }
-              }
-            } catch (_e) {
-              /* localStorage quota exceeded — silently fall through */
-            }
+            this._persistXtermSnapshot(`codeman-xs-${this.activeSessionId}`, snapshot);
           }
         } else {
           this._xtermSnapshots.delete(this.activeSessionId);
@@ -3491,7 +3543,9 @@ class CodemanApp {
           const persisted = localStorage.getItem(`codeman-xs-${sessionId}`);
           if (persisted && this._isUsableXtermSnapshot(persisted)) {
             snapshot = persisted;
-            // Hoist into in-memory cache for next time
+            // Hoist into in-memory cache for next time (delete-before-set keeps
+            // the Map in LRU order so the just-used session isn't evicted first).
+            this._xtermSnapshots?.delete(sessionId);
             this._xtermSnapshots?.set(sessionId, persisted);
           } else if (persisted) {
             localStorage.removeItem(`codeman-xs-${sessionId}`);
@@ -3576,6 +3630,9 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
+        // A snapshot restore or a busy-clear leaves the terminal showing
+        // something other than the cache, so the fetched buffer must be
+        // replayed even when it byte-matches the cache.
         const needsRewrite =
           restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {

@@ -101,9 +101,24 @@ async function serveRawFile(
   resolvedPath: string,
   fileName: string,
   extension: string,
-  download?: boolean
+  download?: boolean,
+  maxSizeBytes?: number
 ): Promise<void> {
   const stat = await fs.stat(resolvedPath);
+  // Optional cap: the by-id attachment raw route bounds its response (an
+  // attacker-influenceable registry id resolves to an arbitrary host file), but
+  // the workspace-scoped file-raw route streams without an app-level cap.
+  if (maxSizeBytes !== undefined && stat.size > maxSizeBytes) {
+    reply
+      .code(413)
+      .send(
+        createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${maxSizeBytes / 1024 / 1024}MB limit)`
+        )
+      );
+    return;
+  }
   const content = createReadStream(resolvedPath);
   const safeName = sanitizeDownloadName(fileName);
   if (download || extension === 'svg') {
@@ -204,16 +219,24 @@ function getAttachmentOr404(
  * runs on the stored path. Uses the broadened blocklist (secret locations +
  * `/root`/`/etc` trees + operator extras); when workspace confinement is
  * enabled it additionally rejects any record outside the session workspace.
- * Returns true and sends a 403 when blocked.
+ *
+ * Returns the path that is SAFE to stream — the freshly realpath-resolved target
+ * when resolvable, else the stored path — or null (after sending a 403) when
+ * blocked. Streaming the resolved path closes a TOCTOU window: a path component
+ * swapped to a symlink after registration would otherwise redirect the stream to
+ * a different file than the guard checked. `rejectIfSensitiveRecord` wraps this
+ * for the metadata/preview/thumbnail routes that only need the boolean verdict.
  */
-async function rejectIfSensitiveRecord(
+async function resolveServableAttachmentPath(
   reply: FastifyReply,
   record: AttachmentRecord,
   sessionWorkingDir?: string
-): Promise<boolean> {
+): Promise<string | null> {
   let pathToCheck = record.filePath;
+  let resolved = false;
   try {
     pathToCheck = realpathSync(record.filePath);
+    resolved = true;
   } catch {
     // Fall back to the stored (already realpath-resolved at registration) path.
   }
@@ -227,9 +250,25 @@ async function rejectIfSensitiveRecord(
 
   if (blocked) {
     reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
-    return true;
+    return null;
   }
-  return false;
+  // Serve the freshly-resolved path, not the stored one: if a path component
+  // became a symlink after registration, the guard checked the resolved target
+  // but streaming record.filePath would follow the symlink to a swapped file.
+  return resolved ? pathToCheck : record.filePath;
+}
+
+/**
+ * Boolean wrapper over {@link resolveServableAttachmentPath} for routes that
+ * gate on the guard verdict but don't stream raw bytes (metadata/preview/
+ * thumbnail). Sends the 403 itself; returns true when the record is blocked.
+ */
+async function rejectIfSensitiveRecord(
+  reply: FastifyReply,
+  record: AttachmentRecord,
+  sessionWorkingDir?: string
+): Promise<boolean> {
+  return (await resolveServableAttachmentPath(reply, record, sessionWorkingDir)) === null;
 }
 
 type StoredSessionWithPrivateAttachmentHistory = SessionState & {
@@ -791,10 +830,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
+    // Stream the freshly-resolved path (TOCTOU): a path component swapped to a
+    // symlink after registration would otherwise redirect the stream to a file
+    // the guard never checked.
+    const servePath = await resolveServableAttachmentPath(reply, record, workingDir);
+    if (!servePath) return;
 
     try {
-      await serveRawFile(reply, record.filePath, record.fileName, record.extension, download === 'true');
+      // 50MB cap on the by-id attachment raw route (matches the attachment POST path).
+      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true', 50 * 1024 * 1024);
     } catch (err) {
       reply
         .code(500)

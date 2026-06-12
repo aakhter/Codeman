@@ -1258,6 +1258,9 @@ export class Session extends EventEmitter {
         .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
     }
 
+    // Scan terminal output for `codeman://attach?path=...` magic links and emit
+    // an attachmentRequested event for each newly-seen absolute path. The web
+    // server turns these into registered attachment cards.
     const attachmentPaths = parseAttachmentMagicLinks(data);
     for (const attachmentPath of attachmentPaths) {
       if (this._attachmentMagicSeen.has(attachmentPath)) continue;

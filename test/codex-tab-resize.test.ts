@@ -51,7 +51,11 @@ describe('Codex tab resize behavior', () => {
     const restoreBlock = source.slice(save, restore);
 
     expect(helper).toBeGreaterThan(-1);
-    expect(source.slice(save - 250, save)).toContain('this._isUsableXtermSnapshot(snapshot)');
+    // Window widened from 250: the upstream delete-before-set LRU hardening
+    // (9893a7f) added a 3-line comment + delete() call between the guard and the
+    // set, so the guard now sits ~338 chars back. The invariant (save is gated on
+    // _isUsableXtermSnapshot) is unchanged.
+    expect(source.slice(save - 450, save)).toContain('this._isUsableXtermSnapshot(snapshot)');
     expect(restoreBlock).toContain('if (snapshot && !this._isUsableXtermSnapshot(snapshot))');
     expect(restoreBlock).toContain('persisted && this._isUsableXtermSnapshot(persisted)');
   });
