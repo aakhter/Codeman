@@ -8245,6 +8245,20 @@ kbd {
   gap: 8px;
 }
 
+/* Inline comment highlight — COD-95. Marks text that has a review comment and is
+   click-to-edit. Subtle background + pointer cursor; must NOT block normal text
+   selection or scroll (no pointer-events tricks, no preventDefault). */
+.comment-highlight {
+  cursor: pointer;
+  background: rgba(122, 162, 255, 0.22);
+  border-bottom: 1px solid var(--accent, #7aa2ff);
+  border-radius: 2px;
+  transition: background 0.12s ease;
+}
+.comment-highlight:hover {
+  background: rgba(122, 162, 255, 0.38);
+}
+
 .file-preview-footer {
   padding: 0.35rem 0.75rem;
   font-size: 0.7rem;
