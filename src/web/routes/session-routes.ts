@@ -41,6 +41,7 @@ import {
   findSessionOrFail,
   parseBody,
   persistAndBroadcastSession,
+  readJsonConfig,
   SETTINGS_PATH,
   validatePathWithinBase,
 } from '../route-helpers.js';
@@ -52,12 +53,14 @@ import { getLifecycleLog } from '../../session-lifecycle-log.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
 import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
+import { readRemoteCases, readRemoteHosts, toSessionRemote } from '../../remote-hosts.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
-import { dataPath } from '../../config/instance.js';
+import { dataPath, getDataDir } from '../../config/instance.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
+const CODEMAN_CONFIG_DIR = getDataDir();
 
 // Pre-compiled regex for terminal buffer cleaning (avoids per-request compilation)
 // eslint-disable-next-line no-control-regex
@@ -261,10 +264,25 @@ export function registerSessionRoutes(
     }
 
     const body = parseBody(CreateSessionSchema, req.body);
-    const workingDir = body.workingDir || process.cwd();
+    let workingDir = body.workingDir || process.cwd();
+    let remote = undefined;
+
+    if (body.caseName) {
+      const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+      const remoteCase = remoteCases.find((item) => item.name === body.caseName);
+      if (remoteCase) {
+        const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+        if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+        workingDir = remoteCase.remotePath;
+        remote = toSessionRemote(host, remoteCase);
+      } else {
+        const linkedCases = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
+        workingDir = linkedCases[body.caseName] || validatePathWithinBase(body.caseName, CASES_DIR) || workingDir;
+      }
+    }
 
     // Validate workingDir exists and is a directory
-    if (body.workingDir) {
+    if ((body.workingDir || body.caseName) && !remote) {
       try {
         const stat = statSync(workingDir);
         if (!stat.isDirectory()) {
@@ -395,6 +413,7 @@ export function registerSessionRoutes(
       envOverrides: body.envOverrides,
       effort: body.effort,
       truecolorEnabled,
+      remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
         maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
@@ -1263,24 +1282,36 @@ export function registerSessionRoutes(
       }
     }
 
-    // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
-    // This mirrors the behaviour of resolveCasePath() in case-routes so that linked
-    // external project directories are honoured by quick-start just like regular case routes.
-    let linkedCases: Record<string, string> = {};
-    try {
-      const raw = await fs.readFile(LINKED_CASES_FILE, 'utf-8');
-      linkedCases = JSON.parse(raw);
-    } catch {
-      // File missing or unparseable — treat as empty registry
-    }
-    const linkedCasePath = linkedCases[caseName];
-    const casePath = linkedCasePath || validatePathWithinBase(caseName, CASES_DIR);
-    if (!casePath) {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case path');
+    let remote = undefined;
+    let linkedCasePath: string | undefined;
+    let casePath: string | null = null;
+    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+    const remoteCase = remoteCases.find((item) => item.name === caseName);
+    if (remoteCase) {
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      casePath = remoteCase.remotePath;
+      remote = toSessionRemote(host, remoteCase);
+    } else {
+      // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
+      // This mirrors the behaviour of resolveCasePath() in case-routes so that linked
+      // external project directories are honoured by quick-start just like regular case routes.
+      let linkedCases: Record<string, string> = {};
+      try {
+        const raw = await fs.readFile(LINKED_CASES_FILE, 'utf-8');
+        linkedCases = JSON.parse(raw);
+      } catch {
+        // File missing or unparseable — treat as empty registry
+      }
+      linkedCasePath = linkedCases[caseName];
+      casePath = linkedCasePath || validatePathWithinBase(caseName, CASES_DIR);
+      if (!casePath) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case path');
+      }
     }
 
-    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked cases)
-    if (!existsSync(casePath)) {
+    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked, non-remote cases)
+    if (!remote && !existsSync(casePath)) {
       try {
         mkdirSync(casePath, { recursive: true });
         mkdirSync(join(casePath, 'src'), { recursive: true });
@@ -1308,6 +1339,7 @@ export function registerSessionRoutes(
       mode !== 'opencode' &&
       mode !== 'codex' &&
       mode !== 'gemini' &&
+      !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
     ) {
@@ -1346,6 +1378,7 @@ export function registerSessionRoutes(
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
+      remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
         maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
@@ -1355,7 +1388,7 @@ export function registerSessionRoutes(
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
-    if (mode === 'claude' && ctx.store.getConfig().ralphEnabled) {
+    if (mode === 'claude' && !remote && ctx.store.getConfig().ralphEnabled) {
       autoConfigureRalph(session, casePath, ctx);
       if (!session.ralphTracker.enabled) {
         session.ralphTracker.enable();

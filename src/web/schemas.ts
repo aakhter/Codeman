@@ -173,6 +173,10 @@ const GeminiConfigSchema = z
   .optional();
 
 export const CreateSessionSchema = z.object({
+  caseName: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
+    .optional(),
   workingDir: safePathSchema.optional(),
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']).optional(),
   name: z.string().max(100).optional(),
@@ -221,6 +225,40 @@ export const CreateCaseSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
   description: z.string().max(1000).optional(),
+});
+
+const RemoteCommandOverridesSchema = z
+  .object({
+    shell: z.string().min(1).max(300).optional(),
+    claude: z.string().min(1).max(300).optional(),
+    opencode: z.string().min(1).max(300).optional(),
+    codex: z.string().min(1).max(300).optional(),
+    gemini: z.string().min(1).max(300).optional(),
+  })
+  .strict()
+  .optional();
+
+export const RemoteHostSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
+  label: z.string().min(1).max(100),
+  host: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-zA-Z0-9._:-]+$/, 'Invalid SSH host'),
+  username: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[a-zA-Z0-9._-]+$/, 'Invalid SSH username'),
+  port: z.number().int().min(1).max(65535).optional(),
+  commands: RemoteCommandOverridesSchema,
+});
+
+export const RemoteCaseLinkSchema = z.object({
+  name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
+  hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
+  remotePath: z.string().min(1).max(2000).regex(/^\//, 'Remote path must be absolute'),
 });
 
 // ========== Quick Start ==========

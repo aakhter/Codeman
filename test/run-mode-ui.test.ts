@@ -121,6 +121,66 @@ describe('run mode UI', () => {
 });
 
 describe('case selector refresh', () => {
+  it('creates remote shell sessions by caseName instead of remote display path', async () => {
+    const elements: Record<string, any> = {
+      quickStartCase: { value: 'gpu-work' },
+      shellCount: { value: '1' },
+    };
+    const requests: Array<{ url: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: {
+        getItem: () => null,
+        setItem: () => {},
+      },
+      document: {
+        getElementById: (id: string) => elements[id] ?? null,
+      },
+      fetch: async (url: string, init?: { body?: string }) => {
+        requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/cases/gpu-work') {
+          return {
+            json: async () => ({
+              success: true,
+              data: {
+                name: 'gpu-work',
+                path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
+                location: 'remote',
+                remote: { hostId: 'gpu-box', path: '/home/ubuntu/work' },
+              },
+            }),
+          };
+        }
+        if (url === '/api/sessions') {
+          return { json: async () => ({ success: true, data: { session: { id: 'sess-1' } } }) };
+        }
+        if (url === '/api/sessions/sess-1/shell') return { json: async () => ({ success: true }) };
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    app.sessions = new Map();
+    app.cases = [{ name: 'gpu-work', path: 'ubuntu@10.0.0.42:/home/ubuntu/work', location: 'remote' }];
+    app.getTerminalDimensions = () => null;
+    app.selectSession = async () => {};
+
+    await app.runShell();
+
+    expect(requests.find((req) => req.url === '/api/sessions')?.body).toMatchObject({
+      caseName: 'gpu-work',
+      mode: 'shell',
+    });
+    expect(requests.find((req) => req.url === '/api/sessions')?.body).not.toHaveProperty('workingDir');
+  });
+
   it('removes a deleted selected case from the dropdown and blurs the native picker', async () => {
     const elements: Record<string, any> = {};
     const requests: Array<{ url: string; method: string; body?: any }> = [];

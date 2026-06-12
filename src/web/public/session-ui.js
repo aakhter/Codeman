@@ -72,9 +72,12 @@ Object.assign(CodemanApp.prototype, {
       const maxNameLength = isMobile ? 8 : 20; // Truncate to 8 chars on mobile
 
       cases.forEach(c => {
-        const displayName = c.name.length > maxNameLength
-          ? c.name.substring(0, maxNameLength) + '…'
+        const baseLabel = c.location === 'remote' && c.remote
+          ? `${c.name} @ ${c.remote.hostId}`
           : c.name;
+        const displayName = baseLabel.length > maxNameLength
+          ? baseLabel.substring(0, maxNameLength) + '…'
+          : baseLabel;
         options += `<option value="${escapeHtml(c.name)}">${escapeHtml(displayName)}</option>`;
       });
 
@@ -125,6 +128,12 @@ Object.assign(CodemanApp.prototype, {
 
   async updateDirDisplayForCase(caseName) {
     try {
+      const matchingCase = (this.cases || []).find(c => c.name === caseName);
+      if (matchingCase?.path) {
+        document.getElementById('dirDisplay').textContent = matchingCase.path;
+        document.getElementById('dirInput').value = matchingCase.path;
+        return;
+      }
       const res = await fetch(`/api/cases/${caseName}`);
       const data = (await res.json()).data;
       if (data.path) {
@@ -326,6 +335,8 @@ Object.assign(CodemanApp.prototype, {
         caseData = createCaseData.data.case;
       }
 
+      const selectedCase = (this.cases || []).find(c => c.name === caseName);
+      const isRemoteCase = caseData.location === 'remote' || selectedCase?.location === 'remote';
       const workingDir = caseData.path;
       if (!workingDir) throw new Error('Case path not found');
       let firstSessionId = null;
@@ -368,7 +379,8 @@ Object.assign(CodemanApp.prototype, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            workingDir, name,
+            ...(isRemoteCase ? { caseName } : { workingDir }),
+            name,
             ...(hasEnvOverrides ? { envOverrides } : {}),
             ...(effort ? { effort } : {}),
             ...(modelOverride !== undefined ? { modelOverride } : {}),
@@ -475,6 +487,8 @@ Object.assign(CodemanApp.prototype, {
         caseData = createCaseData.data.case;
       }
 
+      const selectedCase = (this.cases || []).find(c => c.name === caseName);
+      const isRemoteCase = caseData.location === 'remote' || selectedCase?.location === 'remote';
       const workingDir = caseData.path;
       if (!workingDir) throw new Error('Case path not found');
 
@@ -501,7 +515,7 @@ Object.assign(CodemanApp.prototype, {
         fetch('/api/sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workingDir, mode: 'shell', name })
+          body: JSON.stringify({ ...(isRemoteCase ? { caseName } : { workingDir }), mode: 'shell', name })
         }).then(r => r.json())
       );
       const createResults = await Promise.all(createPromises);
@@ -1261,6 +1275,18 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('newCaseDescription').value = '';
     document.getElementById('linkCaseName').value = '';
     document.getElementById('linkCasePath').value = '';
+    const remoteFields = [
+      'remoteCaseName',
+      'remoteCasePath',
+      'remoteHostId',
+      'remoteHostAddress',
+      'remoteHostUsername',
+      'remoteHostCodexCommand',
+    ];
+    remoteFields.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
     // Reset to first tab
     this.caseModalTab = 'case-create';
     this.switchCaseModalTab('case-create');
@@ -1302,13 +1328,15 @@ Object.assign(CodemanApp.prototype, {
       this.renderCaseManageList();
     } else {
       submitBtn.style.display = '';
-      submitBtn.textContent = tabName === 'case-create' ? 'Create' : 'Link';
+      submitBtn.textContent = tabName === 'case-create' ? 'Create' : tabName === 'case-remote' ? 'Link Remote' : 'Link';
     }
     // Focus appropriate input
     if (tabName === 'case-create') {
       document.getElementById('newCaseName').focus();
     } else if (tabName === 'case-link') {
       document.getElementById('linkCaseName').focus();
+    } else if (tabName === 'case-remote') {
+      document.getElementById('remoteCaseName').focus();
     }
   },
 
@@ -1324,6 +1352,8 @@ Object.assign(CodemanApp.prototype, {
     try {
       if (this.caseModalTab === 'case-create') {
         await this.createCase();
+      } else if (this.caseModalTab === 'case-remote') {
+        await this.linkRemoteCase();
       } else {
         await this.linkCase();
       }
@@ -1414,6 +1444,65 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async linkRemoteCase() {
+    const name = document.getElementById('remoteCaseName').value.trim();
+    const remotePath = document.getElementById('remoteCasePath').value.trim();
+    const hostId = document.getElementById('remoteHostId').value.trim();
+    const host = document.getElementById('remoteHostAddress').value.trim();
+    const username = document.getElementById('remoteHostUsername').value.trim();
+    const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
+
+    if (!name || !remotePath || !hostId || !host || !username) {
+      this.showToast('Please complete all required remote fields', 'error');
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(name) || !/^[a-zA-Z0-9_-]+$/.test(hostId)) {
+      this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+      return;
+    }
+    if (!remotePath.startsWith('/')) {
+      this.showToast('Remote path must be absolute', 'error');
+      return;
+    }
+
+    try {
+      const hostPayload = {
+        id: hostId,
+        label: hostId,
+        host,
+        username,
+        ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
+      };
+      const hostRes = await fetch('/api/remote-hosts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hostPayload)
+      });
+      const hostData = await hostRes.json();
+      if (!hostData.success && hostData.errorCode !== 'ALREADY_EXISTS') {
+        throw new Error(hostData.error || 'Failed to save remote host');
+      }
+
+      const caseRes = await fetch('/api/cases/remote-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, hostId, remotePath })
+      });
+      const caseData = await caseRes.json();
+      if (caseData.success) {
+        this.closeCreateCaseModal();
+        this.showToast(`Remote case "${name}" linked`, 'success');
+        await this.loadQuickStartCases(name);
+        await this.saveLastUsedCase(name);
+      } else {
+        this.showToast(caseData.error || 'Failed to link remote case', 'error');
+      }
+    } catch (err) {
+      console.error('Failed to link remote case:', err);
+      this.showToast('Failed to link remote case: ' + err.message, 'error');
+    }
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Case Management (reorder + delete)
@@ -1432,10 +1521,11 @@ Object.assign(CodemanApp.prototype, {
       const isFirst = idx === 0;
       const isLast = idx === cases.length - 1;
       const pathDisplay = c.path ? c.path.replace(/^\/Users\/[^/]+/, '~') : '';
+      const locationBadge = c.location === 'remote' ? '<span class="case-location-badge">remote</span>' : '';
       html += `
         <div class="case-manage-item" data-case="${escapeHtml(c.name)}">
           <div class="case-manage-info">
-            <span class="case-manage-name">${escapeHtml(c.name)}</span>
+            <span class="case-manage-name">${escapeHtml(c.name)} ${locationBadge}</span>
             <span class="case-manage-path">${escapeHtml(pathDisplay)}</span>
           </div>
           <div class="case-manage-actions">

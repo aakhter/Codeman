@@ -1934,6 +1934,11 @@ html.mobile-init .file-browser-panel {
     margin-bottom: 1rem;
   }
 
+  #case-remote {
+    display: grid;
+    gap: 0.5rem;
+  }
+
   #createCaseModal .form-row label {
     font-size: 0.8rem;
     margin-bottom: 0.4rem;
