@@ -2922,6 +2922,10 @@ Object.assign(CodemanApp.prototype, {
         }"><code>${escapeHtml(text)}</code></pre>`;
         prose = bodyEl.querySelector('.document-preview-text');
       }
+      // COD-95: re-apply comment highlights onto the freshly-rendered prose. The
+      // preview re-renders on poll, destroying any prior spans, so we rebuild them
+      // from the persisted per-comment anchors (quote + occurrence).
+      this._applyCommentHighlights(prose);
       // Reading-view toggle (constrained measure) for both markdown and text.
       const readingBtn = ` <button class="btn-icon-sm document-reading-btn${
         this.readingViewActive ? ' active' : ''
@@ -3206,34 +3210,236 @@ Object.assign(CodemanApp.prototype, {
       this.showToast?.('Select some text in the document first', 'info');
       return;
     }
+    // COD-95: resolve which occurrence of the selected quote this is, so the
+    // highlight can be re-applied after the preview re-renders. We anchor on the
+    // whitespace-collapsed quote + its 0-based occurrence index within the prose.
+    // Compute it BEFORE opening the popover (opening clears any prior pending value),
+    // then assign so addAnnotation can read it.
+    const occurrence = this._selectionOccurrence(sel, this._previewProseEl());
     this._openAnnotationPopover(text);
+    this._annotationPendingOccurrence = occurrence;
   },
 
-  _openAnnotationPopover(passage) {
+  /** The rendered prose container the highlights live in (markdown or text). */
+  _previewProseEl() {
+    const bodyEl = this.$('filePreviewBody');
+    return bodyEl?.querySelector('.document-preview-markdown, .document-preview-text') || null;
+  },
+
+  /** Collapse runs of whitespace to single spaces (matches stored anchor quotes). */
+  _normalizeQuote(s) {
+    return String(s ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
+  /**
+   * COD-95: which 0-based occurrence of the selected quote (within `prose`) the
+   * current selection represents. Counts collapsed-text matches that start at or
+   * before the selection's start offset. Returns 0 when it can't be determined.
+   */
+  _selectionOccurrence(sel, prose) {
+    try {
+      if (!sel || !sel.rangeCount || !prose) return 0;
+      const quote = this._normalizeQuote(String(sel));
+      if (!quote) return 0;
+      const range = sel.getRangeAt(0);
+      // Text from the prose start up to the selection start, collapsed the same way.
+      const pre = range.cloneRange();
+      pre.selectNodeContents(prose);
+      pre.setEnd(range.startContainer, range.startOffset);
+      const before = this._normalizeQuote(pre.toString());
+      // Count non-overlapping matches of the quote that fully precede the selection.
+      let count = 0;
+      let idx = before.indexOf(quote);
+      while (idx !== -1) {
+        count++;
+        idx = before.indexOf(quote, idx + quote.length);
+      }
+      return count;
+    } catch {
+      return 0;
+    }
+  },
+
+  /**
+   * COD-95: build a stable anchor for a comment — the normalized quote plus the
+   * 0-based occurrence index within `prose`. Returns null when the quote isn't
+   * present (so we never persist an un-findable anchor).
+   */
+  _buildCommentAnchor(quote, prose, occurrence = 0) {
+    const q = this._normalizeQuote(quote);
+    if (!q) return null;
+    const haystack = this._normalizeQuote(prose?.textContent || '');
+    if (haystack.indexOf(q) === -1) return null;
+    return { quote: q, occurrence: Math.max(0, occurrence | 0) };
+  },
+
+  /**
+   * COD-95: re-apply every comment highlight onto the freshly-rendered prose. The
+   * preview re-renders on poll, so DOM spans are destroyed and must be rebuilt from
+   * the persisted anchors. For each anchor we walk the prose text nodes, locate the
+   * Nth occurrence of the (whitespace-collapsed) quote across the concatenated text,
+   * and wrap exactly that run — splitting text nodes as needed — in a
+   * `<span class="comment-highlight" data-comment-id>`. Quotes that can't be re-found
+   * (text changed) are skipped silently; nothing throws.
+   */
+  _applyCommentHighlights(prose) {
+    if (!prose) return;
+    const anns = (this._annotations || []).filter((a) => a && a.anchor && a.anchor.quote);
+    // Bind the delegated click-to-edit handler once per prose container.
+    if (!prose.dataset.commentHighlightBound) {
+      prose.dataset.commentHighlightBound = '1';
+      prose.addEventListener('click', (ev) => {
+        const span = ev.target?.closest?.('.comment-highlight');
+        if (span) this.editCommentFromHighlight(span.getAttribute('data-comment-id'));
+      });
+    }
+    for (const ann of anns) {
+      try {
+        this._wrapNthOccurrence(prose, ann.anchor.quote, ann.anchor.occurrence | 0, ann.id);
+      } catch {
+        /* anchor not re-findable after a content change — skip it gracefully */
+      }
+    }
+  },
+
+  /**
+   * Wrap the `occurrence`-th (0-based) match of the whitespace-collapsed `quote`
+   * within `root`'s text in highlight spans. Matching is done over the visible text
+   * with whitespace collapsed, mapping match positions back to (textNode, offset)
+   * pairs so a quote spanning multiple text nodes is wrapped piece by piece. No-op
+   * when the occurrence isn't found.
+   */
+  _wrapNthOccurrence(root, quote, occurrence, commentId) {
+    const q = this._normalizeQuote(quote);
+    if (!q) return;
+    // Collect text nodes (skip ones already inside a highlight to avoid re-wrapping).
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) =>
+        n.parentElement && n.parentElement.closest('.comment-highlight')
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    });
+    const segments = []; // { node, start, end } over the COLLAPSED concatenation
+    let collapsed = '';
+    let prevWasSpace = true; // leading whitespace is trimmed in the collapsed form
+    let node;
+    while ((node = walker.nextNode())) {
+      const raw = node.nodeValue || '';
+      const segStart = collapsed.length;
+      // Map each raw char position to its position in the collapsed string.
+      const map = []; // map[i] = collapsed index for raw char i (or -1 if dropped)
+      for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (/\s/.test(ch)) {
+          if (prevWasSpace) {
+            map.push(-1);
+          } else {
+            map.push(collapsed.length);
+            collapsed += ' ';
+            prevWasSpace = true;
+          }
+        } else {
+          map.push(collapsed.length);
+          collapsed += ch;
+          prevWasSpace = false;
+        }
+      }
+      segments.push({ node, raw, map, segStart });
+    }
+    const collapsedTrimmed = collapsed; // already collapsed; may have a trailing space
+    // Find the Nth occurrence start index in the collapsed text.
+    let from = 0;
+    let foundAt = -1;
+    for (let k = 0; k <= occurrence; k++) {
+      const at = collapsedTrimmed.indexOf(q, from);
+      if (at === -1) return; // not enough occurrences
+      foundAt = at;
+      from = at + q.length;
+    }
+    const matchStart = foundAt;
+    const matchEnd = foundAt + q.length; // exclusive, in collapsed coords
+
+    // For each text node, wrap the sub-range that falls inside [matchStart, matchEnd).
+    for (const seg of segments) {
+      // Determine which raw-char offsets in this node map into the match window.
+      let rawStart = -1;
+      let rawEnd = -1;
+      for (let i = 0; i < seg.raw.length; i++) {
+        const c = seg.map[i];
+        if (c === -1) continue;
+        if (c >= matchStart && c < matchEnd) {
+          if (rawStart === -1) rawStart = i;
+          rawEnd = i + 1;
+        }
+      }
+      if (rawStart === -1) continue; // this node contributes nothing to the match
+      this._wrapTextNodeRange(seg.node, rawStart, rawEnd, commentId);
+    }
+  },
+
+  /** Wrap [start, end) of a single text node in a comment-highlight span. */
+  _wrapTextNodeRange(textNode, start, end, commentId) {
+    const raw = textNode.nodeValue || '';
+    const mid = raw.slice(start, end);
+    const after = raw.slice(end);
+    const before = raw.slice(0, start);
+    const span = document.createElement('span');
+    span.className = 'comment-highlight';
+    span.setAttribute('data-comment-id', commentId);
+    span.setAttribute('title', 'Click to edit this comment');
+    span.textContent = mid;
+    const parent = textNode.parentNode;
+    if (!parent) return;
+    if (after) parent.insertBefore(document.createTextNode(after), textNode.nextSibling);
+    parent.insertBefore(span, textNode.nextSibling);
+    textNode.nodeValue = before;
+    if (!before) parent.removeChild(textNode);
+  },
+
+  /** COD-95: open the existing comment for the clicked highlight, ready to edit. */
+  editCommentFromHighlight(commentId) {
+    const ann = (this._annotations || []).find((a) => a.id === commentId);
+    if (!ann) return;
+    this._annotationPassage = ann.passage || ann.anchor?.quote || '';
+    this._openAnnotationPopover(this._annotationPassage, { note: ann.note || '', editingId: commentId });
+  },
+
+  _openAnnotationPopover(passage, { note = '', editingId = null } = {}) {
     this._closeAnnotationPopover();
     const shortPassage = passage.length > 240 ? `${passage.slice(0, 240)}…` : passage;
+    const editing = !!editingId;
     const pop = document.createElement('div');
     pop.className = 'annotation-popover';
     pop.id = 'annotationPopover';
     pop.innerHTML = `
-      <div class="annotation-popover-title">Add comment on selection</div>
+      <div class="annotation-popover-title">${editing ? 'Edit comment' : 'Add comment on selection'}</div>
       <blockquote class="annotation-quote">${escapeHtml(shortPassage)}</blockquote>
       <textarea class="annotation-note" rows="3" placeholder="e.g. tighten this; make it less formal; add a citation"></textarea>
       <div class="annotation-popover-actions">
         <button type="button" class="btn-icon-sm" onclick="app._closeAnnotationPopover()">Cancel</button>
-        <button type="button" class="btn-icon-sm annotation-send" onclick="app.addAnnotation()">Add to review</button>
+        <button type="button" class="btn-icon-sm annotation-send" onclick="app.addAnnotation()">${
+          editing ? 'Save comment' : 'Add to review'
+        }</button>
       </div>`;
     document.body.appendChild(pop);
     this._annotationPassage = passage;
-    setTimeout(() => pop.querySelector('.annotation-note')?.focus(), 0);
+    this._editingCommentId = editingId;
+    const ta = pop.querySelector('.annotation-note');
+    if (ta) ta.value = note;
+    setTimeout(() => ta?.focus(), 0);
   },
 
   _closeAnnotationPopover() {
     document.getElementById('annotationPopover')?.remove();
     this._annotationPassage = null;
+    this._annotationPendingOccurrence = 0;
+    this._editingCommentId = null;
   },
 
-  /** Add the composed {passage, note} to the review tray (COD-69). */
+  /** Add the composed {passage, note} to the review tray (COD-69), or update an
+   * existing comment when editing from a highlight (COD-95). */
   addAnnotation() {
     const pop = document.getElementById('annotationPopover');
     if (!pop) return;
@@ -3243,15 +3449,41 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
     this._annotations = this._annotations || [];
-    this._annotations.push({ passage: (this._annotationPassage || '').replace(/\s+/g, ' ').trim(), note });
-    this._closeAnnotationPopover();
+    const editingId = this._editingCommentId;
+    if (editingId) {
+      // COD-95: edit-in-place from a highlight — keep id + anchor, swap the note.
+      const existing = this._annotations.find((a) => a.id === editingId);
+      if (existing) existing.note = note;
+      this._closeAnnotationPopover();
+    } else {
+      const passage = this._normalizeQuote(this._annotationPassage || '');
+      // COD-95: persist a stable anchor (quote + occurrence) so the selection can
+      // be re-highlighted after the preview re-renders.
+      const anchor = this._buildCommentAnchor(passage, this._previewProseEl(), this._annotationPendingOccurrence || 0);
+      this._annotations.push({ id: this._newCommentId(), passage, note, anchor });
+      this._closeAnnotationPopover();
+    }
     this._renderAnnotationTray();
+    // Re-apply highlights immediately so the new/edited comment is visible.
+    this._applyCommentHighlights(this._previewProseEl());
+  },
+
+  /** Short, stable id for a comment (crypto.randomUUID with fallback). */
+  _newCommentId() {
+    try {
+      const uuid = globalThis.crypto?.randomUUID?.();
+      if (uuid) return `cmt-${uuid.slice(0, 8)}`;
+    } catch {
+      /* ignore */
+    }
+    return `cmt-${Math.random().toString(36).slice(2, 10)}`;
   },
 
   removeAnnotation(index) {
     if (!this._annotations) return;
     this._annotations.splice(index, 1);
     this._renderAnnotationTray();
+    this._applyCommentHighlights(this._previewProseEl());
   },
 
   _closeAnnotationTray() {
@@ -3272,7 +3504,8 @@ Object.assign(CodemanApp.prototype, {
     tray.id = 'annotationTray';
     const rows = items
       .map((a, i) => {
-        const snippet = a.passage.length > 80 ? `${a.passage.slice(0, 80)}…` : a.passage;
+        const passage = a.passage || a.anchor?.quote || '';
+        const snippet = passage.length > 80 ? `${passage.slice(0, 80)}…` : passage;
         return `<li class="annotation-tray-item">
             <button class="annotation-tray-remove" title="Remove" onclick="app.removeAnnotation(${i})">×</button>
             <div class="annotation-tray-passage">“${escapeHtml(snippet)}”</div>
