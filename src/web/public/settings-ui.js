@@ -1896,6 +1896,10 @@ Object.assign(CodemanApp.prototype, {
       monitorPanel.style.display = showMonitor ? '' : 'none';
       if (showMonitor) {
         monitorPanel.classList.add('open');
+        // COD-97: the Monitor is shown via the setting (not a manual toggle), so
+        // its mux list would otherwise stay empty/stale until the first toggle.
+        // Load it now so it matches the open tabs from the start.
+        this.loadMuxSessions?.();
       } else {
         monitorPanel.classList.remove('open');
       }

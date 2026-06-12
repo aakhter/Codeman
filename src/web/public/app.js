@@ -1296,6 +1296,8 @@ class CodemanApp {
     }
     this.renderSessionTabs();
     this.updateCost();
+    // COD-97: keep the Monitor's mux list in sync with the open tabs.
+    this.renderMuxSessions();
     // Start stats polling when first session appears
     if (this.sessions.size === 1) this.startSystemStatsPolling();
   }
@@ -1342,6 +1344,9 @@ class CodemanApp {
       this.showWelcome();
     }
     this.renderSessionTabs();
+    // COD-97: re-render the Monitor so the closed session's row disappears
+    // immediately, instead of relying solely on a MUX_KILLED event that may race.
+    this.renderMuxSessions();
     this.renderRalphStatePanel();  // Update ralph panel after session deleted
     this.renderProjectInsightsPanel();  // Update project insights panel after session deleted
     // Stop stats polling when no sessions remain

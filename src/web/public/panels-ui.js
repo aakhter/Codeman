@@ -4754,8 +4754,23 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
 
-    let html = '';
+    // COD-97: keep the Monitor list in sync with the real open tabs. A mux entry
+    // whose sessionId is NOT in this.sessions (orphan / restored-* / already-closed
+    // tab) must never be rendered as a normal, clickable tab row — render those
+    // separately under a visually-distinct "not open" treatment so they can't be
+    // silently mistaken for live sessions.
+    const matched = [];
+    const orphans = [];
     for (const muxSession of this.muxSessions) {
+      if (this.sessions.has(muxSession.sessionId)) {
+        matched.push(muxSession);
+      } else {
+        orphans.push(muxSession);
+      }
+    }
+
+    let html = '';
+    for (const muxSession of matched) {
       const stats = muxSession.stats || { memoryMB: 0, cpuPercent: 0, childCount: 0 };
 
       // Look up rich session data by sessionId
@@ -4828,6 +4843,29 @@ Object.assign(CodemanApp.prototype, {
           </div>
           <div class="process-actions">
             <button class="btn-toolbar btn-sm btn-danger" onclick="event.stopPropagation(); app.killMuxSession('${sid}')" title="Kill session">Kill</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // COD-97: orphaned mux sessions (no matching open tab) — render distinct,
+    // non-clickable rows so they're never confused for live tabs. These can be
+    // killed (they're real tmux sessions) but selecting them would do nothing.
+    for (const muxSession of orphans) {
+      const stats = muxSession.stats || { memoryMB: 0, cpuPercent: 0, childCount: 0 };
+      const sid = escapeHtml(muxSession.sessionId);
+      html += `
+        <div class="process-item process-item-orphan" title="Not an open tab (orphaned tmux session)">
+          <span class="monitor-status-badge status-orphan">NOT OPEN</span>
+          <div class="process-info">
+            <div class="process-name">${escapeHtml(muxSession.name || muxSession.muxName)}</div>
+            <div class="process-meta">
+              <span class="process-stat memory">${stats.memoryMB || 0}MB</span>
+              <span class="process-stat cpu">${stats.cpuPercent || 0}%</span>
+            </div>
+          </div>
+          <div class="process-actions">
+            <button class="btn-toolbar btn-sm btn-danger" onclick="app.killMuxSession('${sid}')" title="Kill orphaned session">Kill</button>
           </div>
         </div>
       `;
