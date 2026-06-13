@@ -25,7 +25,10 @@ export interface HeadroomConfig {
 
 function parseBool(value: string | undefined, dflt: boolean): boolean {
   if (value === undefined || value.trim() === '') return dflt;
-  return /^(1|true|yes|on)$/i.test(value.trim());
+  const v = value.trim();
+  if (/^(1|true|yes|on)$/i.test(v)) return true;
+  if (/^(0|false|no|off)$/i.test(v)) return false;
+  return dflt; // unrecognized value => fall back to the default (don't silently disable)
 }
 
 export function getHeadroomConfig(): HeadroomConfig {

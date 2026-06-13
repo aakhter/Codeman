@@ -16,12 +16,14 @@ function setEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string | undefine
   }
 }
 
-afterEach(() => {
+afterEach(async () => {
   for (const k of ENV_KEYS) {
     if (ORIG[k] === undefined) delete process.env[k];
     else process.env[k] = ORIG[k];
   }
   vi.restoreAllMocks();
+  const mod = await import('../../src/config/headroom-routing.js');
+  mod.__resetHealthCache();
 });
 
 describe('getHeadroomConfig', () => {
@@ -46,6 +48,14 @@ describe('getHeadroomConfig', () => {
     const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
     const cfg = getHeadroomConfig();
     expect(cfg.routeClaude).toBe(false);
+    expect(cfg.routeCodex).toBe(true);
+  });
+
+  it('falls back to the default for unrecognized toggle values', async () => {
+    setEnv({ HEADROOM_ROUTE_CLAUDE: 'enabled', HEADROOM_ROUTE_CODEX: 'nope-not-valid' });
+    const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
+    const cfg = getHeadroomConfig();
+    expect(cfg.routeClaude).toBe(true); // unrecognized => default (true), NOT silently false
     expect(cfg.routeCodex).toBe(true);
   });
 });
