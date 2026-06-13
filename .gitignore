@@ -91,3 +91,6 @@ readme-preview.mjs
 
 # Uploaded images land here under each session working dir (runtime artifact)
 .claude-images/
+
+# git worktrees (local dev isolation)
+.worktrees/
