@@ -66,6 +66,7 @@ import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 // ============================================================================
 
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
+import { resolveHeadroomClaudeBaseUrl } from './config/headroom-routing.js';
 
 /** Delay after tmux session creation — enough for detached tmux to be queryable */
 const TMUX_CREATION_WAIT_MS = 100;
@@ -1170,7 +1171,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
     }
 
-    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled).join(' && ');
+    const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
+    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
+      ' && '
+    );
 
     const baseCmd = buildSpawnCommand({
       mode,
@@ -1419,7 +1423,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Resolve CLI binary directory based on mode
     const { pathExport } = this.buildPathExport(mode);
 
-    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled).join(' && ');
+    const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
+    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
+      ' && '
+    );
 
     const baseCmd = buildSpawnCommand({
       mode,
