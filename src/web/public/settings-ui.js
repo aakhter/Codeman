@@ -1672,7 +1672,8 @@ Object.assign(CodemanApp.prototype, {
     if (!dot) return;
     try {
       const res = await fetch('/api/headroom/status');
-      const s = await res.json();
+      const env = await res.json();
+      const s = env?.success === true ? env.data : env;
       dot.style.background = !s.enabled ? '#64748b' : s.healthy ? '#4ade80' : '#f87171';
       health.textContent = !s.enabled
         ? 'Disabled'
