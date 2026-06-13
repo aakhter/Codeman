@@ -1684,10 +1684,15 @@ Object.assign(CodemanApp.prototype, {
         ? `${s.stats.requests} reqs · ${s.stats.compressed} compressed (${s.stats.compressedPct}%) · ${s.stats.tokensSaved.toLocaleString()} tok · $${s.stats.costSavedUsd}`
         : '—';
       sessions.innerHTML = (s.routedSessions || [])
-        .map(
-          (x) =>
-            `<div style="display:flex;gap:8px;padding:2px 0;"><span>${(x.name ?? '(unnamed)').replace(/[<&]/g, '')}</span><span style="color:var(--text-secondary)">${(x.mode ?? '').replace(/[<&]/g, '')}</span><span>${x.routed === null ? 'n/a' : x.routed ? 'routed' : 'direct'}</span></div>`
-        )
+        .map((x) => {
+          const name = (x.name ?? '(unnamed)').replace(/[<&]/g, '');
+          const mode = (x.mode ?? '').replace(/[<&]/g, '');
+          const modeColor = mode === 'claude' ? '#d97757' : mode === 'codex' ? '#2dc4a0' : 'var(--text-secondary)';
+          const state = x.routed === null ? 'n/a' : x.routed ? 'routed' : 'direct';
+          const stateColor = state === 'routed' ? '#4ade80' : state === 'direct' ? '#fbbf24' : 'var(--text-secondary)';
+          const stateWeight = state === 'routed' ? '600' : '400';
+          return `<div style="display:flex;gap:10px;align-items:baseline;padding:2px 0;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${name}</span><span style="width:60px;flex-shrink:0;font-weight:600;color:${modeColor};">${mode}</span><span style="width:54px;flex-shrink:0;font-weight:${stateWeight};color:${stateColor};">${state}</span></div>`;
+        })
         .join('');
     } catch {
       dot.style.background = '#f87171';
