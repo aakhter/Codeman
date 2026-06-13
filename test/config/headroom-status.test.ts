@@ -10,8 +10,13 @@ const READYZ = { status: 'healthy', version: '0.25.0' };
 const STATS = {
   summary: {
     api_requests: 118,
-    compression: { requests_compressed: 89, avg_compression_pct: 74.4, total_tokens_removed: 16629 },
-    cost: { total_saved_usd: 0.19 },
+    compression: {
+      requests_compressed: 89,
+      avg_compression_pct: 74.4,
+      total_tokens_removed: 16629,
+      best_compression_pct: 100,
+    },
+    cost: { total_saved_usd: 0.19, savings_pct: 12, breakdown: { cache_savings_usd: 0.18 } },
   },
 };
 
@@ -38,6 +43,9 @@ describe('fetchHeadroomStatus', () => {
       compressedPct: 74.4,
       tokensSaved: 16629,
       costSavedUsd: 0.19,
+      savingsPct: 12,
+      cacheSavedUsd: 0.18,
+      bestPct: 100,
     });
   });
 

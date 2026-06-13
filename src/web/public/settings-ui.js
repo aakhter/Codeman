@@ -1680,9 +1680,23 @@ Object.assign(CodemanApp.prototype, {
         : s.healthy
           ? `Proxy healthy${s.version ? ' · ' + s.version : ''}${s.latencyMs != null ? ' · ' + s.latencyMs + 'ms' : ''}`
           : 'Proxy unreachable';
-      savings.textContent = s.stats
-        ? `${s.stats.requests} reqs · ${s.stats.compressed} compressed (${s.stats.compressedPct}%) · ${s.stats.tokensSaved.toLocaleString()} tok · $${s.stats.costSavedUsd}`
-        : '—';
+      if (!s.stats) {
+        savings.innerHTML = '<span style="color:var(--text-secondary)">\u2014</span>';
+      } else {
+        const st = s.stats;
+        const pct = Math.max(0, Math.min(100, Number(st.compressedPct) || 0));
+        savings.innerHTML =
+          '<div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;">' +
+          '<span style="font-size:1.9rem;font-weight:700;color:#4ade80;line-height:1;">' +
+          Number(st.tokensSaved).toLocaleString() +
+          '</span><span style="color:var(--text-secondary);">tokens saved</span></div>' +
+          '<div style="font-size:0.85rem;margin:3px 0 8px;">' + st.compressedPct +
+          '% avg compression \u00b7 ' + st.compressed + ' / ' + st.requests + ' requests routed</div>' +
+          '<div style="position:relative;height:14px;border-radius:7px;background:rgba(148,163,184,0.18);overflow:hidden;">' +
+          '<div style="position:absolute;left:0;top:0;bottom:0;width:' + pct + '%;background:#4ade80;"></div></div>' +
+          '<div style="font-size:0.72rem;color:var(--text-secondary);margin-top:6px;">Cost saved $' +
+          st.costSavedUsd + ' (' + st.savingsPct + '%) \u00b7 cache $' + st.cacheSavedUsd + ' \u00b7 best ' + st.bestPct + '%</div>';
+      }
       sessions.innerHTML = (s.routedSessions || [])
         .map((x) => {
           const name = (x.name ?? '(unnamed)').replace(/[<&]/g, '');
