@@ -3127,6 +3127,12 @@ Object.assign(CodemanApp.prototype, {
         <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>
       </div>
       ${content}`;
+    // COD-100: re-apply comment highlights onto the freshly-rendered diff body, the
+    // same way the normal preview does (COD-95). The diff render replaces the
+    // annotated DOM, so commented passages would otherwise lose their highlight in
+    // the Changes view; COD-68 intended highlight/annotation to work on BOTH views.
+    // Anchors that no longer match the diffed text are skipped gracefully.
+    this._applyCommentHighlights(bodyEl.querySelector('.document-preview-diff'));
     if (footerEl) {
       footerEl.textContent = `${versions.length} version${versions.length === 1 ? '' : 's'} \u2022 additions and deletions vs the selected version`;
     }
@@ -3220,10 +3226,15 @@ Object.assign(CodemanApp.prototype, {
     this._annotationPendingOccurrence = occurrence;
   },
 
-  /** The rendered prose container the highlights live in (markdown or text). */
+  /**
+   * The rendered prose container the highlights live in: markdown, plain text, or
+   * the diff/Changes body (COD-68). COD-100 adds `.document-preview-diff` so the
+   * comment highlight + click-to-edit work while comparing versions, not just in
+   * the normal preview.
+   */
   _previewProseEl() {
     const bodyEl = this.$('filePreviewBody');
-    return bodyEl?.querySelector('.document-preview-markdown, .document-preview-text') || null;
+    return bodyEl?.querySelector('.document-preview-markdown, .document-preview-text, .document-preview-diff') || null;
   },
 
   /** Collapse runs of whitespace to single spaces (matches stored anchor quotes). */
