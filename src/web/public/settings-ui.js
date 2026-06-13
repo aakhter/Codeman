@@ -1685,13 +1685,14 @@ Object.assign(CodemanApp.prototype, {
       sessions.innerHTML = (s.routedSessions || [])
         .map(
           (x) =>
-            `<div style="display:flex;gap:8px;padding:2px 0;"><span>${(x.name ?? '(unnamed)').replace(/[<&]/g, '')}</span><span style="color:var(--text-secondary)">${x.mode}</span><span>${x.routed === null ? 'n/a' : x.routed ? 'routed' : 'direct'}</span></div>`
+            `<div style="display:flex;gap:8px;padding:2px 0;"><span>${(x.name ?? '(unnamed)').replace(/[<&]/g, '')}</span><span style="color:var(--text-secondary)">${(x.mode ?? '').replace(/[<&]/g, '')}</span><span>${x.routed === null ? 'n/a' : x.routed ? 'routed' : 'direct'}</span></div>`
         )
         .join('');
     } catch {
       dot.style.background = '#f87171';
       health.textContent = 'Status unavailable';
       savings.textContent = '—';
+      if (sessions) sessions.innerHTML = '';
     }
   },
 
