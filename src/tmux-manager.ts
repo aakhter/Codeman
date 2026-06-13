@@ -827,6 +827,20 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
 }
 
 /**
+ * COD-109 — build the SSH command that KILLS an OWNED remote tmux session on the
+ * host. COD-104 made remote sessions durable (they live in `tmux -L codeman` and
+ * outlive the local pane), so tearing down the local pane only DETACHES; ending a
+ * session we OWN requires propagating `kill-session` to the remote socket. No `-t`
+ * (kill-session is non-interactive). Connection options come from the shared
+ * `buildSshConnectionArgs` (COD-107), identical to launch/attach/discovery.
+ */
+export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
+  const tmuxInvocation = `tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`;
+  const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
+  return sshParts.join(' ');
+}
+
+/**
  * COD-105 — choose the right remote ssh command for a session's ownership:
  *   - NON-owned (`remote.owned === false`): ATTACH to a discovered remote tmux
  *     session by its EXISTING name (`remote.remoteSessionName`, falling back to
@@ -1766,6 +1780,25 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       this.saveSessions();
       this.emit('sessionKilled', { sessionId });
       return true;
+    }
+
+    // COD-109 — propagate the kill to the REMOTE for OWNED remote sessions.
+    // Non-owned sessions never reach here (detach-only early-return above). Since
+    // COD-104, an owned remote session lives in `tmux -L codeman` on the host and
+    // outlives the local pane, so the local teardown below would only DETACH it;
+    // an explicit kill of a session we OWN must also end it on the remote.
+    // Best-effort: if the host is unreachable or the session is already gone, fall
+    // through to the local teardown.
+    if (session.remote) {
+      const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(sessionId);
+      if (isValidMuxName(remoteName)) {
+        try {
+          execSync(buildRemoteKillCommand(session.remote, remoteName), { timeout: EXEC_TIMEOUT_MS });
+          console.log(`[TmuxManager] COD-109 killed owned remote session ${remoteName} on ${session.remote.host}`);
+        } catch {
+          // Remote unreachable or session already gone — local teardown still runs.
+        }
+      }
     }
 
     // Get current PID (may have changed)
