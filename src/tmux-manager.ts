@@ -841,6 +841,19 @@ function setOpenCodeConfigContent(tmuxCmd: string, muxName: string, config?: Ope
 }
 
 /**
+ * Pure: the extra env-export lines that route a session through the Headroom
+ * proxy. Claude-only (the proxy fronts Anthropic for Claude); other modes get
+ * nothing here. `headroomClaudeUrl` is resolved by the caller via
+ * resolveHeadroomClaudeBaseUrl() (config + health gate) -- undefined => no routing.
+ */
+export function buildHeadroomExports(mode: SessionMode, headroomClaudeUrl?: string): string[] {
+  if (mode === 'claude' && headroomClaudeUrl) {
+    return [`export ANTHROPIC_BASE_URL=${shellescape(headroomClaudeUrl)}`];
+  }
+  return [];
+}
+
+/**
  * Manages tmux sessions that wrap Claude CLI or shell processes.
  *
  * Implements the TerminalMultiplexer interface.
@@ -972,7 +985,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * via `tmux setenv` so secret values (e.g., OPENCODE_API_KEY) never appear in the bash
    * command line (visible in `ps`). This also sidesteps shell-metachar injection via keys.
    */
-  private buildEnvExports(sessionId: string, muxName: string, mode: SessionMode, truecolorEnabled?: boolean): string[] {
+  private buildEnvExports(
+    sessionId: string,
+    muxName: string,
+    mode: SessionMode,
+    truecolorEnabled?: boolean,
+    headroomClaudeUrl?: string
+  ): string[] {
     // COLORTERM is unset for Claude/other non-codex sessions by default to avoid
     // tmux→PTY→xterm.js color glitches (an empirical rendering choice). The
     // `truecolorEnabled` app setting (COD-75) lets the user opt those sessions
@@ -990,6 +1009,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     ];
     // Only unset CLAUDECODE for Claude sessions
     if (mode === 'claude') exports.splice(2, 0, 'unset CLAUDECODE');
+    exports.push(...buildHeadroomExports(mode, headroomClaudeUrl));
     return exports;
   }
 
