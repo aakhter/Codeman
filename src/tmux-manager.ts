@@ -61,7 +61,7 @@ import type {
   RespawnPaneOptions,
 } from './mux-interface.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
-import { defaultRemoteCommandForMode, remoteSshTarget } from './remote-hosts.js';
+import { buildSshConnectionArgs, defaultRemoteCommandForMode, remoteSshTarget } from './remote-hosts.js';
 
 // ============================================================================
 // Timing Constants
@@ -745,9 +745,13 @@ export function remoteTmuxSessionName(sessionId: string): string {
  * an SSH drop.
  *
  * Emits:
- *   ssh -o BatchMode=yes -t [-p PORT] user@host \
+ *   ssh -o BatchMode=yes -t [<COD-107 connection opts>] user@host \
  *     'tmux -L codeman new-session -A -s codeman-<id> -c <path> "cd <path> && exec <cli>" \
  *        \; set -g status off \; set -g mouse off \; set -sg escape-time 0 \; set -g prefix C-q'
+ *
+ * COD-107 — the connection options (`-p`, `-i`, `-J`, SOCKS `-o ProxyCommand`,
+ * arbitrary `-o`) come from the shared `buildSshConnectionArgs(remote)`, so the
+ * prereq tmux probe and this launch connect with identical options.
  *
  * - `new-session -A -s codeman-<id>` = attach-if-exists-else-create (idempotent),
  *   so reconnect re-runs the same command and reattaches the still-running agent.
@@ -784,9 +788,14 @@ export function buildRemoteLaunchCommand(options: {
 
   // ssh runs its trailing args through the remote login shell, so the entire
   // tmux invocation is passed as one shell-quoted argument.
-  const sshParts = ['ssh', '-o BatchMode=yes', '-t'];
-  if (remote.port) sshParts.push(`-p ${remote.port}`);
-  sshParts.push(remoteSshTarget(remote), shellescape(tmuxInvocation));
+  //
+  // COD-107 — connection options (port, identity, SOCKS ProxyCommand, jump host,
+  // arbitrary -o) come from the shared `buildSshConnectionArgs` so the launch and
+  // the tmux-prereq probe connect IDENTICALLY. `-t` is inserted right after
+  // `ssh -o BatchMode=yes` (preserving the historical token order), then the rest
+  // of the connection args, then the target and the quoted tmux invocation.
+  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
+  const sshParts = [ssh, batchMode, '-t', ...connectionArgs, remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
