@@ -445,6 +445,10 @@ export const SettingsUpdateSchema = z
     headroomProxyUrl: z.string().max(300).optional(),
     headroomRouteClaude: z.boolean().optional(),
     headroomRouteCodex: z.boolean().optional(),
+    // COD-108 remote-session auto-reconnect kill-switch (default ON). When false,
+    // the TmuxManager watcher does nothing — dropped remote sessions are NOT
+    // auto-reattached.
+    remoteAutoReconnect: z.boolean().optional(),
     thinkingEffort: z.string().max(20).optional(),
     // UI visibility
     showFontControls: z.boolean().optional(),
