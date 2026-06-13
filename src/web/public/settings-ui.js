@@ -359,6 +359,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
     document.getElementById('appSettingsThinkingEffort').value = settings.thinkingEffort ?? '';
+    document.getElementById('appSettingsHeadroomUrl').value = settings.headroomProxyUrl ?? '';
+    document.getElementById('appSettingsHeadroomClaude').checked = settings.headroomRouteClaude ?? true;
+    document.getElementById('appSettingsHeadroomCodex').checked = settings.headroomRouteCodex ?? true;
+    this._refreshHeadroomStatus();
     // CPU Priority settings
     const niceSettings = settings.nice || {};
     document.getElementById('appSettingsNiceEnabled').checked = niceSettings.enabled ?? false;
@@ -1406,6 +1410,9 @@ Object.assign(CodemanApp.prototype, {
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
       truecolorEnabled: document.getElementById('appSettingsTruecolor').checked,
       thinkingEffort: document.getElementById('appSettingsThinkingEffort').value,
+      headroomProxyUrl: document.getElementById('appSettingsHeadroomUrl').value.trim(),
+      headroomRouteClaude: document.getElementById('appSettingsHeadroomClaude').checked,
+      headroomRouteCodex: document.getElementById('appSettingsHeadroomCodex').checked,
       // CPU Priority settings
       nice: {
         enabled: document.getElementById('appSettingsNiceEnabled').checked,
@@ -1657,6 +1664,37 @@ Object.assign(CodemanApp.prototype, {
     return isMobile ? 'codeman-app-settings-mobile' : 'codeman-app-settings';
   },
 
+  async _refreshHeadroomStatus() {
+    const dot = document.getElementById('appSettingsHeadroomDot');
+    const health = document.getElementById('appSettingsHeadroomHealth');
+    const savings = document.getElementById('appSettingsHeadroomSavings');
+    const sessions = document.getElementById('appSettingsHeadroomSessions');
+    if (!dot) return;
+    try {
+      const res = await fetch('/api/headroom/status');
+      const s = await res.json();
+      dot.style.background = !s.enabled ? '#64748b' : s.healthy ? '#4ade80' : '#f87171';
+      health.textContent = !s.enabled
+        ? 'Disabled'
+        : s.healthy
+          ? `Proxy healthy${s.version ? ' · ' + s.version : ''}${s.latencyMs != null ? ' · ' + s.latencyMs + 'ms' : ''}`
+          : 'Proxy unreachable';
+      savings.textContent = s.stats
+        ? `${s.stats.requests} reqs · ${s.stats.compressed} compressed (${s.stats.compressedPct}%) · ${s.stats.tokensSaved.toLocaleString()} tok · $${s.stats.costSavedUsd}`
+        : '—';
+      sessions.innerHTML = (s.routedSessions || [])
+        .map(
+          (x) =>
+            `<div style="display:flex;gap:8px;padding:2px 0;"><span>${(x.name ?? '(unnamed)').replace(/[<&]/g, '')}</span><span style="color:var(--text-secondary)">${x.mode}</span><span>${x.routed === null ? 'n/a' : x.routed ? 'routed' : 'direct'}</span></div>`
+        )
+        .join('');
+    } catch {
+      dot.style.background = '#f87171';
+      health.textContent = 'Status unavailable';
+      savings.textContent = '—';
+    }
+  },
+
   // Get default settings based on device type
   // Note: Notification prefs are handled separately by NotificationManager
   getDefaultSettings() {
@@ -1684,6 +1722,10 @@ Object.assign(CodemanApp.prototype, {
         showMultiMonitorButton: false,
         // Truecolor opt-in (COD-75) — off by default
         truecolorEnabled: false,
+        // Headroom proxy settings
+        headroomProxyUrl: '',
+        headroomRouteClaude: true,
+        headroomRouteCodex: true,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile

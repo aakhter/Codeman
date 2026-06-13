@@ -1280,6 +1280,38 @@
               <input type="number" id="appSettingsNiceValue" min="-20" max="19" value="10" style="width: 80px;">
               <span class="form-hint">Process priority (-20 to 19, higher = lower priority, default: 10)</span>
             </div>
+            <!-- Headroom Section -->
+            <div id="appSettingsHeadroomSection">
+              <div class="form-section-header">Headroom</div>
+              <div class="form-row">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                  <span id="appSettingsHeadroomDot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#64748b;flex-shrink:0;"></span>
+                  <span id="appSettingsHeadroomHealth" style="font-size:0.8rem;color:var(--text-secondary);flex:1;">&#x2014;</span>
+                  <button class="btn-toolbar btn-sm" id="appSettingsHeadroomTest" onclick="app._refreshHeadroomStatus()">Test</button>
+                </div>
+                <label>Proxy URL</label>
+                <input type="text" id="appSettingsHeadroomUrl" placeholder="http://192.168.55.175:8787">
+                <span class="form-hint" id="appSettingsHeadroomSavings">&#x2014;</span>
+              </div>
+              <div class="form-row form-row-switch">
+                <label class="switch">
+                  <input type="checkbox" id="appSettingsHeadroomClaude">
+                  <span class="slider"></span>
+                </label>
+                <label>Route Claude</label>
+                <span class="form-hint" style="margin-top:0;margin-left:4px;">(new sessions)</span>
+              </div>
+              <div class="form-row form-row-switch">
+                <label class="switch">
+                  <input type="checkbox" id="appSettingsHeadroomCodex">
+                  <span class="slider"></span>
+                </label>
+                <label>Route Codex</label>
+                <span class="form-hint" style="margin-top:0;margin-left:4px;">(applies now)</span>
+              </div>
+              <div id="appSettingsHeadroomSessions" style="margin-top:6px;font-size:0.75rem;display:flex;flex-direction:column;gap:3px;"></div>
+              <span class="form-hint">Changes apply to new sessions. Codex toggle takes effect immediately; respawn a session to re-route it.</span>
+            </div>
           </div>
           <!-- Codex CLI Tab -->
           <div class="modal-tab-content hidden" id="settings-codex">
