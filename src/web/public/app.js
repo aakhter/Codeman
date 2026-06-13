@@ -2347,6 +2347,27 @@ class CodemanApp {
     if (typeof KeyboardHandler !== 'undefined') KeyboardHandler.updateLayoutForKeyboard();
   }
 
+  /**
+   * COD-103: reflect which Codeman CLI alias is on PATH in user-facing help text.
+   * Sets the Agent Checkpoint hint's `<code>` to the resolved alias and toggles a
+   * sibling not-on-PATH warning. The attachment-drawer empty state reads
+   * `this.codemanCli` on its own re-render (see panels-ui renderAttachmentHistory),
+   * so re-render it here if it's currently open.
+   */
+  _applyCodemanCliHints() {
+    const cli = this.codemanCli || { onPath: true, name: 'aicodeman' };
+    const name = cli.name || 'aicodeman';
+    const codeEl = document.getElementById('checkpointCliHint');
+    if (codeEl) codeEl.textContent = `${name} checkpoint`;
+    const warnEl = document.getElementById('checkpointCliPathWarning');
+    if (warnEl) warnEl.hidden = cli.onPath !== false ? true : false;
+    // Refresh the attachment drawer empty state only if the drawer already
+    // exists and is showing the empty state (don't eagerly create the drawer).
+    if (document.getElementById('attachmentHistoryDrawer') && !(this.attachmentHistoryItems || []).length) {
+      this.renderAttachmentHistory?.();
+    }
+  }
+
   _isUsableXtermSnapshot(snapshot) {
     if (!snapshot || typeof snapshot !== 'string' || snapshot.length < 8) return false;
     const visibleText = snapshot
@@ -2453,6 +2474,12 @@ class CodemanApp {
     // CJK input form: controlled by user setting (with server env as override)
     this._serverCjkOverride = data.inputCjkForm || false;
     this._updateCjkInputState();
+
+    // COD-103: which Codeman CLI alias is on PATH, for the checkpoint hint and
+    // the attachment-drawer empty state. Persist so panels-ui can read it on
+    // re-render; update the static checkpoint hint now.
+    this.codemanCli = data.codemanCli || { onPath: true, name: 'aicodeman' };
+    this._applyCodemanCliHints();
 
     // Update version displays (header and toolbar)
     if (data.version) {

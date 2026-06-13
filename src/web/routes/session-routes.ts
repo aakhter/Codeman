@@ -54,7 +54,7 @@ import { getLifecycleLog } from '../../session-lifecycle-log.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
 import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
-import { readRemoteCases, readRemoteHosts, toSessionRemote } from '../../remote-hosts.js';
+import { checkRemoteTmuxAvailable, readRemoteCases, readRemoteHosts, toSessionRemote } from '../../remote-hosts.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
@@ -274,6 +274,13 @@ export function registerSessionRoutes(
       if (remoteCase) {
         const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
         if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+        // COD-104: durable remote sessions run the agent inside a remote tmux,
+        // so the remote host must have tmux installed. Fail fast with a clear
+        // message rather than spawning a pane that silently can't start.
+        const tmuxCheck = await checkRemoteTmuxAvailable(host);
+        if (!tmuxCheck.ok) {
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error ?? 'remote tmux check failed');
+        }
         workingDir = remoteCase.remotePath;
         remote = toSessionRemote(host, remoteCase);
       } else {
@@ -1317,6 +1324,11 @@ export function registerSessionRoutes(
     if (remoteCase) {
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      // COD-104: remote sessions live in a remote tmux server — require tmux there.
+      const tmuxCheck = await checkRemoteTmuxAvailable(host);
+      if (!tmuxCheck.ok) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error ?? 'remote tmux check failed');
+      }
       casePath = remoteCase.remotePath;
       remote = toSessionRemote(host, remoteCase);
     } else {

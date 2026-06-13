@@ -104,9 +104,10 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('remote launch command builder', () => {
-    it('wraps codex command overrides in ssh with remote cd', () => {
+    it('wraps codex command overrides in a remote tmux attach-or-create', () => {
       const command = buildRemoteLaunchCommand({
         mode: 'codex',
+        sessionId: 'abcd1234-5678',
         remote: {
           hostId: 'gpu-box',
           label: 'GPU Box',
@@ -121,13 +122,16 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('BatchMode=yes');
       expect(command).toContain('ubuntu@10.0.0.42');
       expect(command).toContain('/home/ubuntu/work');
-      expect(command).toContain('bash -lc');
+      expect(command).toContain('tmux -L codeman new-session -A -s codeman-abcd1234');
       expect(command).toContain('exec codx personal');
+      // COD-104: remote agent now lives in remote tmux, not a child of the ssh channel.
+      expect(command).not.toContain('bash -lc');
     });
 
     it('uses default shell command when no override is configured', () => {
       const command = buildRemoteLaunchCommand({
         mode: 'shell',
+        sessionId: 'abcd1234-5678',
         remote: {
           hostId: 'gpu-box',
           label: 'GPU Box',

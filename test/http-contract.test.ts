@@ -33,6 +33,18 @@ describe('Stable HTTP contract (live server)', () => {
     expect(body.data.version).toBeDefined();
   });
 
+  it('includes the COD-103 codemanCli field on /api/status', async () => {
+    const res = await fetch(`${base}/api/status`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.codemanCli).toBeDefined();
+    expect(typeof body.data.codemanCli.onPath).toBe('boolean');
+    expect(typeof body.data.codemanCli.name).toBe('string');
+    // `name` is always one of the two aliases (resolved, or the canonical default
+    // label when none is on PATH) so the help text always reads sensibly.
+    expect(['aicodeman', 'codeman']).toContain(body.data.codemanCli.name);
+  });
+
   it('serves the same envelope on the /api/v1 alias', async () => {
     const res = await fetch(`${base}/api/v1/status`);
     expect(res.status).toBe(200);

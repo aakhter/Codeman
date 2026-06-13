@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  buildRemoteTmuxCheckCommand,
   defaultRemoteCommandForMode,
   readRemoteCases,
   readRemoteHosts,
@@ -62,5 +63,19 @@ describe('remote-hosts domain', () => {
     expect(remoteDisplayPath({ username: 'aamer', host: 'box.local', path: '/opt/work' })).toBe(
       'aamer@box.local:/opt/work'
     );
+  });
+
+  describe('COD-104 remote tmux prerequisite check command', () => {
+    it('builds an ssh command-v-tmux probe (no port)', () => {
+      const cmd = buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42' });
+      expect(cmd).toBe("ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 'command -v tmux'");
+      expect(cmd).not.toContain(' -p ');
+    });
+
+    it('threads the optional port into the probe', () => {
+      const cmd = buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42', port: 2222 });
+      expect(cmd).toContain('-p 2222');
+      expect(cmd).toMatch(/-p 2222 ubuntu@10\.0\.0\.42/);
+    });
   });
 });
