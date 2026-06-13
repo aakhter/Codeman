@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a TypeScript ESM Node app. Runtime code lives in `src/`; Fastify wiring is in `src/web/`, routes in `src/web/routes/`, config in `src/config/`, shared types in `src/types/`, and utilities in `src/utils/`. Browser assets are plain JS/CSS/HTML under `src/web/public/`. Tests live in `test/`, including `test/routes/`, `test/mobile/`, `test/mocks/`, and `test/utils/`. The zero-lag xterm package is in `packages/xterm-zerolag-input/`. Docs belong in `docs/`; automation scripts belong in `scripts/`.
+This is a TypeScript ESM Node app. Runtime code lives in `src/`; Fastify wiring is in `src/web/`, routes in `src/web/routes/`, config in `src/config/`, shared types in `src/types/`, and utilities in `src/utils/`. Browser assets are plain JS/CSS/HTML under `src/web/public/`. Tests live in `test/`, including `test/routes/`, `test/mobile/`, `test/mocks/`, and `test/utils/`. Workspace packages live in `packages/`: `xterm-zerolag-input/` (local-echo overlay) and `gesture-control/` (camera hand-tracking overlay, built to `src/web/public/gesture/`). Docs belong in `docs/`; automation scripts belong in `scripts/`. Two subsystems beyond the core session manager: **remote sessions** run the agent inside tmux on an SSH host (`src/remote-hosts.ts`; design in `docs/remote-sessions.md`), and **document preview/export** turns session files into previewable/diffable/exportable docs (`src/document-*.ts`, `src/attachment-*.ts`; design in `docs/document-preview.md`).
 
 ## Build, Test, and Development Commands
 
