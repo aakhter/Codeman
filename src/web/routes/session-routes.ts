@@ -30,6 +30,7 @@ import {
   AutoClearSchema,
   AutoCompactSchema,
   AutoResumeSchema,
+  CheckpointSchema,
   ImageWatcherSchema,
   FlickerFilterSchema,
   QuickRunSchema,
@@ -1120,6 +1121,27 @@ export function registerSessionRoutes(
         autoResume: {
           enabled: session.autoResumeEnabled,
           resumeAt: session.autoResumeAt ?? undefined,
+        },
+      },
+    };
+  });
+
+  // ========== Checkpoint (agent-initiated compact-or-clear) ==========
+
+  app.post('/api/sessions/:id/checkpoint', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(CheckpointSchema, req.body, 'Invalid request body');
+    const session = findSessionOrFail(ctx, id);
+
+    session.setCheckpoint(body.enabled, body.mode);
+    persistAndBroadcastSession(ctx, session);
+
+    return {
+      success: true,
+      data: {
+        checkpoint: {
+          enabled: session.checkpointEnabled,
+          mode: session.checkpointMode,
         },
       },
     };

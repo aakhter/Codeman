@@ -110,6 +110,23 @@ const RESUME_ESC_DELAY_MS = 600;
 /** Prompt sent to resume work after the limit resets */
 const RESUME_PROMPT = 'continue';
 
+// ============================================================================
+// Checkpoint (agent-initiated compact-or-clear, then continue) constants
+// ============================================================================
+
+/** Poll interval while driving a checkpoint sequence (idle/working transitions) */
+const CHECKPOINT_POLL_MS = 500;
+
+/**
+ * How long to wait for an op to START (working transition) after sending its
+ * command. If it never goes working in this window, the op is treated as a
+ * no-op (already complete) and the sequence proceeds.
+ */
+const CHECKPOINT_OP_START_TIMEOUT_MS = 8000;
+
+/** Safety cap on how long to wait for an op to FINISH before proceeding anyway */
+const CHECKPOINT_OP_MAX_MS = 180000;
+
 /** Minimum valid threshold for auto-clear/compact (1000 tokens) */
 const MIN_AUTO_THRESHOLD = 1000;
 
@@ -172,6 +189,12 @@ export class SessionAutoOps extends EventEmitter {
   private _autoResumeAt: number | null = null;
   private _limitPaused: boolean = false;
   private _resumeAttempts: number = 0;
+
+  // Checkpoint (agent-initiated compact-or-clear, then continue) state
+  private _checkpointEnabled: boolean = false;
+  private _checkpointMode: 'compact' | 'clear' = 'compact';
+  private _checkpointActive: boolean = false;
+  private _checkpointTimer: NodeJS.Timeout | null = null;
 
   private readonly callbacks: AutoOpsCallbacks;
 
@@ -389,6 +412,167 @@ export class SessionAutoOps extends EventEmitter {
   }
 
   // ============================================================================
+  // Checkpoint (agent-initiated compact-or-clear, then continue)
+  // ============================================================================
+
+  get checkpointEnabled(): boolean {
+    return this._checkpointEnabled;
+  }
+
+  get checkpointMode(): 'compact' | 'clear' {
+    return this._checkpointMode;
+  }
+
+  get isCheckpointActive(): boolean {
+    return this._checkpointActive;
+  }
+
+  /** Enable/disable agent-initiated checkpoints; optionally set the mode. */
+  setCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+    this._checkpointEnabled = enabled;
+    if (mode !== undefined) {
+      this._checkpointMode = mode;
+    }
+  }
+
+  /**
+   * Restore persisted checkpoint enable/mode after a Codeman restart. Unlike
+   * auto-resume there is no pending action to re-arm — checkpoints are
+   * agent-triggered, not time-scheduled — so this only restores the flags.
+   */
+  restoreCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+    this._checkpointEnabled = enabled;
+    if (mode !== undefined) {
+      this._checkpointMode = mode;
+    }
+  }
+
+  /**
+   * Agent signal at a clean boundary: run the checkpoint op (compact or
+   * clear→init) and, ONLY after it completes, send a continue prompt. Returns
+   * whether the sequence was triggered (and if not, why).
+   */
+  requestCheckpoint(opts?: { mode?: 'compact' | 'clear'; continuePrompt?: string }): {
+    triggered: boolean;
+    reason?: string;
+  } {
+    if (!this._checkpointEnabled) return { triggered: false, reason: 'not-enabled' };
+    if (this.callbacks.isStopped()) return { triggered: false, reason: 'stopped' };
+    if (this._isCompacting || this._isClearing || this._checkpointActive) {
+      return { triggered: false, reason: 'busy' };
+    }
+
+    this._checkpointActive = true;
+    const mode = opts?.mode ?? this._checkpointMode;
+    const continueText = opts?.continuePrompt?.trim() || RESUME_PROMPT;
+    const steps = mode === 'clear' ? ['/clear\r', '/init\r'] : ['/compact\r'];
+
+    this.emit('checkpointStart', { mode });
+    void this._runCheckpoint(steps, continueText, mode);
+    return { triggered: true };
+  }
+
+  /**
+   * Drive the checkpoint step sequence: for each step, wait for idle, send the
+   * command, wait for the op to start (working) then finish (idle), and only
+   * then move on. After the last step, send the continue prompt.
+   */
+  private async _runCheckpoint(steps: string[], continueText: string, mode: 'compact' | 'clear'): Promise<void> {
+    for (const step of steps) {
+      const ok = await this._runCheckpointStep(step);
+      if (!ok) {
+        // Aborted (stopped) — _abortCheckpoint already cleared state.
+        return;
+      }
+    }
+
+    if (this.callbacks.isStopped()) {
+      this._abortCheckpoint();
+      return;
+    }
+
+    await this.callbacks.writeCommand(`${continueText}\r`);
+    this.emit('checkpointDone', { mode });
+    this._checkpointActive = false;
+    if (this._checkpointTimer) {
+      clearTimeout(this._checkpointTimer);
+      this._checkpointTimer = null;
+    }
+  }
+
+  /**
+   * Run a single checkpoint step: send the command once idle, then wait for the
+   * op to complete (working→idle). Resolves true on success, false if aborted.
+   */
+  private _runCheckpointStep(step: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      // Phase 1: wait until idle, then send the command.
+      const waitIdleThenSend = (): void => {
+        if (this.callbacks.isStopped()) {
+          this._abortCheckpoint();
+          resolve(false);
+          return;
+        }
+        if (this.callbacks.isWorking()) {
+          this._checkpointTimer = setTimeout(waitIdleThenSend, CHECKPOINT_POLL_MS);
+          return;
+        }
+        void this.callbacks.writeCommand(step).then(() => {
+          awaitOpStart(Date.now());
+        });
+      };
+
+      // Phase 2: wait for the op to START (working). A no-op op never goes
+      // working — after CHECKPOINT_OP_START_TIMEOUT_MS, treat it as complete.
+      const awaitOpStart = (sentAt: number): void => {
+        if (this.callbacks.isStopped()) {
+          this._abortCheckpoint();
+          resolve(false);
+          return;
+        }
+        if (this.callbacks.isWorking()) {
+          awaitOpFinish(Date.now());
+          return;
+        }
+        if (Date.now() - sentAt >= CHECKPOINT_OP_START_TIMEOUT_MS) {
+          resolve(true);
+          return;
+        }
+        this._checkpointTimer = setTimeout(() => awaitOpStart(sentAt), CHECKPOINT_POLL_MS);
+      };
+
+      // Phase 3: op started — wait for it to FINISH (idle), with a safety cap.
+      const awaitOpFinish = (startedAt: number): void => {
+        if (this.callbacks.isStopped()) {
+          this._abortCheckpoint();
+          resolve(false);
+          return;
+        }
+        if (!this.callbacks.isWorking()) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - startedAt >= CHECKPOINT_OP_MAX_MS) {
+          resolve(true);
+          return;
+        }
+        this._checkpointTimer = setTimeout(() => awaitOpFinish(startedAt), CHECKPOINT_POLL_MS);
+      };
+
+      waitIdleThenSend();
+    });
+  }
+
+  /** Clear checkpoint state + timer (on abort or stop). */
+  private _abortCheckpoint(): void {
+    if (this._checkpointTimer) {
+      clearTimeout(this._checkpointTimer);
+      this._checkpointTimer = null;
+    }
+    this._checkpointActive = false;
+  }
+
+  // ============================================================================
   // Threshold checks
   // ============================================================================
 
@@ -398,7 +582,7 @@ export class SessionAutoOps extends EventEmitter {
    */
   checkAutoCompact(): void {
     if (this.callbacks.isStopped()) return;
-    if (!this._autoCompactEnabled || this._isCompacting || this._isClearing) return;
+    if (!this._autoCompactEnabled || this._isCompacting || this._isClearing || this._checkpointActive) return;
 
     const totalTokens = this.callbacks.getTotalTokens();
     if (totalTokens >= this._autoCompactThreshold) {
@@ -446,7 +630,7 @@ export class SessionAutoOps extends EventEmitter {
    */
   checkAutoClear(): void {
     if (this.callbacks.isStopped()) return;
-    if (!this._autoClearEnabled || this._isClearing || this._isCompacting) return;
+    if (!this._autoClearEnabled || this._isClearing || this._isCompacting || this._checkpointActive) return;
 
     const totalTokens = this.callbacks.getTotalTokens();
     if (totalTokens >= this._autoClearThreshold) {
@@ -502,6 +686,12 @@ export class SessionAutoOps extends EventEmitter {
       this._autoClearTimer = null;
     }
     this._isClearing = false;
+
+    if (this._checkpointTimer) {
+      clearTimeout(this._checkpointTimer);
+      this._checkpointTimer = null;
+    }
+    this._checkpointActive = false;
 
     this._cancelAutoResume('stopped');
   }

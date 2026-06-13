@@ -842,6 +842,18 @@
               </div>
             </div>
 
+            <div class="form-row form-row-switch">
+              <label class="checkbox-inline">
+                <input type="checkbox" id="modalCheckpointEnabled" onchange="app.autoSaveCheckpoint()">
+                <span>Agent Checkpoint</span>
+              </label>
+              <select id="modalCheckpointMode" onchange="app.autoSaveCheckpoint()">
+                <option value="compact">compact</option>
+                <option value="clear">clear</option>
+              </select>
+              <span class="form-hint">Let the agent signal a checkpoint (<code>aicodeman checkpoint</code>) — runs /compact (or /clear + /init), then continues. Default OFF.</span>
+            </div>
+
             <div class="form-section-header">File Watching</div>
             <div class="form-row form-row-switch">
               <label>Image Watcher</label>

@@ -288,7 +288,15 @@ export const QuickStartSchema = z.object({
  * Receives Claude Code hook events.
  */
 export const HookEventSchema = z.object({
-  event: z.enum(['permission_prompt', 'elicitation_dialog', 'idle_prompt', 'stop', 'teammate_idle', 'task_completed']),
+  event: z.enum([
+    'permission_prompt',
+    'elicitation_dialog',
+    'idle_prompt',
+    'stop',
+    'teammate_idle',
+    'task_completed',
+    'checkpoint',
+  ]),
   sessionId: z.string().min(1),
   data: z.record(z.string(), z.unknown()).nullable().optional(),
 });
@@ -559,6 +567,12 @@ export const AutoCompactSchema = z.object({
 /** POST /api/sessions/:id/auto-resume */
 export const AutoResumeSchema = z.object({
   enabled: z.boolean(),
+});
+
+/** POST /api/sessions/:id/checkpoint */
+export const CheckpointSchema = z.object({
+  enabled: z.boolean(),
+  mode: z.enum(['compact', 'clear']).optional(),
 });
 
 /** POST /api/sessions/:id/image-watcher */

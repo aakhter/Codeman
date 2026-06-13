@@ -258,6 +258,7 @@ const SSE_EVENTS = {
   SESSION_WORKING: 'session:working',
   SESSION_AUTO_CLEAR: 'session:autoClear',
   SESSION_AUTO_COMPACT: 'session:autoCompact',
+  SESSION_CHECKPOINT: 'session:checkpoint',
   SESSION_LIMIT_PAUSE_SCHEDULED: 'session:limitPauseScheduled',
   SESSION_LIMIT_RESUME: 'session:limitResume',
   SESSION_LIMIT_RESUME_CANCELLED: 'session:limitResumeCancelled',

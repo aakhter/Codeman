@@ -88,7 +88,8 @@ export type HookEventType =
   | 'elicitation_dialog'
   | 'stop'
   | 'teammate_idle'
-  | 'task_completed';
+  | 'task_completed'
+  | 'checkpoint';
 
 // ========== API Response Types ==========
 

@@ -209,6 +209,10 @@ export interface SessionState {
   autoCompactThreshold?: number;
   /** Auto-compact prompt */
   autoCompactPrompt?: string;
+  /** Agent-initiated checkpoint (compact-or-clear, then continue) enabled */
+  checkpointEnabled?: boolean;
+  /** Checkpoint mode: compact or clear */
+  checkpointMode?: 'compact' | 'clear';
   /** Auto-resume on usage limit enabled */
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */

@@ -45,6 +45,8 @@ export interface SessionListenerRefs {
   taskFailed: (task: BackgroundTask, error: string) => void;
   autoClear: (data: { tokens: number; threshold: number }) => void;
   autoCompact: (data: { tokens: number; threshold: number; prompt?: string }) => void;
+  checkpointStart: (data: { mode: 'compact' | 'clear' }) => void;
+  checkpointDone: (data: { mode: 'compact' | 'clear' }) => void;
   limitPauseScheduled: (data: { resetAt: number; resumeAt: number; matched: string }) => void;
   limitResume: (data: { attempt: number }) => void;
   limitResumeCancelled: (data: { reason: string }) => void;
@@ -248,6 +250,18 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       if (tracker) tracker.recordAutoCompact(data.tokens, data.threshold);
     },
 
+    /** Broadcasts `session:checkpoint` — agent-initiated checkpoint started (op about to run) */
+    checkpointStart: (data: { mode: 'compact' | 'clear' }) => {
+      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'start', ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+    },
+
+    /** Broadcasts `session:checkpoint` — agent-initiated checkpoint completed (continue sent) */
+    checkpointDone: (data: { mode: 'compact' | 'clear' }) => {
+      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'done', ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+    },
+
     /** Broadcasts `session:limitPauseScheduled` — usage-limit pause detected, auto-resume armed.
      *  Persisted so a pending schedule survives a Codeman restart. */
     limitPauseScheduled: (data: { resetAt: number; resumeAt: number; matched: string }) => {
@@ -384,6 +398,8 @@ export function attachSessionListeners(session: Session, refs: SessionListenerRe
   session.on('taskFailed', refs.taskFailed);
   session.on('autoClear', refs.autoClear);
   session.on('autoCompact', refs.autoCompact);
+  session.on('checkpointStart', refs.checkpointStart);
+  session.on('checkpointDone', refs.checkpointDone);
   session.on('limitPauseScheduled', refs.limitPauseScheduled);
   session.on('limitResume', refs.limitResume);
   session.on('limitResumeCancelled', refs.limitResumeCancelled);
@@ -417,6 +433,8 @@ export function detachSessionListeners(session: Session, refs: SessionListenerRe
   session.off('taskFailed', refs.taskFailed);
   session.off('autoClear', refs.autoClear);
   session.off('autoCompact', refs.autoCompact);
+  session.off('checkpointStart', refs.checkpointStart);
+  session.off('checkpointDone', refs.checkpointDone);
   session.off('limitPauseScheduled', refs.limitPauseScheduled);
   session.off('limitResume', refs.limitResume);
   session.off('limitResumeCancelled', refs.limitResumeCancelled);

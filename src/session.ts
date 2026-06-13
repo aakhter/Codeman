@@ -599,6 +599,8 @@ export class Session extends EventEmitter {
       this._totalOutputTokens = 0;
       this.emit('autoClear', data);
     });
+    this._autoOps.on('checkpointStart', (data) => this.emit('checkpointStart', data));
+    this._autoOps.on('checkpointDone', (data) => this.emit('checkpointDone', data));
     this._autoOps.on('limitPauseScheduled', (data) => this.emit('limitPauseScheduled', data));
     this._autoOps.on('limitResume', (data) => this.emit('limitResume', data));
     this._autoOps.on('limitResumeCancelled', (data) => this.emit('limitResumeCancelled', data));
@@ -907,6 +909,32 @@ export class Session extends EventEmitter {
     this._autoOps.setAutoCompact(enabled, threshold, prompt);
   }
 
+  get checkpointEnabled(): boolean {
+    return this._autoOps.checkpointEnabled;
+  }
+
+  get checkpointMode(): 'compact' | 'clear' {
+    return this._autoOps.checkpointMode;
+  }
+
+  /** Enable/disable agent-initiated checkpoints; optionally set the mode. */
+  setCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+    this._autoOps.setCheckpoint(enabled, mode);
+  }
+
+  /** Restore persisted checkpoint enable/mode after a Codeman restart. */
+  restoreCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+    this._autoOps.restoreCheckpoint(enabled, mode);
+  }
+
+  /** Agent signal: run the checkpoint op, then continue once it completes. */
+  requestCheckpoint(opts?: { mode?: 'compact' | 'clear'; continuePrompt?: string }): {
+    triggered: boolean;
+    reason?: string;
+  } {
+    return this._autoOps.requestCheckpoint(opts);
+  }
+
   get autoResumeEnabled(): boolean {
     return this._autoOps.autoResumeEnabled;
   }
@@ -1004,6 +1032,8 @@ export class Session extends EventEmitter {
       autoCompactEnabled: this._autoOps.autoCompactEnabled,
       autoCompactThreshold: this._autoOps.autoCompactThreshold,
       autoCompactPrompt: this._autoOps.autoCompactPrompt,
+      checkpointEnabled: this._autoOps.checkpointEnabled,
+      checkpointMode: this._autoOps.checkpointMode,
       autoResumeEnabled: this._autoOps.autoResumeEnabled,
       autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
       imageWatcherEnabled: this._imageWatcherEnabled,

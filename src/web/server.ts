@@ -2098,6 +2098,9 @@ export class WebServer extends EventEmitter {
               if (savedState.autoClearEnabled !== undefined || savedState.autoClearThreshold !== undefined) {
                 session.setAutoClear(savedState.autoClearEnabled ?? false, savedState.autoClearThreshold);
               }
+              // Checkpoint (agent-initiated compact-or-clear) — restore flags only;
+              // checkpoints are agent-triggered, so there's no pending action to re-arm.
+              session.restoreCheckpoint(savedState.checkpointEnabled ?? false, savedState.checkpointMode);
               // Auto-resume on usage limit (re-arms a pending schedule; an
               // overdue one fires shortly after boot — the limit footer won't
               // reprint on its own, so the pause would otherwise stall)

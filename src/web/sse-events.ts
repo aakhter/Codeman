@@ -73,6 +73,8 @@ export const SessionWorking = 'session:working' as const;
 export const SessionAutoClear = 'session:autoClear' as const;
 /** Auto-compact triggered for the session. */
 export const SessionAutoCompact = 'session:autoCompact' as const;
+/** Agent-initiated checkpoint (compact-or-clear, then continue) state changed. */
+export const SessionCheckpoint = 'session:checkpoint' as const;
 /** Usage-limit pause detected; auto-resume scheduled. */
 export const SessionLimitPauseScheduled = 'session:limitPauseScheduled' as const;
 /** Auto-resume prompt sent after a usage-limit reset. */
@@ -369,6 +371,7 @@ export const SseEvent = {
   SessionWorking,
   SessionAutoClear,
   SessionAutoCompact,
+  SessionCheckpoint,
   SessionLimitPauseScheduled,
   SessionLimitResume,
   SessionLimitResumeCancelled,

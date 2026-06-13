@@ -747,6 +747,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('modalAutoClearEnabled').checked = session.autoClearEnabled ?? false;
     document.getElementById('modalAutoClearThreshold').value = session.autoClearThreshold ?? 140000;
 
+    // Populate agent checkpoint (compact-or-clear, then continue)
+    document.getElementById('modalCheckpointEnabled').checked = session.checkpointEnabled ?? false;
+    document.getElementById('modalCheckpointMode').value = session.checkpointMode ?? 'compact';
+
     // Populate auto-resume on usage limit (token pause control)
     document.getElementById('modalAutoResumeEnabled').checked = session.autoResumeEnabled ?? false;
     this.updateAutoResumeStatus(sessionId);
@@ -867,6 +871,23 @@ Object.assign(CodemanApp.prototype, {
         threshold: parseInt(document.getElementById('modalAutoClearThreshold').value) || 140000
       });
     } catch { /* silent */ }
+  },
+
+  async autoSaveCheckpoint() {
+    if (!this.editingSessionId) return;
+    const enabled = document.getElementById('modalCheckpointEnabled').checked;
+    const mode = document.getElementById('modalCheckpointMode').value === 'clear' ? 'clear' : 'compact';
+    try {
+      await this._apiPost(`/api/sessions/${this.editingSessionId}/checkpoint`, { enabled, mode });
+      const session = this.sessions.get(this.editingSessionId);
+      if (session) {
+        session.checkpointEnabled = enabled;
+        session.checkpointMode = mode;
+      }
+      this.showToast(`Agent checkpoint ${enabled ? 'enabled' : 'disabled'} (${mode})`, 'success');
+    } catch (err) {
+      this.showToast('Failed to toggle checkpoint: ' + err.message, 'error');
+    }
   },
 
   async autoSaveAutoResume() {
