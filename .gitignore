@@ -95,3 +95,4 @@ readme-preview.mjs
 
 # git worktrees (local dev isolation)
 .worktrees/
+.playwright-mcp/
