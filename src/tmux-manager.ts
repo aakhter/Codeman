@@ -66,7 +66,7 @@ import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 // ============================================================================
 
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
-import { resolveHeadroomClaudeBaseUrl } from './config/headroom-routing.js';
+import { resolveHeadroomClaudeBaseUrl, reconcileCodexHeadroomPatch } from './config/headroom-routing.js';
 
 /** Delay after tmux session creation — enough for detached tmux to be queryable */
 const TMUX_CREATION_WAIT_MS = 100;
@@ -1169,6 +1169,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
     if (mode === 'gemini' && !cliDir) {
       throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
+    }
+
+    // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
+    // live desired state (toggle + proxy health) right before spawn so a down proxy
+    // leaves codex on the direct chatgpt.com path.
+    if (mode === 'codex') {
+      await reconcileCodexHeadroomPatch();
     }
 
     const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);

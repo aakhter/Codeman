@@ -85,3 +85,5 @@ export async function resolveHeadroomClaudeBaseUrl(mode: SessionMode): Promise<s
   if (!proxyUrl || !routeClaude) return undefined;
   return (await isHeadroomHealthy(proxyUrl)) ? proxyUrl : undefined;
 }
+
+export { reconcileCodexHeadroomPatch } from './codex-headroom-patch.js';

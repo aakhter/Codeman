@@ -91,6 +91,7 @@ import {
 } from './respawn-event-wiring.js';
 
 import { reconcileUpdateOnBoot } from './self-update.js';
+import { reconcileCodexHeadroomPatch } from '../config/headroom-routing.js';
 
 // Load version from package.json
 const require = createRequire(import.meta.url);
@@ -1850,6 +1851,9 @@ export class WebServer extends EventEmitter {
     }
 
     await this.app.listen({ port: this.port, host: this.host });
+    // COD-98: align the codex config.toml Headroom patch with the current toggle +
+    // proxy health at boot (non-fatal; reconcile swallows its own errors).
+    await reconcileCodexHeadroomPatch();
     const protocol = this.https ? 'https' : 'http';
     const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
     console.log(`Codeman web interface running at ${protocol}://${displayHost}:${this.port}`);
