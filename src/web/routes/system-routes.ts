@@ -50,6 +50,7 @@ import { resolveTerminalHistoryConfig } from '../../config/terminal-history.js';
 import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
 import { getHeadroomConfig } from '../../config/headroom-routing.js';
 import { fetchHeadroomStatus } from '../../config/headroom-status.js';
+import { reconcileCodexHeadroomPatch } from '../../config/codex-headroom-patch.js';
 
 // Maximum screenshot upload size (10MB)
 const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024;
@@ -646,6 +647,14 @@ export function registerSystemRoutes(
           ctx.tunnelManager.stop();
           console.log('Tunnel stopped via settings change');
         }
+      }
+
+      // COD-102: codex routing is global host state (the ~/.codex/config.toml patch),
+      // so apply a toggle/URL change immediately. Claude routing is per-session and is
+      // read fresh at the next spawn, so it needs nothing here. Non-fatal (reconcile
+      // swallows its own errors).
+      if ('headroomRouteCodex' in settings || 'headroomProxyUrl' in settings) {
+        await reconcileCodexHeadroomPatch();
       }
 
       return {};
