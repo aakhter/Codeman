@@ -974,6 +974,7 @@
           <button class="modal-tab-btn active" data-tab="settings-display">Display</button>
           <button class="modal-tab-btn" data-tab="settings-claude">Claude CLI</button>
           <button class="modal-tab-btn" data-tab="settings-codex">Codex CLI</button>
+          <button class="modal-tab-btn" data-tab="settings-headroom">Headroom</button>
           <button class="modal-tab-btn" data-tab="settings-models">Models</button>
           <button class="modal-tab-btn" data-tab="settings-paths">Paths</button>
           <button class="modal-tab-btn" data-tab="settings-notifications">Notifications</button>
@@ -1280,6 +1281,9 @@
               <input type="number" id="appSettingsNiceValue" min="-20" max="19" value="10" style="width: 80px;">
               <span class="form-hint">Process priority (-20 to 19, higher = lower priority, default: 10)</span>
             </div>
+          </div>
+          <!-- Headroom Tab -->
+          <div class="modal-tab-content hidden" id="settings-headroom">
             <!-- Headroom Section -->
             <div id="appSettingsHeadroomSection">
               <div class="form-section-header">Headroom</div>
