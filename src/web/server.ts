@@ -42,6 +42,7 @@ import { execSync } from 'node:child_process';
 import { hostname as getHostname } from 'node:os';
 import { dataPath } from '../config/instance.js';
 import { getHookSecret } from '../config/hook-secret.js';
+import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState } from '../types.js';
@@ -1673,6 +1674,16 @@ export class WebServer extends EventEmitter {
       };
     }
 
+    // COD-103: which Codeman CLI alias is on PATH, for the checkpoint hint and
+    // attachment-drawer help text (resolver is itself cached). `name` is the
+    // resolved alias, or the canonical alias as the default label when none is
+    // on PATH so the help text still reads sensibly alongside the warning.
+    const codemanCliName = resolveCodemanCliName();
+    const codemanCli = {
+      onPath: codemanCliName !== null,
+      name: codemanCliName ?? CODEMAN_CLI_ALIASES[0],
+    };
+
     const result = {
       version: APP_VERSION,
       sessions: this.getLightSessionsState(),
@@ -1682,6 +1693,7 @@ export class WebServer extends EventEmitter {
       subagents: subagentWatcher.getRecentSubagents(15), // 15 min to avoid stale agents
       timestamp: now,
       inputCjkForm: process.env.INPUT_CJK_FORM?.toUpperCase() === 'ON',
+      codemanCli,
     };
 
     this.cachedLightState = { data: result, timestamp: now };

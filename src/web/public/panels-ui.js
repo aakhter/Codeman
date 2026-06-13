@@ -4258,11 +4258,20 @@ Object.assign(CodemanApp.prototype, {
 
     subtitle.textContent = `${items.length} ${items.length === 1 ? 'file' : 'files'}`;
     if (items.length === 0) {
+      // COD-103: reference the Codeman CLI alias actually on PATH (default label
+      // 'aicodeman' when status not yet loaded / nothing on PATH), and warn when
+      // neither alias resolves so the `attach` instruction isn't silently broken.
+      const cli = this.codemanCli || { onPath: true, name: 'aicodeman' };
+      const cliName = cli.name || 'aicodeman';
+      const warning = cli.onPath
+        ? ''
+        : `<div class="cli-path-warning">⚠ Codeman CLI not found on PATH — add <code>~/.local/bin</code> to your PATH to use this.</div>`;
       list.innerHTML = `
         <div class="attachment-history-empty">
           <div class="attachment-history-empty-title">No attachments yet</div>
           <div>Show a file here by running:</div>
-          <code>codeman attach /absolute/path/to/file.pptx</code>
+          <code>${cliName} attach /absolute/path/to/file.pptx</code>
+          ${warning}
           <div>Supports .pptx, .docx, .pdf, .png, .md, and .txt.</div>
         </div>
       `;

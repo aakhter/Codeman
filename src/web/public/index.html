@@ -851,7 +851,7 @@
                 <option value="compact">compact</option>
                 <option value="clear">clear</option>
               </select>
-              <span class="form-hint">Let the agent signal a checkpoint (<code>aicodeman checkpoint</code>) — runs /compact (or /clear + /init), then continues. Default OFF.</span>
+              <span class="form-hint">Let the agent signal a checkpoint (<code id="checkpointCliHint">aicodeman checkpoint</code>) — runs /compact (or /clear + /init), then continues. Default OFF.<span id="checkpointCliPathWarning" class="cli-path-warning" hidden> ⚠ Codeman CLI not found on PATH — add <code>~/.local/bin</code> to your PATH to use this.</span></span>
             </div>
 
             <div class="form-section-header">File Watching</div>

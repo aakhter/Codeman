@@ -3728,6 +3728,17 @@ body.solo-mode .btn-lifecycle-log {
   margin-top: 0.35rem;
 }
 
+/* COD-103: not-on-PATH warning for the Codeman CLI help text (checkpoint hint
+   and attachment-drawer empty state). Amber, matches the toast-warning tone. */
+.cli-path-warning {
+  color: rgb(234, 179, 8);
+}
+.attachment-history-empty .cli-path-warning {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+}
+
 /* Preset selector */
 .preset-selector {
   display: flex;
