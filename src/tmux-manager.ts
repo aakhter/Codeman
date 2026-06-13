@@ -727,14 +727,67 @@ function buildSpawnCommand(options: {
   return '$SHELL';
 }
 
-export function buildRemoteLaunchCommand(options: { mode: SessionMode; remote: SessionRemote }): string {
-  const { mode, remote } = options;
+/**
+ * Deterministic, reattach-stable remote tmux session name for a Codeman session.
+ *
+ * Derived from the same stable field the LOCAL muxName uses
+ * (`codeman-${sessionId.slice(0, 8)}`), so reconnecting (which re-issues the
+ * exact same `ssh … new-session -A`) lands back in the SAME remote session.
+ * Must NOT be random/time-based — it has to be stable across reconnects.
+ */
+export function remoteTmuxSessionName(sessionId: string): string {
+  return `codeman-${sessionId.slice(0, 8)}`;
+}
+
+/**
+ * COD-104 — build the SSH command that launches (or reattaches) a remote
+ * session INSIDE a tmux server on the remote host, so the remote agent survives
+ * an SSH drop.
+ *
+ * Emits:
+ *   ssh -o BatchMode=yes -t [-p PORT] user@host \
+ *     'tmux -L codeman new-session -A -s codeman-<id> -c <path> "cd <path> && exec <cli>" \
+ *        \; set -g status off \; set -g mouse off \; set -sg escape-time 0 \; set -g prefix C-q'
+ *
+ * - `new-session -A -s codeman-<id>` = attach-if-exists-else-create (idempotent),
+ *   so reconnect re-runs the same command and reattaches the still-running agent.
+ * - `-L codeman` = canonical remote socket (for Phase 2/3 discovery).
+ * - The whole tmux invocation is a SINGLE ssh argument (the remote login shell
+ *   runs it), so it is shell-quoted as one unit; the `cd && exec` command is in
+ *   turn a single tmux argument (tmux runs it via `/bin/sh -c`), so the path is
+ *   shell-quoted inside it too. This keeps escaping correct through every layer
+ *   even when the remote path contains spaces.
+ */
+export function buildRemoteLaunchCommand(options: {
+  mode: SessionMode;
+  remote: SessionRemote;
+  sessionId: string;
+}): string {
+  const { mode, remote, sessionId } = options;
   const modeCommand = remote.commands?.[mode] || defaultRemoteCommandForMode(mode);
-  const args = ['ssh', '-o', 'BatchMode=yes', '-t'];
-  if (remote.port) args.push('-p', String(remote.port));
-  const remoteCommand = `cd ${shellescape(remote.remotePath)} && ${modeCommand}`;
-  args.push(remoteSshTarget(remote), `bash -lc ${shellescape(remoteCommand)}`);
-  return args.map((arg) => shellescape(arg)).join(' ');
+  const remoteName = remoteTmuxSessionName(sessionId);
+
+  // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
+  // tmux, so the path needs shell-quoting here. `exec` replaces the shell with
+  // the CLI so the pane PID is the agent itself.
+  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${modeCommand}`;
+
+  // The tmux command line, with `\;` separating commands so the config `set`s
+  // apply on the SAME connection (and are idempotent on reattach).
+  const tmuxInvocation = [
+    `tmux -L codeman new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`,
+    'set -g status off',
+    'set -g mouse off',
+    'set -sg escape-time 0',
+    'set -g prefix C-q',
+  ].join(' \\; ');
+
+  // ssh runs its trailing args through the remote login shell, so the entire
+  // tmux invocation is passed as one shell-quoted argument.
+  const sshParts = ['ssh', '-o BatchMode=yes', '-t'];
+  if (remote.port) sshParts.push(`-p ${remote.port}`);
+  sshParts.push(remoteSshTarget(remote), shellescape(tmuxInvocation));
+  return sshParts.join(' ');
 }
 
 /**
@@ -1234,7 +1287,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     try {
       // Build the full command to run inside tmux
       const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
-      const fullCmd = remote ? buildRemoteLaunchCommand({ mode, remote }) : localFullCmd;
+      const fullCmd = remote ? buildRemoteLaunchCommand({ mode, remote, sessionId }) : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
@@ -1494,7 +1547,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);
     const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
-    const fullCmd = remote ? buildRemoteLaunchCommand({ mode, remote }) : localFullCmd;
+    const fullCmd = remote ? buildRemoteLaunchCommand({ mode, remote, sessionId }) : localFullCmd;
 
     try {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn
