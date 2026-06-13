@@ -337,6 +337,20 @@ describe('Settings Schema Security', () => {
     });
     expect(invalidResult.success).toBe(false);
   });
+
+  it('should accept headroom routing fields (COD-102)', () => {
+    const result = SettingsUpdateSchema.safeParse({
+      headroomProxyUrl: 'http://nas02:8787',
+      headroomRouteClaude: true,
+      headroomRouteCodex: false,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.headroomProxyUrl).toBe('http://nas02:8787');
+      expect(result.data.headroomRouteClaude).toBe(true);
+      expect(result.data.headroomRouteCodex).toBe(false);
+    }
+  });
 });
 
 describe('No-Auth Server Startup Policy', () => {
