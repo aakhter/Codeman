@@ -45,6 +45,11 @@ export interface SessionListenerRefs {
   taskFailed: (task: BackgroundTask, error: string) => void;
   autoClear: (data: { tokens: number; threshold: number }) => void;
   autoCompact: (data: { tokens: number; threshold: number; prompt?: string }) => void;
+  checkpointStart: (data: { mode: 'compact' | 'clear' }) => void;
+  checkpointDone: (data: { mode: 'compact' | 'clear' }) => void;
+  limitPauseScheduled: (data: { resetAt: number; resumeAt: number; matched: string }) => void;
+  limitResume: (data: { attempt: number }) => void;
+  limitResumeCancelled: (data: { reason: string }) => void;
   cliInfoUpdated: (data: { version?: string; model?: string; accountType?: string; latestVersion?: string }) => void;
   ralphLoopUpdate: (state: RalphTrackerState) => void;
   ralphTodoUpdate: (todos: RalphTodoItem[]) => void;
@@ -79,7 +84,7 @@ interface SessionListenerDeps {
 }
 
 /**
- * Creates all 25 session listener handlers, capturing dependencies via closure.
+ * Creates all 26 session listener handlers, capturing dependencies via closure.
  * Call `attachSessionListeners()` after to wire them to the session.
  */
 export function createSessionListeners(session: Session, deps: SessionListenerDeps): SessionListenerRefs {
@@ -245,6 +250,40 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       if (tracker) tracker.recordAutoCompact(data.tokens, data.threshold);
     },
 
+    /** Broadcasts `session:checkpoint` — agent-initiated checkpoint started (op about to run) */
+    checkpointStart: (data: { mode: 'compact' | 'clear' }) => {
+      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'start', ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+    },
+
+    /** Broadcasts `session:checkpoint` — agent-initiated checkpoint completed (continue sent) */
+    checkpointDone: (data: { mode: 'compact' | 'clear' }) => {
+      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'done', ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+    },
+
+    /** Broadcasts `session:limitPauseScheduled` — usage-limit pause detected, auto-resume armed.
+     *  Persisted so a pending schedule survives a Codeman restart. */
+    limitPauseScheduled: (data: { resetAt: number; resumeAt: number; matched: string }) => {
+      deps.broadcast(SseEvent.SessionLimitPauseScheduled, { sessionId: session.id, ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+      deps.persistSessionState(session);
+    },
+
+    /** Broadcasts `session:limitResume` — auto-resume prompt sent after limit reset */
+    limitResume: (data: { attempt: number }) => {
+      deps.broadcast(SseEvent.SessionLimitResume, { sessionId: session.id, ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+      deps.persistSessionState(session);
+    },
+
+    /** Broadcasts `session:limitResumeCancelled` — pending auto-resume no longer needed */
+    limitResumeCancelled: (data: { reason: string }) => {
+      deps.broadcast(SseEvent.SessionLimitResumeCancelled, { sessionId: session.id, ...data });
+      deps.broadcastSessionStateDebounced(session.id);
+      deps.persistSessionState(session);
+    },
+
     // ─── CLI Info ────────────────────────────────────────────
 
     /** Broadcasts `session:cliInfo` — Claude Code version, model, account type parsed from terminal */
@@ -359,6 +398,11 @@ export function attachSessionListeners(session: Session, refs: SessionListenerRe
   session.on('taskFailed', refs.taskFailed);
   session.on('autoClear', refs.autoClear);
   session.on('autoCompact', refs.autoCompact);
+  session.on('checkpointStart', refs.checkpointStart);
+  session.on('checkpointDone', refs.checkpointDone);
+  session.on('limitPauseScheduled', refs.limitPauseScheduled);
+  session.on('limitResume', refs.limitResume);
+  session.on('limitResumeCancelled', refs.limitResumeCancelled);
   session.on('cliInfoUpdated', refs.cliInfoUpdated);
   session.on('ralphLoopUpdate', refs.ralphLoopUpdate);
   session.on('ralphTodoUpdate', refs.ralphTodoUpdate);
@@ -389,6 +433,11 @@ export function detachSessionListeners(session: Session, refs: SessionListenerRe
   session.off('taskFailed', refs.taskFailed);
   session.off('autoClear', refs.autoClear);
   session.off('autoCompact', refs.autoCompact);
+  session.off('checkpointStart', refs.checkpointStart);
+  session.off('checkpointDone', refs.checkpointDone);
+  session.off('limitPauseScheduled', refs.limitPauseScheduled);
+  session.off('limitResume', refs.limitResume);
+  session.off('limitResumeCancelled', refs.limitResumeCancelled);
   session.off('cliInfoUpdated', refs.cliInfoUpdated);
   session.off('ralphLoopUpdate', refs.ralphLoopUpdate);
   session.off('ralphTodoUpdate', refs.ralphTodoUpdate);

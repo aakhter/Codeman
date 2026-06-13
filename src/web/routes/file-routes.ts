@@ -28,6 +28,12 @@ import {
 import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
+import {
+  buildTextExportHtml,
+  classifyExportBranch,
+  convertHtmlToPdf,
+  isSupportedExportFormat,
+} from '../../document-pdf-export.js';
 import { documentVersionStore } from '../../document-version-store.js';
 import {
   convertDocxToHtml,
@@ -95,9 +101,24 @@ async function serveRawFile(
   resolvedPath: string,
   fileName: string,
   extension: string,
-  download?: boolean
+  download?: boolean,
+  maxSizeBytes?: number
 ): Promise<void> {
   const stat = await fs.stat(resolvedPath);
+  // Optional cap: the by-id attachment raw route bounds its response (an
+  // attacker-influenceable registry id resolves to an arbitrary host file), but
+  // the workspace-scoped file-raw route streams without an app-level cap.
+  if (maxSizeBytes !== undefined && stat.size > maxSizeBytes) {
+    reply
+      .code(413)
+      .send(
+        createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${maxSizeBytes / 1024 / 1024}MB limit)`
+        )
+      );
+    return;
+  }
   const content = createReadStream(resolvedPath);
   const safeName = sanitizeDownloadName(fileName);
   if (download || extension === 'svg') {
@@ -153,6 +174,15 @@ async function serveConvertedPreview(
   }
 }
 
+async function sendPdfDownload(reply: FastifyReply, content: Buffer, downloadName: string): Promise<void> {
+  reply.header('Content-Type', 'application/pdf');
+  reply.header('Content-Disposition', `attachment; filename="${sanitizeDownloadName(downloadName)}"`);
+  reply.header('Cache-Control', 'no-cache');
+  reply.header('Content-Length', content.length);
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.send(content);
+}
+
 async function serveThumbnail(reply: FastifyReply, resolvedPath: string, extension: string): Promise<void> {
   const thumbnail = await generateFirstPageThumbnail(resolvedPath, extension);
   if (!thumbnail) {
@@ -189,16 +219,24 @@ function getAttachmentOr404(
  * runs on the stored path. Uses the broadened blocklist (secret locations +
  * `/root`/`/etc` trees + operator extras); when workspace confinement is
  * enabled it additionally rejects any record outside the session workspace.
- * Returns true and sends a 403 when blocked.
+ *
+ * Returns the path that is SAFE to stream — the freshly realpath-resolved target
+ * when resolvable, else the stored path — or null (after sending a 403) when
+ * blocked. Streaming the resolved path closes a TOCTOU window: a path component
+ * swapped to a symlink after registration would otherwise redirect the stream to
+ * a different file than the guard checked. `rejectIfSensitiveRecord` wraps this
+ * for the metadata/preview/thumbnail routes that only need the boolean verdict.
  */
-async function rejectIfSensitiveRecord(
+async function resolveServableAttachmentPath(
   reply: FastifyReply,
   record: AttachmentRecord,
   sessionWorkingDir?: string
-): Promise<boolean> {
+): Promise<string | null> {
   let pathToCheck = record.filePath;
+  let resolved = false;
   try {
     pathToCheck = realpathSync(record.filePath);
+    resolved = true;
   } catch {
     // Fall back to the stored (already realpath-resolved at registration) path.
   }
@@ -212,9 +250,25 @@ async function rejectIfSensitiveRecord(
 
   if (blocked) {
     reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
-    return true;
+    return null;
   }
-  return false;
+  // Serve the freshly-resolved path, not the stored one: if a path component
+  // became a symlink after registration, the guard checked the resolved target
+  // but streaming record.filePath would follow the symlink to a swapped file.
+  return resolved ? pathToCheck : record.filePath;
+}
+
+/**
+ * Boolean wrapper over {@link resolveServableAttachmentPath} for routes that
+ * gate on the guard verdict but don't stream raw bytes (metadata/preview/
+ * thumbnail). Sends the 403 itself; returns true when the record is blocked.
+ */
+async function rejectIfSensitiveRecord(
+  reply: FastifyReply,
+  record: AttachmentRecord,
+  sessionWorkingDir?: string
+): Promise<boolean> {
+  return (await resolveServableAttachmentPath(reply, record, sessionWorkingDir)) === null;
 }
 
 type StoredSessionWithPrivateAttachmentHistory = SessionState & {
@@ -776,10 +830,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
+    // Stream the freshly-resolved path (TOCTOU): a path component swapped to a
+    // symlink after registration would otherwise redirect the stream to a file
+    // the guard never checked.
+    const servePath = await resolveServableAttachmentPath(reply, record, workingDir);
+    if (!servePath) return;
 
     try {
-      await serveRawFile(reply, record.filePath, record.fileName, record.extension, download === 'true');
+      // 50MB cap on the by-id attachment raw route (matches the attachment POST path).
+      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true', 50 * 1024 * 1024);
     } catch (err) {
       reply
         .code(500)
@@ -902,6 +961,86 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return reply
         .code(500)
         .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to render HTML: ${getErrorMessage(err)}`));
+    }
+  });
+
+  // One-click PDF export of the open document (COD-61). GET (so a browser link
+  // can download it) + Content-Disposition: attachment, mirroring the
+  // file-raw/file-preview download pattern (the ticket said POST — deviation
+  // noted). PDF is the only supported format today (DOCX/templates deferred).
+  // docx/pptx reuse the LibreOffice preview-PDF cache; md/markdown/txt are
+  // rendered to HTML server-side (pandoc, else vendored marked) then converted
+  // HTML→PDF via the same soffice invocation.
+  app.get('/api/sessions/:id/documents/export', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const query = req.query as { attachmentId?: string; path?: string; format?: string };
+
+    if (!isSupportedExportFormat(query.format)) {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only PDF export is supported (format=pdf)'));
+      return;
+    }
+
+    const target = resolveDocumentTarget(ctx, reply, id, query);
+    if (!target) return;
+
+    // Resolve symlinks before the sensitive-path guard so a symlink pointing at
+    // a secret target is also caught (COD-53 ordering requirement).
+    let realPath = target.filePath;
+    try {
+      realPath = realpathSync(target.filePath);
+    } catch {
+      // Unreadable/deleted — check the stored path; conversion below will 500 if truly gone.
+    }
+    if (isSensitivePath(realPath)) {
+      reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
+      return;
+    }
+
+    const branch = classifyExportBranch(target.extension);
+    if (branch === 'unsupported') {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'PDF export is not supported for this file type'));
+      return;
+    }
+
+    const fileName = pathBasename(realPath);
+    const downloadName = getPreviewPdfDownloadName(fileName, target.extension);
+
+    try {
+      if (branch === 'office') {
+        // Reuse the existing docx/pptx → PDF preview cache.
+        const previewPath = await getOfficePreviewPdfPath(realPath, target.extension);
+        if (!previewPath) {
+          reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document conversion to PDF failed'));
+          return;
+        }
+        const content = await fs.readFile(previewPath);
+        await sendPdfDownload(reply, content, downloadName);
+        return;
+      }
+
+      // text branch: md/markdown/txt → standalone HTML → soffice HTML→PDF.
+      const raw = await fs.readFile(realPath, 'utf-8');
+      const { html } = await buildTextExportHtml(raw, target.extension, fileName);
+      const pdfPath = await convertHtmlToPdf(html);
+      if (!pdfPath) {
+        reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document conversion to PDF failed'));
+        return;
+      }
+      try {
+        const content = await fs.readFile(pdfPath);
+        await sendPdfDownload(reply, content, downloadName);
+      } finally {
+        // convertHtmlToPdf returns a path inside a per-call work dir; remove it.
+        await fs.rm(join(pdfPath, '..'), { recursive: true, force: true }).catch(() => {});
+      }
+    } catch (err) {
+      reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to export PDF: ${getErrorMessage(err)}`));
     }
   });
 

@@ -114,6 +114,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
     // can ignore small-viewport resizes only while a desktop is actually
     // connected (see Session._desktopSizeClaims).
     const sizingToken = Symbol('ws-desktop-sizing');
+    let holdsDesktopClaim = false;
 
     // Attach message handler synchronously BEFORE any async work
     // (@fastify/websocket requirement to avoid dropped messages).
@@ -122,6 +123,9 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         const msg = JSON.parse(String(raw));
         if (msg.t === 'i' && typeof msg.d === 'string') {
           if (msg.d.length > MAX_INPUT_LENGTH) return;
+          // Typed input from a claim-holding desktop keeps the claim "hot"
+          // and re-asserts the desktop layout after a mobile override.
+          if (holdsDesktopClaim) session.noteDesktopActivity();
           session.write(msg.d);
         } else if (
           msg.t === 'z' &&
@@ -135,10 +139,12 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
           const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : undefined;
           if (viewportType === 'desktop') {
             session.claimDesktopSizing(sizingToken);
+            holdsDesktopClaim = true;
           } else if (viewportType) {
             // The connection's viewport can change (e.g. browser window
             // narrowed past the tablet breakpoint) — drop a stale claim.
             session.releaseDesktopSizing(sizingToken);
+            holdsDesktopClaim = false;
           }
           if (viewportType) {
             session.resize(msg.c, msg.r, { viewportType });

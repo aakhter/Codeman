@@ -52,6 +52,7 @@ const GROUPING_TIMEOUT_MS = 5000;           // 5 seconds - notification grouping
 const NOTIFICATION_LIST_CAP = 100;          // Max notifications in list
 const TITLE_FLASH_INTERVAL_MS = 1500;       // Title flash rate
 const BROWSER_NOTIF_RATE_LIMIT_MS = 3000;   // Rate limit for browser notifications
+const MOBILE_RESIZE_RETRY_MS = 30000;       // Small-viewport resize re-send while a desktop sizing claim is hot
 const AUTO_CLOSE_NOTIFICATION_MS = 8000;    // Auto-close browser notifications
 const THROTTLE_DELAY_MS = 100;              // General UI throttle delay
 const TERMINAL_CHUNK_SIZE = 32 * 1024;      // 32KB chunks for terminal buffer loading
@@ -257,6 +258,10 @@ const SSE_EVENTS = {
   SESSION_WORKING: 'session:working',
   SESSION_AUTO_CLEAR: 'session:autoClear',
   SESSION_AUTO_COMPACT: 'session:autoCompact',
+  SESSION_CHECKPOINT: 'session:checkpoint',
+  SESSION_LIMIT_PAUSE_SCHEDULED: 'session:limitPauseScheduled',
+  SESSION_LIMIT_RESUME: 'session:limitResume',
+  SESSION_LIMIT_RESUME_CANCELLED: 'session:limitResumeCancelled',
   SESSION_CLI_INFO: 'session:cliInfo',
   SESSION_MESSAGE: 'session:message',
   SESSION_INTERACTIVE: 'session:interactive',

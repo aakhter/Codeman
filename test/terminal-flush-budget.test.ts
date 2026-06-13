@@ -58,8 +58,8 @@ describe('terminal flush budget', () => {
     expect(app.pendingWrites.join('')).toHaveLength(64 * 1024);
   });
 
-  it('keeps the larger first-frame write budget for plain shell output', () => {
-    const { app, writes } = loadTerminalUiHarness('shell');
+  it('keeps the larger first-frame write budget for non-Codex terminal output', () => {
+    const { app, writes } = loadTerminalUiHarness('claude');
     app.pendingWrites.push('x'.repeat(96 * 1024));
 
     app.flushPendingWrites();
@@ -67,17 +67,6 @@ describe('terminal flush budget', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]).toHaveLength(64 * 1024);
     expect(app.pendingWrites.join('')).toHaveLength(32 * 1024);
-  });
-
-  it('uses the smaller first-frame write budget for non-shell agent TUIs (claude/Ink)', () => {
-    const { app, writes } = loadTerminalUiHarness('claude');
-    app.pendingWrites.push('x'.repeat(96 * 1024));
-
-    app.flushPendingWrites();
-
-    expect(writes).toHaveLength(1);
-    expect(writes[0]).toHaveLength(32 * 1024);
-    expect(app.pendingWrites.join('')).toHaveLength(64 * 1024);
   });
 
   it('waits for xterm to process small buffer replays before completing buffer load', async () => {

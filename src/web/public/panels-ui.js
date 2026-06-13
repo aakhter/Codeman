@@ -2869,7 +2869,13 @@ Object.assign(CodemanApp.prototype, {
         isDocx && view === 'html'
           ? ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`
           : '';
-      footerEl.innerHTML = `${escapeHtml(`${this.formatFileSize(data.size)} \u2022 ${label}`)}${switcher}${comment}`;
+      // One-click PDF export of the open document (COD-61). docx/pptx reuse the
+      // LibreOffice preview-PDF cache server-side; raw PDFs are already PDFs but
+      // the control downloads them consistently via the export endpoint.
+      const exportPdf = this._renderExportPdfControl();
+      footerEl.innerHTML = `${escapeHtml(
+        `${this.formatFileSize(data.size)} \u2022 ${label}`
+      )}${switcher}${comment}${exportPdf}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
@@ -2916,6 +2922,10 @@ Object.assign(CodemanApp.prototype, {
         }"><code>${escapeHtml(text)}</code></pre>`;
         prose = bodyEl.querySelector('.document-preview-text');
       }
+      // COD-95: re-apply comment highlights onto the freshly-rendered prose. The
+      // preview re-renders on poll, destroying any prior spans, so we rebuild them
+      // from the persisted per-comment anchors (quote + occurrence).
+      this._applyCommentHighlights(prose);
       // Reading-view toggle (constrained measure) for both markdown and text.
       const readingBtn = ` <button class="btn-icon-sm document-reading-btn${
         this.readingViewActive ? ' active' : ''
@@ -2928,9 +2938,14 @@ Object.assign(CodemanApp.prototype, {
         : '';
       // Annotate a selected passage and send it back to the session (COD-60).
       const comment = ` <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>`;
+      // User-configured one-click authoring actions (COD-64). Only shown when the
+      // user has configured at least one action AND there's a session to send to.
+      const authoring = this._renderAuthoringControl();
+      // One-click PDF export of the open document (COD-61).
+      const exportPdf = this._renderExportPdfControl();
       footerEl.innerHTML = `${escapeHtml(
         `${this.formatFileSize(data.size)} \u2022 ${data.extension || data.type} \u2022 ${meta}`
-      )}${outlineBtn}${readingBtn}${changes}${comment}`;
+      )}${outlineBtn}${readingBtn}${changes}${comment}${authoring}${exportPdf}`;
     } else if (data.type === 'binary') {
       bodyEl.innerHTML = `
         <div class="binary-message">
@@ -3005,6 +3020,46 @@ Object.assign(CodemanApp.prototype, {
       : `path=${encodeURIComponent(st.filePath)}`;
   },
 
+  /**
+   * Render the "Export PDF" footer control (COD-61), or '' when the document
+   * isn't exportable. Server supports docx/pptx (cached LibreOffice PDF) and
+   * md/markdown/txt (HTML→PDF); other types (incl. already-PDF) are skipped.
+   */
+  _renderExportPdfControl() {
+    const st = this.filePreviewState;
+    if (!st || (!st.filePath && !st.attachmentId)) return '';
+    const ext = (st.filePath || '').split('.').pop()?.toLowerCase() || '';
+    const exportable = ['docx', 'pptx', 'md', 'markdown', 'mdown', 'txt', 'text'];
+    // attachmentId-only previews (no path) still expose the control; the server
+    // resolves the extension from the attachment record and 400s if unsupported.
+    if (st.filePath && !exportable.includes(ext)) return '';
+    return ` <button class="btn-icon-sm document-export-btn" onclick="app.exportDocumentPdf()" title="Download a PDF of this document">Export PDF</button>`;
+  },
+
+  /** Download a PDF of the open document via the export endpoint (COD-61). */
+  exportDocumentPdf() {
+    const st = this.filePreviewState;
+    if (!st || !st.sessionId) {
+      this.showToast?.('No document to export', 'error');
+      return;
+    }
+    const params = this._documentParams();
+    if (!params) {
+      this.showToast?.('No document to export', 'error');
+      return;
+    }
+    const url = `/api/sessions/${st.sessionId}/documents/export?${params}&format=pdf`;
+    // Trigger a download via a temporary anchor so a server error (which returns
+    // a JSON envelope, not a PDF) doesn't navigate the SPA away.
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  },
+
   /** Switch the preview into revision-review mode and render the diff (COD-59). */
   async showDocumentDiff(fromId = null) {
     const st = this.filePreviewState;
@@ -3072,6 +3127,12 @@ Object.assign(CodemanApp.prototype, {
         <button class="btn-icon-sm document-comment-btn" onclick="app.commentOnSelection()">Comment</button>
       </div>
       ${content}`;
+    // COD-100: re-apply comment highlights onto the freshly-rendered diff body, the
+    // same way the normal preview does (COD-95). The diff render replaces the
+    // annotated DOM, so commented passages would otherwise lose their highlight in
+    // the Changes view; COD-68 intended highlight/annotation to work on BOTH views.
+    // Anchors that no longer match the diffed text are skipped gracefully.
+    this._applyCommentHighlights(bodyEl.querySelector('.document-preview-diff'));
     if (footerEl) {
       footerEl.textContent = `${versions.length} version${versions.length === 1 ? '' : 's'} \u2022 additions and deletions vs the selected version`;
     }
@@ -3155,34 +3216,241 @@ Object.assign(CodemanApp.prototype, {
       this.showToast?.('Select some text in the document first', 'info');
       return;
     }
+    // COD-95: resolve which occurrence of the selected quote this is, so the
+    // highlight can be re-applied after the preview re-renders. We anchor on the
+    // whitespace-collapsed quote + its 0-based occurrence index within the prose.
+    // Compute it BEFORE opening the popover (opening clears any prior pending value),
+    // then assign so addAnnotation can read it.
+    const occurrence = this._selectionOccurrence(sel, this._previewProseEl());
     this._openAnnotationPopover(text);
+    this._annotationPendingOccurrence = occurrence;
   },
 
-  _openAnnotationPopover(passage) {
+  /**
+   * The rendered prose container the highlights live in: markdown, plain text, or
+   * the diff/Changes body (COD-68). COD-100 adds `.document-preview-diff` so the
+   * comment highlight + click-to-edit work while comparing versions, not just in
+   * the normal preview.
+   */
+  _previewProseEl() {
+    const bodyEl = this.$('filePreviewBody');
+    return bodyEl?.querySelector('.document-preview-markdown, .document-preview-text, .document-preview-diff') || null;
+  },
+
+  /** Collapse runs of whitespace to single spaces (matches stored anchor quotes). */
+  _normalizeQuote(s) {
+    return String(s ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
+  /**
+   * COD-95: which 0-based occurrence of the selected quote (within `prose`) the
+   * current selection represents. Counts collapsed-text matches that start at or
+   * before the selection's start offset. Returns 0 when it can't be determined.
+   */
+  _selectionOccurrence(sel, prose) {
+    try {
+      if (!sel || !sel.rangeCount || !prose) return 0;
+      const quote = this._normalizeQuote(String(sel));
+      if (!quote) return 0;
+      const range = sel.getRangeAt(0);
+      // Text from the prose start up to the selection start, collapsed the same way.
+      const pre = range.cloneRange();
+      pre.selectNodeContents(prose);
+      pre.setEnd(range.startContainer, range.startOffset);
+      const before = this._normalizeQuote(pre.toString());
+      // Count non-overlapping matches of the quote that fully precede the selection.
+      let count = 0;
+      let idx = before.indexOf(quote);
+      while (idx !== -1) {
+        count++;
+        idx = before.indexOf(quote, idx + quote.length);
+      }
+      return count;
+    } catch {
+      return 0;
+    }
+  },
+
+  /**
+   * COD-95: build a stable anchor for a comment — the normalized quote plus the
+   * 0-based occurrence index within `prose`. Returns null when the quote isn't
+   * present (so we never persist an un-findable anchor).
+   */
+  _buildCommentAnchor(quote, prose, occurrence = 0) {
+    const q = this._normalizeQuote(quote);
+    if (!q) return null;
+    const haystack = this._normalizeQuote(prose?.textContent || '');
+    if (haystack.indexOf(q) === -1) return null;
+    return { quote: q, occurrence: Math.max(0, occurrence | 0) };
+  },
+
+  /**
+   * COD-95: re-apply every comment highlight onto the freshly-rendered prose. The
+   * preview re-renders on poll, so DOM spans are destroyed and must be rebuilt from
+   * the persisted anchors. For each anchor we walk the prose text nodes, locate the
+   * Nth occurrence of the (whitespace-collapsed) quote across the concatenated text,
+   * and wrap exactly that run — splitting text nodes as needed — in a
+   * `<span class="comment-highlight" data-comment-id>`. Quotes that can't be re-found
+   * (text changed) are skipped silently; nothing throws.
+   */
+  _applyCommentHighlights(prose) {
+    if (!prose) return;
+    const anns = (this._annotations || []).filter((a) => a && a.anchor && a.anchor.quote);
+    // Bind the delegated click-to-edit handler once per prose container.
+    if (!prose.dataset.commentHighlightBound) {
+      prose.dataset.commentHighlightBound = '1';
+      prose.addEventListener('click', (ev) => {
+        const span = ev.target?.closest?.('.comment-highlight');
+        if (span) this.editCommentFromHighlight(span.getAttribute('data-comment-id'));
+      });
+    }
+    for (const ann of anns) {
+      try {
+        this._wrapNthOccurrence(prose, ann.anchor.quote, ann.anchor.occurrence | 0, ann.id);
+      } catch {
+        /* anchor not re-findable after a content change — skip it gracefully */
+      }
+    }
+  },
+
+  /**
+   * Wrap the `occurrence`-th (0-based) match of the whitespace-collapsed `quote`
+   * within `root`'s text in highlight spans. Matching is done over the visible text
+   * with whitespace collapsed, mapping match positions back to (textNode, offset)
+   * pairs so a quote spanning multiple text nodes is wrapped piece by piece. No-op
+   * when the occurrence isn't found.
+   */
+  _wrapNthOccurrence(root, quote, occurrence, commentId) {
+    const q = this._normalizeQuote(quote);
+    if (!q) return;
+    // Collect text nodes (skip ones already inside a highlight to avoid re-wrapping).
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) =>
+        n.parentElement && n.parentElement.closest('.comment-highlight')
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    });
+    const segments = []; // { node, start, end } over the COLLAPSED concatenation
+    let collapsed = '';
+    let prevWasSpace = true; // leading whitespace is trimmed in the collapsed form
+    let node;
+    while ((node = walker.nextNode())) {
+      const raw = node.nodeValue || '';
+      const segStart = collapsed.length;
+      // Map each raw char position to its position in the collapsed string.
+      const map = []; // map[i] = collapsed index for raw char i (or -1 if dropped)
+      for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (/\s/.test(ch)) {
+          if (prevWasSpace) {
+            map.push(-1);
+          } else {
+            map.push(collapsed.length);
+            collapsed += ' ';
+            prevWasSpace = true;
+          }
+        } else {
+          map.push(collapsed.length);
+          collapsed += ch;
+          prevWasSpace = false;
+        }
+      }
+      segments.push({ node, raw, map, segStart });
+    }
+    const collapsedTrimmed = collapsed; // already collapsed; may have a trailing space
+    // Find the Nth occurrence start index in the collapsed text.
+    let from = 0;
+    let foundAt = -1;
+    for (let k = 0; k <= occurrence; k++) {
+      const at = collapsedTrimmed.indexOf(q, from);
+      if (at === -1) return; // not enough occurrences
+      foundAt = at;
+      from = at + q.length;
+    }
+    const matchStart = foundAt;
+    const matchEnd = foundAt + q.length; // exclusive, in collapsed coords
+
+    // For each text node, wrap the sub-range that falls inside [matchStart, matchEnd).
+    for (const seg of segments) {
+      // Determine which raw-char offsets in this node map into the match window.
+      let rawStart = -1;
+      let rawEnd = -1;
+      for (let i = 0; i < seg.raw.length; i++) {
+        const c = seg.map[i];
+        if (c === -1) continue;
+        if (c >= matchStart && c < matchEnd) {
+          if (rawStart === -1) rawStart = i;
+          rawEnd = i + 1;
+        }
+      }
+      if (rawStart === -1) continue; // this node contributes nothing to the match
+      this._wrapTextNodeRange(seg.node, rawStart, rawEnd, commentId);
+    }
+  },
+
+  /** Wrap [start, end) of a single text node in a comment-highlight span. */
+  _wrapTextNodeRange(textNode, start, end, commentId) {
+    const raw = textNode.nodeValue || '';
+    const mid = raw.slice(start, end);
+    const after = raw.slice(end);
+    const before = raw.slice(0, start);
+    const span = document.createElement('span');
+    span.className = 'comment-highlight';
+    span.setAttribute('data-comment-id', commentId);
+    span.setAttribute('title', 'Click to edit this comment');
+    span.textContent = mid;
+    const parent = textNode.parentNode;
+    if (!parent) return;
+    if (after) parent.insertBefore(document.createTextNode(after), textNode.nextSibling);
+    parent.insertBefore(span, textNode.nextSibling);
+    textNode.nodeValue = before;
+    if (!before) parent.removeChild(textNode);
+  },
+
+  /** COD-95: open the existing comment for the clicked highlight, ready to edit. */
+  editCommentFromHighlight(commentId) {
+    const ann = (this._annotations || []).find((a) => a.id === commentId);
+    if (!ann) return;
+    this._annotationPassage = ann.passage || ann.anchor?.quote || '';
+    this._openAnnotationPopover(this._annotationPassage, { note: ann.note || '', editingId: commentId });
+  },
+
+  _openAnnotationPopover(passage, { note = '', editingId = null } = {}) {
     this._closeAnnotationPopover();
     const shortPassage = passage.length > 240 ? `${passage.slice(0, 240)}…` : passage;
+    const editing = !!editingId;
     const pop = document.createElement('div');
     pop.className = 'annotation-popover';
     pop.id = 'annotationPopover';
     pop.innerHTML = `
-      <div class="annotation-popover-title">Add comment on selection</div>
+      <div class="annotation-popover-title">${editing ? 'Edit comment' : 'Add comment on selection'}</div>
       <blockquote class="annotation-quote">${escapeHtml(shortPassage)}</blockquote>
       <textarea class="annotation-note" rows="3" placeholder="e.g. tighten this; make it less formal; add a citation"></textarea>
       <div class="annotation-popover-actions">
         <button type="button" class="btn-icon-sm" onclick="app._closeAnnotationPopover()">Cancel</button>
-        <button type="button" class="btn-icon-sm annotation-send" onclick="app.addAnnotation()">Add to review</button>
+        <button type="button" class="btn-icon-sm annotation-send" onclick="app.addAnnotation()">${
+          editing ? 'Save comment' : 'Add to review'
+        }</button>
       </div>`;
     document.body.appendChild(pop);
     this._annotationPassage = passage;
-    setTimeout(() => pop.querySelector('.annotation-note')?.focus(), 0);
+    this._editingCommentId = editingId;
+    const ta = pop.querySelector('.annotation-note');
+    if (ta) ta.value = note;
+    setTimeout(() => ta?.focus(), 0);
   },
 
   _closeAnnotationPopover() {
     document.getElementById('annotationPopover')?.remove();
     this._annotationPassage = null;
+    this._annotationPendingOccurrence = 0;
+    this._editingCommentId = null;
   },
 
-  /** Add the composed {passage, note} to the review tray (COD-69). */
+  /** Add the composed {passage, note} to the review tray (COD-69), or update an
+   * existing comment when editing from a highlight (COD-95). */
   addAnnotation() {
     const pop = document.getElementById('annotationPopover');
     if (!pop) return;
@@ -3192,15 +3460,41 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
     this._annotations = this._annotations || [];
-    this._annotations.push({ passage: (this._annotationPassage || '').replace(/\s+/g, ' ').trim(), note });
-    this._closeAnnotationPopover();
+    const editingId = this._editingCommentId;
+    if (editingId) {
+      // COD-95: edit-in-place from a highlight — keep id + anchor, swap the note.
+      const existing = this._annotations.find((a) => a.id === editingId);
+      if (existing) existing.note = note;
+      this._closeAnnotationPopover();
+    } else {
+      const passage = this._normalizeQuote(this._annotationPassage || '');
+      // COD-95: persist a stable anchor (quote + occurrence) so the selection can
+      // be re-highlighted after the preview re-renders.
+      const anchor = this._buildCommentAnchor(passage, this._previewProseEl(), this._annotationPendingOccurrence || 0);
+      this._annotations.push({ id: this._newCommentId(), passage, note, anchor });
+      this._closeAnnotationPopover();
+    }
     this._renderAnnotationTray();
+    // Re-apply highlights immediately so the new/edited comment is visible.
+    this._applyCommentHighlights(this._previewProseEl());
+  },
+
+  /** Short, stable id for a comment (crypto.randomUUID with fallback). */
+  _newCommentId() {
+    try {
+      const uuid = globalThis.crypto?.randomUUID?.();
+      if (uuid) return `cmt-${uuid.slice(0, 8)}`;
+    } catch {
+      /* ignore */
+    }
+    return `cmt-${Math.random().toString(36).slice(2, 10)}`;
   },
 
   removeAnnotation(index) {
     if (!this._annotations) return;
     this._annotations.splice(index, 1);
     this._renderAnnotationTray();
+    this._applyCommentHighlights(this._previewProseEl());
   },
 
   _closeAnnotationTray() {
@@ -3221,7 +3515,8 @@ Object.assign(CodemanApp.prototype, {
     tray.id = 'annotationTray';
     const rows = items
       .map((a, i) => {
-        const snippet = a.passage.length > 80 ? `${a.passage.slice(0, 80)}…` : a.passage;
+        const passage = a.passage || a.anchor?.quote || '';
+        const snippet = passage.length > 80 ? `${passage.slice(0, 80)}…` : passage;
         return `<li class="annotation-tray-item">
             <button class="annotation-tray-remove" title="Remove" onclick="app.removeAnnotation(${i})">×</button>
             <div class="annotation-tray-passage">“${escapeHtml(snippet)}”</div>
@@ -3306,6 +3601,115 @@ Object.assign(CodemanApp.prototype, {
     } catch {
       this.showToast?.('Failed to send to session', 'error');
       return false;
+    }
+  },
+
+  // ── Authoring actions (COD-64) ───────────────────────────────────────────
+  // User-configured one-click actions surfaced in the document preview footer.
+  // Each action sends a templated single-line instruction to the open document's
+  // agent session. Ships empty — the user authors these in App Settings → Authoring.
+
+  /** Read the user's configured authoring actions from the cached app-settings store. */
+  _authoringActions() {
+    const list = this.loadAppSettingsFromStorage?.().authoringActions;
+    return Array.isArray(list) ? list : [];
+  },
+
+  /**
+   * Build the instruction sent to the agent: replace every `{path}` in the template
+   * with the document path; if the template has no `{path}`, append ` <path>`. Pure;
+   * kept single-line (writeViaMux is single-line only).
+   */
+  buildActionInstruction(template, path) {
+    const t = String(template ?? '');
+    const p = String(path ?? '');
+    const out = t.includes('{path}') ? t.split('{path}').join(p) : `${t} ${p}`;
+    return out.replace(/\s+/g, ' ').trim();
+  },
+
+  /**
+   * Normalize editor rows into the persisted shape: trim label/instruction, drop
+   * rows missing either, assign a stable id when absent, and cap at 20. Pure.
+   */
+  normalizeAuthoringActions(rows) {
+    if (!Array.isArray(rows)) return [];
+    const out = [];
+    for (const row of rows) {
+      const label = String(row?.label ?? '').trim();
+      const instruction = String(row?.instruction ?? '').trim();
+      if (!label || !instruction) continue;
+      const id = String(row?.id ?? '').trim() || this._newAuthoringActionId();
+      out.push({ id, label, instruction });
+      if (out.length >= 20) break;
+    }
+    return out;
+  },
+
+  /** Short, stable id for a new authoring action (crypto.randomUUID with fallback). */
+  _newAuthoringActionId() {
+    try {
+      const uuid = globalThis.crypto?.randomUUID?.();
+      if (uuid) return `act-${uuid.slice(0, 8)}`;
+    } catch {
+      /* ignore */
+    }
+    return `act-${Math.random().toString(36).slice(2, 10)}`;
+  },
+
+  /** Footer control: an "Authoring ▾" button revealing the configured actions. */
+  _renderAuthoringControl() {
+    const actions = this._authoringActions();
+    if (!actions.length || !this.filePreviewState?.sessionId) return '';
+    const items = actions
+      .map(
+        (a) =>
+          `<button class="authoring-action-item" onclick="app.runAuthoringAction('${escapeHtml(a.id)}')">${escapeHtml(
+            a.label
+          )}</button>`
+      )
+      .join('');
+    return (
+      ` <span class="document-authoring-wrap">` +
+      `<button class="btn-icon-sm document-authoring-btn" onclick="app.toggleAuthoringMenu(event)">Authoring ▾</button>` +
+      `<div class="authoring-action-menu" hidden>${items}</div>` +
+      `</span>`
+    );
+  },
+
+  /** Toggle the authoring actions dropdown open/closed. */
+  toggleAuthoringMenu(event) {
+    event?.stopPropagation?.();
+    const wrap = event?.currentTarget?.closest?.('.document-authoring-wrap');
+    const menu = wrap?.querySelector('.authoring-action-menu');
+    if (!menu) return;
+    const open = menu.hasAttribute('hidden');
+    if (open) {
+      menu.removeAttribute('hidden');
+      const close = (e) => {
+        if (!wrap.contains(e.target)) {
+          menu.setAttribute('hidden', '');
+          document.removeEventListener('click', close, true);
+        }
+      };
+      document.addEventListener('click', close, true);
+    } else {
+      menu.setAttribute('hidden', '');
+    }
+  },
+
+  /** Look up an action by id, interpolate the path, and send it to the session. */
+  async runAuthoringAction(actionId) {
+    const st = this.filePreviewState;
+    const action = this._authoringActions().find((a) => a.id === actionId);
+    if (!action) return;
+    if (!st?.sessionId) {
+      this.showToast?.('No active session for this document', 'error');
+      return;
+    }
+    const instruction = this.buildActionInstruction(action.instruction, st.filePath || '');
+    if (!instruction) return;
+    if (await this._postSessionInput(st.sessionId, instruction)) {
+      this.showToast?.(`Sent "${action.label}" to the session`, 'success');
     }
   },
 
@@ -4361,8 +4765,23 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
 
-    let html = '';
+    // COD-97: keep the Monitor list in sync with the real open tabs. A mux entry
+    // whose sessionId is NOT in this.sessions (orphan / restored-* / already-closed
+    // tab) must never be rendered as a normal, clickable tab row — render those
+    // separately under a visually-distinct "not open" treatment so they can't be
+    // silently mistaken for live sessions.
+    const matched = [];
+    const orphans = [];
     for (const muxSession of this.muxSessions) {
+      if (this.sessions.has(muxSession.sessionId)) {
+        matched.push(muxSession);
+      } else {
+        orphans.push(muxSession);
+      }
+    }
+
+    let html = '';
+    for (const muxSession of matched) {
       const stats = muxSession.stats || { memoryMB: 0, cpuPercent: 0, childCount: 0 };
 
       // Look up rich session data by sessionId
@@ -4435,6 +4854,29 @@ Object.assign(CodemanApp.prototype, {
           </div>
           <div class="process-actions">
             <button class="btn-toolbar btn-sm btn-danger" onclick="event.stopPropagation(); app.killMuxSession('${sid}')" title="Kill session">Kill</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // COD-97: orphaned mux sessions (no matching open tab) — render distinct,
+    // non-clickable rows so they're never confused for live tabs. These can be
+    // killed (they're real tmux sessions) but selecting them would do nothing.
+    for (const muxSession of orphans) {
+      const stats = muxSession.stats || { memoryMB: 0, cpuPercent: 0, childCount: 0 };
+      const sid = escapeHtml(muxSession.sessionId);
+      html += `
+        <div class="process-item process-item-orphan" title="Not an open tab (orphaned tmux session)">
+          <span class="monitor-status-badge status-orphan">NOT OPEN</span>
+          <div class="process-info">
+            <div class="process-name">${escapeHtml(muxSession.name || muxSession.muxName)}</div>
+            <div class="process-meta">
+              <span class="process-stat memory">${stats.memoryMB || 0}MB</span>
+              <span class="process-stat cpu">${stats.cpuPercent || 0}%</span>
+            </div>
+          </div>
+          <div class="process-actions">
+            <button class="btn-toolbar btn-sm btn-danger" onclick="app.killMuxSession('${sid}')" title="Kill orphaned session">Kill</button>
           </div>
         </div>
       `;

@@ -19,12 +19,31 @@ import fastifyCookie from '@fastify/cookie';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
+import { Session } from '../../src/session.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
+const remoteStore = vi.hoisted(() => ({
+  hosts: [] as Array<{
+    id: string;
+    label: string;
+    host: string;
+    username: string;
+    commands?: Record<string, string>;
+  }>,
+  cases: [] as Array<{ name: string; type: 'remote'; hostId: string; remotePath: string }>,
+}));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
   return { ...actual, execFile };
+});
+vi.mock('../../src/remote-hosts.js', async (orig) => {
+  const actual = await orig<typeof import('../../src/remote-hosts.js')>();
+  return {
+    ...actual,
+    readRemoteHosts: vi.fn(async () => remoteStore.hosts),
+    readRemoteCases: vi.fn(async () => remoteStore.cases),
+  };
 });
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
@@ -77,6 +96,8 @@ describe('session-routes', () => {
   let harness: LocalHarness;
 
   beforeEach(async () => {
+    remoteStore.hosts = [];
+    remoteStore.cases = [];
     harness = await createEnvelopeHarness(registerSessionRoutes);
   });
 
@@ -285,6 +306,63 @@ describe('session-routes', () => {
     });
   });
 
+  // ========== POST /api/sessions/:id/auto-resume ==========
+
+  describe('POST /api/sessions/:id/auto-resume', () => {
+    it('enables auto-resume on usage limit', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/auto-resume`,
+        payload: { enabled: true },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.autoResume.enabled).toBe(true);
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId)!;
+      expect(session.setAutoResume).toHaveBeenCalledWith(true);
+      expect(harness.ctx.persistSessionState).toHaveBeenCalled();
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:updated', expect.anything());
+    });
+
+    it('disables auto-resume', async () => {
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId)!;
+      session.autoResumeEnabled = true;
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/auto-resume`,
+        payload: { enabled: false },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.autoResume.enabled).toBe(false);
+      expect(session.setAutoResume).toHaveBeenCalledWith(false);
+    });
+
+    it('rejects invalid body', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/auto-resume`,
+        payload: { enabled: 'yes' },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe(ApiErrorCode.INVALID_INPUT);
+    });
+
+    it('returns 404 for unknown session', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/nonexistent/auto-resume',
+        payload: { enabled: true },
+      });
+      expect(res.statusCode).toBe(404);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+    });
+  });
+
   // ========== POST /api/sessions/:id/input ==========
 
   describe('POST /api/sessions/:id/input', () => {
@@ -404,7 +482,7 @@ describe('session-routes', () => {
       ).join('\n');
       harness.ctx._session.terminalBuffer = shellHistory;
       harness.ctx._session.mode = 'shell';
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(() => null);
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -420,7 +498,7 @@ describe('session-routes', () => {
     it('preserves accumulated history before the live mux pane snapshot for Codex TUI replay', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
         () => 'visible tmux pane only\n› current prompt'
       );
 
@@ -437,14 +515,14 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
     it('treats stale Codex scrollback config as TUI replay', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
       harness.ctx._session.codexConfig = { renderMode: 'scrollback' } as any;
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
         () => 'visible tmux pane only\n› current prompt'
       );
 
@@ -461,7 +539,7 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
     it('preserves one-time OAuth authorization URLs in Codex TUI replay history', async () => {
@@ -472,7 +550,7 @@ describe('session-routes', () => {
         authUrl +
         '\n(Browser launch failed; please copy the URL above manually.)\n';
       harness.ctx._session.mode = 'codex';
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
         () => 'visible tmux pane only\n› current prompt'
       );
 
@@ -485,7 +563,9 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain(authUrl);
       expect(body.data.terminalBuffer).toContain('visible tmux pane only');
-      expect(body.data.terminalBuffer.indexOf(authUrl)).toBeLessThan(body.data.terminalBuffer.indexOf('visible tmux pane only'));
+      expect(body.data.terminalBuffer.indexOf(authUrl)).toBeLessThan(
+        body.data.terminalBuffer.indexOf('visible tmux pane only')
+      );
     });
 
     it('preserves incidental OAuth URL mentions as ordinary Codex TUI history', async () => {
@@ -497,7 +577,7 @@ describe('session-routes', () => {
         ' could be present in history but missing from browser-rendered terminal replay.\n' +
         "+        'Authorize `atlassian` by opening this URL in your browser:\\n' +\n";
       harness.ctx._session.mode = 'codex';
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
         () => 'visible tmux pane only\n› current prompt'
       );
 
@@ -515,7 +595,7 @@ describe('session-routes', () => {
     it('preserves accumulated history before a live mux pane snapshot for non-Codex sessions', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'claude';
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
         () => 'visible tmux pane only\n› current prompt'
       );
 
@@ -533,13 +613,13 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
     it('uses live mux pane capture only when the accumulated buffer is empty', async () => {
       harness.ctx._session.terminalBuffer = '';
       harness.ctx._session.mode = 'codex';
-      (harness.ctx.mux as { capturePaneBuffer?: unknown }).capturePaneBuffer = vi.fn(
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
         () => 'visible restored tmux pane\n› current prompt'
       );
 
@@ -552,7 +632,7 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain('visible restored tmux pane');
       expect(body.data.terminalBuffer).toContain('› current prompt');
-      expect(harness.ctx.mux.capturePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
     });
 
     it('returns error for unknown session', async () => {
@@ -563,6 +643,39 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(404);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
+    });
+
+    it('prepends the live tmux pane buffer (cleared) before the byte history', async () => {
+      harness.ctx._session.terminalBuffer = 'history-bytes';
+      harness.ctx.mux.captureActivePaneBuffer = vi.fn(() => 'LIVE-PANE-FRAME');
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+      expect(res.statusCode).toBe(200);
+      const buf = JSON.parse(res.body).data.terminalBuffer as string;
+      // history, then a viewport clear, then the live pane frame
+      expect(buf).toContain('history-bytes');
+      expect(buf).toContain('\x1b[H\x1b[2J');
+      expect(buf).toContain('LIVE-PANE-FRAME');
+      expect(buf.indexOf('history-bytes')).toBeLessThan(buf.indexOf('LIVE-PANE-FRAME'));
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+    });
+
+    it('falls back to the byte history when no live pane buffer is available', async () => {
+      harness.ctx._session.terminalBuffer = 'history-only';
+      // Empty string (the test-mode return) and null both mean "no live frame".
+      harness.ctx.mux.captureActivePaneBuffer = vi.fn(() => '');
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+      expect(res.statusCode).toBe(200);
+      const buf = JSON.parse(res.body).data.terminalBuffer as string;
+      expect(buf).toContain('history-only');
+      expect(buf).not.toContain('\x1b[H\x1b[2J');
     });
   });
 
@@ -817,6 +930,76 @@ describe('session-routes', () => {
   // ========== POST /api/sessions (with resumeSessionId) ==========
 
   describe('POST /api/sessions with resumeSessionId', () => {
+    it('creates session from a remote case without local stat validation', async () => {
+      remoteStore.hosts = [
+        {
+          id: 'gpu-box',
+          label: 'GPU Box',
+          host: '10.0.0.42',
+          username: 'ubuntu',
+          commands: { codex: 'exec codx personal' },
+        },
+      ];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'shell', name: 'Remote Shell' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.session.workingDir).toBe('/home/ubuntu/work');
+      expect(body.data.session.remote).toMatchObject({
+        hostId: 'gpu-box',
+        host: '10.0.0.42',
+        username: 'ubuntu',
+        remotePath: '/home/ubuntu/work',
+        commands: { codex: 'exec codx personal' },
+      });
+    });
+
+    it('quick-start creates remote case sessions through ssh metadata', async () => {
+      const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
+      try {
+        remoteStore.hosts = [
+          {
+            id: 'gpu-box',
+            label: 'GPU Box',
+            host: '10.0.0.42',
+            username: 'ubuntu',
+            commands: { codex: 'exec codx personal' },
+          },
+        ];
+        remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName: 'gpu-work', mode: 'shell' },
+        });
+
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.success).toBe(true);
+        expect(body.data.casePath).toBe('/home/ubuntu/work');
+        const session = [...harness.ctx.sessions.values()].find((item) => item.id === body.data.sessionId);
+        expect(session?.toState()).toMatchObject({
+          workingDir: '/home/ubuntu/work',
+          remote: expect.objectContaining({
+            hostId: 'gpu-box',
+            host: '10.0.0.42',
+            username: 'ubuntu',
+            remotePath: '/home/ubuntu/work',
+          }),
+        });
+      } finally {
+        startShell.mockRestore();
+      }
+    });
+
     it('creates session with valid resumeSessionId', async () => {
       const res = await harness.app.inject({
         method: 'POST',

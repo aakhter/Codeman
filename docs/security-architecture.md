@@ -124,7 +124,11 @@ loopback bind matters. The auth pipeline (`src/web/middleware/auth.ts`,
 `onRequest` hook) runs in this order:
 
 1. **Localhost‑only exemptions** (always first): `POST /api/hook-event` and the QR
-   `/q/` short‑code path are exempt when `req.ip` is loopback (see §3).
+   `/q/` short‑code path are exempt when `req.ip` is loopback (see §3). While the
+   **managed tunnel is running**, the hook‑event exemption additionally requires
+   the per‑instance `X-Codeman-Hook-Secret` header (COD‑54); failed presentations
+   are rate‑limited in a **dedicated bucket** (separate from Basic‑Auth failures)
+   so misfiring hooks can never lock out the login path.
 2. **Session cookie** check — a valid `codeman_session` cookie short‑circuits to
    allow.
 3. **HTTP Basic** check — correct credentials short‑circuit to allow and clear
@@ -165,17 +169,29 @@ protection is unchanged.
 with `req.ip = 127.0.0.1`**. The localhost‑only exemptions then treat those
 requests as local:
 
-- `POST /api/hook-event` — auth‑exempt for loopback. Bounded impact: it is
+- `POST /api/hook-event` — auth‑exempt for loopback **only while no managed tunnel
+  is running**. When Codeman's own tunnel is up, the exemption requires the
+  per‑instance shared secret (`X-Codeman-Hook-Secret`, 256‑bit hex in
+  `~/.codeman/hook-secret`, mode 0600, COD‑54). Local hook commands read the
+  secret file at execution time (`$CODEMAN_HOOK_SECRET_FILE`, exported into every
+  managed session), so they keep working — tunneled internet traffic can't know
+  it. Even without the secret the impact is bounded: the route is
   `HookEventSchema`‑validated and requires a valid in‑memory `sessionId`; it can
   drive respawn signals, SSE broadcasts, push notifications, and transcript
-  watching — **not** arbitrary terminal input or file reads. It is a
-  session‑disruption / notification‑spoofing surface, not RCE.
+  watching — **not** arbitrary terminal input or file reads. ⚠️ The gate keys off
+  the **managed** tunnel — an externally run loopback proxy (your own
+  `cloudflared`, `tailscale serve`) is invisible to it, so the plain loopback
+  exemption still applies there (prefer `tailscale serve`, which authenticates at
+  the tailnet layer). Hook configs regenerated since COD‑54 always present the
+  header, so a future release can require the secret unconditionally.
 - QR `/q/` — still protected by its own short‑code brute‑force limiter
   (10 failures / 60s against a 62⁶ space).
 
 **Mitigation:** set `CODEMAN_PASSWORD` whenever a loopback‑connecting tunnel is
-up (it does not gate the hook‑event exemption, but it gates everything else and
-is the documented practice). Prefer `tailscale serve` (below), which authenticates
+up — it gates everything except the (secret‑gated) hook exemption and is the
+documented practice; since COD‑55 enabling the managed tunnel **refuses** to start
+without it unless `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` explicitly
+acknowledges the exposure. Prefer `tailscale serve` (below), which authenticates
 at the tailnet layer so untrusted clients never reach the loopback port at all.
 
 ### Host‑header & Origin allowlist (DNS‑rebinding & CSRF defense)
@@ -304,7 +320,37 @@ injected from API JSON (`innerHTML`), not via `file-raw`, so they are unaffected
 `/api/download` additionally refuses a blocklist of sensitive paths
 (`/etc/shadow`, `~/.ssh/`, `.env`, `*credentials*`, `.aws/credentials`, …). This
 is **defense‑in‑depth, not the primary boundary** — the realpath containment is
-the control.
+the control. The blocklist patterns are shared (`src/web/sensitive-path.ts`) with
+the attachment guard below.
+
+### External attachments (registry) & the magic‑link trust boundary
+
+Live external attachments (`src/attachment-registry.ts`) mint an `att_<uuid>` id
+for a host file so browser requests carry the id, never an absolute path. Serving
+is by id (`GET /api/sessions/:id/attachments/:attachmentId/raw`, 50 MB cap,
+`nosniff`) and re‑resolves the symlink + re‑checks the **attachment guard**
+(`src/config/attachment-guard.ts`: the shared sensitive‑path blocklist **plus**
+the `/root` and `/etc` trees, extendable via `attachmentBlockedPaths` /
+`CODEMAN_ATTACHMENT_BLOCKED_PATHS`) on every request. Unlike the workspace file
+routes, attachments are intentionally **cross‑workspace** — so the effective gate
+is the blocklist + a 6‑extension allowlist (`png/pdf/docx/pptx/md/txt`), not
+realpath containment.
+
+Two registration paths, with **different trust**:
+
+- **Explicit `POST /api/sessions/:id/attachments`** (and `codeman attach`, which
+  POSTs directly inside a managed session) — a deliberate, Origin‑guarded HTTP
+  request. Allowed cross‑workspace (subject to the guard). This is the supported
+  path for codeman‑publish and the `~/.codeman` review‑card loop.
+- **Terminal `codeman://attach?path=…` magic links** — scanned passively from
+  session output. Terminal output is **attacker‑influenceable** (a prompt‑injected
+  session can print an arbitrary path), and registration here is server‑side with
+  no Origin gate and broadcasts the `rawUrl` over SSE to all clients. This path is
+  therefore **force‑confined to the session workspace** (`forceWorkspaceConfinement`
+  in `registerExternalAttachment`, wired in `WebServer.registerAttachment`),
+  regardless of the global confine setting — a passive magic link cannot expose a
+  file outside the session's own workspace. Cross‑workspace attach must go through
+  the explicit POST path above.
 
 ### SSE log‑tail route — intentional extra read roots
 

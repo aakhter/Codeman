@@ -203,6 +203,9 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_IDLE, '_onSessionIdle'],
   [SSE_EVENTS.SESSION_WORKING, '_onSessionWorking'],
   [SSE_EVENTS.SESSION_AUTO_CLEAR, '_onSessionAutoClear'],
+  [SSE_EVENTS.SESSION_LIMIT_PAUSE_SCHEDULED, '_onSessionLimitPauseScheduled'],
+  [SSE_EVENTS.SESSION_LIMIT_RESUME, '_onSessionLimitResume'],
+  [SSE_EVENTS.SESSION_LIMIT_RESUME_CANCELLED, '_onSessionLimitResumeCancelled'],
   [SSE_EVENTS.SESSION_CLI_INFO, '_onSessionCliInfo'],
 
   // Scheduled runs
@@ -641,7 +644,6 @@ class CodemanApp {
     // Apply keyboard bar mode from settings
     const _kbSettings = this.loadAppSettingsFromStorage();
     if (_kbSettings.extendedKeyboardBar) KeyboardAccessoryBar.setMode('extended');
-    this.bindMobileHeaderUtilityToggle?.();
     this.applyHeaderVisibilitySettings();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
@@ -1294,6 +1296,8 @@ class CodemanApp {
     }
     this.renderSessionTabs();
     this.updateCost();
+    // COD-97: keep the Monitor's mux list in sync with the open tabs.
+    this.renderMuxSessions();
     // Start stats polling when first session appears
     if (this.sessions.size === 1) this.startSystemStatsPolling();
   }
@@ -1340,6 +1344,9 @@ class CodemanApp {
       this.showWelcome();
     }
     this.renderSessionTabs();
+    // COD-97: re-render the Monitor so the closed session's row disappears
+    // immediately, instead of relying solely on a MUX_KILLED event that may race.
+    this.renderMuxSessions();
     this.renderRalphStatePanel();  // Update ralph panel after session deleted
     this.renderProjectInsightsPanel();  // Update project insights panel after session deleted
     // Stop stats polling when no sessions remain
@@ -1870,6 +1877,33 @@ class CodemanApp {
     this._notifySession(data.sessionId, 'info', 'auto-clear', 'Auto-Cleared', `Context reset at ${(data.tokens || 0).toLocaleString()} tokens`);
   }
 
+  _onSessionLimitPauseScheduled(data) {
+    const session = this.sessions.get(data.sessionId);
+    if (session) session.autoResumeAt = data.resumeAt;
+    const at = new Date(data.resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (data.sessionId === this.activeSessionId) {
+      this.showToast(`Usage limit reached — auto-resume at ${at}`, 'warning');
+    }
+    this._notifySession(data.sessionId, 'warning', 'limit-pause', 'Usage Limit Reached', `Auto-resume scheduled for ${at}`);
+    this.updateAutoResumeStatus(data.sessionId);
+  }
+
+  _onSessionLimitResume(data) {
+    const session = this.sessions.get(data.sessionId);
+    if (session) session.autoResumeAt = undefined;
+    if (data.sessionId === this.activeSessionId) {
+      this.showToast('Usage limit reset — work resumed automatically', 'success');
+    }
+    this._notifySession(data.sessionId, 'info', 'limit-resume', 'Auto-Resumed', 'Usage limit reset — continuing work');
+    this.updateAutoResumeStatus(data.sessionId);
+  }
+
+  _onSessionLimitResumeCancelled(data) {
+    const session = this.sessions.get(data.sessionId);
+    if (session) session.autoResumeAt = undefined;
+    this.updateAutoResumeStatus(data.sessionId);
+  }
+
   _onSessionCliInfo(data) {
     const session = this.sessions.get(data.sessionId);
     if (session) {
@@ -1951,6 +1985,7 @@ class CodemanApp {
         // selectSession's earlier resizes ran before this WS existed, so they
         // went over HTTP, which never claims (see ws-routes sizingToken).
         this.sendResize(sessionId)?.catch?.(() => {});
+        this._startMobileResizeRetry(sessionId);
       }
     };
 
@@ -1981,6 +2016,7 @@ class CodemanApp {
         reason: event.reason || '',
         at: new Date().toISOString(),
       };
+      this._stopMobileResizeRetry();
 
       // Reconnect on unexpected close (server restart, network blip, ping timeout).
       // Don't reconnect if we intentionally disconnected (_disconnectWs nulls onclose)
@@ -2011,6 +2047,7 @@ class CodemanApp {
   _disconnectWs() {
     this._clearTimer('_wsReconnectTimer');
     this._wsReconnectAttempts = 0;
+    this._stopMobileResizeRetry();
     if (this._ws) {
       this._ws.onclose = null; // Prevent re-entrant cleanup
       this._ws.close();
@@ -2019,6 +2056,41 @@ class CodemanApp {
       this._wsReady = false;
       this._wsState = 'disconnected';
       this._updateConnectionIndicator();
+    }
+  }
+
+  /**
+   * Small-viewport claim-idle retry. While a desktop sizing claim is "hot",
+   * the server ignores this device's resize (Session.DESKTOP_CLAIM_IDLE_MS),
+   * and the single resize sent on attach is deduped client-side — without a
+   * retry, a phone that attached under an active desktop would render a
+   * desktop-width stream forever. Re-send the current dims periodically (a
+   * server-side no-op once the pane already matches) so the pane reflows to
+   * this device shortly after the desktop goes idle. Visible-tab only: a
+   * phone in a pocket must not steal the pane from an active desktop.
+   */
+  _startMobileResizeRetry(sessionId) {
+    this._stopMobileResizeRetry();
+    const type =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : 'desktop';
+    if (type === 'desktop') return;
+    this._mobileResizeRetryTimer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (!this._wsReady || this._wsSessionId !== sessionId) return;
+      // Same guard as throttledResize: while the virtual keyboard is up, a
+      // fit()+SIGWINCH at the shrunken row count makes Ink re-render garbage
+      // and shifts the accessory toolbar mid-typing. Retry after it closes.
+      if (typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible) return;
+      this.sendResize(sessionId)?.catch?.(() => {});
+    }, MOBILE_RESIZE_RETRY_MS);
+  }
+
+  _stopMobileResizeRetry() {
+    if (this._mobileResizeRetryTimer) {
+      clearInterval(this._mobileResizeRetryTimer);
+      this._mobileResizeRetryTimer = null;
     }
   }
 
@@ -2334,7 +2406,6 @@ class CodemanApp {
     KeyboardHandler.cleanup();
     MobileDetection.init();
     KeyboardHandler.init();
-    this.bindMobileHeaderUtilityToggle?.();
     // Clear tab alerts
     this.tabAlerts.clear();
     this.attachmentHistoryCounts.clear();
@@ -3124,16 +3195,84 @@ class CodemanApp {
    * terminal write queue, IME composition, and local echo flush.
    * @param {string} newSessionId - The session being switched TO.
    */
+  _isUsableXtermSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'string' || snapshot.length < 8) return false;
+    const visibleText = snapshot
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[()][0-2A-Z]/g, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+      .trim();
+    return visibleText.length >= 3;
+  }
+
+  /**
+   * Persist one xterm snapshot to localStorage, bounded to a fixed key budget
+   * regardless of how many sessions are live, and resilient to quota errors.
+   * The previous inline version only pruned snapshots for sessions that no
+   * longer existed AND pruned only after a successful setItem — so once the
+   * quota filled (e.g. >10 live sessions at the 20-session target) the write
+   * threw before the prune could run, permanently disabling persistence.
+   */
+  _persistXtermSnapshot(key, snapshot) {
+    const PREFIX = 'codeman-xs-';
+    const MAX_KEYS = 10;
+    const others = () => Object.keys(localStorage).filter((k) => k.startsWith(PREFIX) && k !== key);
+    try {
+      // Evict down to the budget before writing a NEW key, dead sessions first
+      // then oldest. (Overwriting an existing key doesn't grow the key count.)
+      if (localStorage.getItem(key) === null) {
+        const live = new Set(Array.from(this.sessions?.keys?.() || []));
+        const pool = others().sort(
+          (a, b) =>
+            Number(live.has(a.slice(PREFIX.length))) - Number(live.has(b.slice(PREFIX.length)))
+        );
+        while (pool.length >= MAX_KEYS) localStorage.removeItem(pool.shift());
+      }
+      try {
+        localStorage.setItem(key, snapshot);
+      } catch (_quota) {
+        // Quota exceeded: drop other snapshots one at a time and retry so a full
+        // quota can't permanently disable persistence.
+        for (const victim of others()) {
+          localStorage.removeItem(victim);
+          try {
+            localStorage.setItem(key, snapshot);
+            return;
+          } catch (_again) {
+            /* keep evicting */
+          }
+        }
+        try { localStorage.removeItem(key); } catch {}
+      }
+    } catch (_unavailable) {
+      /* localStorage unavailable (Safari private mode / disabled) — in-memory only */
+    }
+  }
+
   _cleanupPreviousSession(newSessionId) {
     // Snapshot the OUTGOING session's xterm rendered state (viewport + scrollback +
     // colors/attrs) before the terminal gets cleared/reset. Lets us restore the
     // exact view on switch-back rather than replaying codex's byte stream, which
     // drops earlier conversation from each TUI redraw and ends up showing only
     // the latest (idle) frame.
-    if (this.activeSessionId && this._serializeAddon && this._xtermSnapshots) {
+    // Shell sessions are never restored from a snapshot (restore is gated on
+    // mode !== 'shell'), so skip the serialize() + cache slot + localStorage
+    // quota for them. Unknown/undefined mode still snapshots, matching restore.
+    const outgoingSession = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
+    if (
+      this.activeSessionId &&
+      outgoingSession?.mode !== 'shell' &&
+      this._serializeAddon &&
+      this._xtermSnapshots
+    ) {
       try {
         const snapshot = this._serializeAddon.serialize({ scrollback: 1000 });
         if (this._isUsableXtermSnapshot(snapshot)) {
+          // Delete-before-set so re-touching a session moves it to the end of
+          // the Map's insertion order — otherwise eviction is FIFO and can drop
+          // the most-recently-used session instead of the least.
+          this._xtermSnapshots.delete(this.activeSessionId);
           this._xtermSnapshots.set(this.activeSessionId, snapshot);
           // Cap in-memory snapshot cache at 20 entries; evict oldest on overflow.
           if (this._xtermSnapshots.size > 20) {
@@ -3142,27 +3281,11 @@ class CodemanApp {
           }
           // Persist to localStorage so the snapshot survives tab discard /
           // browser reload (Chrome discards inactive tabs after idle periods,
-          // wiping in-memory state). Cap per-snapshot at 256KB and limit total
-          // to 10 sessions; codex buffer-replay produces a visual mess of
-          // stacked banner redraws when no snapshot exists, so persistence
-          // matters more here than for claude.
+          // wiping in-memory state). Cap per-snapshot at 256KB; codex
+          // buffer-replay produces a visual mess of stacked banner redraws when
+          // no snapshot exists, so persistence matters more here than for claude.
           if (snapshot.length < 256 * 1024) {
-            try {
-              localStorage.setItem(`codeman-xs-${this.activeSessionId}`, snapshot);
-              // LRU eviction: keep at most 10 snapshot keys
-              const keys = Object.keys(localStorage).filter((k) => k.startsWith('codeman-xs-'));
-              if (keys.length > 10) {
-                // Drop ones not in the current sessions map (stale)
-                const liveIds = new Set(Array.from(this.sessions?.keys?.() || []));
-                for (const k of keys) {
-                  if (!liveIds.has(k.slice('codeman-xs-'.length))) {
-                    localStorage.removeItem(k);
-                  }
-                }
-              }
-            } catch (_e) {
-              /* localStorage quota exceeded — silently fall through */
-            }
+            this._persistXtermSnapshot(`codeman-xs-${this.activeSessionId}`, snapshot);
           }
         } else {
           this._xtermSnapshots.delete(this.activeSessionId);
@@ -3425,7 +3548,9 @@ class CodemanApp {
           const persisted = localStorage.getItem(`codeman-xs-${sessionId}`);
           if (persisted && this._isUsableXtermSnapshot(persisted)) {
             snapshot = persisted;
-            // Hoist into in-memory cache for next time
+            // Hoist into in-memory cache for next time (delete-before-set keeps
+            // the Map in LRU order so the just-used session isn't evicted first).
+            this._xtermSnapshots?.delete(sessionId);
             this._xtermSnapshots?.set(sessionId, persisted);
           } else if (persisted) {
             localStorage.removeItem(`codeman-xs-${sessionId}`);
@@ -3510,6 +3635,9 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
+        // A snapshot restore or a busy-clear leaves the terminal showing
+        // something other than the cache, so the fetched buffer must be
+        // replayed even when it byte-matches the cache.
         const needsRewrite =
           restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
         if (needsRewrite) {

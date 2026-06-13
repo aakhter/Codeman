@@ -132,54 +132,23 @@ describe('Tab Navigation', () => {
       expect(modalClass).toMatch(/active/);
     });
 
-    it('top-left mobile menu button opens the header utility tray', async () => {
+    it('header has no utility toggle and the tray stays collapsed on mobile', async () => {
+      // The three-dot header utility toggle was removed (owner decision,
+      // 2026-06-10): nothing interactive may occupy the top-left corner, and
+      // the headerRight tray stays collapsed (hidden) on small viewports.
       await page.evaluate(() => {
         document.querySelectorAll('.modal.active').forEach((modal) => modal.classList.remove('active'));
         document.getElementById('headerRight')?.classList.add('mobile-collapsed');
-        const toggle = document.getElementById('mobileHeaderUtilityToggle');
-        toggle?.classList.remove('active');
-        toggle?.setAttribute('aria-expanded', 'false');
       });
 
-      const topLeftElements = await page.evaluate(() => {
-        return document.elementsFromPoint(16, 16).map((el) => ({
-          tag: el.tagName,
-          id: el.id,
-          className: String(el.className),
-          closestButtonId: el.closest('button')?.id ?? '',
-        }));
-      });
+      const toggleCount = await page.locator('#mobileHeaderUtilityToggle').count();
+      expect(toggleCount).toBe(0);
 
-      expect(topLeftElements[0]?.closestButtonId).toBe('mobileHeaderUtilityToggle');
-
-      const toggleBox = await page.locator('#mobileHeaderUtilityToggle').boundingBox();
-      expect(toggleBox?.width ?? 0).toBeGreaterThanOrEqual(44);
-      expect(toggleBox?.height ?? 0).toBeGreaterThanOrEqual(44);
-
-      await page.touchscreen.tap(
-        (toggleBox?.x ?? 0) + (toggleBox?.width ?? 0) / 2,
-        (toggleBox?.y ?? 0) + (toggleBox?.height ?? 0) / 2
-      );
-      await page.waitForTimeout(150);
-
-      const trayClass = await page.locator('#headerRight').getAttribute('class');
-      const expanded = await page.locator('#mobileHeaderUtilityToggle').getAttribute('aria-expanded');
-      const trayBox = await page.locator('#headerRight').boundingBox();
-      const topTrayElement = await page.evaluate(() => {
+      const trayVisible = await page.evaluate(() => {
         const tray = document.getElementById('headerRight');
-        const rect = tray?.getBoundingClientRect();
-        if (!rect) return '';
-        return (
-          document
-            .elementsFromPoint(rect.left + Math.min(24, rect.width / 2), rect.top + Math.min(24, rect.height / 2))
-            .find((el) => el.id === 'headerRight' || el.closest?.('#headerRight'))
-            ?.closest?.('#headerRight')?.id ?? ''
-        );
+        return tray ? getComputedStyle(tray).display !== 'none' : false;
       });
-      expect(trayClass).not.toMatch(/mobile-collapsed/);
-      expect(expanded).toBe('true');
-      expect(trayBox?.x ?? 9999).toBeLessThanOrEqual((toggleBox?.x ?? 0) + (toggleBox?.width ?? 0) + 8);
-      expect(topTrayElement).toBe('headerRight');
+      expect(trayVisible).toBe(false);
     });
 
     it('tabs remain visible on large phone and tablet headers', async () => {

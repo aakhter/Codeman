@@ -65,7 +65,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 0.9.10 (must match `package.json`)
+**Version**: 0.9.14 (must match `package.json`)
 
 ## Project Overview
 
@@ -112,6 +112,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 - **Global regex `lastIndex`** — Shared `g`-flag patterns in loops must reset `lastIndex = 0` first, or use the `execPattern()` helper in `utils/regex-patterns.ts` (resets automatically)
 - **`envOverrides` flow `CLAUDE_CODE_*` / `OPENCODE_*` / `CODEX_*` env vars** — Set via `POST /api/sessions { envOverrides }`, stored on `Session._envOverrides`, exported by `tmux-manager.buildEnvExports()` at spawn time, persisted in `SessionState.envOverrides`. **Do NOT** write these to `<case>/.claude/settings.local.json` — that's the old path and creates UI/disk drift
 - **Effort is NOT an env var** — never carry effort as `CLAUDE_CODE_EFFORT_LEVEL`: the env var hard-locks effort and blocks in-session `/effort` switching (incl. ultracode). It flows as the dedicated `effort` payload field → `Session._effort` → `claude --effort <level>` for regular levels incl. `max` (the settings `effortLevel` key is `enum(["low","medium","high","xhigh"]).catch(undefined)` — `max` gets SILENTLY dropped there), or `claude --settings '{"ultracode":true}'` for ultracode (rejected by `--effort`). Both are soft defaults the user can override anytime. Legacy env-var entries are auto-migrated by the Session constructor and unset from tmux sessions in `applyEnvOverrides()`. See `buildEffortCliArgs()` in `session-cli-builder.ts`, tests in `test/effort-injection.test.ts`
+- **Model choice flows via `settings.local.json`, NOT `--model` or env** — the App Settings **Claude Model** picker (`claudeModel` in `settings.json`) is read by `session-ui.js` at session create (wins over the legacy 1M-Opus toggles `opusContext1m`/`opusContext1mEnabled`), sent as the `modelOverride` payload field, and `updateCaseModel()` (`hooks-config.ts`) writes/deletes the `model` key in `<case>/.claude/settings.local.json`. This is the intended exception to the envOverrides rule above: model legitimately lives in `settings.local.json` (a soft default — in-session `/model` still works); env vars do not
 - **Multi-CLI prefix discipline** — Codeman supports Claude Code, OpenCode, and Codex (`claude-cli-resolver.ts` / `opencode-cli-resolver.ts` / `codex-cli-resolver.ts`); env-var prefix is CLI-specific (`CLAUDE_CODE_*` vs `OPENCODE_*` vs `CODEX_*`) and the allowlist in `schemas.ts` enforces this. When adding settings, decide which CLI(s) it applies to and gate the env export accordingly — don't blindly forward all prefixes. See `docs/opencode-integration.md` for the OpenCode resolver design
 - **Zod `.optional()` rejects `null`** — accepts `undefined` only. When the frontend builds a request body with `JSON.stringify`, an explicit `null` field is preserved on the wire and fails validation with `INVALID_INPUT`. Convert `null` → `undefined` before stringifying (e.g. `field: value ?? undefined`), or declare the schema `.nullish()`. Real bugs caused: 0.6.4 (`durationMinutes` for ∞ respawn), and the same shape pattern hit `opusContext1mEnabled` in 0.6.3
 - **`xterm-zerolag-input` is single-source — edit the package, then rebuild the bundle** — the local-echo overlay source lives ONLY in `packages/xterm-zerolag-input/src/` (`zerolag-input-addon.ts`; also published to npm as a standalone library — see README "Published Packages"). It is bundled (esbuild → IIFE, with appended `window.LocalEchoOverlay` aliases) into the **gitignored** `src/web/public/vendor/xterm-zerolag-input.js` by `scripts/postinstall.js` (for dev/`tsx`) and into `dist/.../vendor/` by `scripts/build.mjs:50` (for prod). `app.js` only **consumes** it via `new LocalEchoOverlay(terminal)` — there is NO inline copy to keep in sync. So: change behavior in the package source, then re-run the bundle step (`npm install` reruns postinstall; `npm run build` for prod); **never hand-edit `app.js` for overlay behavior or commit the gitignored vendor bundle**. A public-API break in the package still warrants a separate `xterm-zerolag-input` version bump in the changeset. Always test on mobile after touching it. See `docs/local-echo-overlay-plan.md`.
@@ -127,7 +128,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | Domain | Key files | Notes |
 |--------|-----------|-------|
 | **Entry** | `src/index.ts`, `src/cli.ts` | |
-| **Session** | `src/session.ts` ★, `src/session-manager.ts`, `src/session-auto-ops.ts`, `src/session-cli-builder.ts`, `src/session-lifecycle-log.ts`, `src/session-task-cache.ts` | |
+| **Session** | `src/session.ts` ★, `src/session-manager.ts`, `src/session-auto-ops.ts`, `src/session-cli-builder.ts`, `src/session-lifecycle-log.ts`, `src/session-task-cache.ts`, `src/usage-limit-patterns.ts` | |
 | **Mux** | `src/mux-interface.ts`, `src/mux-factory.ts`, `src/tmux-manager.ts` ★ | |
 | **Respawn** | `src/respawn-controller.ts` ★ + 4 helpers (`-adaptive-timing`, `-health`, `-metrics`, `-patterns`) | Read `docs/respawn-state-machine.md` first |
 | **Ralph** | `src/ralph-tracker.ts` ★, `src/ralph-loop.ts` + 5 helpers (`-config`, `-fix-plan-watcher`, `-plan-tracker`, `-stall-detector`, `-status-parser`) | Read `docs/ralph-wiggum-guide.md` first |
@@ -137,14 +138,14 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | **Tasks** | `src/task.ts`, `src/task-queue.ts`, `src/task-tracker.ts` | |
 | **State** | `src/state-store.ts`, `src/run-summary.ts`, `src/session-lifecycle-log.ts` | |
 | **Infra** | `src/hooks-config.ts`, `src/push-store.ts`, `src/tunnel-manager.ts`, `src/image-watcher.ts`, `src/file-stream-manager.ts` | |
-| **Plan** | `src/plan-orchestrator.ts`, `src/prompts/*.ts`, `src/templates/claude-md.ts` | |
+| **Plan** | `src/plan-orchestrator.ts`, `src/prompts/*.ts`, `src/templates/` (`claude-md.ts` + `case-template.md`, the CLAUDE.md scaffold generated into new cases) | |
 | **Web** | `src/web/server.ts` ★, `src/web/sse-events.ts`, `src/web/routes/*.ts` (15 route modules + barrel; `session-routes.ts` ★), `src/web/route-helpers.ts`, `src/web/ports/*.ts`, `src/web/middleware/auth.ts`, `src/web/schemas.ts`, `src/web/self-update.ts` | |
-| **Frontend** | `src/web/public/app.js` (~3.6K lines, core) + 5 infra modules (`constants.js`, `mobile-handlers.js`, `voice-input.js`, `notification-manager.js`, `keyboard-accessory.js`) + 7 domain modules (`terminal-ui.js`, `respawn-ui.js`, `ralph-panel.js`, `orchestrator-panel.js`, `settings-ui.js`, `panels-ui.js`, `session-ui.js`) + 5 feature modules (`ralph-wizard.js`, `api-client.js`, `subagent-windows.js`, `input-cjk.js`, `image-input.js`) + `sw.js` | |
+| **Frontend** | `src/web/public/app.js` (~3.7K lines, core) + 5 infra modules (`constants.js`, `mobile-handlers.js`, `voice-input.js`, `notification-manager.js`, `keyboard-accessory.js`) + 7 domain modules (`terminal-ui.js`, `respawn-ui.js`, `ralph-panel.js`, `orchestrator-panel.js`, `settings-ui.js`, `panels-ui.js`, `session-ui.js`) + 5 feature modules (`ralph-wizard.js`, `api-client.js`, `subagent-windows.js`, `input-cjk.js`, `image-input.js`) + `sw.js` | |
 | **Types** | `src/types/index.ts` (barrel) → 15 domain files; also `src/types.ts` root re-export | See `@fileoverview` in index.ts |
 
 ★ = Large, central file (>50KB) — read its `@fileoverview` first. All files have `@fileoverview` JSDoc — read that before diving in. Discovery aid: `grep -l '@fileoverview' src/web/routes/*.ts` lists all route modules; same grep works for `src/types/`, `src/web/public/*.js`.
 
-**Local packages**: `packages/xterm-zerolag-input/` — local echo overlay for xterm.js; copy embedded in `app.js`. `packages/gesture-control/` (`codeman-gesture-control`) — hand-tracking overlay source; built to `src/web/public/gesture/gesture-codeman.js` via `npm run build:gesture` (see Frontend → Gesture control).
+**Local packages**: `packages/xterm-zerolag-input/` — local echo overlay for xterm.js; single-source, bundled to the gitignored `vendor/xterm-zerolag-input.js` and consumed by `app.js` (see Gotchas). `packages/gesture-control/` (`codeman-gesture-control`) — hand-tracking overlay source; built to `src/web/public/gesture/gesture-codeman.js` via `npm run build:gesture` (see Frontend → Gesture control).
 
 **Config**: `src/config/` — 10 files, no barrel (`index.ts`) exists; import from the specific file.
 
@@ -163,11 +164,13 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 **Idle detection**: Multi-layer (completion message → AI check → output silence → token stability). See `docs/respawn-state-machine.md`.
 
+**Auto-resume on usage limit** ("token pause" control, opt-in per session, top of the Respawn tab): when Claude halts on a subscription limit ("5-hour limit reached ∙ resets 8pm" and all 1.0.x–2.1.x variants), `usage-limit-patterns.ts` (pure, unit-tested) parses the reset time from cleaned output; `SessionAutoOps` arms a timer for reset+2min, then sends Esc (dismisses the rate-limit dialog) + `continue`. Still-limited responses re-arm the loop (5-min retry on stale times); a `working` transition cancels it. Claude-mode only (detection rides `_processExpensiveParsers`). Persists/recovers via `SessionState.autoResumeEnabled`/`autoResumeAt`; respawn cycles are blocked while paused (`isLimitPaused` guard in `onIdleDetected` — prevents `/clear` from wiping the paused conversation). Endpoint: `POST /api/sessions/:id/auto-resume`; SSE: `session:limitPauseScheduled`/`limitResume`/`limitResumeCancelled`. Tests: `test/usage-limit-patterns.test.ts`, `test/session-auto-resume.test.ts`.
+
 **Orchestrator**: State machine that turns a user goal into a phased plan and drives it to completion: `idle → planning → approval → executing → verifying → (replanning) → completed/failed`. `OrchestratorLoop` (engine) delegates plan generation to `orchestrator-planner` and per-phase verification gates to `orchestrator-verifier`, executing phases via team agents/`task-queue`. State persists under the `orchestrator` key in `state.json`. Distinct from Ralph (single-session autonomous loop) — orchestrator coordinates multi-phase, multi-agent execution. See `docs/orchestrator-loop-architecture.md`.
 
 **External CLI modes (OpenCode, Codex)**: `isExternalCliMode()` in `session.ts` gates Claude-specific behavior — Ralph tracker, BashToolParser, token/CLI-info parsing, and ❯-prompt readiness detection are all skipped (these CLIs render their own TUIs; readiness = output stabilization instead). Both modes **require tmux — no direct PTY fallback** — because secrets are injected via `tmux setenv`, never on the spawn command line: OpenCode gets `OPENCODE_CONFIG_CONTENT` etc., Codex gets `OPENAI_API_KEY`/`CODEX_API_KEY`/`CODEX_HOME` (`setCodexEnvVars` in `tmux-manager.ts`). Codex specifics: command built by `buildCodexCommand()` (`--model`, `resume <id>`, `--dangerously-bypass-approvals-and-sandbox` from the `codexConfig` payload / `codexDangerouslyBypassApprovals` app setting; `renderMode` is schema-coerced to `'hybrid'`, the only supported mode); tmux exports `COLORTERM=truecolor` + unsets `NO_COLOR` (other modes unset `COLORTERM`); availability via `GET /api/codex/status` — session/quick-start routes fail with `OPERATION_FAILED` and an install hint (`npm install -g @openai/codex`) when the binary is missing. Frontend: run-mode dropdown → `runCodex()` in `session-ui.js` ("Run CX" label), App Settings → Codex CLI tab; Respawn/Ralph options are Claude-only, so session options open on the Summary tab for external CLI sessions. Tests: `test/run-mode-ui.test.ts` (vm-sandbox harness, no real DOM).
 
-**Hook events**: Claude Code hooks trigger via `/api/hook-event`. Key events: `permission_prompt`, `elicitation_dialog`, `idle_prompt`, `stop`, `teammate_idle`, `task_completed`. See `src/hooks-config.ts`.
+**Hook events**: Claude Code hooks trigger via `/api/hook-event`. Key events: `permission_prompt`, `elicitation_dialog`, `idle_prompt`, `stop`, `teammate_idle`, `task_completed`. See `src/hooks-config.ts`; upstream hook semantics mirrored in `docs/claude-code-hooks-reference.md`.
 
 **Agent Teams**: `TeamWatcher` polls `~/.claude/teams/`, matches to sessions via `leadSessionId`. Teammates are in-process threads appearing as subagents. Enable: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. See `docs/agent-teams/`.
 
@@ -181,7 +184,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 Frontend JS modules have `@fileoverview` with `@dependency`/`@loadorder` tags. Load order: `constants.js`(1) → `mobile-handlers.js`(2) → `voice-input.js`(3) → `notification-manager.js`(4) → `keyboard-accessory.js`(5) → `input-cjk.js`(5.5) → `app.js`(6) → `terminal-ui.js`(7) → `respawn-ui.js`(8) → `ralph-panel.js`(9) → `orchestrator-panel.js`(9.5) → `settings-ui.js`(10) → `panels-ui.js`(11) → `session-ui.js`(12) → `ralph-wizard.js`(13) → `api-client.js`(14) → `subagent-windows.js`(15) → `image-input.js`(16). `input-cjk.js` handles CJK IME composition via an always-visible textarea below the terminal (`window.cjkActive` blocks xterm's onData).
 
-**Z-index layers**: subagent windows (1000), plan agents (1100), log viewers (2000), image popups (3000), local echo overlay (7).
+**Z-index layers**: subagent windows (1000), plan agents (1100), mobile/tablet fixed header (1200, `mobile.css`), modals on ≤768px (1300 — must beat the fixed header or the modal close button is buried; bug fixed in `b8cb467`), log viewers (2000), image popups (3000), local echo overlay (7).
 
 **Multi-monitor button** (header, top-right; the notification bell it sits beside stays hidden — notifications live in Settings → Notifications). `app.launchMultiMonitor()` (in `panels-ui.js`) POSTs `/api/system/span-displays`, which spawns `scripts/span-codeman.sh` — a fresh, maximized browser `--app` window sized to the union of all displays (macOS; needs "Displays have separate Spaces" OFF). Supports the gesture layer's in-page floating session panels dragging across the physical monitor seam. **Opt-in:** hidden by default; enable under App Settings → Display → **Header Displays** ("Multi-monitor Button", `showMultiMonitorButton`). The button carries a `btn-multimonitor--hidden` class in the template; `renderIndexHtml` strips that class at render when the setting is on (a unique class token, not a brittle match on the aria-label/style copy), and `applyHeaderVisibilitySettings()` toggles the same class live on save. Solo (detached) windows hide it via `body.solo-mode`.
 
@@ -208,7 +211,7 @@ Frontend JS modules have `@fileoverview` with `@dependency`/`@loadorder` tags. L
 | **QR Auth** | Single-use 6-char tokens (60s TTL) for tunnel login. See `docs/qr-auth-plan.md` |
 | **Sessions** | 24h cookie (`codeman_session`), auto-extend, device context audit |
 | **Rate limit** | 10 failed auth/IP → 429 (15min decay). QR has separate limiter |
-| **Hook bypass** | `/api/hook-event` exempt from auth (localhost-only, schema-validated) |
+| **Hook bypass** | `/api/hook-event` exempt from auth (localhost-only, schema-validated). While the **managed tunnel** runs, the bypass additionally requires the per-instance `X-Codeman-Hook-Secret` header (COD-54, `config/hook-secret.ts`): hook curls cat the secret file at exec time via `$CODEMAN_HOOK_SECRET_FILE` (session env), failures rate-limit in a dedicated bucket (never lock out login). External loopback proxies (own cloudflared/`tailscale serve`) aren't detected — plain bypass still applies there. Tunnel enable also **refuses** without `CODEMAN_PASSWORD` unless `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` (COD-55) |
 | **Env vars** | `CODEMAN_MUX` (managed session), `CODEMAN_API_URL` (auto-set for hooks), `CODEMAN_ALLOWED_HOSTS` (extra Host/Origin allowlist entries for reverse proxies, comma-separated; bare `.suffix` matches subdomains) |
 | **Validation** | Zod schemas, path allowlist regex, env prefix allowlist (`CLAUDE_CODE_*`/`OPENCODE_*`/`CODEX_*`) |
 | **Headers** | CORS localhost-only, CSP, X-Frame-Options, HSTS if HTTPS |
@@ -219,9 +222,9 @@ Frontend JS modules have `@fileoverview` with `@dependency`/`@loadorder` tags. L
 
 ### API Routes
 
-~135 handlers across 15 route files in `src/web/routes/`: system (41, incl. self-update `check`/`status`/`POST /api/system/update`, `POST /api/system/span-displays` → spawns `scripts/span-codeman.sh`, and `GET /api/codex/status`), sessions (28), orchestrator (10), cases (9), ralph (9), plan (8), respawn (7), files (6), mux (5), push (4), scheduled (4), teams (2), hooks (1), clipboard (1), ws (1 WebSocket). Each file has `@fileoverview` with endpoint details.
+~136 handlers across 15 route files in `src/web/routes/`: system (41, incl. self-update `check`/`status`/`POST /api/system/update`, `POST /api/system/span-displays` → spawns `scripts/span-codeman.sh`, and `GET /api/codex/status`), sessions (29), orchestrator (10), cases (9), ralph (9), plan (8), respawn (7), files (6), mux (5), push (4), scheduled (4), teams (2), hooks (1), clipboard (1), ws (1 WebSocket). Each file has `@fileoverview` with endpoint details.
 
-**HTTP contract** (stable since 0.9.x, see `docs/versioning-policy.md`): responses use the `ApiResponse<T>` envelope — `{ success: true, data? }` or `{ success: false, error, errorCode }` (`src/types/api.ts`). `/api/v1/*` is a versioned alias of `/api/*` (URL rewrite in `server.ts`).
+**HTTP contract** (stable since 0.9.x, see `docs/versioning-policy.md`; full envelope/status/error-code/SSE spec in `docs/api-reference.md`): responses use the `ApiResponse<T>` envelope — `{ success: true, data? }` or `{ success: false, error, errorCode }` (`src/types/api.ts`). `/api/v1/*` is a versioned alias of `/api/*` (URL rewrite in `server.ts`).
 
 ## Adding Features
 
@@ -259,7 +262,7 @@ Raw `npx vitest` skips `config/vitest.config.ts`; always use `npm test --` or pa
 
 **Ports**: Pick unique ports manually. Search `const PORT =` before adding new tests.
 
-**Respawn tests**: Use `MockSession` from `test/respawn-test-utils.ts`. **Route tests**: `app.inject({ method, url, payload })` in `test/routes/` — no live port needed. **Mobile tests**: Playwright suite in `test/mobile/` (135 device profiles).
+**Respawn tests**: Use `MockSession` from `test/respawn-test-utils.ts`. **Route tests**: `app.inject({ method, url, payload })` in `test/routes/` — no live port needed. **Mobile tests**: Playwright suite in `test/mobile/` (135 device profiles). Browser-testing infra and practices: `docs/browser-testing-guide.md`.
 
 ## Debugging
 

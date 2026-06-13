@@ -23,7 +23,6 @@ describe('Codex terminal output filtering', () => {
     expect(session.terminalBuffer).toBe('bcdefghijk');
     expect(session.toLightDetailedState().bufferStats.maxTerminalBuffer).toBe(20);
   });
-
   it('keeps browser scrollback guards but skips Codeman row repair in hybrid render mode', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex', codexConfig: { renderMode: 'hybrid' } });
     (session as unknown as SessionInternals)._ptyRows = 63;
@@ -53,6 +52,34 @@ describe('Codex terminal output filtering', () => {
     handleOutput(session, '\x1b[?1049h\x1b[2Jvisible\x1b[3Jscrollback\x1b[?1049l');
 
     expect(session.terminalBuffer).toBe('\x1b[2Jvisiblescrollback');
+  });
+
+  it('strips sequences split across PTY chunk boundaries (carry reassembly)', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    // '\x1b[?1049h' split mid-sequence, then '\x1b[3J' split before its final byte.
+    handleOutput(session, 'before\x1b[?104');
+    handleOutput(session, '9h\x1b[2Jafter\x1b[3');
+    handleOutput(session, 'Jtail');
+
+    expect(session.terminalBuffer).toBe('before\x1b[2Jaftertail');
+    expect(emitted).toEqual(['before', '\x1b[2Jafter', 'tail']);
+  });
+
+  it('emits nothing for a chunk that is only a partial CSI, and completes it next chunk', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+
+    const emitted: string[] = [];
+    session.on('terminal', (data) => emitted.push(data));
+
+    handleOutput(session, '\x1b[?100'); // pure partial — held, nothing emitted
+    handleOutput(session, '6h\x1b[55;1H• Working'); // completes ?1006h (stripped); rest passes
+
+    expect(emitted).toEqual(['\x1b[55;1H• Working']);
+    expect(session.terminalBuffer).toBe('\x1b[55;1H• Working');
   });
 
   it('preserves Codex erase-display redraw when the user pressed Ctrl+L', () => {

@@ -2782,6 +2782,19 @@ export class RespawnController extends EventEmitter {
       return;
     }
 
+    // Usage-limit pause: Claude can't work and the cycle's /clear would wipe
+    // the paused conversation — the auto-resume scheduler owns recovery here.
+    if (this.session.isLimitPaused) {
+      this.log('Skipping respawn cycle - usage-limit pause active (auto-resume armed)');
+      this.logAction('health', 'Respawn skipped: usage-limit pause (auto-resume armed)');
+      this.emit('respawnBlocked', {
+        reason: 'usage_limit',
+        details: 'Usage limit reached — waiting for scheduled auto-resume',
+      });
+      this.setState('watching');
+      return;
+    }
+
     // Start the respawn cycle
     this.cycleCount++;
     this.log(`Starting respawn cycle #${this.cycleCount}`);

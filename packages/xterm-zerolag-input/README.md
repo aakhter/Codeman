@@ -39,7 +39,7 @@ Server echoes 'h' ←───────────────────�
 
 ## Origin
 
-This library was extracted from [Codeman](https://github.com/Ark0N/Codeman), the missing control plane for AI coding agents — multi-session management, real-time agent visualization, autonomous respawn loops, and a mobile-first web UI for Claude Code and OpenCode. The local echo system was built to make mobile and remote access feel instant, then battle-tested across thousands of hours of real usage. After 3 deep code audits, it was extracted into this standalone library with 78 tests covering every state transition.
+This library was extracted from [Codeman](https://github.com/Ark0N/Codeman), mission control for AI coding agents — multi-session management, real-time agent visualization, autonomous respawn loops, and a mobile-first web UI for Claude Code, OpenCode, and Codex. The local echo system was built to make mobile and remote access feel instant, then battle-tested across thousands of hours of real usage. After 3 deep code audits, it was extracted into this standalone library with 78 tests covering every state transition.
 
 ## Install
 

@@ -17,6 +17,7 @@ import type {
   CodexConfig,
   GeminiConfig,
   EffortLevel,
+  SessionRemote,
 } from './types.js';
 
 /**
@@ -33,6 +34,8 @@ export interface MuxSession {
   createdAt: number;
   /** Working directory */
   workingDir: string;
+  /** Remote execution metadata for local tmux sessions wrapping SSH */
+  remote?: SessionRemote;
   /** Session mode */
   mode: SessionMode;
   /** Whether webserver is attached to this session */
@@ -78,6 +81,8 @@ export interface CreateSessionOptions {
   truecolorEnabled?: boolean;
   /** tmux history-limit to set for this session. */
   historyLimit?: number;
+  /** Remote execution metadata for local tmux sessions wrapping SSH */
+  remote?: SessionRemote;
 }
 
 /** Options for respawning a dead pane. */
@@ -102,6 +107,8 @@ export interface RespawnPaneOptions {
   truecolorEnabled?: boolean;
   /** tmux history-limit to set for this session after respawn. */
   historyLimit?: number;
+  /** Remote execution metadata for local tmux sessions wrapping SSH */
+  remote?: SessionRemote;
 }
 
 /**

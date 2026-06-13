@@ -121,6 +121,66 @@ describe('run mode UI', () => {
 });
 
 describe('case selector refresh', () => {
+  it('creates remote shell sessions by caseName instead of remote display path', async () => {
+    const elements: Record<string, any> = {
+      quickStartCase: { value: 'gpu-work' },
+      shellCount: { value: '1' },
+    };
+    const requests: Array<{ url: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: {
+        getItem: () => null,
+        setItem: () => {},
+      },
+      document: {
+        getElementById: (id: string) => elements[id] ?? null,
+      },
+      fetch: async (url: string, init?: { body?: string }) => {
+        requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/cases/gpu-work') {
+          return {
+            json: async () => ({
+              success: true,
+              data: {
+                name: 'gpu-work',
+                path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
+                location: 'remote',
+                remote: { hostId: 'gpu-box', path: '/home/ubuntu/work' },
+              },
+            }),
+          };
+        }
+        if (url === '/api/sessions') {
+          return { json: async () => ({ success: true, data: { session: { id: 'sess-1' } } }) };
+        }
+        if (url === '/api/sessions/sess-1/shell') return { json: async () => ({ success: true }) };
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    app.sessions = new Map();
+    app.cases = [{ name: 'gpu-work', path: 'ubuntu@10.0.0.42:/home/ubuntu/work', location: 'remote' }];
+    app.getTerminalDimensions = () => null;
+    app.selectSession = async () => {};
+
+    await app.runShell();
+
+    expect(requests.find((req) => req.url === '/api/sessions')?.body).toMatchObject({
+      caseName: 'gpu-work',
+      mode: 'shell',
+    });
+    expect(requests.find((req) => req.url === '/api/sessions')?.body).not.toHaveProperty('workingDir');
+  });
+
   it('removes a deleted selected case from the dropdown and blurs the native picker', async () => {
     const elements: Record<string, any> = {};
     const requests: Array<{ url: string; method: string; body?: any }> = [];
@@ -190,99 +250,5 @@ describe('case selector refresh', () => {
       method: 'PUT',
       body: { lastUsedCase: 'kept-case' },
     });
-  });
-});
-
-describe('mobile header utilities', () => {
-  it('renders a mobile utility toggle and collapsible header-right tray without shrinking tabs', () => {
-    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
-    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
-    const mobileCss = readFileSync(resolve(import.meta.dirname, '../src/web/public/mobile.css'), 'utf8');
-
-    expect(html).toContain('id="mobileHeaderUtilityToggle"');
-    expect(html).toContain('aria-controls="headerRight"');
-    expect(html).toContain('<div class="header-right mobile-collapsed" id="headerRight">');
-
-    expect(settingsUi).toContain('toggleMobileHeaderUtilities()');
-    expect(settingsUi).toContain('bindMobileHeaderUtilityToggle()');
-    expect(settingsUi).toContain('closeMobileHeaderUtilities()');
-
-    expect(mobileCss).toContain('.mobile-header-utility-toggle');
-    expect(mobileCss).toContain('.header-right.mobile-collapsed');
-    expect(mobileCss).toContain('position: fixed');
-    expect(mobileCss).toContain('.session-tabs');
-    expect(mobileCss).toContain('flex: 1');
-  });
-
-  it('closes the open header utility tray via closeAllPanels (the Escape path)', () => {
-    // Build a minimal tray + toggle that track the collapsed/active state the
-    // real DOM would carry, then load settings-ui.js into a vm sandbox and drive
-    // closeAllPanels() — the aggregator wired to the global Escape handler.
-    // Real DOM ships the tray collapsed (index.html: header-right mobile-collapsed).
-    const trayClasses = new Set<string>(['mobile-collapsed']);
-    const toggleClasses = new Set<string>();
-    const toggleAttrs: Record<string, string> = { 'aria-expanded': 'false' };
-
-    const tray = {
-      classList: {
-        add: (c: string) => trayClasses.add(c),
-        remove: (c: string) => trayClasses.delete(c),
-        contains: (c: string) => trayClasses.has(c),
-        toggle: (c: string) => (trayClasses.has(c) ? (trayClasses.delete(c), false) : (trayClasses.add(c), true)),
-      },
-    };
-    const toggle = {
-      classList: {
-        add: (c: string) => toggleClasses.add(c),
-        remove: (c: string) => toggleClasses.delete(c),
-        toggle: (c: string, force?: boolean) => {
-          const on = force ?? !toggleClasses.has(c);
-          if (on) toggleClasses.add(c);
-          else toggleClasses.delete(c);
-          return on;
-        },
-      },
-      setAttribute: (k: string, v: string) => {
-        toggleAttrs[k] = v;
-      },
-    };
-
-    const elements: Record<string, any> = {
-      headerRight: tray,
-      mobileHeaderUtilityToggle: toggle,
-      // closeAllPanels also touches monitorPanel/subagentsPanel — provide stubs.
-      monitorPanel: { classList: { remove: () => {} } },
-      subagentsPanel: { classList: { remove: () => {} } },
-    };
-
-    const CodemanApp = function CodemanApp(this: any) {};
-    const context = vm.createContext({
-      CodemanApp,
-      VoiceInput: {},
-      localStorage: { getItem: () => null, setItem: () => {} },
-      document: { getElementById: (id: string) => elements[id] ?? null },
-      console,
-    });
-    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
-    vm.runInContext(settingsUi, context, { filename: 'settings-ui.js' });
-
-    const app = new (CodemanApp as any)();
-    // Stub the other panel-closers closeAllPanels calls so we isolate the tray.
-    app.closeSessionOptions = () => {};
-    app.closeAppSettings = () => {};
-    app.cancelCloseSession = () => {};
-    app.closeTokenStats = () => {};
-
-    // Open the tray (toggle removes mobile-collapsed and marks the toggle active).
-    app.toggleMobileHeaderUtilities();
-    expect(trayClasses.has('mobile-collapsed')).toBe(false);
-    expect(toggleClasses.has('active')).toBe(true);
-    expect(toggleAttrs['aria-expanded']).toBe('true');
-
-    // Escape -> closeAllPanels() must collapse the tray and reset the toggle.
-    app.closeAllPanels();
-    expect(trayClasses.has('mobile-collapsed')).toBe(true);
-    expect(toggleClasses.has('active')).toBe(false);
-    expect(toggleAttrs['aria-expanded']).toBe('false');
   });
 });

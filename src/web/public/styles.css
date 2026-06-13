@@ -190,12 +190,6 @@ body {
   filter: brightness(1.1);
 }
 
-/* Mobile-only header utility toggle — hidden by default; the mobile/tablet
-   media queries in mobile.css (max-width: 768px) re-enable it as flex. */
-.mobile-header-utility-toggle {
-  display: none;
-}
-
 /* Session Tabs */
 .session-tabs {
   display: flex;
@@ -3447,6 +3441,17 @@ body.solo-mode .btn-lifecycle-log {
   text-overflow: ellipsis;
 }
 
+.case-location-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+
 .case-manage-actions {
   display: flex;
   gap: 4px;
@@ -4727,15 +4732,16 @@ body.solo-mode .btn-lifecycle-log {
   width: 60px;
 }
 
-/* Respawn header with status and actions */
+/* Respawn status + Enable/Stop row — sits at the bottom of the Respawn tab,
+   below the settings it acts on */
 .respawn-header {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  margin-bottom: 0.75rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--border);
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(34, 197, 94, 0.2);
 }
 
 .respawn-header .respawn-actions {
@@ -4750,6 +4756,72 @@ body.solo-mode .btn-lifecycle-log {
   flex-wrap: wrap;
   gap: 1rem;
   margin-bottom: 0.25rem;
+}
+
+/* Auto-resume on usage limit (token pause control) */
+.auto-resume-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.75rem;
+  background: rgba(59, 130, 246, 0.07);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 6px;
+}
+
+.auto-resume-box .checkbox-inline {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.auto-resume-box .form-hint {
+  margin-top: 0;
+}
+
+/* Respawn loop box — groups every setting that belongs to the autonomous
+   respawn cycle (duration, presets, cycle prompts, enable). Green like its
+   Enable button; a visual sibling of the standalone auto-resume option above */
+.respawn-loop-box {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.75rem;
+  background: rgba(34, 197, 94, 0.05);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 6px;
+}
+
+.respawn-loop-title {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 0.3rem;
+}
+
+.respawn-loop-hint {
+  display: block;
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+}
+
+.respawn-loop-box .form-section-header {
+  border-bottom-color: rgba(34, 197, 94, 0.2);
+}
+
+/* Match the cycle-step checkboxes (2./3.) to the step labels (1./4.) */
+.respawn-loop-box .checkbox-inline {
+  font-size: 0.7rem;
+}
+
+.auto-resume-status {
+  display: none;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--accent-hover);
+}
+
+.auto-resume-status.active {
+  display: block;
 }
 
 /* Respawn actions in modal */
@@ -6166,6 +6238,19 @@ kbd {
 
 .process-item-clickable:hover {
   border-color: var(--accent);
+}
+
+/* COD-97: orphaned mux session (no matching open tab) — visually distinct,
+   non-clickable, so it can never be mistaken for a live session tab. */
+.process-item-orphan {
+  opacity: 0.65;
+  border: 1px dashed var(--border, #555);
+  cursor: default;
+}
+
+.monitor-status-badge.status-orphan {
+  background: var(--bg-hover, #333);
+  color: var(--text-muted, #999);
 }
 
 .process-info {
@@ -8173,6 +8258,20 @@ kbd {
   gap: 8px;
 }
 
+/* Inline comment highlight — COD-95. Marks text that has a review comment and is
+   click-to-edit. Subtle background + pointer cursor; must NOT block normal text
+   selection or scroll (no pointer-events tricks, no preventDefault). */
+.comment-highlight {
+  cursor: pointer;
+  background: rgba(122, 162, 255, 0.22);
+  border-bottom: 1px solid var(--accent, #7aa2ff);
+  border-radius: 2px;
+  transition: background 0.12s ease;
+}
+.comment-highlight:hover {
+  background: rgba(122, 162, 255, 0.38);
+}
+
 .file-preview-footer {
   padding: 0.35rem 0.75rem;
   font-size: 0.7rem;
@@ -10115,4 +10214,62 @@ body.touch-device.cjk-input-visible .main {
   font-size: 1.2rem;
   pointer-events: none;
   z-index: 100;
+}
+
+/* Authoring actions (COD-64) — App Settings editor + preview footer menu */
+.authoring-actions-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.authoring-action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.authoring-action-row .authoring-action-label {
+  flex: 0 0 30%;
+}
+.authoring-action-row .authoring-action-instruction {
+  flex: 1 1 auto;
+}
+.authoring-action-remove {
+  flex: 0 0 auto;
+}
+.document-authoring-wrap {
+  position: relative;
+  display: inline-block;
+}
+.authoring-action-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  background: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 2100;
+  padding: 4px;
+}
+.authoring-action-menu[hidden] {
+  display: none;
+}
+.authoring-action-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text-primary, #e0e0e0);
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.authoring-action-item:hover {
+  background: var(--bg-hover, #2a2a2a);
 }

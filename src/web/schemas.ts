@@ -173,6 +173,10 @@ const GeminiConfigSchema = z
   .optional();
 
 export const CreateSessionSchema = z.object({
+  caseName: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
+    .optional(),
   workingDir: safePathSchema.optional(),
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']).optional(),
   name: z.string().max(100).optional(),
@@ -223,6 +227,40 @@ export const CreateCaseSchema = z.object({
   description: z.string().max(1000).optional(),
 });
 
+const RemoteCommandOverridesSchema = z
+  .object({
+    shell: z.string().min(1).max(300).optional(),
+    claude: z.string().min(1).max(300).optional(),
+    opencode: z.string().min(1).max(300).optional(),
+    codex: z.string().min(1).max(300).optional(),
+    gemini: z.string().min(1).max(300).optional(),
+  })
+  .strict()
+  .optional();
+
+export const RemoteHostSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
+  label: z.string().min(1).max(100),
+  host: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-zA-Z0-9._:-]+$/, 'Invalid SSH host'),
+  username: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[a-zA-Z0-9._-]+$/, 'Invalid SSH username'),
+  port: z.number().int().min(1).max(65535).optional(),
+  commands: RemoteCommandOverridesSchema,
+});
+
+export const RemoteCaseLinkSchema = z.object({
+  name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
+  hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
+  remotePath: z.string().min(1).max(2000).regex(/^\//, 'Remote path must be absolute'),
+});
+
 // ========== Quick Start ==========
 
 /**
@@ -250,7 +288,15 @@ export const QuickStartSchema = z.object({
  * Receives Claude Code hook events.
  */
 export const HookEventSchema = z.object({
-  event: z.enum(['permission_prompt', 'elicitation_dialog', 'idle_prompt', 'stop', 'teammate_idle', 'task_completed']),
+  event: z.enum([
+    'permission_prompt',
+    'elicitation_dialog',
+    'idle_prompt',
+    'stop',
+    'teammate_idle',
+    'task_completed',
+    'checkpoint',
+  ]),
   sessionId: z.string().min(1),
   data: z.record(z.string(), z.unknown()).nullable().optional(),
 });
@@ -437,6 +483,21 @@ export const SettingsUpdateSchema = z
       )
       .max(20)
       .optional(),
+    // COD-64: user-configured one-click "authoring actions" surfaced as a menu in
+    // the document preview. Each action sends a (templated) single-line instruction
+    // to the open document's agent session; `{path}` in the instruction is replaced
+    // with the document path. Ships EMPTY by default — no skill names baked in here
+    // (the user authors these, e.g. labels like "Tighten prose" / "Narrative review").
+    authoringActions: z
+      .array(
+        z.object({
+          id: z.string().max(100),
+          label: z.string().min(1).max(60),
+          instruction: z.string().min(1).max(2000),
+        })
+      )
+      .max(20)
+      .optional(),
   })
   .strict()
   .superRefine((settings, ctx) => {
@@ -505,6 +566,17 @@ export const AutoCompactSchema = z.object({
   enabled: z.boolean(),
   threshold: z.number().int().min(0).max(1000000).optional(),
   prompt: z.string().max(10000).optional(),
+});
+
+/** POST /api/sessions/:id/auto-resume */
+export const AutoResumeSchema = z.object({
+  enabled: z.boolean(),
+});
+
+/** POST /api/sessions/:id/checkpoint */
+export const CheckpointSchema = z.object({
+  enabled: z.boolean(),
+  mode: z.enum(['compact', 'clear']).optional(),
 });
 
 /** POST /api/sessions/:id/image-watcher */

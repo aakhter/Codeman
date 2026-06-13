@@ -1019,6 +1019,85 @@ describe('file-routes', () => {
     });
   });
 
+  // ========== GET /api/sessions/:id/documents/export (COD-61) ==========
+
+  describe('GET /api/sessions/:id/documents/export', () => {
+    it('rejects an unsupported export format with 400', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/export?path=notes.md&format=docx`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toContain('PDF');
+    });
+
+    it('rejects PDF export for an unsupported document type with 400', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/export?path=image.png&format=pdf`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toContain('not supported for this file type');
+    });
+
+    it('403s a sensitive path (resolved via realpath) before converting', async () => {
+      mockedRealpathSync.mockReturnValue('/tmp/test-workdir/.env' as never);
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/export?path=.env&format=pdf`,
+      });
+      // .env is sensitive, but it's also not a supported export type — the
+      // sensitive guard runs first, so we expect 403 not 400.
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('exports a docx by reusing the LibreOffice preview-PDF cache as an attachment download', async () => {
+      const pdf = Buffer.from('%PDF docx export');
+      mockedStat.mockImplementation(async (path) => {
+        const pathText = String(path);
+        if (pathText.includes('codeman-document-preview-cache') && pathText.endsWith('.pdf')) {
+          throw new Error('ENOENT');
+        }
+        return { size: 8192, mtimeMs: 12345, isFile: () => true } as never;
+      });
+      mockedReaddir.mockResolvedValue(['brief.pdf'] as never);
+      mockedReadFile.mockResolvedValue(pdf as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/export?path=brief.docx&format=pdf`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toBe('attachment; filename="brief.pdf"');
+      expect(res.body).toBe(pdf.toString());
+    });
+
+    it('exports markdown by rendering HTML then converting HTML→PDF via soffice', async () => {
+      const pdf = Buffer.from('%PDF md export');
+      // First readFile = the markdown source; reads of the produced PDF return bytes.
+      mockedReadFile.mockResolvedValue(pdf as never);
+      mockedReaddir.mockResolvedValue(['document.pdf'] as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/documents/export?path=draft.md&format=pdf`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toBe('attachment; filename="draft.pdf"');
+      // The HTML→PDF conversion goes through the shared soffice invocation.
+      expect(mockedExecFile).toHaveBeenCalledWith(
+        'soffice',
+        expect.arrayContaining(['--convert-to', 'pdf']),
+        expect.any(Object),
+        expect.any(Function)
+      );
+    });
+  });
+
   // ========== GET /api/sessions/:id/file-raw ==========
 
   describe('GET /api/sessions/:id/file-raw', () => {

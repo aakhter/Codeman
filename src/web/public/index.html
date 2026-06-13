@@ -78,10 +78,6 @@
         <span class="logo" onclick="app.goHome()" title="Go to main page">Codeman</span>
       </div>
 
-      <button class="mobile-header-utility-toggle" id="mobileHeaderUtilityToggle" type="button" aria-label="Toggle header utilities" aria-controls="headerRight" aria-expanded="false" title="Header utilities">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
-      </button>
-
       <!-- Session Tabs -->
       <div class="session-tabs" id="sessionTabs" role="tablist" aria-label="Session tabs">
       </div>
@@ -678,16 +674,18 @@
           <div class="modal-tab-content" id="respawn-tab">
           <!-- Respawn Settings Section -->
           <div class="session-respawn-section" id="sessionRespawnSection">
-            <div class="respawn-header">
-              <div class="session-respawn-status" id="sessionRespawnStatus">
-                <span class="respawn-status-indicator"></span>
-                <span class="respawn-status-text">Not active</span>
-              </div>
-              <div class="respawn-actions">
-                <button class="btn-toolbar btn-success btn-sm" onclick="app.enableRespawnFromModal()" id="modalEnableRespawnBtn">Enable</button>
-                <button class="btn-toolbar btn-danger btn-sm" onclick="app.stopRespawnFromModal()" id="modalStopRespawnBtn" style="display: none;">Stop</button>
-              </div>
+            <div class="auto-resume-box">
+              <label class="checkbox-inline">
+                <input type="checkbox" id="modalAutoResumeEnabled" onchange="app.autoSaveAutoResume()">
+                <span>Auto-resume when usage limit resets</span>
+              </label>
+              <span class="auto-resume-status" id="autoResumeStatus"></span>
+              <span class="form-hint">If Claude pauses on a usage limit ("limit reached &middot; resets 3pm"), Codeman waits for the reset time and automatically continues the work. Independent of the respawn loop below.</span>
             </div>
+
+            <div class="respawn-loop-box">
+            <div class="respawn-loop-title">Respawn loop</div>
+            <span class="form-hint respawn-loop-hint">One autonomous work cycle: whenever Claude goes idle, Codeman sends the update prompt, optionally runs /clear + /init, and kickstarts the next round &mdash; repeating for the chosen duration. All settings below belong to this loop; configure them, then press Enable.</span>
 
             <div class="form-row">
               <label>Duration</label>
@@ -725,10 +723,10 @@
               <p class="form-hint" id="presetDescriptionHint"></p>
             </div>
 
-            <div class="form-section-header">Respawn Cycle</div>
+            <div class="form-section-header">Cycle Steps</div>
             <div class="form-row">
               <label>1. Update Prompt</label>
-              <textarea id="modalRespawnPrompt" rows="3" placeholder="Prompt to send when idle" onchange="app.autoSaveRespawnConfig()" style="resize: vertical; min-height: 60px;">update all the docs and CLAUDE.md</textarea>
+              <textarea id="modalRespawnPrompt" rows="1" placeholder="Prompt to send when idle" onchange="app.autoSaveRespawnConfig()" style="resize: vertical; min-height: 30px;">update all the docs and CLAUDE.md</textarea>
             </div>
 
             <div class="respawn-options-row" style="margin: 8px 0;">
@@ -740,22 +738,29 @@
                 <input type="checkbox" id="modalRespawnSendInit" checked onchange="app.autoSaveRespawnConfig()">
                 <span>3. Send /init</span>
               </label>
-            </div>
-
-            <div class="form-row">
-              <label>4. Kickstart Prompt</label>
-              <textarea id="modalRespawnKickstart" rows="2" placeholder="Optional: prompt if /init doesn't trigger work" onchange="app.autoSaveRespawnConfig()" style="resize: vertical; min-height: 40px;"></textarea>
-              <span class="form-hint">Sent only when /init completes but Claude stays idle</span>
-            </div>
-
-            <div class="form-section-header">Behavior</div>
-            <div class="respawn-options-row">
-              <label class="checkbox-inline">
+              <label class="checkbox-inline" title="Presses Enter for plan approvals and default question options">
                 <input type="checkbox" id="modalRespawnAutoAccept" checked onchange="app.autoSaveRespawnConfig()">
                 <span>Auto-accept prompts</span>
               </label>
             </div>
-            <span class="form-hint">Auto-accept presses Enter for plan approvals and default question options</span>
+
+            <div class="form-row">
+              <label>4. Kickstart Prompt</label>
+              <textarea id="modalRespawnKickstart" rows="1" placeholder="Optional: prompt if /init doesn't trigger work" onchange="app.autoSaveRespawnConfig()" style="resize: vertical; min-height: 30px;"></textarea>
+              <span class="form-hint">Sent only when /init completes but Claude stays idle &middot; Auto-accept presses Enter for plan approvals and default options</span>
+            </div>
+
+            <div class="respawn-header">
+              <div class="session-respawn-status" id="sessionRespawnStatus">
+                <span class="respawn-status-indicator"></span>
+                <span class="respawn-status-text">Not active</span>
+              </div>
+              <div class="respawn-actions">
+                <button class="btn-toolbar btn-success btn-sm" onclick="app.enableRespawnFromModal()" id="modalEnableRespawnBtn">Enable</button>
+                <button class="btn-toolbar btn-danger btn-sm" onclick="app.stopRespawnFromModal()" id="modalStopRespawnBtn" style="display: none;">Stop</button>
+              </div>
+            </div>
+            </div><!-- End respawn-loop-box -->
           </div>
           </div><!-- End respawn-tab -->
 
@@ -835,6 +840,18 @@
                 </div>
                 <span class="form-hint">Full context reset at threshold (use higher than compact)</span>
               </div>
+            </div>
+
+            <div class="form-row form-row-switch">
+              <label class="checkbox-inline">
+                <input type="checkbox" id="modalCheckpointEnabled" onchange="app.autoSaveCheckpoint()">
+                <span>Agent Checkpoint</span>
+              </label>
+              <select id="modalCheckpointMode" onchange="app.autoSaveCheckpoint()">
+                <option value="compact">compact</option>
+                <option value="clear">clear</option>
+              </select>
+              <span class="form-hint">Let the agent signal a checkpoint (<code>aicodeman checkpoint</code>) — runs /compact (or /clear + /init), then continues. Default OFF.</span>
             </div>
 
             <div class="form-section-header">File Watching</div>
@@ -976,6 +993,7 @@
           <button class="modal-tab-btn" data-tab="settings-codex">Codex CLI</button>
           <button class="modal-tab-btn" data-tab="settings-headroom">Headroom</button>
           <button class="modal-tab-btn" data-tab="settings-models">Models</button>
+          <button class="modal-tab-btn" data-tab="settings-authoring">Authoring</button>
           <button class="modal-tab-btn" data-tab="settings-paths">Paths</button>
           <button class="modal-tab-btn" data-tab="settings-notifications">Notifications</button>
           <button class="modal-tab-btn" data-tab="settings-voice">Voice</button>
@@ -1431,6 +1449,13 @@
               <span class="form-hint">Default directory for new sessions.</span>
             </div>
           </div>
+          <!-- Authoring Tab (COD-64) -->
+          <div class="modal-tab-content hidden" id="settings-authoring">
+            <div class="form-section-header">Authoring Actions</div>
+            <p class="form-hint" style="margin: 0 0 12px 0;">One-click actions shown in the document preview. Clicking one sends its instruction to the open document's agent session. Use <code>{path}</code> in the instruction for the document path (e.g. "Tighten the prose in {path}"); if omitted, the path is appended.</p>
+            <div id="authoringActionsList" class="authoring-actions-editor"></div>
+            <button type="button" class="btn-secondary btn-sm" onclick="app.addAuthoringActionRow()">+ Add action</button>
+          </div>
           <!-- Notifications Tab -->
           <div class="modal-tab-content hidden" id="settings-notifications">
             <div class="settings-grid">
@@ -1635,6 +1660,7 @@
         <div class="modal-tabs">
           <button class="modal-tab-btn active" data-tab="case-create">Create New</button>
           <button class="modal-tab-btn" data-tab="case-link">Link Existing</button>
+          <button class="modal-tab-btn" data-tab="case-remote">Remote</button>
           <button class="modal-tab-btn" data-tab="case-manage">Manage</button>
         </div>
         <div class="modal-body">
@@ -1661,6 +1687,36 @@
               <label>Folder Path</label>
               <input type="text" id="linkCasePath" placeholder="/home/user/projects/my-project" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
               <span class="form-hint">Absolute path to an existing project folder, e.g. /home/you/my-project</span>
+            </div>
+          </div>
+          <!-- Remote Tab -->
+          <div class="modal-tab-content hidden" id="case-remote">
+            <div class="form-row">
+              <label>Case Name</label>
+              <input type="text" id="remoteCaseName" placeholder="gpu-work" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">Name to identify this remote case in Codeman</span>
+            </div>
+            <div class="form-row">
+              <label>Remote Path</label>
+              <input type="text" id="remoteCasePath" placeholder="/home/user/projects/work" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+              <span class="form-hint">Absolute path on the remote host. Codeman will not create or delete it.</span>
+            </div>
+            <div class="form-row">
+              <label>Host ID</label>
+              <input type="text" id="remoteHostId" placeholder="gpu-box" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+            </div>
+            <div class="form-row">
+              <label>SSH Host/IP</label>
+              <input type="text" id="remoteHostAddress" placeholder="10.0.0.42" autocomplete="off" autocapitalize="off" spellcheck="false">
+            </div>
+            <div class="form-row">
+              <label>SSH Username</label>
+              <input type="text" id="remoteHostUsername" placeholder="ubuntu" autocomplete="off" autocapitalize="off" spellcheck="false">
+            </div>
+            <div class="form-row">
+              <label>Codex Command Override</label>
+              <input type="text" id="remoteHostCodexCommand" placeholder="exec codx personal" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">Optional. Leave blank to use exec codex on the remote host.</span>
             </div>
           </div>
           <!-- Manage Tab -->

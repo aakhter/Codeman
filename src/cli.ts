@@ -13,8 +13,8 @@ import { createRequire } from 'module';
 import http from 'node:http';
 import https from 'node:https';
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
+import { dataPath } from './config/instance.js';
 import { getSessionManager } from './session-manager.js';
 import { getTaskQueue } from './task-queue.js';
 import { getRalphLoop } from './ralph-loop.js';
@@ -34,7 +34,7 @@ function makeAttachmentMagicLink(filePath: string): string {
 }
 
 function readCodemanEnv(): Record<string, string> {
-  const envPath = join(homedir(), '.codeman', '.env');
+  const envPath = dataPath('.env');
   try {
     const text = readFileSync(envPath, 'utf-8');
     const result: Record<string, string> = {};
@@ -130,6 +130,71 @@ async function postAttachment(apiUrl: string, sessionId: string, filePath: strin
       }
     );
     req.on('error', () => resolve(false));
+    req.write(body);
+    req.end();
+  });
+}
+
+/** Header carrying the per-instance hook secret on `/api/hook-event`. */
+const HOOK_SECRET_HEADER = 'X-Codeman-Hook-Secret';
+
+/**
+ * POST a hook event to `/api/hook-event` using the per-instance hook secret
+ * (read from `$CODEMAN_HOOK_SECRET_FILE`) — mirrors how Claude Code hook curls
+ * authenticate. Resolves the parsed JSON response body, or null on failure.
+ */
+async function postHookEvent(
+  apiUrl: string,
+  event: string,
+  sessionId: string,
+  data: Record<string, unknown>
+): Promise<unknown> {
+  const url = new URL('/api/hook-event', apiUrl);
+  const body = JSON.stringify({ event, sessionId, data });
+  const transport = url.protocol === 'https:' ? https : http;
+
+  let secret = '';
+  const secretFile = process.env.CODEMAN_HOOK_SECRET_FILE;
+  if (secretFile) {
+    try {
+      secret = readFileSync(secretFile, 'utf-8').trim();
+    } catch {
+      secret = '';
+    }
+  }
+
+  return new Promise((resolve) => {
+    const headers: Record<string, string | number> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    };
+    if (secret) headers[HOOK_SECRET_HEADER] = secret;
+
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        method: 'POST',
+        path: `${url.pathname}${url.search}`,
+        rejectUnauthorized: false,
+        headers,
+      },
+      (res) => {
+        let resBody = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => (resBody += chunk));
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(resBody));
+          } catch {
+            resolve(null);
+          }
+        });
+      }
+    );
+    req.on('error', () => resolve(null));
     req.write(body);
     req.end();
   });
@@ -269,6 +334,43 @@ program
     }
 
     console.log(makeAttachmentMagicLink(filePath));
+  });
+
+program
+  .command('checkpoint')
+  .alias('compact')
+  .description('Signal Codeman to checkpoint (compact-or-clear, then continue) at a clean boundary')
+  .option('-m, --mode <mode>', 'Checkpoint mode: compact or clear', 'compact')
+  .option('-c, --continue <prompt>', 'Prompt to send after the op completes (default: continue)')
+  .option('-s, --session <id>', 'Codeman session ID (defaults to CODEMAN_SESSION_ID)')
+  .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
+  .action(async (options) => {
+    const mode = options.mode === 'clear' ? 'clear' : 'compact';
+    const sessionId = options.session || process.env.CODEMAN_SESSION_ID;
+    const apiUrl = options.url || process.env.CODEMAN_API_URL || 'https://127.0.0.1:3000';
+
+    if (!sessionId) {
+      console.error(chalk.red('✗ checkpoint requires a session id (--session or CODEMAN_SESSION_ID)'));
+      process.exit(1);
+    }
+
+    const data: Record<string, unknown> = { mode };
+    if (options.continue) data.continuePrompt = String(options.continue);
+
+    const body = await postHookEvent(apiUrl, 'checkpoint', sessionId, data);
+    const triggered = Boolean(
+      body &&
+      typeof body === 'object' &&
+      (body as { data?: { checkpoint?: { triggered?: boolean } } }).data?.checkpoint?.triggered
+    );
+
+    if (triggered) {
+      console.log(chalk.green(`✓ checkpoint ${mode} requested`));
+      return;
+    }
+
+    console.error(chalk.red('✗ checkpoint not enabled for this session — enable it in Session Options'));
+    process.exit(1);
   });
 
 /**

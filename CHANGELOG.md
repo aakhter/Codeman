@@ -1,5 +1,56 @@
 # aicodeman
 
+## 0.9.14
+
+### Patch Changes
+
+- Security hardening for the tunnel exposure path, Codex terminal rendering fixes, and a mobile modal fix.
+
+  **Security (PR #115, COD-54/COD-55):**
+  - `/api/hook-event` localhost bypass is now gated while the managed Cloudflare tunnel is running: tunneled traffic arrives with a loopback source IP, so the bypass additionally requires a per-instance shared secret (`X-Codeman-Hook-Secret`, 256-bit, `~/.codeman/hook-secret`, mode 0600). Locally generated hook commands read the secret file at execution time via `$CODEMAN_HOOK_SECRET_FILE` (exported into every managed session's environment), so the value never lands on command lines or in case configs, and running sessions pick up a new secret without respawn. Failed presentations rate-limit in a dedicated per-IP bucket so misfiring legacy hooks can never lock out the Basic-Auth login path. With no tunnel running, behavior is unchanged.
+  - Enabling the Cloudflare tunnel now **refuses with 403** when no `CODEMAN_PASSWORD` is set (a public tunnel URL with no auth is effectively public RCE), unless `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` explicitly acknowledges the exposure. The settings UI surfaces the refusal as an error toast and reverts the toggle.
+
+  **Codex rendering (PRs #116, #117):**
+  - Alt-screen toggles (`?47/?1047/?1049`), scrollback-erase (`CSI 3 J`), and mouse-tracking enables (`?1000`–`?1007`) are stripped from the Codex byte stream (live + replay), so conversation history survives tab switches and the scroll wheel scrolls the viewport instead of being hijacked. Sequences split across PTY chunk boundaries are reassembled via a small carry before stripping, so a split `?1049h` can no longer trap xterm in the scrollback-less alt buffer.
+  - Smaller 32KB first-frame write budget for Codex sessions keeps dense synchronized redraws from stalling the renderer; a 1.5s grace window after a manual scroll-up suppresses sticky-scroll so high-frequency `• Working (Ns)` status ticks no longer snap the viewport back to the bottom while reading earlier output.
+
+  **Mobile:** session-options modal raised above the fixed mobile/tablet header (z-index 1300 vs 1200) so the close button is reachable on phones; Respawn tab controls regrouped.
+
+  **Docs:** security-architecture.md updated for the secret-gated hook bypass (including the external-proxy caveat) and the tunnel password guard; README documents auto-resume on usage limit.
+
+## 0.9.13
+
+### Patch Changes
+
+- Auto-resume on usage limit ("token pause" control) plus a set of mobile-view fixes for regressions introduced in 0.9.8.
+
+  **Auto-resume on usage limit** — new opt-in checkbox at the top of the session Respawn tab (off by default). When Claude stops because a usage limit was reached, Codeman parses the reset time from the limit message, waits until the limit lifts (plus a 2-minute safety buffer), then dismisses the rate-limit dialog (Esc) and sends "continue" so the session picks its work back up automatically. All Claude Code message formats from 1.0.x through 2.1.x are recognized ("5-hour limit reached ∙ resets 8pm", "Limit reached · resets 1pm (America/Chicago) · /upgrade…", "You've hit your weekly limit · resets Mon 12:00am", weekly date forms, and the raw API `usage limit reached|<epoch>` form). Still-limited responses re-arm the scheduler (5-minute retry loop); a pending schedule persists across Codeman restarts and re-arms on boot; respawn cycles are blocked while a limit pause is active so the cycle's `/clear` cannot wipe the paused conversation. New endpoint `POST /api/sessions/:id/auto-resume`; new SSE events `session:limitPauseScheduled`, `session:limitResume`, `session:limitResumeCancelled`; toast/notification on pause and resume, plus a live "resumes at HH:MM" status line in the modal. The Respawn tab layout was also tidied: compact single-row Update/Kickstart prompt fields and a merged options row.
+
+  **Mobile fixes (0.9.8 regressions)**:
+  - **Activity-based resize arbitration** — a desktop sizing claim now only blocks a phone's resize while that desktop has actually typed within the last 90 seconds. Previously any connected desktop tab (even one abandoned hours ago) silently discarded the phone's resize with no fallback, leaving the phone rendering a desktop-width stream in a narrow terminal: mid-word wraps, tmux dot-fill rows, overdrawn garbled text, and misplaced keyboard echo. Now an idle desktop yields the pane to the phone, and the next desktop keystroke automatically restores the desktop layout ("whoever is actively using the session wins"). Phones also re-send their dimensions every 30 seconds (visible tab only, skipped while the virtual keyboard is open) so attaching under a momentarily-active desktop self-corrects.
+  - **Keyboard accessory bar and toolbar restored on iOS** — the lift offset is measured against the layout viewport (`window.innerHeight`) again instead of the keyboard-shrunken app element; on iOS the offset computed to 0, leaving both bars hidden behind the OS keyboard with a dead black gap above it.
+  - **Removed the mobile header utility ("three dots") toggle** — the header-utilities tray stays collapsed on small viewports.
+
+## 0.9.12
+
+### Patch Changes
+
+- Documentation refresh — README catches up with the Codex run mode, plus a CLAUDE.md correction.
+
+  **README (en + zh-CN)**: Codex is now listed as a third supported AI coding CLI everywhere the docs previously said "Claude Code or OpenCode": the install requirement in Quick Start (now "any combination works", linking to the official Codex CLI docs), the Windows/WSL setup note, the renamed **Multi-CLI** feature bullet (env-prefix gating now reads `CLAUDE_CODE_*` vs `OPENCODE_*` vs `CODEX_*`), the Zod schema-validation security bullet, and the architecture mermaid diagram. The header tagline was also finalized to "Claude Code • OpenCode • Codex — One Dashboard • Any Device" in both languages.
+
+  **CLAUDE.md**: fixed a stale "Local packages" line that claimed the xterm-zerolag-input local-echo overlay had a copy embedded in `app.js` — it is single-source in `packages/xterm-zerolag-input/`, bundled to the gitignored vendor file, and only consumed by `app.js`, matching the existing single-source gotcha.
+
+## 0.9.11
+
+### Patch Changes
+
+- Fix a terminal freeze on hover (catastrophic regex backtracking) and a CSP violation that disabled the terminal's anti-throttling worker.
+
+  **Tab-freezing hover bug**: the terminal link provider's `cmdPattern` (which turns `tail -f /path`-style text into clickable links) used an empty-matchable, unbounded arg group — `(?:[^\s\/]*\s+)*` — that backtracks exponentially on real Claude output, e.g. wrapped `git commit -m "$(cat <<'EOF'` heredoc lines or aligned table rows. Hovering the mouse over such a line hung the page's main thread for minutes ("page unresponsive"). The pattern now uses non-empty tokens with bounded repetition (linear time); all intended command+path link forms still match. New `test/link-provider-regex.test.ts` extracts the shipped patterns from source and pins linear-time behavior on the killer line shapes.
+
+  **Blob worker CSP fix**: `worker-src 'self' blob:` is now always present in the CSP (previously only with `CODEMAN_GESTURE=1`). The terminal's `_safeYield` anti-throttling tick worker is created from a Blob URL and was silently blocked on every install, logging a CSP violation on each page load and disabling the worker leg of the render-yield fallback chain.
+
 ## 0.9.10
 
 ### Patch Changes

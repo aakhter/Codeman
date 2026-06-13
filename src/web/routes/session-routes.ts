@@ -29,6 +29,8 @@ import {
   ResizeSchema,
   AutoClearSchema,
   AutoCompactSchema,
+  AutoResumeSchema,
+  CheckpointSchema,
   ImageWatcherSchema,
   FlickerFilterSchema,
   QuickRunSchema,
@@ -40,6 +42,7 @@ import {
   findSessionOrFail,
   parseBody,
   persistAndBroadcastSession,
+  readJsonConfig,
   SETTINGS_PATH,
   validatePathWithinBase,
 } from '../route-helpers.js';
@@ -51,12 +54,14 @@ import { getLifecycleLog } from '../../session-lifecycle-log.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
 import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
+import { readRemoteCases, readRemoteHosts, toSessionRemote } from '../../remote-hosts.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
-import { dataPath } from '../../config/instance.js';
+import { dataPath, getDataDir } from '../../config/instance.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
+const CODEMAN_CONFIG_DIR = getDataDir();
 
 // Pre-compiled regex for terminal buffer cleaning (avoids per-request compilation)
 // eslint-disable-next-line no-control-regex
@@ -72,17 +77,23 @@ const LEADING_WHITESPACE_PATTERN = /^[\s\r\n]+/;
  *   (1049 also saves cursor and clears the alt buffer).
  * - CSI 3 J = erase saved lines (scrollback).
  *
- * Codex emits `\x1b[?1049h` and clear-scrollback sequences during startup
- * and on repaint. xterm.js obeys these by switching to the alt buffer
- * (no native scrollback) and wiping saved lines, so the user's
- * conversation history disappears on every tab switch / pane refresh.
- * Stripping these from the byte stream keeps everything in the main
- * buffer with scrollback intact.
+ * Codex emits `\x1b[?1049h` and clear-scrollback sequences during startup and
+ * on repaint. xterm.js obeys them by switching to the alt buffer (no native
+ * scrollback) and wiping saved lines, so the user's conversation history
+ * disappears on every tab switch / pane refresh. Stripping these from the
+ * replayed byte stream keeps everything in the main buffer with scrollback
+ * intact. Mirrors the live-stream strip in Session._handleTerminalOutput.
  */
 // eslint-disable-next-line no-control-regex
 const ALT_SCREEN_TOGGLE_PATTERN = /\x1b\[\?(?:47|1047|1049)[hl]/g;
 // eslint-disable-next-line no-control-regex
 const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
+// Mouse-tracking enables (X10/button/any-event/UTF-8/SGR/alt-scroll) — once on,
+// xterm.js forwards wheel events to the app instead of scrolling the viewport.
+// Live streams are stripped at the source, but buffers persisted BEFORE that
+// strip existed can still carry them; strip on replay for parity.
+// eslint-disable-next-line no-control-regex
+const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g;
 
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
@@ -254,10 +265,25 @@ export function registerSessionRoutes(
     }
 
     const body = parseBody(CreateSessionSchema, req.body);
-    const workingDir = body.workingDir || process.cwd();
+    let workingDir = body.workingDir || process.cwd();
+    let remote = undefined;
+
+    if (body.caseName) {
+      const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+      const remoteCase = remoteCases.find((item) => item.name === body.caseName);
+      if (remoteCase) {
+        const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+        if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+        workingDir = remoteCase.remotePath;
+        remote = toSessionRemote(host, remoteCase);
+      } else {
+        const linkedCases = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
+        workingDir = linkedCases[body.caseName] || validatePathWithinBase(body.caseName, CASES_DIR) || workingDir;
+      }
+    }
 
     // Validate workingDir exists and is a directory
-    if (body.workingDir) {
+    if ((body.workingDir || body.caseName) && !remote) {
       try {
         const stat = statSync(workingDir);
         if (!stat.isDirectory()) {
@@ -388,6 +414,7 @@ export function registerSessionRoutes(
       envOverrides: body.envOverrides,
       effort: body.effort,
       truecolorEnabled,
+      remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
         maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
@@ -954,13 +981,18 @@ export function registerSessionRoutes(
     const query = req.query as { tail?: string };
     const session = findSessionOrFail(ctx, id);
 
+    // Prepend the live tmux pane buffer so tab-switch replay shows the current
+    // on-screen frame, not just the accumulated byte history. This matters for
+    // TUI modes (codex/opencode) that repaint only their latest frame: the
+    // accumulated buffer alone replays as the idle banner. We clear the viewport
+    // (`\x1b[H\x1b[2J`) between the history and the live pane so they don't
+    // overlap. `captureActivePaneBuffer` is a no-op ('') under test mode and
+    // returns null when unavailable, in which case we fall back to history.
     const muxName = session.muxName;
     const liveMuxBuffer =
-      muxName && typeof ctx.mux.capturePaneBuffer === 'function' ? ctx.mux.capturePaneBuffer(muxName) : null;
-    // All tmux-backed modes prepend the accumulated byte history (cleared, then
-    // the live pane) so tab-switch replay shows full scrollback rather than just
-    // the current pane. Codex converged on this path in 18ce518 ("default codex
-    // to hybrid tui"), so the former per-mode gate is now a single behavior.
+      muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
+        ? ctx.mux.captureActivePaneBuffer(muxName)
+        : null;
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
         ? session.terminalBufferLength > 0
@@ -982,7 +1014,10 @@ export function registerSessionRoutes(
     // xterm.js obeys them by switching to its scrollback-less alt buffer and
     // wiping saved lines, so conversation history disappears on tab switch.
     if (session.mode === 'codex') {
-      strippedBuffer = strippedBuffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '').replace(ERASE_SCROLLBACK_PATTERN, '');
+      strippedBuffer = strippedBuffer
+        .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
+        .replace(ERASE_SCROLLBACK_PATTERN, '')
+        .replace(MOUSE_TRACKING_PATTERN, '');
     }
 
     if (tailBytes > 0 && strippedBuffer.length > tailBytes) {
@@ -1065,6 +1100,48 @@ export function registerSessionRoutes(
           enabled: session.autoCompactEnabled,
           threshold: session.autoCompactThreshold,
           prompt: session.autoCompactPrompt,
+        },
+      },
+    };
+  });
+
+  // ========== Auto-Resume (usage-limit pause) ==========
+
+  app.post('/api/sessions/:id/auto-resume', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(AutoResumeSchema, req.body, 'Invalid request body');
+    const session = findSessionOrFail(ctx, id);
+
+    session.setAutoResume(body.enabled);
+    persistAndBroadcastSession(ctx, session);
+
+    return {
+      success: true,
+      data: {
+        autoResume: {
+          enabled: session.autoResumeEnabled,
+          resumeAt: session.autoResumeAt ?? undefined,
+        },
+      },
+    };
+  });
+
+  // ========== Checkpoint (agent-initiated compact-or-clear) ==========
+
+  app.post('/api/sessions/:id/checkpoint', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(CheckpointSchema, req.body, 'Invalid request body');
+    const session = findSessionOrFail(ctx, id);
+
+    session.setCheckpoint(body.enabled, body.mode);
+    persistAndBroadcastSession(ctx, session);
+
+    return {
+      success: true,
+      data: {
+        checkpoint: {
+          enabled: session.checkpointEnabled,
+          mode: session.checkpointMode,
         },
       },
     };
@@ -1232,24 +1309,36 @@ export function registerSessionRoutes(
       }
     }
 
-    // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
-    // This mirrors the behaviour of resolveCasePath() in case-routes so that linked
-    // external project directories are honoured by quick-start just like regular case routes.
-    let linkedCases: Record<string, string> = {};
-    try {
-      const raw = await fs.readFile(LINKED_CASES_FILE, 'utf-8');
-      linkedCases = JSON.parse(raw);
-    } catch {
-      // File missing or unparseable — treat as empty registry
-    }
-    const linkedCasePath = linkedCases[caseName];
-    const casePath = linkedCasePath || validatePathWithinBase(caseName, CASES_DIR);
-    if (!casePath) {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case path');
+    let remote = undefined;
+    let linkedCasePath: string | undefined;
+    let casePath: string | null = null;
+    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+    const remoteCase = remoteCases.find((item) => item.name === caseName);
+    if (remoteCase) {
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      casePath = remoteCase.remotePath;
+      remote = toSessionRemote(host, remoteCase);
+    } else {
+      // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
+      // This mirrors the behaviour of resolveCasePath() in case-routes so that linked
+      // external project directories are honoured by quick-start just like regular case routes.
+      let linkedCases: Record<string, string> = {};
+      try {
+        const raw = await fs.readFile(LINKED_CASES_FILE, 'utf-8');
+        linkedCases = JSON.parse(raw);
+      } catch {
+        // File missing or unparseable — treat as empty registry
+      }
+      linkedCasePath = linkedCases[caseName];
+      casePath = linkedCasePath || validatePathWithinBase(caseName, CASES_DIR);
+      if (!casePath) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case path');
+      }
     }
 
-    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked cases)
-    if (!existsSync(casePath)) {
+    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked, non-remote cases)
+    if (!remote && !existsSync(casePath)) {
       try {
         mkdirSync(casePath, { recursive: true });
         mkdirSync(join(casePath, 'src'), { recursive: true });
@@ -1277,6 +1366,7 @@ export function registerSessionRoutes(
       mode !== 'opencode' &&
       mode !== 'codex' &&
       mode !== 'gemini' &&
+      !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
     ) {
@@ -1315,6 +1405,7 @@ export function registerSessionRoutes(
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
+      remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
         maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
@@ -1324,7 +1415,7 @@ export function registerSessionRoutes(
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
-    if (mode === 'claude' && ctx.store.getConfig().ralphEnabled) {
+    if (mode === 'claude' && !remote && ctx.store.getConfig().ralphEnabled) {
       autoConfigureRalph(session, casePath, ctx);
       if (!session.ralphTracker.enabled) {
         session.ralphTracker.enable();

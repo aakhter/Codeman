@@ -1,15 +1,25 @@
 /**
- * @fileoverview Auto-compact and auto-clear automation for Session.
+ * @fileoverview Auto-compact, auto-clear, and auto-resume automation for Session.
  *
  * Monitors token counts and triggers /compact or /clear commands when
  * configurable thresholds are reached. Waits for Claude to be idle
  * before sending commands, with retry logic and mutual exclusion
  * (compact and clear never run simultaneously).
  *
+ * Also implements auto-resume on usage limit ("token pause" control):
+ * when enabled and Claude stops on a usage-limit message ("5-hour limit
+ * reached ∙ resets 8pm" and friends — see usage-limit-patterns.ts), a timer
+ * is armed for the parsed reset time plus a safety buffer, then Escape
+ * (dismisses the rate-limit options dialog if open) and a "continue" prompt
+ * are sent so work resumes automatically. If the session is still limited,
+ * the fresh limit message re-arms the scheduler — that retry loop is the
+ * safety net for clock skew and parse imprecision.
+ *
  * @module session-auto-ops
  */
 
 import { EventEmitter } from 'node:events';
+import { detectUsageLimitPause } from './usage-limit-patterns.js';
 
 // ============================================================================
 // Timing Constants
@@ -78,6 +88,45 @@ async function executeWhenIdle(
   }
 }
 
+// ============================================================================
+// Auto-resume (usage-limit pause) constants
+// ============================================================================
+
+/** Safety buffer after the stated reset time before resuming (2 minutes) */
+const RESUME_BUFFER_MS = 2 * 60_000;
+
+/** Minimum delay before an overdue resume fires (lets output settle) */
+const RESUME_MIN_DELAY_MS = 5_000;
+
+/** Retry interval when the reset time is stale/past (5 minutes) */
+const RESUME_RETRY_MS = 5 * 60_000;
+
+/** Re-detections scheduling within this window of the current schedule are ignored */
+const RESUME_DEDUP_TOLERANCE_MS = 90_000;
+
+/** Delay between Escape (dialog dismiss) and the resume prompt */
+const RESUME_ESC_DELAY_MS = 600;
+
+/** Prompt sent to resume work after the limit resets */
+const RESUME_PROMPT = 'continue';
+
+// ============================================================================
+// Checkpoint (agent-initiated compact-or-clear, then continue) constants
+// ============================================================================
+
+/** Poll interval while driving a checkpoint sequence (idle/working transitions) */
+const CHECKPOINT_POLL_MS = 500;
+
+/**
+ * How long to wait for an op to START (working transition) after sending its
+ * command. If it never goes working in this window, the op is treated as a
+ * no-op (already complete) and the sequence proceeds.
+ */
+const CHECKPOINT_OP_START_TIMEOUT_MS = 8000;
+
+/** Safety cap on how long to wait for an op to FINISH before proceeding anyway */
+const CHECKPOINT_OP_MAX_MS = 180000;
+
 /** Minimum valid threshold for auto-clear/compact (1000 tokens) */
 const MIN_AUTO_THRESHOLD = 1000;
 
@@ -130,6 +179,22 @@ export class SessionAutoOps extends EventEmitter {
   private _autoClearEnabled: boolean = false;
   private _isClearing: boolean = false;
   private _autoClearTimer: NodeJS.Timeout | null = null;
+
+  // Auto-resume (usage-limit pause) state
+  private _autoResumeEnabled: boolean = false;
+  private _autoResumeTimer: NodeJS.Timeout | null = null;
+  /** Esc→continue gap timer; detections must NOT cancel a resume in flight */
+  private _resumeFollowupTimer: NodeJS.Timeout | null = null;
+  /** When the scheduled resume fires (epoch ms), null when not armed */
+  private _autoResumeAt: number | null = null;
+  private _limitPaused: boolean = false;
+  private _resumeAttempts: number = 0;
+
+  // Checkpoint (agent-initiated compact-or-clear, then continue) state
+  private _checkpointEnabled: boolean = false;
+  private _checkpointMode: 'compact' | 'clear' = 'compact';
+  private _checkpointActive: boolean = false;
+  private _checkpointTimer: NodeJS.Timeout | null = null;
 
   private readonly callbacks: AutoOpsCallbacks;
 
@@ -208,6 +273,306 @@ export class SessionAutoOps extends EventEmitter {
   }
 
   // ============================================================================
+  // Auto-resume (usage-limit pause) — getters/setters
+  // ============================================================================
+
+  get autoResumeEnabled(): boolean {
+    return this._autoResumeEnabled;
+  }
+
+  /** When the scheduled resume fires (epoch ms), or null when not armed. */
+  get autoResumeAt(): number | null {
+    return this._autoResumeAt;
+  }
+
+  /** True while the session is believed to be paused on a usage limit. */
+  get isLimitPaused(): boolean {
+    return this._limitPaused;
+  }
+
+  setAutoResume(enabled: boolean): void {
+    this._autoResumeEnabled = enabled;
+    if (!enabled) {
+      this._cancelAutoResume('disabled');
+    }
+  }
+
+  /**
+   * Restore auto-resume state after a Codeman restart. A persisted pending
+   * schedule is re-armed; an overdue one fires shortly after boot (the limit
+   * footer won't reprint on its own, so without this the pause would stall).
+   */
+  restoreAutoResume(enabled: boolean, resumeAt?: number): void {
+    this._autoResumeEnabled = enabled;
+    if (!enabled || !resumeAt) return;
+    const now = Date.now();
+    this._scheduleResume(Math.max(resumeAt, now + RESUME_MIN_DELAY_MS), resumeAt, 'restored');
+  }
+
+  // ============================================================================
+  // Auto-resume — detection and scheduling
+  // ============================================================================
+
+  /**
+   * Scan cleaned terminal output for a usage-limit pause message and (re)arm
+   * the resume schedule. Called from the session's throttled parser path.
+   */
+  processCleanData(cleanData: string): void {
+    if (!this._autoResumeEnabled || this.callbacks.isStopped()) return;
+    // A resume is in flight (Esc sent, continue pending): output from our own
+    // Escape can redraw the stale limit footer — don't let it re-arm and
+    // cancel the continue. Fresh evidence arrives after the prompt is sent.
+    if (this._resumeFollowupTimer) return;
+
+    const detection = detectUsageLimitPause(cleanData);
+    if (!detection) return;
+
+    const now = Date.now();
+    const overdue = detection.resetAt <= now;
+    const fireAt = overdue
+      ? now + RESUME_RETRY_MS // stale reset time → gentle retry loop
+      : Math.max(detection.resetAt + RESUME_BUFFER_MS, now + RESUME_MIN_DELAY_MS);
+
+    if (this._autoResumeTimer && this._autoResumeAt !== null) {
+      // Already armed: the footer redraws constantly, so ignore re-detections
+      // that land on (or later than) the current schedule. Only an EARLIER
+      // parsed time replaces it — an overdue retry never preempts a real one.
+      if (overdue || fireAt >= this._autoResumeAt - RESUME_DEDUP_TOLERANCE_MS) return;
+    }
+
+    this._scheduleResume(fireAt, detection.resetAt, detection.matched);
+  }
+
+  /**
+   * Claude started working — the limit is lifted (or the user resumed
+   * manually), so any pending auto-resume is obsolete.
+   */
+  notifyWorking(): void {
+    this._resumeAttempts = 0;
+    if (!this._limitPaused && !this._autoResumeTimer && !this._resumeFollowupTimer) return;
+    this._cancelAutoResume('working');
+  }
+
+  private _scheduleResume(fireAt: number, resetAt: number, matched: string): void {
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
+    this._limitPaused = true;
+    this._autoResumeAt = fireAt;
+    const delay = Math.max(fireAt - Date.now(), 0);
+    console.log(
+      `[SessionAutoOps ${this.callbacks.getSessionId()}] Usage-limit pause detected ("${matched.slice(0, 60)}"), auto-resume in ${Math.round(delay / 60000)}min`
+    );
+    this._autoResumeTimer = setTimeout(() => void this._fireResume(), delay);
+    this.emit('limitPauseScheduled', { resetAt, resumeAt: fireAt, matched });
+  }
+
+  private async _fireResume(): Promise<void> {
+    this._autoResumeTimer = null;
+    if (!this._autoResumeEnabled || this.callbacks.isStopped()) return;
+
+    if (this.callbacks.isWorking()) {
+      // Session resumed on its own (or via the user) — nothing to do.
+      this._cancelAutoResume('working');
+      return;
+    }
+
+    this._resumeAttempts++;
+    const attempt = this._resumeAttempts;
+    this._limitPaused = false; // optimistic: a fresh limit message re-arms us
+    this._autoResumeAt = null;
+
+    // Escape first: dismisses the rate-limit options dialog if Claude opened
+    // one (harmless at an idle prompt), then the resume prompt after a beat.
+    await this.callbacks.writeCommand('\x1b');
+    this._resumeFollowupTimer = setTimeout(() => {
+      this._resumeFollowupTimer = null;
+      if (this.callbacks.isStopped()) return;
+      void this.callbacks.writeCommand(`${RESUME_PROMPT}\r`);
+      this.emit('limitResume', { attempt });
+    }, RESUME_ESC_DELAY_MS);
+  }
+
+  private _cancelAutoResume(reason: 'disabled' | 'working' | 'stopped'): void {
+    const wasArmed = this._autoResumeTimer !== null || this._resumeFollowupTimer !== null || this._limitPaused;
+    if (this._autoResumeTimer) {
+      clearTimeout(this._autoResumeTimer);
+      this._autoResumeTimer = null;
+    }
+    if (this._resumeFollowupTimer) {
+      clearTimeout(this._resumeFollowupTimer);
+      this._resumeFollowupTimer = null;
+    }
+    this._limitPaused = false;
+    this._autoResumeAt = null;
+    if (wasArmed && reason !== 'stopped') {
+      this.emit('limitResumeCancelled', { reason });
+    }
+  }
+
+  // ============================================================================
+  // Checkpoint (agent-initiated compact-or-clear, then continue)
+  // ============================================================================
+
+  get checkpointEnabled(): boolean {
+    return this._checkpointEnabled;
+  }
+
+  get checkpointMode(): 'compact' | 'clear' {
+    return this._checkpointMode;
+  }
+
+  get isCheckpointActive(): boolean {
+    return this._checkpointActive;
+  }
+
+  /** Enable/disable agent-initiated checkpoints; optionally set the mode. */
+  setCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+    this._checkpointEnabled = enabled;
+    if (mode !== undefined) {
+      this._checkpointMode = mode;
+    }
+  }
+
+  /**
+   * Restore persisted checkpoint enable/mode after a Codeman restart. Unlike
+   * auto-resume there is no pending action to re-arm — checkpoints are
+   * agent-triggered, not time-scheduled — so this only restores the flags.
+   */
+  restoreCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+    this._checkpointEnabled = enabled;
+    if (mode !== undefined) {
+      this._checkpointMode = mode;
+    }
+  }
+
+  /**
+   * Agent signal at a clean boundary: run the checkpoint op (compact or
+   * clear→init) and, ONLY after it completes, send a continue prompt. Returns
+   * whether the sequence was triggered (and if not, why).
+   */
+  requestCheckpoint(opts?: { mode?: 'compact' | 'clear'; continuePrompt?: string }): {
+    triggered: boolean;
+    reason?: string;
+  } {
+    if (!this._checkpointEnabled) return { triggered: false, reason: 'not-enabled' };
+    if (this.callbacks.isStopped()) return { triggered: false, reason: 'stopped' };
+    if (this._isCompacting || this._isClearing || this._checkpointActive) {
+      return { triggered: false, reason: 'busy' };
+    }
+
+    this._checkpointActive = true;
+    const mode = opts?.mode ?? this._checkpointMode;
+    const continueText = opts?.continuePrompt?.trim() || RESUME_PROMPT;
+    const steps = mode === 'clear' ? ['/clear\r', '/init\r'] : ['/compact\r'];
+
+    this.emit('checkpointStart', { mode });
+    void this._runCheckpoint(steps, continueText, mode);
+    return { triggered: true };
+  }
+
+  /**
+   * Drive the checkpoint step sequence: for each step, wait for idle, send the
+   * command, wait for the op to start (working) then finish (idle), and only
+   * then move on. After the last step, send the continue prompt.
+   */
+  private async _runCheckpoint(steps: string[], continueText: string, mode: 'compact' | 'clear'): Promise<void> {
+    for (const step of steps) {
+      const ok = await this._runCheckpointStep(step);
+      if (!ok) {
+        // Aborted (stopped) — _abortCheckpoint already cleared state.
+        return;
+      }
+    }
+
+    if (this.callbacks.isStopped()) {
+      this._abortCheckpoint();
+      return;
+    }
+
+    await this.callbacks.writeCommand(`${continueText}\r`);
+    this.emit('checkpointDone', { mode });
+    this._checkpointActive = false;
+    if (this._checkpointTimer) {
+      clearTimeout(this._checkpointTimer);
+      this._checkpointTimer = null;
+    }
+  }
+
+  /**
+   * Run a single checkpoint step: send the command once idle, then wait for the
+   * op to complete (working→idle). Resolves true on success, false if aborted.
+   */
+  private _runCheckpointStep(step: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      // Phase 1: wait until idle, then send the command.
+      const waitIdleThenSend = (): void => {
+        if (this.callbacks.isStopped()) {
+          this._abortCheckpoint();
+          resolve(false);
+          return;
+        }
+        if (this.callbacks.isWorking()) {
+          this._checkpointTimer = setTimeout(waitIdleThenSend, CHECKPOINT_POLL_MS);
+          return;
+        }
+        void this.callbacks.writeCommand(step).then(() => {
+          awaitOpStart(Date.now());
+        });
+      };
+
+      // Phase 2: wait for the op to START (working). A no-op op never goes
+      // working — after CHECKPOINT_OP_START_TIMEOUT_MS, treat it as complete.
+      const awaitOpStart = (sentAt: number): void => {
+        if (this.callbacks.isStopped()) {
+          this._abortCheckpoint();
+          resolve(false);
+          return;
+        }
+        if (this.callbacks.isWorking()) {
+          awaitOpFinish(Date.now());
+          return;
+        }
+        if (Date.now() - sentAt >= CHECKPOINT_OP_START_TIMEOUT_MS) {
+          resolve(true);
+          return;
+        }
+        this._checkpointTimer = setTimeout(() => awaitOpStart(sentAt), CHECKPOINT_POLL_MS);
+      };
+
+      // Phase 3: op started — wait for it to FINISH (idle), with a safety cap.
+      const awaitOpFinish = (startedAt: number): void => {
+        if (this.callbacks.isStopped()) {
+          this._abortCheckpoint();
+          resolve(false);
+          return;
+        }
+        if (!this.callbacks.isWorking()) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - startedAt >= CHECKPOINT_OP_MAX_MS) {
+          resolve(true);
+          return;
+        }
+        this._checkpointTimer = setTimeout(() => awaitOpFinish(startedAt), CHECKPOINT_POLL_MS);
+      };
+
+      waitIdleThenSend();
+    });
+  }
+
+  /** Clear checkpoint state + timer (on abort or stop). */
+  private _abortCheckpoint(): void {
+    if (this._checkpointTimer) {
+      clearTimeout(this._checkpointTimer);
+      this._checkpointTimer = null;
+    }
+    this._checkpointActive = false;
+  }
+
+  // ============================================================================
   // Threshold checks
   // ============================================================================
 
@@ -217,7 +582,7 @@ export class SessionAutoOps extends EventEmitter {
    */
   checkAutoCompact(): void {
     if (this.callbacks.isStopped()) return;
-    if (!this._autoCompactEnabled || this._isCompacting || this._isClearing) return;
+    if (!this._autoCompactEnabled || this._isCompacting || this._isClearing || this._checkpointActive) return;
 
     const totalTokens = this.callbacks.getTotalTokens();
     if (totalTokens >= this._autoCompactThreshold) {
@@ -265,7 +630,7 @@ export class SessionAutoOps extends EventEmitter {
    */
   checkAutoClear(): void {
     if (this.callbacks.isStopped()) return;
-    if (!this._autoClearEnabled || this._isClearing || this._isCompacting) return;
+    if (!this._autoClearEnabled || this._isClearing || this._isCompacting || this._checkpointActive) return;
 
     const totalTokens = this.callbacks.getTotalTokens();
     if (totalTokens >= this._autoClearThreshold) {
@@ -321,5 +686,13 @@ export class SessionAutoOps extends EventEmitter {
       this._autoClearTimer = null;
     }
     this._isClearing = false;
+
+    if (this._checkpointTimer) {
+      clearTimeout(this._checkpointTimer);
+      this._checkpointTimer = null;
+    }
+    this._checkpointActive = false;
+
+    this._cancelAutoResume('stopped');
   }
 }

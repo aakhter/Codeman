@@ -73,6 +73,14 @@ export const SessionWorking = 'session:working' as const;
 export const SessionAutoClear = 'session:autoClear' as const;
 /** Auto-compact triggered for the session. */
 export const SessionAutoCompact = 'session:autoCompact' as const;
+/** Agent-initiated checkpoint (compact-or-clear, then continue) state changed. */
+export const SessionCheckpoint = 'session:checkpoint' as const;
+/** Usage-limit pause detected; auto-resume scheduled. */
+export const SessionLimitPauseScheduled = 'session:limitPauseScheduled' as const;
+/** Auto-resume prompt sent after a usage-limit reset. */
+export const SessionLimitResume = 'session:limitResume' as const;
+/** Pending usage-limit auto-resume cancelled (session resumed or feature disabled). */
+export const SessionLimitResumeCancelled = 'session:limitResumeCancelled' as const;
 /** CLI version/model info detected from session output. */
 export const SessionCliInfo = 'session:cliInfo' as const;
 /** General session message (e.g. status text). */
@@ -363,6 +371,10 @@ export const SseEvent = {
   SessionWorking,
   SessionAutoClear,
   SessionAutoCompact,
+  SessionCheckpoint,
+  SessionLimitPauseScheduled,
+  SessionLimitResume,
+  SessionLimitResumeCancelled,
   SessionCliInfo,
   SessionMessage,
   SessionInteractive,
