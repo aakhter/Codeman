@@ -24,6 +24,7 @@ afterEach(async () => {
   if (origDataDir === undefined) delete process.env.CODEMAN_DATA_DIR;
   else process.env.CODEMAN_DATA_DIR = origDataDir;
   for (const d of dataDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   const mod = await import('../../src/config/headroom-routing.js');
   mod.__resetHealthCache();
@@ -149,5 +150,38 @@ describe('resolveHeadroomClaudeBaseUrl', () => {
     const { resolveHeadroomClaudeBaseUrl, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
     __resetHealthCache();
     expect(await resolveHeadroomClaudeBaseUrl('claude')).toBeUndefined();
+  });
+});
+
+describe('resolveHeadroomRouted', () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it('true for healthy claude and codex, false for shell', async () => {
+    withSettings({ headroomProxyUrl: 'http://h:8787', headroomRouteClaude: true, headroomRouteCodex: true });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true } as Response));
+    const m = await import('../../src/config/headroom-routing.js');
+    m.__resetHealthCache();
+    expect(await m.resolveHeadroomRouted('claude')).toBe(true);
+    expect(await m.resolveHeadroomRouted('codex')).toBe(true);
+    expect(await m.resolveHeadroomRouted('shell')).toBe(false);
+  });
+
+  it('false when the proxy is unhealthy', async () => {
+    withSettings({ headroomProxyUrl: 'http://h:8787' });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
+    const m = await import('../../src/config/headroom-routing.js');
+    m.__resetHealthCache();
+    expect(await m.resolveHeadroomRouted('claude')).toBe(false);
+    expect(await m.resolveHeadroomRouted('codex')).toBe(false);
+  });
+
+  it('false for codex when routeCodex is off', async () => {
+    withSettings({ headroomProxyUrl: 'http://h:8787', headroomRouteCodex: false });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true } as Response));
+    const m = await import('../../src/config/headroom-routing.js');
+    m.__resetHealthCache();
+    expect(await m.resolveHeadroomRouted('codex')).toBe(false);
   });
 });

@@ -66,7 +66,11 @@ import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 // ============================================================================
 
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
-import { resolveHeadroomClaudeBaseUrl, reconcileCodexHeadroomPatch } from './config/headroom-routing.js';
+import {
+  resolveHeadroomClaudeBaseUrl,
+  reconcileCodexHeadroomPatch,
+  resolveHeadroomRouted,
+} from './config/headroom-routing.js';
 
 /** Delay after tmux session creation — enough for detached tmux to be queryable */
 const TMUX_CREATION_WAIT_MS = 100;
@@ -1179,6 +1183,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
+    const headroomRouted =
+      mode === 'claude'
+        ? headroomClaudeUrl !== undefined
+        : mode === 'codex'
+          ? await resolveHeadroomRouted('codex')
+          : undefined;
     const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
       ' && '
     );
@@ -1330,6 +1340,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         mode,
         attached: false,
         name,
+        headroomRouted,
       };
 
       this.sessions.set(sessionId, session);
@@ -1431,6 +1442,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const { pathExport } = this.buildPathExport(mode);
 
     const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
+    if (session) {
+      session.headroomRouted =
+        mode === 'claude'
+          ? headroomClaudeUrl !== undefined
+          : mode === 'codex'
+            ? await resolveHeadroomRouted('codex')
+            : undefined;
+    }
     const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
       ' && '
     );

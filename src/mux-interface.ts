@@ -43,6 +43,8 @@ export interface MuxSession {
   respawnConfig?: PersistedRespawnConfig;
   /** Whether Ralph / Todo tracking is enabled */
   ralphEnabled?: boolean;
+  /** COD-102: whether this session was routed through Headroom at spawn (claude/codex); undefined for other modes. */
+  headroomRouted?: boolean;
 }
 
 /**

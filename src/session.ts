@@ -867,6 +867,11 @@ export class Session extends EventEmitter {
     return this._name;
   }
 
+  /** COD-102: whether this session was routed through Headroom at spawn. */
+  get headroomRouted(): boolean | undefined {
+    return this._muxSession?.headroomRouted;
+  }
+
   set name(value: string) {
     this._name = value;
   }

@@ -88,4 +88,17 @@ export async function resolveHeadroomClaudeBaseUrl(mode: SessionMode): Promise<s
   return (await isHeadroomHealthy(proxyUrl)) ? proxyUrl : undefined;
 }
 
+/**
+ * Whether a session of this mode would be routed through Headroom right now
+ * (config + live health). Claude routes via env injection; Codex via the
+ * config.toml patch; other modes never route. Used to label sessions in the UI.
+ */
+export async function resolveHeadroomRouted(mode: SessionMode): Promise<boolean> {
+  if (mode === 'claude') return (await resolveHeadroomClaudeBaseUrl('claude')) !== undefined;
+  if (mode === 'codex') {
+    const { proxyUrl, routeCodex } = getHeadroomConfig();
+    return !!proxyUrl && routeCodex && (await isHeadroomHealthy(proxyUrl));
+  }
+  return false;
+}
 export { reconcileCodexHeadroomPatch } from './codex-headroom-patch.js';
