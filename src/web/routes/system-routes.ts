@@ -48,6 +48,8 @@ import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
 import { AUTH_SESSION_TTL_MS } from '../../config/auth-config.js';
 import { resolveTerminalHistoryConfig } from '../../config/terminal-history.js';
 import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
+import { getHeadroomConfig } from '../../config/headroom-routing.js';
+import { fetchHeadroomStatus } from '../../config/headroom-status.js';
 
 // Maximum screenshot upload size (10MB)
 const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024;
@@ -365,6 +367,24 @@ export function registerSystemRoutes(
     return {
       available: isGeminiAvailable(),
       path: resolveGeminiDir(),
+    };
+  });
+
+  // ========== Headroom ===
+  app.get('/api/headroom/status', async () => {
+    const cfg = getHeadroomConfig();
+    const status = await fetchHeadroomStatus(cfg.proxyUrl);
+    const routedSessions = [...ctx.sessions.values()].map((s) => ({
+      name: s.name,
+      mode: s.mode,
+      routed: s.headroomRouted ?? null,
+    }));
+    return {
+      enabled: cfg.proxyUrl !== '',
+      proxyUrl: cfg.proxyUrl,
+      settings: { routeClaude: cfg.routeClaude, routeCodex: cfg.routeCodex },
+      ...status,
+      routedSessions,
     };
   });
 
