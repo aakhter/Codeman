@@ -40,7 +40,7 @@ export function stripManagedRegions(text: string): string {
 
 /** Pure: produce the patched file content for the given original + proxy URL. */
 export function patchText(original: string, proxyUrl: string): string {
-  const v1 = `${proxyUrl.replace(/\/$/, '')}/v1`;
+  const v1 = `${proxyUrl.replace(/\/+$/, '')}/v1`;
   const body = stripManagedRegions(original); // idempotent: drop any prior patch first
   const top = `${TOP_START}\n` + `model_provider = "headroom"\n` + `openai_base_url = "${v1}"\n` + `${TOP_END}\n\n`;
   const prov =
@@ -54,7 +54,7 @@ export function patchText(original: string, proxyUrl: string): string {
 }
 
 function writeAtomic(path: string, content: string): void {
-  const tmp = join(dirname(path), '.config.toml.headroom.tmp');
+  const tmp = join(dirname(path), `.config.toml.headroom.${process.pid}.${Date.now()}.tmp`);
   writeFileSync(tmp, content, { mode: 0o600 });
   renameSync(tmp, path);
 }

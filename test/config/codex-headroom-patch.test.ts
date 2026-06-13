@@ -65,6 +65,12 @@ describe('patchText', () => {
     expect(out).toContain('[model_providers.headroom]');
     expect(stripManagedRegions(out)).toBe('');
   });
+
+  it('normalizes multiple trailing slashes to a single /v1', () => {
+    const out = patchText(REAL, 'http://h:8787//');
+    expect(out).toContain('openai_base_url = "http://h:8787/v1"');
+    expect(out).not.toContain('8787//v1');
+  });
 });
 
 describe('applyCodexHeadroomPatch / removeCodexHeadroomPatch', () => {
