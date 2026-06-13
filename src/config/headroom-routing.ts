@@ -39,4 +39,46 @@ export function getHeadroomConfig(): HeadroomConfig {
   };
 }
 
-// --- health gate (Task 2 adds the implementation) ---
+let _healthCache: { url: string; ok: boolean; at: number } | null = null;
+
+/** Test-only: clear the cached health result. */
+export function __resetHealthCache(): void {
+  _healthCache = null;
+}
+
+/**
+ * Cached probe of `<proxyUrl>/readyz`. `now` is injectable for deterministic
+ * TTL tests; production callers omit it (defaults to Date.now()).
+ */
+export async function isHeadroomHealthy(proxyUrl: string, now: number = Date.now()): Promise<boolean> {
+  if (!proxyUrl) return false;
+  if (_healthCache && _healthCache.url === proxyUrl && now - _healthCache.at < HEALTH_TTL_MS) {
+    return _healthCache.ok;
+  }
+  let ok = false;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), HEALTH_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/readyz`, { signal: ctl.signal });
+      ok = res.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    ok = false;
+  }
+  _healthCache = { url: proxyUrl, ok, at: now };
+  return ok;
+}
+
+/**
+ * Resolve the ANTHROPIC_BASE_URL to inject for a session, or undefined to leave
+ * the session on the direct API. Claude-only; gated on config + health.
+ */
+export async function resolveHeadroomClaudeBaseUrl(mode: SessionMode): Promise<string | undefined> {
+  if (mode !== 'claude') return undefined;
+  const { proxyUrl, routeClaude } = getHeadroomConfig();
+  if (!proxyUrl || !routeClaude) return undefined;
+  return (await isHeadroomHealthy(proxyUrl)) ? proxyUrl : undefined;
+}

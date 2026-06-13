@@ -49,3 +49,75 @@ describe('getHeadroomConfig', () => {
     expect(cfg.routeCodex).toBe(true);
   });
 });
+
+describe('isHeadroomHealthy', () => {
+  it('returns true on a 2xx /readyz and caches within the TTL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    vi.stubGlobal('fetch', fetchMock);
+    const { isHeadroomHealthy, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
+    __resetHealthCache();
+    expect(await isHeadroomHealthy('http://h:8787', 1000)).toBe(true);
+    expect(await isHeadroomHealthy('http://h:8787', 1500)).toBe(true); // cached, no 2nd fetch
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://h:8787/readyz',
+      expect.objectContaining({ signal: expect.anything() })
+    );
+  });
+
+  it('re-probes after the TTL expires', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    vi.stubGlobal('fetch', fetchMock);
+    const { isHeadroomHealthy, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
+    __resetHealthCache();
+    await isHeadroomHealthy('http://h:8787', 1000);
+    await isHeadroomHealthy('http://h:8787', 1000 + 31_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns false when fetch rejects (proxy down/timeout)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
+    const { isHeadroomHealthy, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
+    __resetHealthCache();
+    expect(await isHeadroomHealthy('http://h:8787', 2000)).toBe(false);
+  });
+
+  it('returns false for an empty proxy URL without fetching', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { isHeadroomHealthy, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
+    __resetHealthCache();
+    expect(await isHeadroomHealthy('', 1000)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveHeadroomClaudeBaseUrl', () => {
+  it('returns the proxy URL for a healthy Claude session', async () => {
+    setEnv({ HEADROOM_PROXY_URL: 'http://h:8787', HEADROOM_ROUTE_CLAUDE: '1' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true } as Response));
+    const { resolveHeadroomClaudeBaseUrl, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
+    __resetHealthCache();
+    expect(await resolveHeadroomClaudeBaseUrl('claude')).toBe('http://h:8787');
+  });
+
+  it('returns undefined for non-claude modes', async () => {
+    const { resolveHeadroomClaudeBaseUrl } = await import('../../src/config/headroom-routing.js');
+    expect(await resolveHeadroomClaudeBaseUrl('codex')).toBeUndefined();
+    expect(await resolveHeadroomClaudeBaseUrl('shell')).toBeUndefined();
+  });
+
+  it('returns undefined when Claude routing is disabled', async () => {
+    setEnv({ HEADROOM_PROXY_URL: 'http://h:8787', HEADROOM_ROUTE_CLAUDE: 'off' });
+    const { resolveHeadroomClaudeBaseUrl } = await import('../../src/config/headroom-routing.js');
+    expect(await resolveHeadroomClaudeBaseUrl('claude')).toBeUndefined();
+  });
+
+  it('returns undefined when the proxy is unhealthy (fallback to direct API)', async () => {
+    setEnv({ HEADROOM_PROXY_URL: 'http://h:8787', HEADROOM_ROUTE_CLAUDE: '1' });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
+    const { resolveHeadroomClaudeBaseUrl, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
+    __resetHealthCache();
+    expect(await resolveHeadroomClaudeBaseUrl('claude')).toBeUndefined();
+  });
+});
