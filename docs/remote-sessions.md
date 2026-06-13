@@ -29,8 +29,9 @@ Types live in `src/types/session.ts`; persistence in `src/remote-hosts.ts`.
 | `RemoteSshOptions` | The **HOW-to-reach** fields, shared by host + session: `identityFile`, `socksProxy` (`host:port`), `jumpHost` (`[user@]host[:port]`), `extraSshOptions` (`KEY=VALUE[]`). Every field optional — all-absent reproduces port-22, default-identity, directly-SSH-able behavior. |
 | `RemoteHost` (extends `RemoteSshOptions`) | A saved host: `id`, `label`, `host`, `username`, `port?`, `commands?` (per-mode launch command override). |
 | `RemoteCase` | A working directory on a host: `name`, `type: 'remote'`, `hostId`, `remotePath`. |
-| `SessionRemote` (extends `RemoteSshOptions`) | The resolved bundle stamped onto a live session: host coordinates + `remotePath` + `commands`. Built by `toSessionRemote(host, case)`, which copies the advanced SSH options through so the launch connects exactly as configured. |
+| `SessionRemote` (extends `RemoteSshOptions`) | The resolved bundle stamped onto a live session: host coordinates + `remotePath` + `commands`, plus **`owned?`** and **`remoteSessionName?`** (COD-105 — see [Ownership](#ownership-launched-vs-discovered-and-attached-cod-105)). Built by `toSessionRemote(host, case)` (sets `owned: true`) for the launch path, or `toAttachedSessionRemote(host, name, path)` (sets `owned: false`) for the attach path. Both copy the advanced SSH options through so every connection is identical. |
 | `RemoteCommandMode` | `Extract<SessionMode, 'shell' \| 'claude' \| 'opencode' \| 'codex' \| 'gemini'>` — the modes that can run remotely. |
+| `RemoteSessionInfo` (COD-105) | One discovered remote tmux session: `name` (always `codeman-*`), `attached` (a client is connected), `created` (epoch s), `windows`. Returned by `listRemoteCodemanSessions()`. |
 
 Persistence is two flat JSON arrays in the instance data dir:
 
@@ -135,6 +136,63 @@ can reach also passes the probe (and vice-versa).
 create-path tests would hit a real ~10s ssh timeout. Only the live probe is
 skipped; command construction is still asserted by unit tests.
 
+## Ownership: launched vs. discovered-and-attached (COD-105)
+
+COD-104 (above) was Phase 1 — Codeman *launches* a remote session and owns it.
+COD-105 is Phase 2 — Codeman can also **discover** `codeman-*` tmux sessions
+already running on a remote host (created by the remote's own Codeman or another
+instance) and **attach** to one it didn't launch. Ownership decides what happens
+when the tab closes.
+
+`SessionRemote.owned` carries this:
+
+- **`owned: true`** (or absent — legacy/COD-104 sessions persisted before this
+  field) — we launched it via `buildRemoteLaunchCommand` and may explicitly kill it.
+- **`owned: false`** — discovered + attached; another Codeman owns the remote
+  session. `remoteSessionName` holds its existing tmux name. Closing the tab
+  **detaches**, never kills.
+
+### Discovery
+
+`listRemoteCodemanSessions(host)` lists the remote's `codeman-*` sessions:
+
+- `buildRemoteListSessionsCommand()` runs `tmux -L codeman list-sessions -F "…"`
+  over SSH (connection args from the shared `buildSshConnectionArgs`, so discovery
+  connects identically to launch/probe). `2>/dev/null` swallows tmux's "no server
+  running" stderr.
+- `parseRemoteSessionList()` is a **pure, unit-tested** parser. ⚠️ Quirk: the
+  remote tmux's `-F "…\t…"` format emits the **literal two-character `\t`**, not a
+  real tab (verified on tmux next-3.7), so the parser splits on `/\\t|\t/` (literal
+  backslash-t **or** a real tab, for builds that do expand it). It keeps only
+  `codeman-*` names, coerces types, and skips malformed lines.
+- `listRemoteCodemanSessions()` **never throws** — unreachable host / no tmux / no
+  sessions all map to `[]`. Like the prereq probe, it **no-ops to `[]` under
+  `VITEST`** so a request path never opens a real ssh connection.
+
+Discovery is **explicit** — the UI has a "Discover existing sessions" button per
+host; Codeman never auto-discovers on host select.
+
+### Attach vs. launch selection
+
+`buildRemoteSessionCommand(mode, remote, sessionId)` in `tmux-manager.ts` picks the
+remote command line by ownership:
+
+- **`owned === false`** → `buildRemoteAttachCommand(remote, name)` — emits
+  `ssh … -t … 'tmux -L codeman attach -t <remoteSessionName>'`. It uses **`attach`,
+  NOT `new-session -A`**, so it only *joins* an existing session and never creates
+  one.
+- **owned (default)** → `buildRemoteLaunchCommand` (the COD-104 path above).
+
+### Detach-not-kill
+
+`TmuxManager.killSession()` has an **early return for non-owned remote sessions**:
+it tears down **only the LOCAL pane** holding the ssh client (`tmux -L codeman
+kill-session` on *this* host's socket). Killing the local ssh sends SIGHUP to the
+remote `tmux attach`, which **detaches** — the durable remote session survives.
+The early return is a structural guarantee that **no code path can ever issue a
+remote `kill-session` for a session we don't own** — the only `kill-session` run is
+on the local socket, which never reaches the remote socket.
+
 ## API
 
 Routes are registered in `src/web/routes/case-routes.ts`:
@@ -145,11 +203,18 @@ Routes are registered in `src/web/routes/case-routes.ts`:
 | `POST` | `/api/remote-hosts` | Create a host |
 | `PUT` | `/api/remote-hosts/:id` | Update a host |
 | `DELETE` | `/api/remote-hosts/:id` | Delete a host |
+| `GET` | `/api/remote-hosts/:hostId/sessions` | Discover `codeman-*` sessions on the host (COD-105; `listRemoteCodemanSessions`, never errors) |
 | `POST` | `/api/cases/remote-link` | Link a case to a remote host (creates the `RemoteCase`) |
+
+Attaching to a discovered session is a **session-create** path, not a host route:
+`POST /api/sessions` accepts `attachRemoteSession: { hostId, remoteSessionName }`
+(schema in `schemas.ts`; `remoteSessionName` must match `^codeman-[a-zA-Z0-9._-]+$`),
+which `session-routes.ts` turns into a non-owned (`owned: false`) session.
 
 Frontend touchpoints: the remote-host management UI is in `session-ui.js` /
 `panels-ui.js`; a remote session is created by picking a remote host/case in the
-session-create flow.
+session-create flow, or via the per-host **"Discover existing sessions"** button →
+**Attach** action (creates an `owned: false` session).
 
 ## Security notes
 
@@ -169,4 +234,4 @@ session-create flow.
 - `CLAUDE.md` → Architecture → **Remote** row, and the **Remote sessions (SSH)**
   Key Pattern.
 - `docs/security-architecture.md` — overall network/auth model.
-- COD-104 (tmux prereq + durable launch), COD-107 (shell-safe connection args).
+- COD-104 (tmux prereq + durable launch), COD-105 (discover + attach, detach-not-kill ownership), COD-107 (shell-safe connection args).
