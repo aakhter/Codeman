@@ -1,34 +1,41 @@
 /**
- * Headroom routing config + health gate (src/config/headroom-routing.ts), COD-98.
- * Module reads env at call time (not module load), so each case sets env then calls.
+ * Headroom routing config + health gate (src/config/headroom-routing.ts), COD-98/COD-102.
+ * getHeadroomConfig now reads settings.json (not env vars).
+ * isHeadroomHealthy takes proxyUrl directly -- no config read, no change needed.
  * Port: N/A (no server).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-const ENV_KEYS = ['HEADROOM_PROXY_URL', 'HEADROOM_ROUTE_CLAUDE', 'HEADROOM_ROUTE_CODEX'] as const;
-const ORIG: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-
-function setEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>) {
-  for (const k of ENV_KEYS) {
-    const v = env[k];
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+const dataDirs: string[] = [];
+function withSettings(obj: Record<string, unknown> | null): string {
+  const dir = mkdtempSync(join(tmpdir(), 'hr-settings-'));
+  dataDirs.push(dir);
+  if (obj !== null) writeFileSync(join(dir, 'settings.json'), JSON.stringify(obj));
+  process.env.CODEMAN_DATA_DIR = dir;
+  return dir;
 }
 
+const origDataDir = process.env.CODEMAN_DATA_DIR;
+
 afterEach(async () => {
-  for (const k of ENV_KEYS) {
-    if (ORIG[k] === undefined) delete process.env[k];
-    else process.env[k] = ORIG[k];
-  }
+  if (origDataDir === undefined) delete process.env.CODEMAN_DATA_DIR;
+  else process.env.CODEMAN_DATA_DIR = origDataDir;
+  for (const d of dataDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   vi.restoreAllMocks();
   const mod = await import('../../src/config/headroom-routing.js');
   mod.__resetHealthCache();
 });
 
-describe('getHeadroomConfig', () => {
-  it('defaults to ON with the baked-in proxy URL when nothing is set', async () => {
-    setEnv({ HEADROOM_PROXY_URL: undefined, HEADROOM_ROUTE_CLAUDE: undefined, HEADROOM_ROUTE_CODEX: undefined });
+describe('getHeadroomConfig (settings-based)', () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it('defaults to ON with the baked-in proxy URL when settings.json is absent', async () => {
+    withSettings(null);
     const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
     expect(getHeadroomConfig()).toEqual({
       proxyUrl: 'http://192.168.55.175:8787',
@@ -37,26 +44,34 @@ describe('getHeadroomConfig', () => {
     });
   });
 
-  it('treats an empty HEADROOM_PROXY_URL as the master kill-switch', async () => {
-    setEnv({ HEADROOM_PROXY_URL: '' });
+  it('reads values from settings.json', async () => {
+    withSettings({ headroomProxyUrl: 'http://h:9000', headroomRouteClaude: false, headroomRouteCodex: true });
+    const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
+    expect(getHeadroomConfig()).toEqual({ proxyUrl: 'http://h:9000', routeClaude: false, routeCodex: true });
+  });
+
+  it('treats an empty headroomProxyUrl as the kill-switch', async () => {
+    withSettings({ headroomProxyUrl: '' });
     const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
     expect(getHeadroomConfig().proxyUrl).toBe('');
   });
 
-  it('parses per-type toggles case-insensitively', async () => {
-    setEnv({ HEADROOM_ROUTE_CLAUDE: 'off', HEADROOM_ROUTE_CODEX: 'TRUE' });
-    const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
-    const cfg = getHeadroomConfig();
-    expect(cfg.routeClaude).toBe(false);
-    expect(cfg.routeCodex).toBe(true);
-  });
-
-  it('falls back to the default for unrecognized toggle values', async () => {
-    setEnv({ HEADROOM_ROUTE_CLAUDE: 'enabled', HEADROOM_ROUTE_CODEX: 'nope-not-valid' });
-    const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
-    const cfg = getHeadroomConfig();
-    expect(cfg.routeClaude).toBe(true); // unrecognized => default (true), NOT silently false
-    expect(cfg.routeCodex).toBe(true);
+  it('falls back to defaults for missing keys and malformed file', async () => {
+    const dir = withSettings({ headroomRouteClaude: false });
+    let { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
+    expect(getHeadroomConfig()).toEqual({
+      proxyUrl: 'http://192.168.55.175:8787',
+      routeClaude: false,
+      routeCodex: true,
+    });
+    vi.resetModules();
+    writeFileSync(join(dir, 'settings.json'), '{ not json');
+    ({ getHeadroomConfig } = await import('../../src/config/headroom-routing.js'));
+    expect(getHeadroomConfig()).toEqual({
+      proxyUrl: 'http://192.168.55.175:8787',
+      routeClaude: true,
+      routeCodex: true,
+    });
   });
 });
 
@@ -67,7 +82,7 @@ describe('isHeadroomHealthy', () => {
     const { isHeadroomHealthy, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
     __resetHealthCache();
     expect(await isHeadroomHealthy('http://h:8787', 1000)).toBe(true);
-    expect(await isHeadroomHealthy('http://h:8787', 1500)).toBe(true); // cached, no 2nd fetch
+    expect(await isHeadroomHealthy('http://h:8787', 1500)).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://h:8787/readyz',
@@ -103,8 +118,12 @@ describe('isHeadroomHealthy', () => {
 });
 
 describe('resolveHeadroomClaudeBaseUrl', () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
   it('returns the proxy URL for a healthy Claude session', async () => {
-    setEnv({ HEADROOM_PROXY_URL: 'http://h:8787', HEADROOM_ROUTE_CLAUDE: '1' });
+    withSettings({ headroomProxyUrl: 'http://h:8787', headroomRouteClaude: true });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true } as Response));
     const { resolveHeadroomClaudeBaseUrl, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
     __resetHealthCache();
@@ -112,19 +131,20 @@ describe('resolveHeadroomClaudeBaseUrl', () => {
   });
 
   it('returns undefined for non-claude modes', async () => {
+    withSettings({ headroomProxyUrl: 'http://h:8787', headroomRouteClaude: true });
     const { resolveHeadroomClaudeBaseUrl } = await import('../../src/config/headroom-routing.js');
     expect(await resolveHeadroomClaudeBaseUrl('codex')).toBeUndefined();
     expect(await resolveHeadroomClaudeBaseUrl('shell')).toBeUndefined();
   });
 
   it('returns undefined when Claude routing is disabled', async () => {
-    setEnv({ HEADROOM_PROXY_URL: 'http://h:8787', HEADROOM_ROUTE_CLAUDE: 'off' });
+    withSettings({ headroomProxyUrl: 'http://h:8787', headroomRouteClaude: false });
     const { resolveHeadroomClaudeBaseUrl } = await import('../../src/config/headroom-routing.js');
     expect(await resolveHeadroomClaudeBaseUrl('claude')).toBeUndefined();
   });
 
   it('returns undefined when the proxy is unhealthy (fallback to direct API)', async () => {
-    setEnv({ HEADROOM_PROXY_URL: 'http://h:8787', HEADROOM_ROUTE_CLAUDE: '1' });
+    withSettings({ headroomProxyUrl: 'http://h:8787', headroomRouteClaude: true });
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
     const { resolveHeadroomClaudeBaseUrl, __resetHealthCache } = await import('../../src/config/headroom-routing.js');
     __resetHealthCache();

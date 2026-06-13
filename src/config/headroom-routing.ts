@@ -1,16 +1,18 @@
 /**
- * @fileoverview Headroom proxy routing config + health gate (COD-98).
+ * @fileoverview Headroom proxy routing config + health gate (COD-98/COD-102).
  *
- * Reads three env vars (evaluated at call time, not module load):
- *   - HEADROOM_PROXY_URL   unset => baked-in default (feature ON); '' => kill-switch (OFF)
- *   - HEADROOM_ROUTE_CLAUDE default true; inject ANTHROPIC_BASE_URL for Claude sessions
- *   - HEADROOM_ROUTE_CODEX  default true; manage the ~/.codex/config.toml patch
+ * Reads three keys from settings.json (evaluated at call time, not module load):
+ *   - headroomProxyUrl    absent => baked-in default (feature ON); "" => kill-switch (OFF)
+ *   - headroomRouteClaude default true; inject ANTHROPIC_BASE_URL for Claude sessions
+ *   - headroomRouteCodex  default true; manage the ~/.codex/config.toml patch
  *
  * Routing is health-gated: a down proxy => sessions fall back to the direct API.
  *
  * @module config/headroom-routing
  */
+import { readFileSync } from 'node:fs';
 import type { SessionMode } from '../types/session.js';
+import { dataPath } from './instance.js';
 
 const DEFAULT_PROXY_URL = 'http://192.168.55.175:8787';
 const HEALTH_TTL_MS = 30_000;
@@ -23,22 +25,22 @@ export interface HeadroomConfig {
   routeCodex: boolean;
 }
 
-function parseBool(value: string | undefined, dflt: boolean): boolean {
-  if (value === undefined || value.trim() === '') return dflt;
-  const v = value.trim();
-  if (/^(1|true|yes|on)$/i.test(v)) return true;
-  if (/^(0|false|no|off)$/i.test(v)) return false;
-  return dflt; // unrecognized value => fall back to the default (don't silently disable)
+function readSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(dataPath('settings.json'), 'utf8')) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 export function getHeadroomConfig(): HeadroomConfig {
-  const raw = process.env.HEADROOM_PROXY_URL;
-  // unset => default (ON); explicit empty string => OFF.
-  const proxyUrl = raw === undefined ? DEFAULT_PROXY_URL : raw.trim();
+  const s = readSettings();
+  const rawUrl = s.headroomProxyUrl;
   return {
-    proxyUrl,
-    routeClaude: parseBool(process.env.HEADROOM_ROUTE_CLAUDE, true),
-    routeCodex: parseBool(process.env.HEADROOM_ROUTE_CODEX, true),
+    // key present as string => use it ("" = off); absent/non-string => default (ON)
+    proxyUrl: typeof rawUrl === 'string' ? rawUrl.trim() : DEFAULT_PROXY_URL,
+    routeClaude: typeof s.headroomRouteClaude === 'boolean' ? s.headroomRouteClaude : true,
+    routeCodex: typeof s.headroomRouteCodex === 'boolean' ? s.headroomRouteCodex : true,
   };
 }
 
