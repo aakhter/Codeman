@@ -359,7 +359,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
     document.getElementById('appSettingsThinkingEffort').value = settings.thinkingEffort ?? '';
-    document.getElementById('appSettingsHeadroomUrl').value = settings.headroomProxyUrl ?? '';
+    document.getElementById('appSettingsHeadroomUrl').value = settings.headroomProxyUrl ?? 'http://192.168.55.175:8787';
     document.getElementById('appSettingsHeadroomClaude').checked = settings.headroomRouteClaude ?? true;
     document.getElementById('appSettingsHeadroomCodex').checked = settings.headroomRouteCodex ?? true;
     this._refreshHeadroomStatus();
@@ -1725,7 +1725,7 @@ Object.assign(CodemanApp.prototype, {
         // Truecolor opt-in (COD-75) — off by default
         truecolorEnabled: false,
         // Headroom proxy settings
-        headroomProxyUrl: '',
+        headroomProxyUrl: 'http://192.168.55.175:8787',
         headroomRouteClaude: true,
         headroomRouteCodex: true,
         // Input
