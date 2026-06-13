@@ -54,7 +54,13 @@ import { getLifecycleLog } from '../../session-lifecycle-log.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
 import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
-import { checkRemoteTmuxAvailable, readRemoteCases, readRemoteHosts, toSessionRemote } from '../../remote-hosts.js';
+import {
+  checkRemoteTmuxAvailable,
+  readRemoteCases,
+  readRemoteHosts,
+  toAttachedSessionRemote,
+  toSessionRemote,
+} from '../../remote-hosts.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
@@ -268,7 +274,16 @@ export function registerSessionRoutes(
     let workingDir = body.workingDir || process.cwd();
     let remote = undefined;
 
-    if (body.caseName) {
+    // COD-105 — attach to a discovered (non-owned) remote tmux session. The
+    // remote session is already running, so we skip the tmux-prereq probe and
+    // build a NON-owned SessionRemote (detach-not-kill on close).
+    if (body.attachRemoteSession) {
+      const { hostId, remoteSessionName } = body.attachRemoteSession;
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      workingDir = `${host.username}@${host.host}:${remoteSessionName}`;
+      remote = toAttachedSessionRemote(host, remoteSessionName, workingDir);
+    } else if (body.caseName) {
       const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
       const remoteCase = remoteCases.find((item) => item.name === body.caseName);
       if (remoteCase) {
