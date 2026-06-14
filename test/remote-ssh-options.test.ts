@@ -146,6 +146,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
       'set -g mouse off',
       'set -sg escape-time 0',
       'set -g prefix C-q',
+      'set -g window-size latest',
     ].join(' \\; ');
     const expected = `ssh -o BatchMode=yes -t ${remoteSshTarget(baseRemote)} ${sh(tmuxInvocation)}`;
     expect(command).toBe(expected);
