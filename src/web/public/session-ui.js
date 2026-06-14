@@ -891,7 +891,10 @@ Object.assign(CodemanApp.prototype, {
         session.checkpointEnabled = enabled;
         session.checkpointMode = mode;
       }
-      this.showToast(`Agent checkpoint ${enabled ? 'enabled' : 'disabled'} (${mode})`, 'success');
+      this.showToast(
+        `Agent checkpoint ${enabled ? `enabled (default: ${mode})` : 'disabled'}`,
+        'success'
+      );
     } catch (err) {
       this.showToast('Failed to toggle checkpoint: ' + err.message, 'error');
     }

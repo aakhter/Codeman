@@ -197,4 +197,56 @@ describe('SessionAutoOps checkpoint', () => {
     await vi.advanceTimersByTimeAsync(POLL_MS * 4);
     expect(sentCommands()).not.toContain('continue\r');
   });
+
+  // ── COD-112: both modes available (agent-selectable), compact the default ──
+
+  it('default fallback is compact when enabled without a mode (no -m given)', async () => {
+    // Operator enables checkpoint without choosing a mode; agent signals with
+    // no explicit mode → compact runs (AC: "no explicit mode → compact").
+    ops.setCheckpoint(true);
+    expect(ops.checkpointMode).toBe('compact');
+
+    const res = ops.requestCheckpoint();
+    expect(res).toEqual({ triggered: true });
+    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    expect(sentCommands()).toContain('/compact\r');
+    expect(sentCommands()).not.toContain('/clear\r');
+  });
+
+  it('compact default + agent picks clear per-call → /clear runs (both available)', async () => {
+    // Headline AC: operator did NOT lock the session; default is compact, yet
+    // the agent can still run a clear checkpoint by passing the mode.
+    ops.setCheckpoint(true); // default compact, no lock
+    ops.requestCheckpoint({ mode: 'clear' });
+
+    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    expect(sentCommands()).toContain('/clear\r');
+    expect(sentCommands()).not.toContain('/compact\r');
+  });
+
+  it('agent runs compact then clear in one session without changing settings', async () => {
+    // AC: "an agent can trigger a compact checkpoint and a clear checkpoint
+    // within the same session without the operator changing settings."
+    ops.setCheckpoint(true); // enabled once, default compact
+
+    // 1) compact (default) — drive the full op cycle to completion.
+    ops.requestCheckpoint();
+    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    expect(sentCommands()).toContain('/compact\r');
+    working = true;
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    working = false;
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    expect(ops.isCheckpointActive).toBe(false); // first checkpoint done
+
+    // 2) clear (per-call override) — same session, no setCheckpoint between.
+    const res = ops.requestCheckpoint({ mode: 'clear' });
+    expect(res).toEqual({ triggered: true });
+    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    expect(sentCommands()).toContain('/clear\r');
+
+    // Both modes ran in the one session.
+    expect(sentCommands()).toContain('/compact\r');
+    expect(sentCommands()).toContain('/clear\r');
+  });
 });

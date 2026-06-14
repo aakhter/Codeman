@@ -2419,7 +2419,7 @@ class CodemanApp {
     const cli = this.codemanCli || { onPath: true, name: 'aicodeman' };
     const name = cli.name || 'aicodeman';
     const codeEl = document.getElementById('checkpointCliHint');
-    if (codeEl) codeEl.textContent = `${name} checkpoint`;
+    if (codeEl) codeEl.textContent = `${name} checkpoint -m compact|clear`;
     const warnEl = document.getElementById('checkpointCliPathWarning');
     if (warnEl) warnEl.hidden = cli.onPath !== false ? true : false;
     // Refresh the attachment drawer empty state only if the drawer already

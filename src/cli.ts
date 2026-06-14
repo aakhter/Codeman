@@ -339,8 +339,8 @@ program
 program
   .command('checkpoint')
   .alias('compact')
-  .description('Signal Codeman to checkpoint (compact-or-clear, then continue) at a clean boundary')
-  .option('-m, --mode <mode>', 'Checkpoint mode: compact or clear', 'compact')
+  .description('Signal Codeman to checkpoint at a clean boundary, then continue (both compact and clear available)')
+  .option('-m, --mode <mode>', 'Checkpoint mode: compact (default) or clear', 'compact')
   .option('-c, --continue <prompt>', 'Prompt to send after the op completes (default: continue)')
   .option('-s, --session <id>', 'Codeman session ID (defaults to CODEMAN_SESSION_ID)')
   .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')

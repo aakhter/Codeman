@@ -4203,6 +4203,19 @@ body.solo-mode .btn-lifecycle-log {
   margin-top: 0.25rem;
 }
 
+/* COD-112: the Agent Checkpoint "Default" picker is a non-locking fallback —
+   both compact and clear stay available to the agent regardless of this value.
+   Specificity (.form-row .checkpoint-default) intentionally beats the generic
+   `.form-row label { display: block }` rule so the label sits inline. */
+.form-row .checkpoint-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #9aa);
+}
+
 .switch {
   position: relative;
   display: inline-block;
