@@ -989,6 +989,18 @@ export class Session extends EventEmitter {
     this._flickerFilterEnabled = enabled;
   }
 
+  isIdle(): boolean {
+    return this._status === 'idle';
+  }
+
+  isBusy(): boolean {
+    return this._status === 'busy';
+  }
+
+  isRunning(): boolean {
+    return this._status === 'idle' || this._status === 'busy';
+  }
+
   get attachmentHistory(): SessionAttachmentHistoryItem[] {
     return sanitizeAttachmentHistory(this._attachmentHistory);
   }
@@ -1000,24 +1012,17 @@ export class Session extends EventEmitter {
   restoreAttachmentHistory(history: SessionAttachmentHistoryItem[] | undefined): void {
     this._attachmentHistory = [];
     for (const item of [...(history ?? [])].reverse()) {
+      // Guard against malformed/legacy on-disk entries (null, non-object, or
+      // missing required fields). historyKey() dereferences source/fileName, so
+      // a bad item would otherwise throw inside the constructor and abort the
+      // entire mux-recovery loop.
+      if (!item || typeof item !== 'object' || !item.source || !item.fileName) continue;
       this.upsertAttachmentHistory(item);
     }
   }
 
   getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] | undefined {
     return this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined;
-  }
-
-  isIdle(): boolean {
-    return this._status === 'idle';
-  }
-
-  isBusy(): boolean {
-    return this._status === 'busy';
-  }
-
-  isRunning(): boolean {
-    return this._status === 'idle' || this._status === 'busy';
   }
 
   toState(): SessionState {

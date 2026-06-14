@@ -185,6 +185,8 @@ export const CreateSessionSchema = z.object({
   effort: effortLevelSchema,
   /** Model override to write to .claude/settings.local.json (e.g., "opus[1m]"). Empty string clears. */
   modelOverride: z.string().max(50).optional(),
+  /** Inject the plan-usage statusLine exporter into the case (App Settings → Display → "Plan Usage Limits"). Claude-only. */
+  statusLineTelemetry: z.boolean().optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
@@ -228,6 +230,51 @@ export const ResizeSchema = z.object({
   cols: z.number().int().min(1).max(500),
   rows: z.number().int().min(1).max(200),
   viewportType: z.enum(['mobile', 'tablet', 'desktop']).optional(),
+});
+
+/**
+ * Schema for POST /api/status-telemetry
+ * Claude Code statusline payload forwarded by the Codeman-managed statusLine
+ * exporter (see hooks-config.generateStatusLineCommand). Validates only the
+ * subset Codeman displays; unknown keys (session_id, transcript_path, cwd, …)
+ * are stripped by z.object. Auth-exempt like /api/hook-event.
+ */
+// NOTE: every modeled field is `.nullish()` (not `.optional()`) on purpose.
+// Claude's statusline blob is officially shipped but undocumented in exact
+// shape, and `z.optional()` REJECTS an explicit `null` (accepts only
+// `undefined`) — a single stray `null` (e.g. `cost:{total_cost_usd:null}`)
+// would 400 the ENTIRE POST before the deliberately-tolerant parser
+// (usage-telemetry.ts, which only acts on `typeof === 'number'/'string'`) ever
+// runs, silently killing the chip's data feed. `.nullish()` keeps the schema
+// gate as forgiving as the parser it guards.
+const RateLimitWindowSchema = z
+  .object({
+    used_percentage: z.number().nullish(),
+    resets_at: z.number().nullish(),
+  })
+  .nullish();
+
+export const StatusTelemetrySchema = z.object({
+  sessionId: z.string().min(1).max(100),
+  data: z
+    .object({
+      rate_limits: z
+        .object({
+          five_hour: RateLimitWindowSchema,
+          seven_day: RateLimitWindowSchema,
+        })
+        .nullish(),
+      context_window: z
+        .object({
+          used_percentage: z.number().nullish(),
+          total_input_tokens: z.number().nullish(),
+          total_output_tokens: z.number().nullish(),
+        })
+        .nullish(),
+      cost: z.object({ total_cost_usd: z.number().nullish() }).nullish(),
+      model: z.object({ display_name: z.string().max(100).nullish() }).nullish(),
+    })
+    .nullish(),
 });
 
 // ========== Case Routes ==========
@@ -461,6 +508,7 @@ export const SettingsUpdateSchema = z
     showFileBrowser: z.boolean().optional(),
     showSubagents: z.boolean().optional(),
     showMultiMonitorButton: z.boolean().optional(),
+    showPlanUsageLimits: z.boolean().optional(),
     // Input
     gestureControlEnabled: z.boolean().optional(),
     // Claude CLI settings

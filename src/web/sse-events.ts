@@ -89,6 +89,8 @@ export const SessionMessage = 'session:message' as const;
 export const SessionInteractive = 'session:interactive' as const;
 /** Prompt sent to session for execution. */
 export const SessionRunning = 'session:running' as const;
+/** Claude plan-usage telemetry (5-hour + weekly limits) parsed from the statusline. */
+export const SessionStatusTelemetry = 'session:statusTelemetry' as const;
 
 // ─── Session: Ralph ──────────────────────────────────────────────────────────
 
@@ -388,6 +390,7 @@ export const SseEvent = {
   SessionMessage,
   SessionInteractive,
   SessionRunning,
+  SessionStatusTelemetry,
 
   // Session: Ralph
   SessionRalphLoopUpdate,

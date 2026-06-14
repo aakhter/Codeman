@@ -135,7 +135,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 0.9.14 (must match `package.json`)
+**Version**: 1.0.0 (must match `package.json`)
 
 ## Project Overview
 
@@ -158,7 +158,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | Domain | Key files | Notes |
 |--------|-----------|-------|
 | **Entry** | `src/index.ts`, `src/cli.ts` | |
-| **Session** | `src/session.ts` ★, `src/session-manager.ts`, `src/session-auto-ops.ts`, `src/session-cli-builder.ts`, `src/session-lifecycle-log.ts`, `src/session-task-cache.ts`, `src/usage-limit-patterns.ts` | |
+| **Session** | `src/session.ts` ★, `src/session-manager.ts`, `src/session-auto-ops.ts`, `src/session-cli-builder.ts`, `src/session-lifecycle-log.ts`, `src/session-task-cache.ts`, `src/usage-limit-patterns.ts`, `src/usage-telemetry.ts` | |
 | **Mux** | `src/mux-interface.ts`, `src/mux-factory.ts`, `src/tmux-manager.ts` ★ | |
 | **Respawn** | `src/respawn-controller.ts` ★ + 4 helpers (`-adaptive-timing`, `-health`, `-metrics`, `-patterns`) | Read `docs/respawn-state-machine.md` first |
 | **Ralph** | `src/ralph-tracker.ts` ★, `src/ralph-loop.ts` + 5 helpers (`-config`, `-fix-plan-watcher`, `-plan-tracker`, `-stall-detector`, `-status-parser`) | Read `docs/ralph-wiggum-guide.md` first |
@@ -231,7 +231,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | **QR Auth** | Single-use 6-char tokens (60s TTL) for tunnel login. See `docs/qr-auth-plan.md` |
 | **Sessions** | 24h cookie (`codeman_session`), auto-extend, device context audit |
 | **Rate limit** | 10 failed auth/IP → 429 (15min decay). QR has separate limiter |
-| **Hook bypass** | `/api/hook-event` exempt from auth (localhost-only, schema-validated). While the **managed tunnel** runs, the bypass additionally requires the per-instance `X-Codeman-Hook-Secret` header (COD-54, `config/hook-secret.ts`): hook curls cat the secret file at exec time via `$CODEMAN_HOOK_SECRET_FILE` (session env), failures rate-limit in a dedicated bucket (never lock out login). External loopback proxies (own cloudflared/`tailscale serve`) aren't detected — plain bypass still applies there. Tunnel enable also **refuses** without `CODEMAN_PASSWORD` unless `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` (COD-55) |
+| **Hook bypass** | `/api/hook-event` (and `/api/status-telemetry`, the statusLine exporter) exempt from auth (localhost-only, schema-validated). While the **managed tunnel** runs, the bypass additionally requires the per-instance `X-Codeman-Hook-Secret` header (COD-54, `config/hook-secret.ts`): hook curls cat the secret file at exec time via `$CODEMAN_HOOK_SECRET_FILE` (session env), failures rate-limit in a dedicated bucket (never lock out login). External loopback proxies (own cloudflared/`tailscale serve`) aren't detected — plain bypass still applies there. Tunnel enable also **refuses** without `CODEMAN_PASSWORD` unless `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` (COD-55) |
 | **Env vars** | `CODEMAN_MUX` (managed session), `CODEMAN_API_URL` (auto-set for hooks), `CODEMAN_ALLOWED_HOSTS` (extra Host/Origin allowlist entries for reverse proxies, comma-separated; bare `.suffix` matches subdomains) |
 | **Validation** | Zod schemas, path allowlist regex, env prefix allowlist (`CLAUDE_CODE_*`/`OPENCODE_*`/`CODEX_*`) |
 | **Headers** | CORS localhost-only, CSP, X-Frame-Options, HSTS if HTTPS |

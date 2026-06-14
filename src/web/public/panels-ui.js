@@ -1868,29 +1868,7 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const terminal = new Terminal({
-        theme: {
-          background: '#0d0d0d',
-          foreground: '#e0e0e0',
-          cursor: '#e0e0e0',
-          cursorAccent: '#0d0d0d',
-          selection: 'rgba(255, 255, 255, 0.3)',
-          black: '#0d0d0d',
-          red: '#ff6b6b',
-          green: '#51cf66',
-          yellow: '#ffd43b',
-          blue: '#339af0',
-          magenta: '#cc5de8',
-          cyan: '#22b8cf',
-          white: '#e0e0e0',
-          brightBlack: '#495057',
-          brightRed: '#ff8787',
-          brightGreen: '#69db7c',
-          brightYellow: '#ffe066',
-          brightBlue: '#5c7cfa',
-          brightMagenta: '#da77f2',
-          brightCyan: '#66d9e8',
-          brightWhite: '#ffffff',
-        },
+        theme: { ...window.codemanCurrentXtermTheme() },
         fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "SF Mono", Monaco, monospace',
         fontSize: 12,
         lineHeight: 1.2,
@@ -3801,6 +3779,441 @@ Object.assign(CodemanApp.prototype, {
       overlay.classList.remove('visible');
     }
     this.filePreviewContent = '';
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Attachment Cards (detected documents/images)
+  // ═══════════════════════════════════════════════════════════════
+
+  // SSE `attachment:detected` consumer: surface a dismissible card for the file
+  // and bump the per-session history unread count (refreshing the open drawer).
+  _onAttachmentDetected(data) {
+    console.log('[Attachment Detected]', data);
+    this.addAttachmentCard(data);
+    if (data.sessionId) {
+      const current =
+        this.attachmentHistoryCounts.get(data.sessionId) ??
+        this.sessions.get(data.sessionId)?.attachmentHistory?.length ??
+        0;
+      this.attachmentHistoryCounts.set(data.sessionId, Math.min(current + 1, 100));
+      if (data.sessionId === this.activeSessionId) {
+        this.updateAttachmentHistoryBadge();
+        if (this.attachmentHistoryDrawerOpen) {
+          this._debouncedCall(
+            'attachmentHistoryRefresh',
+            () => {
+              // The drawer may have closed or the active session changed during
+              // the debounce window — don't refresh for a stale session.
+              if (this.attachmentHistoryDrawerOpen && this.activeSessionId === data.sessionId) {
+                this.loadAttachmentHistory(data.sessionId);
+              }
+            },
+            250
+          );
+        }
+      }
+    }
+  },
+
+  // Lazily create the floating stack the cards live in (appended to <body>).
+  ensureAttachmentCardStack() {
+    let stack = this.attachmentCardStack || document.getElementById('attachmentCardStack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.id = 'attachmentCardStack';
+      stack.className = 'attachment-card-stack';
+      document.body.appendChild(stack);
+    }
+    this.attachmentCardStack = stack;
+    return stack;
+  },
+
+  openAttachmentInNewTab(sessionId, filePath, attachmentId = null) {
+    const url = attachmentId
+      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
+      : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+    window.open(url, '_blank');
+  },
+
+  addAttachmentCard(attachmentEvent) {
+    const {
+      sessionId,
+      relativePath,
+      fileName,
+      timestamp,
+      size,
+      attachmentType,
+      extension,
+      attachmentId,
+      rawUrl,
+      previewUrl,
+      thumbnailUrl,
+    } = attachmentEvent;
+    const filePath = relativePath || fileName;
+    const cardId = attachmentId || `${sessionId}-${timestamp}-${fileName}`;
+
+    if (this.attachmentCards.has(cardId)) {
+      const existing = this.attachmentCards.get(cardId);
+      existing.element.focus?.();
+      return;
+    }
+
+    const MAX_ATTACHMENT_CARDS = 10;
+    if (this.attachmentCards.size >= MAX_ATTACHMENT_CARDS) {
+      const oldestId = this.attachmentCards.keys().next().value;
+      if (oldestId) this.closeAttachmentCard(oldestId);
+    }
+
+    const stack = this.ensureAttachmentCardStack();
+    const session = this.sessions.get(sessionId);
+    const sessionName = session?.name || sessionId.substring(0, 8);
+    const attachmentRawUrl =
+      rawUrl ||
+      (attachmentId
+        ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
+        : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`);
+    const attachmentPreviewUrl =
+      previewUrl ||
+      (attachmentId ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/preview` : null);
+    const attachmentThumbnailUrl =
+      thumbnailUrl ||
+      (attachmentId
+        ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/thumbnail`
+        : `/api/sessions/${sessionId}/file-thumbnail?path=${encodeURIComponent(filePath)}`);
+    const downloadUrl = attachmentId ? `${attachmentRawUrl}?download=true` : `${attachmentRawUrl}&download=true`;
+    const typeLabel = (extension || attachmentType || 'file').toUpperCase();
+
+    const card = document.createElement('article');
+    card.className = `attachment-card attachment-${escapeHtml(attachmentType || 'file')}`;
+    card.tabIndex = 0;
+    card.dataset.attachmentId = cardId;
+    card.dataset.previewUrl = attachmentPreviewUrl || '';
+    card.innerHTML = `
+      <div class="attachment-thumbnail">
+        ${attachmentThumbnailUrl ? `<img class="attachment-thumbnail-img" src="${escapeHtml(attachmentThumbnailUrl)}" alt="">` : ''}
+        <div class="attachment-thumbnail-fallback ${attachmentThumbnailUrl ? '' : 'visible'}">${escapeHtml(typeLabel)}</div>
+      </div>
+      <div class="attachment-card-main">
+        <div class="attachment-file-name" title="${escapeHtml(filePath)}">${escapeHtml(fileName)}</div>
+        <div class="attachment-file-meta">
+          <span>${escapeHtml(sessionName)}</span>
+          <span>${this.formatFileSize(size || 0)}</span>
+        </div>
+        <div class="attachment-actions">
+          <button type="button" class="attachment-preview-btn">Preview</button>
+          <a href="${escapeHtml(downloadUrl)}">Download</a>
+          <button type="button" class="attachment-open-btn">Open</button>
+        </div>
+      </div>
+      <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
+    `;
+
+    const attachmentThumbnailImg = card.querySelector('.attachment-thumbnail-img');
+    if (attachmentThumbnailImg) {
+      attachmentThumbnailImg.onerror = () => {
+        attachmentThumbnailImg.remove();
+        card.querySelector('.attachment-thumbnail-fallback')?.classList.add('visible');
+      };
+    }
+
+    card.querySelector('.attachment-preview-btn')?.addEventListener('click', () => {
+      this.openFilePreview(filePath, sessionId, attachmentId || null);
+    });
+    card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
+      this.openAttachmentInNewTab(sessionId, filePath, attachmentId || null);
+    });
+    card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
+      this.closeAttachmentCard(cardId);
+    });
+
+    stack.prepend(card);
+    this.attachmentCards.set(cardId, { element: card, sessionId, filePath });
+    this._refreshAttachmentClearAll();
+  },
+
+  // Centralized show/hide for the stack's "Clear all" control. Both addAttachmentCard and
+  // closeAttachmentCard call this so the control appears on the 2nd card and hides at <=1.
+  _refreshAttachmentClearAll() {
+    const stack = this.attachmentCardStack;
+    if (!stack) return;
+    let control = stack.querySelector('.attachment-clear-all');
+    if (this.attachmentCards.size < 2) {
+      if (control) control.hidden = true;
+      return;
+    }
+    if (!control) {
+      control = document.createElement('button');
+      control.type = 'button';
+      control.className = 'attachment-clear-all';
+      control.textContent = 'Clear all';
+      control.title = 'Dismiss all attachment cards';
+      control.addEventListener('click', () => this.closeAllAttachmentCards());
+      stack.prepend(control);
+    }
+    control.hidden = false;
+  },
+
+  closeAttachmentCard(attachmentId) {
+    const cardData = this.attachmentCards.get(attachmentId);
+    if (!cardData) return;
+    cardData.element.remove();
+    this.attachmentCards.delete(attachmentId);
+    if (this.attachmentCardStack && this.attachmentCards.size === 0) {
+      this.attachmentCardStack.remove();
+      this.attachmentCardStack = null;
+    } else {
+      this._refreshAttachmentClearAll();
+    }
+  },
+
+  closeAllAttachmentCards() {
+    for (const attachmentId of [...this.attachmentCards.keys()]) {
+      this.closeAttachmentCard(attachmentId);
+    }
+  },
+
+  closeSessionAttachmentCards(sessionId) {
+    const toClose = [];
+    for (const [attachmentId, data] of this.attachmentCards) {
+      if (data.sessionId === sessionId) toClose.push(attachmentId);
+    }
+    for (const attachmentId of toClose) {
+      this.closeAttachmentCard(attachmentId);
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Attachment History Drawer
+  // ═══════════════════════════════════════════════════════════════
+
+  updateAttachmentHistoryBadge(count = null) {
+    const badge = document.getElementById('attachmentHistoryBadge');
+    const button = document.getElementById('attachmentsHistoryBtn');
+    const sessionId = this.activeSessionId;
+    const nextCount = count ?? (sessionId ? this.attachmentHistoryCounts.get(sessionId) || 0 : 0);
+    if (badge) {
+      badge.textContent = nextCount > 99 ? '99+' : String(nextCount);
+      badge.style.display = nextCount > 0 ? '' : 'none';
+    }
+    if (button) {
+      button.classList.toggle('active', this.attachmentHistoryDrawerOpen);
+      button.setAttribute('aria-expanded', this.attachmentHistoryDrawerOpen ? 'true' : 'false');
+    }
+  },
+
+  ensureAttachmentHistoryDrawer() {
+    let drawer = document.getElementById('attachmentHistoryDrawer');
+    if (drawer) return drawer;
+
+    drawer = document.createElement('aside');
+    drawer.id = 'attachmentHistoryDrawer';
+    drawer.className = 'attachment-history-drawer';
+    drawer.setAttribute('aria-label', 'Attachment history');
+    drawer.innerHTML = `
+      <div class="attachment-history-header">
+        <div>
+          <div class="attachment-history-title">Attachments</div>
+          <div class="attachment-history-subtitle" id="attachmentHistorySubtitle">0 files</div>
+        </div>
+        <div class="attachment-history-header-actions">
+          <button type="button" class="btn-icon-sm" id="attachmentHistoryRefreshBtn" title="Refresh" aria-label="Refresh attachments">&#x21BB;</button>
+          <button type="button" class="btn-icon-sm" id="attachmentHistoryCloseBtn" title="Close" aria-label="Close attachments">&times;</button>
+        </div>
+      </div>
+      <div class="attachment-history-list" id="attachmentHistoryList"></div>
+    `;
+    document.body.appendChild(drawer);
+    drawer.querySelector('#attachmentHistoryRefreshBtn')?.addEventListener('click', () => {
+      this.loadAttachmentHistory(this.activeSessionId);
+    });
+    drawer.querySelector('#attachmentHistoryCloseBtn')?.addEventListener('click', () => {
+      this.closeAttachmentHistory();
+    });
+    return drawer;
+  },
+
+  async toggleAttachmentHistory() {
+    if (this.attachmentHistoryDrawerOpen) {
+      this.closeAttachmentHistory();
+      return;
+    }
+    await this.openAttachmentHistory();
+  },
+
+  async openAttachmentHistory() {
+    const drawer = this.ensureAttachmentHistoryDrawer();
+    this.attachmentHistoryDrawerOpen = true;
+    drawer.classList.add('open');
+    this.updateAttachmentHistoryBadge();
+    await this.loadAttachmentHistory(this.activeSessionId);
+  },
+
+  closeAttachmentHistory() {
+    const drawer = document.getElementById('attachmentHistoryDrawer');
+    this.attachmentHistoryDrawerOpen = false;
+    drawer?.classList.remove('open');
+    // Cancel any pending debounced refresh so it can't fire against a closed drawer.
+    if (this._debounceTimers?.attachmentHistoryRefresh) {
+      clearTimeout(this._debounceTimers.attachmentHistoryRefresh);
+      this._debounceTimers.attachmentHistoryRefresh = null;
+    }
+    this.updateAttachmentHistoryBadge();
+  },
+
+  async loadAttachmentHistory(sessionId = this.activeSessionId) {
+    const drawer = this.ensureAttachmentHistoryDrawer();
+    const list = drawer.querySelector('#attachmentHistoryList');
+    const subtitle = drawer.querySelector('#attachmentHistorySubtitle');
+    if (!list || !subtitle) return;
+
+    if (!sessionId) {
+      this.attachmentHistoryItems = [];
+      subtitle.textContent = 'No session';
+      list.innerHTML = '<div class="attachment-history-empty">No active session</div>';
+      this.updateAttachmentHistoryBadge(0);
+      return;
+    }
+
+    list.innerHTML = '<div class="attachment-history-empty">Loading...</div>';
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/attachments`);
+      if (!res.ok) throw new Error('Failed to load attachments');
+      const result = await res.json();
+      if (!result.success) throw new Error(result.error || 'Failed to load attachments');
+      const items = result.data?.items || [];
+      this.attachmentHistoryItems = items;
+      this.attachmentHistoryCounts.set(sessionId, items.length);
+      this.updateAttachmentHistoryBadge(items.length);
+      this.renderAttachmentHistory(items);
+    } catch (err) {
+      console.error('Failed to load attachment history:', err);
+      subtitle.textContent = 'Unavailable';
+      list.innerHTML = `<div class="attachment-history-empty">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  renderAttachmentHistory(items = this.attachmentHistoryItems || []) {
+    const drawer = this.ensureAttachmentHistoryDrawer();
+    const list = drawer.querySelector('#attachmentHistoryList');
+    const subtitle = drawer.querySelector('#attachmentHistorySubtitle');
+    if (!list || !subtitle) return;
+
+    subtitle.textContent = `${items.length} ${items.length === 1 ? 'file' : 'files'}`;
+    if (items.length === 0) {
+      list.innerHTML = `
+        <div class="attachment-history-empty">
+          <div class="attachment-history-empty-title">No attachments yet</div>
+          <div>Show a file here by running:</div>
+          <code>codeman attach /absolute/path/to/file.pptx</code>
+          <div>Supports .pptx, .docx, .pdf, .png, .md, and .txt.</div>
+        </div>
+      `;
+      return;
+    }
+
+    list.innerHTML = items.map((item) => this.renderAttachmentHistoryItem(item)).join('');
+    list.querySelectorAll('.attachment-history-thumb-img').forEach((img) => {
+      img.onerror = () => {
+        img.remove();
+        const fallback = img.closest('.attachment-history-thumb')?.querySelector('.attachment-history-thumb-fallback');
+        fallback?.classList.add('visible');
+      };
+    });
+    list.querySelectorAll('[data-attachment-action]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const id = button.getAttribute('data-history-id');
+        const action = button.getAttribute('data-attachment-action');
+        if (!id || !action) return;
+        if (action === 'preview') this.previewAttachmentHistoryItem(id);
+        if (action === 'download') this.downloadAttachmentHistoryItem(id);
+        if (action === 'open') this.openAttachmentHistoryItem(id);
+        if (action === 'reshow') this.reshowAttachmentCard(id);
+      });
+    });
+  },
+
+  renderAttachmentHistoryItem(item) {
+    const typeLabel = (item.extension || item.attachmentType || 'file').toUpperCase();
+    const meta = [
+      item.source === 'external' ? 'published' : 'workspace',
+      this.formatFileSize(item.size || 0),
+      item.missing ? 'missing' : '',
+    ]
+      .filter(Boolean)
+      .join(' • ');
+    const thumb =
+      item.thumbnailUrl && !item.missing
+        ? `<img class="attachment-history-thumb-img" src="${escapeHtml(item.thumbnailUrl)}" alt="">`
+        : '';
+    const disabled = item.missing ? 'disabled aria-disabled="true"' : '';
+    return `
+      <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
+        <div class="attachment-history-thumb">
+          ${thumb}
+          <div class="attachment-history-thumb-fallback ${thumb ? '' : 'visible'}">${escapeHtml(typeLabel)}</div>
+        </div>
+        <div class="attachment-history-item-main">
+          <div class="attachment-history-file-name" title="${escapeHtml(item.fileName)}">${escapeHtml(item.fileName)}</div>
+          <div class="attachment-history-meta">${escapeHtml(meta)}</div>
+          <div class="attachment-history-actions">
+            <button type="button" data-attachment-action="preview" data-history-id="${escapeHtml(item.id)}" ${disabled}>Preview</button>
+            <button type="button" data-attachment-action="download" data-history-id="${escapeHtml(item.id)}" ${disabled}>Download</button>
+            <button type="button" data-attachment-action="open" data-history-id="${escapeHtml(item.id)}" ${disabled}>Open</button>
+            <button type="button" data-attachment-action="reshow" data-history-id="${escapeHtml(item.id)}" ${disabled}>Card</button>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  getAttachmentHistoryItem(itemId) {
+    return (this.attachmentHistoryItems || []).find((item) => item.id === itemId) || null;
+  },
+
+  previewAttachmentHistoryItem(itemId) {
+    const item = this.getAttachmentHistoryItem(itemId);
+    if (!item || item.missing) return;
+    const path = item.relativePath || item.fileName;
+    this.openFilePreview(path, item.sessionId, item.attachmentId || null);
+    // Close the drawer so the preview window is unobstructed.
+    this.closeAttachmentHistory();
+  },
+
+  openAttachmentHistoryItem(itemId) {
+    const item = this.getAttachmentHistoryItem(itemId);
+    if (!item || item.missing) return;
+    if (item.rawUrl || item.url) {
+      window.open(item.rawUrl || item.url, '_blank');
+      return;
+    }
+    this.openAttachmentInNewTab(item.sessionId, item.relativePath || item.fileName, item.attachmentId || null);
+  },
+
+  downloadAttachmentHistoryItem(itemId) {
+    const item = this.getAttachmentHistoryItem(itemId);
+    if (!item || item.missing || !item.downloadUrl) return;
+    window.open(item.downloadUrl, '_blank');
+  },
+
+  reshowAttachmentCard(itemId) {
+    const item = this.getAttachmentHistoryItem(itemId);
+    if (!item || item.missing) return;
+    this.addAttachmentCard({
+      sessionId: item.sessionId,
+      relativePath: item.relativePath,
+      fileName: item.fileName,
+      // Use the item's own timestamp (not Date.now()) so the derived cardId is
+      // stable across clicks — re-showing focuses the existing card instead of
+      // stacking a duplicate.
+      timestamp: item.timestamp ?? Date.now(),
+      size: item.size,
+      attachmentType: item.attachmentType,
+      extension: item.extension,
+      attachmentId: item.attachmentId,
+      rawUrl: item.rawUrl,
+      previewUrl: item.previewUrl,
+      thumbnailUrl: item.thumbnailUrl,
+    });
   },
 
   copyFilePreviewContent() {

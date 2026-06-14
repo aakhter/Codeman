@@ -207,6 +207,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_LIMIT_RESUME, '_onSessionLimitResume'],
   [SSE_EVENTS.SESSION_LIMIT_RESUME_CANCELLED, '_onSessionLimitResumeCancelled'],
   [SSE_EVENTS.SESSION_CLI_INFO, '_onSessionCliInfo'],
+  [SSE_EVENTS.SESSION_STATUS_TELEMETRY, '_onSessionStatusTelemetry'],
 
   // Scheduled runs
   [SSE_EVENTS.SCHEDULED_CREATED, '_onScheduledCreated'],
@@ -649,6 +650,8 @@ class CodemanApp {
     const _kbSettings = this.loadAppSettingsFromStorage();
     if (_kbSettings.extendedKeyboardBar) KeyboardAccessoryBar.setMode('extended');
     this.applyHeaderVisibilitySettings();
+    this.restorePlanUsageChip();
+    this.applySkin();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
     // Remove mobile-init class now that JS has applied visibility settings.
@@ -706,6 +709,7 @@ class CodemanApp {
     // Load server-stored settings (async, re-applies visibility after load)
     this.loadAppSettingsFromServer(settingsPromise).then(() => {
       this.applyHeaderVisibilitySettings();
+      this.applySkin();
       this.applyTabWrapSettings();
       this.applyMonitorVisibility();
     });
@@ -834,6 +838,7 @@ class CodemanApp {
       if (e.key === 'Escape') {
         this.closeAllPanels();
         this.closeHelp();
+        if (this.attachmentHistoryDrawerOpen) this.closeAttachmentHistory();
       }
 
       // Option/Alt navigation uses physical key codes so macOS keyboard layouts
@@ -1921,6 +1926,58 @@ class CodemanApp {
     }
   }
 
+  // Claude plan usage limits (5-hour + weekly) — account-global, so the latest
+  // sample from any session drives the shared header chip.
+  _onSessionStatusTelemetry(data) {
+    this.updatePlanUsageChip(data);
+    // Persist last-known so the chip shows immediately on the next page load /
+    // SSE reconnect, instead of staying blank until a session next renders.
+    try {
+      localStorage.setItem('codeman:planUsage', JSON.stringify({ t: Date.now(), data }));
+    } catch {}
+  }
+
+  // Repopulate the chip from the last-known value on page load (account-global,
+  // slow-moving; ignored if older than 12h). Live events refresh it.
+  restorePlanUsageChip() {
+    try {
+      const raw = localStorage.getItem('codeman:planUsage');
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved?.data && Date.now() - (saved.t || 0) < 12 * 3600 * 1000) {
+        this.updatePlanUsageChip(saved.data);
+      }
+    } catch {}
+  }
+
+  updatePlanUsageChip(data) {
+    const chip = document.getElementById('planUsageChip');
+    if (!chip || !data) return;
+    const pct = (w) => (w && typeof w.usedPercentage === 'number' ? Math.round(w.usedPercentage) : null);
+    const five = pct(data.fiveHour);
+    const seven = pct(data.sevenDay);
+    if (five === null && seven === null) return;
+    // Per-window color by how much is used up: green < 60%, yellow 60–84%, red ≥ 85%.
+    const colorClass = (p) => (p >= 85 ? 'pu-red' : p >= 60 ? 'pu-yellow' : 'pu-green');
+    // innerHTML here is XSS-safe ONLY because every interpolated value is a
+    // coerced finite number and the labels/classes are fixed literals. If a
+    // string field (e.g. modelDisplayName, which the route also broadcasts) is
+    // ever shown in this chip, render it via textContent — never interpolate an
+    // untrusted string into this template.
+    const seg = (label, p) => {
+      if (p === null) return '';
+      const n = Math.round(Number(p));
+      if (!Number.isFinite(n)) return '';
+      return `<span class="pu-win"><span class="pu-label">${label}</span><span class="pu-val ${colorClass(n)}">${n}%</span></span>`;
+    };
+    chip.innerHTML = [seg('5h', five), seg('7d', seven)].filter(Boolean).join('<span class="pu-sep">·</span>');
+    const resetStr = (w) => (w && w.resetAt ? new Date(w.resetAt).toLocaleString() : '—');
+    chip.title =
+      `Claude plan usage\n` +
+      `5-hour limit: ${five ?? '—'}% used (resets ${resetStr(data.fiveHour)})\n` +
+      `Weekly limit: ${seven ?? '—'}% used (resets ${resetStr(data.sevenDay)})`;
+  }
+
   // Scheduled runs
   _onScheduledCreated(data) {
     this.currentRun = data;
@@ -2484,6 +2541,9 @@ class CodemanApp {
     // re-render; update the static checkpoint hint now.
     this.codemanCli = data.codemanCli || { onPath: true, name: 'aicodeman' };
     this._applyCodemanCliHints();
+    // Plan-usage chip: server's last-known telemetry, so it shows immediately on
+    // a fresh load / reconnect (authoritative; wins over the localStorage restore).
+    if (data.planUsage) this.updatePlanUsageChip(data.planUsage);
 
     // Update version displays (header and toolbar)
     if (data.version) {

@@ -47,7 +47,7 @@ import {
   validatePathWithinBase,
 } from '../route-helpers.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
-import { writeHooksConfig, updateCaseModel, stripCaseEnvKeys } from '../../hooks-config.js';
+import { writeHooksConfig, updateCaseModel, stripCaseEnvKeys, applyStatusLineConfig } from '../../hooks-config.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { imageWatcher } from '../../image-watcher.js';
 import { getLifecycleLog } from '../../session-lifecycle-log.js';
@@ -338,6 +338,21 @@ export function registerSessionRoutes(
     // Write model override to .claude/settings.local.json if provided
     if (body.modelOverride !== undefined) {
       await updateCaseModel(workingDir, body.modelOverride || null);
+    }
+
+    // Plan-usage statusLine exporter (App Settings → Display → "Plan Usage
+    // Limits"). Claude-only; runs for ANY working dir (linked cases / real repos,
+    // where most sessions live), mirroring updateCaseModel above.
+    //
+    // ADD-ONLY: we never remove on create. Sessions in a repo share one
+    // settings.local.json, so a single create-with-false (e.g. a client whose
+    // synced setting hadn't loaded yet) must NOT yank the statusLine out from
+    // under other live sessions in that repo — that breaks their footer + the
+    // chip's data feed for everyone. The exporter is benign when the chip is off
+    // (the footer just shows session status). isOurs-guarded so a user's own
+    // statusLine is never touched.
+    if ((body.mode ?? 'claude') === 'claude' && body.statusLineTelemetry === true) {
+      await applyStatusLineConfig(workingDir, true);
     }
 
     // Check OpenCode availability if requested

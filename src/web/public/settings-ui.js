@@ -305,15 +305,15 @@ Object.assign(CodemanApp.prototype, {
     // Header visibility settings
     document.getElementById('appSettingsShowFontControls').checked = settings.showFontControls ?? defaults.showFontControls ?? false;
     document.getElementById('appSettingsShowSystemStats').checked = settings.showSystemStats ?? defaults.showSystemStats ?? true;
-    document.getElementById('appSettingsShowTokenCount').checked = settings.showTokenCount ?? defaults.showTokenCount ?? true;
-    document.getElementById('appSettingsShowCost').checked = settings.showCost ?? defaults.showCost ?? false;
     document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? true;
     document.getElementById('appSettingsShowResponseViewer').checked = settings.showResponseViewer ?? defaults.showResponseViewer ?? false;
+    document.getElementById('appSettingsSkin').value = settings.skin ?? defaults.skin ?? 'daylight-blue';
     document.getElementById('appSettingsShowMonitor').checked = settings.showMonitor ?? defaults.showMonitor ?? false;
     document.getElementById('appSettingsShowProjectInsights').checked = settings.showProjectInsights ?? defaults.showProjectInsights ?? false;
     document.getElementById('appSettingsShowFileBrowser').checked = settings.showFileBrowser ?? defaults.showFileBrowser ?? false;
     document.getElementById('appSettingsShowSubagents').checked = settings.showSubagents ?? defaults.showSubagents ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
+    document.getElementById('appSettingsShowPlanUsageLimits').checked = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
     // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
     // but is only available when the instance runs with CODEMAN_GESTURE=1 (server sets
     // window.__codemanGestureAvailable). Hide just this item otherwise so the toggle
@@ -1436,7 +1436,8 @@ Object.assign(CodemanApp.prototype, {
   async saveAppSettings() {
     // Gesture overlay is injected at page render (server-side), so a change to it
     // only takes effect on reload — remember the prior value to decide below.
-    const _prevGestureEnabled = (this.loadAppSettingsFromStorage().gestureControlEnabled ?? false) === true;
+    const _prev = this.loadAppSettingsFromStorage();
+    const _prevGestureEnabled = (_prev.gestureControlEnabled ?? false) === true;
     const settings = {
       defaultClaudeMdPath: document.getElementById('appSettingsClaudeMdPath').value.trim(),
       defaultWorkingDir: document.getElementById('appSettingsDefaultDir').value.trim(),
@@ -1444,8 +1445,6 @@ Object.assign(CodemanApp.prototype, {
       // Header visibility settings
       showFontControls: document.getElementById('appSettingsShowFontControls').checked,
       showSystemStats: document.getElementById('appSettingsShowSystemStats').checked,
-      showTokenCount: document.getElementById('appSettingsShowTokenCount').checked,
-      showCost: document.getElementById('appSettingsShowCost').checked,
       showLifecycleLog: document.getElementById('appSettingsShowLifecycleLog').checked,
       showResponseViewer: document.getElementById('appSettingsShowResponseViewer').checked,
       showMonitor: document.getElementById('appSettingsShowMonitor').checked,
@@ -1453,6 +1452,7 @@ Object.assign(CodemanApp.prototype, {
       showFileBrowser: document.getElementById('appSettingsShowFileBrowser').checked,
       showSubagents: document.getElementById('appSettingsShowSubagents').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
+      showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
       subagentTrackingEnabled: document.getElementById('appSettingsSubagentTracking').checked,
       subagentActiveTabOnly: document.getElementById('appSettingsSubagentActiveTabOnly').checked,
@@ -1462,6 +1462,7 @@ Object.assign(CodemanApp.prototype, {
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
+      skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
       allowedTools: document.getElementById('appSettingsAllowedTools').value.trim(),
@@ -1492,6 +1493,16 @@ Object.assign(CodemanApp.prototype, {
       // Authoring actions (COD-64) — read editor rows, drop blanks, cap 20
       authoringActions: this.readAuthoringActionsFromEditor(),
     };
+
+    // The "Token Count" / "Show Cost ($)" header toggles were removed from the
+    // UI, but their features still read settings.showTokenCount / settings.showCost
+    // (applyHeaderVisibilitySettings, the header cost render). saveAppSettings
+    // rebuilds `settings` fresh from the DOM (a full replacement, not a merge), so
+    // without this these keys would be DROPPED on every save and fall back to their
+    // defaults — silently re-enabling the token chip for anyone who'd turned it off,
+    // with no UI left to turn it back off. Preserve the prior stored preference.
+    if (_prev.showTokenCount !== undefined) settings.showTokenCount = _prev.showTokenCount;
+    if (_prev.showCost !== undefined) settings.showCost = _prev.showCost;
 
     // Save to localStorage
     this.saveAppSettingsToStorage(settings);
@@ -1591,6 +1602,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Apply header visibility immediately
     this.applyHeaderVisibilitySettings();
+    this.applySkin();
     this.applyTabWrapSettings();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
@@ -1605,7 +1617,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Save to server (includes notification prefs for cross-browser persistence)
     // Strip device-specific keys — localEchoEnabled/cjkInputEnabled are per-platform
-    const { localEchoEnabled: _leo, cjkInputEnabled: _cjk, extendedKeyboardBar: _ekb, ...serverSettings } = settings;
+    const { localEchoEnabled: _leo, cjkInputEnabled: _cjk, extendedKeyboardBar: _ekb, skin: _skin, ...serverSettings } = settings;
     try {
       const res = await this._apiPut('/api/settings', {
         ...serverSettings,
@@ -1822,6 +1834,8 @@ Object.assign(CodemanApp.prototype, {
         headroomProxyUrl: 'http://192.168.55.175:8787',
         headroomRouteClaude: true,
         headroomRouteCodex: true,
+        // Plan usage limits header chip (upstream)
+        showPlanUsageLimits: false,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile
@@ -1831,6 +1845,7 @@ Object.assign(CodemanApp.prototype, {
         ralphTrackerEnabled: false,
         tabTwoRows: false,
         cjkInputEnabled: false,
+        skin: 'daylight-blue',
       };
     }
     // Desktop defaults - rely on ?? operators in apply functions
@@ -1866,6 +1881,24 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       console.error('Failed to save app settings:', err);
     }
+  },
+
+  // Apply the chosen skin live: sets the html[data-skin] attribute, syncs BOTH
+  // localStorage locations (the standalone 'codeman:skin' key the pre-paint head
+  // script reads + the app-settings blob field written by saveAppSettingsToStorage),
+  // updates window.__codemanSkin, and re-themes any live terminals.
+  applySkin() {
+    const settings = this.loadAppSettingsFromStorage();
+    const defaults = this.getDefaultSettings();
+    const skin = settings.skin ?? defaults.skin ?? 'daylight-blue';
+    document.documentElement.setAttribute('data-skin', skin);
+    window.__codemanSkin = skin;
+    try {
+      localStorage.setItem('codeman:skin', skin);
+    } catch (_e) {
+      /* private mode */
+    }
+    if (typeof this.applyTerminalSkin === 'function') this.applyTerminalSkin(skin);
   },
 
   applyHeaderVisibilitySettings() {
@@ -1913,6 +1946,16 @@ Object.assign(CodemanApp.prototype, {
     const multiMonitorBtn = document.querySelector('.btn-multimonitor');
     if (multiMonitorBtn) {
       multiMonitorBtn.classList.toggle('btn-multimonitor--hidden', !showMultiMonitorButton);
+    }
+
+    // Plan-usage chip — hidden by default (App Settings → Display → "Plan Usage
+    // Limits"). Server renders the initial state on reload; this handles a live
+    // toggle from a settings save. Marker class (base is display:inline-flex
+    // !important), matching the response-viewer/multimonitor pattern.
+    const showPlanUsageLimits = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
+    const planUsageChip = document.getElementById('planUsageChip');
+    if (planUsageChip) {
+      planUsageChip.classList.toggle('header-plan-usage--hidden', !showPlanUsageLimits);
     }
 
     // Notification bell is retired (notifications live in Settings → Notifications
@@ -2116,6 +2159,7 @@ Object.assign(CodemanApp.prototype, {
           'showLifecycleLog', 'showResponseViewer',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'skin',
         ]);
         // Merge settings: non-display keys always sync from server,
         // display keys only seed from server when localStorage has no value

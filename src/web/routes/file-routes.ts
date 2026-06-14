@@ -224,8 +224,8 @@ function getAttachmentOr404(
  * when resolvable, else the stored path — or null (after sending a 403) when
  * blocked. Streaming the resolved path closes a TOCTOU window: a path component
  * swapped to a symlink after registration would otherwise redirect the stream to
- * a different file than the guard checked. `rejectIfSensitiveRecord` wraps this
- * for the metadata/preview/thumbnail routes that only need the boolean verdict.
+ * a different file than the guard checked. The metadata/preview/thumbnail routes
+ * that only need the boolean verdict treat a null result as "blocked".
  */
 async function resolveServableAttachmentPath(
   reply: FastifyReply,
@@ -258,19 +258,8 @@ async function resolveServableAttachmentPath(
   return resolved ? pathToCheck : record.filePath;
 }
 
-/**
- * Boolean wrapper over {@link resolveServableAttachmentPath} for routes that
- * gate on the guard verdict but don't stream raw bytes (metadata/preview/
- * thumbnail). Sends the 403 itself; returns true when the record is blocked.
- */
-async function rejectIfSensitiveRecord(
-  reply: FastifyReply,
-  record: AttachmentRecord,
-  sessionWorkingDir?: string
-): Promise<boolean> {
-  return (await resolveServableAttachmentPath(reply, record, sessionWorkingDir)) === null;
-}
-
+// Persisted sessions carry the private (externalPath-bearing) history under a
+// `__attachmentHistory` key so the list route can re-register external files.
 type StoredSessionWithPrivateAttachmentHistory = SessionState & {
   __attachmentHistory?: SessionAttachmentHistoryItem[];
 };
@@ -289,6 +278,11 @@ function appendDownloadFlag(url: string): string {
   return `${url}${url.includes('?') ? '&' : '?'}download=true`;
 }
 
+/**
+ * Resolve a session's working dir from the live session, falling back to the
+ * persisted record so preview/thumbnail requests keep working for a session
+ * that has since detached. Sends a 404 and returns undefined when unknown.
+ */
 function getKnownSessionWorkingDir(
   ctx: SessionPort & ConfigPort,
   sessionId: string,
@@ -325,6 +319,8 @@ function getSessionAttachmentHistory(
   };
 }
 
+// History item for a file detected inside the workspace: re-stat for live
+// size/mtime and resolve preview/thumbnail/raw routes off the relative path.
 async function buildDetectedAttachmentRouteItem(
   sessionId: string,
   workingDir: string,
@@ -373,6 +369,8 @@ async function buildDetectedAttachmentRouteItem(
   };
 }
 
+// History item for an explicitly published external file: re-register it to mint
+// a fresh id + by-id routes (the guard runs again), or mark it missing.
 async function buildExternalAttachmentRouteItem(
   sessionId: string,
   item: SessionAttachmentHistoryItem,
@@ -760,6 +758,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
   });
 
+  // List a session's attachment history (live session or persisted), resolving
+  // each entry to current metadata + routes. External entries are re-registered.
   app.get('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
     const sessionHistory = getSessionAttachmentHistory(ctx, id);
@@ -770,9 +770,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     const items = await Promise.all(
       sessionHistory.history.map((item) =>
-        item.source === 'external'
+        (item.source === 'external'
           ? buildExternalAttachmentRouteItem(id, item, sessionHistory.workingDir)
           : buildDetectedAttachmentRouteItem(id, sessionHistory.workingDir, item)
+        ).catch(() => ({ ...sanitizeAttachmentHistoryItem(item), missing: true }))
       )
     );
 
@@ -785,13 +786,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     };
   });
 
+  // Metadata poll for a single registered attachment (re-stats for live
+  // size/mtime as the underlying file is rewritten).
   app.get('/api/sessions/:id/attachments/:attachmentId', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
     const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
+    if (!(await resolveServableAttachmentPath(reply, record, workingDir))) return;
     const event = attachmentRecordToEvent(record);
     // Re-stat so the live preview poller sees current size/mtime as the agent
     // rewrites the underlying file (COD-58). Fall back to the cached record on error.
@@ -823,6 +826,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     };
   });
 
+  // Serve the raw bytes of a registered attachment by id. Re-checks the
+  // attachment-guard policy on every request (defense-in-depth) before streaming.
   app.get('/api/sessions/:id/attachments/:attachmentId/raw', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
     const { download } = req.query as { download?: string };
@@ -846,13 +851,16 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
   });
 
+  // Serve a converted PDF preview of a registered attachment by id. Office docs
+  // convert server-side; PDF/PNG/text redirect to the raw route.
   app.get('/api/sessions/:id/attachments/:attachmentId/preview', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
     const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
+    const servePath = await resolveServableAttachmentPath(reply, record, workingDir);
+    if (!servePath) return;
 
     // Only Office formats need server-side conversion; PDF/PNG and text formats
     // (md/txt) preview directly from their raw bytes.
@@ -861,17 +869,19 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return;
     }
 
-    await serveConvertedPreview(reply, record.filePath, record.fileName, record.extension);
+    await serveConvertedPreview(reply, servePath, record.fileName, record.extension);
   });
 
+  // Serve a first-page thumbnail of a registered attachment by id.
   app.get('/api/sessions/:id/attachments/:attachmentId/thumbnail', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
     const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (await rejectIfSensitiveRecord(reply, record, workingDir)) return;
-    await serveThumbnail(reply, record.filePath, record.extension);
+    const servePath = await resolveServableAttachmentPath(reply, record, workingDir);
+    if (!servePath) return;
+    await serveThumbnail(reply, servePath, record.extension);
   });
 
   // ===== Document revision history (COD-59) =====
@@ -1112,8 +1122,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
   });
 
-  // Serve converted document previews. DOCX/PPTX are converted to PDF using
-  // LibreOffice when available; PDF/PNG preview directly through file-raw.
+  // Serve converted document previews for a workspace-relative path. DOCX/PPTX
+  // are converted to PDF via LibreOffice; PDF/PNG/text preview through file-raw.
   app.get('/api/sessions/:id/file-preview', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath } = req.query as { path?: string };
@@ -1143,6 +1153,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     await serveConvertedPreview(reply, resolvedPath, filePath, ext);
   });
 
+  // Serve a first-page thumbnail for a workspace-relative path.
   app.get('/api/sessions/:id/file-thumbnail', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath } = req.query as { path?: string };

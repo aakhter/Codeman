@@ -131,6 +131,7 @@ import type { EventLoopMonitorHandle } from '../utils/index.js';
 import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.js';
 import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { SseEvent } from './sse-events.js';
+import { getLatestPlanUsage } from './plan-usage-latest.js';
 import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
 import { installRouteErrorHandler } from './route-error-handler.js';
@@ -142,6 +143,7 @@ import {
   registerFileRoutes,
   registerScheduledRoutes,
   registerHookEventRoutes,
+  registerStatusTelemetryRoutes,
   registerSystemRoutes,
   registerCaseRoutes,
   registerSessionRoutes,
@@ -851,6 +853,7 @@ export class WebServer extends EventEmitter {
     registerFileRoutes(this.app, ctx);
     registerScheduledRoutes(this.app, ctx);
     registerHookEventRoutes(this.app, ctx);
+    registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
     registerSessionRoutes(this.app, ctx);
@@ -942,6 +945,8 @@ export class WebServer extends EventEmitter {
     // field kept off SessionState to avoid leaking via API broadcasts.
     const base = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
+    // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
+    // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
     const state = {
       ...base,
@@ -1169,6 +1174,14 @@ export class WebServer extends EventEmitter {
     // class token (not user-facing copy) keeps this robust against template edits.
     if (settings.showMultiMonitorButton === true) {
       html = html.replace(' btn-multimonitor--hidden', '');
+    }
+    // Plan-usage chip: same pattern. Ships with `header-plan-usage--hidden` (App
+    // Settings → Display → "Plan Usage Limits", default off); strip it server-side
+    // when enabled so the chip doesn't flash hidden on every reload before the
+    // client's applyHeaderVisibilitySettings runs. showPlanUsageLimits is a synced
+    // (non-display) setting, so readSettings sees the persisted value here.
+    if (settings.showPlanUsageLimits === true) {
+      html = html.replace(' header-plan-usage--hidden', '');
     }
     // Detached single-session ("solo") window: inject the target session id so
     // the client can enter solo mode even if a (network-first) service worker
@@ -1712,6 +1725,7 @@ export class WebServer extends EventEmitter {
       timestamp: now,
       inputCjkForm: process.env.INPUT_CJK_FORM?.toUpperCase() === 'ON',
       codemanCli,
+      planUsage: getLatestPlanUsage(), // last-known plan-usage telemetry, for the header chip on fresh load
     };
 
     this.cachedLightState = { data: result, timestamp: now };
@@ -2094,6 +2108,8 @@ export class WebServer extends EventEmitter {
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
             const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
+            // Prefer the private (externalPath-bearing) history; fall back to the
+            // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =
               (savedState as { __attachmentHistory?: SessionAttachmentHistoryItem[] })?.__attachmentHistory ??
               savedState?.attachmentHistory;
