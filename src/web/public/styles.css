@@ -4203,17 +4203,23 @@ body.solo-mode .btn-lifecycle-log {
   margin-top: 0.25rem;
 }
 
-/* COD-112: the Agent Checkpoint "Default" picker is a non-locking fallback —
-   both compact and clear stay available to the agent regardless of this value.
-   Specificity (.form-row .checkpoint-default) intentionally beats the generic
-   `.form-row label { display: block }` rule so the label sits inline. */
-.form-row .checkpoint-default {
+/* COD-112: Agent Checkpoint allowed-mode toggles — the operator ticks which
+   modes (compact / clear) the agent may invoke; both are allowed by default.
+   The inner labels reuse .checkbox-inline; inline-flex on the group lays them
+   out side by side, and the bumped specificity on the inner labels restores
+   their flex display (the generic `.form-row label { display: block }` would
+   otherwise stack them). */
+.checkpoint-modes {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.75rem;
+}
+.checkpoint-modes .checkbox-inline {
+  display: flex;
   margin-bottom: 0;
-  font-size: 0.85rem;
-  color: var(--text-secondary, #9aa);
+}
+.checkpoint-modes .checkbox-inline input:disabled + span {
+  opacity: 0.5;
 }
 
 .switch {

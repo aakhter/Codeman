@@ -53,7 +53,7 @@ describe('SessionAutoOps checkpoint', () => {
   });
 
   it('refuses when the session is stopped', () => {
-    ops.setCheckpoint(true, 'compact');
+    ops.setCheckpoint(true, ['compact']);
     stopped = true;
     const res = ops.requestCheckpoint();
     expect(res).toEqual({ triggered: false, reason: 'stopped' });
@@ -61,7 +61,7 @@ describe('SessionAutoOps checkpoint', () => {
   });
 
   it('compact happy path: sends /compact, waits for the op, THEN continues', async () => {
-    ops.setCheckpoint(true, 'compact');
+    ops.setCheckpoint(true, ['compact']);
     const started = vi.fn();
     const done = vi.fn();
     ops.on('checkpointStart', started);
@@ -97,7 +97,7 @@ describe('SessionAutoOps checkpoint', () => {
   });
 
   it('clear mode sends /clear → /init → continue in order, each gated by an op cycle', async () => {
-    ops.setCheckpoint(true, 'clear');
+    ops.setCheckpoint(true, ['clear']);
     ops.requestCheckpoint();
 
     // Step 1: /clear
@@ -130,7 +130,7 @@ describe('SessionAutoOps checkpoint', () => {
   });
 
   it('uses an agent-supplied continue prompt', async () => {
-    ops.setCheckpoint(true, 'compact');
+    ops.setCheckpoint(true, ['compact']);
     ops.requestCheckpoint({ continuePrompt: 'resume task X' });
 
     await vi.advanceTimersByTimeAsync(POLL_MS + 50);
@@ -144,7 +144,7 @@ describe('SessionAutoOps checkpoint', () => {
   });
 
   it('busy guard: a second request is rejected, and token-threshold compact is suppressed', async () => {
-    ops.setCheckpoint(true, 'compact');
+    ops.setCheckpoint(true, ['compact']);
     const first = ops.requestCheckpoint();
     expect(first).toEqual({ triggered: true });
 
@@ -165,27 +165,28 @@ describe('SessionAutoOps checkpoint', () => {
     expect(compacts.length).toBe(1);
   });
 
-  it('mode default + per-request override', async () => {
-    ops.setCheckpoint(true, 'clear');
-    expect(ops.checkpointMode).toBe('clear');
+  it('gating: an explicit mode the operator forbade is refused', () => {
+    ops.setCheckpoint(true, ['clear']); // compact NOT allowed
+    expect(ops.checkpointModes).toEqual(['clear']);
+    expect(ops.checkpointMode).toBe('clear'); // bare checkpoint falls to clear
 
-    // Override to compact for this request
-    ops.requestCheckpoint({ mode: 'compact' });
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/compact\r');
-    expect(sentCommands()).not.toContain('/clear\r');
+    const res = ops.requestCheckpoint({ mode: 'compact' });
+    expect(res).toEqual({ triggered: false, reason: 'mode-not-allowed' });
+    expect(writeCommand).not.toHaveBeenCalled();
+    expect(ops.isCheckpointActive).toBe(false);
   });
 
-  it('restoreCheckpoint restores flags without arming anything', () => {
-    ops.restoreCheckpoint(true, 'clear');
+  it('restoreCheckpoint restores flags + allowed modes without arming anything', () => {
+    ops.restoreCheckpoint(true, ['clear']);
     expect(ops.checkpointEnabled).toBe(true);
+    expect(ops.checkpointModes).toEqual(['clear']);
     expect(ops.checkpointMode).toBe('clear');
     expect(ops.isCheckpointActive).toBe(false);
     expect(writeCommand).not.toHaveBeenCalled();
   });
 
   it('aborts the sequence (no continue) if the session stops mid-checkpoint', async () => {
-    ops.setCheckpoint(true, 'compact');
+    ops.setCheckpoint(true, ['compact']);
     ops.requestCheckpoint();
     await vi.advanceTimersByTimeAsync(POLL_MS + 50);
     expect(sentCommands()).toContain('/compact\r');
@@ -248,5 +249,48 @@ describe('SessionAutoOps checkpoint', () => {
     // Both modes ran in the one session.
     expect(sentCommands()).toContain('/compact\r');
     expect(sentCommands()).toContain('/clear\r');
+  });
+
+  // ── COD-112 (toggles): operator-selectable allowed-mode set + gating ──
+
+  it('enabling with no modes specified defaults to both allowed', () => {
+    ops.setCheckpoint(true);
+    expect(ops.checkpointModes).toEqual(['compact', 'clear']);
+  });
+
+  it('allowed set is reported in stable order regardless of input order', () => {
+    ops.setCheckpoint(true, ['clear', 'compact']);
+    expect(ops.checkpointModes).toEqual(['compact', 'clear']);
+  });
+
+  it('gating: only compact allowed → clear refused, bare checkpoint runs compact', async () => {
+    ops.setCheckpoint(true, ['compact']);
+    expect(ops.checkpointModes).toEqual(['compact']);
+
+    const refused = ops.requestCheckpoint({ mode: 'clear' });
+    expect(refused).toEqual({ triggered: false, reason: 'mode-not-allowed' });
+
+    const ok = ops.requestCheckpoint(); // no -m → compact (the only allowed mode)
+    expect(ok).toEqual({ triggered: true });
+    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    expect(sentCommands()).toContain('/compact\r');
+    expect(sentCommands()).not.toContain('/clear\r');
+  });
+
+  it('gating: empty allowed set → every request is refused (no-mode-allowed)', () => {
+    ops.setCheckpoint(true, []);
+    expect(ops.checkpointModes).toEqual([]);
+    expect(ops.requestCheckpoint()).toEqual({ triggered: false, reason: 'no-mode-allowed' });
+    expect(ops.requestCheckpoint({ mode: 'compact' })).toEqual({ triggered: false, reason: 'mode-not-allowed' });
+    expect(writeCommand).not.toHaveBeenCalled();
+  });
+
+  it('only clear allowed → bare checkpoint runs clear (compact-preferred default falls through)', async () => {
+    ops.setCheckpoint(true, ['clear']);
+    expect(ops.checkpointMode).toBe('clear');
+    ops.requestCheckpoint();
+    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    expect(sentCommands()).toContain('/clear\r');
+    expect(sentCommands()).not.toContain('/compact\r');
   });
 });

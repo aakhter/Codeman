@@ -358,18 +358,26 @@ program
     if (options.continue) data.continuePrompt = String(options.continue);
 
     const body = await postHookEvent(apiUrl, 'checkpoint', sessionId, data);
-    const triggered = Boolean(
-      body &&
-      typeof body === 'object' &&
-      (body as { data?: { checkpoint?: { triggered?: boolean } } }).data?.checkpoint?.triggered
-    );
+    const result =
+      (body as { data?: { checkpoint?: { triggered?: boolean; reason?: string } } }).data?.checkpoint ?? {};
 
-    if (triggered) {
+    if (result.triggered) {
       console.log(chalk.green(`✓ checkpoint ${mode} requested`));
       return;
     }
 
-    console.error(chalk.red('✗ checkpoint not enabled for this session — enable it in Session Options'));
+    // Surface why nothing ran so the agent can adapt (e.g. pick the other mode).
+    const reasonMessage: Record<string, string> = {
+      'not-enabled': 'checkpoint not enabled for this session — enable it in Session Options',
+      'mode-not-allowed': `checkpoint mode '${mode}' is not allowed for this session — allow it in Session Options, or try the other mode`,
+      'no-mode-allowed':
+        'no checkpoint modes are allowed for this session — enable compact and/or clear in Session Options',
+      busy: 'a checkpoint or compact/clear is already running',
+      stopped: 'session is stopped',
+    };
+    const msg =
+      reasonMessage[result.reason ?? ''] ?? 'checkpoint not enabled for this session — enable it in Session Options';
+    console.error(chalk.red(`✗ ${msg}`));
     process.exit(1);
   });
 

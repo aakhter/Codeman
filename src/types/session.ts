@@ -277,8 +277,18 @@ export interface SessionState {
   autoCompactPrompt?: string;
   /** Agent-initiated checkpoint (compact-or-clear, then continue) enabled */
   checkpointEnabled?: boolean;
-  /** Checkpoint mode: compact or clear */
+  /**
+   * Deprecated (kept for backward compat): the single mode a bare checkpoint
+   * runs. Superseded by `checkpointModes`; emitted as the compact-preferred
+   * default of the allowed set.
+   */
   checkpointMode?: 'compact' | 'clear';
+  /**
+   * Modes the agent is allowed to invoke at checkpoint signal time. Default is
+   * both; the operator may forbid one. A bare checkpoint (no -m) runs compact
+   * when allowed, else clear.
+   */
+  checkpointModes?: Array<'compact' | 'clear'>;
   /** Auto-resume on usage limit enabled */
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */

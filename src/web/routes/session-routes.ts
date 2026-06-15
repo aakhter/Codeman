@@ -1170,7 +1170,9 @@ export function registerSessionRoutes(
     const body = parseBody(CheckpointSchema, req.body, 'Invalid request body');
     const session = findSessionOrFail(ctx, id);
 
-    session.setCheckpoint(body.enabled, body.mode);
+    // Prefer the allowed-modes array; fall back to the deprecated single `mode`.
+    const modes = body.modes ?? (body.mode !== undefined ? [body.mode] : undefined);
+    session.setCheckpoint(body.enabled, modes);
     persistAndBroadcastSession(ctx, session);
 
     return {
@@ -1178,6 +1180,7 @@ export function registerSessionRoutes(
       data: {
         checkpoint: {
           enabled: session.checkpointEnabled,
+          modes: session.checkpointModes,
           mode: session.checkpointMode,
         },
       },

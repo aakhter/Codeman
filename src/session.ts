@@ -918,18 +918,24 @@ export class Session extends EventEmitter {
     return this._autoOps.checkpointEnabled;
   }
 
+  /** The mode a bare checkpoint runs (compact-preferred); legacy compat field. */
   get checkpointMode(): 'compact' | 'clear' {
     return this._autoOps.checkpointMode;
   }
 
-  /** Enable/disable agent-initiated checkpoints; optionally set the mode. */
-  setCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
-    this._autoOps.setCheckpoint(enabled, mode);
+  /** Modes the agent is allowed to invoke at checkpoint signal time. */
+  get checkpointModes(): Array<'compact' | 'clear'> {
+    return this._autoOps.checkpointModes;
   }
 
-  /** Restore persisted checkpoint enable/mode after a Codeman restart. */
-  restoreCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
-    this._autoOps.restoreCheckpoint(enabled, mode);
+  /** Enable/disable agent-initiated checkpoints; optionally set allowed modes. */
+  setCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
+    this._autoOps.setCheckpoint(enabled, modes);
+  }
+
+  /** Restore persisted checkpoint enable/allowed-modes after a Codeman restart. */
+  restoreCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
+    this._autoOps.restoreCheckpoint(enabled, modes);
   }
 
   /** Agent signal: run the checkpoint op, then continue once it completes. */
@@ -1044,6 +1050,7 @@ export class Session extends EventEmitter {
       autoCompactPrompt: this._autoOps.autoCompactPrompt,
       checkpointEnabled: this._autoOps.checkpointEnabled,
       checkpointMode: this._autoOps.checkpointMode,
+      checkpointModes: this._autoOps.checkpointModes,
       autoResumeEnabled: this._autoOps.autoResumeEnabled,
       autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
       imageWatcherEnabled: this._imageWatcherEnabled,

@@ -192,7 +192,12 @@ export class SessionAutoOps extends EventEmitter {
 
   // Checkpoint (agent-initiated compact-or-clear, then continue) state
   private _checkpointEnabled: boolean = false;
-  private _checkpointMode: 'compact' | 'clear' = 'compact';
+  /**
+   * Modes the agent is allowed to invoke at signal time. Both are allowed by
+   * default; the operator may forbid one (e.g. allow compact, forbid the more
+   * destructive clear). compact is the fallback when the agent passes no -m.
+   */
+  private _checkpointModes: Set<'compact' | 'clear'> = new Set(['compact', 'clear']);
   private _checkpointActive: boolean = false;
   private _checkpointTimer: NodeJS.Timeout | null = null;
 
@@ -419,31 +424,46 @@ export class SessionAutoOps extends EventEmitter {
     return this._checkpointEnabled;
   }
 
+  /** Allowed checkpoint modes, in stable order (compact, clear). */
+  get checkpointModes(): Array<'compact' | 'clear'> {
+    return (['compact', 'clear'] as const).filter((m) => this._checkpointModes.has(m));
+  }
+
+  /**
+   * The mode a bare checkpoint (no -m) runs: compact when allowed, else clear.
+   * Retained for backward-compatible persisted state (legacy `checkpointMode`).
+   */
   get checkpointMode(): 'compact' | 'clear' {
-    return this._checkpointMode;
+    return this._checkpointModes.has('compact') ? 'compact' : this._checkpointModes.has('clear') ? 'clear' : 'compact';
   }
 
   get isCheckpointActive(): boolean {
     return this._checkpointActive;
   }
 
-  /** Enable/disable agent-initiated checkpoints; optionally set the mode. */
-  setCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+  /**
+   * Enable/disable agent-initiated checkpoints; optionally set which modes the
+   * agent may invoke. Pass `[]` to allow nothing (checkpoint becomes a no-op
+   * until a mode is re-enabled). Omit `modes` to leave the allowed set unchanged.
+   */
+  setCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
     this._checkpointEnabled = enabled;
-    if (mode !== undefined) {
-      this._checkpointMode = mode;
+    if (modes !== undefined) {
+      this._checkpointModes = new Set(modes);
     }
   }
 
   /**
-   * Restore persisted checkpoint enable/mode after a Codeman restart. Unlike
-   * auto-resume there is no pending action to re-arm — checkpoints are
-   * agent-triggered, not time-scheduled — so this only restores the flags.
+   * Restore persisted checkpoint enable/allowed-modes after a Codeman restart.
+   * Unlike auto-resume there is no pending action to re-arm — checkpoints are
+   * agent-triggered, not time-scheduled — so this only restores the flags. A
+   * legacy session with no saved `checkpointModes` keeps the default (both
+   * allowed), matching pre-COD-112 behavior where any requested mode ran.
    */
-  restoreCheckpoint(enabled: boolean, mode?: 'compact' | 'clear'): void {
+  restoreCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
     this._checkpointEnabled = enabled;
-    if (mode !== undefined) {
-      this._checkpointMode = mode;
+    if (modes !== undefined) {
+      this._checkpointModes = new Set(modes);
     }
   }
 
@@ -462,8 +482,24 @@ export class SessionAutoOps extends EventEmitter {
       return { triggered: false, reason: 'busy' };
     }
 
+    // Resolve the mode, gated by the operator's allowed set. An explicit -m that
+    // the operator forbade is refused; with no -m, compact is the default (then
+    // clear) — so a bare checkpoint always runs an allowed mode if one exists.
+    let mode: 'compact' | 'clear';
+    if (opts?.mode !== undefined) {
+      if (!this._checkpointModes.has(opts.mode)) {
+        return { triggered: false, reason: 'mode-not-allowed' };
+      }
+      mode = opts.mode;
+    } else if (this._checkpointModes.has('compact')) {
+      mode = 'compact';
+    } else if (this._checkpointModes.has('clear')) {
+      mode = 'clear';
+    } else {
+      return { triggered: false, reason: 'no-mode-allowed' };
+    }
+
     this._checkpointActive = true;
-    const mode = opts?.mode ?? this._checkpointMode;
     const continueText = opts?.continuePrompt?.trim() || RESUME_PROMPT;
     const steps = mode === 'clear' ? ['/clear\r', '/init\r'] : ['/compact\r'];
 

@@ -690,6 +690,9 @@ export const AutoResumeSchema = z.object({
 /** POST /api/sessions/:id/checkpoint */
 export const CheckpointSchema = z.object({
   enabled: z.boolean(),
+  /** Allowed modes the agent may invoke. Omit to leave unchanged. */
+  modes: z.array(z.enum(['compact', 'clear'])).optional(),
+  /** Deprecated single-mode form; treated as `modes: [mode]` when `modes` absent. */
   mode: z.enum(['compact', 'clear']).optional(),
 });
 

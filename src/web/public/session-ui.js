@@ -754,9 +754,19 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('modalAutoClearEnabled').checked = session.autoClearEnabled ?? false;
     document.getElementById('modalAutoClearThreshold').value = session.autoClearThreshold ?? 140000;
 
-    // Populate agent checkpoint (compact-or-clear, then continue)
-    document.getElementById('modalCheckpointEnabled').checked = session.checkpointEnabled ?? false;
-    document.getElementById('modalCheckpointMode').value = session.checkpointMode ?? 'compact';
+    // Populate agent checkpoint (compact-or-clear, then continue). Both modes
+    // are allowed by default; an explicit empty set means the operator unticked
+    // everything (kept faithfully). Legacy sessions with no `checkpointModes`
+    // fall back to both, matching the backend's migration.
+    const cpEnabled = session.checkpointEnabled ?? false;
+    const cpModes = Array.isArray(session.checkpointModes) ? session.checkpointModes : ['compact', 'clear'];
+    document.getElementById('modalCheckpointEnabled').checked = cpEnabled;
+    const cpCompact = document.getElementById('modalCheckpointModeCompact');
+    const cpClear = document.getElementById('modalCheckpointModeClear');
+    cpCompact.checked = cpModes.includes('compact');
+    cpClear.checked = cpModes.includes('clear');
+    cpCompact.disabled = !cpEnabled;
+    cpClear.disabled = !cpEnabled;
 
     // Populate auto-resume on usage limit (token pause control)
     document.getElementById('modalAutoResumeEnabled').checked = session.autoResumeEnabled ?? false;
@@ -883,18 +893,27 @@ Object.assign(CodemanApp.prototype, {
   async autoSaveCheckpoint() {
     if (!this.editingSessionId) return;
     const enabled = document.getElementById('modalCheckpointEnabled').checked;
-    const mode = document.getElementById('modalCheckpointMode').value === 'clear' ? 'clear' : 'compact';
+    const compactEl = document.getElementById('modalCheckpointModeCompact');
+    const clearEl = document.getElementById('modalCheckpointModeClear');
+    let modes = [...(compactEl.checked ? ['compact'] : []), ...(clearEl.checked ? ['clear'] : [])];
+    // Can't enable with zero modes — fall back to both so the agent has something to run.
+    if (enabled && modes.length === 0) {
+      compactEl.checked = true;
+      clearEl.checked = true;
+      modes = ['compact', 'clear'];
+    }
+    // Mode ticks only apply while Agent Checkpoint is enabled.
+    compactEl.disabled = !enabled;
+    clearEl.disabled = !enabled;
     try {
-      await this._apiPost(`/api/sessions/${this.editingSessionId}/checkpoint`, { enabled, mode });
+      await this._apiPost(`/api/sessions/${this.editingSessionId}/checkpoint`, { enabled, modes });
       const session = this.sessions.get(this.editingSessionId);
       if (session) {
         session.checkpointEnabled = enabled;
-        session.checkpointMode = mode;
+        session.checkpointModes = modes;
       }
-      this.showToast(
-        `Agent checkpoint ${enabled ? `enabled (default: ${mode})` : 'disabled'}`,
-        'success'
-      );
+      const label = enabled ? `enabled (${modes.join(' + ')})` : 'disabled';
+      this.showToast(`Agent checkpoint ${label}`, 'success');
     } catch (err) {
       this.showToast('Failed to toggle checkpoint: ' + err.message, 'error');
     }
