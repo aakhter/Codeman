@@ -186,7 +186,7 @@ Object.assign(CodemanApp.prototype, {
       phasesHtml = `<div class="ultracode-phase-list">${chips.join('')}</div>`;
     }
     return (
-      `<div class="ultracode-run-item${active ? ' selected' : ''}" onclick="app.selectWorkflowRun('${escapeHtml(r.runId)}')">` +
+      `<div class="ultracode-run-item${active ? ' selected' : ''}" onclick="app.selectWorkflowRun(${escapeHtml(JSON.stringify(r.runId))})">` +
       `<div class="ultracode-run-head"><span class="ultracode-run-name">${name}</span>` +
       `<span class="ultracode-status ${statusCls}">${escapeHtml(status || '—')}</span></div>` +
       `<div class="ultracode-run-stats">${escapeHtml(stats)}</div>` +
@@ -259,7 +259,7 @@ Object.assign(CodemanApp.prototype, {
     const clickable = !!a.agentId;
     const cardAttrs = clickable
       ? ` class="ultracode-agent-card ultracode-agent-card--clickable" role="button" tabindex="0"` +
-        ` title="View transcript" onclick="app.openWorkflowAgentTranscript('${escapeHtml(a.agentId)}')"`
+        ` title="View transcript" onclick="app.openWorkflowAgentTranscript(${escapeHtml(JSON.stringify(a.agentId))})"`
       : ` class="ultracode-agent-card"`;
     return (
       `<div${cardAttrs}>` +
