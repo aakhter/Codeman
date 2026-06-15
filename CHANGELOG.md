@@ -1,5 +1,39 @@
 # aicodeman
 
+## 1.1.2
+
+### Patch Changes
+
+- Ultracode/Workflow run visualization + subagent discovery fixes.
+  - **Ultracode / Workflow run visualization** (new, opt-in): App Settings → Display → "Ultracode Agents" (`showUltracodeAgents`, default OFF) adds a master-detail tab that shows ultracode / Workflow-tool runs like Claude Code's "working agents" view — the LEFT pane lists runs and their phases (selectable tasks), the RIGHT pane shows each run's agents with model, live state, tokens burned, and tool calls. Clicking an agent opens its live transcript. Backed by a new standalone workflow-run watcher that reads the per-run state JSON (stripping the heavy embedded script/result/logs so payloads stay small), exposes `GET /api/workflows` and `GET /api/workflows/:runId`, and broadcasts `workflow:run_discovered/updated/removed` SSE events. The header launcher and panel stay hidden until the setting is enabled (the setting is synced across devices, not per-device).
+  - **Subagent tracking discovery fix**: restored subagent tracking after Claude Code changed the on-disk format from `agent-*.jsonl` to `agent-*.meta.json` (background agents were showing 0). Also discovers workflow-nested subagents under `subagents/workflows/<wf>/` and hardens the meta→transcript upgrade path so an agent re-points to its `.jsonl` transcript once it appears.
+  - **File viewer**: opens audio, SVG, and other binary files the same way the attachments viewer does.
+  - **Tooling**: hardened the real-overview screenshot capture script and documented the `deviceScaleFactor` / static-cache gotchas.
+
+## 1.1.1
+
+### Patch Changes
+
+- Six reviewed contributor PRs (all adversarially reviewed and fixed before merge):
+  - **Markdown sanitizer hardened against mutation-XSS (#126).** The denylist `_sanitizeHtml` is replaced with vendored DOMPurify 3.4.8 (authentic, byte-matched to the official dist) wired via a new `sanitize-html.js` allowlist, with a fail-closed escape fallback. The curated allowlist is genuinely enforced (no `USE_PROFILES` override) so non-markdown tags and svg/math/style/script/event-handler/`javascript:` vectors are stripped while legitimate markdown survives.
+  - **Hook-event secret now required unconditionally (#127).** The `/api/hook-event` + `/api/status-telemetry` localhost bypass requires the per-instance hook secret whether or not a managed tunnel is running, closing the own-loopback-reverse-proxy gap. A self-heal refreshes pre-secret hook configs in existing cases on spawn so password-protected installs don't silently 401 their hooks. No-password loopback installs are unaffected.
+  - **`codeman doctor` dependency checker (#125).** New `doctor`/`check-deps` command probes Node, the agent CLIs, tmux, and document converters per environment (linux/darwin/win32/wsl), with grouped or `--json` output and a non-zero exit when a required tool is missing. Requires Node 22+, reports `pdftoppm` (used for PDF/Office thumbnails), and validates `--category`.
+  - **macOS Option / physical-key session shortcuts (#129).** Tab switching matches physical key codes (`e.code`) so Option+1–9 works on macOS layouts that remap Option, plus Option/Alt+`[`/`]` for previous/next session — without leaking escape sequences into the focused terminal.
+  - **Desktop session tabs auto-wrap to a second row on overflow (#128)** instead of horizontal scrolling (off when the manual two-row layout is pinned; mobile/tablet unchanged), re-evaluated on window resize.
+  - **CJK input textarea hidden on the welcome screen (#123)** so it no longer floats over the welcome overlay, and re-shown on session entry; vertical centering fixed.
+
+## 1.1.0
+
+### Minor Changes
+
+- **Plan Usage Limits chip (new).** A header chip now shows your live Claude plan usage — the 5-hour and weekly windows as a percentage — parsed from Claude Code's statusLine telemetry (CLI v2.1.80+). It's opt-in via **App Settings → Display → "Plan Usage Limits"** (default OFF). The toggle is **per-device**: turn it on at your desk without it appearing on your phone. Telemetry collection is decoupled from display, so one device's preference never affects another's, and the last-known value replays instantly on reconnect. Distinct from auto-resume (which reacts to the limit _message_) — this proactively shows the live %.
+
+  **Attachments.** New attachment history drawer to browse files referenced by a session (COD-39), plus document previews and thumbnails on attachment cards (COD-38). The header **Attachments button is now opt-in** (default OFF) via **App Settings → Display → "Attachments Button"**, per-device like the Response Viewer button.
+
+  **Settings & models.** Added Opus 4.6 options to the Claude Model picker. Removed the legacy Token Count / Show Cost header toggles and moved Plan Usage Limits to the top of the Display settings. Slimmed the Skin picker control to match its row.
+
+  **Mobile & header polish.** Restored the response-viewer (eye) button on phones; kept the phone header minimal (settings gear + lifecycle log stay in the toolbar). Added two regression guards so header controls can't silently leak onto the mobile header again — a CI-runnable static policy check plus a real-browser E2E test.
+
 ## 1.0.0
 
 ### Major Changes

@@ -114,8 +114,14 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.attachCustomKeyEventHandler((ev) => {
       if (ev.isComposing || ev.keyCode === 229) return false;
 
-      // Let Alt+digit pass through to browser (tab switching)
-      if (ev.altKey && ev.key >= '0' && ev.key <= '9') return false;
+      // Let the app's Alt/Option session-nav shortcuts reach the document keydown handler
+      // (app.js switches tabs by PHYSICAL e.code) instead of xterm injecting ESC<char> into
+      // the PTY. Mirror app.js's gate exactly — same physical codes + modifier guard — so
+      // macOS Option layouts (Option+1 -> "¡", Option+[ -> "“") are suppressed here too and
+      // don't leak an escape sequence into the focused terminal on every tab switch.
+      if (ev.altKey && !ev.ctrlKey && !ev.shiftKey && /^(Digit[1-9]|BracketLeft|BracketRight)$/.test(ev.code || '')) {
+        return false;
+      }
 
       // Ctrl+V / Cmd+V: intercept before xterm sends ^V to PTY.
       // Route through our paste trap which handles both images and text.
@@ -962,6 +968,9 @@ Object.assign(CodemanApp.prototype, {
       this.loadHistorySessions();
       this.initSearchPanel();
     }
+    // Home screen has no input target — hide the CJK textarea (activeSessionId
+    // is null by the time we get here). Guarded: defined on the app object.
+    this._updateCjkInputState?.();
   },
 
   hideWelcome() {
@@ -975,6 +984,9 @@ Object.assign(CodemanApp.prototype, {
       clearTimeout(this._welcomeQrShrinkTimer);
       qrWrap.classList.remove('expanded');
     }
+    // Entering a session — restore CJK textarea if the user has it enabled
+    // (activeSessionId is already set by selectSession before this call).
+    this._updateCjkInputState?.();
   },
 
   /**

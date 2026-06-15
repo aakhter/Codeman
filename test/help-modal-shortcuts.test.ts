@@ -37,9 +37,9 @@ describe('help modal shortcuts', () => {
   it('documents implemented global and tab shortcuts', () => {
     expectShortcut(helpModal, ['Ctrl', 'W'], 'Close Session');
     expectShortcut(helpModal, ['Ctrl', 'Tab'], 'Next Session');
-    expectShortcut(helpModal, ['Option', '['], 'Previous / Next Session');
-    expectShortcut(helpModal, ['Option', ']'], 'Previous / Next Session');
-    expectShortcut(helpModal, ['Option', '1-9'], 'Switch to Tab N');
+    expectShortcut(helpModal, ['Alt/Option', '['], 'Previous / Next Session');
+    expectShortcut(helpModal, ['Alt/Option', ']'], 'Previous / Next Session');
+    expectShortcut(helpModal, ['Alt/Option', '1-9'], 'Switch to Tab N');
     expectShortcut(helpModal, ['Ctrl', '{'], 'Move Active Tab Left');
     expectShortcut(helpModal, ['Ctrl', '}'], 'Move Active Tab Right');
     expectShortcut(helpModal, ['Ctrl', '?'], 'Show Help');

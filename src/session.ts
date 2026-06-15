@@ -136,7 +136,7 @@ const CTRL_L_PATTERN = /\x0c/g;
 /** Pattern to split by newlines (CR or LF) */
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
-function isExternalCliMode(mode: SessionMode): boolean {
+export function isExternalCliMode(mode: SessionMode): boolean {
   return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
 }
 

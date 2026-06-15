@@ -45,7 +45,7 @@ import { getHookSecret } from '../config/hook-secret.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
-import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState } from '../types.js';
+import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState, WorkflowRunInfo } from '../types.js';
 import { RespawnController, RespawnConfig } from '../respawn-controller.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import { createMultiplexer } from '../mux-factory.js';
@@ -61,6 +61,7 @@ import {
   type SubagentToolResult,
 } from '../subagent-watcher.js';
 import { imageWatcher } from '../image-watcher.js';
+import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
 import {
   buildDetectedAttachmentHistoryItem,
@@ -263,6 +264,11 @@ export class WebServer extends EventEmitter {
     attachmentDetected: (event: AttachmentDetectedEvent) => void;
     error: (error: Error, sessionId?: string) => void;
   } | null = null;
+  private workflowRunWatcherHandlers: {
+    discovered: (info: WorkflowRunInfo) => void;
+    updated: (info: WorkflowRunInfo) => void;
+    removed: (data: { runId: string }) => void;
+  } | null = null;
   private tunnelManager: TunnelManager = new TunnelManager();
   private authSessions: StaleExpirationMap<string, import('./ports/auth-port.js').AuthSessionRecord> | null = null;
   private authFailures: StaleExpirationMap<string, number> | null = null;
@@ -358,6 +364,7 @@ export class WebServer extends EventEmitter {
 
     // Set up subagent watcher listeners
     this.setupSubagentWatcherListeners();
+    this.setupWorkflowRunWatcherListeners();
 
     // Set up image watcher listeners
     this.setupImageWatcherListeners();
@@ -454,6 +461,31 @@ export class WebServer extends EventEmitter {
       subagentWatcher.off('subagent:completed', this.subagentWatcherHandlers.completed);
       subagentWatcher.off('subagent:error', this.subagentWatcherHandlers.error);
       this.subagentWatcherHandlers = null;
+    }
+  }
+
+  /**
+   * Bridge WorkflowRunWatcher events → SSE. Broadcasts run SUMMARIES (no agents[])
+   * to keep payloads small; the full agents[] is fetched per-run via
+   * GET /api/workflows/:runId when the user selects a run.
+   */
+  private setupWorkflowRunWatcherListeners(): void {
+    this.workflowRunWatcherHandlers = {
+      discovered: (info: WorkflowRunInfo) => this.broadcast(SseEvent.WorkflowRunDiscovered, summarizeRun(info)),
+      updated: (info: WorkflowRunInfo) => this.broadcast(SseEvent.WorkflowRunUpdated, summarizeRun(info)),
+      removed: (data: { runId: string }) => this.broadcast(SseEvent.WorkflowRunRemoved, data),
+    };
+    workflowRunWatcher.on('run_discovered', this.workflowRunWatcherHandlers.discovered);
+    workflowRunWatcher.on('run_updated', this.workflowRunWatcherHandlers.updated);
+    workflowRunWatcher.on('run_removed', this.workflowRunWatcherHandlers.removed);
+  }
+
+  private cleanupWorkflowRunWatcherListeners(): void {
+    if (this.workflowRunWatcherHandlers) {
+      workflowRunWatcher.off('run_discovered', this.workflowRunWatcherHandlers.discovered);
+      workflowRunWatcher.off('run_updated', this.workflowRunWatcherHandlers.updated);
+      workflowRunWatcher.off('run_removed', this.workflowRunWatcherHandlers.removed);
+      this.workflowRunWatcherHandlers = null;
     }
   }
 
@@ -651,10 +683,8 @@ export class WebServer extends EventEmitter {
     // on the default no-password install. See docs/reports/security-review-2026-06-09.md.
     registerHostGuard(this.app, () => this.getHostPolicy());
 
-    // Auth middleware (Basic Auth + session cookies + rate limiting).
-    // The tunnel-running probe gates the /api/hook-event localhost bypass (COD-54):
-    // while a tunnel is up, the bypass requires the shared hook secret.
-    const authState = registerAuthMiddleware(this.app, this.https, () => this.tunnelManager.isRunning());
+    // Auth middleware (Basic Auth + session cookies + rate limiting)
+    const authState = registerAuthMiddleware(this.app, this.https);
     if (authState) {
       this.authSessions = authState.authSessions;
       this.authFailures = authState.authFailures;
@@ -1175,14 +1205,11 @@ export class WebServer extends EventEmitter {
     if (settings.showMultiMonitorButton === true) {
       html = html.replace(' btn-multimonitor--hidden', '');
     }
-    // Plan-usage chip: same pattern. Ships with `header-plan-usage--hidden` (App
-    // Settings → Display → "Plan Usage Limits", default off); strip it server-side
-    // when enabled so the chip doesn't flash hidden on every reload before the
-    // client's applyHeaderVisibilitySettings runs. showPlanUsageLimits is a synced
-    // (non-display) setting, so readSettings sees the persisted value here.
-    if (settings.showPlanUsageLimits === true) {
-      html = html.replace(' header-plan-usage--hidden', '');
-    }
+    // Plan-usage chip: ships hidden (`header-plan-usage--hidden`) and is revealed
+    // PER-DEVICE by the client (settings-ui.js applyHeaderVisibilitySettings). It
+    // used to be server-revealed from a synced setting, but that leaked the desktop
+    // choice onto mobile — display is now per-device only (like the response viewer).
+    // Telemetry collection stays server-side via the statusLineTelemetry action.
     // Detached single-session ("solo") window: inject the target session id so
     // the client can enter solo mode even if a (network-first) service worker
     // later serves a cached shell. The client primarily detects solo mode from
@@ -1722,6 +1749,7 @@ export class WebServer extends EventEmitter {
       respawnStatus,
       globalStats: this.store.getAggregateStats(activeSessionTokens),
       subagents: subagentWatcher.getRecentSubagents(15), // 15 min to avoid stale agents
+      workflowRuns: workflowRunWatcher.getAllRunSummaries(), // ultracode run summaries (no agents[]) for the LEFT list
       timestamp: now,
       inputCjkForm: process.env.INPUT_CJK_FORM?.toUpperCase() === 'ON',
       codemanCli,
@@ -1997,6 +2025,14 @@ export class WebServer extends EventEmitter {
       console.log('Subagent watcher disabled by user settings');
     }
 
+    // Start workflow run watcher for ultracode / Workflow run visualization (if enabled)
+    if (await this.isWorkflowAgentTrackingEnabled()) {
+      workflowRunWatcher.start();
+      console.log('Workflow run watcher started - monitoring ~/.claude/projects for ultracode run activity');
+    } else {
+      console.log('Workflow run watcher disabled by user settings (showUltracodeAgents off)');
+    }
+
     // Start image watcher for auto-popup of screenshots (if enabled)
     if (await this.isImageWatcherEnabled()) {
       imageWatcher.start();
@@ -2041,6 +2077,23 @@ export class WebServer extends EventEmitter {
       }
     }
     return true; // Default enabled
+  }
+
+  /**
+   * Check if ultracode/workflow run tracking is enabled in settings (default: FALSE — opt-in).
+   */
+  private async isWorkflowAgentTrackingEnabled(): Promise<boolean> {
+    const settingsPath = dataPath('settings.json');
+    try {
+      const content = await fs.readFile(settingsPath, 'utf-8');
+      const settings = JSON.parse(content);
+      return settings.showUltracodeAgents ?? false;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error('Failed to read showUltracodeAgents setting:', err);
+      }
+    }
+    return false; // Default disabled (opt-in)
   }
 
   /**
@@ -2460,11 +2513,15 @@ export class WebServer extends EventEmitter {
 
     // Clean up watcher listeners to prevent memory leaks
     this.cleanupSubagentWatcherListeners();
+    this.cleanupWorkflowRunWatcherListeners();
     this.cleanupImageWatcherListeners();
     this.cleanupTeamWatcherListeners();
 
     // Stop subagent watcher
     subagentWatcher.stop();
+
+    // Stop workflow run watcher
+    workflowRunWatcher.stop();
 
     // Stop image watcher
     imageWatcher.stop();

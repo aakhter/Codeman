@@ -8,6 +8,7 @@ export const PORTS = {
   DEVICE_MATRIX: 3205,
   VISUAL_REGRESSION: 3206,
   ACCESSIBILITY: 3207,
+  HEADER_BUTTONS: 3208,
 } as const;
 
 // CSS Selectors

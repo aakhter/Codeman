@@ -307,11 +307,13 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowSystemStats').checked = settings.showSystemStats ?? defaults.showSystemStats ?? true;
     document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? true;
     document.getElementById('appSettingsShowResponseViewer').checked = settings.showResponseViewer ?? defaults.showResponseViewer ?? false;
+    document.getElementById('appSettingsShowAttachmentsButton').checked = settings.showAttachmentsButton ?? defaults.showAttachmentsButton ?? false;
     document.getElementById('appSettingsSkin').value = settings.skin ?? defaults.skin ?? 'daylight-blue';
     document.getElementById('appSettingsShowMonitor').checked = settings.showMonitor ?? defaults.showMonitor ?? false;
     document.getElementById('appSettingsShowProjectInsights').checked = settings.showProjectInsights ?? defaults.showProjectInsights ?? false;
     document.getElementById('appSettingsShowFileBrowser').checked = settings.showFileBrowser ?? defaults.showFileBrowser ?? false;
     document.getElementById('appSettingsShowSubagents').checked = settings.showSubagents ?? defaults.showSubagents ?? false;
+    document.getElementById('appSettingsShowUltracodeAgents').checked = settings.showUltracodeAgents ?? defaults.showUltracodeAgents ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
     // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
@@ -1447,10 +1449,12 @@ Object.assign(CodemanApp.prototype, {
       showSystemStats: document.getElementById('appSettingsShowSystemStats').checked,
       showLifecycleLog: document.getElementById('appSettingsShowLifecycleLog').checked,
       showResponseViewer: document.getElementById('appSettingsShowResponseViewer').checked,
+      showAttachmentsButton: document.getElementById('appSettingsShowAttachmentsButton').checked,
       showMonitor: document.getElementById('appSettingsShowMonitor').checked,
       showProjectInsights: document.getElementById('appSettingsShowProjectInsights').checked,
       showFileBrowser: document.getElementById('appSettingsShowFileBrowser').checked,
       showSubagents: document.getElementById('appSettingsShowSubagents').checked,
+      showUltracodeAgents: document.getElementById('appSettingsShowUltracodeAgents').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
@@ -1615,12 +1619,26 @@ Object.assign(CodemanApp.prototype, {
     // Apply keyboard bar mode
     KeyboardAccessoryBar.setMode(settings.extendedKeyboardBar ? 'extended' : 'simple');
 
-    // Save to server (includes notification prefs for cross-browser persistence)
-    // Strip device-specific keys — localEchoEnabled/cjkInputEnabled are per-platform
-    const { localEchoEnabled: _leo, cjkInputEnabled: _cjk, extendedKeyboardBar: _ekb, skin: _skin, ...serverSettings } = settings;
+    // Save to server (includes notification prefs for cross-browser persistence).
+    // Strip device-specific DISPLAY keys so they never sync across devices —
+    // localEcho/cjk/extendedKeyboard/skin are per-platform, and showPlanUsageLimits
+    // is per-device too (desktop can show the usage chip while mobile stays hidden).
+    // Telemetry COLLECTION is requested out-of-band via statusLineTelemetry (sent on
+    // ENABLE only, so a device with the chip OFF never strips the exporter that
+    // another device's chip depends on — see system-routes settings handler).
+    const {
+      localEchoEnabled: _leo,
+      cjkInputEnabled: _cjk,
+      extendedKeyboardBar: _ekb,
+      skin: _skin,
+      showPlanUsageLimits: _pul,
+      showAttachmentsButton: _ahb,
+      ...serverSettings
+    } = settings;
     try {
       const res = await this._apiPut('/api/settings', {
         ...serverSettings,
+        ...(settings.showPlanUsageLimits ? { statusLineTelemetry: true } : {}),
         notificationPreferences: notifPrefsToSave,
         voiceSettings,
       });
@@ -1825,6 +1843,7 @@ Object.assign(CodemanApp.prototype, {
         showProjectInsights: false,
         showFileBrowser: false,
         showSubagents: false,
+        showUltracodeAgents: false,
         showMultiMonitorButton: false,
         // Truecolor opt-in (COD-75) — off by default
         truecolorEnabled: false,
@@ -1836,6 +1855,7 @@ Object.assign(CodemanApp.prototype, {
         headroomRouteCodex: true,
         // Plan usage limits header chip (upstream)
         showPlanUsageLimits: false,
+        showAttachmentsButton: false,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile
@@ -1938,6 +1958,14 @@ Object.assign(CodemanApp.prototype, {
       responseViewerBtn.classList.toggle('btn-response-viewer-header--hidden', !showResponseViewer);
     }
 
+    // Hide the attachments (history) button when disabled. Opt-in, default OFF —
+    // marker class, base is display:inline-flex !important.
+    const showAttachmentsButton = settings.showAttachmentsButton ?? defaults.showAttachmentsButton ?? false;
+    const attachmentsBtn = document.getElementById('attachmentsHistoryBtn');
+    if (attachmentsBtn) {
+      attachmentsBtn.classList.toggle('btn-attachments-history--hidden', !showAttachmentsButton);
+    }
+
     // Multi-monitor button — hidden by default (App Settings → Display → "Header
     // Displays"). The server renders the correct initial state on every reload;
     // this handles a live toggle from a settings save (no reload). Toggle the
@@ -1946,6 +1974,15 @@ Object.assign(CodemanApp.prototype, {
     const multiMonitorBtn = document.querySelector('.btn-multimonitor');
     if (multiMonitorBtn) {
       multiMonitorBtn.classList.toggle('btn-multimonitor--hidden', !showMultiMonitorButton);
+    }
+
+    // Ultracode/Workflow agents launcher — hidden by default; reveal when enabled.
+    // Marker class only (base is display:inline-flex !important) so it's auto-excluded
+    // from the mobile-header-buttons-policy guard.
+    const showUltracodeAgents = settings.showUltracodeAgents ?? defaults.showUltracodeAgents ?? false;
+    const ultracodeBtn = document.querySelector('.btn-ultracode-agents');
+    if (ultracodeBtn) {
+      ultracodeBtn.classList.toggle('btn-ultracode-agents--hidden', !showUltracodeAgents);
     }
 
     // Plan-usage chip — hidden by default (App Settings → Display → "Plan Usage
@@ -2021,6 +2058,18 @@ Object.assign(CodemanApp.prototype, {
         subagentsPanel.classList.remove('hidden');
       } else {
         subagentsPanel.classList.add('hidden');
+      }
+    }
+
+    // Ultracode agents panel visibility (SYNCED setting — not in displayKeys)
+    const showUltracodeAgents = settings.showUltracodeAgents ?? defaults.showUltracodeAgents ?? false;
+    const ultracodePanel = document.getElementById('ultracodeAgentsPanel');
+    if (ultracodePanel) {
+      if (showUltracodeAgents) {
+        ultracodePanel.classList.remove('hidden');
+      } else {
+        ultracodePanel.classList.remove('open');
+        ultracodePanel.classList.add('hidden');
       }
     }
 
@@ -2145,6 +2194,25 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async loadAppSettingsFromServer(settingsPromise = null) {
+    // One-time migration: showPlanUsageLimits became a per-device display setting.
+    // Before this, it synced from the server, so the (separate) mobile settings blob
+    // may carry a stale `true` the user never enabled on this device. Clear it once
+    // so mobile defaults to OFF; the desktop blob is untouched and keeps its value.
+    try {
+      if (
+        MobileDetection.getDeviceType() === 'mobile' &&
+        !localStorage.getItem('codeman:planUsagePerDeviceMigrated')
+      ) {
+        const s = this.loadAppSettingsFromStorage();
+        if (s && s.showPlanUsageLimits) {
+          s.showPlanUsageLimits = false;
+          this.saveAppSettingsToStorage(s);
+        }
+        localStorage.setItem('codeman:planUsagePerDeviceMigrated', '1');
+      }
+    } catch {
+      /* best-effort migration */
+    }
     try {
       const settings = settingsPromise ? await settingsPromise : await fetch('/api/settings').then(r => r.ok ? r.json() : null).then(env => env?.success === true ? env.data : env);
       if (settings) {
@@ -2159,8 +2227,14 @@ Object.assign(CodemanApp.prototype, {
           'showLifecycleLog', 'showResponseViewer',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
-          'skin',
+          'skin', 'showPlanUsageLimits', 'showAttachmentsButton',
         ]);
+        // The plan-usage chip is a PER-DEVICE display setting (default OFF): desktop
+        // can show it while mobile stays hidden. It used to sync, so an older
+        // server.json may still carry `true` — drop it so the server value is NEVER
+        // seeded into a device that didn't explicitly enable it (collection is handled
+        // separately via the statusLineTelemetry action, not this display flag).
+        delete appSettings.showPlanUsageLimits;
         // Merge settings: non-display keys always sync from server,
         // display keys only seed from server when localStorage has no value
         // (prevents cross-device overwrite while fixing settings re-enabling on fresh loads)
