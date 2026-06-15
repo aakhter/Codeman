@@ -29,6 +29,15 @@
 // Voice Input (Deepgram Nova-3 + Web Speech API fallback)
 // ═══════════════════════════════════════════════════════════════
 
+// COD-117: Recording no longer stops on the first finalized utterance — finalized
+// segments accumulate and the session stays open across natural pauses. It ends only
+// on a manual mic tap or after this much continuous silence. Bumped 3s → 5s so a
+// thinking pause mid-sentence doesn't cut the speaker off.
+const VOICE_SILENCE_MS = 5000;
+// iOS Safari Web Speech never sets isFinal; we treat interim as final once it stops
+// changing for this long. Bumped 750ms → 1500ms to be less trigger-happy.
+const VOICE_IOS_STABILITY_MS = 1500;
+
 /**
  * DeepgramProvider - Speech-to-text via Deepgram Nova-3 WebSocket API.
  * Direct browser-to-Deepgram connection (no server proxy).
@@ -207,7 +216,7 @@ const DeepgramProvider = {
     clearTimeout(this._silenceTimeout);
     this._silenceTimeout = setTimeout(() => {
       this.stop();
-    }, 3000);
+    }, VOICE_SILENCE_MS);
   },
 
   stop() {
@@ -367,10 +376,12 @@ const VoiceInput = {
         if (!this.isRecording) return;
         this._hasReceivedResult = true;
         if (isFinal) {
+          // COD-117: accumulate finalized segments but keep listening — Deepgram flags
+          // is_final on an endpoint (a pause), so stopping here cut the speaker off
+          // mid-sentence. The session now ends only on a manual tap or VOICE_SILENCE_MS
+          // of silence (DeepgramProvider's own timer), which flushes via onEnd → stop().
           this._accumulatedFinal += text;
-          this._hidePreview();
-          this._insertText(this._accumulatedFinal);
-          this.stop();
+          this._showPreview(this._accumulatedFinal, 'deepgram');
         } else {
           const display = this._accumulatedFinal + text;
           this._showPreview(display, 'deepgram');
@@ -382,12 +393,10 @@ const VoiceInput = {
         if (wasRecording) app.showToast(msg, 'error');
       },
       onEnd: () => {
-        if (this.isRecording) {
-          if (this._accumulatedFinal) {
-            this._insertText(this._accumulatedFinal);
-          }
-          this.stop();
-        }
+        // Provider ended on its own (VOICE_SILENCE_MS silence timer). stop() flushes
+        // the accumulated transcript (COD-117). Guard against the manual-tap path,
+        // where stop() has already set isRecording=false before calling us.
+        if (this.isRecording) this.stop();
       }
     });
 
@@ -451,6 +460,10 @@ const VoiceInput = {
     this._stopLevelMeter();
     this._updateButtons('idle');
     this._hidePreview();
+    // COD-117: single flush point — insert whatever was accumulated across pauses.
+    // Idempotent (clears _accumulatedFinal), so the silence-timer and manual-tap paths
+    // that both funnel through stop() can't double-insert.
+    this._flushAccumulated();
 
     if (this._activeProvider === 'deepgram') {
       DeepgramProvider.stop();
@@ -488,15 +501,16 @@ const VoiceInput = {
     }
 
     if (finalText) {
+      // COD-117: accumulate finalized segments but keep listening (continuous=true).
+      // Ending here cut the speaker off at the first pause; the session now ends only
+      // on a manual tap or VOICE_SILENCE_MS of silence (both flush via stop()).
       this._accumulatedFinal += finalText;
-      this._hidePreview();
-      this._insertText(this._accumulatedFinal);
-      this.stop();
+      this._showPreview(this._accumulatedFinal);
     } else if (interim) {
       const display = this._accumulatedFinal + interim;
       this._showPreview(display);
       // iOS Safari workaround: isFinal is always false.
-      // Detect when interim results stop changing for 750ms → treat as final.
+      // Detect when interim results stop changing for VOICE_IOS_STABILITY_MS → treat as final.
       this._iosStabilityCheck(interim);
     }
   },
@@ -540,17 +554,31 @@ const VoiceInput = {
         this.recognition.start();
       } catch (_e) {
         // If restart fails, fall through to stop
-        if (this._accumulatedFinal) this._insertText(this._accumulatedFinal);
+        this._flushAccumulated();
         this.stop();
       }
       return;
     }
 
-    // Genuine end — finalize any accumulated text
-    if (this._accumulatedFinal) {
-      this._insertText(this._accumulatedFinal);
+    // COD-117: Chrome auto-ends recognition on a pause even with continuous=true. We're
+    // still recording here (a manual tap or silence-timeout stop sets isRecording=false
+    // first and returns above), so restart to keep dictating across the pause. The
+    // VOICE_SILENCE_MS silence timer or a manual tap is what actually ends the session.
+    try {
+      this.recognition.start();
+      return;
+    } catch (_e) {
+      // Restart failed (e.g. InvalidStateError) — fall through and finalize.
     }
+    this._flushAccumulated();
     this.stop();
+  },
+
+  /** COD-117: insert accumulated transcript exactly once, then clear it (idempotent). */
+  _flushAccumulated() {
+    const text = this._accumulatedFinal;
+    this._accumulatedFinal = '';
+    if (text) this._insertText(text);
   },
 
   _insertText(text) {
@@ -676,14 +704,9 @@ const VoiceInput = {
   _resetSilenceTimeout() {
     clearTimeout(this.silenceTimeout);
     this.silenceTimeout = setTimeout(() => {
-      if (this.isRecording) {
-        // Finalize any accumulated text before stopping
-        if (this._accumulatedFinal) {
-          this._insertText(this._accumulatedFinal);
-        }
-        this.stop();
-      }
-    }, 3000);
+      // COD-117: true silence ends the session; stop() flushes accumulated text.
+      if (this.isRecording) this.stop();
+    }, VOICE_SILENCE_MS);
   },
 
   _iosStabilityCheck(transcript) {
@@ -692,12 +715,14 @@ const VoiceInput = {
       clearTimeout(this._stabilityTimer);
       this._stabilityTimer = setTimeout(() => {
         if (this.isRecording) {
-          const finalText = this._accumulatedFinal + transcript;
-          this._hidePreview();
-          this._insertText(finalText);
+          // iOS Safari never sets isFinal, so fold the stabilized interim into the
+          // accumulated transcript and stop (stop() flushes). COD-117: longer window
+          // (VOICE_IOS_STABILITY_MS) so a brief pause doesn't cut the speaker off.
+          // Note: continuous iOS dictation across pauses is a known follow-up.
+          this._accumulatedFinal += transcript;
           this.stop();
         }
-      }, 750);
+      }, VOICE_IOS_STABILITY_MS);
     }
   },
 
