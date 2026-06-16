@@ -86,6 +86,7 @@ import {
 import { SessionAutoOps } from './session-auto-ops.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
+import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
 import { parseAttachmentMagicLinks } from './attachment-magic.js';
 import {
   sanitizeAttachmentHistory,
@@ -278,6 +279,13 @@ export class Session extends EventEmitter {
   private _pid: number | null = null;
   private _status: SessionStatus = 'idle';
   private _currentTaskId: string | null = null;
+
+  // COD-118: bound repeated non-zero interactive-PTY exits. Recorded in the
+  // interactive PTY onExit handler; when it trips, the session flips to 'error'
+  // and startInteractive() refuses to respawn until an explicit user restart
+  // calls resetRespawnBreaker(). Defense-in-depth over the COD-115 crash-loop.
+  private readonly _ptyExitBreaker = new InteractivePtyExitBreaker();
+  private _respawnBlocked = false;
   private readonly _terminalBufferMaxSize: number;
   private readonly _terminalBufferTrimSize: number;
   private readonly _tmuxHistoryLimit: number;
@@ -1394,6 +1402,16 @@ export class Session extends EventEmitter {
       throw new Error('Session already has a running process');
     }
 
+    // COD-118: if the PTY exit breaker has tripped (repeated non-zero exits in a
+    // short window), refuse to respawn. This is the uniform choke point that stops
+    // automatic recovery/reconnect callers from re-creating a crash-looping PTY.
+    // An explicit user restart clears it via resetRespawnBreaker().
+    if (this._respawnBlocked) {
+      throw new Error(
+        'Respawn blocked: interactive PTY exited non-zero too many times in a short window (circuit breaker tripped). Restart the session to clear it.'
+      );
+    }
+
     this._resetBuffers();
 
     const modeLabel = getModeLabel(this.mode);
@@ -1622,6 +1640,9 @@ export class Session extends EventEmitter {
 
     this.ptyProcess.onExit(({ exitCode }) => {
       console.log('[Session] Interactive PTY exited with code:', exitCode);
+      // COD-118: record the exit in the circuit breaker BEFORE status bookkeeping.
+      // A clean (0) exit resets the counter; rapid non-zero repeats trip it.
+      const breakerResult = this._ptyExitBreaker.recordExit(exitCode, Date.now());
       this.ptyProcess = null;
       this._pid = null;
       this._status = 'idle';
@@ -1649,8 +1670,36 @@ export class Session extends EventEmitter {
       if (this._muxSession && this._mux) {
         this._mux.setAttached(this.id, false);
       }
+      // COD-118: if the breaker tripped, surface an error state and block the NEXT
+      // respawn so recovery/reconnect callers stop looping. Still emit 'exit' below
+      // for normal cleanup. Cleared by an explicit user restart (resetRespawnBreaker()).
+      if (breakerResult.tripped && !this._respawnBlocked) {
+        this._respawnBlocked = true;
+        this._status = 'error';
+        console.error(
+          `[Session] PTY exit circuit breaker tripped for ${this.id} (${breakerResult.count} non-zero exits within window); blocking respawn.`
+        );
+        this.emit('respawnBreakerTripped', { count: breakerResult.count });
+      }
       this.emit('exit', exitCode);
     });
+  }
+
+  /**
+   * Clear the interactive-PTY exit circuit breaker (COD-118).
+   *
+   * Called on an EXPLICIT, user-initiated (re)start so an intentional restart is
+   * never blocked by a prior crash-loop trip. Automatic recovery/reconnect paths
+   * must NOT call this — that's the whole point of the breaker.
+   */
+  resetRespawnBreaker(): void {
+    this._ptyExitBreaker.reset();
+    this._respawnBlocked = false;
+  }
+
+  /** Whether the interactive-PTY exit circuit breaker is currently tripped (COD-118). */
+  get respawnBlocked(): boolean {
+    return this._respawnBlocked;
   }
 
   /**
