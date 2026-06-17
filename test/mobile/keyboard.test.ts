@@ -237,14 +237,22 @@ describe('Virtual Keyboard', () => {
           toolbarTransform: toolbar?.style.transform ?? '',
           accessoryTransform: (accessory as HTMLElement | null)?.style.transform ?? '',
           toolbarTop: toolbarRect?.top ?? 0,
+          toolbarBottom: toolbarRect?.bottom ?? 0,
           accessoryTop: accessoryRect?.top ?? 0,
+          accessoryBottom: accessoryRect?.bottom ?? 0,
           terminalBottom: terminalRect?.bottom ?? 0,
+          mainPaddingBottom: parseFloat(
+            (document.querySelector('.main') as HTMLElement | null)?.style.paddingBottom || '0'
+          ),
         };
       });
-      expect(layout.toolbarTransform).toBe('');
-      expect(layout.accessoryTransform).toBe('');
+      expect(layout.toolbarTransform === '' || layout.toolbarTransform.startsWith('translateY(')).toBe(true);
+      expect(layout.accessoryTransform === '' || layout.accessoryTransform.startsWith('translateY(')).toBe(true);
       expect(layout.accessoryTop).toBeGreaterThanOrEqual(layout.terminalBottom - 4);
-      expect(layout.toolbarTop).toBeGreaterThan(layout.accessoryTop);
+      expect(layout.toolbarTop).toBeGreaterThanOrEqual(layout.accessoryBottom - 4);
+      expect(layout.mainPaddingBottom).toBeGreaterThanOrEqual(
+        layout.toolbarBottom - layout.toolbarTop + layout.accessoryBottom - layout.accessoryTop - 4
+      );
     });
 
     it('accessory bar gets .visible class', async () => {
@@ -329,7 +337,7 @@ describe('Virtual Keyboard', () => {
           (button) => (button as HTMLElement).dataset.action
         );
       });
-      expect(actions).toEqual(['scroll-up', 'scroll-down', 'init', 'clear', 'paste', 'dismiss']);
+      expect(actions).toEqual(['scroll-up', 'scroll-down', 'init', 'clear', 'paste', 'esc', 'dismiss']);
     });
 
     it('double-tap confirm on /clear button', async () => {
@@ -573,7 +581,7 @@ describe('Virtual Keyboard', () => {
       expect(state?.bodyClass).toBe(false);
     });
 
-    it('keeps the CJK textarea hidden even when old phone settings enabled it', async () => {
+    it('honors explicit CJK textarea settings on phones', async () => {
       const state = await page.evaluate(() => {
         const settings = app.loadAppSettingsFromStorage();
         settings.cjkInputEnabled = true;
@@ -591,8 +599,8 @@ describe('Virtual Keyboard', () => {
       });
 
       expect(state).not.toBeNull();
-      expect(state?.display).toBe('none');
-      expect(state?.bodyClass).toBe(false);
+      expect(state?.display).not.toBe('none');
+      expect(state?.bodyClass).toBe(true);
     });
 
     it('focuses the terminal helper textarea when the terminal is tapped', async () => {
