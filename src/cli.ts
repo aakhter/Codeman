@@ -343,6 +343,7 @@ program
   .option('-m, --mode <mode>', 'Checkpoint mode: compact (default) or clear', 'compact')
   .option('-c, --continue <prompt>', 'Prompt to send after the op completes (default: continue)')
   .option('-s, --session <id>', 'Codeman session ID (defaults to CODEMAN_SESSION_ID)')
+  .option('--status', 'Report the session checkpoint config (read-only — does NOT fire a checkpoint)')
   .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
   .action(async (options) => {
     const mode = options.mode === 'clear' ? 'clear' : 'compact';
@@ -352,6 +353,23 @@ program
     if (!sessionId) {
       console.error(chalk.red('✗ checkpoint requires a session id (--session or CODEMAN_SESSION_ID)'));
       process.exit(1);
+    }
+
+    // Read-only status query (COD-111): GET the session state and report the
+    // checkpoint config without POSTing the `checkpoint` hook event — so nothing
+    // is queued or fired. This is the side-effect-free alternative to the old
+    // "probe by running `aicodeman checkpoint`" detection, which compacts/clears
+    // the live session as a side effect.
+    if (options.status) {
+      let state: unknown;
+      try {
+        state = await fetchServerJson(apiUrl, `/api/sessions/${encodeURIComponent(sessionId)}`);
+      } catch (err) {
+        console.error(chalk.red(`✗ could not query session ${sessionId}: ${(err as Error).message}`));
+        process.exit(1);
+      }
+      console.log(formatCheckpointStatus(state));
+      return;
     }
 
     const data: Record<string, unknown> = { mode };
@@ -539,6 +557,50 @@ export function formatSessionRows(sessions: SessionRow[]): string {
       return `  ${chalk.cyan(id)} ${status} ${s.workingDir || ''}`.trimEnd();
     })
     .join('\n');
+}
+
+/**
+ * The prompt a checkpoint-and-continue sends after the op completes when the
+ * caller passes no `--continue`. Mirrors `RESUME_PROMPT` in session-auto-ops.ts;
+ * kept as a CLI-local literal so the short-lived CLI process needn't import
+ * server internals. Reported by `checkpoint --status`.
+ */
+const CHECKPOINT_DEFAULT_CONTINUE = 'continue';
+
+/**
+ * Render a session's AGENT CHECKPOINT (checkpoint-and-continue) config as a
+ * human-readable status report (COD-111). Input is the already-unwrapped session
+ * state from `GET /api/sessions/:id` (carrying `checkpointEnabled`,
+ * `checkpointModes`, and the legacy `checkpointMode`). Pure + defensive:
+ * tolerates missing/legacy fields and null input. Exported for tests.
+ *
+ * Read-only: this only formats already-fetched state — it never triggers a
+ * checkpoint (that is the whole point of the `--status` query).
+ */
+export function formatCheckpointStatus(state: unknown): string {
+  const s = (state ?? {}) as {
+    checkpointEnabled?: boolean;
+    checkpointMode?: 'compact' | 'clear';
+    checkpointModes?: Array<'compact' | 'clear'>;
+  };
+  const enabled = s.checkpointEnabled === true;
+  // Normalize to the stable display order (compact, clear). Fall back to the
+  // legacy single `checkpointMode` when the modes array is absent.
+  const modes = Array.isArray(s.checkpointModes)
+    ? (['compact', 'clear'] as const).filter((m) => s.checkpointModes!.includes(m))
+    : s.checkpointMode === 'compact' || s.checkpointMode === 'clear'
+      ? [s.checkpointMode]
+      : [];
+  // A bare `checkpoint` (no -m) runs compact when allowed, else clear (mirrors
+  // the server's `checkpointMode` getter); `n/a` when no mode is allowed.
+  const bare = modes.includes('compact') ? 'compact' : modes.includes('clear') ? 'clear' : 'n/a';
+  return [
+    'AGENT CHECKPOINT status:',
+    `  enabled:           ${enabled ? 'yes' : 'no'}`,
+    `  allowed modes:     ${modes.length ? modes.join(', ') : 'none'}`,
+    `  bare checkpoint:   ${bare}`,
+    `  default continue:  ${CHECKPOINT_DEFAULT_CONTINUE}`,
+  ].join('\n');
 }
 
 /**
@@ -1010,11 +1072,16 @@ program
   .alias('check-deps')
   .description('Check Codeman tool dependencies (Node, Claude CLI, tmux, LibreOffice, MS Office)')
   .option('--json', 'Output structured JSON instead of a table')
-  .option('--category <name>', 'Only check one category (core|office|documents|media|other)')
+  .option('--category <name>', 'Only check one category (core|office|other)')
   .action(async (options) => {
     const { createRealHost, checkAll } = await import('./utils/dependency-checker.js');
     const { renderTable, renderJson, computeExitCode } = await import('./utils/dependency-report.js');
-    const { DEPENDENCY_REGISTRY } = await import('./config/dependency-registry.js');
+    const { DEPENDENCY_REGISTRY, TOOL_CATEGORIES } = await import('./config/dependency-registry.js');
+
+    if (options.category && !(TOOL_CATEGORIES as readonly string[]).includes(options.category)) {
+      console.error(`Unknown category "${options.category}". Valid categories: ${TOOL_CATEGORIES.join(', ')}`);
+      process.exit(2);
+    }
 
     const host = createRealHost();
     const registry = options.category

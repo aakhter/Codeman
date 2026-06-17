@@ -112,6 +112,11 @@ function evaluateWebGLLongTaskTrip(recent, entries, now, config = WEBGL_FALLBACK
   return recent.length >= config.LONGTASK_COUNT;
 }
 
+// Expose for tests. `const` declarations at the top of a non-module script
+// are global lexical bindings but not `window` properties, so explicit
+// assignment is the test-visible API surface.
+// Desktop tab-overflow policy: auto-wrap the session tabs to a second row when
+// they overflow one row (and the user hasn't pinned the manual two-row layout).
 function shouldAutoWrapTabs(input) {
   if (!input || input.deviceType !== 'desktop') return false;
   if (input.manualTwoRows) return false;
@@ -122,9 +127,6 @@ function shouldAutoWrapTabs(input) {
   return scrollWidth > clientWidth + 1;
 }
 
-// Expose for tests. `const` declarations at the top of a non-module script
-// are global lexical bindings but not `window` properties, so explicit
-// assignment is the test-visible API surface.
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -262,6 +264,7 @@ const SSE_EVENTS = {
   SESSION_LIMIT_PAUSE_SCHEDULED: 'session:limitPauseScheduled',
   SESSION_LIMIT_RESUME: 'session:limitResume',
   SESSION_LIMIT_RESUME_CANCELLED: 'session:limitResumeCancelled',
+  SESSION_RESPAWN_BREAKER_TRIPPED: 'session:respawnBreakerTripped',
   SESSION_CLI_INFO: 'session:cliInfo',
   SESSION_MESSAGE: 'session:message',
   SESSION_INTERACTIVE: 'session:interactive',
@@ -354,6 +357,11 @@ const SSE_EVENTS = {
   SUBAGENT_MESSAGE: 'subagent:message',
   SUBAGENT_TOOL_RESULT: 'subagent:tool_result',
   SUBAGENT_COMPLETED: 'subagent:completed',
+
+  // Workflow runs (ultracode / Workflow tool)
+  WORKFLOW_RUN_DISCOVERED: 'workflow:run_discovered',
+  WORKFLOW_RUN_UPDATED: 'workflow:run_updated',
+  WORKFLOW_RUN_REMOVED: 'workflow:run_removed',
 
   // Images
   IMAGE_DETECTED: 'image:detected',

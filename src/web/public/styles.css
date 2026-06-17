@@ -4350,6 +4350,12 @@ body.solo-mode .btn-lifecycle-log {
   min-width: 220px;
   max-width: 320px;
   flex: 0 1 auto;
+  /* Match the field to its settings row: the base .form-select (0.8rem / 0.5rem
+     padding) renders bigger and taller than the row, and the daylight skins'
+     Manrope font exaggerates it further. Slim it to the row's 0.75rem text. */
+  font-size: 0.75rem;
+  padding-top: 0.3rem;
+  padding-bottom: 0.3rem;
 }
 
 .settings-item-multiline {
@@ -5270,6 +5276,7 @@ body.solo-mode .btn-lifecycle-log {
 /* Modal Tabs */
 .modal-tabs {
   display: flex;
+  flex-wrap: wrap; /* COD-116: 9 settings tabs overflow narrow modals; wrap so none are clipped/unreachable */
   gap: 0.5rem;
   padding: 0 1rem 0.75rem 1rem;
   border-bottom: 1px solid var(--border);
@@ -8355,6 +8362,12 @@ kbd {
   background: #1f1f24;
 }
 
+.file-preview-body audio {
+  display: block;
+  width: 90%;
+  margin: 2rem auto;
+}
+
 .file-preview-body .binary-message {
   padding: 2rem;
   text-align: center;
@@ -8707,6 +8720,10 @@ kbd {
 }
 .comment-highlight:hover {
   background: rgba(122, 162, 255, 0.38);
+}
+
+.file-preview-body .binary-message a {
+  color: var(--accent, #4ea1ff);
 }
 
 .file-preview-footer {
@@ -9799,6 +9816,340 @@ kbd {
   display: none !important;
 }
 
+/* "Attachments" header button — opt-in (App Settings → Display), hidden by
+   default. Same pattern as the response viewer: a base inline-flex !important so
+   an inline style can't override it, and a more-specific marker rule to hide. */
+.btn-attachments-history {
+  display: inline-flex !important;
+}
+.btn-attachments-history.btn-attachments-history--hidden {
+  display: none !important;
+}
+
+/* "Ultracode Agents" header launcher — opt-in (App Settings → Display), hidden by
+   default everywhere (so the mobile-header-buttons-policy guard auto-excludes it).
+   Base inline-flex !important + a more-specific marker rule to hide. */
+.btn-ultracode-agents {
+  display: inline-flex !important;
+}
+.btn-ultracode-agents.btn-ultracode-agents--hidden {
+  display: none !important;
+}
+
+/* ===== Ultracode / Workflow agents master-detail panel ===== */
+/* Reuses .subagents-panel dock behavior but anchors LEFT so it never overlaps the
+   bottom-right subagents panel when both are open. */
+.ultracode-agents-panel {
+  right: auto;
+  left: 0.5rem;
+  width: 640px;
+}
+@media (max-width: 700px) {
+  .ultracode-agents-panel {
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
+/* LEFT pane: run rows */
+.ultracode-run-item {
+  padding: 0.45rem 0.5rem;
+  border-radius: 6px;
+  background: var(--bg-input);
+  margin-bottom: 0.4rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ultracode-run-item:hover {
+  background: var(--bg-card);
+}
+.ultracode-run-item.selected {
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+}
+.ultracode-run-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.2rem;
+}
+.ultracode-run-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ultracode-run-stats {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+}
+.ultracode-status {
+  font-size: 0.58rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  margin-left: auto;
+  text-transform: lowercase;
+  background: var(--text-muted);
+  color: white;
+  flex-shrink: 0;
+}
+.ultracode-status.completed {
+  background: var(--success);
+}
+.ultracode-status.active {
+  background: var(--warning);
+  color: black;
+}
+.ultracode-status.failed {
+  background: var(--error, #b3261e);
+  color: white;
+}
+
+/* LEFT pane: phase chips for the selected run */
+.ultracode-phase-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+}
+.ultracode-phase-chip {
+  font-size: 0.62rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ultracode-phase-chip:hover {
+  color: var(--text);
+}
+.ultracode-phase-chip.selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+/* RIGHT pane: per-phase header + agent cards */
+.ultracode-phase-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0.5rem 0 0.3rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--border);
+}
+.ultracode-phase-sub {
+  font-size: 0.62rem;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.ultracode-agent-card {
+  background: var(--bg-input);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.35rem;
+}
+.ultracode-agent-card--clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ultracode-agent-card--clickable:hover {
+  background: var(--bg-card);
+}
+.ultracode-agent-top {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+}
+.ultracode-agent-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ultracode-agent-state {
+  font-size: 0.56rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: var(--text-muted);
+  color: white;
+}
+.ultracode-agent-state.completed {
+  background: var(--success);
+}
+.ultracode-agent-state.active {
+  background: var(--warning);
+  color: black;
+}
+.ultracode-agent-state.idle {
+  background: var(--bg-card);
+  color: var(--text-muted);
+}
+.ultracode-agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.ultracode-chip {
+  font-size: 0.62rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.ultracode-chip-tok {
+  color: var(--accent);
+}
+.ultracode-chip-tool {
+  color: var(--text);
+}
+.ultracode-agent-sub {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  margin-top: 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ========== Ultracode floating run windows (additional to the dock panel) ========== */
+/* A draggable window that auto-pops while a Workflow/ultracode run is active and is
+   tied by a glowing connector line to the originating session tab (ultracode-windows.js). */
+.ultracode-window {
+  position: fixed;
+  width: 380px;
+  height: 320px;
+  min-width: 260px;
+  min-height: 140px;
+  max-width: 92vw;
+  max-height: 80vh;
+  background: var(--bg-card);
+  border: 1px solid #a855f7;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(168, 85, 247, 0.15);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  resize: both;
+  contain: layout paint;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+.ultracode-window.spawning {
+  transform: scale(0.92);
+  opacity: 0;
+}
+.ultracode-window.collapsed {
+  height: auto !important;
+  resize: none;
+}
+.ultracode-window.collapsed .ultracode-window-body {
+  display: none;
+}
+.ultracode-window-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--bg-input);
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+}
+.ultracode-window-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+}
+.ultracode-window-title .icon {
+  font-size: 0.95rem;
+  flex-shrink: 0;
+}
+.ultracode-window-title .uw-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ultracode-window-title .uw-status {
+  flex-shrink: 0;
+  margin-left: 0;
+}
+.ultracode-window-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+.ultracode-window-actions button {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.ultracode-window-actions button:hover {
+  color: var(--text);
+}
+.ultracode-window-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.5rem;
+  background: var(--bg);
+  min-height: 0;
+}
+.ultracode-window-body::-webkit-scrollbar {
+  width: 6px;
+}
+.ultracode-window-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.ultracode-window-body .uw-summary {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  margin-bottom: 0.4rem;
+}
+
+/* Ultracode connector line — distinct purple to set it apart from blue subagent lines. */
+.connection-line.ultracode-connection {
+  stroke: #a855f7;
+  stroke-width: 3;
+  stroke-dasharray: 6 3;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8))
+          drop-shadow(0 0 5px rgba(168, 85, 247, 0.85))
+          drop-shadow(0 0 10px rgba(168, 85, 247, 0.5));
+  animation: ultracode-conn-pulse 1.4s ease-in-out infinite;
+}
+.connection-line.ultracode-connection:hover {
+  stroke-width: 3.5;
+}
+@keyframes ultracode-conn-pulse {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 1; }
+}
+
 /* Plan-usage chip (App Settings → Display → "Plan Usage Limits"). Shows the
    live 5-hour + weekly plan limits parsed from the Claude statusline. Hidden by
    default via the marker class below; the server strips it at render when the
@@ -10429,6 +10780,7 @@ kbd {
   display: block;
   min-height: 44px;
   max-height: 96px;
+  padding: 12px 10px;
   border: 1px solid rgba(80, 120, 190, 0.55);
   border-left: none;
   border-right: none;

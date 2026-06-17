@@ -15,6 +15,7 @@
  * - **Mux** (4): created, killed, died, statsUpdated
  * - **Respawn** (24): stateChanged, cycleStarted/Completed, step*, aiCheck*, planCheck*, timer*, log, ...
  * - **Subagents** (7): discovered, updated, tool_call, tool_result, progress, message, completed
+ * - **Workflow runs** (3): run_discovered, run_updated, run_removed (ultracode / Workflow tool)
  * - **Scheduled** (6): created, updated, completed, stopped, log, deleted
  * - **Teams** (4): created, updated, removed, taskUpdated
  * - **Transcript** (4): complete, plan_mode, tool_start, tool_end
@@ -81,6 +82,8 @@ export const SessionLimitPauseScheduled = 'session:limitPauseScheduled' as const
 export const SessionLimitResume = 'session:limitResume' as const;
 /** Pending usage-limit auto-resume cancelled (session resumed or feature disabled). */
 export const SessionLimitResumeCancelled = 'session:limitResumeCancelled' as const;
+/** Interactive-PTY exit circuit breaker tripped (COD-118): repeated non-zero exits; respawn blocked, session errored. */
+export const SessionRespawnBreakerTripped = 'session:respawnBreakerTripped' as const;
 /** CLI version/model info detected from session output. */
 export const SessionCliInfo = 'session:cliInfo' as const;
 /** General session message (e.g. status text). */
@@ -225,6 +228,15 @@ export const SubagentProgress = 'subagent:progress' as const;
 export const SubagentMessage = 'subagent:message' as const;
 /** Subagent finished. */
 export const SubagentCompleted = 'subagent:completed' as const;
+
+// ─── Workflow Runs (ultracode / Workflow tool) ───────────────────────────────
+
+/** A workflow run was discovered (first time seen). Payload: WorkflowRunInfo. */
+export const WorkflowRunDiscovered = 'workflow:run_discovered' as const;
+/** A workflow run changed (agent state/token tick). Payload: WorkflowRunInfo. */
+export const WorkflowRunUpdated = 'workflow:run_updated' as const;
+/** A workflow run's file disappeared. Payload: { runId: string }. */
+export const WorkflowRunRemoved = 'workflow:run_removed' as const;
 
 // ─── Scheduled Runs ──────────────────────────────────────────────────────────
 
@@ -386,6 +398,7 @@ export const SseEvent = {
   SessionLimitPauseScheduled,
   SessionLimitResume,
   SessionLimitResumeCancelled,
+  SessionRespawnBreakerTripped,
   SessionCliInfo,
   SessionMessage,
   SessionInteractive,
@@ -462,6 +475,11 @@ export const SseEvent = {
   SubagentProgress,
   SubagentMessage,
   SubagentCompleted,
+
+  // Workflow runs (ultracode)
+  WorkflowRunDiscovered,
+  WorkflowRunUpdated,
+  WorkflowRunRemoved,
 
   // Scheduled runs
   ScheduledCreated,

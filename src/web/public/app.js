@@ -206,6 +206,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_LIMIT_PAUSE_SCHEDULED, '_onSessionLimitPauseScheduled'],
   [SSE_EVENTS.SESSION_LIMIT_RESUME, '_onSessionLimitResume'],
   [SSE_EVENTS.SESSION_LIMIT_RESUME_CANCELLED, '_onSessionLimitResumeCancelled'],
+  [SSE_EVENTS.SESSION_RESPAWN_BREAKER_TRIPPED, '_onSessionRespawnBreakerTripped'],
   [SSE_EVENTS.SESSION_CLI_INFO, '_onSessionCliInfo'],
   [SSE_EVENTS.SESSION_STATUS_TELEMETRY, '_onSessionStatusTelemetry'],
 
@@ -274,6 +275,11 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SUBAGENT_MESSAGE, '_onSubagentMessage'],
   [SSE_EVENTS.SUBAGENT_TOOL_RESULT, '_onSubagentToolResult'],
   [SSE_EVENTS.SUBAGENT_COMPLETED, '_onSubagentCompleted'],
+
+  // Workflow runs (ultracode)
+  [SSE_EVENTS.WORKFLOW_RUN_DISCOVERED, '_onWorkflowRunDiscovered'],
+  [SSE_EVENTS.WORKFLOW_RUN_UPDATED, '_onWorkflowRunUpdated'],
+  [SSE_EVENTS.WORKFLOW_RUN_REMOVED, '_onWorkflowRunRemoved'],
 
   // Images
   [SSE_EVENTS.IMAGE_DETECTED, '_onImageDetected'],
@@ -393,6 +399,17 @@ class CodemanApp {
     this.subagentToolResults = new Map(); // Map<agentId, Map<toolUseId, result>> - tool results by toolUseId
     this.activeSubagentId = null; // Currently selected subagent for detail view
     this.subagentPanelVisible = false;
+
+    // Ultracode / Workflow run visualization (master-detail tab)
+    this.workflowRuns = new Map(); // runId -> run summary (LEFT list)
+    this.workflowRunDetails = new Map(); // runId -> full run with agents[] (RIGHT pane)
+    this.activeWorkflowRunId = null;
+    this.activeWorkflowPhaseIndex = null;
+    // Ultracode floating run windows (additional to the dock panel — ultracode-windows.js)
+    this.ultracodeWindows = new Map(); // runId -> { element, parentSessionId, dragListeners, collapsed }
+    this.ultracodeWindowsClosed = new Set(); // runIds the user explicitly dismissed (don't re-pop)
+    this.ultracodeWindowCloseTimers = new Map(); // runId -> auto-close timeout
+    this.ultracodeWindowZIndex = 1000;
     this.subagentWindows = new Map(); // Map<agentId, { element, position }>
     this.subagentWindowZIndex = ZINDEX_SUBAGENT_BASE;
     this.minimizedSubagents = new Map(); // Map<sessionId, Set<agentId>> - minimized to tab
@@ -841,33 +858,31 @@ class CodemanApp {
         if (this.attachmentHistoryDrawerOpen) this.closeAttachmentHistory();
       }
 
-      // Option/Alt navigation uses physical key codes so macOS keyboard layouts
-      // that emit special characters (for example Option+1 -> ¡) still work.
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      // Option/Alt session navigation uses physical key CODES, not e.key, so macOS
+      // keyboard layouts that emit special characters under Option (Option+1 -> ¡,
+      // Option+[ -> "“") still switch sessions. e.code is the physical key regardless
+      // of layout. Option+1-9 = switch by index; Option+[ / Option+] = prev / next.
+      if (e.altKey && !e.ctrlKey && !e.shiftKey) {
         const code = e.code || '';
         const digitMatch = code.match(/^Digit([1-9])$/);
         if (digitMatch) {
           const idx = parseInt(digitMatch[1], 10) - 1;
-          e.preventDefault();
           if (idx < this.sessionOrder.length) {
+            e.preventDefault();
             this.selectSession(this.sessionOrder[idx]);
           }
           return;
         }
-
         if (e.code === 'BracketLeft') {
           e.preventDefault();
-          this.previousSession();
+          this.prevSession();
           return;
         }
-
         if (e.code === 'BracketRight') {
           e.preventDefault();
           this.nextSession();
           return;
         }
-
-        return;
       }
 
       // Match against shortcut table
@@ -1913,6 +1928,15 @@ class CodemanApp {
     this.updateAutoResumeStatus(data.sessionId);
   }
 
+  // COD-118: the interactive PTY exit circuit breaker tripped (repeated non-zero exits).
+  // The errored status itself arrives via session:updated; this just surfaces a toast for
+  // diagnostic clarity so a silently-looping session is obvious. Restart clears the breaker.
+  _onSessionRespawnBreakerTripped(data) {
+    const session = this.sessions.get(data.sessionId);
+    const label = session?.name || 'Session';
+    this.showToast?.(`${label} stopped: repeated crashes detected. Restart to retry.`, 'error');
+  }
+
   _onSessionCliInfo(data) {
     const session = this.sessions.get(data.sessionId);
     if (session) {
@@ -2398,7 +2422,13 @@ class CodemanApp {
     // Mobile defaults ship cjkInputEnabled: false (native terminal input by
     // default on touch), but an explicit user enable is honored everywhere —
     // the App Settings toggle must not be a silent no-op on phones.
-    const showCjk = this._serverCjkOverride || (settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false);
+    // The welcome/home screen (no active session) has nothing to type into.
+    // Force-hide the CJK textarea there — otherwise the `position: fixed`
+    // `.cjk-input-visible` rule floats it over the welcome overlay and blocks
+    // content. Re-synced on session enter/leave via hideWelcome()/showWelcome().
+    const cjkUserEnabled =
+      this._serverCjkOverride || (settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false);
+    const showCjk = cjkUserEnabled && !!this.activeSessionId;
     cjkEl.classList.toggle('cjk-input-visible', !!showCjk);
     document.body.classList.toggle('cjk-input-visible', !!showCjk);
     cjkEl.style.display = showCjk ? 'block' : 'none';
@@ -2483,6 +2513,11 @@ class CodemanApp {
     // Clear subagent activity/results maps (prevents leaks if data.subagents is missing)
     this.subagentActivity.clear();
     this.subagentToolResults.clear();
+    // Clear ultracode workflow run state (re-seeded from data.workflowRuns below)
+    if (this.workflowRuns) this.workflowRuns.clear();
+    if (this.workflowRunDetails) this.workflowRunDetails.clear();
+    this.activeWorkflowRunId = null;
+    this.activeWorkflowPhaseIndex = null;
     // Clean up mobile/keyboard handlers and re-init (prevents listener accumulation on reconnect)
     MobileDetection.cleanup();
     KeyboardHandler.cleanup();
@@ -2661,6 +2696,11 @@ class CodemanApp {
         // Finally, restore window states (this opens windows with correct parent info)
         this.restoreSubagentWindowStates();
       });
+    }
+
+    // Seed ultracode workflow runs (LEFT-pane summaries) from the snapshot
+    if (data.workflowRuns) {
+      this.seedWorkflowRuns(data.workflowRuns);
     }
 
     // Restore previously active session (survives page reload + SSE reconnect)
@@ -2929,6 +2969,9 @@ class CodemanApp {
     this.updateTabOverflowMode();
   }
 
+  // Auto-wrap desktop session tabs to a second row when they overflow one row,
+  // unless the user has pinned the manual two-row layout (tabTwoRows). Mobile/
+  // tablet keep horizontal scroll. Policy lives in constants.js for unit testing.
   updateTabOverflowMode() {
     const container = this.$('sessionTabs');
     if (!container) return;
@@ -2936,9 +2979,7 @@ class CodemanApp {
     const deviceType = MobileDetection.getDeviceType();
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
-    const manualTwoRows = deviceType === 'desktop'
-      ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false)
-      : false;
+    const manualTwoRows = deviceType === 'desktop' ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false) : false;
 
     if (manualTwoRows || deviceType !== 'desktop') {
       container.classList.remove('tabs-auto-wrap');
@@ -3036,6 +3077,12 @@ class CodemanApp {
 
     // Update connection lines after tabs change (positions may have shifted)
     this.updateConnectionLines();
+
+    // Re-evaluate desktop auto-wrap for every full rebuild, including the incremental
+    // branch's early `_fullRenderSessionTabs(); return;` paths and the manual two-rows
+    // toggle (applyTabWrapSettings calls this) which would otherwise leave a stale
+    // tabs-auto-wrap class until the next content render.
+    this.updateTabOverflowMode();
   }
 
   // Set up arrow key navigation for session tabs (accessibility)
