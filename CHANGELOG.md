@@ -1,5 +1,59 @@
 # aicodeman
 
+## 1.1.9
+
+### Patch Changes
+
+- Two welcome-screen tunnel changes:
+  - **UI (Daylight Blue skin):** the **Cloudflare Tunnel** button is now purple (was orange/yellow), keeping the three welcome buttons visually distinct — Claude blue, Tunnel purple, OpenCode green.
+  - **Enable a tunnel without `CODEMAN_PASSWORD`, with a warning.** Previously enabling the Cloudflare tunnel with no password set was hard-refused unless you set `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1`. Now you can opt in straight from the browser: clicking the tunnel toggle without a password pops a **security confirm dialog** ("publishes this machine to a public URL with no login — effectively remote code execution; set CODEMAN_PASSWORD instead"), and only on confirm does it enable, sending an explicit per-request `acknowledgeUnauthTunnel:true`. The server logs a loud warning whenever a passwordless public tunnel starts. curl/API/CLI callers are unchanged — still refused unless they set a password, set the env var, or pass `acknowledgeUnauthTunnel:true` — so nothing gets exposed accidentally. The acknowledgment is an action field and is never persisted to settings.json.
+
+## 1.1.8
+
+### Patch Changes
+
+- UI (Daylight Blue skin): give the welcome-screen action buttons distinct colors instead of all reading blue. **Run Claude Code** keeps the blue accent, **Cloudflare Tunnel** now uses Cloudflare's brand orange, and **Run OpenCode** uses an emerald green — so the three are visually distinguishable at a glance. Scoped to the default `daylight-blue` skin only (daylight-green and OG are unchanged), with matching hover/active states and dark ink for contrast. Verified in a real browser: the three buttons compute to blue / orange / green gradients on the welcome overlay.
+
+## 1.1.7
+
+### Patch Changes
+
+- Fix: terminal scroll-up (scrollback) intermittently breaking for **Claude** sessions — most visible on iPhone, where you suddenly "can't scroll up the Claude console."
+
+  Root cause: Claude Code periodically emits alternate-screen switches (`\x1b[?1049h`/`\x1b[?47h`/`\x1b[?1047h`), scrollback-erase (`\x1b[3J`), and mouse-tracking enables — typically when it draws a full-screen UI (pickers/dialogs, the boot welcome). xterm.js obeys these by moving to the scrollback-less alternate buffer (or wiping saved lines / hijacking the wheel), so the conversation history becomes unreachable until Claude returns to its normal view. Codeman already stripped these sequences so history stays scrollable, but the strip was gated to **Codex mode only** — Claude (and the equivalent buffer-replay path) let them through.
+
+  The strip is now shared via a single `isAltScreenStripMode(mode)` predicate (`codex || claude`) applied at BOTH sites that were Codex-only: the live PTY stream (`Session._handleTerminalOutput`, including the split-across-chunks carry reassembly) and the `/terminal` buffer replay used on tab-switch/reconnect. `shell` is deliberately excluded so full-screen TUIs run from a shell (vim/less/htop) keep their alternate screen; `opencode` is also unchanged.
+
+  Verified end-to-end on an isolated instance against a real Claude session: the replayed buffer and live stream now carry zero alt-screen/scrollback-erase/mouse sequences, the terminal stays in the normal buffer with scrollback intact, and touch swipe-up scrolls correctly. Covered by new unit tests (`test/claude-scrollback-strip.test.ts`); the existing Codex strip tests are unchanged.
+
+## 1.1.6
+
+### Patch Changes
+
+- Fix: ultracode floating run windows now pop on a fresh device/browser that loads while a run is already active.
+
+  `ultracodeFloatingWindows` syncs from the server (it's a non-display setting), but on a first-time device the SSE `getLightState` run snapshot can seed the run list BEFORE the async settings load resolves — so the floating-window gate read `false` at that instant and skipped any already-active run, leaving the window un-popped until the next ~10s watcher tick. The app now re-runs `syncAllUltracodeFloatingWindows()` once server settings finish loading (in the `loadAppSettingsFromServer().then()` callback), so an in-flight run pops its window immediately. Idempotent: open windows are left as-is, and if the setting is off any premature windows are torn down. Verified end-to-end against a real in-flight run on an isolated instance — a pristine browser (empty localStorage) seeds the setting from the server and pops the active run's window ~0.4s after first paint.
+
+  Also corrected a stale `@fileoverview` comment in `ultracode-windows.js` that claimed the floating windows are gated on `showUltracodeAgents`; they are gated on the dedicated `ultracodeFloatingWindows` toggle (only the docked "Ultracode Agents" panel uses `showUltracodeAgents`).
+
+## 1.1.5
+
+### Patch Changes
+
+- Fix: the Ultracode Agents panel's (×) Close button now fully hides the panel.
+
+  `closeUltracodeAgentsPanel()` only removed the `open` class, which drops the bottom-docked drawer to its collapsed _peek_ state (the 36px header strip stays visible) rather than closing it — so clicking (×) looked like it did nothing. It now also adds the `hidden` class (`display:none`), mirroring `closeSubagentsPanel()`. It deliberately does NOT flip the `showUltracodeAgents` setting (that also gates the run watcher and floating windows); the header launcher button reopens the panel. Verified in a real browser: after (×) the panel computes `display:none`.
+
+## 1.1.4
+
+### Patch Changes
+
+- Fix: ultracode floating run windows (and the live dock panel) now appear DURING an in-flight Workflow/ultracode run, not only after it finishes.
+
+  The Workflow runtime writes the run-state file `…/workflows/wf_<id>.json` only at completion (always a terminal status); while a run is live, its only on-disk state is the sibling `…/subagents/workflows/wf_<id>/` transcript tree. `workflow-run-watcher` previously scanned only the completion file, so it never observed a run until it was already terminal — and the floating-window auto-pop is gated on an ACTIVE run, so it never fired for a live run (the feature was effectively dead for in-flight runs).
+
+  The watcher now ALSO scans the `subagents/workflows/wf_<id>/` transcript tree and synthesizes a minimal ACTIVE run (status `running`, agent slots keyed by their `agentId` so the agent-card → live-transcript click still works, `lastActivityAt` from the newest agent/journal mtime, per-agent done/running derived from the run journal's `result` events) when no completion file exists yet. When the run finishes, the real `wf_<id>.json` supersedes the synthesized record (same runId), restoring full phase/token detail and the normal finish → 8s-grace auto-close flow. The watcher stays standalone (it never imports subagent-watcher). Verified end-to-end against a real in-flight run; adds unit coverage for live synthesis, agentId preservation, journal-derived state, empty-dir skipping, and completion-file precedence.
+
 ## 1.1.3
 
 ### Patch Changes
