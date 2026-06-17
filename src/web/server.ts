@@ -45,7 +45,7 @@ import { getHookSecret } from '../config/hook-secret.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
-import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState } from '../types.js';
+import type { ClaudeMode, SessionAttachmentHistoryItem, SessionRemote, SessionState } from '../types.js';
 import { RespawnController, RespawnConfig } from '../respawn-controller.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import { createMultiplexer } from '../mux-factory.js';
@@ -108,6 +108,13 @@ function rewriteApiV1Url(url: string): string {
   if (url === '/api/v1') return '/api';
   if (url.startsWith('/api/v1/')) return '/api/' + url.slice('/api/v1/'.length);
   return url;
+}
+
+export function resolveRestoredSessionRemote(
+  savedStateRemote: SessionRemote | undefined,
+  muxSessionRemote: SessionRemote | undefined
+): SessionRemote | undefined {
+  return savedStateRemote ?? muxSessionRemote;
 }
 import {
   getErrorMessage,
@@ -2116,6 +2123,7 @@ export class WebServer extends EventEmitter {
             const session = new Session({
               id: muxSession.sessionId, // Preserve the original session ID
               workingDir: muxSession.workingDir,
+              remote: resolveRestoredSessionRemote(savedState?.remote, muxSession.remote),
               mode: muxSession.mode,
               name: sessionName,
               mux: this.mux,
