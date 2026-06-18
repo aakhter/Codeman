@@ -130,6 +130,17 @@ It connects with the **identical** options as the launch
 `-o ConnectTimeout=10`), so a proxied/custom-port/identity host that the launch
 can reach also passes the probe (and vice-versa).
 
+Remote SSH commands bootstrap a conservative binary PATH before invoking tmux or
+agent commands:
+
+```sh
+$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
+```
+
+This covers non-interactive SSH sessions on macOS where Homebrew binaries such as
+`tmux` and `codex` are not visible in the default `/usr/bin:/bin:/usr/sbin:/sbin`
+PATH.
+
 **Test-mode short-circuit:** under `VITEST` the probe returns
 `{ ok: true, tmuxPath: '(test-mode)' }` without opening a socket — mirroring
 `TmuxManager`'s no-op-shell-under-VITEST (`IS_TEST_MODE`). Without it, remote-case

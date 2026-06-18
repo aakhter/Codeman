@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildRemoteKillCommand } from '../src/tmux-manager.js';
+import { REMOTE_PATH_BOOTSTRAP } from '../src/remote-hosts.js';
 import type { SessionRemote } from '../src/types.js';
 
 // COD-109 — kill an OWNED remote tmux session by propagating `kill-session` to the
@@ -16,7 +17,9 @@ describe('COD-109 buildRemoteKillCommand', () => {
 
   it('emits a remote kill-session against the codeman socket (no -t — non-interactive)', () => {
     const cmd = buildRemoteKillCommand(base, 'codeman-abc12345');
-    expect(cmd).toContain("aakht@192.168.55.170 'tmux -L codeman kill-session -t '\\''codeman-abc12345'\\'''");
+    expect(cmd).toContain(
+      `aakht@192.168.55.170 '${REMOTE_PATH_BOOTSTRAP}; tmux -L codeman kill-session -t '\\''codeman-abc12345'\\'''`
+    );
     expect(cmd.startsWith('ssh -o BatchMode=yes ')).toBe(true);
     // kill-session needs no PTY — must NOT request the ssh `-t` flag (attach uses
     // `ssh -o BatchMode=yes -t …`; kill must not). The ` -t ` inside the quoted

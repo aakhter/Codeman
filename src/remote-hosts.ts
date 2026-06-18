@@ -69,6 +69,13 @@ export function defaultRemoteCommandForMode(mode: SessionMode): string {
   return commands[mode as RemoteCommandMode] || commands.shell;
 }
 
+export const REMOTE_PATH_BOOTSTRAP =
+  'export PATH=$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH';
+
+export function withRemotePathBootstrap(command: string): string {
+  return `${REMOTE_PATH_BOOTSTRAP}; ${command}`;
+}
+
 export function remoteSshTarget(host: Pick<RemoteHost, 'username' | 'host'>): string {
   return `${host.username}@${host.host}`;
 }
@@ -149,7 +156,7 @@ export function buildRemoteTmuxCheckCommand(
 ): string {
   const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
   const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
-  parts.push(remoteSshTarget(host), "'command -v tmux'");
+  parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap('command -v tmux')));
   return parts.join(' ');
 }
 
@@ -229,7 +236,7 @@ export function buildRemoteListSessionsCommand(
   // separators (tmux expands them); `2>/dev/null` is inside the quoted command.
   const remoteCmd =
     'tmux -L codeman list-sessions -F "#{session_name}\\t#{session_attached}\\t#{session_created}\\t#{session_windows}" 2>/dev/null';
-  parts.push(remoteSshTarget(host), shellescape(remoteCmd));
+  parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap(remoteCmd)));
   return parts.join(' ');
 }
 

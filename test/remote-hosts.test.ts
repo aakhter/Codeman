@@ -7,6 +7,7 @@ import {
   defaultRemoteCommandForMode,
   readRemoteCases,
   readRemoteHosts,
+  REMOTE_PATH_BOOTSTRAP,
   remoteDisplayPath,
   remoteSshTarget,
   writeRemoteCases,
@@ -68,7 +69,9 @@ describe('remote-hosts domain', () => {
   describe('COD-104 remote tmux prerequisite check command', () => {
     it('builds an ssh command-v-tmux probe (no port)', () => {
       const cmd = buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42' });
-      expect(cmd).toBe("ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 'command -v tmux'");
+      expect(cmd).toBe(
+        `ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 '${REMOTE_PATH_BOOTSTRAP}; command -v tmux'`
+      );
       expect(cmd).not.toContain(' -p ');
     });
 

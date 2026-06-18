@@ -20,7 +20,12 @@
 
 import { homedir } from 'node:os';
 import { describe, it, expect } from 'vitest';
-import { buildSshConnectionArgs, buildRemoteTmuxCheckCommand, remoteSshTarget } from '../src/remote-hosts.js';
+import {
+  buildSshConnectionArgs,
+  buildRemoteTmuxCheckCommand,
+  REMOTE_PATH_BOOTSTRAP,
+  remoteSshTarget,
+} from '../src/remote-hosts.js';
 import { buildRemoteLaunchCommand } from '../src/tmux-manager.js';
 import type { SessionRemote } from '../src/types.js';
 
@@ -115,6 +120,17 @@ describe('COD-107 buildSshConnectionArgs — shared ssh connection tokens', () =
 });
 
 describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
+  it('bootstraps common remote binary paths before tmux and the pane command', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      remote: { ...baseRemote, commands: { codex: 'exec /Users/me/.local/bin/codx personal' } },
+      sessionId: SESSION_ID,
+    });
+
+    expect(command).toContain(`${REMOTE_PATH_BOOTSTRAP}; tmux -L codeman`);
+    expect(command).toContain(`&& ${REMOTE_PATH_BOOTSTRAP}; exec /Users/me/.local/bin/codx personal`);
+  });
+
   it('emits the aa-desktop ssh connection options ahead of -t and the target', () => {
     const command = buildRemoteLaunchCommand({ mode: 'shell', remote: aaDesktop, sessionId: SESSION_ID });
 
@@ -132,22 +148,22 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
     expect(idxProxy).toBeLessThan(idxTarget);
   });
 
-  it('back-compat: a remote with no advanced options is byte-identical to the historical form', () => {
+  it('builds the exact default remote launch command with the PATH bootstrap', () => {
     const command = buildRemoteLaunchCommand({ mode: 'shell', remote: baseRemote, sessionId: SESSION_ID });
-    // Reconstruct the historical command using the SAME nested POSIX
+    // Reconstruct the command using the SAME nested POSIX
     // single-quote escaping the production code uses, to prove byte-identity.
     const sh = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
     const remoteName = `codeman-${SESSION_ID.slice(0, 8)}`;
     const path = sh('/home/ubuntu/work');
-    const paneCommand = `cd ${path} && exec bash -l`;
-    const tmuxInvocation = [
+    const paneCommand = `cd ${path} && ${REMOTE_PATH_BOOTSTRAP}; exec bash -l`;
+    const tmuxInvocation = `${REMOTE_PATH_BOOTSTRAP}; ${[
       `tmux -L codeman new-session -A -s ${remoteName} -c ${path} ${sh(paneCommand)}`,
       'set -g status off',
       'set -g mouse off',
       'set -sg escape-time 0',
       'set -g prefix C-q',
       'set -g window-size latest',
-    ].join(' \\; ');
+    ].join(' \\; ')}`;
     const expected = `ssh -o BatchMode=yes -t ${remoteSshTarget(baseRemote)} ${sh(tmuxInvocation)}`;
     expect(command).toBe(expected);
   });
@@ -163,6 +179,11 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
 });
 
 describe('COD-107 buildRemoteTmuxCheckCommand — same connection options as the launch', () => {
+  it('bootstraps common remote binary paths before probing for tmux', () => {
+    const cmd = buildRemoteTmuxCheckCommand({ username: 'saqebakhter', host: '192.168.21.109' });
+    expect(cmd).toContain(`'${REMOTE_PATH_BOOTSTRAP}; command -v tmux'`);
+  });
+
   it('uses the shared connection args (proxy/identity/port) plus ConnectTimeout', () => {
     const cmd = buildRemoteTmuxCheckCommand(aaDesktop);
     expect(cmd).toContain('-o BatchMode=yes');
@@ -171,12 +192,12 @@ describe('COD-107 buildRemoteTmuxCheckCommand — same connection options as the
     expect(cmd).toContain(`-i '${HOME}/.ssh/remote_ed25519'`);
     expect(cmd).toContain("-o 'ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p'");
     expect(cmd).toContain('aakht@192.168.55.170');
-    expect(cmd).toContain("'command -v tmux'");
+    expect(cmd).toContain(`'${REMOTE_PATH_BOOTSTRAP}; command -v tmux'`);
   });
 
-  it('back-compat: no advanced options ⇒ unchanged probe string', () => {
+  it('keeps default ssh options while adding the remote PATH bootstrap', () => {
     expect(buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42' })).toBe(
-      "ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 'command -v tmux'"
+      `ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 '${REMOTE_PATH_BOOTSTRAP}; command -v tmux'`
     );
     expect(buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42', port: 2222 })).toContain('-p 2222');
   });

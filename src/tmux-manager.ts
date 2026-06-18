@@ -61,7 +61,12 @@ import type {
   RespawnPaneOptions,
 } from './mux-interface.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
-import { buildSshConnectionArgs, defaultRemoteCommandForMode, remoteSshTarget } from './remote-hosts.js';
+import {
+  buildSshConnectionArgs,
+  defaultRemoteCommandForMode,
+  remoteSshTarget,
+  withRemotePathBootstrap,
+} from './remote-hosts.js';
 import {
   decideReconnect,
   advanceBackoff,
@@ -798,22 +803,24 @@ export function buildRemoteLaunchCommand(options: {
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
   // tmux, so the path needs shell-quoting here. `exec` replaces the shell with
   // the CLI so the pane PID is the agent itself.
-  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${modeCommand}`;
+  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${withRemotePathBootstrap(modeCommand)}`;
 
   // The tmux command line, with `\;` separating commands so the config `set`s
   // apply on the SAME connection (and are idempotent on reattach).
-  const tmuxInvocation = [
-    `tmux -L codeman new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`,
-    'set -g status off',
-    'set -g mouse off',
-    'set -sg escape-time 0',
-    'set -g prefix C-q',
-    // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
-    // to the SMALLEST attached client, so two Codemans at different viewports
-    // would fight (clamp to the smaller). `window-size latest` sizes to the
-    // most-recently-active client instead, so concurrent clients coexist.
-    'set -g window-size latest',
-  ].join(' \\; ');
+  const tmuxInvocation = withRemotePathBootstrap(
+    [
+      `tmux -L codeman new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`,
+      'set -g status off',
+      'set -g mouse off',
+      'set -sg escape-time 0',
+      'set -g prefix C-q',
+      // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
+      // to the SMALLEST attached client, so two Codemans at different viewports
+      // would fight (clamp to the smaller). `window-size latest` sizes to the
+      // most-recently-active client instead, so concurrent clients coexist.
+      'set -g window-size latest',
+    ].join(' \\; ')
+  );
 
   // ssh runs its trailing args through the remote login shell, so the entire
   // tmux invocation is passed as one shell-quoted argument.
@@ -849,7 +856,7 @@ export function buildRemoteLaunchCommand(options: {
  *   right after `ssh -o BatchMode=yes` (a PTY is required for interactive tmux).
  */
 export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionName: string): string {
-  const tmuxInvocation = `tmux -L codeman attach -t ${shellescape(remoteSessionName)}`;
+  const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman attach -t ${shellescape(remoteSessionName)}`);
   const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
   const sshParts = [ssh, batchMode, '-t', ...connectionArgs, remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
@@ -864,7 +871,7 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
  * `buildSshConnectionArgs` (COD-107), identical to launch/attach/discovery.
  */
 export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
-  const tmuxInvocation = `tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`;
+  const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`);
   const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }

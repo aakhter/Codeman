@@ -11,6 +11,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
+import { REMOTE_PATH_BOOTSTRAP } from '../src/remote-hosts.js';
 import { buildRemoteLaunchCommand } from '../src/tmux-manager.js';
 import type { SessionRemote } from '../src/types.js';
 
@@ -139,8 +140,8 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     // The pane command is one tmux argument; the path is still single-quoted for
     // the /bin/sh -c that tmux runs it under, so the deepest `cd` gets the space
     // path intact and `exec bash -l` follows.
-    const paneCmd = tmuxArgs.find((a) => a.includes('&& exec'));
-    expect(paneCmd).toBe(`cd '${spacePath}' && exec bash -l`);
+    const paneCmd = tmuxArgs.find((a) => a.includes('&& export PATH='));
+    expect(paneCmd).toBe(`cd '${spacePath}' && ${REMOTE_PATH_BOOTSTRAP}; exec bash -l`);
   });
 
   it('derives a deterministic, reattach-stable session name from sessionId', () => {
