@@ -361,9 +361,11 @@ const KeyboardHandler = {
     }
     if (accessoryBar) {
       accessoryBar.style.transform = '';
+      accessoryBar.style.bottom = '';
     }
     if (cjkInput) {
       cjkInput.style.transform = '';
+      cjkInput.style.bottom = '';
     }
     if (main) {
       main.style.paddingBottom = '';

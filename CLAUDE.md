@@ -135,7 +135,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 1.1.9 (must match `package.json`)
+**Version**: 1.1.13 (must match `package.json`)
 
 ## Project Overview
 
@@ -171,9 +171,9 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | **Remote** | `src/remote-hosts.ts` | SSH remote hosts/cases — `~/.codeman/remote-hosts.json` + `remote-cases.json`. See `docs/remote-sessions.md` |
 | **Infra** | `src/hooks-config.ts`, `src/push-store.ts`, `src/tunnel-manager.ts`, `src/image-watcher.ts`, `src/file-stream-manager.ts` | |
 | **Plan** | `src/plan-orchestrator.ts`, `src/prompts/*.ts`, `src/templates/` (`claude-md.ts` + `case-template.md`, the CLAUDE.md scaffold generated into new cases) | |
-| **Web** | `src/web/server.ts` ★, `src/web/sse-events.ts`, `src/web/routes/*.ts` (15 route modules + barrel; `session-routes.ts` ★), `src/web/route-helpers.ts`, `src/web/ports/*.ts`, `src/web/middleware/auth.ts`, `src/web/schemas.ts`, `src/web/self-update.ts` | |
-| **Frontend** | `src/web/public/app.js` (~4.2K lines, core) + 18 infra/domain/feature modules + `sw.js` | Full map, load order, gesture: `docs/frontend-architecture.md` |
-| **Types** | `src/types/index.ts` (barrel) → 15 domain files; also `src/types.ts` root re-export | See `@fileoverview` in index.ts |
+| **Web** | `src/web/server.ts` ★, `src/web/sse-events.ts`, `src/web/routes/*.ts` (16 route modules + barrel; `session-routes.ts` ★), `src/web/route-helpers.ts`, `src/web/ports/*.ts`, `src/web/middleware/auth.ts`, `src/web/schemas.ts`, `src/web/self-update.ts`, `src/web/plan-usage-latest.ts` | |
+| **Frontend** | `src/web/public/app.js` (~4K lines, core) + 6 infra modules (`constants.js`, `mobile-handlers.js`, `voice-input.js`, `notification-manager.js`, `keyboard-accessory.js`, `sanitize-html.js` — DOMPurify mXSS allowlist, COD-56) + 8 domain modules (`terminal-ui.js`, `respawn-ui.js`, `ralph-panel.js`, `orchestrator-panel.js`, `ultracode-panel.js`, `settings-ui.js`, `panels-ui.js`, `session-ui.js`) + 6 feature modules (`ralph-wizard.js`, `api-client.js`, `subagent-windows.js`, `ultracode-windows.js`, `input-cjk.js`, `image-input.js`) + `sw.js` | `ultracode-windows.js` = floating run windows w/ tab connector lines (additional to the dock panel) |
+| **Types** | `src/types/index.ts` (barrel) → 16 domain files (incl. `workflow-run.ts`); also `src/types.ts` root re-export | See `@fileoverview` in index.ts |
 
 ★ = Large, central file (>50KB) — read its `@fileoverview` first. All files have `@fileoverview` JSDoc — read that before diving in. Discovery aid: `grep -l '@fileoverview' src/web/routes/*.ts` lists all route modules; same grep works for `src/types/`, `src/web/public/*.js`.
 

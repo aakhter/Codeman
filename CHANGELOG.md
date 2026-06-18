@@ -1,5 +1,53 @@
 # aicodeman
 
+## 1.1.13
+
+### Patch Changes
+
+- Keep the `/compact` button in the extended (full) mobile keyboard accessory bar; only the simple bar drops it. (1.1.12 had removed it from both.)
+
+## 1.1.12
+
+### Patch Changes
+
+- Remove the `/compact` button from the mobile keyboard accessory bar. It had been reintroduced in 1.1.10; this removes the button from both the simple and full accessory-bar layouts (the underlying command handler is left in place as inert plumbing).
+
+## 1.1.11
+
+### Patch Changes
+
+- Ultracode (Workflow-tool) run visualization — much better live tracking.
+
+  While a run is in flight, the watcher previously showed empty agent slots ("agent N", 0 tokens, raw `wf_…` id as the title) because the detailed completion JSON only lands when the run finishes. The live path now enriches in-flight runs directly from the on-disk transcript tree:
+  - **Real per-agent stats mid-run** — tokens and tool-call counts are parsed from each `agent-<id>.jsonl` transcript (tool counts match the final accounting exactly; token totals land within ~1% of the completion value), with model and a prompt preview. All mtime-cached (transcripts, journal, and script meta) so idle polls do no extra reads.
+  - **Readable window/run title** — workflow name, summary, and phases are derived from the persisted `workflows/scripts/<name>-<runId>.js` instead of showing the raw run id.
+  - **Agent status colors** — done agents show green, working agents show yellow (this also fixes the run/agent status badges, which referenced undefined `--success`/`--warning` CSS variables and were rendering with no color).
+  - **Connector line** — the floating-window → session-tab line now uses the session-tab accent blue (was purple).
+  - **Click a run to open its floating window** — clicking a workflow in the dock panel opens (or focuses) its floating window with the connector line, in addition to the auto-popped windows.
+  - Agents are ordered by journal launch order; concurrent run-detail fetches are de-duplicated.
+
+## 1.1.10
+
+### Patch Changes
+
+- Mobile CJK input, iPad keyboard accessory bar, and terminal touch interaction fixes (PRs #130, #131).
+
+  Mobile / CJK (#130):
+  - Restore reliable real-time CJK (e.g. Pinyin) composition in the always-visible textarea, and refocus input when the terminal is tapped.
+  - Stop clearing the textarea during `compositionstart` — some IMEs include existing text in the composition region, and clearing it mid-composition corrupted input.
+  - iPad-specific fixes: `#cjkInput` positioning, paste-dialog placement, and duplicated voice-dictation output.
+  - Split CJK keyboard positioning by device size (phones vs iPad use different keyboard offsets).
+  - iPad accessory-bar styling/positioning: moved the accessory-bar and paste-overlay base styles out of the `max-width:1023px`-gated mobile stylesheet so iPad landscape (≥1024px) renders them correctly.
+  - Raise the toolbar stacking context while the case-settings popover is open so the popover is no longer hidden behind the toolbar.
+  - Restore the `/compact` button to the keyboard accessory bar (with double-tap confirmation, like `/clear`); the paste dialog now submits pasted text on "Send".
+
+  Terminal touch + forced redraw (#131):
+  - Enable terminal touch interaction on all touch devices and show the stop button on touch devices.
+  - Add an 8px tap threshold so micro-drift is treated as a tap, not a scroll, fixing cases where a tap failed to register.
+  - Tap-to-position the cursor via a synthesized mouse report, gated on the live mouse-tracking mode so it never triggers local text selection when tracking is off; let SGR mouse reports through to the PTY even while the CJK input field owns focus.
+  - Suppress the cursor/momentum side effects of a sub-threshold tap so a jittery tap no longer both positions the cursor and starts a momentum fling.
+  - New opt-in, per-device "Redraw Terminal" header button (`showRedrawButton`, default off) that forces an xterm redraw via a resize jitter to clear occasional rendering glitches; the resize path now accepts a `force` flag (threaded through the session, HTTP, and WebSocket resize routes) that guarantees a SIGWINCH/redraw at the current device's size without bypassing multi-client resize arbitration.
+
 ## 1.1.9
 
 ### Patch Changes

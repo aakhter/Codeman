@@ -318,6 +318,7 @@ Object.assign(CodemanApp.prototype, {
       settings.ultracodeFloatingWindows ?? defaults.ultracodeFloatingWindows ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
+    document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
     // but is only available when the instance runs with CODEMAN_GESTURE=1 (server sets
     // window.__codemanGestureAvailable). Hide just this item otherwise so the toggle
@@ -1502,6 +1503,7 @@ Object.assign(CodemanApp.prototype, {
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
+      showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
       subagentTrackingEnabled: document.getElementById('appSettingsSubagentTracking').checked,
       subagentActiveTabOnly: document.getElementById('appSettingsSubagentActiveTabOnly').checked,
@@ -1902,6 +1904,7 @@ Object.assign(CodemanApp.prototype, {
         // Plan usage limits header chip (upstream)
         showPlanUsageLimits: false,
         showAttachmentsButton: false,
+        showRedrawButton: false,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile
@@ -2039,6 +2042,12 @@ Object.assign(CodemanApp.prototype, {
     const planUsageChip = document.getElementById('planUsageChip');
     if (planUsageChip) {
       planUsageChip.classList.toggle('header-plan-usage--hidden', !showPlanUsageLimits);
+    }
+
+    const showRedrawButton = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
+    const redrawBtn = document.querySelector('.btn-redraw-terminal');
+    if (redrawBtn) {
+      redrawBtn.classList.toggle('btn-redraw-terminal--hidden', !showRedrawButton);
     }
 
     // Notification bell is retired (notifications live in Settings → Notifications
@@ -2279,7 +2288,7 @@ Object.assign(CodemanApp.prototype, {
         // are NOT display keys — they control server-side behavior and must sync from server.
         const displayKeys = new Set([
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
-          'showLifecycleLog', 'showResponseViewer',
+          'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton',
