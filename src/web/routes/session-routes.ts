@@ -1926,6 +1926,7 @@ export function registerSessionRoutes(
             sizeBytes: h.sizeBytes,
             lastModified: h.lastModified,
             firstPrompt: h.firstPrompt,
+            projectKey: h.projectKey,
           });
         }
       }
