@@ -5229,6 +5229,24 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
+    // COD-122: render the secondary identifiers (tmux name + agent session id)
+    // beneath the primary tab-name label. Each is labelled by kind and truncates
+    // independently so the tab name above is never crowded out on narrow widths.
+    const kindMeta = {
+      tmux: { label: 'tmux', title: 'tmux session name' },
+      agent: { label: 'agent', title: 'agent (Claude/Codex) session id' },
+    };
+    const rowIdsHtml = (secondaries) => {
+      if (!secondaries || secondaries.length === 0) return '';
+      const ids = secondaries
+        .map((s) => {
+          const meta = kindMeta[s.kind] || { label: s.kind, title: '' };
+          return `<span class="monitor-id monitor-id-${s.kind}" title="${escapeHtml(meta.title)}: ${escapeHtml(s.label)}"><span class="monitor-id-kind">${escapeHtml(meta.label)}</span><span class="monitor-id-val">${escapeHtml(s.label)}</span></span>`;
+        })
+        .join('');
+      return `<div class="monitor-row-ids">${ids}</div>`;
+    };
+
     let html = '';
     for (const muxSession of matched) {
       const stats = muxSession.stats || { memoryMB: 0, cpuPercent: 0, childCount: 0 };
@@ -5287,12 +5305,22 @@ Object.assign(CodemanApp.prototype, {
         modelHtml = `<span class="monitor-model-badge ${modelShort}">${modelShort}</span>`;
       }
 
+      // COD-122: tab name is the primary/L1 label; tmux + agent ids are secondary.
+      const labels = window.CodemanMonitorLabels.resolveMonitorRowLabels({
+        tabName: session && session.name,
+        storedName: muxSession.name,
+        muxName: muxSession.muxName,
+        agentSessionId: session && session.claudeSessionId,
+        sessionId: muxSession.sessionId,
+      });
+
       const sid = escapeHtml(muxSession.sessionId);
       html += `
         <div class="process-item process-item-clickable" onclick="app.selectSession('${sid}')" title="Switch to session">
           <span class="monitor-status-badge ${statusClass}">${statusLabel}</span>
           <div class="process-info">
-            <div class="process-name">${modelHtml} ${escapeHtml(muxSession.name || muxSession.muxName)}</div>
+            <div class="process-name">${modelHtml} <span class="monitor-tab-name">${escapeHtml(labels.primary)}</span></div>
+            ${rowIdsHtml(labels.secondaries)}
             <div class="process-meta">
               ${tokenHtml}
               ${costHtml}
@@ -5313,12 +5341,20 @@ Object.assign(CodemanApp.prototype, {
     // killed (they're real tmux sessions) but selecting them would do nothing.
     for (const muxSession of orphans) {
       const stats = muxSession.stats || { memoryMB: 0, cpuPercent: 0, childCount: 0 };
+      // COD-122: no matching UI session, so there's no tab name / agent id — the
+      // persisted mux name (if any) leads, falling back to the tmux name.
+      const labels = window.CodemanMonitorLabels.resolveMonitorRowLabels({
+        storedName: muxSession.name,
+        muxName: muxSession.muxName,
+        sessionId: muxSession.sessionId,
+      });
       const sid = escapeHtml(muxSession.sessionId);
       html += `
         <div class="process-item process-item-orphan" title="Not an open tab (orphaned tmux session)">
           <span class="monitor-status-badge status-orphan">NOT OPEN</span>
           <div class="process-info">
-            <div class="process-name">${escapeHtml(muxSession.name || muxSession.muxName)}</div>
+            <div class="process-name"><span class="monitor-tab-name">${escapeHtml(labels.primary)}</span></div>
+            ${rowIdsHtml(labels.secondaries)}
             <div class="process-meta">
               <span class="process-stat memory">${stats.memoryMB || 0}MB</span>
               <span class="process-stat cpu">${stats.cpuPercent || 0}%</span>

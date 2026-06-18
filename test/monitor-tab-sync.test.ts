@@ -206,3 +206,43 @@ describe('COD-97 (c) showing the Monitor via setting loads mux sessions', () => 
     expect(loadSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('COD-122 Monitor rows use the tab name as the primary label', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('shows the tab name as primary and exposes tmux + agent ids as secondaries', () => {
+    const app = makeApp();
+    const body = muxBody();
+    app.sessions.set('s1', { status: 'idle', isWorking: false, name: 'my work', claudeSessionId: 'agent-xyz' });
+    app.muxSessions = [{ sessionId: 's1', name: 'my work', muxName: 'codeman-1fac7304', stats: {} }];
+
+    app._renderMuxSessionsImmediate();
+
+    const row = body.querySelector('.process-item-clickable');
+    expect(row).not.toBeNull();
+    // Tab name is the primary/L1 label.
+    expect(row!.querySelector('.monitor-tab-name')!.textContent).toBe('my work');
+    // Both secondary identifiers are present and labelled by kind.
+    const ids = row!.querySelectorAll('.monitor-id');
+    expect(ids.length).toBe(2);
+    expect(row!.querySelector('.monitor-id-tmux .monitor-id-val')!.textContent).toBe('codeman-1fac7304');
+    expect(row!.querySelector('.monitor-id-agent .monitor-id-val')!.textContent).toBe('agent-xyz');
+  });
+
+  it('degrades gracefully: tab name without an agent id shows only the tmux id', () => {
+    const app = makeApp();
+    const body = muxBody();
+    app.sessions.set('s2', { status: 'busy', isWorking: true, name: 'tabby' });
+    app.muxSessions = [{ sessionId: 's2', name: 'tabby', muxName: 'codeman-2', stats: {} }];
+
+    app._renderMuxSessionsImmediate();
+
+    const row = body.querySelector('.process-item-clickable');
+    expect(row!.querySelector('.monitor-tab-name')!.textContent).toBe('tabby');
+    expect(row!.querySelectorAll('.monitor-id').length).toBe(1);
+    expect(row!.querySelector('.monitor-id-tmux .monitor-id-val')!.textContent).toBe('codeman-2');
+    expect(row!.querySelector('.monitor-id-agent')).toBeNull();
+  });
+});

@@ -6756,6 +6756,52 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* COD-122: the tab name is the primary/L1 label in a Monitor row. */
+.monitor-tab-name {
+  font-weight: 600;
+}
+
+/* COD-122: secondary identifiers (tmux session name + agent session id) sit on
+   their own line beneath the tab name. They truncate independently so the tab
+   name above is always preserved first on narrow widths. */
+.monitor-row-ids {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.monitor-id {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 0;
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
+.monitor-id-kind {
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.58rem;
+  opacity: 0.7;
+}
+
+.monitor-id-val {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.monitor-id-agent .monitor-id-val {
+  opacity: 0.85;
+}
+
 .process-meta {
   display: flex;
   gap: 0.75rem;
