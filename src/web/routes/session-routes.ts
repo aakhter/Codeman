@@ -5,10 +5,10 @@
  */
 
 import { FastifyInstance } from 'fastify';
-import { join, dirname, extname } from 'node:path';
+import { join, dirname, extname, posix as pathPosix } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
@@ -71,11 +71,16 @@ import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
   checkRemoteTmuxAvailable,
+  buildSshConnectionArgv,
   readRemoteCases,
   readRemoteHosts,
+  remoteSshTarget,
+  shellescape,
   toAttachedSessionRemote,
   toSessionRemote,
+  withRemotePathBootstrap,
 } from '../../remote-hosts.js';
+import type { SessionRemote } from '../../types.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
@@ -210,6 +215,57 @@ export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
     default:
       return false;
   }
+}
+
+function getSessionRemote(session: { toState?: () => unknown }): SessionRemote | undefined {
+  const state = typeof session.toState === 'function' ? session.toState() : undefined;
+  if (!state || typeof state !== 'object') return undefined;
+  const remote = (state as { remote?: unknown }).remote;
+  if (!remote || typeof remote !== 'object') return undefined;
+  const candidate = remote as Partial<SessionRemote>;
+  if (
+    typeof candidate.hostId !== 'string' ||
+    typeof candidate.label !== 'string' ||
+    typeof candidate.host !== 'string' ||
+    typeof candidate.username !== 'string' ||
+    typeof candidate.remotePath !== 'string'
+  ) {
+    return undefined;
+  }
+  return candidate as SessionRemote;
+}
+
+async function writeRemotePasteImage(remote: SessionRemote, imageDir: string, filepath: string, imageBytes: Buffer) {
+  const tmpPath = `${filepath}.tmp-${randomBytes(4).toString('hex')}`;
+  const script = withRemotePathBootstrap(
+    [
+      `dir=${shellescape(imageDir)}`,
+      `file=${shellescape(filepath)}`,
+      `tmp=${shellescape(tmpPath)}`,
+      'if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then echo ".claude-images is not a regular directory" >&2; exit 73; fi',
+      'if [ ! -e "$dir" ]; then mkdir "$dir"; fi',
+      'umask 077',
+      'cat > "$tmp"',
+      'mv -n "$tmp" "$file"',
+      'rm -f "$tmp"',
+    ].join('; ')
+  );
+  const args = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), script];
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('ssh', args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    const stderr: Buffer[] = [];
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const message = Buffer.concat(stderr).toString('utf8').trim();
+      reject(new Error(message || `remote image upload failed with exit code ${code ?? 'unknown'}`));
+    });
+    child.stdin.end(imageBytes);
+  });
 }
 
 // Per-(IP, sessionId) token bucket for paste-image. 30 requests/minute.
@@ -2098,39 +2154,47 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Image bytes do not match declared type ${ext}`);
     }
 
-    // Save to {workingDir}/.claude-images/
-    // Refuse symlinks at imageDir — an agent or postinstall script could plant
-    // `.claude-images -> ~/.ssh/` and redirect future writes outside workingDir.
-    // We lstat (not stat) so we see the symlink itself. Use mkdir without
-    // `recursive` so the leaf creation does not follow a symlink either, and
-    // O_EXCL|O_NOFOLLOW on the file open so the write itself is symlink-safe.
-    const imageDir = join(session.workingDir, '.claude-images');
-    try {
-      const dirStat = await fs.lstat(imageDir);
-      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-        reply.code(403);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
-      }
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      // Non-recursive mkdir: errors on EEXIST and does not follow symlinks for
-      // the leaf. session.workingDir is guaranteed to exist (live session).
-      await fs.mkdir(imageDir);
-    }
     // Date.now() collides on same-ms uploads from two tabs (last-write wins
     // silently). Append 8 hex chars so concurrent pastes get distinct names.
     const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${ext}`;
-    const filepath = join(imageDir, filename);
-    // O_EXCL: refuse to overwrite (collision is impossible with random suffix,
-    // but defends against TOCTOU). O_NOFOLLOW: refuse if filepath is a symlink.
-    const fh = await fs.open(
-      filepath,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
-    );
-    try {
-      await fh.writeFile(imageBytes);
-    } finally {
-      await fh.close();
+    const remote = getSessionRemote(session);
+    const imageDir = remote
+      ? pathPosix.join(session.workingDir, '.claude-images')
+      : join(session.workingDir, '.claude-images');
+    const filepath = remote ? pathPosix.join(imageDir, filename) : join(imageDir, filename);
+
+    if (remote) {
+      await writeRemotePasteImage(remote, imageDir, filepath, imageBytes);
+    } else {
+      // Save to {workingDir}/.claude-images/
+      // Refuse symlinks at imageDir — an agent or postinstall script could plant
+      // `.claude-images -> ~/.ssh/` and redirect future writes outside workingDir.
+      // We lstat (not stat) so we see the symlink itself. Use mkdir without
+      // `recursive` so the leaf creation does not follow a symlink either, and
+      // O_EXCL|O_NOFOLLOW on the file open so the write itself is symlink-safe.
+      try {
+        const dirStat = await fs.lstat(imageDir);
+        if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+          reply.code(403);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
+        }
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        // Non-recursive mkdir: errors on EEXIST and does not follow symlinks for
+        // the leaf. session.workingDir is guaranteed to exist (live session).
+        await fs.mkdir(imageDir);
+      }
+      // O_EXCL: refuse to overwrite (collision is impossible with random suffix,
+      // but defends against TOCTOU). O_NOFOLLOW: refuse if filepath is a symlink.
+      const fh = await fs.open(
+        filepath,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
+      );
+      try {
+        await fh.writeFile(imageBytes);
+      } finally {
+        await fh.close();
+      }
     }
 
     return { path: filepath, filename };

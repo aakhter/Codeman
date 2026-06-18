@@ -14,15 +14,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { PassThrough, Writable } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { Session } from '../../src/session.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
-const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
+const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
 const remoteStore = vi.hoisted(() => ({
   hosts: [] as Array<{
     id: string;
@@ -35,7 +37,7 @@ const remoteStore = vi.hoisted(() => ({
 }));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
-  return { ...actual, execFile };
+  return { ...actual, execFile, spawn };
 });
 vi.mock('../../src/remote-hosts.js', async (orig) => {
   const actual = await orig<typeof import('../../src/remote-hosts.js')>();
@@ -64,6 +66,14 @@ async function createEnvelopeHarness(
 ): Promise<LocalHarness> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
+  await app.register(fastifyMultipart, {
+    limits: {
+      fileSize: 10 * 1024 * 1024,
+      files: 1,
+      fields: 4,
+      parts: 5,
+    },
+  });
 
   const ctx = createMockRouteContext();
   registerFn(app, ctx);
@@ -140,6 +150,90 @@ describe('session-routes', () => {
       });
       expect(JSON.parse(res.body).success).toBe(false);
       expect(execFile).not.toHaveBeenCalled();
+    });
+  });
+
+  // ========== POST /api/sessions/:id/paste-image ==========
+
+  describe('POST /api/sessions/:id/paste-image', () => {
+    function pngUploadBody(boundary: string, imageBytes: Buffer): Buffer {
+      return Buffer.concat([
+        Buffer.from(
+          `--${boundary}\r\n` +
+            'Content-Disposition: form-data; name="image"; filename="issue.png"\r\n' +
+            'Content-Type: image/png\r\n\r\n'
+        ),
+        imageBytes,
+        Buffer.from(`\r\n--${boundary}--\r\n`),
+      ]);
+    }
+
+    it('uploads paste images for remote sessions to the remote workspace over ssh', async () => {
+      const remotePath = '/Users/saqebakhter/repos/projects/moneytrove';
+      const session = harness.ctx._session;
+      session.workingDir = remotePath;
+      vi.spyOn(session, 'toState').mockReturnValue({
+        ...session.toState(),
+        workingDir: remotePath,
+        remote: {
+          hostId: 'mac-mini',
+          label: 'mac-mini',
+          host: '192.168.21.109',
+          username: 'saqebakhter',
+          remotePath,
+        },
+      });
+
+      const stdinChunks: Buffer[] = [];
+      spawn.mockImplementation(() => {
+        const child = new PassThrough() as unknown as {
+          stdin: Writable;
+          stdout: PassThrough;
+          stderr: PassThrough;
+          on: (event: string, cb: (...args: unknown[]) => void) => unknown;
+          emit: (event: string, ...args: unknown[]) => boolean;
+        };
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.stdin = new Writable({
+          write(chunk, _encoding, callback) {
+            stdinChunks.push(Buffer.from(chunk));
+            callback();
+          },
+          final(callback) {
+            queueMicrotask(() => child.emit('close', 0));
+            callback();
+          },
+        });
+        return child;
+      });
+
+      const boundary = 'codeman-test-boundary';
+      const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: pngUploadBody(boundary, png),
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.path).toMatch(
+        /^\/Users\/saqebakhter\/repos\/projects\/moneytrove\/\.claude-images\/paste-\d+-[a-f0-9]{8}\.png$/
+      );
+      expect(spawn).toHaveBeenCalledTimes(1);
+      const [bin, argv] = spawn.mock.calls[0];
+      expect(bin).toBe('ssh');
+      expect(argv).toContain('BatchMode=yes');
+      expect(argv).toContain('saqebakhter@192.168.21.109');
+      expect(String(argv.at(-1))).toContain('mkdir "$dir"');
+      expect(Buffer.concat(stdinChunks)).toEqual(png);
     });
   });
 
