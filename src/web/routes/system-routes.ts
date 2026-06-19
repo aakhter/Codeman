@@ -45,6 +45,7 @@ import {
 } from '../route-helpers.js';
 import { SseEvent } from '../sse-events.js';
 import { getInstallInfo, checkForUpdate, startUpdate, getUpdateStatusForApi } from '../self-update.js';
+import { getRepositoryStatus } from '../repo-status.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
@@ -341,6 +342,10 @@ export function registerSystemRoutes(
     const m = map[result.code];
     return reply.code(m.http).send(createErrorResponse(m.api, result.message));
   });
+
+  // Repository status: ahead/behind + incoming-commit summary vs the upstream
+  // and the maintainer's own fork. Informational; does a read-only git fetch.
+  app.get('/api/system/repo-status', async () => getRepositoryStatus());
 
   // ═══════════════════════════════════════════════════════════════
   // CLI Integrations (OpenCode)

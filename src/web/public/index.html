@@ -1304,6 +1304,13 @@
               <div id="updateNotes" style="display:none; max-height:160px; overflow:auto; padding:8px 10px; margin:4px 0 8px; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-word; background:rgba(127,127,127,0.08); border:1px solid var(--border); border-radius:6px"></div>
               <div id="updateProgress" style="display:none; padding:8px 10px; margin:4px 0 8px; font-size:13px; border:1px solid var(--border); border-radius:6px"></div>
 
+              <!-- Repository status: ahead/behind vs upstream + your own fork. Informational. -->
+              <div class="settings-item" id="repoStatusRow" title="Compare this checkout against the upstream project and your own fork (commit ahead/behind + incoming changes)">
+                <span class="settings-item-label">Repository Status</span>
+                <button class="btn-toolbar btn-sm" id="repoStatusBtn" onclick="app.checkRepoStatus()">Check repository status</button>
+              </div>
+              <div id="repoStatusResult" style="display:none; padding:4px 2px 8px"></div>
+
             </div>
           </div>
           <!-- Tab-Switch Tab -->

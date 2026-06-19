@@ -518,7 +518,7 @@ Object.assign(CodemanApp.prototype, {
   _initUpdatesSection() {
     const verEl = this.$('updateCurrentVersion');
     if (verEl) verEl.textContent = (this.$('versionDisplay')?.textContent || '').trim() || '—';
-    for (const id of ['updateResult', 'updateActionRow', 'updateNotes', 'updateProgress']) {
+    for (const id of ['updateResult', 'updateActionRow', 'updateNotes', 'updateProgress', 'repoStatusResult']) {
       const el = this.$(id);
       if (el) el.style.display = 'none';
     }
@@ -533,6 +533,67 @@ Object.assign(CodemanApp.prototype, {
   _setUpdateProgress(html) {
     const el = this.$('updateProgress');
     if (el) { el.style.display = 'block'; el.innerHTML = html; }
+  },
+
+  // ── Repository status (App Settings → Updates). Backend: src/web/repo-status.ts.
+
+  /** Human label for a remote's role in the status view. */
+  _repoRoleLabel(role) {
+    if (role === 'tracking') return 'Your remote';
+    if (role === 'upstream') return 'Upstream';
+    return 'Remote';
+  },
+
+  /** Render one remote's status card. */
+  _renderRepoRemoteCard(r) {
+    const label = escapeHtml(this._repoRoleLabel(r.role));
+    const name = escapeHtml(r.name || '');
+    const url = r.url ? `<div style="font-size:11px; color:var(--text-secondary); word-break:break-all">${escapeHtml(r.url)}</div>` : '';
+    const head = `<div style="display:flex; align-items:baseline; gap:6px"><strong>${label}</strong><span style="font-family:monospace; font-size:12px">${name}</span></div>${url}`;
+
+    if (r.error) {
+      return `<div style="padding:8px 10px; margin:6px 0; font-size:12px; border:1px solid var(--border); border-radius:6px">${head}<div style="margin-top:4px; color:var(--text-secondary)">${escapeHtml(r.error)}</div></div>`;
+    }
+
+    const parts = [];
+    if (r.behind > 0) parts.push(`<span style="color:#e0a030">↓ ${r.behind} behind</span>`);
+    if (r.ahead > 0) parts.push(`<span style="color:#3aa3ff">↑ ${r.ahead} ahead</span>`);
+    const counts = parts.length ? parts.join(' · ') : '<span style="color:var(--text-secondary)">Up to date</span>';
+    const cmp = r.compareRef ? ` <span style="font-size:11px; color:var(--text-secondary)">vs ${escapeHtml(r.compareRef)}</span>` : '';
+
+    let incoming = '';
+    if (Array.isArray(r.incoming) && r.incoming.length > 0) {
+      const rows = r.incoming
+        .map((c) => `<div style="font-family:monospace; font-size:11px; line-height:1.5"><span style="color:var(--text-secondary)">${escapeHtml(c.sha)}</span> ${escapeHtml(c.subject)}</div>`)
+        .join('');
+      const more = r.behind > r.incoming.length ? `<div style="font-size:11px; color:var(--text-secondary); margin-top:4px">…and ${r.behind - r.incoming.length} more</div>` : '';
+      incoming = `<details style="margin-top:6px"><summary style="cursor:pointer; font-size:12px">Incoming changes</summary><div style="margin-top:6px; max-height:180px; overflow:auto">${rows}${more}</div></details>`;
+    }
+
+    return `<div style="padding:8px 10px; margin:6px 0; font-size:13px; border:1px solid var(--border); border-radius:6px">${head}<div style="margin-top:6px">${counts}${cmp}</div>${incoming}</div>`;
+  },
+
+  /** Manual "Check repository status" — fetches + compares against each remote. */
+  async checkRepoStatus() {
+    const btn = this.$('repoStatusBtn');
+    const el = this.$('repoStatusResult');
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    if (el) { el.style.display = 'block'; el.innerHTML = '<div style="font-size:13px; color:var(--text-secondary); padding:4px 2px">Fetching from remotes…</div>'; }
+
+    const data = await this._apiJson('/api/system/repo-status');
+
+    if (btn) { btn.disabled = false; btn.textContent = 'Check repository status'; }
+    if (!el) return;
+
+    if (!data) {
+      el.innerHTML = '<div style="font-size:13px; color:var(--text-secondary); padding:4px 2px">Could not check repository status. Try again later.</div>';
+      return;
+    }
+    if (data.error && (!data.remotes || data.remotes.length === 0)) {
+      el.innerHTML = `<div style="font-size:13px; color:var(--text-secondary); padding:4px 2px">${escapeHtml(data.error)}</div>`;
+      return;
+    }
+    el.innerHTML = (data.remotes || []).map((r) => this._renderRepoRemoteCard(r)).join('');
   },
 
   /** Manual "Check for updates" — asks the server to query GitHub. */
