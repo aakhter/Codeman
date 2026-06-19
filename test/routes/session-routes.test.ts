@@ -658,7 +658,99 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
+    // ── COD-47: full tmux scrollback replay on full page reload ──
+    it('full reload (no tail) requests full tmux history and replays boundary markers', async () => {
+      // A realistic scrollback-length capture: ~5000 lines, well past one screen.
+      const firstLine = 'SCROLLBACK_FIRST_LINE_0001';
+      const lastLine = 'SCROLLBACK_LAST_LINE_5000';
+      const lines: string[] = [firstLine];
+      for (let i = 2; i <= 4999; i++) {
+        lines.push(`scrollback line ${String(i).padStart(4, '0')} lorem ipsum payload`);
+      }
+      lines.push(lastLine);
+      const fullHistoryCapture = lines.join('\n');
+
+      harness.ctx._session.mode = 'shell';
+      harness.ctx._session.terminalBuffer = '';
+      const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+        opts?.fullHistory ? fullHistoryCapture : 'only the visible frame'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      // Full reload asked tmux for the entire scrollback.
+      expect(captureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, { fullHistory: true });
+      // Both boundary markers survived the capture → route pipeline.
+      expect(body.data.terminalBuffer).toContain(firstLine);
+      expect(body.data.terminalBuffer).toContain(lastLine);
+      expect(body.data.source).toBe('mux-full-history');
+      expect(typeof body.data.fullSize).toBe('number');
+    });
+
+    it('tab switch (with tail) uses the visible frame, not full history', async () => {
+      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.terminalBuffer = 'accumulated history';
+      const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+        opts?.fullHistory ? 'FULL_HISTORY_SHOULD_NOT_APPEAR' : 'visible frame only\n› prompt'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=65536`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      // Tail/tab-switch must NOT request fullHistory (undefined opts).
+      expect(captureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(body.data.terminalBuffer).toContain('visible frame only');
+      expect(body.data.terminalBuffer).not.toContain('FULL_HISTORY_SHOULD_NOT_APPEAR');
+      expect(body.data.source).toBe('mux-visible');
+    });
+
+    it('caps huge full-history at the configured terminal buffer limit and marks truncated', async () => {
+      // Shrink the cap so the test can exceed it without allocating 32MB.
+      harness.ctx.getTerminalHistoryConfig = vi.fn(async () => ({
+        terminalScrollbackLines: 100_000,
+        tmuxHistoryLimit: 100_000,
+        terminalBufferMaxBytes: 4096,
+        terminalBufferTrimBytes: 4096,
+      }));
+      harness.ctx._session.mode = 'shell';
+      harness.ctx._session.terminalBuffer = '';
+      const oldestMarker = 'OLDEST_EVICTED_MARKER';
+      const newestMarker = 'NEWEST_KEPT_MARKER';
+      const filler = Array.from({ length: 400 }, (_, i) => `line ${i} ${'x'.repeat(30)}`).join('\n');
+      const huge = `${oldestMarker}\n${filler}\n${newestMarker}`;
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? huge : 'visible')
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.truncated).toBe(true);
+      expect(body.data.fullSize).toBeGreaterThan(4096);
+      expect(body.data.terminalBuffer.length).toBeLessThanOrEqual(4096);
+      // Cap keeps the most RECENT bytes: newest marker survives, oldest is dropped.
+      expect(body.data.terminalBuffer).toContain(newestMarker);
+      expect(body.data.terminalBuffer).not.toContain(oldestMarker);
     });
 
     it('treats stale Codex scrollback config as TUI replay', async () => {
@@ -682,7 +774,9 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
     });
 
     it('preserves one-time OAuth authorization URLs in Codex TUI replay history', async () => {
@@ -756,7 +850,9 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
     });
 
     it('uses live mux pane capture only when the accumulated buffer is empty', async () => {
@@ -775,7 +871,9 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain('visible restored tmux pane');
       expect(body.data.terminalBuffer).toContain('› current prompt');
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
     });
 
     it('returns error for unknown session', async () => {
@@ -803,7 +901,9 @@ describe('session-routes', () => {
       expect(buf).toContain('\x1b[H\x1b[2J');
       expect(buf).toContain('LIVE-PANE-FRAME');
       expect(buf.indexOf('history-bytes')).toBeLessThan(buf.indexOf('LIVE-PANE-FRAME'));
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
     });
 
     it('falls back to the byte history when no live pane buffer is available', async () => {
