@@ -528,17 +528,28 @@ class CodemanApp {
     this.maxReconnectAttempts = 10;
     this.isOnline = navigator.onLine;
 
-    // Offline input queue
-    this._inputQueue = new Map(); // Map<sessionId, string>
-    this._inputQueueMaxBytes = 64 * 1024; // 64KB cap per session
+    // Reliable, durable input delivery (replaces the old best-effort queue).
+    // Every input byte is recorded with a stable clientId + a monotonic
+    // per-session seq, persisted to localStorage, and only dropped once the
+    // server ACKs that exact seq — so a half-open socket silently dropping a
+    // frame, a reconnect, or a page reload can never lose a typed prompt.
+    // Exactly-once: the server applies each (clientId, seq) at most once.
     this._connectionStatus = 'connected';
-
-    // Sequential input send chain — ensures keystroke ordering across async fetches
-    this._inputSendChain = Promise.resolve();
-    this._httpInputQueues = new Map(); // Map<sessionId, string> for ordered fallback coalescing
-    this._httpInputDrainActive = false;
-    this._httpFallbackGraceTimer = null;
-    this._httpFallbackGraceMs = 150;
+    this._clientId = '';
+    this._seqCounters = new Map(); // sessionId -> last issued seq
+    this._pendingDeliveries = new Map(); // sessionId -> [{seq,data,useMux,ts,tries,sentAt}]
+    this._postDraining = new Set(); // sessionIds with an in-flight POST drainer
+    this._persistReliableTimer = null;
+    this._reliableAckTimeoutMs = 4000; // unacked WS frame older than this ⇒ socket likely dead
+    this._reliableMaxBytes = 256 * 1024; // cap on the persisted backlog
+    this._loadReliableState();
+    this._reliableSweepTimer = setInterval(() => this._redeliverSweep(), 2000);
+    // Flush the durable queue synchronously when the page is hidden/closed —
+    // debounced persistence may have a pending write we mustn't lose on reload.
+    window.addEventListener('pagehide', () => this._persistReliableNow());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') this._persistReliableNow();
+    });
 
     // Local echo overlay — DOM overlay positioned at the visible ❯ prompt
     // (not at buffer.cursorY, which reflects Ink's internal cursor position)
@@ -2051,8 +2062,10 @@ class CodemanApp {
   setConnectionStatus(status) {
     this._connectionStatus = status;
     this._updateConnectionIndicator();
-    if (status === 'connected' && this._inputQueue.size > 0) {
-      this._drainInputQueues();
+    if (status === 'connected') {
+      // Reconnected (SSE) — push any durably-queued input out immediately
+      // instead of waiting for the next 2s sweep.
+      this._redeliverSweep();
     }
   }
 
@@ -2091,6 +2104,9 @@ class CodemanApp {
         // went over HTTP, which never claims (see ws-routes sizingToken).
         this.sendResize(sessionId)?.catch?.(() => {});
         this._startMobileResizeRetry(sessionId);
+        // Flush any durably-queued input over the fresh socket (covers frames a
+        // prior half-open socket silently dropped, and input typed while offline).
+        this._onWsReady(sessionId);
       }
     };
 
@@ -2105,6 +2121,10 @@ class CodemanApp {
           this._onSessionClearTerminal({ id: sessionId });
         } else if (msg.t === 'r') {
           this._onSessionNeedsRefresh({ id: sessionId });
+        } else if (msg.t === 'ia') {
+          // Input ACK — the server applied (or deduped) this seq; drop it from
+          // the durable queue so it can never be re-delivered/lost.
+          this._onWsInputAck(msg.seq);
         }
       } catch {
         // Ignore malformed messages
@@ -2200,183 +2220,270 @@ class CodemanApp {
   }
 
   /**
-   * Send input to server without blocking the keystroke flush cycle.
-   * Uses a sequential promise chain to preserve character ordering
-   * across concurrent async fetches.
+   * Public input entry point — name/signature kept for all call sites.
+   * Records the input durably, then delivers it reliably (exactly-once). Never
+   * blocks the keystroke flush; never silently drops on a half-open socket.
+   * @param {string} sessionId
+   * @param {string} input
+   * @param {{useMux?: boolean}} [opts] - useMux only affects the POST fallback.
    */
-  _sendInputAsync(sessionId, input) {
-    // Queue immediately if offline
-    if (!this.isOnline || this._connectionStatus === 'disconnected') {
-      this._enqueueInput(sessionId, input);
-      return;
-    }
-
-    // Fast path: WebSocket — fire-and-forget, inherently ordered (single TCP stream).
-    if (this._wsReady && this._wsSessionId === sessionId) {
-      try {
-        this._ws.send(JSON.stringify({ t: 'i', d: input }));
-        this._wsInputSendCount += 1;
-        this.clearPendingHooks(sessionId);
-        this._updateConnectionIndicator();
-        return;
-      } catch {
-        // WS send failed — fall through to HTTP POST
-      }
-    }
-
-    // Fallback path: preserve ordering without creating a request per
-    // keystroke. New input appends to a per-session buffer while the previous
-    // fallback POST is in flight; the next drain sends the combined chunk.
-    this._queueHttpFallbackInput(sessionId, input);
+  _sendInputAsync(sessionId, input, opts) {
+    if (!sessionId || !input) return;
+    this._reliableSend(sessionId, input, opts?.useMux === true);
   }
 
-  _queueHttpFallbackInput(sessionId, input) {
-    const existing = this._httpInputQueues.get(sessionId) || '';
-    this._httpInputQueues.set(sessionId, existing + input);
-    if (this._wsState !== 'connecting' && this._wsState !== 'reconnecting') {
-      this._wsState = 'fallback';
+  /** Record one input frame and kick delivery. The record lives until ACKed. */
+  _reliableSend(sessionId, data, useMux) {
+    const seq = this._nextSeq(sessionId);
+    const rec = { seq, data, useMux: !!useMux, ts: Date.now(), tries: 0, sentAt: 0 };
+    let list = this._pendingDeliveries.get(sessionId);
+    if (!list) {
+      list = [];
+      this._pendingDeliveries.set(sessionId, list);
     }
+    list.push(rec);
+    this._persistReliableState();
     this._updateConnectionIndicator();
-
-    if (this._wsState === 'connecting' || this._wsState === 'reconnecting') {
-      if (!this._httpFallbackGraceTimer) {
-        this._httpFallbackGraceTimer = setTimeout(() => {
-          this._httpFallbackGraceTimer = null;
-          if (!this._flushHttpFallbackQueuesViaWs()) {
-            this._startHttpFallbackDrain();
-          }
-        }, this._httpFallbackGraceMs);
-      }
-      return;
-    }
-
-    this._startHttpFallbackDrain();
+    this._drainSession(sessionId);
   }
 
-  _flushHttpFallbackQueuesViaWs() {
-    if (!this._wsReady || !this._ws || !this._wsSessionId) return false;
-    if (this._httpFallbackGraceTimer) {
-      clearTimeout(this._httpFallbackGraceTimer);
-      this._httpFallbackGraceTimer = null;
-    }
-    const queuedInput = this._httpInputQueues.get(this._wsSessionId);
-    if (!queuedInput) return this._httpInputQueues.size === 0;
-    try {
-      this._ws.send(JSON.stringify({ t: 'i', d: queuedInput }));
-      this._wsInputSendCount += 1;
-      this._httpInputQueues.delete(this._wsSessionId);
-      this.clearPendingHooks(this._wsSessionId);
-      this._updateConnectionIndicator();
-      return this._httpInputQueues.size === 0;
-    } catch {
-      return false;
-    }
+  _nextSeq(sessionId) {
+    const next = (this._seqCounters.get(sessionId) || 0) + 1;
+    this._seqCounters.set(sessionId, next);
+    return next;
   }
 
-  _startHttpFallbackDrain() {
-    if (this._httpInputDrainActive) return;
-    this._httpInputDrainActive = true;
-    this._inputSendChain = this._inputSendChain
-      .catch(() => {})
-      .then(async () => {
+  /** Deliver all unacked records for a session, in seq order. */
+  _drainSession(sessionId) {
+    const list = this._pendingDeliveries.get(sessionId);
+    if (!list || list.length === 0) return;
+
+    // Fast path: WebSocket open for this session — fire each not-yet-sent record
+    // over the single ordered stream. They stay pending until the server ACKs
+    // them ({t:'ia'}); a frame swallowed by a half-open socket is re-sent after
+    // the sweep force-reconnects (which resets sentAt=0 in _onWsReady).
+    if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
+      for (const rec of list) {
+        if (rec.sentAt !== 0) continue;
         try {
-          while (this._httpInputQueues.size > 0) {
-            const batch = Array.from(this._httpInputQueues.entries());
-            this._httpInputQueues.clear();
-            for (const [queuedSessionId, queuedInput] of batch) {
-              this._httpFallbackSendCount += 1;
-              this._updateConnectionIndicator();
-              try {
-                const resp = await fetch(`/api/sessions/${queuedSessionId}/input`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ input: queuedInput }),
-                  keepalive: queuedInput.length < 65536,
-                });
-                if (!resp.ok) {
-                  this._enqueueInput(queuedSessionId, queuedInput);
-                } else {
-                  this.clearPendingHooks(queuedSessionId);
-                }
-              } catch {
-                this._enqueueInput(queuedSessionId, queuedInput);
-              }
-            }
-          }
-        } finally {
-          this._httpInputDrainActive = false;
-          this._updateConnectionIndicator();
+          this._ws.send(JSON.stringify({ t: 'i', d: rec.data, seq: rec.seq, cid: this._clientId }));
+          rec.sentAt = Date.now();
+          rec.tries++;
+        } catch {
+          break; // socket died mid-send — reconnect/POST drainer retries
         }
-      });
+      }
+      return;
+    }
+
+    // Slow path: no WS — POST records in order, awaiting each (the HTTP 2xx is
+    // the ACK). Serialized per session so seq order survives async fetches.
+    if (this._postDraining.has(sessionId)) return;
+    this._postDraining.add(sessionId);
+    (async () => {
+      try {
+        for (;;) {
+          const cur = this._pendingDeliveries.get(sessionId);
+          if (!cur || cur.length === 0) break;
+          // If the WebSocket came back mid-drain, yield to it (the acked stream)
+          // so we don't redundantly re-POST what onopen is already re-sending.
+          if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
+            break;
+          }
+          const rec = cur[0];
+          rec.tries++;
+          rec.sentAt = Date.now();
+          let resp = null;
+          try {
+            const body = { input: rec.data, seq: rec.seq, clientId: this._clientId };
+            if (rec.useMux) body.useMux = true;
+            resp = await fetch(`/api/sessions/${sessionId}/input`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              keepalive: rec.data.length < 65536,
+            });
+          } catch {
+            resp = null;
+          }
+          if (resp && resp.ok) {
+            this._ackDelivery(sessionId, rec.seq);
+          } else if (resp && (resp.status === 404 || resp.status === 410)) {
+            // Session no longer exists — the input can never land. Drop it
+            // rather than retry forever (not a "lost" prompt: the target is gone).
+            this._ackDelivery(sessionId, rec.seq);
+          } else {
+            break; // offline / 5xx — leave queued; sweep + reconnect retry later
+          }
+        }
+      } finally {
+        this._postDraining.delete(sessionId);
+      }
+    })();
   }
 
-  _pendingHttpFallbackBytes() {
-    let totalBytes = 0;
-    for (const v of this._httpInputQueues.values()) {
-      totalBytes += v.length;
-    }
-    return totalBytes;
-  }
-
-  _transportSummary() {
-    const pendingHttpBytes = this._pendingHttpFallbackBytes();
-    if (this._wsReady && this._wsSessionId === this.activeSessionId) {
-      return {
-        state: 'ws',
-        label: 'WS',
-        detail: `WebSocket connected. WS sends: ${this._wsInputSendCount}. HTTP fallback sends: ${this._httpFallbackSendCount}.`,
-      };
-    }
-    if (this._wsState === 'connecting') {
-      return {
-        state: 'connecting',
-        label: 'WS connecting',
-        detail: 'WebSocket is opening; input will use ordered HTTP fallback until it is ready.',
-      };
-    }
-    if (this._wsState === 'reconnecting') {
-      return {
-        state: 'reconnecting',
-        label: 'WS reconnecting',
-        detail: this._wsLastClose
-          ? `WebSocket reconnecting after close ${this._wsLastClose.code} ${this._wsLastClose.reason}`.trim()
-          : 'WebSocket reconnecting.',
-      };
-    }
-    return {
-      state: 'fallback',
-      label: pendingHttpBytes > 0 ? `HTTP fallback ${pendingHttpBytes}B` : 'HTTP fallback',
-      detail: this._wsLastClose
-        ? `Using ordered HTTP fallback. Last WS close: ${this._wsLastClose.code} ${this._wsLastClose.reason} at ${this._wsLastClose.at}.`
-        : 'Using ordered HTTP fallback; WebSocket is not ready.',
-    };
-  }
-
-  _enqueueInput(sessionId, input) {
-    const existing = this._inputQueue.get(sessionId) || '';
-    let combined = existing + input;
-    // Enforce 64KB cap — keep most recent keystrokes
-    if (combined.length > this._inputQueueMaxBytes) {
-      combined = combined.slice(combined.length - this._inputQueueMaxBytes);
-    }
-    this._inputQueue.set(sessionId, combined);
-    this._updateConnectionIndicator();
-  }
-
-  async _drainInputQueues() {
-    if (this._inputQueue.size === 0) return;
-    // Snapshot and clear
-    const queued = new Map(this._inputQueue);
-    this._inputQueue.clear();
-    this._updateConnectionIndicator();
-
-    for (const [sessionId, input] of queued) {
-      const resp = await this._apiPost(`/api/sessions/${sessionId}/input`, { input });
-      if (!resp?.ok) {
-        this._enqueueInput(sessionId, input);
+  /** Drop an ACKed record (by exact seq) and persist. */
+  _ackDelivery(sessionId, seq) {
+    const list = this._pendingDeliveries.get(sessionId);
+    if (list) {
+      const idx = list.findIndex((r) => r.seq === seq);
+      if (idx !== -1) {
+        list.splice(idx, 1);
+        if (list.length === 0) this._pendingDeliveries.delete(sessionId);
+        // When nothing is left pending anywhere, flush durable state immediately
+        // (not debounced) so a reload in the next 250ms can't redeliver an
+        // already-delivered frame — otherwise localStorage briefly still shows it.
+        if (this._pendingDeliveries.size === 0) this._persistReliableNow();
+        else this._persistReliableState();
+        this._updateConnectionIndicator();
       }
     }
-    this._updateConnectionIndicator();
+    this.clearPendingHooks?.(sessionId);
+  }
+
+  /** Server input-ACK frame ({t:'ia',seq}) over the WebSocket. */
+  _onWsInputAck(seq) {
+    if (this._wsSessionId && Number.isInteger(seq)) this._ackDelivery(this._wsSessionId, seq);
+  }
+
+  /** Called from ws.onopen — flush everything pending over the fresh socket. */
+  _onWsReady(sessionId) {
+    const list = this._pendingDeliveries.get(sessionId);
+    if (list) for (const r of list) r.sentAt = 0; // fresh socket ⇒ re-send all
+    this._drainSession(sessionId);
+  }
+
+  /**
+   * Periodic retry. For the active WS session, an oldest frame unacked past the
+   * timeout means the socket is (half-)dead — close it to force a fast reconnect
+   * (onclose → reconnect → onopen → _onWsReady re-sends). Other sessions just
+   * (re)drain over POST.
+   */
+  _redeliverSweep() {
+    if (this._pendingDeliveries.size === 0) return;
+    for (const sessionId of [...this._pendingDeliveries.keys()]) {
+      const list = this._pendingDeliveries.get(sessionId);
+      if (!list || list.length === 0) continue;
+      const isActiveWs =
+        this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId;
+      if (isActiveWs) {
+        const oldest = list[0];
+        if (oldest && oldest.sentAt && Date.now() - oldest.sentAt > this._reliableAckTimeoutMs) {
+          try {
+            this._ws.close(); // half-open: never recovers on its own — force reconnect
+          } catch {
+            /* ignore */
+          }
+          continue;
+        }
+      }
+      this._drainSession(sessionId);
+    }
+  }
+
+  /** Total bytes/count still awaiting ACK across all sessions (for the indicator). */
+  _pendingBytes() {
+    let bytes = 0;
+    let count = 0;
+    for (const list of this._pendingDeliveries.values()) {
+      for (const r of list) {
+        bytes += r.data.length;
+        count++;
+      }
+    }
+    return { bytes, count };
+  }
+
+  // ---- durable persistence (localStorage; quota- and disabled-storage-safe) --
+
+  _loadReliableState() {
+    // Stable client identity for server-side dedup across reconnects/reloads.
+    try {
+      this._clientId = localStorage.getItem('codeman:clientId') || '';
+    } catch {
+      this._clientId = '';
+    }
+    if (!this._clientId) {
+      this._clientId = 'c-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+      try {
+        localStorage.setItem('codeman:clientId', this._clientId);
+      } catch {
+        /* storage disabled — dedup degrades to per-load, still no loss */
+      }
+    }
+    try {
+      const raw = localStorage.getItem('codeman:pendingInput');
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && saved.seqs) {
+        for (const [s, n] of Object.entries(saved.seqs)) {
+          if (Number.isFinite(n)) this._seqCounters.set(s, n);
+        }
+      }
+      if (saved && saved.pending) {
+        for (const [s, recs] of Object.entries(saved.pending)) {
+          if (Array.isArray(recs) && recs.length) {
+            // Reset sentAt so they re-deliver promptly on this fresh load.
+            this._pendingDeliveries.set(
+              s,
+              recs
+                .filter((r) => r && typeof r.data === 'string' && Number.isInteger(r.seq))
+                .map((r) => ({
+                  seq: r.seq,
+                  data: r.data,
+                  useMux: !!r.useMux,
+                  ts: r.ts || Date.now(),
+                  tries: 0,
+                  sentAt: 0,
+                }))
+            );
+          }
+        }
+      }
+    } catch {
+      /* corrupt/parse error — start clean rather than throw */
+    }
+  }
+
+  _persistReliableState() {
+    // Debounced — typing without local echo calls this per keystroke.
+    if (this._persistReliableTimer) return;
+    this._persistReliableTimer = setTimeout(() => {
+      this._persistReliableTimer = null;
+      this._persistReliableNow();
+    }, 250);
+  }
+
+  _persistReliableNow() {
+    if (this._persistReliableTimer) {
+      clearTimeout(this._persistReliableTimer);
+      this._persistReliableTimer = null;
+    }
+    try {
+      const seqs = {};
+      for (const [s, n] of this._seqCounters) seqs[s] = n;
+      const pending = {};
+      let bytes = 0;
+      for (const [s, list] of this._pendingDeliveries) {
+        if (!list.length) continue;
+        pending[s] = list.map((r) => ({
+          seq: r.seq,
+          data: r.data,
+          useMux: r.useMux,
+          ts: r.ts,
+          tries: r.tries,
+        }));
+        for (const r of list) bytes += r.data.length;
+      }
+      // Bound the persisted backlog. On extreme overflow keep the seq counters
+      // (so future input stays monotonic and dedup-safe) but skip the payloads —
+      // the in-memory queue still delivers; only cross-reload durability is lost.
+      const payload =
+        bytes > this._reliableMaxBytes ? { seqs } : { seqs, pending };
+      localStorage.setItem('codeman:pendingInput', JSON.stringify(payload));
+    } catch {
+      /* QuotaExceeded or disabled storage — in-memory delivery is unaffected */
+    }
   }
 
   _updateConnectionIndicator() {
@@ -2385,12 +2492,15 @@ class CodemanApp {
     const text = this.$('connectionText');
     if (!indicator || !dot || !text) return;
 
-    let totalBytes = 0;
-    for (const v of this._inputQueue.values()) totalBytes += v.length;
-
+    const { bytes: totalBytes, count } = this._pendingBytes();
     const status = this._connectionStatus;
-    const hasQueue = totalBytes > 0;
-    const transport = this._transportSummary();
+    const hasQueue = count > 0;
+
+    // Connected with empty queue — hide
+    if ((status === 'connected' || status === 'connecting') && !hasQueue) {
+      indicator.style.display = 'none';
+      return;
+    }
 
     indicator.style.display = 'flex';
     dot.className = 'connection-dot';
@@ -2426,6 +2536,8 @@ class CodemanApp {
       this.isOnline = true;
       this.reconnectAttempts = 0;
       this.connectSSE();
+      // Network came back — drain durably-queued input right away.
+      this._redeliverSweep();
     });
     window.addEventListener('offline', () => {
       this.isOnline = false;
@@ -3067,7 +3179,7 @@ class CodemanApp {
       const tallTabsEnabled = this._tallTabsEnabled ?? false;
       const showFolder = tallTabsEnabled && session.name && folderName && folderName !== name;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}" data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, '${escapeHtml(id)}')" oncontextmenu="event.preventDefault(); app.startInlineRename('${escapeHtml(id)}')" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}" data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${session.workingDir ? `title="${escapeHtml(session.workingDir)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${status}" aria-hidden="true"></span>
@@ -3082,9 +3194,9 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions('${escapeHtml(id)}')" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span>
-          <span class="tab-detach" onclick="event.stopPropagation(); app.detachSession('${escapeHtml(id)}')" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span>
-          <span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession('${escapeHtml(id)}')" title="Close session" aria-label="Close session" tabindex="0">&times;</span>
+          <span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span>
+          <span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span>
+          <span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span>
         </div>`);
       _tabIdx++;
     }
@@ -3980,7 +4092,13 @@ class CodemanApp {
 
     this._flushedOffsets?.delete(sessionId);
     this._flushedTexts?.delete(sessionId);
-    this._inputQueue.delete(sessionId);
+    // Drop any durably-queued input for a session that's actually gone (deleted/
+    // exited). Not a lost prompt — the target no longer exists. Only reached on
+    // real session removal, never on a tab switch.
+    this._pendingDeliveries?.delete(sessionId);
+    this._seqCounters?.delete(sessionId);
+    this._postDraining?.delete(sessionId);
+    this._persistReliableState();
     this.ralphStates.delete(sessionId);
     this.ralphClosedSessions.delete(sessionId);
     this.projectInsights.delete(sessionId);

@@ -135,7 +135,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 1.1.14 (must match `package.json`)
+**Version**: 1.1.15 (must match `package.json`)
 
 ## Project Overview
 
@@ -240,7 +240,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 ### SSE Event Registry
 
-~120 event types in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). Both must be kept in sync.
+~127 event types in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). Both must be kept in sync.
 
 ### API Routes
 

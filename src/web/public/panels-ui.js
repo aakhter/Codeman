@@ -1188,8 +1188,8 @@ Object.assign(CodemanApp.prototype, {
       const agentIcon = teammateInfo ? `<span class="subagent-icon teammate-dot teammate-color-${teammateInfo.color}">●</span>` : '<span class="subagent-icon">🤖</span>';
       html.push(`
         <div class="subagent-item ${statusClass} ${isActive ? 'selected' : ''}${teammateInfo ? ' is-teammate' : ''}"
-             onclick="app.selectSubagent('${escapeHtml(agent.agentId)}')"
-             ondblclick="app.openSubagentWindow('${escapeHtml(agent.agentId)}')"
+             onclick="app.selectSubagent(${escapeHtml(JSON.stringify(agent.agentId))})"
+             ondblclick="app.openSubagentWindow(${escapeHtml(JSON.stringify(agent.agentId))})"
              title="Double-click to open tracking window">
           <div class="subagent-header">
             ${agentIcon}
@@ -1197,8 +1197,8 @@ Object.assign(CodemanApp.prototype, {
             ${teammateBadge}
             ${modelBadge}
             <span class="subagent-status ${statusClass}">${agent.status}</span>
-            ${canKill ? `<button class="subagent-kill-btn" onclick="event.stopPropagation(); app.killSubagent('${escapeHtml(agent.agentId)}')" title="Kill agent">&#x2715;</button>` : ''}
-            <button class="subagent-window-btn" onclick="event.stopPropagation(); app.${hasWindow ? 'closeSubagentWindow' : 'openSubagentWindow'}('${escapeHtml(agent.agentId)}')" title="${hasWindow ? 'Close window' : 'Open in window'}">
+            ${canKill ? `<button class="subagent-kill-btn" onclick="event.stopPropagation(); app.killSubagent(${escapeHtml(JSON.stringify(agent.agentId))})" title="Kill agent">&#x2715;</button>` : ''}
+            <button class="subagent-window-btn" onclick="event.stopPropagation(); app.${hasWindow ? 'closeSubagentWindow' : 'openSubagentWindow'}(${escapeHtml(JSON.stringify(agent.agentId))})" title="${hasWindow ? 'Close window' : 'Open in window'}">
               ${hasWindow ? '✕' : '⧉'}
             </button>
           </div>
@@ -1245,7 +1245,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="icon">${this.getToolIcon(a.tool)}</span>
           <span class="name">${escapeHtml(a.tool)}</span>
           <span class="detail">${escapeHtml(toolDetail.primary)}</span>
-          ${toolDetail.hasMore ? `<button class="tool-expand-btn" onclick="app.toggleToolParams('${escapeHtml(a.toolUseId)}')">▶</button>` : ''}
+          ${toolDetail.hasMore ? `<button class="tool-expand-btn" onclick="app.toggleToolParams(${escapeHtml(JSON.stringify(a.toolUseId))})">▶</button>` : ''}
           ${toolDetail.hasMore ? `<div class="tool-params-expanded" id="tool-params-${escapeHtml(a.toolUseId)}" style="display:none;"><pre>${escapeHtml(JSON.stringify(a.fullInput || a.input, null, 2))}</pre></div>` : ''}
         </div>`;
       } else if (a.type === 'tool_result') {
@@ -1294,7 +1294,7 @@ Object.assign(CodemanApp.prototype, {
         <span class="subagent-id" title="${escapeHtml(agent.description || agent.agentId)}">${escapeHtml(detailTitle.length > 60 ? detailTitle.substring(0, 60) + '...' : detailTitle)}</span>
         ${modelBadge}
         <span class="subagent-status ${agent.status}">${agent.status}</span>
-        <button class="subagent-transcript-btn" onclick="app.viewSubagentTranscript('${escapeHtml(agent.agentId)}')">
+        <button class="subagent-transcript-btn" onclick="app.viewSubagentTranscript(${escapeHtml(JSON.stringify(agent.agentId))})">
           View Full Transcript
         </button>
       </div>
@@ -1630,7 +1630,7 @@ Object.assign(CodemanApp.prototype, {
       parentDiv.dataset.parentSession = parentSessionId;
       parentDiv.innerHTML = `
         <span class="parent-label">from</span>
-        <span class="parent-name" onclick="app.selectSession('${escapeHtml(parentSessionId)}')">${escapeHtml(parentName)}</span>
+        <span class="parent-name" onclick="app.selectSession(${escapeHtml(JSON.stringify(parentSessionId))})">${escapeHtml(parentName)}</span>
       `;
       header.insertAdjacentElement('afterend', parentDiv);
     }
@@ -2122,7 +2122,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="status running">terminal</span>
         </div>
         <div class="subagent-window-actions">
-          <button onclick="app.closeSubagentWindow('${escapeHtml(windowId)}')" title="Minimize to tab">─</button>
+          <button onclick="app.closeSubagentWindow(${escapeHtml(JSON.stringify(windowId))})" title="Minimize to tab">─</button>
         </div>
       </div>
       <div class="subagent-window-body teammate-terminal-body" id="subagent-window-body-${windowId}">
@@ -2635,7 +2635,7 @@ Object.assign(CodemanApp.prototype, {
         const fileName = path.split('/').pop();
         html.push(`
             <span class="project-insight-filepath"
-                  onclick="app.openLogViewerWindow('${escapeHtml(path)}', '${escapeHtml(tool.sessionId)}')"
+                  onclick="app.openLogViewerWindow(${escapeHtml(JSON.stringify(path))}, ${escapeHtml(JSON.stringify(tool.sessionId))})"
                   title="${escapeHtml(path)}">${escapeHtml(fileName)}</span>
         `);
       }
@@ -4577,7 +4577,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="status streaming">streaming</span>
         </div>
         <div class="log-viewer-window-actions">
-          <button onclick="app.closeLogViewerWindow('${escapeHtml(windowId)}')" title="Close">×</button>
+          <button onclick="app.closeLogViewerWindow(${escapeHtml(JSON.stringify(windowId))})" title="Close">×</button>
         </div>
       </div>
       <div class="log-viewer-window-body" id="log-viewer-body-${windowId}">
@@ -5159,14 +5159,14 @@ Object.assign(CodemanApp.prototype, {
           <span class="size-badge">${sizeKB} KB</span>
         </div>
         <div class="image-popup-actions">
-          <button onclick="app.openImageInNewTab('${escapeHtml(imageUrl)}')" title="Open in new tab">↗</button>
-          <button onclick="app.closeImagePopup('${escapeHtml(imageId)}')" title="Close">×</button>
+          <button onclick="app.openImageInNewTab(${escapeHtml(JSON.stringify(imageUrl))})" title="Open in new tab">↗</button>
+          <button onclick="app.closeImagePopup(${escapeHtml(JSON.stringify(imageId))})" title="Close">×</button>
         </div>
       </div>
       <div class="image-popup-body">
         <img src="${imageUrl}" alt="${escapeHtml(fileName)}"
              onerror="this.parentElement.innerHTML='<div class=\\'image-error\\'>Failed to load image</div>'"
-             onclick="app.openImageInNewTab('${escapeHtml(imageUrl)}')" />
+             onclick="app.openImageInNewTab(${escapeHtml(JSON.stringify(imageUrl))})" />
       </div>
     `;
 
@@ -5431,9 +5431,9 @@ Object.assign(CodemanApp.prototype, {
         sessionId: muxSession.sessionId,
       });
 
-      const sid = escapeHtml(muxSession.sessionId);
+      const sid = escapeHtml(JSON.stringify(muxSession.sessionId));
       html += `
-        <div class="process-item process-item-clickable" onclick="app.selectSession('${sid}')" title="Switch to session">
+        <div class="process-item process-item-clickable" onclick="app.selectSession(${sid})" title="Switch to session">
           <span class="monitor-status-badge ${statusClass}">${statusLabel}</span>
           <div class="process-info">
             <div class="process-name">${modelHtml} <span class="monitor-tab-name">${escapeHtml(labels.primary)}</span></div>
@@ -5447,7 +5447,7 @@ Object.assign(CodemanApp.prototype, {
             </div>
           </div>
           <div class="process-actions">
-            <button class="btn-toolbar btn-sm btn-danger" onclick="event.stopPropagation(); app.killMuxSession('${sid}')" title="Kill session">Kill</button>
+            <button class="btn-toolbar btn-sm btn-danger" onclick="event.stopPropagation(); app.killMuxSession(${sid})" title="Kill session">Kill</button>
           </div>
         </div>
       `;
@@ -5521,7 +5521,7 @@ Object.assign(CodemanApp.prototype, {
             </div>
           </div>
           <div class="process-actions">
-            ${agent.status !== 'completed' ? `<button class="btn-toolbar btn-sm btn-danger" onclick="app.killSubagent('${escapeHtml(agent.agentId)}')" title="Kill agent">Kill</button>` : ''}
+            ${agent.status !== 'completed' ? `<button class="btn-toolbar btn-sm btn-danger" onclick="app.killSubagent(${escapeHtml(JSON.stringify(agent.agentId))})" title="Kill agent">Kill</button>` : ''}
           </div>
         </div>
       `;
