@@ -292,6 +292,9 @@ export class StateStore {
     if (this.state.tokenStats) {
       parts.push(`"tokenStats":${JSON.stringify(this.state.tokenStats)}`);
     }
+    if (this.state.sessionOrder) {
+      parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
+    }
 
     return `{${parts.join(',')}}`;
   }
@@ -602,6 +605,17 @@ export class StateStore {
   /** Updates configuration (partial merge) and triggers a debounced save. */
   setConfig(config: Partial<AppState['config']>) {
     this.state.config = { ...this.state.config, ...config };
+    this.save();
+  }
+
+  /** Returns the global tab order (ordered sessionIds), [] if unset. COD-131. */
+  getSessionOrder(): string[] {
+    return this.state.sessionOrder ?? [];
+  }
+
+  /** Persists the global tab order (ordered sessionIds) and triggers a debounced save. COD-131. */
+  setSessionOrder(order: string[]): void {
+    this.state.sessionOrder = order;
     this.save();
   }
 

@@ -111,6 +111,8 @@ export interface AppState {
   tokenStats?: TokenStats;
   /** Orchestrator Loop state (phased plan execution) */
   orchestrator?: import('./orchestrator.js').OrchestratorPersistState;
+  /** Global tab order shared across devices (ordered list of sessionIds) — COD-131 */
+  sessionOrder?: string[];
 }
 
 // ========== Default Configuration ==========
