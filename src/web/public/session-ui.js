@@ -1686,7 +1686,7 @@ Object.assign(CodemanApp.prototype, {
             <span class="remote-discover-name">${escapeHtml(s.name)} ${attachedBadge}</span>
             <span class="form-hint">age ${age} · ${s.windows || 1} window(s)</span>
           </div>
-          <button type="button" class="btn-toolbar" onclick="app.attachDiscoveredSession('${escapeHtml(hostId)}', '${escapeHtml(s.name)}')">Attach</button>
+          <button type="button" class="btn-toolbar" onclick="app.attachDiscoveredSession(${escapeHtml(JSON.stringify(hostId))}, ${escapeHtml(JSON.stringify(s.name))})">Attach</button>
         </div>`;
     }).join('');
     results.innerHTML = rows;

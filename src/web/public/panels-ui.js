@@ -3073,7 +3073,7 @@ Object.assign(CodemanApp.prototype, {
         <div class="binary-message">
           Binary file (${this.formatFileSize(data.size)})<br>
           Cannot preview<br><br>
-          <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab('${escapeHtml(sessionId)}', '${escapeHtml(filePath)}', ${attachmentId ? `'${escapeHtml(attachmentId)}'` : 'null'})">Open</button>
+          <button class="btn-icon-sm" onclick="app.openAttachmentInNewTab(${escapeHtml(JSON.stringify(sessionId))}, ${escapeHtml(JSON.stringify(filePath))}, ${attachmentId ? escapeHtml(JSON.stringify(attachmentId)) : 'null'})">Open</button>
         </div>
       `;
       footerEl.textContent = data.extension || 'binary';
@@ -3235,7 +3235,7 @@ Object.assign(CodemanApp.prototype, {
         : '';
     const restoreBtn =
       diff.from && diff.from !== diff.to
-        ? `<button class="btn-icon-sm" onclick="app.rollbackDocument('${escapeHtml(diff.from)}')">Restore v${seqOf(diff.from)}</button>`
+        ? `<button class="btn-icon-sm" onclick="app.rollbackDocument(${escapeHtml(JSON.stringify(diff.from))})">Restore v${seqOf(diff.from)}</button>`
         : '';
     const content =
       versions.length < 2
@@ -3785,7 +3785,7 @@ Object.assign(CodemanApp.prototype, {
     const items = actions
       .map(
         (a) =>
-          `<button class="authoring-action-item" onclick="app.runAuthoringAction('${escapeHtml(a.id)}')">${escapeHtml(
+          `<button class="authoring-action-item" onclick="app.runAuthoringAction(${escapeHtml(JSON.stringify(a.id))})">${escapeHtml(
             a.label
           )}</button>`
       )
