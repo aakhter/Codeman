@@ -2874,6 +2874,30 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: var(--green);
 }
 
+/* COD-129: per-CLI mode-chip colors, matching the canonical .session-tab
+   .tab-mode.* / .btn-run.mode-* palette so each CLI is visually distinct.
+   Unknown/missing mode keeps the neutral .history-item-badge default. */
+.history-item-badge.mode-claude {
+  background: rgba(59, 130, 246, 0.18);
+  color: #93c5fd;
+}
+.history-item-badge.mode-codex {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+}
+.history-item-badge.mode-opencode {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+.history-item-badge.mode-gemini {
+  background: rgba(99, 102, 241, 0.22);
+  color: #a5b4fc;
+}
+.history-item-badge.mode-shell {
+  background: rgba(234, 179, 8, 0.2);
+  color: var(--yellow);
+}
+
 .history-item-meta {
   font-size: 0.7rem;
   color: var(--text-muted);

@@ -1171,7 +1171,17 @@ Object.assign(CodemanApp.prototype, {
     badgeRow.className = 'history-item-badges';
     if (s.mode) {
       const modeBadge = document.createElement('span');
-      modeBadge.className = 'history-item-badge history-item-badge-mode';
+      // COD-129: color-code the chip per CLI. Only append a mode-* class for a
+      // known SessionMode so an unexpected value degrades to the neutral default
+      // (and can't inject an arbitrary class name).
+      const modeKey = String(s.mode).toLowerCase();
+      const known =
+        modeKey === 'claude' ||
+        modeKey === 'codex' ||
+        modeKey === 'opencode' ||
+        modeKey === 'gemini' ||
+        modeKey === 'shell';
+      modeBadge.className = 'history-item-badge history-item-badge-mode' + (known ? ' mode-' + modeKey : '');
       modeBadge.textContent = s.mode;
       badgeRow.appendChild(modeBadge);
     }
