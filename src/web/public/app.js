@@ -2496,42 +2496,67 @@ class CodemanApp {
     if (!indicator || !dot || !text) return;
 
     const { bytes: totalBytes, count } = this._pendingBytes();
-    const status = this._connectionStatus;
     const hasQueue = count > 0;
+    // Only surface a backlog once it's more than a few bytes. A single keystroke
+    // (1B) ACKs in milliseconds, so without this the label flickered "sending 1B"
+    // on every key press. Above this threshold means input is genuinely backing up.
+    const BACKLOG_HINT_BYTES = 4;
+    const showBacklog = totalBytes > BACKLOG_HINT_BYTES;
+    const formatBytes = (b) => (b < 1024 ? `${b}B` : `${(b / 1024).toFixed(1)}KB`);
+    const queuedSuffix = showBacklog ? ` · ${formatBytes(totalBytes)} queued` : '';
 
-    // Connected with empty queue — hide
-    if ((status === 'connected' || status === 'connecting') && !hasQueue) {
-      indicator.style.display = 'none';
+    // Hard offline (browser reports no network) dominates everything.
+    if (!this.isOnline || this._connectionStatus === 'offline') {
+      indicator.style.display = 'flex';
+      dot.className = 'connection-dot offline';
+      text.textContent = showBacklog ? `Offline (${formatBytes(totalBytes)} queued)` : 'Offline';
+      indicator.title = 'No network connection';
       return;
     }
 
-    indicator.style.display = 'flex';
-    dot.className = 'connection-dot';
-    indicator.title = transport.detail;
-
-    const formatBytes = (b) => b < 1024 ? `${b}B` : `${(b / 1024).toFixed(1)}KB`;
-
-    if (status === 'connected' && hasQueue) {
-      // Draining
-      dot.classList.add('draining');
-      text.textContent = `${transport.label} · sending ${formatBytes(totalBytes)}`;
-    } else if (status === 'reconnecting') {
-      dot.classList.add('reconnecting');
-      text.textContent = hasQueue ? `Reconnecting (${formatBytes(totalBytes)} queued)` : 'Reconnecting...';
-    } else if (status === 'disconnected' || !this.isOnline) {
-      // Offline or disconnected
-      dot.classList.add('offline');
-      text.textContent = hasQueue ? `Offline (${formatBytes(totalBytes)} queued)` : 'Offline';
-    } else if (transport.state === 'ws') {
-      dot.classList.add('connected');
-      text.textContent = transport.label;
-    } else if (transport.state === 'connecting' || transport.state === 'reconnecting') {
-      dot.classList.add('reconnecting');
-      text.textContent = transport.label;
-    } else {
-      dot.classList.add('fallback');
-      text.textContent = transport.label;
+    // With an active terminal, show its transport (WebSocket vs HTTP fallback).
+    if (this.activeSessionId) {
+      let cls, label, detail;
+      switch (this._wsState) {
+        case 'connected':
+          cls = 'connected'; label = 'WS'; detail = 'Terminal connected over WebSocket';
+          break;
+        case 'fallback':
+          cls = 'fallback'; label = 'HTTP'; detail = 'WebSocket unavailable — input sent over HTTP';
+          break;
+        case 'reconnecting':
+          cls = 'reconnecting'; label = 'WS…'; detail = 'Reconnecting WebSocket';
+          break;
+        case 'connecting':
+        default:
+          cls = 'reconnecting'; label = 'WS…'; detail = 'Connecting WebSocket';
+          break;
+      }
+      indicator.style.display = 'flex';
+      dot.className = `connection-dot ${cls}`;
+      text.textContent = `${label}${queuedSuffix}`;
+      indicator.title = detail;
+      return;
     }
+
+    // No active terminal — reflect the SSE event stream only when it needs attention.
+    if (this._connectionStatus === 'reconnecting' || this._connectionStatus === 'disconnected') {
+      indicator.style.display = 'flex';
+      dot.className = 'connection-dot reconnecting';
+      text.textContent = showBacklog ? `Reconnecting (${formatBytes(totalBytes)} queued)` : 'Reconnecting...';
+      indicator.title = 'Reconnecting to server';
+      return;
+    }
+
+    // Idle dashboard, healthy stream — hide unless input is genuinely queued.
+    if (!hasQueue) {
+      indicator.style.display = 'none';
+      return;
+    }
+    indicator.style.display = 'flex';
+    dot.className = 'connection-dot draining';
+    text.textContent = showBacklog ? `Sending ${formatBytes(totalBytes)}...` : 'Sending...';
+    indicator.title = 'Delivering queued input';
   }
 
   setupOnlineDetection() {

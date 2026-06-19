@@ -1,3 +1,18 @@
+/**
+ * @fileoverview Input dispatch ordering for the durable, acknowledged delivery
+ * layer (`CodemanApp._sendInputAsync` → `_reliableSend` → `_drainSession`).
+ *
+ * Local replaced the upstream best-effort "coalescing fallback queue" with the
+ * durable per-(clientId, seq) layer in commit 1255e28 (docs/reliable-input-
+ * delivery.md). This suite verifies the client-side ordering guarantees of that
+ * layer: each input is a distinct seq-tagged frame, delivered in order over the
+ * WebSocket when open, serialized over HTTP POST when not, and only dropped on a
+ * server ACK (HTTP 2xx). Exactly-once application is covered server-side in
+ * test/reliable-input-dedup.test.ts; the header transport indicator ("WS"/"HTTP")
+ * is covered in test/connection-indicator.test.ts.
+ *
+ * Loaded via `vm` with a stubbed context (no jsdom).
+ */
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
@@ -16,6 +31,7 @@ function loadCodemanAppClass() {
     clearTimeout,
     requestAnimationFrame: vi.fn(),
     HTMLCanvasElement: class HTMLCanvasElement {},
+    WebSocket: { OPEN: 1 },
     fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args),
     document: { addEventListener: vi.fn() },
     localStorage: {
@@ -25,185 +41,119 @@ function loadCodemanAppClass() {
       setItem: vi.fn(),
       removeItem: vi.fn(),
     },
-    window: {
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    },
+    window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
     MobileDetection: {},
   });
-
   vm.runInContext(`${constants}\n${source}\nglobalThis.__CodemanApp = CodemanApp;`, context);
   return (context as { __CodemanApp: new () => unknown }).__CodemanApp;
 }
 
-async function waitForCalls(calls: string[], count: number) {
-  for (let i = 0; i < 20; i++) {
+const CodemanApp = loadCodemanAppClass();
+
+async function waitForCalls(calls: unknown[], count: number) {
+  for (let i = 0; i < 50; i++) {
     if (calls.length >= count) return;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((r) => setTimeout(r, 0));
   }
 }
 
-function fakeElement() {
-  const classes = new Set<string>();
-  return {
-    style: { display: '' },
-    title: '',
-    textContent: '',
-    className: '',
-    classList: {
-      add: (...names: string[]) => {
-        names.forEach((name) => classes.add(name));
-      },
-      contains: (name: string) => classes.has(name),
-    },
-  };
+type Frame = { t: string; d: string; seq: number; cid: string };
+type PostBody = { input: string; seq: number; clientId: string };
+
+type App = {
+  _sendInputAsync: (sessionId: string, input: string, opts?: { useMux?: boolean }) => void;
+  _pendingDeliveries: Map<string, Array<{ seq: number; data: string; sentAt: number }>>;
+  _ws: { readyState: number; send: (data: string) => void } | null;
+  _wsSessionId: string | null;
+  activeSessionId: string | null;
+};
+
+function makeApp(): App {
+  const app = Object.create((CodemanApp as { prototype: object }).prototype) as App & Record<string, unknown>;
+  app._clientId = 'c-test';
+  app._seqCounters = new Map();
+  app._pendingDeliveries = new Map();
+  app._postDraining = new Set();
+  app._persistReliableState = vi.fn();
+  app._persistReliableNow = vi.fn();
+  app._updateConnectionIndicator = vi.fn();
+  app.clearPendingHooks = vi.fn();
+  app.activeSessionId = 'session-1';
+  app.isOnline = true;
+  app._connectionStatus = 'connected';
+  app._ws = null;
+  app._wsSessionId = null;
+  return app as unknown as App;
 }
 
-describe('CodemanApp input dispatch ordering', () => {
-  function makeApp() {
-    const CodemanApp = loadCodemanAppClass();
-    const app = Object.create(CodemanApp.prototype) as {
-      _sendInputAsync: (sessionId: string, input: string) => void;
-      _inputSendChain: Promise<void>;
-      _inputQueue: Map<string, string>;
-      _httpInputQueues?: Map<string, string>;
-      _httpInputDrainActive?: boolean;
-      _httpFallbackGraceMs?: number;
-      _flushHttpFallbackQueuesViaWs?: () => boolean;
-      activeSessionId: string | null;
-      isOnline: boolean;
-      _connectionStatus: string;
-      _wsReady: boolean;
-      _wsSessionId: string | null;
-      _wsState?: string;
-      _ws?: { send: (data: string) => void };
-      clearPendingHooks: () => void;
-      _enqueueInput: () => void;
-      $: (id: string) => any;
-    };
-
-    app._inputSendChain = Promise.resolve();
-    app._inputQueue = new Map();
-    app._httpInputQueues = new Map();
-    app._httpInputDrainActive = false;
-    app._httpFallbackGraceMs = 150;
-    app.activeSessionId = 'session-1';
-    app.isOnline = true;
-    app._connectionStatus = 'connected';
-    app._wsReady = false;
-    app._wsSessionId = null;
-    app._wsState = 'disconnected';
-    app.clearPendingHooks = vi.fn();
-    app._enqueueInput = vi.fn();
-    app.$ = vi.fn();
-
-    return app;
-  }
-
-  it('coalesces rapid HTTP fallback input while preserving character order', async () => {
+describe('durable input delivery — send ordering', () => {
+  it('delivers rapid input as distinct ordered seq frames over an open WebSocket (no coalescing)', () => {
     const app = makeApp();
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (d: string) => frames.push(JSON.parse(d)) };
+    app._wsSessionId = 'session-1';
 
+    app._sendInputAsync('session-1', 'a');
+    app._sendInputAsync('session-1', 'b');
+    app._sendInputAsync('session-1', 'c');
+
+    // Each keystroke is its own frame, in seq order — never merged into "abc".
+    expect(frames.map((f) => f.d)).toEqual(['a', 'b', 'c']);
+    expect(frames.map((f) => f.seq)).toEqual([1, 2, 3]);
+    expect(frames.every((f) => f.t === 'i' && f.cid === 'c-test')).toBe(true);
+  });
+
+  it('POSTs queued input one frame at a time in seq order when no socket is open', async () => {
+    const app = makeApp();
+    const calls: PostBody[] = [];
     const completions: Array<() => void> = [];
-    const calls: string[] = [];
     global.fetch = vi.fn(async (_url, init) => {
-      calls.push(JSON.parse(String(init?.body)).input);
-      await new Promise<void>((resolve) => completions.push(resolve));
+      calls.push(JSON.parse(String(init?.body)) as PostBody);
+      await new Promise<void>((r) => completions.push(r));
       return new Response('{}', { status: 200 });
     });
 
     app._sendInputAsync('session-1', 'a');
     app._sendInputAsync('session-1', 'b');
-    await Promise.resolve();
-    await Promise.resolve();
 
-    expect(calls).toEqual(['ab']);
+    // Serialized: only the first frame is in flight until its 2xx ACK lands.
+    await waitForCalls(calls, 1);
+    expect(calls.map((c) => c.input)).toEqual(['a']);
+
+    completions.shift()?.(); // ACK 'a'
+    await waitForCalls(calls, 2);
+    expect(calls.map((c) => c.input)).toEqual(['a', 'b']);
+    expect(calls.map((c) => c.seq)).toEqual([1, 2]);
 
     completions.shift()?.();
-    await app._inputSendChain;
-
-    expect(calls).toEqual(['ab']);
+    await waitForCalls(calls, 2);
   });
 
-  it('waits for an in-flight HTTP fallback send before dispatching the next combined chunk', async () => {
+  it('leaves a frame queued (unacked) when HTTP delivery fails', async () => {
     const app = makeApp();
-
-    const completions: Array<() => void> = [];
-    const calls: string[] = [];
+    const calls: PostBody[] = [];
     global.fetch = vi.fn(async (_url, init) => {
-      calls.push(JSON.parse(String(init?.body)).input);
-      await new Promise<void>((resolve) => completions.push(resolve));
-      return new Response('{}', { status: 200 });
+      calls.push(JSON.parse(String(init?.body)) as PostBody);
+      return new Response('busy', { status: 503 });
     });
 
     app._sendInputAsync('session-1', 'a');
     await waitForCalls(calls, 1);
-    app._sendInputAsync('session-1', 'b');
-    app._sendInputAsync('session-1', 'c');
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
 
-    expect(calls).toEqual(['a']);
-
-    completions.shift()?.();
-    await waitForCalls(calls, 2);
-
-    expect(calls).toEqual(['a', 'bc']);
-    completions.shift()?.();
-    await app._inputSendChain;
+    // 5xx is not an ACK — the frame must survive for the sweep/reconnect to retry.
+    expect(app._pendingDeliveries.get('session-1')).toHaveLength(1);
+    expect(app._pendingDeliveries.get('session-1')?.[0].data).toBe('a');
   });
 
-  it('flushes connecting-state input over WebSocket when the socket opens during the grace window', async () => {
+  it('drops a frame addressed to a vanished session (404) instead of retrying forever', async () => {
     const app = makeApp();
-    const httpCalls: string[] = [];
-    const wsCalls: string[] = [];
-    global.fetch = vi.fn(async (_url, init) => {
-      httpCalls.push(JSON.parse(String(init?.body)).input);
-      return new Response('{}', { status: 200 });
-    });
+    global.fetch = vi.fn(async () => new Response('gone', { status: 404 }));
 
-    app._wsState = 'connecting';
     app._sendInputAsync('session-1', 'a');
-    app._sendInputAsync('session-1', 'b');
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
 
-    expect(httpCalls).toEqual([]);
-
-    app._wsReady = true;
-    app._wsSessionId = 'session-1';
-    app._ws = {
-      send: (data: string) => wsCalls.push(JSON.parse(data).d),
-    };
-
-    expect(app._flushHttpFallbackQueuesViaWs?.()).toBe(true);
-    expect(wsCalls).toEqual(['ab']);
-    expect(httpCalls).toEqual([]);
-  });
-
-  it('shows WebSocket and HTTP fallback transport states in the header indicator', () => {
-    const app = makeApp();
-    const indicator = fakeElement();
-    const dot = fakeElement();
-    const text = fakeElement();
-    app.activeSessionId = 'session-1';
-    app.$ = (id: string) =>
-      ({
-        connectionIndicator: indicator,
-        connectionDot: dot,
-        connectionText: text,
-      })[id] ?? null;
-
-    app._wsReady = true;
-    app._wsSessionId = 'session-1';
-    app._updateConnectionIndicator();
-
-    expect(indicator.style.display).toBe('flex');
-    expect(dot.classList.contains('connected')).toBe(true);
-    expect(text.textContent).toBe('WS');
-
-    app._wsReady = false;
-    app._httpInputQueues?.set('session-1', 'abc');
-    app._updateConnectionIndicator();
-
-    expect(dot.classList.contains('fallback')).toBe(true);
-    expect(text.textContent).toContain('HTTP fallback');
+    expect(app._pendingDeliveries.get('session-1')).toBeUndefined();
   });
 });
