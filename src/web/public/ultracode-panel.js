@@ -279,7 +279,7 @@ Object.assign(CodemanApp.prototype, {
     const cardStateCls = state === 'done' ? ' uw-state-done' : state === 'progress' ? ' uw-state-working' : '';
     const cardAttrs = clickable
       ? ` class="ultracode-agent-card ultracode-agent-card--clickable${cardStateCls}" role="button" tabindex="0"` +
-        ` title="View transcript" onclick="app.openUltracodeAgentWindow('${escapeHtml(a.agentId)}','${escapeHtml(runId || '')}')"`
+        ` title="View transcript" onclick="app.openUltracodeAgentWindow(${escapeHtml(JSON.stringify(a.agentId))},${escapeHtml(JSON.stringify(runId || ''))})"`
       : ` class="ultracode-agent-card${cardStateCls}"`;
     return (
       `<div${cardAttrs}>` +
