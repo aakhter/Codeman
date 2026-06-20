@@ -235,6 +235,8 @@ export class MockSession extends EventEmitter {
       mode: this.mode,
       muxName: this._muxName,
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
+      pinned: this.pinned || undefined,
+      pinnedAt: this.pinned ? (this.pinnedAt ?? undefined) : undefined,
     };
   }
 
@@ -257,6 +259,14 @@ export class MockSession extends EventEmitter {
   setAutoResume = vi.fn((enabled: boolean) => {
     this.autoResumeEnabled = enabled;
     if (!enabled) this.autoResumeAt = null;
+  });
+
+  /** Pin state (COD-139) */
+  pinned: boolean = false;
+  pinnedAt: number | null = null;
+  setPinned = vi.fn((pinned: boolean) => {
+    this.pinned = pinned;
+    this.pinnedAt = pinned ? Date.now() : null;
   });
 
   /** Check if session is busy */

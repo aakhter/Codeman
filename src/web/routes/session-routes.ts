@@ -30,6 +30,7 @@ import {
   AutoClearSchema,
   AutoCompactSchema,
   AutoResumeSchema,
+  PinSessionSchema,
   CheckpointSchema,
   ImageWatcherSchema,
   FlickerFilterSchema,
@@ -1292,6 +1293,32 @@ export function registerSessionRoutes(
     };
   });
 
+  // ========== Pin (float to top of the session manager list, COD-139) ==========
+
+  app.post('/api/sessions/:id/pin', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(PinSessionSchema, req.body, 'Invalid request body');
+    const session = findSessionOrFail(ctx, id);
+
+    session.setPinned(body.pinned);
+    // Persist + broadcast session:updated (keeps tabs/state consistent), then a
+    // dedicated session:pinned event so the session manager list re-sorts live.
+    persistAndBroadcastSession(ctx, session);
+    ctx.broadcast(SseEvent.SessionPinned, {
+      id,
+      pinned: session.pinned,
+      pinnedAt: session.pinnedAt ?? undefined,
+    });
+
+    return {
+      success: true,
+      data: {
+        pinned: session.pinned,
+        pinnedAt: session.pinnedAt ?? undefined,
+      },
+    };
+  });
+
   // ========== Checkpoint (agent-initiated compact-or-clear) ==========
 
   app.post('/api/sessions/:id/checkpoint', async (req) => {
@@ -1987,6 +2014,8 @@ export function registerSessionRoutes(
         createdAt: st.createdAt,
         lastActivityAt: st.lastActivityAt,
         claudeSessionId: s.claudeSessionId ?? undefined,
+        pinned: st.pinned,
+        pinnedAt: st.pinnedAt,
       };
     });
 
@@ -1999,6 +2028,8 @@ export function registerSessionRoutes(
       workingDir: p.workingDir,
       createdAt: p.createdAt,
       lastActivityAt: p.lastActivityAt,
+      pinned: p.pinned,
+      pinnedAt: p.pinnedAt,
     }));
 
     // Lifecycle audit log (newest-first, capped).
