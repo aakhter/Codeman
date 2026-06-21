@@ -2662,6 +2662,37 @@ Object.assign(CodemanApp.prototype, {
   // File Browser Panel
   // ═══════════════════════════════════════════════════════════════
 
+  // Reveal the file browser panel and load the given session's files. This is the
+  // ONE canonical reveal path — it does NOT consult the `showFileBrowser` App Setting
+  // (that setting only gates whether settings-ui.js calls this on settings apply).
+  // An explicit user action (Session Manager → ⋯ → Open folder) always reveals.
+  showFileBrowserPanel(sessionId) {
+    const panel = this.$('fileBrowserPanel');
+    if (!panel) return;
+    panel.classList.add('visible');
+    // Attach drag listeners if not already attached
+    if (!this.fileBrowserDragListeners) {
+      const header = panel.querySelector('.file-browser-header');
+      if (header) {
+        // Convert right-positioned to left/top before drag so makeWindowDraggable works
+        const onFirstDrag = () => {
+          if (!panel.style.left) {
+            const rect = panel.getBoundingClientRect();
+            panel.style.left = `${rect.left}px`;
+            panel.style.top = `${rect.top}px`;
+            panel.style.right = 'auto';
+          }
+        };
+        header.addEventListener('mousedown', onFirstDrag);
+        header.addEventListener('touchstart', onFirstDrag, { passive: true });
+        this.fileBrowserDragListeners = this.makeWindowDraggable(panel, header);
+        this.fileBrowserDragListeners._onFirstDrag = onFirstDrag;
+      }
+    }
+    // Load LAST: panel + #fileBrowserTree now exist, so loadFileBrowser won't early-return.
+    this.loadFileBrowser(sessionId);
+  },
+
   async loadFileBrowser(sessionId) {
     if (!sessionId) return;
 

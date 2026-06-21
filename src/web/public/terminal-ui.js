@@ -1399,7 +1399,7 @@ Object.assign(CodemanApp.prototype, {
     if (isLiveOpen) {
       addItem('Open folder', () => {
         this.selectSession(s.sessionId);
-        this.loadFileBrowser?.(s.sessionId);
+        this.showFileBrowserPanel?.(s.sessionId);
         this.closeSessionManager?.();
         closeMenu();
       });

@@ -2198,31 +2198,14 @@ Object.assign(CodemanApp.prototype, {
       this.removeAllUltracodeWindows();
     }
 
-    // File browser panel visibility
+    // File browser panel visibility. The `showFileBrowser` setting only gates whether
+    // we reveal on settings-apply; the actual reveal (add .visible + load + drag wiring)
+    // lives in the canonical `showFileBrowserPanel` helper (panels-ui.js), shared with
+    // the Session Manager → ⋯ → Open folder action.
     const fileBrowserPanel = document.getElementById('fileBrowserPanel');
     if (fileBrowserPanel) {
       if (showFileBrowser && this.activeSessionId) {
-        fileBrowserPanel.classList.add('visible');
-        this.loadFileBrowser(this.activeSessionId);
-        // Attach drag listeners if not already attached
-        if (!this.fileBrowserDragListeners) {
-          const header = fileBrowserPanel.querySelector('.file-browser-header');
-          if (header) {
-            // Convert right-positioned to left/top before drag so makeWindowDraggable works
-            const onFirstDrag = () => {
-              if (!fileBrowserPanel.style.left) {
-                const rect = fileBrowserPanel.getBoundingClientRect();
-                fileBrowserPanel.style.left = `${rect.left}px`;
-                fileBrowserPanel.style.top = `${rect.top}px`;
-                fileBrowserPanel.style.right = 'auto';
-              }
-            };
-            header.addEventListener('mousedown', onFirstDrag);
-            header.addEventListener('touchstart', onFirstDrag, { passive: true });
-            this.fileBrowserDragListeners = this.makeWindowDraggable(fileBrowserPanel, header);
-            this.fileBrowserDragListeners._onFirstDrag = onFirstDrag;
-          }
-        }
+        this.showFileBrowserPanel(this.activeSessionId);
       } else {
         fileBrowserPanel.classList.remove('visible');
       }
