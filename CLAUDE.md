@@ -171,15 +171,16 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | **Remote** | `src/remote-hosts.ts` | SSH remote hosts/cases — `~/.codeman/remote-hosts.json` + `remote-cases.json`. See `docs/remote-sessions.md` |
 | **Infra** | `src/hooks-config.ts`, `src/push-store.ts`, `src/tunnel-manager.ts`, `src/image-watcher.ts`, `src/file-stream-manager.ts` | |
 | **Plan** | `src/plan-orchestrator.ts`, `src/prompts/*.ts`, `src/templates/` (`claude-md.ts` + `case-template.md`, the CLAUDE.md scaffold generated into new cases) | |
-| **Web** | `src/web/server.ts` ★, `src/web/sse-events.ts`, `src/web/routes/*.ts` (16 route modules + barrel; `session-routes.ts` ★), `src/web/route-helpers.ts`, `src/web/ports/*.ts`, `src/web/middleware/auth.ts`, `src/web/schemas.ts`, `src/web/self-update.ts`, `src/web/plan-usage-latest.ts` | |
+| **Web** | `src/web/server.ts` ★, `src/web/sse-events.ts`, `src/web/routes/*.ts` (17 route modules + barrel; `session-routes.ts` ★), `src/web/route-helpers.ts`, `src/web/ports/*.ts`, `src/web/middleware/auth.ts`, `src/web/schemas.ts`, `src/web/self-update.ts`, `src/web/plan-usage-latest.ts` | |
+| **Search** | `src/search-service.ts`, `src/web/routes/search-routes.ts`, `src/types/search.ts` | COD-9 cross-session federated search. Thin route harvests live source arrays (sessions/cases, run-summary events, attachment file paths) → pure `searchSources()` core for ranking/capping. `GET /api/search?q=&types=&limit=`. Workspace-relative paths only; no terminal-buffer scan |
 | **Frontend** | `src/web/public/app.js` (~4K lines, core) + 6 infra modules (`constants.js`, `mobile-handlers.js`, `voice-input.js`, `notification-manager.js`, `keyboard-accessory.js`, `sanitize-html.js` — DOMPurify mXSS allowlist, COD-56) + 8 domain modules (`terminal-ui.js`, `respawn-ui.js`, `ralph-panel.js`, `orchestrator-panel.js`, `ultracode-panel.js`, `settings-ui.js`, `panels-ui.js`, `session-ui.js`) + 6 feature modules (`ralph-wizard.js`, `api-client.js`, `subagent-windows.js`, `ultracode-windows.js`, `input-cjk.js`, `image-input.js`) + `sw.js` | `ultracode-windows.js` = floating run windows w/ tab connector lines (additional to the dock panel) |
-| **Types** | `src/types/index.ts` (barrel) → 16 domain files (incl. `workflow-run.ts`); also `src/types.ts` root re-export | See `@fileoverview` in index.ts |
+| **Types** | `src/types/index.ts` (barrel) → 17 domain files (incl. `workflow-run.ts`, `search.ts`); also `src/types.ts` root re-export | See `@fileoverview` in index.ts |
 
 ★ = Large, central file (>50KB) — read its `@fileoverview` first. All files have `@fileoverview` JSDoc — read that before diving in. Discovery aid: `grep -l '@fileoverview' src/web/routes/*.ts` lists all route modules; same grep works for `src/types/`, `src/web/public/*.js`.
 
 **Local packages**: `packages/xterm-zerolag-input/` (local-echo overlay) and `packages/gesture-control/` (`codeman-gesture-control`, hand-tracking overlay). Both are single-source and bundled into `src/web/public/` — see Common Gotchas and `docs/frontend-architecture.md`.
 
-**Config**: `src/config/` — 17 files, no barrel (`index.ts`) exists; import from the specific file.
+**Config**: `src/config/` — 18 files, no barrel (`index.ts`) exists; import from the specific file.
 
 **Utilities**: `src/utils/` — re-exported via index. Key: `CleanupManager`, `LRUMap`, `StaleExpirationMap`, `BufferAccumulator`, `stripAnsi`, `Debouncer`, `KeyedDebouncer`. Also: `claude-cli-resolver`/`opencode-cli-resolver`/`codex-cli-resolver`/`gemini-cli-resolver` (CLI path resolution), `string-similarity` (fuzzy matching), `regex-patterns` (ANSI/token/spinner patterns), `assertNever` (exhaustive checks), `token-validation` (auth tokens), `nice-wrapper` (process priority).
 
@@ -244,7 +245,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 ### API Routes
 
-~155 handlers across 15 route files in `src/web/routes/`: system (~44, incl. self-update `check`/`status`/`POST /api/system/update`, `POST /api/system/span-displays` → spawns `scripts/span-codeman.sh`, and `GET /api/codex/status`), sessions (~30), files (~20, file browser + the document/attachment endpoints — see the Document preview Key Pattern), cases (~14, incl. `GET/POST/PUT/DELETE /api/remote-hosts(/:id)` + `POST /api/cases/remote-link`), orchestrator (10), ralph (9), plan (7), respawn (7), mux (5), push (4), scheduled (4), teams (2), hooks (1), clipboard (1), ws (1 WebSocket). Counts drift as endpoints are added — re-grep `\.(get|post|put|delete)\(` per file rather than trusting these. Each file has `@fileoverview` with endpoint details.
+~214 handlers across 17 route files in `src/web/routes/`: system (~44, incl. self-update `check`/`status`/`POST /api/system/update`, `POST /api/system/span-displays` → spawns `scripts/span-codeman.sh`, and `GET /api/codex/status`), sessions (~30), files (~20, file browser + the document/attachment endpoints — see the Document preview Key Pattern), cases (~14, incl. `GET/POST/PUT/DELETE /api/remote-hosts(/:id)` + `POST /api/cases/remote-link`), orchestrator (10), ralph (9), plan (7), respawn (7), mux (5), push (4), scheduled (4), teams (2), hooks (1), clipboard (1), search (1, `GET /api/search` — COD-9 federated search), ws (1 WebSocket). Counts drift as endpoints are added — re-grep `\.(get|post|put|delete)\(` per file rather than trusting these. Each file has `@fileoverview` with endpoint details.
 
 **HTTP contract** (stable since 0.9.x): responses use the `ApiResponse<T>` envelope — `{ success: true, data? }` or `{ success: false, error, errorCode }` (`src/types/api.ts`). `/api/v1/*` is a versioned alias of `/api/*` (URL rewrite in `server.ts`). Full envelope/status/error-code/SSE spec: `docs/api-reference.md`.
 
