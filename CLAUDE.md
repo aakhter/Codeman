@@ -147,7 +147,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 **Requirements**: Node.js 22+, Claude CLI, tmux
 
-**Git**: Main branch is `master`. SSH session chooser: `sc` (interactive), `sc 2` (quick attach), `sc -l` (list).
+**Git**: This box works on and deploys from `local` (tracks `bitbucket/local`). `master` is **not** the working branch here — it only tracks `origin/master` (the canonical `Ark0N/Codeman` upstream main) as a base for upstream PRs and new worktrees, and is never deployed. SSH session chooser: `sc` (interactive), `sc 2` (quick attach), `sc -l` (list).
 
 **Import conventions**: Utils from `./utils`, types from `./types` (barrel), config from specific `./config/*` files.
 
