@@ -127,6 +127,14 @@ function shouldAutoWrapTabs(input) {
   return scrollWidth > clientWidth + 1;
 }
 
+// COD-147: When session tabs occupy a second row (manual two-row pin or the
+// auto-wrap signal), allow the header-right cluster to wrap too so the tab area
+// gets more width. Desktop-only; one-row layouts stay unchanged.
+function shouldWrapHeaderRight(input) {
+  if (!input || input.deviceType !== 'desktop') return false;
+  return input.manualTwoRows === true || input.autoWrap === true;
+}
+
 // COD-122: Monitor "Tmux Sessions" row label policy. A row carries up to three
 // identifiers — the tab name (user-facing L1 label), the tmux session name
 // (e.g. "codeman-1fac7304"), and the agent (Claude/Codex) session id. The tab name
@@ -188,6 +196,7 @@ if (typeof window !== 'undefined') {
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
   window.CodemanTabOverflow = {
     shouldAutoWrapTabs,
+    shouldWrapHeaderRight,
   };
   window.CodemanMonitorLabels = {
     resolveMonitorRowLabels,

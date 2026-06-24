@@ -7,8 +7,14 @@ function loadTabOverflowHelper() {
   const context = vm.createContext({ window: {}, globalThis: {} });
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8');
   vm.runInContext(source, context, { filename: 'constants.js' });
-  return (context.window as { CodemanTabOverflow: { shouldAutoWrapTabs: (input: unknown) => boolean } })
-    .CodemanTabOverflow;
+  return (
+    context.window as {
+      CodemanTabOverflow: {
+        shouldAutoWrapTabs: (input: unknown) => boolean;
+        shouldWrapHeaderRight: (input: unknown) => boolean;
+      };
+    }
+  ).CodemanTabOverflow;
 }
 
 describe('tab overflow layout policy', () => {
@@ -61,5 +67,38 @@ describe('tab overflow layout policy', () => {
     expect(helper.shouldAutoWrapTabs({ ...base, scrollWidth: 802, clientWidth: 800 })).toBe(true);
     // A single overflowing tab must not wrap (need at least 2 to form a second row).
     expect(helper.shouldAutoWrapTabs({ ...base, tabCount: 1, scrollWidth: 1400, clientWidth: 760 })).toBe(false);
+  });
+});
+
+describe('shouldWrapHeaderRight (COD-147)', () => {
+  it('wraps when desktop and manual two-rows is pinned', () => {
+    const helper = loadTabOverflowHelper();
+    expect(helper.shouldWrapHeaderRight({ deviceType: 'desktop', manualTwoRows: true })).toBe(true);
+  });
+
+  it('wraps when desktop and tabs auto-wrapped', () => {
+    const helper = loadTabOverflowHelper();
+    expect(helper.shouldWrapHeaderRight({ deviceType: 'desktop', autoWrap: true })).toBe(true);
+  });
+
+  it('does not wrap on desktop when neither manual nor auto wrap is active', () => {
+    const helper = loadTabOverflowHelper();
+    expect(helper.shouldWrapHeaderRight({ deviceType: 'desktop' })).toBe(false);
+  });
+
+  it('never wraps on mobile even when tabs auto-wrap', () => {
+    const helper = loadTabOverflowHelper();
+    expect(helper.shouldWrapHeaderRight({ deviceType: 'mobile', autoWrap: true })).toBe(false);
+  });
+
+  it('never wraps on tablet even when manual two-rows is pinned', () => {
+    const helper = loadTabOverflowHelper();
+    expect(helper.shouldWrapHeaderRight({ deviceType: 'tablet', manualTwoRows: true })).toBe(false);
+  });
+
+  it('does not wrap for missing or empty input', () => {
+    const helper = loadTabOverflowHelper();
+    expect(helper.shouldWrapHeaderRight(undefined)).toBe(false);
+    expect(helper.shouldWrapHeaderRight({})).toBe(false);
   });
 });

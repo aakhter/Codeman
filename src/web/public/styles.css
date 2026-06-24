@@ -610,6 +610,17 @@ body {
   flex-shrink: 0;
 }
 
+/* COD-147: when session tabs wrap to a 2nd row, let the right-side cluster
+   (CPU/MEM stats + icon buttons) wrap too so it's horizontally narrower,
+   giving the tab area more width. Gated on .header--tabs-wrapped (desktop only). */
+.header--tabs-wrapped .header-right {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-content: flex-start;
+  row-gap: 4px;
+  max-width: min(46%, 420px);
+}
+
 .mobile-header-utility-toggle {
   display: none;
 }

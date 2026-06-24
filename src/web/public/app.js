@@ -3263,6 +3263,8 @@ class CodemanApp {
 
     if (manualTwoRows || deviceType !== 'desktop') {
       container.classList.remove('tabs-auto-wrap');
+      // Manual two-rows on desktop wraps the header too; non-desktop never wraps.
+      this._applyHeaderRightWrap(deviceType, manualTwoRows, false);
       return;
     }
 
@@ -3279,6 +3281,19 @@ class CodemanApp {
       : container.scrollWidth > container.clientWidth + 1;
 
     container.classList.toggle('tabs-auto-wrap', shouldWrap);
+    // COD-147: mirror the final tab-wrap state onto the header so .header-right wraps too.
+    this._applyHeaderRightWrap(deviceType, manualTwoRows, shouldWrap);
+  }
+
+  // COD-147: toggle `header--tabs-wrapped` so the right-side cluster wraps to a
+  // 2nd line when tabs do, freeing horizontal width for the tab area.
+  _applyHeaderRightWrap(deviceType, manualTwoRows, autoWrap) {
+    const header = document.querySelector('.header');
+    if (!header) return;
+    const wrapped = window.CodemanTabOverflow?.shouldWrapHeaderRight
+      ? window.CodemanTabOverflow.shouldWrapHeaderRight({ deviceType, manualTwoRows, autoWrap })
+      : deviceType === 'desktop' && (manualTwoRows || autoWrap);
+    header.classList.toggle('header--tabs-wrapped', wrapped);
   }
 
   _fullRenderSessionTabs() {
