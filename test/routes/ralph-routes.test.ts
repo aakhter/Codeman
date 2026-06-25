@@ -171,6 +171,10 @@ describe('ralph-routes', () => {
         payload: { maxTodos: 25, todoExpirationMinutes: 90 },
       });
       expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      // The ralph-config success path returns a bare {} envelope (matching its
+      // sibling config routes); an error would surface as { success: false }.
+      expect(body.success).not.toBe(false);
       expect(tracker.setMaxTodos).toHaveBeenCalledWith(25);
       expect(tracker.setTodoExpirationMinutes).toHaveBeenCalledWith(90);
     });

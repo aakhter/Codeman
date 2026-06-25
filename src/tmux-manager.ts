@@ -1203,13 +1203,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // COLORTERM is unset for Claude/other non-codex sessions by default to avoid
     // tmux→PTY→xterm.js color glitches (an empirical rendering choice). The
     // `truecolorEnabled` app setting (COD-75) lets the user opt those sessions
-    // into 24-bit truecolor. Codex always gets truecolor.
-    const colorTermExport = mode === 'codex' || truecolorEnabled ? 'export COLORTERM=truecolor' : 'unset COLORTERM';
+    // into 24-bit truecolor. Codex and Gemini always get truecolor (Ink TUIs).
+    const colorTermExport =
+      mode === 'codex' || mode === 'gemini' || truecolorEnabled ? 'export COLORTERM=truecolor' : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
       colorTermExport,
-      ...(mode === 'codex' ? ['unset NO_COLOR'] : []),
+      ...(mode === 'codex' || mode === 'gemini' ? ['unset NO_COLOR'] : []),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,

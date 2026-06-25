@@ -135,7 +135,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 1.1.17 (must match `package.json`)
+**Version**: 1.2.0 (must match `package.json`)
 
 ## Project Overview
 
@@ -193,7 +193,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 ### Key Patterns
 
-**Input**: `session.writeViaMux()` for programmatic input — tmux `send-keys -l` (literal) + `send-keys Enter`. Single-line only.
+**Input**: `session.writeViaMux()` for programmatic/curl input — tmux `send-keys -l` (literal) + `send-keys Enter`. Single-line only (fire-and-once). Interactive **browser** input goes through a durable **exactly-once** layer: each frame carries a stable `clientId` + monotonic per-session `seq`, persisted to localStorage until the server ACKs (`{t:'ia',seq}` over WS, or HTTP 2xx), so a dropped link/reconnect can't lose or double-deliver a prompt.
 
 **Idle detection**: Multi-layer (completion message → AI check → output silence → token stability). See `docs/respawn-state-machine.md`.
 
@@ -308,7 +308,7 @@ Raw `npx vitest` skips `config/vitest.config.ts`; always use `npm test --` or pa
 
 **Ports**: Pick unique ports manually. Search `const PORT =` before adding new tests.
 
-**Respawn tests**: Use `MockSession` from `test/respawn-test-utils.ts`. **Route tests**: `app.inject({ method, url, payload })` in `test/routes/` — no live port needed. **Mobile tests**: Playwright suite in `test/mobile/` (135 device profiles). Browser-testing infra and practices: `docs/browser-testing-guide.md`.
+**Respawn tests**: Use `MockSession` from `test/mocks/index.ts` (defined in `test/mocks/mock-session.ts`). **Route tests**: `app.inject({ method, url, payload })` in `test/routes/` — no live port needed. **Mobile tests**: Playwright suite in `test/mobile/` (135 device profiles). Browser-testing infra and practices: `docs/browser-testing-guide.md`.
 
 ### Debugging
 
@@ -324,7 +324,7 @@ Mobile screenshots: `~/.codeman/screenshots/`, accessed via `GET/POST /api/scree
 
 ### Performance & Limits
 
-Target: 20 sessions, 50 agent windows at 60fps. Limits in `src/config/`: terminal 2MB, text 1MB, messages 1000, max agents 500, max sessions 50, max SSE clients 100. Use `LRUMap` for bounded caches, `StaleExpirationMap` for TTL cleanup. Anti-flicker pipeline: `docs/terminal-anti-flicker.md`.
+Target: 20 sessions, 50 agent windows at 60fps. Limits in `src/config/`: terminal 2MB, text 1MB, messages 1000, max agents 500, max sessions 50, max SSE clients 100. **Image upload** (`image-input.js` / `config/buffer-limits.ts`): up to `_maxBatchImages` 20 images/batch (bounded concurrency 3), per-file `MAX_PASTE_IMAGE_BYTES` 50MB (env `CODEMAN_MAX_PASTE_IMAGE_BYTES`); the mobile camera-roll picker auto-downscales to fit before upload. Use `LRUMap` for bounded caches, `StaleExpirationMap` for TTL cleanup. Anti-flicker pipeline: `docs/terminal-anti-flicker.md`.
 
 **Memory leaks (24+ hour sessions)**: use `CleanupManager`, clear Maps in `stop()`, guard async with `if (this.cleanup.isStopped) return`. Frontend: store handler refs, clean in `close*()`. Verify: `npm test -- test/memory-leak-prevention.test.ts`.
 

@@ -348,7 +348,7 @@ export function registerSystemRoutes(
   app.get('/api/system/repo-status', async () => getRepositoryStatus());
 
   // ═══════════════════════════════════════════════════════════════
-  // CLI Integrations (OpenCode)
+  // CLI Integrations (OpenCode, Codex, Gemini)
   // ═══════════════════════════════════════════════════════════════
 
   // ========== OpenCode ===
@@ -369,7 +369,8 @@ export function registerSystemRoutes(
     };
   });
 
-  // ========== Gemini ===
+  // ========== Gemini ==========
+
   app.get('/api/gemini/status', async () => {
     const { isGeminiAvailable, resolveGeminiDir } = await import('../../utils/gemini-cli-resolver.js');
     return {
@@ -378,7 +379,7 @@ export function registerSystemRoutes(
     };
   });
 
-  // ========== Headroom ===
+  // ========== Headroom ==========
   app.get('/api/headroom/status', async () => {
     const cfg = getHeadroomConfig();
     const status = await fetchHeadroomStatus(cfg.proxyUrl);

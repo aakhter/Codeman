@@ -23,7 +23,6 @@
  */
 
 import { FastifyInstance } from 'fastify';
-import { createSuccessResponse } from '../../types.js';
 import { parseBody } from '../route-helpers.js';
 import { SearchQuerySchema } from '../schemas.js';
 import {
@@ -158,6 +157,6 @@ export function registerSearchRoutes(app: FastifyInstance, ctx: SessionPort & In
       result.truncated = true;
     }
 
-    return createSuccessResponse(result);
+    return { success: true, data: result };
   });
 }

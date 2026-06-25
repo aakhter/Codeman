@@ -695,6 +695,47 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async runGemini() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+
+    this.terminal.clear();
+    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln('');
+    this.terminal.focus();
+
+    try {
+      const statusRes = await fetch('/api/gemini/status');
+      const status = (await statusRes.json()).data;
+      if (!status.available) {
+        this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
+        this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
+        return;
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'gemini',
+          geminiConfig: { approvalMode: 'yolo' },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+    }
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Session Options Modal
@@ -840,6 +881,8 @@ Object.assign(CodemanApp.prototype, {
         enabled: ralphState?.loop?.enabled ?? session.ralphLoop?.enabled ?? false,
         completionPhrase: ralphState?.loop?.completionPhrase || session.ralphLoop?.completionPhrase || '',
         maxIterations: ralphState?.loop?.maxIterations || session.ralphLoop?.maxIterations || 0,
+        maxTodos: ralphState?.loop?.maxTodos || session.ralphLoop?.maxTodos,
+        todoExpirationMinutes: ralphState?.loop?.todoExpirationMinutes || session.ralphLoop?.todoExpirationMinutes,
       });
     }
 
