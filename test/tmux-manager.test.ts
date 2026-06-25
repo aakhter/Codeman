@@ -16,6 +16,7 @@ import {
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
+  parsePaneRecords,
   resolveActivePaneTarget,
   resolveTmuxPaneTarget,
 } from '../src/tmux-manager.js';
@@ -670,6 +671,80 @@ describe('TmuxManager (unit)', () => {
         nonTestManager.destroy();
       }
     });
+
+    it('treats a remote respawn as failed when ssh exits during the connect window', async () => {
+      vi.useFakeTimers();
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      nonTestManager.registerSession({
+        sessionId: 'remote1234',
+        muxName: 'codeman-dead1234',
+        pid: 1000,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'shell',
+        attached: false,
+        remote: {
+          hostId: 'moneytrove-host',
+          label: 'moneytrove',
+          host: '192.168.21.109',
+          username: 'saqebakhter',
+          remotePath: '/Users/saqebakhter/repos/projects/moneytrove',
+        },
+      });
+      const isPaneDead = vi.spyOn(nonTestManager, 'isPaneDead').mockReturnValue(true);
+
+      try {
+        const pending = nonTestManager.respawnPane({
+          sessionId: 'remote1234',
+          workingDir: '/Users/saqebakhter/repos/projects/moneytrove',
+          mode: 'shell',
+          remote: {
+            hostId: 'moneytrove-host',
+            label: 'moneytrove',
+            host: '192.168.21.109',
+            username: 'saqebakhter',
+            remotePath: '/Users/saqebakhter/repos/projects/moneytrove',
+          },
+        });
+
+        await vi.runAllTimersAsync();
+
+        await expect(pending).resolves.toBeNull();
+        expect(isPaneDead).toHaveBeenCalledWith('codeman-dead1234');
+      } finally {
+        vi.useRealTimers();
+        nonTestManager.destroy();
+      }
+    });
+
+    it('cleans up untracked dead codeman panes during reconcile', async () => {
+      mockedExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === 'string' && cmd.includes('which tmux')) {
+          return '/usr/bin/tmux\n';
+        }
+        if (typeof cmd === 'string' && cmd.includes('list-panes')) {
+          return 'codeman-aabb1111|111|0\ncodeman-aabb2222|222|1\n';
+        }
+        return '';
+      });
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+
+      try {
+        const result = await nonTestManager.reconcileSessions();
+
+        expect(result.discovered).toEqual(['restored-aabb1111']);
+        expect(mockedExecSync).toHaveBeenCalledWith(
+          `tmux -L 'codeman' kill-session -t "codeman-aabb2222" 2>/dev/null`,
+          {
+            timeout: expect.any(Number),
+          }
+        );
+      } finally {
+        nonTestManager.destroy();
+      }
+    });
   });
 });
 
@@ -754,6 +829,16 @@ describe('parsePaneList', () => {
     // Legacy 2-field output (no #{pane_dead}) must still parse as alive.
     const result = parsePaneList('codeman-aaaa|1234');
     expect(result.get('codeman-aaaa')).toBe(1234);
+  });
+
+  it('can report dead panes for health cleanup without marking them alive', () => {
+    const result = parsePaneRecords('codeman-dead|123|1\ncodeman-live|456|0\ncodeman-legacy|789');
+
+    expect(result).toEqual([
+      { name: 'codeman-dead', pid: 123, dead: true },
+      { name: 'codeman-live', pid: 456, dead: false },
+      { name: 'codeman-legacy', pid: 789, dead: false },
+    ]);
   });
 });
 

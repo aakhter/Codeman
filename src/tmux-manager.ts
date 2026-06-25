@@ -105,6 +105,12 @@ const DEFAULT_STATS_INTERVAL_MS = 2000;
 /** Default remote-reconnect watcher poll interval (5 seconds) — COD-108 */
 const DEFAULT_REMOTE_RECONNECT_INTERVAL_MS = 5000;
 
+/** Remote SSH connects should fail fast; TCP default retries can hang UI actions for minutes. */
+const REMOTE_SSH_CONNECT_TIMEOUT_OPTION = '-o ConnectTimeout=10';
+
+/** Wait slightly longer than SSH ConnectTimeout before accepting a remote respawn as connected. */
+const REMOTE_RESPAWN_CONNECT_VERIFY_WAIT_MS = 10_500;
+
 /** Stable cwd for tmux server/pane launch; actual session cwd is reached inside the pane. */
 const TMUX_LAUNCH_CWD = '/tmp';
 
@@ -175,6 +181,12 @@ const PANE_LIST_SEP = '|';
 /** Format string for `tmux list-panes -F`. Keep in sync with {@link parsePaneList}. */
 const PANE_LIST_FORMAT = `#{session_name}${PANE_LIST_SEP}#{pane_pid}${PANE_LIST_SEP}#{pane_dead}`;
 
+interface ParsedPane {
+  name: string;
+  pid: number;
+  dead: boolean;
+}
+
 /**
  * 构建 pane 启动前的 nofile 修复命令。
  *
@@ -202,6 +214,14 @@ export function buildNofileLimitCommand(targetLimit = CLAUDE_CODE_NOFILE_LIMIT):
  */
 export function parsePaneList(output: string): Map<string, number> {
   const result = new Map<string, number>();
+  for (const pane of parsePaneRecords(output)) {
+    if (!pane.dead) result.set(pane.name, pane.pid);
+  }
+  return result;
+}
+
+export function parsePaneRecords(output: string): ParsedPane[] {
+  const result: ParsedPane[] = [];
   for (const line of output.split('\n')) {
     if (!line) continue;
     const sep = line.indexOf(PANE_LIST_SEP);
@@ -212,8 +232,8 @@ export function parsePaneList(output: string): Map<string, number> {
     const pidStr = sep2 === -1 ? rest : rest.slice(0, sep2);
     const dead = sep2 !== -1 && rest.slice(sep2 + 1) === '1';
     const pid = parseInt(pidStr, 10);
-    if (name && !Number.isNaN(pid) && !dead) {
-      result.set(name, pid);
+    if (name && !Number.isNaN(pid)) {
+      result.push({ name, pid, dead });
     }
   }
   return result;
@@ -851,7 +871,15 @@ export function buildRemoteLaunchCommand(options: {
   // `ssh -o BatchMode=yes` (preserving the historical token order), then the rest
   // of the connection args, then the target and the quoted tmux invocation.
   const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [ssh, batchMode, '-t', ...connectionArgs, remoteSshTarget(remote), shellescape(tmuxInvocation)];
+  const sshParts = [
+    ssh,
+    batchMode,
+    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
+    '-t',
+    ...connectionArgs,
+    remoteSshTarget(remote),
+    shellescape(tmuxInvocation),
+  ];
   return sshParts.join(' ');
 }
 
@@ -878,7 +906,15 @@ export function buildRemoteLaunchCommand(options: {
 export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionName: string): string {
   const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman attach -t ${shellescape(remoteSessionName)}`);
   const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [ssh, batchMode, '-t', ...connectionArgs, remoteSshTarget(remote), shellescape(tmuxInvocation)];
+  const sshParts = [
+    ssh,
+    batchMode,
+    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
+    '-t',
+    ...connectionArgs,
+    remoteSshTarget(remote),
+    shellescape(tmuxInvocation),
+  ];
   return sshParts.join(' ');
 }
 
@@ -892,7 +928,15 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
  */
 export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
   const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`);
-  const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
+  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
+  const sshParts = [
+    ssh,
+    batchMode,
+    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
+    ...connectionArgs,
+    remoteSshTarget(remote),
+    shellescape(tmuxInvocation),
+  ];
   return sshParts.join(' ');
 }
 
@@ -1715,8 +1759,17 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // Wait for the respawned process to start
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
       const pid = this.getPanePid(muxName);
-      if (pid) session.pid = pid;
-      return pid;
+      if (!pid) return null;
+      if (remote) {
+        await new Promise((resolve) => setTimeout(resolve, REMOTE_RESPAWN_CONNECT_VERIFY_WAIT_MS));
+        if (this.isPaneDead(muxName)) {
+          console.error(`[TmuxManager] Remote respawn failed after SSH connect window: ${muxName}`);
+          return null;
+        }
+      }
+      const verifiedPid = this.getPanePid(muxName) ?? pid;
+      session.pid = verifiedPid;
+      return verifiedPid;
     } catch (err) {
       console.error('[TmuxManager] Failed to respawn pane:', err);
       return null;
@@ -2015,15 +2068,18 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // socket a session's location is a constant, so there is no per-session
     // socket tag to reconcile and no cross-socket ambiguity that could mark a
     // live session dead (the root cause of vanished/duplicate tabs).
+    let panes: ParsedPane[];
     let active: Map<string, number>;
     try {
       const output = execSync(`${this.tmux()} list-panes -a -F '${PANE_LIST_FORMAT}' 2>/dev/null || true`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
       }).trim();
-      active = parsePaneList(output);
+      panes = parsePaneRecords(output);
+      active = new Map(panes.filter((pane) => !pane.dead).map((pane) => [pane.name, pane.pid]));
     } catch (err) {
       console.error('[TmuxManager] Failed to list tmux panes:', err);
+      panes = [];
       active = new Map();
     }
 
@@ -2047,6 +2103,24 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const knownMuxNames = new Set<string>();
     for (const session of this.sessions.values()) {
       knownMuxNames.add(session.muxName);
+    }
+
+    for (const pane of panes) {
+      if (!pane.dead) continue;
+      if (!pane.name.startsWith('codeman-') && !pane.name.startsWith('claudeman-')) continue;
+      if (knownMuxNames.has(pane.name)) continue;
+      if (!isValidMuxName(pane.name)) {
+        console.warn(`[TmuxManager] Skipping dead tmux session with unsafe name: ${pane.name}`);
+        continue;
+      }
+      try {
+        execSync(`${this.tmux()} kill-session -t "${pane.name}" 2>/dev/null`, {
+          timeout: EXEC_TIMEOUT_MS,
+        });
+        console.log(`[TmuxManager] Cleaned up untracked dead tmux session: ${pane.name}`);
+      } catch {
+        // Session may already be gone.
+      }
     }
 
     for (const [sessionName, pid] of active) {
