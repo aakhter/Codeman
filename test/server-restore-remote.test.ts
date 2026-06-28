@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRestoredSessionRemote } from '../src/web/server.js';
+import { resolveRestoredSessionName, resolveRestoredSessionRemote } from '../src/web/server.js';
 import type { SessionRemote } from '../src/types.js';
 
 describe('server mux restore remote metadata', () => {
@@ -23,5 +23,19 @@ describe('server mux restore remote metadata', () => {
     };
 
     expect(resolveRestoredSessionRemote(savedRemote, muxRemote)).toEqual(savedRemote);
+  });
+});
+
+describe('server mux restore session names', () => {
+  it('preserves an explicit saved name', () => {
+    expect(resolveRestoredSessionName('home-mon', '', 'codeman-a9d1e821')).toBe('home-mon');
+  });
+
+  it('uses a non-empty mux name when state has no saved name', () => {
+    expect(resolveRestoredSessionName(undefined, 'custom mux label', 'codeman-a9d1e821')).toBe('custom mux label');
+  });
+
+  it('does not turn an unnamed restored session into its mux id', () => {
+    expect(resolveRestoredSessionName(undefined, '', 'codeman-a9d1e821')).toBe('');
   });
 });
