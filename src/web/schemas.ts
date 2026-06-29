@@ -371,6 +371,23 @@ export const RemoteCaseLinkSchema = z.object({
   remotePath: z.string().min(1).max(2000).regex(/^\//, 'Remote path must be absolute'),
 });
 
+export const UpdateCaseSchema = z
+  .object({
+    name: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
+      .optional(),
+    path: safePathSchema.optional(),
+    hostId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id')
+      .optional(),
+    remotePath: z.string().min(1).max(2000).regex(/^\//, 'Remote path must be absolute').optional(),
+  })
+  .refine((value) => value.name || value.path || value.hostId || value.remotePath, {
+    message: 'At least one case parameter must be provided',
+  });
+
 // ========== Quick Start ==========
 
 /**

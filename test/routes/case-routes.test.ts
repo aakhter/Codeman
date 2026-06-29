@@ -375,6 +375,85 @@ describe('case-routes', () => {
       expect(deleted.statusCode).toBe(200);
       expect(JSON.parse(deleted.body)).toEqual({ success: true, data: { name: 'gpu-work' } });
     });
+
+    it('updates a linked case name and folder path', async () => {
+      setupRemoteConfigStore();
+      mockedReaddir.mockRejectedValue(new Error('ENOENT'));
+      mockedExistsSync.mockImplementation((path) => {
+        const value = String(path);
+        return value === '/projects/old-app' || value === '/projects/new-app';
+      });
+
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/link',
+        payload: { name: 'old-app', path: '/projects/old-app' },
+      });
+
+      const update = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/old-app',
+        payload: { name: 'new-app', path: '/projects/new-app' },
+      });
+      expect(update.statusCode).toBe(200);
+      expect(JSON.parse(update.body)).toMatchObject({
+        success: true,
+        data: { case: { name: 'new-app', path: '/projects/new-app', linked: true, location: 'linked-local' } },
+      });
+
+      const cases = await harness.app.inject({ method: 'GET', url: '/api/cases' });
+      expect(JSON.parse(cases.body).data).toContainEqual(
+        expect.objectContaining({ name: 'new-app', path: '/projects/new-app', linked: true, location: 'linked-local' })
+      );
+    });
+
+    it('updates a remote case name, host, and remote path', async () => {
+      setupRemoteConfigStore();
+      mockedReaddir.mockRejectedValue(new Error('ENOENT'));
+
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/remote-hosts',
+        payload: { id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' },
+      });
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/remote-hosts',
+        payload: { id: 'build-box', label: 'Build Box', host: '10.0.0.43', username: 'builder' },
+      });
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/remote-link',
+        payload: { name: 'gpu-work', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' },
+      });
+
+      const update = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/gpu-work',
+        payload: { name: 'build-work', hostId: 'build-box', remotePath: '/srv/build/work' },
+      });
+      expect(update.statusCode).toBe(200);
+      expect(JSON.parse(update.body)).toMatchObject({
+        success: true,
+        data: {
+          case: {
+            name: 'build-work',
+            location: 'remote',
+            path: 'builder@10.0.0.43:/srv/build/work',
+            remote: { hostId: 'build-box', host: '10.0.0.43', username: 'builder', path: '/srv/build/work' },
+          },
+        },
+      });
+
+      const cases = await harness.app.inject({ method: 'GET', url: '/api/cases' });
+      expect(JSON.parse(cases.body).data).toContainEqual(
+        expect.objectContaining({
+          name: 'build-work',
+          location: 'remote',
+          path: 'builder@10.0.0.43:/srv/build/work',
+        })
+      );
+    });
   });
 
   // ========== POST /api/cases ==========

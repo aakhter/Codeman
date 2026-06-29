@@ -17,6 +17,7 @@ import {
   CaseOrderSchema,
   RemoteCaseLinkSchema,
   RemoteHostSchema,
+  UpdateCaseSchema,
 } from '../schemas.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { writeHooksConfig } from '../../hooks-config.js';
@@ -283,6 +284,104 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
     }
+  });
+
+  app.put('/api/cases/:name', async (req): Promise<ApiResponse<{ case: CaseInfo }>> => {
+    const { name: originalName } = req.params as { name: string };
+    const update = parseBody(UpdateCaseSchema, req.body, 'Invalid case update');
+
+    if (!validatePathWithinBase(originalName, CASES_DIR)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
+    }
+
+    const nextName = update.name ?? originalName;
+    if (!validatePathWithinBase(nextName, CASES_DIR)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
+    }
+
+    const linkedCases = await readLinkedCases();
+    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+    const nameExists = (candidate: string): boolean =>
+      candidate !== originalName &&
+      (Boolean(linkedCases[candidate]) ||
+        remoteCases.some((item) => item.name === candidate) ||
+        existsSync(join(CASES_DIR, candidate)));
+
+    if (nameExists(nextName)) {
+      return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Case already exists');
+    }
+
+    const remoteCaseIndex = remoteCases.findIndex((item) => item.name === originalName);
+    if (remoteCaseIndex !== -1) {
+      const hostId = update.hostId ?? remoteCases[remoteCaseIndex].hostId;
+      const remotePath = update.remotePath ?? remoteCases[remoteCaseIndex].remotePath;
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+
+      const nextRemoteCase = {
+        ...remoteCases[remoteCaseIndex],
+        name: nextName,
+        hostId,
+        remotePath,
+        type: 'remote' as const,
+      };
+      const nextRemoteCases = [...remoteCases];
+      nextRemoteCases[remoteCaseIndex] = nextRemoteCase;
+      await writeRemoteCases(CODEMAN_CONFIG_DIR, nextRemoteCases);
+      const caseInfo: CaseInfo = {
+        name: nextName,
+        path: remoteDisplayPath({ username: host.username, host: host.host, path: remotePath }),
+        hasClaudeMd: false,
+        location: 'remote',
+        remote: {
+          hostId: host.id,
+          host: host.host,
+          username: host.username,
+          path: remotePath,
+        },
+      };
+      ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: remotePath, type: 'remote-updated' });
+      return { success: true, data: { case: caseInfo } };
+    }
+
+    if (linkedCases[originalName]) {
+      const nextPath = update.path ?? linkedCases[originalName];
+      if (!existsSync(nextPath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, `Folder not found: ${nextPath}`);
+      }
+      delete linkedCases[originalName];
+      linkedCases[nextName] = nextPath;
+      await fs.writeFile(LINKED_CASES_FILE, JSON.stringify(linkedCases, null, 2));
+      const caseInfo: CaseInfo = {
+        name: nextName,
+        path: nextPath,
+        hasClaudeMd: existsSync(join(nextPath, 'CLAUDE.md')),
+        linked: true,
+        location: 'linked-local',
+      };
+      ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: nextPath, type: 'updated' });
+      return { success: true, data: { case: caseInfo } };
+    }
+
+    const currentPath = join(CASES_DIR, originalName);
+    if (!existsSync(currentPath)) {
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, `Case "${originalName}" not found`);
+    }
+    if (update.path) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Managed case paths cannot be changed');
+    }
+    const nextPath = join(CASES_DIR, nextName);
+    if (nextName !== originalName) {
+      await fs.rename(currentPath, nextPath);
+    }
+    const caseInfo: CaseInfo = {
+      name: nextName,
+      path: nextPath,
+      hasClaudeMd: existsSync(join(nextPath, 'CLAUDE.md')),
+      location: 'local',
+    };
+    ctx.broadcast(SseEvent.CaseCreated, { name: nextName, path: nextPath, type: 'updated' });
+    return { success: true, data: { case: caseInfo } };
   });
 
   // ========== Delete / Unlink Case ==========
