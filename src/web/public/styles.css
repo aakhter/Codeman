@@ -4007,6 +4007,12 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: #ef4444;
 }
 
+.case-manage-btn-edit:hover:not(:disabled) {
+  background: rgba(97, 175, 239, 0.15);
+  border-color: rgba(97, 175, 239, 0.3);
+  color: var(--accent);
+}
+
 .toolbar-input {
   padding: 0.4rem 0.5rem;
   background: var(--bg-input);

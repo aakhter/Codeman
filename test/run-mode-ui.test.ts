@@ -252,3 +252,149 @@ describe('case selector refresh', () => {
     });
   });
 });
+
+describe('case edit UI', () => {
+  it('prefills and saves remote case parameters from the Manage tab edit action', async () => {
+    const elements: Record<string, any> = {};
+    const requests: Array<{ url: string; method: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+    const modalTabs = ['case-create', 'case-link', 'case-remote', 'case-manage'].map((tab) => ({
+      dataset: { tab },
+      classList: { toggle: vi.fn() },
+    }));
+    const modalContents = modalTabs.map((tab) => ({ id: tab.dataset.tab, classList: { toggle: vi.fn() } }));
+
+    elements.createCaseModal = {
+      classList: { add: vi.fn(), remove: vi.fn() },
+      querySelectorAll: (selector: string) => {
+        if (selector === '.modal-tabs .modal-tab-btn') return modalTabs;
+        if (selector === '.modal-tab-content') return modalContents;
+        if (selector === 'input[type="text"]') return [];
+        return [];
+      },
+    };
+    elements.caseModalTitle = { textContent: '' };
+    elements.caseModalSubmit = { textContent: '', style: {}, classList: { add: vi.fn(), remove: vi.fn() } };
+    elements.remoteDiscoverSection = { classList: { add: vi.fn(), remove: vi.fn() } };
+    elements.caseManageList = { innerHTML: '' };
+    elements.quickStartCase = { value: 'gpu-work' };
+    elements.mobileCaseName = { textContent: '' };
+    elements.dirDisplay = { textContent: '' };
+    elements.dirInput = { value: '' };
+
+    for (const id of [
+      'newCaseName',
+      'newCaseDescription',
+      'linkCaseName',
+      'linkCasePath',
+      'remoteCaseName',
+      'remoteCasePath',
+      'remoteHostId',
+      'remoteHostAddress',
+      'remoteHostUsername',
+      'remoteHostPort',
+      'remoteHostCodexCommand',
+      'remoteHostIdentityFile',
+      'remoteHostSocksProxy',
+      'remoteHostJumpHost',
+      'remoteHostExtraSshOptions',
+    ]) {
+      elements[id] = { value: '', focus: vi.fn(), addEventListener: vi.fn() };
+    }
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      fetch: async (url: string, init?: { method?: string; body?: string }) => {
+        requests.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/remote-hosts') {
+          return {
+            json: async () => ({
+              success: true,
+              data: [
+                {
+                  id: 'gpu-box',
+                  label: 'GPU Box',
+                  host: '10.0.0.42',
+                  username: 'ubuntu',
+                  port: 2222,
+                  identityFile: '~/.ssh/gpu',
+                  socksProxy: '127.0.0.1:1080',
+                  jumpHost: 'bastion',
+                  extraSshOptions: ['StrictHostKeyChecking=accept-new'],
+                  commands: { codex: 'exec codx personal' },
+                },
+              ],
+            }),
+          };
+        }
+        if (url === '/api/remote-hosts/gpu-box' && init?.method === 'PUT')
+          return { json: async () => ({ success: true }) };
+        if (url === '/api/cases/gpu-work' && init?.method === 'PUT') {
+          return {
+            json: async () => ({
+              success: true,
+              data: {
+                case: {
+                  name: 'gpu-renamed',
+                  path: 'ubuntu@10.0.0.42:/home/ubuntu/new-work',
+                  location: 'remote',
+                  remote: { hostId: 'gpu-box', path: '/home/ubuntu/new-work' },
+                },
+              },
+            }),
+          };
+        }
+        if (url === '/api/cases') return { json: async () => ({ success: true, data: [] }) };
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+      escapeHtml: (s: string) => s,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.cases = [
+      {
+        name: 'gpu-work',
+        path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
+        location: 'remote',
+        remote: { hostId: 'gpu-box', host: '10.0.0.42', username: 'ubuntu', path: '/home/ubuntu/work' },
+      },
+    ];
+    app.showToast = vi.fn();
+    app.loadQuickStartCases = vi.fn(async () => {});
+    app.saveLastUsedCase = vi.fn(async () => {});
+
+    await app.editCase('gpu-work');
+
+    expect(elements.remoteCaseName.value).toBe('gpu-work');
+    expect(elements.remoteCasePath.value).toBe('/home/ubuntu/work');
+    expect(elements.remoteHostPort.value).toBe('2222');
+    expect(elements.remoteHostCodexCommand.value).toBe('exec codx personal');
+    expect(elements.remoteHostExtraSshOptions.value).toBe('StrictHostKeyChecking=accept-new');
+
+    elements.remoteCaseName.value = 'gpu-renamed';
+    elements.remoteCasePath.value = '/home/ubuntu/new-work';
+    await app.submitCaseModal();
+
+    expect(requests).toContainEqual({
+      url: '/api/remote-hosts/gpu-box',
+      method: 'PUT',
+      body: expect.objectContaining({
+        id: 'gpu-box',
+        host: '10.0.0.42',
+        port: 2222,
+        commands: { codex: 'exec codx personal' },
+      }),
+    });
+    expect(requests).toContainEqual({
+      url: '/api/cases/gpu-work',
+      method: 'PUT',
+      body: { name: 'gpu-renamed', hostId: 'gpu-box', remotePath: '/home/ubuntu/new-work' },
+    });
+  });
+});

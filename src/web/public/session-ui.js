@@ -1320,7 +1320,7 @@ Object.assign(CodemanApp.prototype, {
   // Create Case Modal
   // ═══════════════════════════════════════════════════════════════
 
-  showCreateCaseModal() {
+  resetCaseModalFields() {
     document.getElementById('newCaseName').value = '';
     document.getElementById('newCaseDescription').value = '';
     document.getElementById('linkCaseName').value = '';
@@ -1342,6 +1342,27 @@ Object.assign(CodemanApp.prototype, {
       const el = document.getElementById(id);
       if (el) el.value = '';
     });
+    const remoteHostId = document.getElementById('remoteHostId');
+    if (remoteHostId) remoteHostId.disabled = false;
+    const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
+    if (remoteDiscoverSection) remoteDiscoverSection.classList.remove('hidden');
+  },
+
+  resetCaseEditState() {
+    this.caseEditOriginalName = null;
+    this.caseEditOriginalLocation = null;
+    this.caseEditOriginalHostId = null;
+    const title = document.getElementById('caseModalTitle');
+    if (title) title.textContent = 'Add Case';
+    const remoteHostId = document.getElementById('remoteHostId');
+    if (remoteHostId) remoteHostId.disabled = false;
+    const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
+    if (remoteDiscoverSection) remoteDiscoverSection.classList.remove('hidden');
+  },
+
+  showCreateCaseModal() {
+    this.resetCaseEditState();
+    this.resetCaseModalFields();
     // Reset to first tab
     this.caseModalTab = 'case-create';
     this.switchCaseModalTab('case-create');
@@ -1368,6 +1389,7 @@ Object.assign(CodemanApp.prototype, {
   switchCaseModalTab(tabName) {
     this.caseModalTab = tabName;
     const modal = document.getElementById('createCaseModal');
+    const isEditing = Boolean(this.caseEditOriginalName);
     // Toggle active class on tab buttons
     modal.querySelectorAll('.modal-tabs .modal-tab-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tab === tabName);
@@ -1383,7 +1405,7 @@ Object.assign(CodemanApp.prototype, {
       this.renderCaseManageList();
     } else {
       submitBtn.style.display = '';
-      submitBtn.textContent = tabName === 'case-create' ? 'Create' : tabName === 'case-remote' ? 'Link Remote' : 'Link';
+      submitBtn.textContent = isEditing ? 'Save' : tabName === 'case-create' ? 'Create' : tabName === 'case-remote' ? 'Link Remote' : 'Link';
     }
     // Focus appropriate input
     if (tabName === 'case-create') {
@@ -1397,15 +1419,18 @@ Object.assign(CodemanApp.prototype, {
 
   closeCreateCaseModal() {
     document.getElementById('createCaseModal').classList.remove('active');
+    this.resetCaseEditState();
   },
 
   async submitCaseModal() {
     const btn = document.getElementById('caseModalSubmit');
     const originalText = btn.textContent;
     btn.classList.add('loading');
-    btn.textContent = this.caseModalTab === 'case-create' ? 'Creating...' : 'Linking...';
+    btn.textContent = this.caseEditOriginalName ? 'Saving...' : this.caseModalTab === 'case-create' ? 'Creating...' : 'Linking...';
     try {
-      if (this.caseModalTab === 'case-create') {
+      if (this.caseEditOriginalName) {
+        await this.updateCase();
+      } else if (this.caseModalTab === 'case-create') {
         await this.createCase();
       } else if (this.caseModalTab === 'case-remote') {
         await this.linkRemoteCase();
@@ -1730,6 +1755,185 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async editCase(name) {
+    const caseInfo = (this.cases || []).find(c => c.name === name);
+    if (!caseInfo) {
+      this.showToast(`Case "${name}" not found`, 'error');
+      return;
+    }
+
+    this.resetCaseModalFields();
+    this.caseEditOriginalName = name;
+    this.caseEditOriginalLocation = caseInfo.location || (caseInfo.linked ? 'linked-local' : 'local');
+    this.caseEditOriginalHostId = caseInfo.remote?.hostId || null;
+
+    const title = document.getElementById('caseModalTitle');
+    if (title) title.textContent = 'Edit Case';
+
+    const modal = document.getElementById('createCaseModal');
+    modal.querySelectorAll('.modal-tabs .modal-tab-btn').forEach(btn => {
+      btn.onclick = () => this.switchCaseModalTab(btn.dataset.tab);
+    });
+
+    if (this.caseEditOriginalLocation === 'remote') {
+      const remote = caseInfo.remote || {};
+      document.getElementById('remoteCaseName').value = caseInfo.name || '';
+      document.getElementById('remoteCasePath').value = remote.path || '';
+      document.getElementById('remoteHostId').value = remote.hostId || '';
+      document.getElementById('remoteHostId').disabled = true;
+      document.getElementById('remoteHostAddress').value = remote.host || '';
+      document.getElementById('remoteHostUsername').value = remote.username || '';
+
+      try {
+        const res = await fetch('/api/remote-hosts');
+        const data = await res.json();
+        const hosts = Array.isArray(data) ? data : data.data || [];
+        const host = hosts.find(item => item.id === remote.hostId);
+        if (host) {
+          document.getElementById('remoteHostAddress').value = host.host || '';
+          document.getElementById('remoteHostUsername').value = host.username || '';
+          document.getElementById('remoteHostPort').value = host.port ? String(host.port) : '';
+          document.getElementById('remoteHostCodexCommand').value = host.commands?.codex || '';
+          document.getElementById('remoteHostIdentityFile').value = host.identityFile || '';
+          document.getElementById('remoteHostSocksProxy').value = host.socksProxy || '';
+          document.getElementById('remoteHostJumpHost').value = host.jumpHost || '';
+          document.getElementById('remoteHostExtraSshOptions').value = (host.extraSshOptions || []).join('\n');
+        }
+      } catch (err) {
+        console.warn('Failed to load remote host details for editing:', err);
+      }
+
+      const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
+      if (remoteDiscoverSection) remoteDiscoverSection.classList.add('hidden');
+      this.switchCaseModalTab('case-remote');
+    } else if (this.caseEditOriginalLocation === 'linked-local' || caseInfo.linked) {
+      document.getElementById('linkCaseName').value = caseInfo.name || '';
+      document.getElementById('linkCasePath').value = caseInfo.path || '';
+      this.switchCaseModalTab('case-link');
+    } else {
+      document.getElementById('newCaseName').value = caseInfo.name || '';
+      document.getElementById('newCaseDescription').value = '';
+      this.switchCaseModalTab('case-create');
+    }
+
+    modal.classList.add('active');
+  },
+
+  async updateCase() {
+    const originalName = this.caseEditOriginalName;
+    const originalLocation = this.caseEditOriginalLocation;
+    if (!originalName) return;
+
+    try {
+      let nextName;
+      let updatePayload;
+
+      if (originalLocation === 'remote') {
+        nextName = document.getElementById('remoteCaseName').value.trim();
+        const remotePath = document.getElementById('remoteCasePath').value.trim();
+        const hostId = this.caseEditOriginalHostId || document.getElementById('remoteHostId').value.trim();
+        const host = document.getElementById('remoteHostAddress').value.trim();
+        const username = document.getElementById('remoteHostUsername').value.trim();
+        const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
+        const portRaw = document.getElementById('remoteHostPort').value.trim();
+        const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
+        const socksProxy = document.getElementById('remoteHostSocksProxy').value.trim();
+        const jumpHost = document.getElementById('remoteHostJumpHost').value.trim();
+        const extraSshOptions = document.getElementById('remoteHostExtraSshOptions').value
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line.length > 0);
+
+        if (!nextName || !remotePath || !hostId || !host || !username) {
+          this.showToast('Please complete all required remote fields', 'error');
+          return;
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+          this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+          return;
+        }
+        if (!remotePath.startsWith('/')) {
+          this.showToast('Remote path must be absolute', 'error');
+          return;
+        }
+
+        let port;
+        if (portRaw) {
+          port = Number(portRaw);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            this.showToast('SSH port must be a number between 1 and 65535', 'error');
+            return;
+          }
+        }
+
+        const hostPayload = {
+          id: hostId,
+          label: hostId,
+          host,
+          username,
+          ...(port ? { port } : {}),
+          ...(identityFile ? { identityFile } : {}),
+          ...(socksProxy ? { socksProxy } : {}),
+          ...(jumpHost ? { jumpHost } : {}),
+          ...(extraSshOptions.length ? { extraSshOptions } : {}),
+          ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
+        };
+        const hostRes = await fetch(`/api/remote-hosts/${encodeURIComponent(hostId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hostPayload)
+        });
+        const hostData = await hostRes.json();
+        if (!hostData.success) throw new Error(hostData.error || 'Failed to update remote host');
+        updatePayload = { name: nextName, hostId, remotePath };
+      } else if (originalLocation === 'linked-local') {
+        nextName = document.getElementById('linkCaseName').value.trim();
+        const path = document.getElementById('linkCasePath').value.trim();
+        if (!nextName || !path) {
+          this.showToast('Please enter a case name and folder path', 'error');
+          return;
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+          this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+          return;
+        }
+        updatePayload = { name: nextName, path };
+      } else {
+        nextName = document.getElementById('newCaseName').value.trim();
+        if (!nextName) {
+          this.showToast('Please enter a case name', 'error');
+          return;
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+          this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+          return;
+        }
+        updatePayload = { name: nextName };
+      }
+
+      const res = await fetch(`/api/cases/${encodeURIComponent(originalName)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatePayload)
+      });
+      const data = await res.json();
+      if (!data.success) {
+        this.showToast(data.error || 'Failed to update case', 'error');
+        return;
+      }
+
+      this.closeCreateCaseModal();
+      this.showToast(`Case "${nextName}" updated`, 'success');
+      await this.loadQuickStartCases(nextName);
+      if (document.getElementById('quickStartCase')?.value === nextName || originalName === nextName) {
+        await this.saveLastUsedCase(nextName);
+      }
+    } catch (err) {
+      console.error('Failed to update case:', err);
+      this.showToast('Failed to update case: ' + err.message, 'error');
+    }
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Case Management (reorder + delete)
@@ -1756,6 +1960,8 @@ Object.assign(CodemanApp.prototype, {
             <span class="case-manage-path">${escapeHtml(pathDisplay)}</span>
           </div>
           <div class="case-manage-actions">
+            <button class="case-manage-btn case-manage-btn-edit" onclick="app.editCase(${escapeHtml(JSON.stringify(c.name))})"
+                    title="Edit case">&#x270E;</button>
             <button class="case-manage-btn" onclick="app.moveCaseUp(${escapeHtml(JSON.stringify(c.name))})"
                     title="Move up" ${isFirst ? 'disabled' : ''}>&#x25B2;</button>
             <button class="case-manage-btn" onclick="app.moveCaseDown(${escapeHtml(JSON.stringify(c.name))})"
