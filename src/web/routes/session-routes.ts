@@ -126,6 +126,8 @@ const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
 // eslint-disable-next-line no-control-regex
 const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g;
 
+const REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS = 15_000;
+
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
  * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA) to animate
@@ -254,19 +256,32 @@ async function writeRemotePasteImage(remote: SessionRemote, imageDir: string, fi
       'rm -f "$tmp"',
     ].join('; ')
   );
-  const args = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), script];
+  const args = [...buildSshConnectionArgv(remote), '-o', 'ConnectTimeout=10', remoteSshTarget(remote), script];
   await new Promise<void>((resolve, reject) => {
     const child = spawn('ssh', args, { stdio: ['pipe', 'ignore', 'pipe'] });
     const stderr: Buffer[] = [];
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn();
+    };
+    const timeout = setTimeout(() => {
+      finish(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`remote image upload timed out connecting to ${remote.host}`));
+      });
+    }, REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS);
     child.stderr.on('data', (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
-    child.on('error', reject);
+    child.on('error', (err) => finish(() => reject(err)));
     child.on('close', (code) => {
       if (code === 0) {
-        resolve();
+        finish(resolve);
         return;
       }
       const message = Buffer.concat(stderr).toString('utf8').trim();
-      reject(new Error(message || `remote image upload failed with exit code ${code ?? 'unknown'}`));
+      finish(() => reject(new Error(message || `remote image upload failed with exit code ${code ?? 'unknown'}`)));
     });
     child.stdin.end(imageBytes);
   });

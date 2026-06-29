@@ -123,6 +123,16 @@ export function resolveRestoredSessionRemote(
 ): SessionRemote | undefined {
   return savedStateRemote ?? muxSessionRemote;
 }
+
+export function resolveRestoredSessionName(
+  savedStateName: string | undefined,
+  muxSessionName: string | undefined,
+  muxName: string
+): string {
+  if (savedStateName) return savedStateName;
+  if (muxSessionName && muxSessionName !== muxName) return muxSessionName;
+  return '';
+}
 import {
   getErrorMessage,
   httpStatusForErrorCode,
@@ -2167,9 +2177,10 @@ export class WebServer extends EventEmitter {
             // Restore session settings from state.json (single source of truth)
             const savedState = this.store.getSession(muxSession.sessionId);
 
-            // Determine the correct session name (priority: savedState > muxSession > muxName)
-            // This ensures renamed sessions keep their name after server restart
-            const sessionName = savedState?.name || muxSession.name || muxSession.muxName;
+            // Determine the correct session name (priority: savedState > muxSession custom label).
+            // Do not fall back to the technical mux id: an unnamed session should
+            // stay unnamed so the UI can display the project folder basename.
+            const sessionName = resolveRestoredSessionName(savedState?.name, muxSession.name, muxSession.muxName);
 
             // Create a session object for this mux session
             const recoveryClaudeMode = await this.getClaudeModeConfig();

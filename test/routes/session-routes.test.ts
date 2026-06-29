@@ -231,6 +231,7 @@ describe('session-routes', () => {
       const [bin, argv] = spawn.mock.calls[0];
       expect(bin).toBe('ssh');
       expect(argv).toContain('BatchMode=yes');
+      expect(argv).toContain('ConnectTimeout=10');
       expect(argv).toContain('saqebakhter@192.168.21.109');
       expect(String(argv.at(-1))).toContain('mkdir "$dir"');
       expect(Buffer.concat(stdinChunks)).toEqual(png);

@@ -135,6 +135,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
     const command = buildRemoteLaunchCommand({ mode: 'shell', remote: aaDesktop, sessionId: SESSION_ID });
 
     expect(command).toContain('-p 2222');
+    expect(command).toContain('-o ConnectTimeout=10');
     expect(command).toContain(`-i '${HOME}/.ssh/remote_ed25519'`);
     expect(command).toContain("-o 'ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p'");
     expect(command).toContain("-o 'StrictHostKeyChecking=accept-new'");
@@ -164,7 +165,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
       'set -g prefix C-q',
       'set -g window-size latest',
     ].join(' \\; ')}`;
-    const expected = `ssh -o BatchMode=yes -t ${remoteSshTarget(baseRemote)} ${sh(tmuxInvocation)}`;
+    const expected = `ssh -o BatchMode=yes -o ConnectTimeout=10 -t ${remoteSshTarget(baseRemote)} ${sh(tmuxInvocation)}`;
     expect(command).toBe(expected);
   });
 
@@ -174,7 +175,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
       remote: { ...baseRemote, port: 2222 },
       sessionId: SESSION_ID,
     });
-    expect(command).toMatch(/^ssh -o BatchMode=yes -t -p 2222 ubuntu@10\.0\.0\.42 /);
+    expect(command).toMatch(/^ssh -o BatchMode=yes -o ConnectTimeout=10 -t -p 2222 ubuntu@10\.0\.0\.42 /);
   });
 });
 
