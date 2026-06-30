@@ -4190,6 +4190,7 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 .form-row input[type="text"],
 .form-row input[type="number"],
+.form-row select,
 .form-row textarea,
 .form-select {
   width: 100%;
@@ -4204,11 +4205,167 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 }
 
 .form-row input:focus,
+.form-row select:focus,
 .form-row textarea:focus,
 .form-select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.case-path-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.case-path-input-row input {
+  min-width: 0;
+  flex: 1;
+}
+
+.saved-ssh-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.saved-ssh-row select {
+  min-width: 0;
+  flex: 1;
+}
+
+.saved-ssh-action-btn {
+  height: 2.2rem;
+  min-width: 2.9rem;
+  padding: 0 0.65rem;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.saved-ssh-add-btn {
+  width: 2.2rem;
+  height: 2.2rem;
+  min-width: 2.2rem;
+  padding-inline: 0;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.remote-host-verify-status {
+  min-height: 1.2rem;
+  margin-top: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.remote-host-verify-status.verified {
+  color: var(--success, #22c55e);
+}
+
+.remote-host-verify-status.error {
+  color: var(--error, #ef4444);
+}
+
+.case-directory-browser {
+  margin: 0.25rem 0 0.9rem;
+  padding: 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--btn-radius);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.case-directory-browser.hidden {
+  display: none;
+}
+
+.case-directory-browser-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.5rem;
+}
+
+.case-directory-browser-up {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--btn-radius);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.case-directory-browser-up:hover {
+  background: var(--bg-hover);
+}
+
+.case-directory-browser-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.case-directory-browser-error {
+  margin-bottom: 0.4rem;
+  color: var(--error, #ef4444);
+  font-size: 0.75rem;
+}
+
+.case-directory-browser-error:empty {
+  display: none;
+}
+
+.case-directory-browser-list {
+  max-height: 12rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.case-directory-row {
+  width: 100%;
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--btn-radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.case-directory-row:hover {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: var(--bg-hover);
+}
+
+.case-directory-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.case-directory-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .form-col {

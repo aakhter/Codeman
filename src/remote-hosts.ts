@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, posix as posixPath } from 'node:path';
 import { homedir } from 'node:os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -182,6 +182,39 @@ export interface RemoteTmuxCheckResult {
   error?: string;
 }
 
+export function buildRemoteSshAccessCheckCommand(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions
+): string {
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
+  const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
+  parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap('printf codeman-ssh-ok')));
+  return parts.join(' ');
+}
+
+export interface RemoteSshAccessCheckResult {
+  ok: boolean;
+  error?: string;
+}
+
+export async function checkRemoteSshAccess(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions
+): Promise<RemoteSshAccessCheckResult> {
+  const command = buildRemoteSshAccessCheckCommand(host);
+  try {
+    const { stdout } = await execAsync(command, { timeout: 15_000, maxBuffer: 1024 * 1024 });
+    if (stdout.includes('codeman-ssh-ok')) return { ok: true };
+    return { ok: false, error: `could not verify SSH access to ${host.host}` };
+  } catch (err) {
+    const stderr =
+      err && typeof err === 'object' && 'stderr' in err ? String((err as { stderr?: unknown }).stderr ?? '') : '';
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: stderr.trim() || message || `could not verify SSH access to ${host.host}`,
+    };
+  }
+}
+
 /**
  * COD-104 — verify the remote host has tmux installed (required for durable
  * remote sessions). Returns a structured result with a clear, user-facing error
@@ -252,6 +285,40 @@ export function buildRemoteListSessionsCommand(
     'tmux -L codeman list-sessions -F "#{session_name}\\t#{session_attached}\\t#{session_created}\\t#{session_windows}" 2>/dev/null';
   parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap(remoteCmd)));
   return parts.join(' ');
+}
+
+export interface RemoteDirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export function buildRemoteListDirectoriesCommand(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
+  remotePath: string
+): string {
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
+  const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
+  const remoteCmd = `find ${shellescape(remotePath)} -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort`;
+  parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap(remoteCmd)));
+  return parts.join(' ');
+}
+
+export function parseRemoteDirectoryList(stdout: string): RemoteDirectoryEntry[] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('/'))
+    .filter((path) => !posixPath.basename(path).startsWith('.'))
+    .map((path) => ({ name: posixPath.basename(path), path }));
+}
+
+export async function listRemoteDirectories(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
+  remotePath: string
+): Promise<RemoteDirectoryEntry[]> {
+  const command = buildRemoteListDirectoriesCommand(host, remotePath);
+  const { stdout } = await execAsync(command, { timeout: 15_000, maxBuffer: 1024 * 1024 });
+  return parseRemoteDirectoryList(stdout);
 }
 
 /**
@@ -345,7 +412,7 @@ export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): Sessi
     username: host.username,
     port: host.port,
     remotePath: remoteCase.remotePath,
-    commands: host.commands,
+    commands: remoteCase.commands ?? host.commands,
     // COD-105 — the COD-104 launch path creates the remote session, so we own it
     // (an explicit kill may propagate a remote kill-session). Discovered+attached
     // sessions go through `toAttachedSessionRemote` with `owned: false`.

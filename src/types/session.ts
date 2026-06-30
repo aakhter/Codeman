@@ -78,6 +78,7 @@ export interface RemoteHost extends RemoteSshOptions {
   host: string;
   username: string;
   port?: number;
+  /** Legacy/default command overrides. New case-specific overrides live on RemoteCase. */
   commands?: Partial<Record<RemoteCommandMode, string>>;
 }
 
@@ -86,6 +87,7 @@ export interface RemoteCase {
   type: 'remote';
   hostId: string;
   remotePath: string;
+  commands?: Partial<Record<RemoteCommandMode, string>>;
 }
 
 export interface SessionRemote extends RemoteSshOptions {

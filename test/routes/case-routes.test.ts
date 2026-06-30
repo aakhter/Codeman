@@ -21,6 +21,18 @@ import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { registerCaseRoutes } from '../../src/web/routes/case-routes.js';
 
+const { execMock, execPromisifyMock } = vi.hoisted(() => {
+  const promisifySymbol = Symbol.for('nodejs.util.promisify.custom');
+  const execMock = vi.fn();
+  const custom = vi.fn(async () => ({ stdout: '', stderr: '' }));
+  (execMock as unknown as Record<symbol, unknown>)[promisifySymbol] = custom;
+  return { execMock, execPromisifyMock: custom };
+});
+
+vi.mock('node:child_process', () => ({
+  exec: execMock,
+}));
+
 // Mock filesystem modules
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -36,6 +48,8 @@ vi.mock('node:fs', async (importOriginal) => {
 vi.mock('node:fs/promises', () => ({
   default: {
     readdir: vi.fn(async () => []),
+    realpath: vi.fn(async (path: string) => path),
+    stat: vi.fn(async () => ({ isDirectory: () => true })),
     readFile: vi.fn(async () => {
       const err = new Error('ENOENT') as NodeJS.ErrnoException;
       err.code = 'ENOENT';
@@ -61,6 +75,8 @@ const mockedExistsSync = vi.mocked(existsSync);
 const mockedMkdirSync = vi.mocked(mkdirSync);
 const mockedReaddirSync = vi.mocked(readdirSync);
 const mockedReaddir = vi.mocked(fs.readdir);
+const mockedRealpath = vi.mocked(fs.realpath);
+const mockedStat = vi.mocked(fs.stat);
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedWriteFile = vi.mocked(fs.writeFile);
 
@@ -114,7 +130,10 @@ describe('case-routes', () => {
 
     // Default: existsSync returns false, readFile throws ENOENT
     mockedExistsSync.mockReturnValue(false);
+    mockedRealpath.mockImplementation(async (path) => String(path));
+    mockedStat.mockResolvedValue({ isDirectory: () => true } as never);
     mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    execPromisifyMock.mockResolvedValue({ stdout: '', stderr: '' });
   });
 
   afterEach(async () => {
@@ -303,6 +322,23 @@ describe('case-routes', () => {
       expect(JSON.parse(create.body)).toMatchObject({ success: false });
     });
 
+    it('verifies SSH access for an unsaved remote host profile', async () => {
+      execPromisifyMock.mockResolvedValueOnce({ stdout: 'codeman-ssh-ok', stderr: '' });
+
+      const verify = await harness.app.inject({
+        method: 'POST',
+        url: '/api/remote-hosts/verify',
+        payload: { id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', port: 2222 },
+      });
+
+      expect(verify.statusCode).toBe(200);
+      expect(JSON.parse(verify.body)).toEqual({ success: true, data: { ok: true } });
+      expect(execPromisifyMock).toHaveBeenCalledWith(expect.stringContaining('printf codeman-ssh-ok'), {
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+      });
+    });
+
     it('links a remote case and includes it in GET /api/cases', async () => {
       setupRemoteConfigStore();
       mockedReaddir.mockRejectedValue(new Error('ENOENT'));
@@ -316,9 +352,18 @@ describe('case-routes', () => {
       const link = await harness.app.inject({
         method: 'POST',
         url: '/api/cases/remote-link',
-        payload: { name: 'gpu-work', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' },
+        payload: {
+          name: 'gpu-work',
+          hostId: 'gpu-box',
+          remotePath: '/home/ubuntu/work',
+          commands: { codex: 'exec case-codex' },
+        },
       });
       expect(link.statusCode).toBe(200);
+      expect(JSON.parse(link.body).data.case).toMatchObject({
+        name: 'gpu-work',
+        commands: { codex: 'exec case-codex' },
+      });
 
       const cases = await harness.app.inject({ method: 'GET', url: '/api/cases' });
       expect(JSON.parse(cases.body).data).toContainEqual(
@@ -326,7 +371,11 @@ describe('case-routes', () => {
           name: 'gpu-work',
           location: 'remote',
           path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
-          remote: expect.objectContaining({ hostId: 'gpu-box', path: '/home/ubuntu/work' }),
+          remote: expect.objectContaining({
+            hostId: 'gpu-box',
+            path: '/home/ubuntu/work',
+            commands: { codex: 'exec case-codex' },
+          }),
         })
       );
     });
@@ -430,7 +479,12 @@ describe('case-routes', () => {
       const update = await harness.app.inject({
         method: 'PUT',
         url: '/api/cases/gpu-work',
-        payload: { name: 'build-work', hostId: 'build-box', remotePath: '/srv/build/work' },
+        payload: {
+          name: 'build-work',
+          hostId: 'build-box',
+          remotePath: '/srv/build/work',
+          commands: { codex: 'exec build-codex' },
+        },
       });
       expect(update.statusCode).toBe(200);
       expect(JSON.parse(update.body)).toMatchObject({
@@ -440,7 +494,13 @@ describe('case-routes', () => {
             name: 'build-work',
             location: 'remote',
             path: 'builder@10.0.0.43:/srv/build/work',
-            remote: { hostId: 'build-box', host: '10.0.0.43', username: 'builder', path: '/srv/build/work' },
+            remote: {
+              hostId: 'build-box',
+              host: '10.0.0.43',
+              username: 'builder',
+              path: '/srv/build/work',
+              commands: { codex: 'exec build-codex' },
+            },
           },
         },
       });
@@ -453,6 +513,67 @@ describe('case-routes', () => {
           path: 'builder@10.0.0.43:/srv/build/work',
         })
       );
+    });
+
+    it('lists only local directories for case path browsing', async () => {
+      mockedStat.mockResolvedValueOnce({ isDirectory: () => true } as never);
+      mockedReaddir.mockResolvedValueOnce([
+        { name: 'app', isDirectory: () => true },
+        { name: '.hidden', isDirectory: () => true },
+        { name: 'README.md', isDirectory: () => false },
+        { name: 'ops', isDirectory: () => true },
+      ] as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/cases/browse-local?path=%2Fprojects',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({
+        success: true,
+        data: {
+          path: '/projects',
+          parentPath: '/',
+          entries: [
+            { name: 'app', path: '/projects/app' },
+            { name: 'ops', path: '/projects/ops' },
+          ],
+        },
+      });
+    });
+
+    it('lists remote directories through a saved remote host', async () => {
+      setupRemoteConfigStore();
+      execPromisifyMock.mockResolvedValueOnce({ stdout: '/srv/app\n/srv/ops\n', stderr: '' });
+
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/remote-hosts',
+        payload: { id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' },
+      });
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/remote-hosts/gpu-box/directories?path=%2Fsrv',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({
+        success: true,
+        data: {
+          path: '/srv',
+          parentPath: '/',
+          entries: [
+            { name: 'app', path: '/srv/app' },
+            { name: 'ops', path: '/srv/ops' },
+          ],
+        },
+      });
+      expect(execPromisifyMock).toHaveBeenCalledWith(expect.stringContaining('ubuntu@10.0.0.42'), {
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+      });
     });
   });
 

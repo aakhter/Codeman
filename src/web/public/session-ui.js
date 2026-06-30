@@ -1328,11 +1328,11 @@ Object.assign(CodemanApp.prototype, {
     const remoteFields = [
       'remoteCaseName',
       'remoteCasePath',
+      'remoteCaseCodexCommand',
       'remoteHostId',
       'remoteHostAddress',
       'remoteHostUsername',
       'remoteHostPort',
-      'remoteHostCodexCommand',
       'remoteHostIdentityFile',
       'remoteHostSocksProxy',
       'remoteHostJumpHost',
@@ -1344,8 +1344,11 @@ Object.assign(CodemanApp.prototype, {
     });
     const remoteHostId = document.getElementById('remoteHostId');
     if (remoteHostId) remoteHostId.disabled = false;
+    const remoteHostSavedSelect = document.getElementById('remoteHostSavedSelect');
+    if (remoteHostSavedSelect) remoteHostSavedSelect.value = '';
     const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
     if (remoteDiscoverSection) remoteDiscoverSection.classList.remove('hidden');
+    this.closeCaseDirectoryBrowser();
   },
 
   resetCaseEditState() {
@@ -1382,6 +1385,7 @@ Object.assign(CodemanApp.prototype, {
         });
       }
     });
+    void this.loadRemoteHostsForCaseModal();
     modal.classList.add('active');
     document.getElementById('newCaseName').focus();
   },
@@ -1413,6 +1417,7 @@ Object.assign(CodemanApp.prototype, {
     } else if (tabName === 'case-link') {
       document.getElementById('linkCaseName').focus();
     } else if (tabName === 'case-remote') {
+      void this.loadRemoteHostsForCaseModal(document.getElementById('remoteHostSavedSelect')?.value || '');
       document.getElementById('remoteCaseName').focus();
     }
   },
@@ -1527,10 +1532,11 @@ Object.assign(CodemanApp.prototype, {
   async linkRemoteCase() {
     const name = document.getElementById('remoteCaseName').value.trim();
     const remotePath = document.getElementById('remoteCasePath').value.trim();
-    const hostId = document.getElementById('remoteHostId').value.trim();
+    const hostId = document.getElementById('remoteHostId').value.trim()
+      || document.getElementById('remoteHostSavedSelect')?.value.trim();
     const host = document.getElementById('remoteHostAddress').value.trim();
     const username = document.getElementById('remoteHostUsername').value.trim();
-    const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
+    const commands = this._readRemoteCaseCommandsFromForm();
     // COD-107 — port + advanced SSH connection options.
     const portRaw = document.getElementById('remoteHostPort').value.trim();
     const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
@@ -1563,32 +1569,10 @@ Object.assign(CodemanApp.prototype, {
     }
 
     try {
-      const hostPayload = {
-        id: hostId,
-        label: hostId,
-        host,
-        username,
-        ...(port ? { port } : {}),
-        ...(identityFile ? { identityFile } : {}),
-        ...(socksProxy ? { socksProxy } : {}),
-        ...(jumpHost ? { jumpHost } : {}),
-        ...(extraSshOptions.length ? { extraSshOptions } : {}),
-        ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
-      };
-      const hostRes = await fetch('/api/remote-hosts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(hostPayload)
-      });
-      const hostData = await hostRes.json();
-      if (!hostData.success && hostData.errorCode !== 'ALREADY_EXISTS') {
-        throw new Error(hostData.error || 'Failed to save remote host');
-      }
-
       const caseRes = await fetch('/api/cases/remote-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, hostId, remotePath })
+        body: JSON.stringify({ name, hostId, remotePath, commands })
       });
       const caseData = await caseRes.json();
       if (caseData.success) {
@@ -1605,6 +1589,357 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  _caseRemoteHostsFromResponse(data) {
+    return Array.isArray(data) ? data : data?.data || [];
+  },
+
+  _fillRemoteHostForm(host) {
+    if (!host) return;
+    document.getElementById('remoteHostId').value = host.id || '';
+    document.getElementById('remoteHostAddress').value = host.host || '';
+    document.getElementById('remoteHostUsername').value = host.username || '';
+    document.getElementById('remoteHostPort').value = host.port ? String(host.port) : '';
+    document.getElementById('remoteHostIdentityFile').value = host.identityFile || '';
+    document.getElementById('remoteHostSocksProxy').value = host.socksProxy || '';
+    document.getElementById('remoteHostJumpHost').value = host.jumpHost || '';
+    document.getElementById('remoteHostExtraSshOptions').value = (host.extraSshOptions || []).join('\n');
+  },
+
+  async loadRemoteHostsForCaseModal(selectedHostId = '') {
+    const select = document.getElementById('remoteHostSavedSelect');
+
+    try {
+      const res = await fetch('/api/remote-hosts');
+      const data = await res.json();
+      const hosts = this._caseRemoteHostsFromResponse(data);
+      this.caseRemoteHosts = hosts;
+      if (select) {
+        select.innerHTML = [
+          '<option value="">New host...</option>',
+          ...hosts.map(host => {
+            const label = host.label || host.id;
+            const target = host.username && host.host ? ` (${host.username}@${host.host})` : '';
+            return `<option value="${escapeHtml(host.id)}">${escapeHtml(label + target)}</option>`;
+          })
+        ].join('');
+        if (selectedHostId) select.value = selectedHostId;
+      }
+    } catch (err) {
+      console.warn('Failed to load remote hosts for case modal:', err);
+      this.caseRemoteHosts = [];
+    }
+  },
+
+  onRemoteHostSelected() {
+    const select = document.getElementById('remoteHostSavedSelect');
+    const hostId = select?.value || '';
+    if (!hostId) return;
+    const host = (this.caseRemoteHosts || []).find(item => item.id === hostId);
+    if (host) this._fillRemoteHostForm(host);
+  },
+
+  startNewRemoteHostConfig() {
+    const select = document.getElementById('remoteHostSavedSelect');
+    if (select) select.value = '';
+    this.remoteHostConfigMode = 'new';
+    this.remoteHostConfigOriginalId = null;
+    [
+      'remoteHostId',
+      'remoteHostAddress',
+      'remoteHostUsername',
+      'remoteHostPort',
+      'remoteHostIdentityFile',
+      'remoteHostSocksProxy',
+      'remoteHostJumpHost',
+      'remoteHostExtraSshOptions',
+    ].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    const hostId = document.getElementById('remoteHostId');
+    if (hostId) {
+      hostId.disabled = false;
+      hostId.focus?.();
+    }
+    this.remoteHostVerifiedFingerprint = null;
+    this._setRemoteHostVerificationState(false, 'Test SSH access before saving.');
+    document.getElementById('remoteHostConfigModal')?.classList.add('active');
+    this.closeCaseDirectoryBrowser();
+  },
+
+  editSelectedRemoteHostConfig() {
+    const select = document.getElementById('remoteHostSavedSelect');
+    const hostId = select?.value || '';
+    if (!hostId) {
+      this.showToast('Select a saved SSH profile to edit', 'error');
+      return;
+    }
+    const host = (this.caseRemoteHosts || []).find(item => item.id === hostId);
+    if (!host) {
+      this.showToast('Saved SSH profile not found', 'error');
+      return;
+    }
+    this.remoteHostConfigMode = 'edit';
+    this.remoteHostConfigOriginalId = host.id;
+    this._fillRemoteHostForm(host);
+    const hostIdInput = document.getElementById('remoteHostId');
+    if (hostIdInput) hostIdInput.disabled = true;
+    this.remoteHostVerifiedFingerprint = null;
+    this._setRemoteHostVerificationState(false, 'Test SSH access before saving changes.');
+    document.getElementById('remoteHostConfigModal')?.classList.add('active');
+    this.closeCaseDirectoryBrowser();
+  },
+
+  closeRemoteHostConfigModal() {
+    document.getElementById('remoteHostConfigModal')?.classList.remove('active');
+  },
+
+  _remoteHostFingerprint(hostPayload) {
+    return JSON.stringify(hostPayload);
+  },
+
+  _setRemoteHostVerificationState(verified, message = '') {
+    const saveBtn = document.getElementById('remoteHostSaveBtn');
+    const status = document.getElementById('remoteHostVerifyStatus');
+    if (saveBtn) saveBtn.disabled = !verified;
+    if (status) {
+      status.textContent = message;
+      status.classList.toggle('verified', verified);
+      status.classList.toggle('error', !verified && Boolean(message));
+    }
+  },
+
+  async testRemoteHostConfig() {
+    const hostPayload = this._readRemoteHostFromForm();
+    if (!this._validateRemoteHostFormForBrowse(hostPayload)) return;
+    const verifyBtn = document.getElementById('remoteHostVerifyBtn');
+    if (verifyBtn) verifyBtn.disabled = true;
+    this._setRemoteHostVerificationState(false, 'Testing SSH access...');
+
+    try {
+      const res = await fetch('/api/remote-hosts/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hostPayload)
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'SSH verification failed');
+      this.remoteHostVerifiedFingerprint = this._remoteHostFingerprint(hostPayload);
+      this._setRemoteHostVerificationState(true, 'SSH access verified.');
+    } catch (err) {
+      this.remoteHostVerifiedFingerprint = null;
+      this._setRemoteHostVerificationState(false, err.message);
+      this.showToast('SSH verification failed: ' + err.message, 'error');
+    } finally {
+      if (verifyBtn) verifyBtn.disabled = false;
+    }
+  },
+
+  async saveRemoteHostConfig() {
+    const hostPayload = this._readRemoteHostFromForm();
+    if (!this._validateRemoteHostFormForBrowse(hostPayload)) return;
+    if (this.remoteHostVerifiedFingerprint !== this._remoteHostFingerprint(hostPayload)) {
+      this._setRemoteHostVerificationState(false, 'Test SSH access before saving.');
+      this.showToast('Test SSH access before saving this profile', 'error');
+      return;
+    }
+
+    const saveBtn = document.getElementById('remoteHostSaveBtn');
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+      if (this.remoteHostConfigMode === 'edit') {
+        const targetId = this.remoteHostConfigOriginalId || hostPayload.id;
+        const updateRes = await fetch(`/api/remote-hosts/${encodeURIComponent(targetId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hostPayload)
+        });
+        const updateData = await updateRes.json();
+        if (!updateData.success) throw new Error(updateData.error || 'Failed to update SSH profile');
+      } else {
+        const createRes = await fetch('/api/remote-hosts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hostPayload)
+        });
+        const createData = await createRes.json();
+        if (!createData.success) {
+          if (createData.errorCode !== 'ALREADY_EXISTS') {
+            throw new Error(createData.error || 'Failed to save SSH profile');
+          }
+          const updateRes = await fetch(`/api/remote-hosts/${encodeURIComponent(hostPayload.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(hostPayload)
+          });
+          const updateData = await updateRes.json();
+          if (!updateData.success) throw new Error(updateData.error || 'Failed to update SSH profile');
+        }
+      }
+      await this.loadRemoteHostsForCaseModal(hostPayload.id);
+      const select = document.getElementById('remoteHostSavedSelect');
+      if (select) select.value = hostPayload.id;
+      this.closeRemoteHostConfigModal();
+      this.showToast(`SSH profile "${hostPayload.id}" saved`, 'success');
+    } catch (err) {
+      this._setRemoteHostVerificationState(true, 'SSH access verified.');
+      this.showToast('Failed to save SSH profile: ' + err.message, 'error');
+    }
+  },
+
+  _validateRemoteHostFormForBrowse(hostPayload) {
+    if (!hostPayload.id || !hostPayload.host || !hostPayload.username) {
+      this.showToast('Fill in Host ID, address, and username first', 'error');
+      return false;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(hostPayload.id)) {
+      this.showToast('Invalid Host ID. Use letters, numbers, hyphens, underscores.', 'error');
+      return false;
+    }
+    const portRaw = document.getElementById('remoteHostPort')?.value.trim() || '';
+    if (portRaw) {
+      const port = Number(portRaw);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        this.showToast('SSH port must be a number between 1 and 65535', 'error');
+        return false;
+      }
+    }
+    return true;
+  },
+
+  async _ensureRemoteHostSavedForBrowse() {
+    const hostPayload = this._readRemoteHostFromForm();
+    const selectedHostId = document.getElementById('remoteHostSavedSelect')?.value || '';
+    const effectiveHostId = hostPayload.id || selectedHostId;
+    const knownHost = (this.caseRemoteHosts || []).find(host => host.id === effectiveHostId);
+    if (knownHost) {
+      if (!hostPayload.id) this._fillRemoteHostForm(knownHost);
+      return true;
+    }
+    this.showToast('Save this SSH profile before browsing remote directories', 'error');
+    return false;
+  },
+
+  _currentCaseDirectoryPath(target) {
+    if (target === 'remote') {
+      return document.getElementById('remoteCasePath')?.value.trim() || '/';
+    }
+    return document.getElementById('linkCasePath')?.value.trim() || '~';
+  },
+
+  _caseDirectoryBrowseUrl(target, path) {
+    if (target === 'remote') {
+      const hostId = document.getElementById('remoteHostId')?.value.trim()
+        || document.getElementById('remoteHostSavedSelect')?.value.trim();
+      if (!hostId) {
+        this.showToast('Select or enter a saved remote host first', 'error');
+        return null;
+      }
+      return `/api/remote-hosts/${encodeURIComponent(hostId)}/directories?path=${encodeURIComponent(path || '/')}`;
+    }
+    return `/api/cases/browse-local?path=${encodeURIComponent(path || '~')}`;
+  },
+
+  _positionCaseDirectoryBrowser(target, panel) {
+    const inputId = target === 'remote' ? 'remoteCasePath' : 'linkCasePath';
+    const pathRow = document.getElementById(inputId)?.closest?.('.form-row');
+    pathRow?.insertAdjacentElement?.('afterend', panel);
+  },
+
+  async openCaseDirectoryBrowser(target, pathOverride = null) {
+    const panel = document.getElementById('caseDirectoryBrowserPanel');
+    const error = document.getElementById('caseDirectoryBrowserError');
+    const list = document.getElementById('caseDirectoryBrowserList');
+    if (!panel || !list) return;
+
+    const path = pathOverride || this._currentCaseDirectoryPath(target);
+
+    this.caseDirectoryBrowserTarget = target;
+    this._positionCaseDirectoryBrowser(target, panel);
+    if (error) error.textContent = '';
+    list.innerHTML = '<div class="form-hint">Loading...</div>';
+    panel.classList.remove('hidden');
+
+    try {
+      if (target === 'remote') {
+        if (!this.caseRemoteHosts) await this.loadRemoteHostsForCaseModal();
+        const hostSaved = await this._ensureRemoteHostSavedForBrowse();
+        if (!hostSaved) {
+          list.innerHTML = '';
+          return;
+        }
+      }
+      const url = this._caseDirectoryBrowseUrl(target, path);
+      if (!url) {
+        list.innerHTML = '';
+        return;
+      }
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to browse directories');
+      this.renderCaseDirectoryBrowser(target, data.data);
+    } catch (err) {
+      console.error('Failed to browse directories:', err);
+      if (error) error.textContent = err.message;
+      list.innerHTML = '';
+    }
+  },
+
+  renderCaseDirectoryBrowser(target, data) {
+    const pathEl = document.getElementById('caseDirectoryBrowserPath');
+    const list = document.getElementById('caseDirectoryBrowserList');
+    const selectBtn = document.getElementById('caseDirectoryBrowserSelect');
+    if (!list) return;
+
+    const currentPath = data?.path || this._currentCaseDirectoryPath(target);
+    this.caseDirectoryBrowserTarget = target;
+    this.caseDirectoryBrowserCurrentPath = currentPath;
+    this.caseDirectoryBrowserParentPath = data?.parentPath || null;
+    if (pathEl) pathEl.textContent = currentPath;
+    if (selectBtn) selectBtn.disabled = false;
+
+    const entries = Array.isArray(data?.entries) ? data.entries : [];
+    if (entries.length === 0) {
+      list.innerHTML = '<div class="form-hint">No subdirectories</div>';
+      return;
+    }
+
+    list.innerHTML = entries.map(entry => {
+      const targetArg = escapeHtml(JSON.stringify(target));
+      const pathArg = escapeHtml(JSON.stringify(entry.path));
+      return `
+        <button type="button" class="case-directory-row" onclick="app.openCaseDirectoryBrowser(${targetArg}, ${pathArg})">
+          <span class="case-directory-icon">/</span>
+          <span class="case-directory-name">${escapeHtml(entry.name)}</span>
+        </button>
+      `;
+    }).join('');
+  },
+
+  openParentCaseDirectory() {
+    if (!this.caseDirectoryBrowserParentPath) return;
+    this.openCaseDirectoryBrowser(this.caseDirectoryBrowserTarget || 'local', this.caseDirectoryBrowserParentPath);
+  },
+
+  selectCaseDirectory(path = null) {
+    const selectedPath = path || this.caseDirectoryBrowserCurrentPath;
+    if (!selectedPath) return;
+    if (this.caseDirectoryBrowserTarget === 'remote') {
+      document.getElementById('remoteCasePath').value = selectedPath;
+    } else {
+      document.getElementById('linkCasePath').value = selectedPath;
+    }
+    this.closeCaseDirectoryBrowser();
+  },
+
+  closeCaseDirectoryBrowser() {
+    const panel = document.getElementById('caseDirectoryBrowserPanel');
+    if (panel) panel.classList.add('hidden');
+    this.caseDirectoryBrowserTarget = null;
+    this.caseDirectoryBrowserCurrentPath = null;
+    this.caseDirectoryBrowserParentPath = null;
+  },
+
   // ═══════════════════════════════════════════════════════════════
   // COD-105 — Discover + attach existing remote tmux sessions
   // ═══════════════════════════════════════════════════════════════
@@ -1618,7 +1953,6 @@ Object.assign(CodemanApp.prototype, {
     const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
     const socksProxy = document.getElementById('remoteHostSocksProxy').value.trim();
     const jumpHost = document.getElementById('remoteHostJumpHost').value.trim();
-    const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
     const extraSshOptions = document.getElementById('remoteHostExtraSshOptions').value
       .split('\n')
       .map(line => line.trim())
@@ -1638,8 +1972,12 @@ Object.assign(CodemanApp.prototype, {
       ...(socksProxy ? { socksProxy } : {}),
       ...(jumpHost ? { jumpHost } : {}),
       ...(extraSshOptions.length ? { extraSshOptions } : {}),
-      ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
     };
+  },
+
+  _readRemoteCaseCommandsFromForm() {
+    const codexCommand = document.getElementById('remoteCaseCodexCommand')?.value.trim() || '';
+    return codexCommand ? { codex: codexCommand } : {};
   },
 
   /**
@@ -1779,26 +2117,18 @@ Object.assign(CodemanApp.prototype, {
       const remote = caseInfo.remote || {};
       document.getElementById('remoteCaseName').value = caseInfo.name || '';
       document.getElementById('remoteCasePath').value = remote.path || '';
+      document.getElementById('remoteCaseCodexCommand').value = remote.commands?.codex || '';
       document.getElementById('remoteHostId').value = remote.hostId || '';
       document.getElementById('remoteHostId').disabled = true;
       document.getElementById('remoteHostAddress').value = remote.host || '';
       document.getElementById('remoteHostUsername').value = remote.username || '';
 
       try {
-        const res = await fetch('/api/remote-hosts');
-        const data = await res.json();
-        const hosts = Array.isArray(data) ? data : data.data || [];
-        const host = hosts.find(item => item.id === remote.hostId);
-        if (host) {
-          document.getElementById('remoteHostAddress').value = host.host || '';
-          document.getElementById('remoteHostUsername').value = host.username || '';
-          document.getElementById('remoteHostPort').value = host.port ? String(host.port) : '';
-          document.getElementById('remoteHostCodexCommand').value = host.commands?.codex || '';
-          document.getElementById('remoteHostIdentityFile').value = host.identityFile || '';
-          document.getElementById('remoteHostSocksProxy').value = host.socksProxy || '';
-          document.getElementById('remoteHostJumpHost').value = host.jumpHost || '';
-          document.getElementById('remoteHostExtraSshOptions').value = (host.extraSshOptions || []).join('\n');
-        }
+        await this.loadRemoteHostsForCaseModal(remote.hostId || '');
+        const host = (this.caseRemoteHosts || []).find(item => item.id === remote.hostId);
+        if (host) this._fillRemoteHostForm(host);
+        document.getElementById('remoteHostId').value = remote.hostId || '';
+        document.getElementById('remoteHostId').disabled = true;
       } catch (err) {
         console.warn('Failed to load remote host details for editing:', err);
       }
@@ -1834,15 +2164,8 @@ Object.assign(CodemanApp.prototype, {
         const hostId = this.caseEditOriginalHostId || document.getElementById('remoteHostId').value.trim();
         const host = document.getElementById('remoteHostAddress').value.trim();
         const username = document.getElementById('remoteHostUsername').value.trim();
-        const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
+        const commands = this._readRemoteCaseCommandsFromForm();
         const portRaw = document.getElementById('remoteHostPort').value.trim();
-        const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
-        const socksProxy = document.getElementById('remoteHostSocksProxy').value.trim();
-        const jumpHost = document.getElementById('remoteHostJumpHost').value.trim();
-        const extraSshOptions = document.getElementById('remoteHostExtraSshOptions').value
-          .split('\n')
-          .map(line => line.trim())
-          .filter(line => line.length > 0);
 
         if (!nextName || !remotePath || !hostId || !host || !username) {
           this.showToast('Please complete all required remote fields', 'error');
@@ -1866,26 +2189,7 @@ Object.assign(CodemanApp.prototype, {
           }
         }
 
-        const hostPayload = {
-          id: hostId,
-          label: hostId,
-          host,
-          username,
-          ...(port ? { port } : {}),
-          ...(identityFile ? { identityFile } : {}),
-          ...(socksProxy ? { socksProxy } : {}),
-          ...(jumpHost ? { jumpHost } : {}),
-          ...(extraSshOptions.length ? { extraSshOptions } : {}),
-          ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
-        };
-        const hostRes = await fetch(`/api/remote-hosts/${encodeURIComponent(hostId)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(hostPayload)
-        });
-        const hostData = await hostRes.json();
-        if (!hostData.success) throw new Error(hostData.error || 'Failed to update remote host');
-        updatePayload = { name: nextName, hostId, remotePath };
+        updatePayload = { name: nextName, hostId, remotePath, commands };
       } else if (originalLocation === 'linked-local') {
         nextName = document.getElementById('linkCaseName').value.trim();
         const path = document.getElementById('linkCasePath').value.trim();

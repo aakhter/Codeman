@@ -3,8 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  buildRemoteSshAccessCheckCommand,
+  buildRemoteListDirectoriesCommand,
   buildRemoteTmuxCheckCommand,
   defaultRemoteCommandForMode,
+  parseRemoteDirectoryList,
   readRemoteCases,
   readRemoteHosts,
   REMOTE_PATH_BOOTSTRAP,
@@ -79,6 +82,50 @@ describe('remote-hosts domain', () => {
       const cmd = buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42', port: 2222 });
       expect(cmd).toContain('-p 2222');
       expect(cmd).toMatch(/-p 2222 ubuntu@10\.0\.0\.42/);
+    });
+  });
+
+  describe('remote directory browsing', () => {
+    it('builds a shell-safe immediate-directory listing command', () => {
+      const cmd = buildRemoteListDirectoriesCommand(
+        {
+          username: 'ubuntu',
+          host: '10.0.0.42',
+          port: 2222,
+          identityFile: '~/.ssh/remote key',
+        },
+        "/home/ubuntu/Project's"
+      );
+
+      expect(cmd).toContain('ssh -o BatchMode=yes -o ConnectTimeout=10 -p 2222');
+      expect(cmd).toContain("-i '/home/");
+      expect(cmd).toContain('ubuntu@10.0.0.42');
+      expect(cmd).toContain('find ');
+      expect(cmd).toContain('-mindepth 1 -maxdepth 1 -type d -print');
+      expect(cmd).toContain("'\\''");
+    });
+
+    it('parses remote directory output into directory entries', () => {
+      expect(parseRemoteDirectoryList('/srv/app\n/srv/.hidden\n/srv/with space\n\n')).toEqual([
+        { name: 'app', path: '/srv/app' },
+        { name: 'with space', path: '/srv/with space' },
+      ]);
+    });
+  });
+
+  describe('remote SSH access verification', () => {
+    it('builds a shell-safe SSH access check command', () => {
+      const cmd = buildRemoteSshAccessCheckCommand({
+        username: 'ubuntu',
+        host: '10.0.0.42',
+        port: 2222,
+        identityFile: '~/.ssh/remote key',
+      });
+
+      expect(cmd).toContain('ssh -o BatchMode=yes -o ConnectTimeout=10 -p 2222');
+      expect(cmd).toContain("-i '/home/");
+      expect(cmd).toContain('ubuntu@10.0.0.42');
+      expect(cmd).toContain('printf codeman-ssh-ok');
     });
   });
 });
