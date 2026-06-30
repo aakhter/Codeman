@@ -7,11 +7,12 @@
 import { FastifyInstance } from 'fastify';
 import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, posix as posixPath, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { ApiResponse, CaseInfo, RemoteSessionInfo } from '../../types.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import {
+  BrowseDirectoryQuerySchema,
   CreateCaseSchema,
   LinkCaseSchema,
   CaseOrderSchema,
@@ -22,11 +23,14 @@ import {
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { writeHooksConfig } from '../../hooks-config.js';
 import { CASES_DIR, SETTINGS_PATH, validatePathWithinBase, parseBody, readJsonConfig } from '../route-helpers.js';
+import { isSensitivePath } from '../sensitive-path.js';
 import { SseEvent } from '../sse-events.js';
 import type { EventPort, ConfigPort } from '../ports/index.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
 import {
+  checkRemoteSshAccess,
   listRemoteCodemanSessions,
+  listRemoteDirectories,
   readRemoteCases,
   readRemoteHosts,
   remoteDisplayPath,
@@ -38,6 +42,17 @@ const LINKED_CASES_FILE = dataPath('linked-cases.json');
 const CODEMAN_CONFIG_DIR = getDataDir();
 const SAFE_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
 
+interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+}
+
+interface DirectoryBrowseResponse {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryBrowseEntry[];
+}
+
 /** Read and parse linked-cases.json, returning empty object on missing/invalid file. */
 async function readLinkedCases(): Promise<Record<string, string>> {
   return readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
@@ -48,6 +63,23 @@ async function resolveCasePath(name: string): Promise<string> {
   const linkedCases = await readLinkedCases();
   if (linkedCases[name]) return linkedCases[name];
   return join(CASES_DIR, name);
+}
+
+function expandLocalBrowsePath(path?: string): string {
+  if (!path || path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  return path;
+}
+
+function localParentPath(path: string): string | null {
+  const parent = dirname(path);
+  return parent === path ? null : parent;
+}
+
+function remoteParentPath(path: string): string | null {
+  const normalized = posixPath.normalize(path);
+  const parent = posixPath.dirname(normalized);
+  return parent === normalized ? null : parent;
 }
 
 export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & ConfigPort): void {
@@ -109,6 +141,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           host: host.host,
           username: host.username,
           path: remoteCase.remotePath,
+          commands: remoteCase.commands ?? host.commands,
         },
       };
       const existingIndex = cases.findIndex((item) => item.name === remoteCase.name);
@@ -168,6 +201,40 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
 
   app.get('/api/remote-hosts', async () => readRemoteHosts(CODEMAN_CONFIG_DIR));
 
+  app.get('/api/cases/browse-local', async (req): Promise<ApiResponse<DirectoryBrowseResponse>> => {
+    const { path: rawPath } = parseBody(BrowseDirectoryQuerySchema, req.query, 'Invalid directory browse query');
+    const requestedPath = expandLocalBrowsePath(rawPath);
+    if (!requestedPath.startsWith('/')) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Directory path must be absolute');
+    }
+
+    try {
+      const realPath = await fs.realpath(requestedPath);
+      if (isSensitivePath(realPath)) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this directory is blocked');
+      }
+      const stat = await fs.stat(realPath);
+      if (!stat.isDirectory()) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path is not a directory');
+      }
+      const entries = await fs.readdir(realPath, { withFileTypes: true });
+      const directories = entries
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+        .map((entry) => ({ name: entry.name, path: join(realPath, entry.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return {
+        success: true,
+        data: {
+          path: realPath,
+          parentPath: localParentPath(realPath),
+          entries: directories,
+        },
+      };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
   // COD-105 — discover `codeman-*` tmux sessions already running on a remote
   // host (created by the remote's own Codeman, another instance, or this one)
   // so the operator can attach to one this Codeman didn't launch. Explicit
@@ -184,6 +251,41 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       return { success: true, data: { sessions } };
     }
   );
+
+  app.get('/api/remote-hosts/:hostId/directories', async (req): Promise<ApiResponse<DirectoryBrowseResponse>> => {
+    const { hostId } = req.params as { hostId: string };
+    const { path: rawPath } = parseBody(BrowseDirectoryQuerySchema, req.query, 'Invalid directory browse query');
+    const remotePath = rawPath || '/';
+    if (!remotePath.startsWith('/')) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Remote path must be absolute');
+    }
+
+    const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
+    if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+
+    try {
+      const entries = await listRemoteDirectories(host, remotePath);
+      return {
+        success: true,
+        data: {
+          path: posixPath.normalize(remotePath),
+          parentPath: remoteParentPath(remotePath),
+          entries,
+        },
+      };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  app.post('/api/remote-hosts/verify', async (req): Promise<ApiResponse<{ ok: boolean }>> => {
+    const host = parseBody(RemoteHostSchema, req.body);
+    const result = await checkRemoteSshAccess(host);
+    if (!result.ok) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, result.error || 'Could not verify SSH access');
+    }
+    return { success: true, data: { ok: true } };
+  });
 
   app.post('/api/remote-hosts', async (req): Promise<ApiResponse<{ host: unknown }>> => {
     const host = parseBody(RemoteHostSchema, req.body);
@@ -315,6 +417,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
     if (remoteCaseIndex !== -1) {
       const hostId = update.hostId ?? remoteCases[remoteCaseIndex].hostId;
       const remotePath = update.remotePath ?? remoteCases[remoteCaseIndex].remotePath;
+      const commands = update.commands ?? remoteCases[remoteCaseIndex].commands;
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
 
@@ -323,6 +426,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
         name: nextName,
         hostId,
         remotePath,
+        ...(commands ? { commands } : {}),
         type: 'remote' as const,
       };
       const nextRemoteCases = [...remoteCases];
@@ -338,6 +442,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           host: host.host,
           username: host.username,
           path: remotePath,
+          commands: commands ?? host.commands,
         },
       };
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: remotePath, type: 'remote-updated' });
@@ -478,6 +583,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           host: host.host,
           username: host.username,
           path: remoteCase.remotePath,
+          commands: remoteCase.commands ?? host.commands,
         },
       };
     }

@@ -144,6 +144,7 @@ export interface CaseInfo {
     host: string;
     username: string;
     path: string;
+    commands?: Record<string, string>;
   };
 }
 

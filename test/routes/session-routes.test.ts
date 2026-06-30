@@ -33,7 +33,13 @@ const remoteStore = vi.hoisted(() => ({
     username: string;
     commands?: Record<string, string>;
   }>,
-  cases: [] as Array<{ name: string; type: 'remote'; hostId: string; remotePath: string }>,
+  cases: [] as Array<{
+    name: string;
+    type: 'remote';
+    hostId: string;
+    remotePath: string;
+    commands?: Record<string, string>;
+  }>,
 }));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
@@ -1184,7 +1190,15 @@ describe('session-routes', () => {
           commands: { codex: 'exec codx personal' },
         },
       ];
-      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+      remoteStore.cases = [
+        {
+          name: 'gpu-work',
+          type: 'remote',
+          hostId: 'gpu-box',
+          remotePath: '/home/ubuntu/work',
+          commands: { codex: 'exec case-codex' },
+        },
+      ];
 
       const res = await harness.app.inject({
         method: 'POST',
@@ -1201,7 +1215,7 @@ describe('session-routes', () => {
         host: '10.0.0.42',
         username: 'ubuntu',
         remotePath: '/home/ubuntu/work',
-        commands: { codex: 'exec codx personal' },
+        commands: { codex: 'exec case-codex' },
       });
     });
 

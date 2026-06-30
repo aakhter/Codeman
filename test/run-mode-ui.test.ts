@@ -342,11 +342,11 @@ describe('case edit UI', () => {
       'linkCasePath',
       'remoteCaseName',
       'remoteCasePath',
+      'remoteCaseCodexCommand',
       'remoteHostId',
       'remoteHostAddress',
       'remoteHostUsername',
       'remoteHostPort',
-      'remoteHostCodexCommand',
       'remoteHostIdentityFile',
       'remoteHostSocksProxy',
       'remoteHostJumpHost',
@@ -361,6 +361,9 @@ describe('case edit UI', () => {
       document: { getElementById: (id: string) => elements[id] ?? null },
       fetch: async (url: string, init?: { method?: string; body?: string }) => {
         requests.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/remote-hosts' && init?.method === 'POST') {
+          return { json: async () => ({ success: true }) };
+        }
         if (url === '/api/remote-hosts') {
           return {
             json: async () => ({
@@ -376,7 +379,6 @@ describe('case edit UI', () => {
                   socksProxy: '127.0.0.1:1080',
                   jumpHost: 'bastion',
                   extraSshOptions: ['StrictHostKeyChecking=accept-new'],
-                  commands: { codex: 'exec codx personal' },
                 },
               ],
             }),
@@ -393,7 +395,7 @@ describe('case edit UI', () => {
                   name: 'gpu-renamed',
                   path: 'ubuntu@10.0.0.42:/home/ubuntu/new-work',
                   location: 'remote',
-                  remote: { hostId: 'gpu-box', path: '/home/ubuntu/new-work' },
+                  remote: { hostId: 'gpu-box', path: '/home/ubuntu/new-work', commands: { codex: 'exec case-codex' } },
                 },
               },
             }),
@@ -415,7 +417,13 @@ describe('case edit UI', () => {
         name: 'gpu-work',
         path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
         location: 'remote',
-        remote: { hostId: 'gpu-box', host: '10.0.0.42', username: 'ubuntu', path: '/home/ubuntu/work' },
+        remote: {
+          hostId: 'gpu-box',
+          host: '10.0.0.42',
+          username: 'ubuntu',
+          path: '/home/ubuntu/work',
+          commands: { codex: 'exec case-codex' },
+        },
       },
     ];
     app.showToast = vi.fn();
@@ -426,28 +434,324 @@ describe('case edit UI', () => {
 
     expect(elements.remoteCaseName.value).toBe('gpu-work');
     expect(elements.remoteCasePath.value).toBe('/home/ubuntu/work');
+    expect(elements.remoteCaseCodexCommand.value).toBe('exec case-codex');
     expect(elements.remoteHostPort.value).toBe('2222');
-    expect(elements.remoteHostCodexCommand.value).toBe('exec codx personal');
     expect(elements.remoteHostExtraSshOptions.value).toBe('StrictHostKeyChecking=accept-new');
 
     elements.remoteCaseName.value = 'gpu-renamed';
     elements.remoteCasePath.value = '/home/ubuntu/new-work';
     await app.submitCaseModal();
 
-    expect(requests).toContainEqual({
-      url: '/api/remote-hosts/gpu-box',
-      method: 'PUT',
-      body: expect.objectContaining({
-        id: 'gpu-box',
-        host: '10.0.0.42',
-        port: 2222,
-        commands: { codex: 'exec codx personal' },
-      }),
-    });
+    expect(requests.some((req) => req.url === '/api/remote-hosts/gpu-box' && req.method === 'PUT')).toBe(false);
     expect(requests).toContainEqual({
       url: '/api/cases/gpu-work',
       method: 'PUT',
-      body: { name: 'gpu-renamed', hostId: 'gpu-box', remotePath: '/home/ubuntu/new-work' },
+      body: {
+        name: 'gpu-renamed',
+        hostId: 'gpu-box',
+        remotePath: '/home/ubuntu/new-work',
+        commands: { codex: 'exec case-codex' },
+      },
+    });
+  });
+});
+
+describe('case directory browser UI', () => {
+  it('orders saved SSH configuration before remote directory selection', () => {
+    const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
+
+    expect(html.indexOf('id="remoteHostSavedSelect"')).toBeGreaterThan(-1);
+    expect(html.indexOf('id="remoteHostSavedEdit"')).toBeGreaterThan(-1);
+    expect(html.indexOf('id="remoteHostSavedAdd"')).toBeGreaterThan(-1);
+    expect(html.indexOf('id="remoteHostConfigModal"')).toBeGreaterThan(-1);
+    expect(html.indexOf('id="remoteHostSavedSelect"')).toBeLessThan(html.indexOf('id="remoteCasePath"'));
+  });
+
+  function loadCaseDirectoryHarness() {
+    const elements: Record<string, any> = {};
+    const requests: Array<{ url: string; method: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+
+    for (const id of [
+      'linkCasePath',
+      'remoteCasePath',
+      'remoteHostSavedSelect',
+      'remoteHostSavedEdit',
+      'remoteHostSavedAdd',
+      'remoteHostConfigModal',
+      'remoteHostVerifyStatus',
+      'remoteHostVerifyBtn',
+      'remoteHostSaveBtn',
+      'remoteHostId',
+      'remoteHostAddress',
+      'remoteHostUsername',
+      'remoteHostPort',
+      'remoteHostIdentityFile',
+      'remoteHostSocksProxy',
+      'remoteHostJumpHost',
+      'remoteHostExtraSshOptions',
+      'caseDirectoryBrowserPanel',
+      'caseDirectoryBrowserPath',
+      'caseDirectoryBrowserList',
+      'caseDirectoryBrowserError',
+      'caseDirectoryBrowserSelect',
+    ]) {
+      elements[id] = {
+        value: '',
+        innerHTML: '',
+        textContent: '',
+        disabled: false,
+        classList: { add: vi.fn(), remove: vi.fn(), toggle: vi.fn() },
+        focus: vi.fn(),
+      };
+    }
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      fetch: async (url: string, init?: { method?: string; body?: string }) => {
+        requests.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/remote-hosts' && init?.method === 'POST') {
+          return { json: async () => ({ success: true, data: { host: JSON.parse(init.body || '{}') } }) };
+        }
+        if (url === '/api/remote-hosts/gpu-box' && init?.method === 'PUT') {
+          return { json: async () => ({ success: true, data: { host: JSON.parse(init.body || '{}') } }) };
+        }
+        if (url === '/api/remote-hosts/verify' && init?.method === 'POST') {
+          return { json: async () => ({ success: true, data: { ok: true } }) };
+        }
+        if (url === '/api/remote-hosts') {
+          return {
+            json: async () => ({
+              success: true,
+              data: [
+                {
+                  id: 'gpu-box',
+                  label: 'GPU Box',
+                  host: '10.0.0.42',
+                  username: 'ubuntu',
+                  port: 2222,
+                  identityFile: '~/.ssh/gpu',
+                  socksProxy: '127.0.0.1:1080',
+                  jumpHost: 'bastion',
+                  extraSshOptions: ['StrictHostKeyChecking=accept-new'],
+                  commands: { codex: 'exec codx personal' },
+                },
+              ],
+            }),
+          };
+        }
+        if (url === '/api/remote-hosts/gpu-box/directories?path=%2Fsrv') {
+          return {
+            json: async () => ({
+              success: true,
+              data: {
+                path: '/srv',
+                parentPath: '/',
+                entries: [{ name: 'app', path: '/srv/app' }],
+              },
+            }),
+          };
+        }
+        if (url === '/api/remote-hosts/new-host' && init?.method === 'PUT') {
+          return { json: async () => ({ success: true }) };
+        }
+        if (url === '/api/remote-hosts/new-host/directories?path=%2Fhome') {
+          return {
+            json: async () => ({
+              success: true,
+              data: {
+                path: '/home',
+                parentPath: '/',
+                entries: [{ name: 'ubuntu', path: '/home/ubuntu' }],
+              },
+            }),
+          };
+        }
+        if (url === '/api/cases/browse-local?path=%2Fprojects') {
+          return {
+            json: async () => ({
+              success: true,
+              data: {
+                path: '/projects',
+                parentPath: '/',
+                entries: [{ name: 'codeman', path: '/projects/codeman' }],
+              },
+            }),
+          };
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+      escapeHtml: (s: string) => s,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.showToast = vi.fn();
+    return { app, elements, requests };
+  }
+
+  it('loads saved remote hosts and pre-fills host fields when selected', async () => {
+    const { app, elements } = loadCaseDirectoryHarness();
+
+    await app.loadRemoteHostsForCaseModal();
+    elements.remoteHostSavedSelect.value = 'gpu-box';
+    app.onRemoteHostSelected();
+
+    expect(elements.remoteHostSavedSelect.innerHTML).toContain('GPU Box');
+    expect(elements.remoteHostId.value).toBe('gpu-box');
+    expect(elements.remoteHostAddress.value).toBe('10.0.0.42');
+    expect(elements.remoteHostUsername.value).toBe('ubuntu');
+    expect(elements.remoteHostPort.value).toBe('2222');
+    expect(elements.remoteHostExtraSshOptions.value).toBe('StrictHostKeyChecking=accept-new');
+  });
+
+  it('starts a new saved SSH profile from the plus action', async () => {
+    const { app, elements } = loadCaseDirectoryHarness();
+
+    await app.loadRemoteHostsForCaseModal();
+    elements.remoteHostSavedSelect.value = 'gpu-box';
+    app.onRemoteHostSelected();
+    app.startNewRemoteHostConfig();
+
+    expect(elements.remoteHostSavedSelect.value).toBe('');
+    expect(elements.remoteHostConfigModal.classList.add).toHaveBeenCalledWith('active');
+    expect(elements.remoteHostSaveBtn.disabled).toBe(true);
+    expect(elements.remoteHostId.value).toBe('');
+    expect(elements.remoteHostAddress.value).toBe('');
+    expect(elements.remoteHostUsername.value).toBe('');
+    expect(elements.remoteHostPort.value).toBe('');
+  });
+
+  it('enables saving a new SSH profile only after verification succeeds', async () => {
+    const { app, elements, requests } = loadCaseDirectoryHarness();
+    app.startNewRemoteHostConfig();
+    elements.remoteHostId.value = 'new-host';
+    elements.remoteHostAddress.value = '10.0.0.99';
+    elements.remoteHostUsername.value = 'ubuntu';
+
+    expect(elements.remoteHostSaveBtn.disabled).toBe(true);
+    await app.testRemoteHostConfig();
+
+    expect(elements.remoteHostSaveBtn.disabled).toBe(false);
+    expect(elements.remoteHostVerifyStatus.textContent).toContain('verified');
+    expect(requests).toContainEqual({
+      url: '/api/remote-hosts/verify',
+      method: 'POST',
+      body: expect.objectContaining({ id: 'new-host', host: '10.0.0.99', username: 'ubuntu' }),
+    });
+  });
+
+  it('saves a verified SSH profile and refreshes the saved SSH dropdown', async () => {
+    const { app, elements, requests } = loadCaseDirectoryHarness();
+    app.startNewRemoteHostConfig();
+    elements.remoteHostId.value = 'new-host';
+    elements.remoteHostAddress.value = '10.0.0.99';
+    elements.remoteHostUsername.value = 'ubuntu';
+
+    await app.testRemoteHostConfig();
+    await app.saveRemoteHostConfig();
+
+    expect(requests).toContainEqual({
+      url: '/api/remote-hosts',
+      method: 'POST',
+      body: expect.objectContaining({ id: 'new-host', host: '10.0.0.99', username: 'ubuntu' }),
+    });
+    expect(elements.remoteHostConfigModal.classList.remove).toHaveBeenCalledWith('active');
+    expect(elements.remoteHostSavedSelect.value).toBe('new-host');
+  });
+
+  it('opens the selected saved SSH profile for editing', async () => {
+    const { app, elements } = loadCaseDirectoryHarness();
+    await app.loadRemoteHostsForCaseModal();
+    elements.remoteHostSavedSelect.value = 'gpu-box';
+
+    app.editSelectedRemoteHostConfig();
+
+    expect(elements.remoteHostConfigModal.classList.add).toHaveBeenCalledWith('active');
+    expect(elements.remoteHostId.value).toBe('gpu-box');
+    expect(elements.remoteHostId.disabled).toBe(true);
+    expect(elements.remoteHostAddress.value).toBe('10.0.0.42');
+    expect(elements.remoteHostUsername.value).toBe('ubuntu');
+    expect(elements.remoteHostSaveBtn.disabled).toBe(true);
+  });
+
+  it('saves an edited verified SSH profile with PUT and refreshes the dropdown', async () => {
+    const { app, elements, requests } = loadCaseDirectoryHarness();
+    await app.loadRemoteHostsForCaseModal();
+    elements.remoteHostSavedSelect.value = 'gpu-box';
+    app.editSelectedRemoteHostConfig();
+    elements.remoteHostAddress.value = '10.0.0.43';
+
+    await app.testRemoteHostConfig();
+    await app.saveRemoteHostConfig();
+
+    expect(requests).toContainEqual({
+      url: '/api/remote-hosts/gpu-box',
+      method: 'PUT',
+      body: expect.objectContaining({ id: 'gpu-box', host: '10.0.0.43', username: 'ubuntu' }),
+    });
+    expect(elements.remoteHostSavedSelect.value).toBe('gpu-box');
+    expect(elements.remoteHostConfigModal.classList.remove).toHaveBeenCalledWith('active');
+  });
+
+  it('fills the remote path from the directory browser selection', async () => {
+    const { app, elements, requests } = loadCaseDirectoryHarness();
+    elements.remoteHostId.value = 'gpu-box';
+    elements.remoteCasePath.value = '/srv';
+
+    await app.openCaseDirectoryBrowser('remote');
+    app.selectCaseDirectory('/srv/app');
+
+    expect(elements.remoteCasePath.value).toBe('/srv/app');
+    expect(requests).toContainEqual({
+      url: '/api/remote-hosts/gpu-box/directories?path=%2Fsrv',
+      method: 'GET',
+      body: undefined,
+    });
+  });
+
+  it('opens the remote directory browser directly below the remote path row', async () => {
+    const { app, elements } = loadCaseDirectoryHarness();
+    const remotePathRow = { insertAdjacentElement: vi.fn() };
+    elements.remoteHostId.value = 'gpu-box';
+    elements.remoteCasePath.value = '/srv';
+    elements.remoteCasePath.closest = vi.fn(() => remotePathRow);
+
+    await app.openCaseDirectoryBrowser('remote');
+
+    expect(remotePathRow.insertAdjacentElement).toHaveBeenCalledWith('afterend', elements.caseDirectoryBrowserPanel);
+  });
+
+  it('requires a saved SSH profile before browsing remote directories', async () => {
+    const { app, elements } = loadCaseDirectoryHarness();
+    app.caseRemoteHosts = [];
+    elements.remoteHostId.value = 'new-host';
+    elements.remoteHostAddress.value = '10.0.0.99';
+    elements.remoteHostUsername.value = 'ubuntu';
+    elements.remoteCasePath.value = '/home';
+
+    await app.openCaseDirectoryBrowser('remote');
+
+    expect(app.showToast).toHaveBeenCalledWith('Save this SSH profile before browsing remote directories', 'error');
+  });
+
+  it('fills the linked local path from the directory browser selection', async () => {
+    const { app, elements, requests } = loadCaseDirectoryHarness();
+    elements.linkCasePath.value = '/projects';
+
+    await app.openCaseDirectoryBrowser('local');
+    app.selectCaseDirectory('/projects/codeman');
+
+    expect(elements.linkCasePath.value).toBe('/projects/codeman');
+    expect(requests).toContainEqual({
+      url: '/api/cases/browse-local?path=%2Fprojects',
+      method: 'GET',
+      body: undefined,
     });
   });
 });

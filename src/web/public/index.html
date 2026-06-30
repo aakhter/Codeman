@@ -1801,7 +1801,10 @@
             </div>
             <div class="form-row">
               <label>Folder Path</label>
-              <input type="text" id="linkCasePath" placeholder="/home/user/projects/my-project" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+              <div class="case-path-input-row">
+                <input type="text" id="linkCasePath" placeholder="/home/user/projects/my-project" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+                <button type="button" class="btn-toolbar btn-sm" onclick="app.openCaseDirectoryBrowser('local')">Browse</button>
+              </div>
               <span class="form-hint">Absolute path to an existing project folder, e.g. /home/you/my-project</span>
             </div>
           </div>
@@ -1813,57 +1816,29 @@
               <span class="form-hint">Name to identify this remote case in Codeman</span>
             </div>
             <div class="form-row">
+              <label>Saved SSH</label>
+              <div class="saved-ssh-row">
+                <select id="remoteHostSavedSelect" onchange="app.onRemoteHostSelected()">
+                  <option value="">New host...</option>
+                </select>
+                <button type="button" class="btn-toolbar btn-sm saved-ssh-action-btn" id="remoteHostSavedEdit" onclick="app.editSelectedRemoteHostConfig()" title="Edit saved SSH profile">Edit</button>
+                <button type="button" class="btn-toolbar btn-sm saved-ssh-add-btn" id="remoteHostSavedAdd" onclick="app.startNewRemoteHostConfig()" title="Add saved SSH profile">+</button>
+              </div>
+              <span class="form-hint">Reuse an existing SSH profile or click + to add a new saved profile.</span>
+            </div>
+            <div class="form-row">
               <label>Remote Path</label>
-              <input type="text" id="remoteCasePath" placeholder="/home/user/projects/work" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+              <div class="case-path-input-row">
+                <input type="text" id="remoteCasePath" placeholder="/home/user/projects/work" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+                <button type="button" class="btn-toolbar btn-sm" onclick="app.openCaseDirectoryBrowser('remote')">Browse</button>
+              </div>
               <span class="form-hint">Absolute path on the remote host. Codeman will not create or delete it.</span>
             </div>
             <div class="form-row">
-              <label>Host ID</label>
-              <input type="text" id="remoteHostId" placeholder="gpu-box" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
-            </div>
-            <div class="form-row">
-              <label>SSH Host/IP</label>
-              <input type="text" id="remoteHostAddress" placeholder="10.0.0.42" autocomplete="off" autocapitalize="off" spellcheck="false">
-            </div>
-            <div class="form-row">
-              <label>SSH Username</label>
-              <input type="text" id="remoteHostUsername" placeholder="ubuntu" autocomplete="off" autocapitalize="off" spellcheck="false">
-            </div>
-            <div class="form-row">
-              <label>SSH Port</label>
-              <input type="number" id="remoteHostPort" placeholder="22" min="1" max="65535" autocomplete="off">
-              <span class="form-hint">Optional. Leave blank for the default port 22.</span>
-            </div>
-            <div class="form-row">
               <label>Codex Command Override</label>
-              <input type="text" id="remoteHostCodexCommand" placeholder="exec codx personal" autocomplete="off" autocapitalize="off" spellcheck="false">
-              <span class="form-hint">Optional. Leave blank to use exec codex on the remote host.</span>
+              <input type="text" id="remoteCaseCodexCommand" placeholder="exec codx personal" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">Optional per-case Codex command for this remote environment.</span>
             </div>
-            <details class="advanced-options">
-              <summary>Advanced SSH</summary>
-              <div class="advanced-options-content">
-                <div class="form-row">
-                  <label>Identity File</label>
-                  <input type="text" id="remoteHostIdentityFile" placeholder="~/.ssh/remote_ed25519" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-                  <span class="form-hint">Optional. Path to a private key on this machine (passed to ssh -i). Never the key contents.</span>
-                </div>
-                <div class="form-row">
-                  <label>SOCKS Proxy</label>
-                  <input type="text" id="remoteHostSocksProxy" placeholder="127.0.0.1:1080" autocomplete="off" autocapitalize="off" spellcheck="false">
-                  <span class="form-hint">Optional. host:port of a SOCKS5 proxy (e.g. cloudflared). Routes ssh through it via a ProxyCommand.</span>
-                </div>
-                <div class="form-row">
-                  <label>Jump Host</label>
-                  <input type="text" id="remoteHostJumpHost" placeholder="bastion@10.0.0.1:22" autocomplete="off" autocapitalize="off" spellcheck="false">
-                  <span class="form-hint">Optional. [user@]host[:port] for ssh -J (jump/bastion host).</span>
-                </div>
-                <div class="form-row">
-                  <label>Extra -o Options</label>
-                  <textarea id="remoteHostExtraSshOptions" rows="3" placeholder="StrictHostKeyChecking=accept-new&#10;ConnectTimeout=10" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-                  <span class="form-hint">Optional. One KEY=VALUE per line; each becomes an ssh -o option.</span>
-                </div>
-              </div>
-            </details>
             <!-- COD-105 — discover + attach existing remote tmux sessions this Codeman didn't create. -->
             <details class="advanced-options" id="remoteDiscoverSection">
               <summary>Discover existing sessions</summary>
@@ -1876,6 +1851,16 @@
               </div>
             </details>
           </div>
+          <div class="case-directory-browser hidden" id="caseDirectoryBrowserPanel">
+            <div class="case-directory-browser-header">
+              <button type="button" class="case-directory-browser-up" onclick="app.openParentCaseDirectory()" title="Parent directory">&#x25B2;</button>
+              <span class="case-directory-browser-path" id="caseDirectoryBrowserPath"></span>
+              <button type="button" class="btn-toolbar btn-sm" id="caseDirectoryBrowserSelect" onclick="app.selectCaseDirectory()">Select</button>
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.closeCaseDirectoryBrowser()">Cancel</button>
+            </div>
+            <div class="case-directory-browser-error" id="caseDirectoryBrowserError"></div>
+            <div class="case-directory-browser-list" id="caseDirectoryBrowserList"></div>
+          </div>
           <!-- Manage Tab -->
           <div class="modal-tab-content hidden" id="case-manage">
             <div class="case-manage-list" id="caseManageList">
@@ -1887,6 +1872,66 @@
         <div class="form-actions">
           <button class="btn-toolbar" onclick="app.closeCreateCaseModal()">Cancel</button>
           <button class="btn-toolbar btn-primary" id="caseModalSubmit" onclick="app.submitCaseModal()">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="remoteHostConfigModal">
+      <div class="modal-backdrop" onclick="app.closeRemoteHostConfigModal()"></div>
+      <div class="modal-content modal-sm">
+        <div class="modal-header">
+          <h2>Saved SSH</h2>
+          <button class="modal-close" onclick="app.closeRemoteHostConfigModal()" aria-label="Close saved SSH">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label>Host ID</label>
+            <input type="text" id="remoteHostId" placeholder="gpu-box" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label>SSH Host/IP</label>
+            <input type="text" id="remoteHostAddress" placeholder="10.0.0.42" autocomplete="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label>SSH Username</label>
+            <input type="text" id="remoteHostUsername" placeholder="ubuntu" autocomplete="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div class="form-row">
+            <label>SSH Port</label>
+            <input type="number" id="remoteHostPort" placeholder="22" min="1" max="65535" autocomplete="off">
+            <span class="form-hint">Optional. Leave blank for the default port 22.</span>
+          </div>
+          <details class="advanced-options">
+            <summary>Advanced SSH</summary>
+            <div class="advanced-options-content">
+              <div class="form-row">
+                <label>Identity File</label>
+                <input type="text" id="remoteHostIdentityFile" placeholder="~/.ssh/remote_ed25519" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+                <span class="form-hint">Optional. Path to a private key on this machine (passed to ssh -i). Never the key contents.</span>
+              </div>
+              <div class="form-row">
+                <label>SOCKS Proxy</label>
+                <input type="text" id="remoteHostSocksProxy" placeholder="127.0.0.1:1080" autocomplete="off" autocapitalize="off" spellcheck="false">
+                <span class="form-hint">Optional. host:port of a SOCKS5 proxy (e.g. cloudflared). Routes ssh through it via a ProxyCommand.</span>
+              </div>
+              <div class="form-row">
+                <label>Jump Host</label>
+                <input type="text" id="remoteHostJumpHost" placeholder="bastion@10.0.0.1:22" autocomplete="off" autocapitalize="off" spellcheck="false">
+                <span class="form-hint">Optional. [user@]host[:port] for ssh -J (jump/bastion host).</span>
+              </div>
+              <div class="form-row">
+                <label>Extra -o Options</label>
+                <textarea id="remoteHostExtraSshOptions" rows="3" placeholder="StrictHostKeyChecking=accept-new&#10;ConnectTimeout=10" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+                <span class="form-hint">Optional. One KEY=VALUE per line; each becomes an ssh -o option.</span>
+              </div>
+            </div>
+          </details>
+          <div class="remote-host-verify-status" id="remoteHostVerifyStatus"></div>
+        </div>
+        <div class="form-actions">
+          <button class="btn-toolbar" onclick="app.closeRemoteHostConfigModal()">Cancel</button>
+          <button class="btn-toolbar" id="remoteHostVerifyBtn" onclick="app.testRemoteHostConfig()">Test</button>
+          <button class="btn-toolbar btn-primary" id="remoteHostSaveBtn" onclick="app.saveRemoteHostConfig()" disabled>Save</button>
         </div>
       </div>
     </div>
