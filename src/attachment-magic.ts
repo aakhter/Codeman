@@ -8,6 +8,8 @@ import { isSupportedAttachmentExtension } from './attachment-registry.js';
 
 const MAGIC_LINK_RE = /codeman:\/\/attach\?([^\s<>"']+)/g;
 const CODEX_SAVED_FILE_RE = /\bSaved to:\s*(file:\/\/[^\s<>"']+)/gi;
+const GENERATED_ARTIFACT_LABEL_RE =
+  /\b(?:Mockup|Screenshot|Artifact|Generated artifact|Generated image):\s*(?:\r?\n\s*)?(\/[^\r\n<>"']+)/gi;
 
 export interface TerminalAttachmentRequest {
   path: string;
@@ -22,7 +24,11 @@ export function parseTerminalAttachmentRequests(data: string): TerminalAttachmen
   const results: TerminalAttachmentRequest[] = [];
   const seen = new Set<string>();
 
-  for (const request of [...parseMagicAttachmentRequests(data), ...parseCodexGeneratedArtifactRequests(data)]) {
+  for (const request of [
+    ...parseMagicAttachmentRequests(data),
+    ...parseCodexGeneratedArtifactRequests(data),
+    ...parseLabeledGeneratedArtifactRequests(data),
+  ]) {
     const key = `${request.source}:${request.path}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -72,6 +78,23 @@ function parseCodexGeneratedArtifactRequests(data: string): TerminalAttachmentRe
     } catch {
       // Ignore malformed terminal text. Generated-artifact links are advisory.
     }
+  }
+
+  return results;
+}
+
+function parseLabeledGeneratedArtifactRequests(data: string): TerminalAttachmentRequest[] {
+  const results: TerminalAttachmentRequest[] = [];
+  const seen = new Set<string>();
+
+  for (const match of data.matchAll(GENERATED_ARTIFACT_LABEL_RE)) {
+    const filePath = trimTrailingPunctuation((match[1] || '').trim());
+    if (!isAbsolute(filePath)) continue;
+    const extension = filePath.split('.').pop()?.toLowerCase() || '';
+    if (!isSupportedAttachmentExtension(extension)) continue;
+    if (seen.has(filePath)) continue;
+    seen.add(filePath);
+    results.push({ path: filePath, source: 'codex-generated' });
   }
 
   return results;

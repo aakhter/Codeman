@@ -31,6 +31,9 @@ const CODEX_GENERATED_DIR_MARKERS = [
   '/.codex/generated_artifacts/',
 ];
 
+const SUPERPOWERS_WORKTREE_MARKER = '/.config/superpowers/worktrees/';
+const SUPERPOWERS_ARTIFACT_DIR_MARKERS = ['/output/', '/docs/mockups/'];
+
 export interface GeneratedArtifactRegistrationOptions {
   sessionId: string;
   filePath: string;
@@ -59,7 +62,15 @@ export async function registerGeneratedArtifactAttachment(
 export function isAllowedGeneratedArtifactPath(filePath: string, workingDir: string): boolean {
   const normalizedPath = posixPath.normalize(filePath);
   if (isPathInside(normalizedPath, workingDir)) return true;
+  if (isAllowedSuperpowersArtifactPath(normalizedPath)) return true;
   return CODEX_GENERATED_DIR_MARKERS.some((marker) => normalizedPath.includes(marker));
+}
+
+function isAllowedSuperpowersArtifactPath(normalizedPath: string): boolean {
+  const worktreeIndex = normalizedPath.indexOf(SUPERPOWERS_WORKTREE_MARKER);
+  if (worktreeIndex < 0) return false;
+  const pathInWorktrees = normalizedPath.slice(worktreeIndex + SUPERPOWERS_WORKTREE_MARKER.length);
+  return SUPERPOWERS_ARTIFACT_DIR_MARKERS.some((marker) => pathInWorktrees.includes(marker));
 }
 
 function isPathInside(filePath: string, rootPath: string): boolean {
