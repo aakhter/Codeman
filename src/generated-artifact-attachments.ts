@@ -77,14 +77,8 @@ async function materializeRemoteGeneratedArtifact(
   remote: SessionRemote,
   remotePath: string
 ): Promise<string> {
-  const fileName = sanitizeCacheFileName(basename(remotePath));
-  const digest = createHash('sha256')
-    .update(`${remote.username}@${remote.host}:${remote.port ?? 22}:${remotePath}`)
-    .digest('hex')
-    .slice(0, 16);
-  const cacheDir = dataPath('generated-artifacts', sessionId);
-  await mkdir(cacheDir, { recursive: true });
-  const localPath = join(cacheDir, `${digest}-${fileName}`);
+  const localPath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, remotePath);
+  await mkdir(posixPath.dirname(localPath), { recursive: true });
 
   const args = buildRemoteGeneratedArtifactFetchArgs(remote, remotePath);
   const { stdout } = (await execFileAsync('ssh', args, {
@@ -95,6 +89,18 @@ async function materializeRemoteGeneratedArtifact(
 
   await fs.writeFile(localPath, stdout);
   return localPath;
+}
+
+export function buildRemoteGeneratedArtifactCachePath(
+  sessionId: string,
+  remote: Pick<SessionRemote, 'username' | 'host' | 'port'>,
+  remotePath: string
+): string {
+  const digest = createHash('sha256')
+    .update(`${remote.username}@${remote.host}:${remote.port ?? 22}:${remotePath}`)
+    .digest('hex')
+    .slice(0, 16);
+  return join(dataPath('generated-artifacts', sessionId, digest), sanitizeCacheFileName(basename(remotePath)));
 }
 
 export function buildRemoteGeneratedArtifactFetchArgs(remote: SessionRemote, remotePath: string): string[] {

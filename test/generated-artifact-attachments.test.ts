@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildRemoteGeneratedArtifactCachePath,
   buildRemoteGeneratedArtifactFetchArgs,
   isAllowedGeneratedArtifactPath,
 } from '../src/generated-artifact-attachments.js';
@@ -51,5 +52,24 @@ describe('generated artifact attachments', () => {
       'aamer@192.168.1.20',
       "cat -- '/Users/aamer/.codex-personal/generated_images/a'\\''b.png'",
     ]);
+  });
+
+  it('keeps the original remote filename as the cache basename', () => {
+    const remote: SessionRemote = {
+      hostId: 'mac-mini',
+      label: 'mac-mini',
+      host: '192.168.1.20',
+      username: 'aamer',
+      remotePath: '/Users/aamer/projects/app',
+    };
+
+    const cachePath = buildRemoteGeneratedArtifactCachePath(
+      'session-123',
+      remote,
+      '/Users/aamer/.codex-personal/generated_images/mockup-final.png'
+    );
+
+    expect(cachePath.endsWith('/mockup-final.png')).toBe(true);
+    expect(cachePath).toContain('/generated-artifacts/session-123/');
   });
 });
