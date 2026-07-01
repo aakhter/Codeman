@@ -2036,7 +2036,7 @@ Object.assign(CodemanApp.prototype, {
         const override = shortcutOverrides[shortcut.id];
         const isCustom = !!override;
         return `
-          <div class="shortcut-setting-row" data-shortcut-id="${escapeHtml(shortcut.id)}" data-default-bindings="${escapeHtml(JSON.stringify(defaultBindings))}">
+          <div class="shortcut-setting-row" data-shortcut-id="${escapeHtml(shortcut.id)}" data-default-bindings="${escapeHtml(JSON.stringify(defaultBindings))}" data-default-value="${escapeHtml(defaultValue)}">
             <label class="shortcut-enabled-toggle" title="${isConfigurable ? 'Enable this shortcut' : 'This shortcut is informational'}">
               <input type="checkbox" class="shortcut-enabled-checkbox" ${disabled ? '' : 'checked'} ${isConfigurable ? '' : 'disabled'}>
             </label>
@@ -2069,7 +2069,8 @@ Object.assign(CodemanApp.prototype, {
       if (defaultBindings.length === 0) continue;
       const enabled = row.querySelector('.shortcut-enabled-checkbox')?.checked !== false;
       const inputValue = row.querySelector('.shortcut-binding-input')?.value || '';
-      const bindings = this.parseShortcutBindingList(inputValue);
+      const usingDefaultBindings = inputValue.trim() === (row.dataset.defaultValue || '').trim();
+      const bindings = usingDefaultBindings ? defaultBindings : this.parseShortcutBindingList(inputValue);
       const sameBindings = JSON.stringify(bindings) === JSON.stringify(defaultBindings);
       if (!enabled || (bindings.length > 0 && !sameBindings)) {
         overrides[id] = {};
@@ -2163,7 +2164,7 @@ Object.assign(CodemanApp.prototype, {
       const normalized = part.toLowerCase();
       if (['ctrl', 'control', 'cmd', 'command'].includes(normalized)) {
         modifiers.push(normalized === 'cmd' || normalized === 'command' ? 'meta' : 'ctrl');
-      } else if (['alt', 'option'].includes(normalized)) {
+      } else if (normalized.includes('alt') || normalized.includes('option')) {
         modifiers.push('alt');
       } else if (normalized === 'shift') {
         modifiers.push('shift');

@@ -28,6 +28,9 @@ describe('shortcut registry and overlay', () => {
     expect(appSource).toContain("key: '?'");
     expect(appSource).toContain("code: 'Slash'");
     expect(appSource).not.toContain("key: '/'");
+    expect(appSource).toContain(
+      'const codeMatch = binding.code && e.code === binding.code && (!binding.key || (keyNeedsShift && e.shiftKey));'
+    );
   });
 
   it('exposes shortcut overrides in a dedicated App Settings shortcuts tab', () => {
@@ -49,5 +52,9 @@ describe('shortcut registry and overlay', () => {
     expect(settingsSource).toContain('shortcut-binding-input');
     expect(settingsSource).toContain('shortcut-reset-btn');
     expect(settingsSource).toContain('shortcut-enabled-checkbox');
+    expect(settingsSource).toContain('data-default-value');
+    expect(settingsSource).toContain(
+      'usingDefaultBindings ? defaultBindings : this.parseShortcutBindingList(inputValue)'
+    );
   });
 });

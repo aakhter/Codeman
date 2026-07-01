@@ -1008,7 +1008,7 @@ class CodemanApp {
       const alt = modifiers.has('alt') ? e.altKey : !e.altKey;
       const keyNeedsShift = ['?', '+', '{', '}'].includes(binding.key);
       const shift = modifiers.has('shift') ? e.shiftKey : (!e.shiftKey || keyNeedsShift);
-      const codeMatch = binding.code && e.code === binding.code;
+      const codeMatch = binding.code && e.code === binding.code && (!binding.key || (keyNeedsShift && e.shiftKey));
       const keyMatch = binding.key && String(e.key).toLowerCase() === String(binding.key).toLowerCase();
       return ctrlOrMeta && meta && alt && shift && (codeMatch || keyMatch);
     });
