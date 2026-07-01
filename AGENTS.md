@@ -35,9 +35,20 @@ npm test -- -t "auth"                             # by name (safe)
 
 ## Commit & Pull Request Guidelines
 
-The working and deploy branch on this box is `local` (tracks `bitbucket/local`); `master` is not worked on or deployed here — it tracks `origin/master` (the canonical `Ark0N/Codeman` GitHub upstream main) and serves only as a base for upstream PRs and new worktrees. Remotes: `origin` = GitHub upstream `Ark0N/Codeman` (canonical project), `bitbucket` = personal Bitbucket `aamer_akhter/codeman` (what `local` tracks), `fork` = personal GitHub fork `aakhter/Codeman` (for upstream PRs). Recent history uses Conventional Commit-style subjects, often with Jira keys: `fix(test): COD-25 stabilize mobile visual regression`, `feat: COD-18 add attachment history drawer`, `docs: COD-18 design session attachment history`. The Jira project key is `COD`; use `COD-###` in branch names, commit subjects, and PR titles for Jira-backed work. For multi-PR efforts, create one parent `COD` issue and focused sub-issues per feature/fix PR. Update Jira with branch, PR, commit, and verification before marking work Done. PRs should summarize the problem and approach, link Jira/issues, and include screenshots for UI/mobile changes. Before review, run typecheck, lint, format check, lockfile check, and targeted tests.
-
-For upstream GitHub PRs, do not push branches directly to `Ark0N/Codeman`: GitHub user `aakhter` has read-only permission there. Create upstream PR branches from `origin/master`, push them to the `fork` remote (`aakhter/Codeman`), then open PRs against `Ark0N/Codeman:master`. Preserve local work on `bitbucket/local` or another Bitbucket branch when useful, but GitHub PR branches must come from the fork.
+The working and deploy repository for this box is Bitbucket:
+`https://bitbucket.org/aamer_akhter/codeman/src`. Treat `Ark0N/Codeman` as off-limits:
+do not create issues, branches, commits, PRs, comments, or any other resources there. The local remotes may vary, so check
+`git remote -v`; on this checkout `origin` is Bitbucket (`aamer_akhter/codeman`) and `upstream` is the read-only GitHub
+project (`Ark0N/Codeman`) for reference only. Recent history uses Conventional Commit-style subjects, often with Jira keys:
+`fix(test): COD-25 stabilize mobile visual regression`, `feat: COD-18 add attachment history drawer`,
+`docs: COD-18 design session attachment history`. The Jira project key is `COD`; use `COD-###` in branch names, commit
+subjects, and PR titles for Jira-backed work. Never start implementation work on a bug or feature until a Jira issue exists
+for that work. Create and update issues only through Jira MCP, not GitHub Issues or Bitbucket Issues. For this repository,
+use the `mcp_servers.atlassian-aakhter` Jira MCP configuration. For multi-PR efforts, create one parent `COD` issue and
+focused sub-issues per feature/fix PR. Update
+Jira with branch, PR, commit, and verification before marking work Done. PRs should summarize the problem and approach,
+link Jira/issues, and include screenshots for UI/mobile changes. Before review, run typecheck, lint, format check, lockfile
+check, and targeted tests.
 
 ## Session Safety
 
