@@ -627,12 +627,25 @@
           <section class="shortcut-section">
             <h4>Panels</h4>
             <div class="shortcuts-grid">
-              <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Help</div>
-              <div><kbd>Ctrl</kbd>+<kbd>/</kbd></div><div>Show Help</div>
+              <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Shortcuts</div>
+              <div><kbd>Ctrl</kbd>+<kbd>/</kbd></div><div>Show Shortcuts</div>
+              <div><kbd>Alt/Option</kbd>+<kbd>?</kbd></div><div>Show Shortcuts</div>
               <div><kbd>Escape</kbd></div><div>Close Panels</div>
             </div>
           </section>
         </div>
+      </div>
+    </div>
+
+    <!-- Shortcut Overlay Modal -->
+    <div class="modal" id="shortcutOverlayModal">
+      <div class="modal-backdrop" onclick="app.closeShortcutOverlay()"></div>
+      <div class="modal-content shortcut-overlay-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutOverlayTitle">
+        <div class="modal-header">
+          <h3 id="shortcutOverlayTitle">Keyboard Shortcuts</h3>
+          <button class="modal-close" onclick="app.closeShortcutOverlay()" aria-label="Close shortcut overlay">&times;</button>
+        </div>
+        <div class="modal-body" id="shortcutOverlayList"></div>
       </div>
     </div>
 
@@ -1138,6 +1151,13 @@
                   <input type="checkbox" id="appSettingsGestureControl">
                   <span class="slider"></span>
                 </label>
+              </div>
+              <div class="settings-item settings-item-multiline settings-item-full" title="JSON shortcut overrides keyed by shortcut id. Example: {&quot;show-shortcuts&quot;:{&quot;bindings&quot;:[{&quot;modifiers&quot;:[&quot;ctrl&quot;],&quot;key&quot;:&quot;?&quot;,&quot;code&quot;:&quot;Slash&quot;}]}}">
+                <div class="settings-item-text">
+                  <span class="settings-item-label">Shortcut Overrides</span>
+                  <span class="settings-item-desc">Global JSON overrides for shortcut bindings</span>
+                </div>
+                <textarea id="appSettingsShortcutOverrides" class="settings-textarea" rows="5" spellcheck="false" placeholder='{"show-shortcuts":{"bindings":[{"modifiers":["ctrl"],"key":"?","code":"Slash"}]}}'></textarea>
               </div>
 
               <!-- Header Displays Section -->

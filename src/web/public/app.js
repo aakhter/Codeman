@@ -339,6 +339,127 @@ function parseSessionPrefix(name) {
   return null;
 }
 
+const DEFAULT_SHORTCUTS = [
+  {
+    id: 'show-shortcuts',
+    group: 'Panels',
+    label: 'Show Shortcuts',
+    bindings: [
+      { modifiers: ['ctrl'], key: '?', code: 'Slash' },
+      { modifiers: ['ctrl'], key: '/', code: 'Slash' },
+      { modifiers: ['alt'], key: '?', code: 'Slash' },
+      { modifiers: ['alt'], key: '/', code: 'Slash' },
+    ],
+    action: 'showShortcutOverlay',
+  },
+  {
+    id: 'close-session',
+    group: 'Session',
+    label: 'Close Session',
+    bindings: [{ modifiers: ['ctrl'], key: 'w' }],
+    action: 'killActiveSession',
+  },
+  {
+    id: 'next-session',
+    group: 'Session',
+    label: 'Next Session',
+    bindings: [{ modifiers: ['ctrl'], key: 'Tab' }],
+    action: 'nextSession',
+  },
+  {
+    id: 'clear-terminal',
+    group: 'Terminal',
+    label: 'Clear Terminal',
+    bindings: [{ modifiers: ['ctrl'], key: 'l' }],
+    action: 'clearTerminal',
+  },
+  {
+    id: 'increase-font',
+    group: 'Terminal',
+    label: 'Increase Font',
+    bindings: [
+      { modifiers: ['ctrl'], key: '=', code: 'Equal' },
+      { modifiers: ['ctrl'], key: '+', code: 'Equal' },
+    ],
+    action: 'increaseFontSize',
+  },
+  {
+    id: 'decrease-font',
+    group: 'Terminal',
+    label: 'Decrease Font',
+    bindings: [{ modifiers: ['ctrl'], key: '-', code: 'Minus' }],
+    action: 'decreaseFontSize',
+  },
+  {
+    id: 'voice-input',
+    group: 'Terminal',
+    label: 'Voice Input',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'V' }],
+    action: 'toggleVoiceInput',
+  },
+  {
+    id: 'move-tab-left',
+    group: 'Tabs',
+    label: 'Move Active Tab Left',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: '{', code: 'BracketLeft' }],
+    action: 'moveActiveTabLeft',
+  },
+  {
+    id: 'move-tab-right',
+    group: 'Tabs',
+    label: 'Move Active Tab Right',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: '}', code: 'BracketRight' }],
+    action: 'moveActiveTabRight',
+  },
+  {
+    id: 'command-palette',
+    group: 'Session',
+    label: 'Find Open Session',
+    bindings: [
+      { modifiers: ['ctrl'], key: 'k', code: 'KeyK' },
+      { modifiers: ['meta'], key: 'k', code: 'KeyK' },
+      { modifiers: ['alt'], key: 'k', code: 'KeyK' },
+    ],
+    action: 'openCommandPalette',
+  },
+  {
+    id: 'previous-next-session',
+    group: 'Session',
+    label: 'Previous / Next Session',
+    displayBindings: ['Alt/Option+[', 'Alt/Option+]'],
+  },
+  {
+    id: 'switch-tab-n',
+    group: 'Session',
+    label: 'Switch to Tab N',
+    displayBindings: ['Alt/Option+1-9'],
+  },
+  {
+    id: 'focus-tabs',
+    group: 'Tabs',
+    label: 'Focus Tabs',
+    displayBindings: ['ArrowLeft', 'ArrowRight', 'Home', 'End'],
+  },
+  {
+    id: 'activate-focused-tab',
+    group: 'Tabs',
+    label: 'Activate Focused Tab',
+    displayBindings: ['Enter', 'Space'],
+  },
+  {
+    id: 'insert-newline',
+    group: 'Terminal',
+    label: 'Insert Newline',
+    displayBindings: ['Shift+Enter', 'Ctrl+Enter'],
+  },
+  {
+    id: 'close-panels',
+    group: 'Panels',
+    label: 'Close Panels',
+    displayBindings: ['Escape'],
+  },
+];
+
 // ═══════════════════════════════════════════════════════════════
 // CodemanApp Class — constructor and global state
 // ═══════════════════════════════════════════════════════════════
@@ -845,35 +966,119 @@ class CodemanApp {
     } catch {}
   }
 
+  getShortcutRegistry() {
+    const settings = this.loadAppSettingsFromStorage?.() || {};
+    const shortcutOverrides = settings.shortcutOverrides || {};
+    return DEFAULT_SHORTCUTS.map((shortcut) => {
+      const override = shortcutOverrides[shortcut.id];
+      if (!override || typeof override !== 'object') return shortcut;
+      const next = { ...shortcut };
+      if (override.disabled === true) next.disabled = true;
+      if (Array.isArray(override.bindings)) next.bindings = this.normalizeShortcutBindings(override.bindings);
+      if (Array.isArray(override.displayBindings)) next.displayBindings = override.displayBindings.filter(Boolean);
+      return next;
+    });
+  }
+
+  normalizeShortcutBindings(bindings) {
+    return bindings
+      .filter((binding) => binding && typeof binding === 'object')
+      .map((binding) => ({
+        key: typeof binding.key === 'string' ? binding.key : '',
+        code: typeof binding.code === 'string' ? binding.code : undefined,
+        modifiers: Array.isArray(binding.modifiers)
+          ? binding.modifiers.filter((modifier) => ['ctrl', 'meta', 'alt', 'shift'].includes(modifier))
+          : [],
+      }))
+      .filter((binding) => binding.key || binding.code);
+  }
+
+  matchesShortcutEvent(e, shortcut) {
+    if (!shortcut || shortcut.disabled || !Array.isArray(shortcut.bindings)) return false;
+    return shortcut.bindings.some((binding) => {
+      const modifiers = new Set(binding.modifiers || []);
+      const ctrlOrMeta = modifiers.has('ctrl') ? (e.ctrlKey || e.metaKey) : true;
+      const meta = modifiers.has('meta') ? e.metaKey : true;
+      const alt = modifiers.has('alt') ? e.altKey : !e.altKey;
+      const keyNeedsShift = ['?', '+', '{', '}'].includes(binding.key);
+      const shift = modifiers.has('shift') ? e.shiftKey : (!e.shiftKey || keyNeedsShift);
+      const codeMatch = binding.code && e.code === binding.code;
+      const keyMatch = binding.key && String(e.key).toLowerCase() === String(binding.key).toLowerCase();
+      return ctrlOrMeta && meta && alt && shift && (codeMatch || keyMatch);
+    });
+  }
+
+  runShortcutAction(shortcut) {
+    if (!shortcut?.action) return false;
+    if (shortcut.action === 'toggleVoiceInput') {
+      VoiceInput.toggle();
+      return true;
+    }
+    const fn = this[shortcut.action];
+    if (typeof fn !== 'function') return false;
+    fn.call(this);
+    return true;
+  }
+
+  formatShortcutBinding(binding) {
+    if (typeof binding === 'string') return binding;
+    const parts = [];
+    const modifiers = binding.modifiers || [];
+    if (modifiers.includes('ctrl')) parts.push('Ctrl');
+    if (modifiers.includes('meta')) parts.push('Cmd');
+    if (modifiers.includes('alt')) parts.push('Alt/Option');
+    if (modifiers.includes('shift')) parts.push('Shift');
+    parts.push(binding.key || binding.code || '');
+    return parts.filter(Boolean).join('+');
+  }
+
+  renderShortcutOverlay() {
+    const list = document.getElementById('shortcutOverlayList');
+    if (!list) return;
+    const groups = new Map();
+    for (const shortcut of this.getShortcutRegistry()) {
+      if (shortcut.disabled) continue;
+      if (!groups.has(shortcut.group)) groups.set(shortcut.group, []);
+      groups.get(shortcut.group).push(shortcut);
+    }
+    const html = [];
+    for (const [group, shortcuts] of groups) {
+      html.push(`<section class="shortcut-section"><h4>${escapeHtml(group)}</h4><div class="shortcuts-grid">`);
+      for (const shortcut of shortcuts) {
+        const displayBindings = shortcut.displayBindings || shortcut.bindings || [];
+        const keys = displayBindings
+          .map((binding) => this.formatShortcutBinding(binding).split('+').map((part) => `<kbd>${escapeHtml(part)}</kbd>`).join('+'))
+          .join(' / ');
+        html.push(`<div>${keys}</div><div>${escapeHtml(shortcut.label)}</div>`);
+      }
+      html.push('</div></section>');
+    }
+    list.innerHTML = html.join('');
+  }
+
+  showShortcutOverlay() {
+    const modal = document.getElementById('shortcutOverlayModal');
+    if (!modal) return;
+    this.renderShortcutOverlay();
+    modal.classList.add('active');
+    this.activeFocusTrap = new FocusTrap(modal);
+    this.activeFocusTrap.activate();
+  }
+
+  closeShortcutOverlay() {
+    const modal = document.getElementById('shortcutOverlayModal');
+    if (modal) modal.classList.remove('active');
+    if (this.activeFocusTrap) {
+      this.activeFocusTrap.deactivate();
+      this.activeFocusTrap = null;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Event Listeners (Keyboard Shortcuts, Resize, Beforeunload)
   // ═══════════════════════════════════════════════════════════════
 
   setupEventListeners() {
-    // Keyboard shortcut lookup table — data-driven to avoid 12 separate if-blocks.
-    // Each entry: { key, altKey? (alternative key match), ctrl? (require Ctrl/Cmd),
-    //               shift? (require Shift), action }.
-    const SHORTCUTS = [
-      { key: '?', altKey: '/', ctrl: true, action: () => this.showHelp() },
-      // Ctrl+Enter reserved for multi-line input in terminal; use welcome screen button instead
-      // { key: 'Enter', ctrl: true, action: () => this.quickStart() },
-      { key: 'w', ctrl: true, action: () => this.killActiveSession() },
-      { key: 'Tab', ctrl: true, action: () => this.nextSession() },
-      // { key: 'k', ctrl: true, action: () => this.killAllSessions() }, // disabled: too easy to trigger accidentally
-      { key: 'l', ctrl: true, action: () => this.clearTerminal() },
-      // Ctrl+Shift+R left to the browser for hard-reload. The previous binding
-      // to restoreTerminalSize() sent a resize POST + Ctrl+L (form feed) to
-      // the active session — for codex sessions that triggers a fresh TUI
-      // redraw (banner + status bar) per press, stacking ghost frames in
-      // xterm with every press. restoreTerminalSize remains callable via
-      // the toolbar / mobile keyboard accessory.
-      { key: '=', altKey: '+', ctrl: true, action: () => this.increaseFontSize() },
-      { key: '-', ctrl: true, action: () => this.decreaseFontSize() },
-      { key: 'V', ctrl: true, shift: true, action: () => VoiceInput.toggle() },
-      { key: '{', ctrl: true, shift: true, action: () => this.moveActiveTabLeft() },
-      { key: '}', ctrl: true, shift: true, action: () => this.moveActiveTabRight() },
-    ];
-
     // Use capture to handle before terminal
     document.addEventListener('keydown', (e) => {
       // Don't intercept keys during CJK IME composition
@@ -889,6 +1094,7 @@ class CodemanApp {
       if (e.key === 'Escape') {
         this.closeAllPanels();
         this.closeHelp();
+        this.closeShortcutOverlay();
         if (this.attachmentHistoryDrawerOpen) this.closeAttachmentHistory();
         this.closeSessionManager();
         this.closeCommandPalette?.();
@@ -921,14 +1127,10 @@ class CodemanApp {
         }
       }
 
-      // Match against shortcut table
-      for (const s of SHORTCUTS) {
-        const keyMatch = e.key === s.key || (s.altKey && e.key === s.altKey);
-        const ctrlMatch = s.ctrl ? (e.ctrlKey || e.metaKey) : true;
-        const shiftMatch = s.shift ? e.shiftKey : !e.shiftKey;
-        if (keyMatch && ctrlMatch && shiftMatch) {
+      for (const shortcut of this.getShortcutRegistry()) {
+        if (this.matchesShortcutEvent(e, shortcut)) {
           e.preventDefault();
-          s.action();
+          this.runShortcutAction(shortcut);
           return;
         }
       }

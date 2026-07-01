@@ -4764,6 +4764,12 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   align-items: center;
 }
 
+.settings-item-full {
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
 .settings-item-text {
   display: flex;
   flex-direction: column;
@@ -4804,6 +4810,25 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 }
 
 .settings-item-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.settings-textarea {
+  width: min(100%, 360px);
+  min-height: 92px;
+  resize: vertical;
+  padding: 0.45rem 0.55rem;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.settings-textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -4944,6 +4969,17 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 .modal-content.modal-sm {
   max-width: 340px;
+}
+
+.shortcut-overlay-modal {
+  max-width: 620px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shortcut-overlay-modal .modal-body {
+  overflow-y: auto;
 }
 
 .modal-content.modal-lg {

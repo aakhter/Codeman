@@ -335,6 +335,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
+    this.renderShortcutOverrideEditor(settings.shortcutOverrides || {});
     // Claude CLI settings
     const claudeModeSelect = document.getElementById('appSettingsClaudeMode');
     const allowedToolsRow = document.getElementById('allowedToolsRow');
@@ -1574,6 +1575,7 @@ Object.assign(CodemanApp.prototype, {
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
+      shortcutOverrides: this.readShortcutOverridesFromEditor(),
       skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
@@ -2010,6 +2012,25 @@ Object.assign(CodemanApp.prototype, {
       localStorage.setItem(key, JSON.stringify(settings));
     } catch (err) {
       console.error('Failed to save app settings:', err);
+    }
+  },
+
+  renderShortcutOverrideEditor(shortcutOverrides) {
+    const el = document.getElementById('appSettingsShortcutOverrides');
+    if (!el) return;
+    const value = shortcutOverrides && typeof shortcutOverrides === 'object' ? shortcutOverrides : {};
+    el.value = Object.keys(value).length ? JSON.stringify(value, null, 2) : '';
+  },
+
+  readShortcutOverridesFromEditor() {
+    const el = document.getElementById('appSettingsShortcutOverrides');
+    if (!el || !el.value.trim()) return {};
+    try {
+      const parsed = JSON.parse(el.value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      this.showToast?.('Shortcut overrides must be valid JSON', 'error');
+      return this.loadAppSettingsFromStorage().shortcutOverrides || {};
     }
   },
 
@@ -2588,6 +2609,7 @@ Object.assign(CodemanApp.prototype, {
     this.closeAppSettings();
     this.cancelCloseSession();
     this.closeTokenStats();
+    this.closeShortcutOverlay?.();
     // Mobile header utility tray closes alongside the other overlays so Escape
     // (and any future closeAllPanels caller) dismisses it like every other panel
     // instead of leaving it pinned open with only its toggle to close it.
