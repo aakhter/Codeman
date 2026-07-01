@@ -25,6 +25,7 @@ import { Session } from '../../src/session.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
+const heicConvert = vi.hoisted(() => vi.fn(async () => Buffer.from('ffd8ffe000104a4649460001', 'hex')));
 const remoteStore = vi.hoisted(() => ({
   hosts: [] as Array<{
     id: string;
@@ -45,6 +46,7 @@ vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
   return { ...actual, execFile, spawn };
 });
+vi.mock('heic-convert', () => ({ default: heicConvert }));
 vi.mock('../../src/remote-hosts.js', async (orig) => {
   const actual = await orig<typeof import('../../src/remote-hosts.js')>();
   return {
@@ -162,24 +164,26 @@ describe('session-routes', () => {
   // ========== POST /api/sessions/:id/paste-image ==========
 
   describe('POST /api/sessions/:id/paste-image', () => {
-    function pngUploadBody(boundary: string, imageBytes: Buffer): Buffer {
+    function imageUploadBody(boundary: string, filename: string, mimetype: string, imageBytes: Buffer): Buffer {
       return Buffer.concat([
         Buffer.from(
           `--${boundary}\r\n` +
-            'Content-Disposition: form-data; name="image"; filename="issue.png"\r\n' +
-            'Content-Type: image/png\r\n\r\n'
+            `Content-Disposition: form-data; name="image"; filename="${filename}"\r\n` +
+            `Content-Type: ${mimetype}\r\n\r\n`
         ),
         imageBytes,
         Buffer.from(`\r\n--${boundary}--\r\n`),
       ]);
     }
 
-    it('uploads paste images for remote sessions to the remote workspace over ssh', async () => {
-      const remotePath = '/Users/saqebakhter/repos/projects/moneytrove';
-      const session = harness.ctx._session;
-      session.workingDir = remotePath;
-      vi.spyOn(session, 'toState').mockReturnValue({
-        ...session.toState(),
+    function pngUploadBody(boundary: string, imageBytes: Buffer): Buffer {
+      return imageUploadBody(boundary, 'issue.png', 'image/png', imageBytes);
+    }
+
+    function makeSessionRemote(remotePath = '/Users/saqebakhter/repos/projects/moneytrove'): void {
+      harness.ctx._session.workingDir = remotePath;
+      vi.spyOn(harness.ctx._session, 'toState').mockReturnValue({
+        ...harness.ctx._session.toState(),
         workingDir: remotePath,
         remote: {
           hostId: 'mac-mini',
@@ -189,7 +193,9 @@ describe('session-routes', () => {
           remotePath,
         },
       });
+    }
 
+    function mockSuccessfulSshUpload(): Buffer[] {
       const stdinChunks: Buffer[] = [];
       spawn.mockImplementation(() => {
         const child = new PassThrough() as unknown as {
@@ -213,6 +219,41 @@ describe('session-routes', () => {
         });
         return child;
       });
+      return stdinChunks;
+    }
+
+    it('converts HEIC paste images to JPEG attachments when browser-side normalization falls back', async () => {
+      makeSessionRemote();
+      heicConvert.mockClear();
+      const stdinChunks = mockSuccessfulSshUpload();
+
+      const boundary = 'codeman-test-boundary';
+      const heic = Buffer.from('00000034667479706865696300000000', 'hex');
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: imageUploadBody(boundary, 'IMG_4996.HEIC', 'image/heic', heic),
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.path).toMatch(
+        /^\/Users\/saqebakhter\/repos\/projects\/moneytrove\/\.claude-images\/paste-\d+-[a-f0-9]{8}\.jpg$/
+      );
+      const written = Buffer.concat(stdinChunks);
+      expect(written.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+      expect(heicConvert).toHaveBeenCalledWith({ buffer: heic, format: 'JPEG', quality: 0.92 });
+    });
+
+    it('uploads paste images for remote sessions to the remote workspace over ssh', async () => {
+      makeSessionRemote();
+      const stdinChunks = mockSuccessfulSshUpload();
 
       const boundary = 'codeman-test-boundary';
       const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
