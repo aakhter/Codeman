@@ -1090,6 +1090,7 @@
           <button class="modal-tab-btn" data-tab="settings-codex">Codex CLI</button>
           <button class="modal-tab-btn" data-tab="settings-headroom">Headroom</button>
           <button class="modal-tab-btn" data-tab="settings-models">Models</button>
+          <button class="modal-tab-btn" data-tab="settings-shortcuts">Shortcuts</button>
           <button class="modal-tab-btn" data-tab="settings-authoring">Authoring</button>
           <button class="modal-tab-btn" data-tab="settings-paths">Paths</button>
           <button class="modal-tab-btn" data-tab="settings-notifications">Notifications</button>
@@ -1152,14 +1153,6 @@
                   <span class="slider"></span>
                 </label>
               </div>
-              <div class="settings-item settings-item-multiline settings-item-full" title="JSON shortcut overrides keyed by shortcut id. Example: {&quot;show-shortcuts&quot;:{&quot;bindings&quot;:[{&quot;modifiers&quot;:[&quot;ctrl&quot;],&quot;key&quot;:&quot;?&quot;,&quot;code&quot;:&quot;Slash&quot;}]}}">
-                <div class="settings-item-text">
-                  <span class="settings-item-label">Shortcut Overrides</span>
-                  <span class="settings-item-desc">Global JSON overrides for shortcut bindings</span>
-                </div>
-                <textarea id="appSettingsShortcutOverrides" class="settings-textarea" rows="5" spellcheck="false" placeholder='{"show-shortcuts":{"bindings":[{"modifiers":["ctrl"],"key":"?","code":"Slash"}]}}'></textarea>
-              </div>
-
               <!-- Header Displays Section -->
               <div class="settings-section-header">Header Displays</div>
               <div class="settings-item" title="Show Claude plan usage limits (5-hour & weekly) in the header. Applies to newly created sessions.">
@@ -1587,6 +1580,10 @@
               </select>
               <span class="form-hint">Code review, quality checks</span>
             </div>
+          </div>
+          <!-- Shortcuts Tab -->
+          <div class="modal-tab-content hidden" id="settings-shortcuts">
+            <div class="shortcuts-settings-list" id="appSettingsShortcutsList"></div>
           </div>
           <!-- Paths Tab -->
           <div class="modal-tab-content hidden" id="settings-paths">

@@ -335,7 +335,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
-    this.renderShortcutOverrideEditor(settings.shortcutOverrides || {});
+    this.renderShortcutSettingsList(settings.shortcutOverrides || {});
     // Claude CLI settings
     const claudeModeSelect = document.getElementById('appSettingsClaudeMode');
     const allowedToolsRow = document.getElementById('allowedToolsRow');
@@ -488,6 +488,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   closeAppSettings() {
+    this.stopShortcutCapture?.();
     document.getElementById('appSettingsModal').classList.remove('active');
 
     // Deactivate focus trap and restore focus
@@ -1575,7 +1576,7 @@ Object.assign(CodemanApp.prototype, {
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
-      shortcutOverrides: this.readShortcutOverridesFromEditor(),
+      shortcutOverrides: this.readShortcutOverridesFromSettings(),
       skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
@@ -2015,22 +2016,170 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  renderShortcutOverrideEditor(shortcutOverrides) {
-    const el = document.getElementById('appSettingsShortcutOverrides');
-    if (!el) return;
-    const value = shortcutOverrides && typeof shortcutOverrides === 'object' ? shortcutOverrides : {};
-    el.value = Object.keys(value).length ? JSON.stringify(value, null, 2) : '';
+  renderShortcutSettingsList(shortcutOverrides = {}) {
+    const list = document.getElementById('appSettingsShortcutsList');
+    if (!list) return;
+    const defaultsById = new Map(this.getDefaultShortcutRegistry().map((shortcut) => [shortcut.id, shortcut]));
+    const configured = this.getShortcutRegistry();
+    list.innerHTML = configured
+      .map((shortcut) => {
+        const defaultShortcut = defaultsById.get(shortcut.id) || shortcut;
+        const bindings = shortcut.bindings || [];
+        const defaultBindings = defaultShortcut.bindings || [];
+        const isConfigurable = defaultBindings.length > 0;
+        const value = bindings.length > 0 ? bindings.map((binding) => this.formatShortcutBinding(binding)).join(', ') : '';
+        const defaultValue =
+          defaultBindings.length > 0
+            ? defaultBindings.map((binding) => this.formatShortcutBinding(binding)).join(', ')
+            : (defaultShortcut.displayBindings || []).join(', ');
+        const disabled = shortcut.disabled === true;
+        const override = shortcutOverrides[shortcut.id];
+        const isCustom = !!override;
+        return `
+          <div class="shortcut-setting-row" data-shortcut-id="${escapeHtml(shortcut.id)}" data-default-bindings="${escapeHtml(JSON.stringify(defaultBindings))}">
+            <label class="shortcut-enabled-toggle" title="${isConfigurable ? 'Enable this shortcut' : 'This shortcut is informational'}">
+              <input type="checkbox" class="shortcut-enabled-checkbox" ${disabled ? '' : 'checked'} ${isConfigurable ? '' : 'disabled'}>
+            </label>
+            <div class="shortcut-setting-info">
+              <span class="shortcut-setting-label">${escapeHtml(shortcut.label)}</span>
+              <span class="shortcut-setting-group">${escapeHtml(shortcut.group)}${isCustom ? ' · custom' : ''}</span>
+            </div>
+            <input type="text" class="shortcut-binding-input" value="${escapeHtml(value || defaultValue)}" ${isConfigurable ? '' : 'disabled'} placeholder="Ctrl+K" aria-label="${escapeHtml(shortcut.label)} shortcut">
+            <button type="button" class="btn-toolbar btn-sm shortcut-capture-btn" ${isConfigurable ? '' : 'disabled'} onclick="app.startShortcutCapture('${escapeHtml(shortcut.id)}')">Capture</button>
+            <button type="button" class="btn-toolbar btn-sm shortcut-reset-btn" ${isConfigurable ? '' : 'disabled'} onclick="app.resetShortcutSetting('${escapeHtml(shortcut.id)}')">Reset</button>
+          </div>`;
+      })
+      .join('');
+    list.querySelectorAll('.shortcut-binding-input').forEach((input) => {
+      input.addEventListener('keydown', (ev) => {
+        if (this._capturingShortcutId) return;
+        ev.stopPropagation();
+      });
+    });
   },
 
-  readShortcutOverridesFromEditor() {
-    const el = document.getElementById('appSettingsShortcutOverrides');
-    if (!el || !el.value.trim()) return {};
+  readShortcutOverridesFromSettings() {
+    const list = document.getElementById('appSettingsShortcutsList');
+    if (!list) return {};
+    const overrides = {};
+    for (const row of Array.from(list.querySelectorAll('.shortcut-setting-row'))) {
+      const id = row.dataset.shortcutId;
+      if (!id) continue;
+      const defaultBindings = this._parseShortcutBindingsJson(row.dataset.defaultBindings);
+      if (defaultBindings.length === 0) continue;
+      const enabled = row.querySelector('.shortcut-enabled-checkbox')?.checked !== false;
+      const inputValue = row.querySelector('.shortcut-binding-input')?.value || '';
+      const bindings = this.parseShortcutBindingList(inputValue);
+      const sameBindings = JSON.stringify(bindings) === JSON.stringify(defaultBindings);
+      if (!enabled || (bindings.length > 0 && !sameBindings)) {
+        overrides[id] = {};
+        if (!enabled) overrides[id].disabled = true;
+        if (bindings.length > 0 && !sameBindings) overrides[id].bindings = bindings;
+      }
+    }
+    return overrides;
+  },
+
+  startShortcutCapture(shortcutId) {
+    const row = document.querySelector(`.shortcut-setting-row[data-shortcut-id="${CSS.escape(shortcutId)}"]`);
+    if (!row) return;
+    this._capturingShortcutId = shortcutId;
+    row.classList.add('capturing');
+    const input = row.querySelector('.shortcut-binding-input');
+    if (input) {
+      input.value = 'Press shortcut...';
+      input.focus();
+      input.select();
+    }
+    this._shortcutCaptureHandler = (ev) => this.onShortcutCaptureKeydown(ev);
+    document.addEventListener('keydown', this._shortcutCaptureHandler, true);
+  },
+
+  onShortcutCaptureKeydown(ev) {
+    if (!this._capturingShortcutId) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.key === 'Escape') {
+      this.stopShortcutCapture();
+      return;
+    }
+    if (['Control', 'Shift', 'Alt', 'Meta'].includes(ev.key)) return;
+    const binding = this.shortcutBindingFromEvent(ev);
+    const row = document.querySelector(`.shortcut-setting-row[data-shortcut-id="${CSS.escape(this._capturingShortcutId)}"]`);
+    const input = row?.querySelector('.shortcut-binding-input');
+    if (input) input.value = this.formatShortcutBinding(binding);
+    this.stopShortcutCapture();
+  },
+
+  stopShortcutCapture() {
+    if (this._shortcutCaptureHandler) {
+      document.removeEventListener('keydown', this._shortcutCaptureHandler, true);
+      this._shortcutCaptureHandler = null;
+    }
+    if (this._capturingShortcutId) {
+      const row = document.querySelector(`.shortcut-setting-row[data-shortcut-id="${CSS.escape(this._capturingShortcutId)}"]`);
+      row?.classList.remove('capturing');
+    }
+    this._capturingShortcutId = null;
+  },
+
+  resetShortcutSetting(shortcutId) {
+    const row = document.querySelector(`.shortcut-setting-row[data-shortcut-id="${CSS.escape(shortcutId)}"]`);
+    if (!row) return;
+    const defaultBindings = this._parseShortcutBindingsJson(row.dataset.defaultBindings);
+    const input = row.querySelector('.shortcut-binding-input');
+    const checkbox = row.querySelector('.shortcut-enabled-checkbox');
+    if (input) input.value = defaultBindings.map((binding) => this.formatShortcutBinding(binding)).join(', ');
+    if (checkbox) checkbox.checked = true;
+  },
+
+  shortcutBindingFromEvent(ev) {
+    const modifiers = [];
+    if (ev.ctrlKey) modifiers.push('ctrl');
+    if (ev.metaKey) modifiers.push('meta');
+    if (ev.altKey) modifiers.push('alt');
+    if (ev.shiftKey && !['?', '+', '{', '}'].includes(ev.key)) modifiers.push('shift');
+    return {
+      modifiers,
+      key: ev.key && ev.key.length === 1 ? ev.key : ev.key,
+      code: ev.code || undefined,
+    };
+  },
+
+  parseShortcutBindingList(value) {
+    return String(value || '')
+      .split(',')
+      .map((part) => this.parseShortcutBindingText(part.trim()))
+      .filter(Boolean);
+  },
+
+  parseShortcutBindingText(value) {
+    if (!value) return null;
+    const parts = value.split('+').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 0) return null;
+    const modifiers = [];
+    let key = parts.pop();
+    for (const part of parts) {
+      const normalized = part.toLowerCase();
+      if (['ctrl', 'control', 'cmd', 'command'].includes(normalized)) {
+        modifiers.push(normalized === 'cmd' || normalized === 'command' ? 'meta' : 'ctrl');
+      } else if (['alt', 'option'].includes(normalized)) {
+        modifiers.push('alt');
+      } else if (normalized === 'shift') {
+        modifiers.push('shift');
+      }
+    }
+    if (!key) return null;
+    const code = key.length === 1 && /^[a-z0-9]$/i.test(key) ? `${/^\d$/.test(key) ? 'Digit' : 'Key'}${key.toUpperCase()}` : undefined;
+    return { modifiers, key, code };
+  },
+
+  _parseShortcutBindingsJson(value) {
     try {
-      const parsed = JSON.parse(el.value);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      const parsed = JSON.parse(value || '[]');
+      return Array.isArray(parsed) ? parsed : [];
     } catch {
-      this.showToast?.('Shortcut overrides must be valid JSON', 'error');
-      return this.loadAppSettingsFromStorage().shortcutOverrides || {};
+      return [];
     }
   },
 

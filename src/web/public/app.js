@@ -969,7 +969,7 @@ class CodemanApp {
   getShortcutRegistry() {
     const settings = this.loadAppSettingsFromStorage?.() || {};
     const shortcutOverrides = settings.shortcutOverrides || {};
-    return DEFAULT_SHORTCUTS.map((shortcut) => {
+    return this.getDefaultShortcutRegistry().map((shortcut) => {
       const override = shortcutOverrides[shortcut.id];
       if (!override || typeof override !== 'object') return shortcut;
       const next = { ...shortcut };
@@ -978,6 +978,14 @@ class CodemanApp {
       if (Array.isArray(override.displayBindings)) next.displayBindings = override.displayBindings.filter(Boolean);
       return next;
     });
+  }
+
+  getDefaultShortcutRegistry() {
+    return DEFAULT_SHORTCUTS.map((shortcut) => ({
+      ...shortcut,
+      bindings: shortcut.bindings ? shortcut.bindings.map((binding) => ({ ...binding, modifiers: [...(binding.modifiers || [])] })) : undefined,
+      displayBindings: shortcut.displayBindings ? [...shortcut.displayBindings] : undefined,
+    }));
   }
 
   normalizeShortcutBindings(bindings) {
@@ -1028,7 +1036,8 @@ class CodemanApp {
     if (modifiers.includes('meta')) parts.push('Cmd');
     if (modifiers.includes('alt')) parts.push('Alt/Option');
     if (modifiers.includes('shift')) parts.push('Shift');
-    parts.push(binding.key || binding.code || '');
+    const key = binding.key || binding.code || '';
+    parts.push(key.length === 1 && /[a-z]/.test(key) ? key.toUpperCase() : key);
     return parts.filter(Boolean).join('+');
   }
 
@@ -1083,6 +1092,7 @@ class CodemanApp {
     document.addEventListener('keydown', (e) => {
       // Don't intercept keys during CJK IME composition
       if (e.isComposing || e.keyCode === 229) return;
+      if (this._capturingShortcutId || e.target?.classList?.contains('shortcut-binding-input')) return;
 
       if (this.shouldOpenCommandPaletteFromShortcut?.(e)) {
         e.preventDefault();

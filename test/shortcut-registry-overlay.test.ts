@@ -29,10 +29,24 @@ describe('shortcut registry and overlay', () => {
     expect(appSource).toContain("code: 'Slash'");
   });
 
-  it('exposes shortcut overrides in App Settings persistence', () => {
-    expect(htmlSource).toContain('id="appSettingsShortcutOverrides"');
-    expect(settingsSource).toContain('renderShortcutOverrideEditor');
-    expect(settingsSource).toContain('readShortcutOverridesFromEditor');
+  it('exposes shortcut overrides in a dedicated App Settings shortcuts tab', () => {
+    expect(htmlSource).toContain('data-tab="settings-shortcuts"');
+    expect(htmlSource).toContain('id="settings-shortcuts"');
+    expect(htmlSource).toContain('id="appSettingsShortcutsList"');
+    expect(htmlSource).not.toContain('id="appSettingsShortcutOverrides"');
+    expect(htmlSource).not.toContain('Shortcut Overrides</span>');
+    expect(settingsSource).toContain('renderShortcutSettingsList');
+    expect(settingsSource).toContain('readShortcutOverridesFromSettings');
+    expect(settingsSource).toContain('startShortcutCapture');
+    expect(settingsSource).toContain('onShortcutCaptureKeydown');
     expect(settingsSource).toContain('settings.shortcutOverrides');
+  });
+
+  it('renders shortcut rows with capture, typed input, reset, and disable controls', () => {
+    expect(settingsSource).toContain('shortcut-setting-row');
+    expect(settingsSource).toContain('shortcut-capture-btn');
+    expect(settingsSource).toContain('shortcut-binding-input');
+    expect(settingsSource).toContain('shortcut-reset-btn');
+    expect(settingsSource).toContain('shortcut-enabled-checkbox');
   });
 });
