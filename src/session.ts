@@ -87,7 +87,7 @@ import { SessionAutoOps } from './session-auto-ops.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
-import { parseAttachmentMagicLinks } from './attachment-magic.js';
+import { parseTerminalAttachmentRequests } from './attachment-magic.js';
 import {
   sanitizeAttachmentHistory,
   upsertAttachmentHistory as upsertAttachmentHistoryList,
@@ -1017,6 +1017,10 @@ export class Session extends EventEmitter {
     this._imageWatcherEnabled = enabled;
   }
 
+  get remote(): SessionRemote | undefined {
+    return this._remote;
+  }
+
   /** Whether this session is pinned to the top of the session manager (COD-139). */
   get pinned(): boolean {
     return this._pinned;
@@ -1423,18 +1427,24 @@ export class Session extends EventEmitter {
         .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
     }
 
-    // Scan terminal output for `codeman://attach?path=...` magic links and emit
-    // an attachmentRequested event for each newly-seen absolute path. The web
-    // server turns these into registered attachment cards.
-    const attachmentPaths = parseAttachmentMagicLinks(data);
-    for (const attachmentPath of attachmentPaths) {
-      if (this._attachmentMagicSeen.has(attachmentPath)) continue;
-      this._attachmentMagicSeen.add(attachmentPath);
+    // Scan terminal output for attachment requests. `codeman://attach?...` is an
+    // explicit magic link; Codex generated images report `Saved to: file://...`.
+    // The web server applies the trust boundary for each request source.
+    const attachmentRequests = parseTerminalAttachmentRequests(data);
+    for (const request of attachmentRequests) {
+      const seenKey = `${request.source}:${request.path}`;
+      if (this._attachmentMagicSeen.has(seenKey)) continue;
+      this._attachmentMagicSeen.add(seenKey);
       if (this._attachmentMagicSeen.size > 200) {
         const oldest = this._attachmentMagicSeen.values().next().value;
         if (oldest) this._attachmentMagicSeen.delete(oldest);
       }
-      this.emit('attachmentRequested', { sessionId: this.id, path: attachmentPath, timestamp: Date.now() });
+      this.emit('attachmentRequested', {
+        sessionId: this.id,
+        path: request.path,
+        source: request.source,
+        timestamp: Date.now(),
+      });
     }
 
     // BufferAccumulator handles auto-trimming when max size exceeded
