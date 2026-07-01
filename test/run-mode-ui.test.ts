@@ -121,6 +121,40 @@ describe('run mode UI', () => {
 });
 
 describe('case selector refresh', () => {
+  it('sorts case picker options alphabetically and filters by case or host label', () => {
+    const CodemanApp = function CodemanApp(this: any) {};
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: () => null },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    const cases = [
+      { name: 'zeta' },
+      { name: 'moneytrove', location: 'remote', remote: { hostId: 'mac-mini', path: '/Users/saqeb/moneytrove' } },
+      { name: 'Alpha' },
+      { name: 'plex-previews' },
+    ];
+
+    const options = app.buildCasePickerOptions(cases);
+
+    expect(options.map((option: any) => option.name)).toEqual([
+      'Alpha',
+      'moneytrove',
+      'plex-previews',
+      'testcase',
+      'zeta',
+    ]);
+    expect(options.find((option: any) => option.name === 'moneytrove')?.label).toBe('moneytrove @ mac-mini');
+    expect(app.filterCasePickerOptions(options, 'MAC').map((option: any) => option.name)).toEqual(['moneytrove']);
+    expect(app.filterCasePickerOptions(options, 'plex').map((option: any) => option.name)).toEqual(['plex-previews']);
+  });
+
   it('creates remote shell sessions by caseName instead of remote display path', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'gpu-work' },
