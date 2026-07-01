@@ -1001,6 +1001,7 @@ class CodemanApp {
 
   matchesShortcutEvent(e, shortcut) {
     if (!shortcut || shortcut.disabled || !Array.isArray(shortcut.bindings)) return false;
+    const eventKey = this.shortcutEventKey(e);
     return shortcut.bindings.some((binding) => {
       const modifiers = new Set(binding.modifiers || []);
       const ctrlOrMeta = modifiers.has('ctrl') ? (e.ctrlKey || e.metaKey) : true;
@@ -1008,10 +1009,21 @@ class CodemanApp {
       const alt = modifiers.has('alt') ? e.altKey : !e.altKey;
       const keyNeedsShift = ['?', '+', '{', '}'].includes(binding.key);
       const shift = modifiers.has('shift') ? e.shiftKey : (!e.shiftKey || keyNeedsShift);
-      const codeMatch = binding.code && e.code === binding.code && (!binding.key || (keyNeedsShift && e.shiftKey));
-      const keyMatch = binding.key && String(e.key).toLowerCase() === String(binding.key).toLowerCase();
+      const codeMatch = !binding.key && binding.code && e.code === binding.code;
+      const keyMatch = binding.key && String(eventKey).toLowerCase() === String(binding.key).toLowerCase();
       return ctrlOrMeta && meta && alt && shift && (codeMatch || keyMatch);
     });
+  }
+
+  shortcutEventKey(e) {
+    const shiftedCodeKeys = {
+      Slash: '?',
+      Equal: '+',
+      BracketLeft: '{',
+      BracketRight: '}',
+    };
+    if (e.shiftKey && shiftedCodeKeys[e.code]) return shiftedCodeKeys[e.code];
+    return e.key || '';
   }
 
   runShortcutAction(shortcut) {

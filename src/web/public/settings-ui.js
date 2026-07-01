@@ -2135,16 +2135,28 @@ Object.assign(CodemanApp.prototype, {
   },
 
   shortcutBindingFromEvent(ev) {
+    const key = this.shortcutKeyFromEvent(ev);
     const modifiers = [];
     if (ev.ctrlKey) modifiers.push('ctrl');
     if (ev.metaKey) modifiers.push('meta');
     if (ev.altKey) modifiers.push('alt');
-    if (ev.shiftKey && !['?', '+', '{', '}'].includes(ev.key)) modifiers.push('shift');
+    if (ev.shiftKey && !['?', '+', '{', '}'].includes(key)) modifiers.push('shift');
     return {
       modifiers,
-      key: ev.key && ev.key.length === 1 ? ev.key : ev.key,
+      key,
       code: ev.code || undefined,
     };
+  },
+
+  shortcutKeyFromEvent(ev) {
+    const shiftedCodeKeys = {
+      Slash: '?',
+      Equal: '+',
+      BracketLeft: '{',
+      BracketRight: '}',
+    };
+    if (ev.shiftKey && shiftedCodeKeys[ev.code]) return shiftedCodeKeys[ev.code];
+    return ev.key || '';
   },
 
   parseShortcutBindingList(value) {
@@ -2164,7 +2176,7 @@ Object.assign(CodemanApp.prototype, {
       const normalized = part.toLowerCase();
       if (['ctrl', 'control', 'cmd', 'command'].includes(normalized)) {
         modifiers.push(normalized === 'cmd' || normalized === 'command' ? 'meta' : 'ctrl');
-      } else if (normalized.includes('alt') || normalized.includes('option')) {
+      } else if (['alt', 'option', 'alt/option'].includes(normalized)) {
         modifiers.push('alt');
       } else if (normalized === 'shift') {
         modifiers.push('shift');

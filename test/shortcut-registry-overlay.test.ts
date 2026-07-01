@@ -28,9 +28,9 @@ describe('shortcut registry and overlay', () => {
     expect(appSource).toContain("key: '?'");
     expect(appSource).toContain("code: 'Slash'");
     expect(appSource).not.toContain("key: '/'");
-    expect(appSource).toContain(
-      'const codeMatch = binding.code && e.code === binding.code && (!binding.key || (keyNeedsShift && e.shiftKey));'
-    );
+    expect(appSource).toContain('const eventKey = this.shortcutEventKey(e);');
+    expect(appSource).toContain("Slash: '?'");
+    expect(appSource).toContain('const codeMatch = !binding.key && binding.code && e.code === binding.code;');
   });
 
   it('exposes shortcut overrides in a dedicated App Settings shortcuts tab', () => {
@@ -56,5 +56,12 @@ describe('shortcut registry and overlay', () => {
     expect(settingsSource).toContain(
       'usingDefaultBindings ? defaultBindings : this.parseShortcutBindingList(inputValue)'
     );
+  });
+
+  it('preserves Alt/Option when parsing captured question-mark shortcuts', () => {
+    expect(settingsSource).toContain("['alt', 'option', 'alt/option'].includes(normalized)");
+    expect(settingsSource).toContain("if (ev.altKey) modifiers.push('alt');");
+    expect(settingsSource).toContain('shortcutKeyFromEvent(ev)');
+    expect(settingsSource).toContain("Slash: '?'");
   });
 });
