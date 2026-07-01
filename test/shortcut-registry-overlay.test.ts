@@ -27,6 +27,7 @@ describe('shortcut registry and overlay', () => {
     expect(appSource).toContain("modifiers: ['alt']");
     expect(appSource).toContain("key: '?'");
     expect(appSource).toContain("code: 'Slash'");
+    expect(appSource).not.toContain("key: '/'");
   });
 
   it('exposes shortcut overrides in a dedicated App Settings shortcuts tab', () => {

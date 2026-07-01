@@ -346,9 +346,7 @@ const DEFAULT_SHORTCUTS = [
     label: 'Show Shortcuts',
     bindings: [
       { modifiers: ['ctrl'], key: '?', code: 'Slash' },
-      { modifiers: ['ctrl'], key: '/', code: 'Slash' },
       { modifiers: ['alt'], key: '?', code: 'Slash' },
-      { modifiers: ['alt'], key: '/', code: 'Slash' },
     ],
     action: 'showShortcutOverlay',
   },
