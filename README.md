@@ -465,11 +465,11 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 |----------|--------|
 | `Ctrl+Enter` | Quick-start session |
 | `Ctrl/Cmd+W` | Kill active session |
+| `Ctrl/Cmd+K` | Find open session or start a new one |
 | `Ctrl/Cmd+Tab` | Next session |
 | `Alt/Option+[` / `Alt/Option+]` | Previous / next session |
 | `Alt/Option+1`-`Alt/Option+9` | Switch to tab N (physical keys, so macOS Option layouts work) |
 | `Ctrl+Shift+{` / `Ctrl+Shift+}` | Move active tab left / right |
-| `Ctrl+K` | Kill all sessions |
 | `Ctrl+L` | Clear terminal |
 | `Ctrl+Shift+R` | Restore terminal size |
 | `Ctrl+Shift+V` | Toggle voice input |
