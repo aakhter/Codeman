@@ -128,43 +128,6 @@ const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[h
 
 const REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS = 15_000;
 
-function stripAnsiForReplayComparison(value: string): string {
-  return (
-    value
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b[()][0-2A-Z]/g, '')
-  );
-}
-
-function hasDuplicateCodexPromptTail(accumulatedBuffer: string, liveMuxBuffer: string): boolean {
-  const normalize = (value: string) =>
-    stripAnsiForReplayComparison(value)
-      .replace(/\r/g, '\n')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-  const liveLines = normalize(liveMuxBuffer);
-  let promptIndex = -1;
-  for (let i = liveLines.length - 1; i >= 0; i--) {
-    if (liveLines[i].startsWith('› ')) {
-      promptIndex = i;
-      break;
-    }
-  }
-  if (promptIndex < 0) return false;
-
-  const liveTail = liveLines.slice(promptIndex, promptIndex + 4);
-  if (liveTail.length < 2) return false;
-
-  const accumulatedTail = normalize(accumulatedBuffer).slice(-80).join('\n');
-  return accumulatedTail.includes(liveTail.join('\n'));
-}
-
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
  * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA) to animate
@@ -1208,27 +1171,37 @@ export function registerSessionRoutes(
     // (`\x1b[H\x1b[2J`) between the history and the live pane so they don't
     // overlap. `captureActivePaneBuffer` is a no-op ('') under test mode and
     // returns null when unavailable, in which case we fall back to history.
+    //
+    // COD-178: for codex/gemini the byte history is NEVER replayed when a
+    // capture is available. These TUIs repaint the entire screen (`\x1b[H` +
+    // every row) on each geometry change, so the accumulated history is a
+    // stack of full-frame redraws painted at historical window sizes; replaying
+    // a frame taller than the browser's current viewport scrolls it, orphaning
+    // the previous frame's rows into scrollback (stacked stale banner boxes).
+    // The tmux capture is line-based with no cursor addressing — tmux already
+    // applied every redraw in place — so it replays cleanly at any size and is
+    // the canonical scrollback. We therefore request the FULL history capture
+    // even on tab switch for these modes (bounded by tmux history-limit).
+    const isCaptureOnlyTuiMode = session.mode === 'codex' || session.mode === 'gemini';
     const muxName = session.muxName;
     const liveMuxBuffer =
       muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
-        ? ctx.mux.captureActivePaneBuffer(muxName, isFullReload ? { fullHistory: true } : undefined)
+        ? ctx.mux.captureActivePaneBuffer(
+            muxName,
+            isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true } : undefined
+          )
         : null;
     const source: 'history' | 'mux-visible' | 'mux-full-history' =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? isFullReload
+        ? isFullReload || isCaptureOnlyTuiMode
           ? 'mux-full-history'
           : 'mux-visible'
         : 'history';
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? isFullReload &&
-          session.mode === 'codex' &&
-          session.terminalBufferLength > 0 &&
-          hasDuplicateCodexPromptTail(session.terminalBuffer, liveMuxBuffer)
+        ? isCaptureOnlyTuiMode || session.terminalBufferLength === 0
           ? liveMuxBuffer
-          : session.terminalBufferLength > 0
-            ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
-            : liveMuxBuffer
+          : `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
         : session.terminalBuffer;
     const fullSize = rawBuffer.length;
     let truncated = false;

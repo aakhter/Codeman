@@ -711,11 +711,11 @@ describe('session-routes', () => {
       });
     });
 
-    it('preserves accumulated history before the visible mux pane snapshot on tab switch', async () => {
+    it('preserves accumulated history before the visible mux pane snapshot on tab switch (claude)', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
-      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.mode = 'claude';
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
-        () => 'visible tmux pane only\n› current prompt'
+        () => 'visible tmux pane only\n❯ current prompt'
       );
 
       const res = await harness.app.inject({
@@ -732,6 +732,96 @@ describe('session-routes', () => {
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
       expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+    });
+
+    // ── COD-178: TUI modes replay the tmux capture ONLY — raw byte history is
+    // full-screen redraw frames painted at historical window sizes; replaying
+    // them at the browser's current row count scrolls each frame into
+    // scrollback, stacking stale banner boxes. ──
+    it('COD-178: codex full reload drops raw byte history even when the prompt-tail heuristic misses', async () => {
+      // Prompt rendered via erase-char + cursor-forward (\x1b[1X\x1b[C) instead of a
+      // literal space — the real prod byte stream that defeated the old
+      // hasDuplicateCodexPromptTail text comparison.
+      harness.ctx._session.terminalBuffer =
+        '\x1b[H\x1b[1;40rstale banner frame one\n\x1b[Hstale banner frame two\n' +
+        '›\x1b[1X\x1b[2m\x1b[CUse /skills to list available skills\x1b[0m\n' +
+        'gpt-5.5 medium · ~/case';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        () => 'clean full capture\n› Use /skills to list available skills\ngpt-5.5 medium · ~/case'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('clean full capture');
+      expect(body.data.terminalBuffer).not.toContain('stale banner frame');
+      expect(body.data.terminalBuffer).not.toContain('\x1b[H\x1b[2J');
+      expect(body.data.source).toBe('mux-full-history');
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
+    it('COD-178: codex tab switch (tail) replays the full tmux capture instead of raw byte history', async () => {
+      harness.ctx._session.terminalBuffer = 'stale redraw history';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { fullHistory?: boolean }) =>
+          opts?.fullHistory ? 'full capture scrollback\n› current prompt' : 'visible frame only'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=65536`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('full capture scrollback');
+      expect(body.data.terminalBuffer).not.toContain('stale redraw history');
+      expect(body.data.terminalBuffer).not.toContain('visible frame only');
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
+    it('COD-178: gemini full reload replays the tmux capture only', async () => {
+      harness.ctx._session.terminalBuffer = 'stale gemini redraw frames';
+      harness.ctx._session.mode = 'gemini';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        () => 'gemini clean capture'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('gemini clean capture');
+      expect(body.data.terminalBuffer).not.toContain('stale gemini redraw frames');
+    });
+
+    it('COD-178: codex falls back to raw byte history when capture is unavailable', async () => {
+      harness.ctx._session.terminalBuffer = 'accumulated byte history fallback';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('accumulated byte history fallback');
+      expect(body.data.source).toBe('history');
     });
 
     // ── COD-47: full tmux scrollback replay on full page reload ──
@@ -770,7 +860,9 @@ describe('session-routes', () => {
     });
 
     it('tab switch (with tail) uses the visible frame, not full history', async () => {
-      harness.ctx._session.mode = 'codex';
+      // COD-178 moved codex/gemini to full-capture-only replay; the cheap
+      // visible-frame tail capture still applies to shell (and claude) modes.
+      harness.ctx._session.mode = 'shell';
       harness.ctx._session.terminalBuffer = 'accumulated history';
       const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
         opts?.fullHistory ? 'FULL_HISTORY_SHOULD_NOT_APPEAR' : 'visible frame only\n› prompt'
@@ -825,11 +917,13 @@ describe('session-routes', () => {
     });
 
     it('treats stale Codex scrollback config as TUI replay', async () => {
+      // A stale renderMode:'scrollback' in codexConfig must NOT switch codex
+      // back to append-style history replay — capture-only (COD-178) applies.
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
       harness.ctx._session.codexConfig = { renderMode: 'scrollback' } as any;
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
-        () => 'visible tmux pane only\n› current prompt'
+        () => 'full capture scrollback\n› current prompt'
       );
 
       const res = await harness.app.inject({
@@ -839,27 +933,28 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.data.terminalBuffer).toContain('hello world');
-      expect(body.data.terminalBuffer).toContain('later accumulated history');
-      expect(body.data.terminalBuffer).toContain('\x1b[H\x1b[2Jvisible tmux pane only');
-      expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
-        body.data.terminalBuffer.indexOf('visible tmux pane only')
-      );
+      expect(body.data.terminalBuffer).toContain('full capture scrollback');
+      expect(body.data.terminalBuffer).not.toContain('hello world');
+      expect(body.data.terminalBuffer).not.toContain('\x1b[H\x1b[2J');
       expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
         fullHistory: true,
       });
     });
 
     it('preserves one-time OAuth authorization URLs in Codex TUI replay history', async () => {
+      // Everything codex prints lands in the tmux scrollback, so the full
+      // capture (the only thing codex replay ships since COD-178) carries the
+      // one-time OAuth URL the user still needs to click.
       const authUrl =
         'https://auth.atlassian.com/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A35547%2Fcallback%2Fxyz';
-      harness.ctx._session.terminalBuffer =
-        'Authorize `atlassian` by opening this URL in your browser:\n' +
-        authUrl +
-        '\n(Browser launch failed; please copy the URL above manually.)\n';
+      harness.ctx._session.terminalBuffer = 'stale codex redraw frames';
       harness.ctx._session.mode = 'codex';
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
-        () => 'visible tmux pane only\n› current prompt'
+        () =>
+          'Authorize `atlassian` by opening this URL in your browser:\n' +
+          authUrl +
+          '\n(Browser launch failed; please copy the URL above manually.)\n' +
+          '› current prompt'
       );
 
       const res = await harness.app.inject({
@@ -870,23 +965,21 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain(authUrl);
-      expect(body.data.terminalBuffer).toContain('visible tmux pane only');
-      expect(body.data.terminalBuffer.indexOf(authUrl)).toBeLessThan(
-        body.data.terminalBuffer.indexOf('visible tmux pane only')
-      );
+      expect(body.data.terminalBuffer).toContain('› current prompt');
+      expect(body.data.terminalBuffer).not.toContain('stale codex redraw frames');
     });
 
     it('preserves incidental OAuth URL mentions as ordinary Codex TUI history', async () => {
       const authUrl =
         'https://auth.atlassian.com/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A35547%2Fcallback%2Fxyz';
-      harness.ctx._session.terminalBuffer =
-        'Root cause: URLs like ' +
-        authUrl +
-        ' could be present in history but missing from browser-rendered terminal replay.\n' +
-        "+        'Authorize `atlassian` by opening this URL in your browser:\\n' +\n";
+      harness.ctx._session.terminalBuffer = 'stale codex redraw frames';
       harness.ctx._session.mode = 'codex';
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
-        () => 'visible tmux pane only\n› current prompt'
+        () =>
+          'Root cause: URLs like ' +
+          authUrl +
+          ' could be present in history but missing from browser-rendered terminal replay.\n' +
+          '› current prompt'
       );
 
       const res = await harness.app.inject({
@@ -897,7 +990,7 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain(authUrl);
-      expect(body.data.terminalBuffer).toContain('visible tmux pane only');
+      expect(body.data.terminalBuffer).toContain('› current prompt');
     });
 
     it('preserves accumulated history before a live mux pane snapshot for non-Codex sessions', async () => {
