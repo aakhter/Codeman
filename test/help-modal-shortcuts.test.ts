@@ -42,8 +42,8 @@ describe('help modal shortcuts', () => {
     expectShortcut(helpModal, ['Alt/Option', '1-9'], 'Switch to Tab N');
     expectShortcut(helpModal, ['Ctrl', '{'], 'Move Active Tab Left');
     expectShortcut(helpModal, ['Ctrl', '}'], 'Move Active Tab Right');
-    expectShortcut(helpModal, ['Ctrl', '?'], 'Show Help');
-    expectShortcut(helpModal, ['Ctrl', '/'], 'Show Help');
+    expectShortcut(helpModal, ['Ctrl', '?'], 'Show Shortcuts');
+    expect(helpModal).not.toMatch(/Ctrl<\/kbd>\s*\+\s*<kbd>\/<\/kbd>.*?Show Shortcuts/i);
     expectShortcut(helpModal, ['Ctrl', 'Shift', 'V'], 'Voice Input');
     expectShortcut(helpModal, ['Escape'], 'Close Panels');
   });

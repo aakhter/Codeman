@@ -30,11 +30,11 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     const source = appSource();
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
     const declaration = source.indexOf('let restoredSnapshot = false;', selectStart);
-    const snapshotBranch = source.indexOf("if (snapshot && !sessionIsBusy && session?.mode !== 'shell')", selectStart);
-    const rewriteDecision = source.indexOf(
-      'restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer',
+    const snapshotBranch = source.indexOf(
+      "if (snapshot && session?.mode !== 'shell' && (!sessionIsBusy || session?.mode === 'codex'))",
       selectStart
     );
+    const rewriteDecision = source.indexOf('const preserveSnapshotScrollback', selectStart);
 
     expect(selectStart).toBeGreaterThan(-1);
     expect(declaration).toBeGreaterThan(selectStart);
@@ -58,7 +58,64 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     // Snapshot restore must NOT short-circuit the canonical fetch.
     expect(snapshotBlock).not.toContain('this._finishBufferLoad();');
     expect(postSnapshotRestore).toContain('restoredSnapshot');
-    expect(postSnapshotRestore).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+    expect(postSnapshotRestore).toContain('preserveSnapshotScrollback');
+  });
+
+  it('fetches full Codex history the first time a session is loaded after page open', () => {
+    const source = appSource();
+    const constructorState = source.indexOf('this._sessionsLoadedSincePageOpen = new Set()');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", selectStart);
+    const fetchBlock = source.slice(fetchStart, source.indexOf('const res = await fetch(terminalUrl);', fetchStart));
+
+    expect(constructorState).toBeGreaterThan(-1);
+    expect(fetchStart).toBeGreaterThan(selectStart);
+    expect(fetchBlock).toContain('const requestFullHistory');
+    expect(fetchBlock).toContain('!this._sessionsLoadedSincePageOpen.has(sessionId)');
+    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal`');
+    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
+    expect(fetchBlock).toContain('this._sessionsLoadedSincePageOpen.add(sessionId)');
+  });
+
+  it('restores Codex snapshots even while the session is busy', () => {
+    const source = appSource();
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const sessionIsBusy = source.indexOf('const sessionIsBusy', selectStart);
+    const snapshotBranch = source.indexOf('if (snapshot && session?.mode !==', sessionIsBusy);
+    const busyClear = source.indexOf('CACHE_SKIP_BUSY', snapshotBranch);
+    const block = source.slice(sessionIsBusy, busyClear + 120);
+
+    expect(sessionIsBusy).toBeGreaterThan(selectStart);
+    expect(snapshotBranch).toBeGreaterThan(sessionIsBusy);
+    expect(block).toContain("session?.mode === 'codex'");
+    expect(block).toContain('!sessionIsBusy');
+    expect(block).toContain('!restoredSnapshot');
+  });
+
+  it('uses full terminal history when refreshing an active Codex session after dropped output', () => {
+    const source = appSource();
+    const refreshStart = source.indexOf('async _onSessionNeedsRefresh()');
+    const fetchLine = source.indexOf('const terminalUrl', refreshStart);
+    const fetchCall = source.indexOf('const res = await fetch(terminalUrl);', fetchLine);
+    const block = source.slice(refreshStart, fetchCall + 80);
+
+    expect(refreshStart).toBeGreaterThan(-1);
+    expect(fetchLine).toBeGreaterThan(refreshStart);
+    expect(block).toContain("activeSession?.mode === 'codex'");
+    expect(block).toContain('`/api/sessions/${this.activeSessionId}/terminal`');
+    expect(block).toContain('`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
+  });
+
+  it('schedules a terminal buffer refresh after an unexpected active WebSocket close', () => {
+    const source = appSource();
+    const connectStart = source.indexOf('_connectWs(sessionId)');
+    const closeStart = source.indexOf('ws.onclose = (event) => {', connectStart);
+    const closeEnd = source.indexOf('ws.onerror = () => {', closeStart);
+    const closeBlock = source.slice(closeStart, closeEnd);
+
+    expect(closeStart).toBeGreaterThan(connectStart);
+    expect(closeBlock).toContain('const stillActive = this.activeSessionId === sessionId');
+    expect(closeBlock).toContain('this._scheduleWsCloseRefresh(sessionId)');
   });
 
   it('forces replay after clearing a busy tab even when the fetched frame matches cache', () => {
@@ -72,7 +129,8 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     expect(busyClear).toBeGreaterThan(cacheRestore);
     expect(needsRewrite).toBeGreaterThan(busyClear);
     expect(replayBlock).toContain('clearedForBusy');
-    expect(replayBlock).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+    expect(replayBlock).toContain('preserveSnapshotScrollback');
+    expect(replayBlock).toContain("session?.mode === 'codex'");
   });
 
   it('loads the SerializeAddon and keeps a per-session snapshot map', () => {

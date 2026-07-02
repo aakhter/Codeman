@@ -18,6 +18,27 @@ describe('generated artifact attachments', () => {
     ).toBe(false);
   });
 
+  it('allows known Superpowers mockup artifact directories only', () => {
+    expect(
+      isAllowedGeneratedArtifactPath(
+        '/Users/aamer/.config/superpowers/worktrees/flux-player/issue-268/output/playwright/mockup.png',
+        '/Users/aamer/projects/flux-player'
+      )
+    ).toBe(true);
+    expect(
+      isAllowedGeneratedArtifactPath(
+        '/Users/aamer/.config/superpowers/worktrees/flux-player/issue-268/docs/mockups/mockup.png',
+        '/Users/aamer/projects/flux-player'
+      )
+    ).toBe(true);
+    expect(
+      isAllowedGeneratedArtifactPath(
+        '/Users/aamer/.config/superpowers/worktrees/flux-player/issue-268/.env.png',
+        '/Users/aamer/projects/flux-player'
+      )
+    ).toBe(false);
+  });
+
   it('builds remote fetch argv from the session SSH configuration', () => {
     const remote: SessionRemote = {
       hostId: 'mac-mini',

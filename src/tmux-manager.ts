@@ -835,9 +835,12 @@ export function buildRemoteLaunchCommand(options: {
   mode: SessionMode;
   remote: SessionRemote;
   sessionId: string;
+  codexConfig?: CodexConfig;
 }): string {
-  const { mode, remote, sessionId } = options;
-  const modeCommand = remote.commands?.[mode] || defaultRemoteCommandForMode(mode);
+  const { mode, remote, sessionId, codexConfig } = options;
+  const modeCommand =
+    remote.commands?.[mode] ||
+    (mode === 'codex' ? `exec ${buildCodexCommand(codexConfig)}` : defaultRemoteCommandForMode(mode));
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -948,12 +951,17 @@ export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName:
  *   - owned (default): LAUNCH/attach-or-create via `buildRemoteLaunchCommand`
  *     (COD-104), which we then own and may explicitly kill.
  */
-function buildRemoteSessionCommand(mode: SessionMode, remote: SessionRemote, sessionId: string): string {
+function buildRemoteSessionCommand(
+  mode: SessionMode,
+  remote: SessionRemote,
+  sessionId: string,
+  options: { codexConfig?: CodexConfig } = {}
+): string {
   if (remote.owned === false) {
     const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId);
     return buildRemoteAttachCommand(remote, target);
   }
-  return buildRemoteLaunchCommand({ mode, remote, sessionId });
+  return buildRemoteLaunchCommand({ mode, remote, sessionId, codexConfig: options.codexConfig });
 }
 
 /**
@@ -1465,7 +1473,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     try {
       // Build the full command to run inside tmux
       const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
-      const fullCmd = remote ? buildRemoteSessionCommand(mode, remote, sessionId) : localFullCmd;
+      const fullCmd = remote ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig }) : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
@@ -1725,7 +1733,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);
     const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
-    const fullCmd = remote ? buildRemoteSessionCommand(mode, remote, sessionId) : localFullCmd;
+    const fullCmd = remote ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig }) : localFullCmd;
 
     try {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn

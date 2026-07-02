@@ -69,6 +69,21 @@ describe('attachment magic links', () => {
     ]);
   });
 
+  it('extracts Superpowers mockup paths printed as labeled terminal output', () => {
+    const requests = parseTerminalAttachmentRequests(
+      ['Mockup:', '/Users/aamer/.config/superpowers/worktrees/flux-player/issue-268/output/playwright/mockup.png'].join(
+        '\n'
+      )
+    );
+
+    expect(requests).toEqual([
+      {
+        path: '/Users/aamer/.config/superpowers/worktrees/flux-player/issue-268/output/playwright/mockup.png',
+        source: 'codex-generated',
+      },
+    ]);
+  });
+
   it('emits generated artifact requests from Codex saved-to output', () => {
     const session = new Session({ id: 'session-generated-artifact-test', workingDir: '/tmp', mode: 'codex' });
     const requested: Array<{ path: string; source?: string }> = [];

@@ -339,6 +339,125 @@ function parseSessionPrefix(name) {
   return null;
 }
 
+const DEFAULT_SHORTCUTS = [
+  {
+    id: 'show-shortcuts',
+    group: 'Panels',
+    label: 'Show Shortcuts',
+    bindings: [
+      { modifiers: ['ctrl'], key: '?', code: 'Slash' },
+      { modifiers: ['alt'], key: '?', code: 'Slash' },
+    ],
+    action: 'showShortcutOverlay',
+  },
+  {
+    id: 'close-session',
+    group: 'Session',
+    label: 'Close Session',
+    bindings: [{ modifiers: ['ctrl'], key: 'w' }],
+    action: 'killActiveSession',
+  },
+  {
+    id: 'next-session',
+    group: 'Session',
+    label: 'Next Session',
+    bindings: [{ modifiers: ['ctrl'], key: 'Tab' }],
+    action: 'nextSession',
+  },
+  {
+    id: 'clear-terminal',
+    group: 'Terminal',
+    label: 'Clear Terminal',
+    bindings: [{ modifiers: ['ctrl'], key: 'l' }],
+    action: 'clearTerminal',
+  },
+  {
+    id: 'increase-font',
+    group: 'Terminal',
+    label: 'Increase Font',
+    bindings: [
+      { modifiers: ['ctrl'], key: '=', code: 'Equal' },
+      { modifiers: ['ctrl'], key: '+', code: 'Equal' },
+    ],
+    action: 'increaseFontSize',
+  },
+  {
+    id: 'decrease-font',
+    group: 'Terminal',
+    label: 'Decrease Font',
+    bindings: [{ modifiers: ['ctrl'], key: '-', code: 'Minus' }],
+    action: 'decreaseFontSize',
+  },
+  {
+    id: 'voice-input',
+    group: 'Terminal',
+    label: 'Voice Input',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'V' }],
+    action: 'toggleVoiceInput',
+  },
+  {
+    id: 'move-tab-left',
+    group: 'Tabs',
+    label: 'Move Active Tab Left',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: '{', code: 'BracketLeft' }],
+    action: 'moveActiveTabLeft',
+  },
+  {
+    id: 'move-tab-right',
+    group: 'Tabs',
+    label: 'Move Active Tab Right',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: '}', code: 'BracketRight' }],
+    action: 'moveActiveTabRight',
+  },
+  {
+    id: 'command-palette',
+    group: 'Session',
+    label: 'Find Open Session',
+    bindings: [
+      { modifiers: ['ctrl'], key: 'k', code: 'KeyK' },
+      { modifiers: ['meta'], key: 'k', code: 'KeyK' },
+      { modifiers: ['alt'], key: 'k', code: 'KeyK' },
+    ],
+    action: 'openCommandPalette',
+  },
+  {
+    id: 'previous-next-session',
+    group: 'Session',
+    label: 'Previous / Next Session',
+    displayBindings: ['Alt/Option+[', 'Alt/Option+]'],
+  },
+  {
+    id: 'switch-tab-n',
+    group: 'Session',
+    label: 'Switch to Tab N',
+    displayBindings: ['Alt/Option+1-9'],
+  },
+  {
+    id: 'focus-tabs',
+    group: 'Tabs',
+    label: 'Focus Tabs',
+    displayBindings: ['ArrowLeft', 'ArrowRight', 'Home', 'End'],
+  },
+  {
+    id: 'activate-focused-tab',
+    group: 'Tabs',
+    label: 'Activate Focused Tab',
+    displayBindings: ['Enter', 'Space'],
+  },
+  {
+    id: 'insert-newline',
+    group: 'Terminal',
+    label: 'Insert Newline',
+    displayBindings: ['Shift+Enter', 'Ctrl+Enter'],
+  },
+  {
+    id: 'close-panels',
+    group: 'Panels',
+    label: 'Close Panels',
+    displayBindings: ['Escape'],
+  },
+];
+
 // ═══════════════════════════════════════════════════════════════
 // CodemanApp Class — constructor and global state
 // ═══════════════════════════════════════════════════════════════
@@ -389,6 +508,7 @@ class CodemanApp {
     this.respawnActionLogs = {};      // { sessionId: [action, action, ...] } (max 20)
     this.timerCountdownInterval = null; // Interval for updating countdown display
     this.terminalBuffers = new Map(); // Store terminal content per session
+    this._sessionsLoadedSincePageOpen = new Set(); // First load after browser reload gets full tmux scrollback
     this.editingSessionId = null; // Session being edited in options modal
     this.pendingCloseSessionId = null; // Session pending close confirmation
     this.muxSessions = []; // Screen sessions for process monitor
@@ -497,6 +617,7 @@ class CodemanApp {
     this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | disconnected
     this._wsLastClose = null; // { code, reason, at } for transport diagnostics
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
+    this._wsCloseRefreshTimer = null;
     this._wsInputSendCount = 0;
     this._httpFallbackSendCount = 0;
 
@@ -845,39 +966,145 @@ class CodemanApp {
     } catch {}
   }
 
+  getShortcutRegistry() {
+    const settings = this.loadAppSettingsFromStorage?.() || {};
+    const shortcutOverrides = settings.shortcutOverrides || {};
+    return this.getDefaultShortcutRegistry().map((shortcut) => {
+      const override = shortcutOverrides[shortcut.id];
+      if (!override || typeof override !== 'object') return shortcut;
+      const next = { ...shortcut };
+      if (override.disabled === true) next.disabled = true;
+      if (Array.isArray(override.bindings)) next.bindings = this.normalizeShortcutBindings(override.bindings);
+      if (Array.isArray(override.displayBindings)) next.displayBindings = override.displayBindings.filter(Boolean);
+      return next;
+    });
+  }
+
+  getDefaultShortcutRegistry() {
+    return DEFAULT_SHORTCUTS.map((shortcut) => ({
+      ...shortcut,
+      bindings: shortcut.bindings ? shortcut.bindings.map((binding) => ({ ...binding, modifiers: [...(binding.modifiers || [])] })) : undefined,
+      displayBindings: shortcut.displayBindings ? [...shortcut.displayBindings] : undefined,
+    }));
+  }
+
+  normalizeShortcutBindings(bindings) {
+    return bindings
+      .filter((binding) => binding && typeof binding === 'object')
+      .map((binding) => ({
+        key: typeof binding.key === 'string' ? binding.key : '',
+        code: typeof binding.code === 'string' ? binding.code : undefined,
+        modifiers: Array.isArray(binding.modifiers)
+          ? binding.modifiers.filter((modifier) => ['ctrl', 'meta', 'alt', 'shift'].includes(modifier))
+          : [],
+      }))
+      .filter((binding) => binding.key || binding.code);
+  }
+
+  matchesShortcutEvent(e, shortcut) {
+    if (!shortcut || shortcut.disabled || !Array.isArray(shortcut.bindings)) return false;
+    const eventKey = this.shortcutEventKey(e);
+    return shortcut.bindings.some((binding) => {
+      const modifiers = new Set(binding.modifiers || []);
+      const ctrlOrMeta = modifiers.has('ctrl') ? (e.ctrlKey || e.metaKey) : true;
+      const meta = modifiers.has('meta') ? e.metaKey : true;
+      const alt = modifiers.has('alt') ? e.altKey : !e.altKey;
+      const keyNeedsShift = ['?', '+', '{', '}'].includes(binding.key);
+      const shift = modifiers.has('shift') ? e.shiftKey : (!e.shiftKey || keyNeedsShift);
+      const codeMatch = !binding.key && binding.code && e.code === binding.code;
+      const keyMatch = binding.key && String(eventKey).toLowerCase() === String(binding.key).toLowerCase();
+      return ctrlOrMeta && meta && alt && shift && (codeMatch || keyMatch);
+    });
+  }
+
+  shortcutEventKey(e) {
+    const shiftedCodeKeys = {
+      Slash: '?',
+      Equal: '+',
+      BracketLeft: '{',
+      BracketRight: '}',
+    };
+    if (e.shiftKey && shiftedCodeKeys[e.code]) return shiftedCodeKeys[e.code];
+    return e.key || '';
+  }
+
+  runShortcutAction(shortcut) {
+    if (!shortcut?.action) return false;
+    if (shortcut.action === 'toggleVoiceInput') {
+      VoiceInput.toggle();
+      return true;
+    }
+    const fn = this[shortcut.action];
+    if (typeof fn !== 'function') return false;
+    fn.call(this);
+    return true;
+  }
+
+  formatShortcutBinding(binding) {
+    if (typeof binding === 'string') return binding;
+    const parts = [];
+    const modifiers = binding.modifiers || [];
+    if (modifiers.includes('ctrl')) parts.push('Ctrl');
+    if (modifiers.includes('meta')) parts.push('Cmd');
+    if (modifiers.includes('alt')) parts.push('Alt/Option');
+    if (modifiers.includes('shift')) parts.push('Shift');
+    const key = binding.key || binding.code || '';
+    parts.push(key.length === 1 && /[a-z]/.test(key) ? key.toUpperCase() : key);
+    return parts.filter(Boolean).join('+');
+  }
+
+  renderShortcutOverlay() {
+    const list = document.getElementById('shortcutOverlayList');
+    if (!list) return;
+    const groups = new Map();
+    for (const shortcut of this.getShortcutRegistry()) {
+      if (shortcut.disabled) continue;
+      if (!groups.has(shortcut.group)) groups.set(shortcut.group, []);
+      groups.get(shortcut.group).push(shortcut);
+    }
+    const html = [];
+    for (const [group, shortcuts] of groups) {
+      html.push(`<section class="shortcut-section"><h4>${escapeHtml(group)}</h4><div class="shortcuts-grid">`);
+      for (const shortcut of shortcuts) {
+        const displayBindings = shortcut.displayBindings || shortcut.bindings || [];
+        const keys = displayBindings
+          .map((binding) => this.formatShortcutBinding(binding).split('+').map((part) => `<kbd>${escapeHtml(part)}</kbd>`).join('+'))
+          .join(' / ');
+        html.push(`<div>${keys}</div><div>${escapeHtml(shortcut.label)}</div>`);
+      }
+      html.push('</div></section>');
+    }
+    list.innerHTML = html.join('');
+  }
+
+  showShortcutOverlay() {
+    const modal = document.getElementById('shortcutOverlayModal');
+    if (!modal) return;
+    this.renderShortcutOverlay();
+    modal.classList.add('active');
+    this.activeFocusTrap = new FocusTrap(modal);
+    this.activeFocusTrap.activate();
+  }
+
+  closeShortcutOverlay() {
+    const modal = document.getElementById('shortcutOverlayModal');
+    if (modal) modal.classList.remove('active');
+    if (this.activeFocusTrap) {
+      this.activeFocusTrap.deactivate();
+      this.activeFocusTrap = null;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Event Listeners (Keyboard Shortcuts, Resize, Beforeunload)
   // ═══════════════════════════════════════════════════════════════
 
   setupEventListeners() {
-    // Keyboard shortcut lookup table — data-driven to avoid 12 separate if-blocks.
-    // Each entry: { key, altKey? (alternative key match), ctrl? (require Ctrl/Cmd),
-    //               shift? (require Shift), action }.
-    const SHORTCUTS = [
-      { key: '?', altKey: '/', ctrl: true, action: () => this.showHelp() },
-      // Ctrl+Enter reserved for multi-line input in terminal; use welcome screen button instead
-      // { key: 'Enter', ctrl: true, action: () => this.quickStart() },
-      { key: 'w', ctrl: true, action: () => this.killActiveSession() },
-      { key: 'Tab', ctrl: true, action: () => this.nextSession() },
-      // { key: 'k', ctrl: true, action: () => this.killAllSessions() }, // disabled: too easy to trigger accidentally
-      { key: 'l', ctrl: true, action: () => this.clearTerminal() },
-      // Ctrl+Shift+R left to the browser for hard-reload. The previous binding
-      // to restoreTerminalSize() sent a resize POST + Ctrl+L (form feed) to
-      // the active session — for codex sessions that triggers a fresh TUI
-      // redraw (banner + status bar) per press, stacking ghost frames in
-      // xterm with every press. restoreTerminalSize remains callable via
-      // the toolbar / mobile keyboard accessory.
-      { key: '=', altKey: '+', ctrl: true, action: () => this.increaseFontSize() },
-      { key: '-', ctrl: true, action: () => this.decreaseFontSize() },
-      { key: 'V', ctrl: true, shift: true, action: () => VoiceInput.toggle() },
-      { key: '{', ctrl: true, shift: true, action: () => this.moveActiveTabLeft() },
-      { key: '}', ctrl: true, shift: true, action: () => this.moveActiveTabRight() },
-    ];
-
     // Use capture to handle before terminal
     document.addEventListener('keydown', (e) => {
       // Don't intercept keys during CJK IME composition
       if (e.isComposing || e.keyCode === 229) return;
+      if (this._capturingShortcutId || e.target?.classList?.contains('shortcut-binding-input')) return;
 
       if (this.shouldOpenCommandPaletteFromShortcut?.(e)) {
         e.preventDefault();
@@ -889,6 +1116,7 @@ class CodemanApp {
       if (e.key === 'Escape') {
         this.closeAllPanels();
         this.closeHelp();
+        this.closeShortcutOverlay();
         if (this.attachmentHistoryDrawerOpen) this.closeAttachmentHistory();
         this.closeSessionManager();
         this.closeCommandPalette?.();
@@ -921,14 +1149,10 @@ class CodemanApp {
         }
       }
 
-      // Match against shortcut table
-      for (const s of SHORTCUTS) {
-        const keyMatch = e.key === s.key || (s.altKey && e.key === s.altKey);
-        const ctrlMatch = s.ctrl ? (e.ctrlKey || e.metaKey) : true;
-        const shiftMatch = s.shift ? e.shiftKey : !e.shiftKey;
-        if (keyMatch && ctrlMatch && shiftMatch) {
+      for (const shortcut of this.getShortcutRegistry()) {
+        if (this.matchesShortcutEvent(e, shortcut)) {
           e.preventDefault();
-          s.action();
+          this.runShortcutAction(shortcut);
           return;
         }
       }
@@ -1836,7 +2060,12 @@ class CodemanApp {
     // Skip if buffer load already in progress — avoids competing clear+rewrite cycles
     if (this._isLoadingBuffer) return;
     try {
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
+      const activeSession = this.sessions.get(this.activeSessionId);
+      const terminalUrl =
+        activeSession?.mode === 'codex'
+          ? `/api/sessions/${this.activeSessionId}/terminal`
+          : `/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      const res = await fetch(terminalUrl);
       const data = (await res.json())?.data ?? {};
       if (data.terminalBuffer) {
         this.terminal.clear();
@@ -2199,6 +2428,9 @@ class CodemanApp {
       );
 
       const stillActive = this.activeSessionId === sessionId;
+      if (stillActive && plan.action !== 'give-up') {
+        this._scheduleWsCloseRefresh(sessionId);
+      }
       if (plan.action === 'give-up') {
         this._wsState = stillActive ? 'fallback' : 'disconnected';
         this._updateConnectionIndicator();
@@ -2238,6 +2470,16 @@ class CodemanApp {
     ws.onerror = () => {
       // onclose will fire after onerror — cleanup happens there
     };
+  }
+
+  _scheduleWsCloseRefresh(sessionId) {
+    this._clearTimer('_wsCloseRefreshTimer');
+    this._wsCloseRefreshTimer = setTimeout(() => {
+      this._wsCloseRefreshTimer = null;
+      if (this.activeSessionId === sessionId) {
+        this._onSessionNeedsRefresh({ id: sessionId });
+      }
+    }, 250);
   }
 
   /** Close the active WebSocket connection (if any). */
@@ -3409,7 +3651,7 @@ class CodemanApp {
       if ((e.key === 'Enter' || e.key === ' ') && currentIndex >= 0) {
         e.preventDefault();
         const sessionId = tabs[currentIndex].dataset.id;
-        this.selectSession(sessionId, { forceReload: true });
+        this.selectSession(sessionId);
         return;
       }
 
@@ -3449,7 +3691,7 @@ class CodemanApp {
     if (!keyboardOpen && MobileDetection.isTouchDevice()) {
       document.activeElement?.blur?.();
     }
-    return this.selectSession(sessionId, { forceReload: true });
+    return this.selectSession(sessionId);
   }
 
 
@@ -3871,8 +4113,6 @@ class CodemanApp {
     if (this.activeSessionId === sessionId && !forceReload) return;
     if (this.activeSessionId === sessionId && forceReload) {
       this.terminalBufferCache?.delete(sessionId);
-      this._xtermSnapshots?.delete(sessionId);
-      try { localStorage.removeItem(`codeman-xs-${sessionId}`); } catch {}
       this._clearTimer('syncWaitTimeout');
       this.pendingWrites = [];
       this.writeFrameScheduled = false;
@@ -4038,7 +4278,7 @@ class CodemanApp {
       }
       const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
       let restoredSnapshot = false;
-      if (snapshot && !sessionIsBusy && session?.mode !== 'shell') {
+      if (snapshot && session?.mode !== 'shell' && (!sessionIsBusy || session?.mode === 'codex')) {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');
         this._resetTerminalForReplay();
@@ -4049,10 +4289,10 @@ class CodemanApp {
         }
         this.scrollToLastNonEmptyLine();
         _crashDiag.log('SNAPSHOT_RESTORE_DONE');
-        // Snapshot restore is only first paint. Inactive tabs intentionally
-        // unsubscribe from high-volume terminal output, so they can miss bytes
-        // emitted while away. Keep going and replace the snapshot with the
-        // canonical live tmux pane frame from /terminal.
+        // Snapshot restore is authoritative for Codex scrollback. Codex's TUI
+        // current frame can omit earlier assistant output that xterm already
+        // preserved, so the fetch below should update cache/state without
+        // replacing this rendered snapshot.
         restoredSnapshot = true;
       }
 
@@ -4074,7 +4314,7 @@ class CodemanApp {
         }
         this.terminal.scrollToBottom();
         _crashDiag.log('CACHE_DONE');
-      } else if (sessionIsBusy) {
+      } else if (sessionIsBusy && !restoredSnapshot) {
         // Clear stale content immediately — fresh buffer is being fetched
         this._resetTerminalForReplay();
         clearedForBusy = true;
@@ -4096,10 +4336,12 @@ class CodemanApp {
 
       this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
+      const requestFullHistory = session?.mode !== 'shell' && !this._sessionsLoadedSincePageOpen.has(sessionId);
       const terminalUrl =
-        session?.mode === 'shell'
+        session?.mode === 'shell' || requestFullHistory
           ? `/api/sessions/${sessionId}/terminal`
           : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      this._sessionsLoadedSincePageOpen.add(sessionId);
       const res = await fetch(terminalUrl);
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
@@ -4112,11 +4354,12 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
-        // A snapshot restore or a busy-clear leaves the terminal showing
-        // something other than the cache, so the fetched buffer must be
-        // replayed even when it byte-matches the cache.
+        // A restored Codex snapshot intentionally keeps the browser's richer
+        // scrollback. Other snapshot restores and busy-clears still replay the
+        // fetched frame because it is the canonical terminal state.
+        const preserveSnapshotScrollback = restoredSnapshot && session?.mode === 'codex' && !clearedForBusy;
         const needsRewrite =
-          restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
+          clearedForBusy || (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');

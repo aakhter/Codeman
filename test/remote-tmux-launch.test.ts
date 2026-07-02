@@ -74,6 +74,17 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).toContain('exec codx personal');
   });
 
+  it('passes Codex bypass approvals flag to default remote Codex launches', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      sessionId: SESSION_ID,
+      remote: baseRemote,
+      codexConfig: { dangerouslyBypassApprovals: true },
+    });
+
+    expect(command).toContain('exec codex --dangerously-bypass-approvals-and-sandbox');
+  });
+
   it('omits -p when no port is set', () => {
     const command = buildRemoteLaunchCommand({
       mode: 'shell',

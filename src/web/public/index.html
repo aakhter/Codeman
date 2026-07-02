@@ -627,12 +627,24 @@
           <section class="shortcut-section">
             <h4>Panels</h4>
             <div class="shortcuts-grid">
-              <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Help</div>
-              <div><kbd>Ctrl</kbd>+<kbd>/</kbd></div><div>Show Help</div>
+              <div><kbd>Ctrl</kbd>+<kbd>?</kbd></div><div>Show Shortcuts</div>
+              <div><kbd>Alt/Option</kbd>+<kbd>?</kbd></div><div>Show Shortcuts</div>
               <div><kbd>Escape</kbd></div><div>Close Panels</div>
             </div>
           </section>
         </div>
+      </div>
+    </div>
+
+    <!-- Shortcut Overlay Modal -->
+    <div class="modal" id="shortcutOverlayModal">
+      <div class="modal-backdrop" onclick="app.closeShortcutOverlay()"></div>
+      <div class="modal-content shortcut-overlay-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutOverlayTitle">
+        <div class="modal-header">
+          <h3 id="shortcutOverlayTitle">Keyboard Shortcuts</h3>
+          <button class="modal-close" onclick="app.closeShortcutOverlay()" aria-label="Close shortcut overlay">&times;</button>
+        </div>
+        <div class="modal-body" id="shortcutOverlayList"></div>
       </div>
     </div>
 
@@ -1077,6 +1089,7 @@
           <button class="modal-tab-btn" data-tab="settings-codex">Codex CLI</button>
           <button class="modal-tab-btn" data-tab="settings-headroom">Headroom</button>
           <button class="modal-tab-btn" data-tab="settings-models">Models</button>
+          <button class="modal-tab-btn" data-tab="settings-shortcuts">Shortcuts</button>
           <button class="modal-tab-btn" data-tab="settings-authoring">Authoring</button>
           <button class="modal-tab-btn" data-tab="settings-paths">Paths</button>
           <button class="modal-tab-btn" data-tab="settings-notifications">Notifications</button>
@@ -1139,7 +1152,6 @@
                   <span class="slider"></span>
                 </label>
               </div>
-
               <!-- Header Displays Section -->
               <div class="settings-section-header">Header Displays</div>
               <div class="settings-item" title="Show Claude plan usage limits (5-hour & weekly) in the header. Applies to newly created sessions.">
@@ -1567,6 +1579,10 @@
               </select>
               <span class="form-hint">Code review, quality checks</span>
             </div>
+          </div>
+          <!-- Shortcuts Tab -->
+          <div class="modal-tab-content hidden" id="settings-shortcuts">
+            <div class="shortcuts-settings-list" id="appSettingsShortcutsList"></div>
           </div>
           <!-- Paths Tab -->
           <div class="modal-tab-content hidden" id="settings-paths">
