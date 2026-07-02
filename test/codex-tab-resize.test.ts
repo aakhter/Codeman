@@ -67,7 +67,7 @@ describe('Codex tab resize behavior', () => {
     const fetchStart = source.indexOf("FETCH_START'", snapshotRestore);
     const needsRewrite = source.indexOf('const needsRewrite', fetchStart);
     const snapshotBlock = source.slice(snapshotRestore, cacheRestore);
-    const postSnapshotRestore = source.slice(snapshotRestore, needsRewrite + 120);
+    const postSnapshotRestore = source.slice(snapshotRestore, needsRewrite + 220);
 
     expect(snapshotRestore).toBeGreaterThan(-1);
     expect(cacheRestore).toBeGreaterThan(snapshotRestore);
@@ -76,18 +76,54 @@ describe('Codex tab resize behavior', () => {
     expect(snapshotBlock).not.toContain('this._finishBufferLoad();');
     expect(snapshotBlock).not.toContain("Don't fall through to buffer-fetch");
     expect(postSnapshotRestore).toContain('restoredSnapshot');
-    expect(postSnapshotRestore).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+    expect(postSnapshotRestore).toContain('preserveSnapshotScrollback');
+  });
+
+  it('does not hard-reload or delete snapshots for ordinary tab clicks', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const clickStart = source.indexOf('handleSessionTabClick(event, sessionId)');
+    const clickEnd = source.indexOf('// ═══════════════════════════════════════════════════════════════', clickStart);
+    const clickBlock = source.slice(clickStart, clickEnd);
+    const forceReloadBranch = source.slice(
+      source.indexOf('if (this.activeSessionId === sessionId && forceReload)'),
+      source.indexOf(
+        '// Focus terminal SYNCHRONOUSLY',
+        source.indexOf('if (this.activeSessionId === sessionId && forceReload)')
+      )
+    );
+
+    expect(clickStart).toBeGreaterThan(-1);
+    expect(clickBlock).toContain('this.selectSession(sessionId)');
+    expect(clickBlock).not.toContain('forceReload: true');
+    expect(forceReloadBranch).toContain('this.terminalBufferCache?.delete(sessionId)');
+    expect(forceReloadBranch).not.toContain('this._xtermSnapshots?.delete(sessionId)');
+    expect(forceReloadBranch).not.toContain('localStorage.removeItem(`codeman-xs-${sessionId}`)');
+  });
+
+  it('keeps restored Codex snapshots from being overwritten by the fetched TUI frame', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const sessionIsBusy = source.indexOf('const sessionIsBusy', selectStart);
+    const needsRewrite = source.indexOf('const needsRewrite', sessionIsBusy);
+    const rewriteBlock = source.slice(sessionIsBusy, source.indexOf('if (needsRewrite)', needsRewrite));
+
+    expect(selectStart).toBeGreaterThan(-1);
+    expect(sessionIsBusy).toBeGreaterThan(selectStart);
+    expect(rewriteBlock).toContain('const preserveSnapshotScrollback');
+    expect(rewriteBlock).toContain("session?.mode === 'codex'");
+    expect(rewriteBlock).toContain('!preserveSnapshotScrollback');
+    expect(rewriteBlock).not.toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
   });
 
   it('declares the snapshot-restore flag before selectSession uses it', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
     const declaration = source.indexOf('let restoredSnapshot = false;', selectStart);
-    const snapshotBranch = source.indexOf("if (snapshot && !sessionIsBusy && session?.mode !== 'shell')", selectStart);
-    const rewriteDecision = source.indexOf(
-      'restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer',
+    const snapshotBranch = source.indexOf(
+      "if (snapshot && session?.mode !== 'shell' && (!sessionIsBusy || session?.mode === 'codex'))",
       selectStart
     );
+    const rewriteDecision = source.indexOf('const preserveSnapshotScrollback', selectStart);
 
     expect(selectStart).toBeGreaterThan(-1);
     expect(declaration).toBeGreaterThan(selectStart);
@@ -106,7 +142,8 @@ describe('Codex tab resize behavior', () => {
     expect(busyClear).toBeGreaterThan(cacheRestore);
     expect(needsRewrite).toBeGreaterThan(busyClear);
     expect(replayBlock).toContain('clearedForBusy');
-    expect(replayBlock).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
+    expect(replayBlock).toContain('preserveSnapshotScrollback');
+    expect(replayBlock).toContain("session?.mode === 'codex'");
   });
 
   it('nudges xterm to repaint after session restore and browser refocus', () => {
@@ -114,7 +151,8 @@ describe('Codex tab resize behavior', () => {
     const terminalSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
     const focus = appSource.indexOf("_crashDiag.log('FOCUS')");
     const selectDone = appSource.indexOf('SELECT_DONE', focus);
-    const visibilityListener = appSource.indexOf("document.addEventListener('visibilitychange'");
+    const setupEvents = appSource.indexOf('setupEventListeners()');
+    const visibilityListener = appSource.indexOf("document.addEventListener('visibilitychange'", setupEvents);
     const windowFocusListener = appSource.indexOf("window.addEventListener('focus'");
 
     expect(focus).toBeGreaterThan(-1);
@@ -137,7 +175,7 @@ describe('Codex tab resize behavior', () => {
       source.indexOf('return false;', source.indexOf('_isStaleSelect(selectGen)'))
     );
     const loadStart = source.indexOf('const bufferLoadOwner = this._beginBufferLoad(selectGen);');
-    const selectDone = source.indexOf('SELECT_DONE', loadStart);
+    const selectDone = source.indexOf('_crashDiag.log(`SELECT_DONE:', loadStart);
     const selectBlock = source.slice(loadStart, selectDone);
     const catchBlock = source.slice(
       source.indexOf('} catch (err) {', selectDone),
@@ -150,7 +188,7 @@ describe('Codex tab resize behavior', () => {
     expect(selectBlock).toContain(
       'this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)'
     );
-    expect(selectBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
+    expect(selectBlock).toContain('this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty })');
     expect(catchBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
     expect(selectBlock).not.toContain('this._finishBufferLoad()');
     expect(catchBlock).not.toContain('this._finishBufferLoad()');

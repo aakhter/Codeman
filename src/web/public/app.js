@@ -508,6 +508,7 @@ class CodemanApp {
     this.respawnActionLogs = {};      // { sessionId: [action, action, ...] } (max 20)
     this.timerCountdownInterval = null; // Interval for updating countdown display
     this.terminalBuffers = new Map(); // Store terminal content per session
+    this._sessionsLoadedSincePageOpen = new Set(); // First load after browser reload gets full tmux scrollback
     this.editingSessionId = null; // Session being edited in options modal
     this.pendingCloseSessionId = null; // Session pending close confirmation
     this.muxSessions = []; // Screen sessions for process monitor
@@ -616,6 +617,7 @@ class CodemanApp {
     this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | disconnected
     this._wsLastClose = null; // { code, reason, at } for transport diagnostics
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
+    this._wsCloseRefreshTimer = null;
     this._wsInputSendCount = 0;
     this._httpFallbackSendCount = 0;
 
@@ -2058,7 +2060,12 @@ class CodemanApp {
     // Skip if buffer load already in progress — avoids competing clear+rewrite cycles
     if (this._isLoadingBuffer) return;
     try {
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
+      const activeSession = this.sessions.get(this.activeSessionId);
+      const terminalUrl =
+        activeSession?.mode === 'codex'
+          ? `/api/sessions/${this.activeSessionId}/terminal`
+          : `/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      const res = await fetch(terminalUrl);
       const data = (await res.json())?.data ?? {};
       if (data.terminalBuffer) {
         this.terminal.clear();
@@ -2421,6 +2428,9 @@ class CodemanApp {
       );
 
       const stillActive = this.activeSessionId === sessionId;
+      if (stillActive && plan.action !== 'give-up') {
+        this._scheduleWsCloseRefresh(sessionId);
+      }
       if (plan.action === 'give-up') {
         this._wsState = stillActive ? 'fallback' : 'disconnected';
         this._updateConnectionIndicator();
@@ -2460,6 +2470,16 @@ class CodemanApp {
     ws.onerror = () => {
       // onclose will fire after onerror — cleanup happens there
     };
+  }
+
+  _scheduleWsCloseRefresh(sessionId) {
+    this._clearTimer('_wsCloseRefreshTimer');
+    this._wsCloseRefreshTimer = setTimeout(() => {
+      this._wsCloseRefreshTimer = null;
+      if (this.activeSessionId === sessionId) {
+        this._onSessionNeedsRefresh({ id: sessionId });
+      }
+    }, 250);
   }
 
   /** Close the active WebSocket connection (if any). */
@@ -3631,7 +3651,7 @@ class CodemanApp {
       if ((e.key === 'Enter' || e.key === ' ') && currentIndex >= 0) {
         e.preventDefault();
         const sessionId = tabs[currentIndex].dataset.id;
-        this.selectSession(sessionId, { forceReload: true });
+        this.selectSession(sessionId);
         return;
       }
 
@@ -3671,7 +3691,7 @@ class CodemanApp {
     if (!keyboardOpen && MobileDetection.isTouchDevice()) {
       document.activeElement?.blur?.();
     }
-    return this.selectSession(sessionId, { forceReload: true });
+    return this.selectSession(sessionId);
   }
 
 
@@ -4093,8 +4113,6 @@ class CodemanApp {
     if (this.activeSessionId === sessionId && !forceReload) return;
     if (this.activeSessionId === sessionId && forceReload) {
       this.terminalBufferCache?.delete(sessionId);
-      this._xtermSnapshots?.delete(sessionId);
-      try { localStorage.removeItem(`codeman-xs-${sessionId}`); } catch {}
       this._clearTimer('syncWaitTimeout');
       this.pendingWrites = [];
       this.writeFrameScheduled = false;
@@ -4260,7 +4278,7 @@ class CodemanApp {
       }
       const sessionIsBusy = session && (session.status === 'busy' || session.status === 'working');
       let restoredSnapshot = false;
-      if (snapshot && !sessionIsBusy && session?.mode !== 'shell') {
+      if (snapshot && session?.mode !== 'shell' && (!sessionIsBusy || session?.mode === 'codex')) {
         _crashDiag.log(`SNAPSHOT_RESTORE: ${(snapshot.length/1024).toFixed(0)}KB`);
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');
         this._resetTerminalForReplay();
@@ -4271,10 +4289,10 @@ class CodemanApp {
         }
         this.scrollToLastNonEmptyLine();
         _crashDiag.log('SNAPSHOT_RESTORE_DONE');
-        // Snapshot restore is only first paint. Inactive tabs intentionally
-        // unsubscribe from high-volume terminal output, so they can miss bytes
-        // emitted while away. Keep going and replace the snapshot with the
-        // canonical live tmux pane frame from /terminal.
+        // Snapshot restore is authoritative for Codex scrollback. Codex's TUI
+        // current frame can omit earlier assistant output that xterm already
+        // preserved, so the fetch below should update cache/state without
+        // replacing this rendered snapshot.
         restoredSnapshot = true;
       }
 
@@ -4296,7 +4314,7 @@ class CodemanApp {
         }
         this.terminal.scrollToBottom();
         _crashDiag.log('CACHE_DONE');
-      } else if (sessionIsBusy) {
+      } else if (sessionIsBusy && !restoredSnapshot) {
         // Clear stale content immediately — fresh buffer is being fetched
         this._resetTerminalForReplay();
         clearedForBusy = true;
@@ -4318,10 +4336,12 @@ class CodemanApp {
 
       this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
+      const requestFullHistory = session?.mode !== 'shell' && !this._sessionsLoadedSincePageOpen.has(sessionId);
       const terminalUrl =
-        session?.mode === 'shell'
+        session?.mode === 'shell' || requestFullHistory
           ? `/api/sessions/${sessionId}/terminal`
           : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      this._sessionsLoadedSincePageOpen.add(sessionId);
       const res = await fetch(terminalUrl);
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
@@ -4334,11 +4354,12 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
-        // A snapshot restore or a busy-clear leaves the terminal showing
-        // something other than the cache, so the fetched buffer must be
-        // replayed even when it byte-matches the cache.
+        // A restored Codex snapshot intentionally keeps the browser's richer
+        // scrollback. Other snapshot restores and busy-clears still replay the
+        // fetched frame because it is the canonical terminal state.
+        const preserveSnapshotScrollback = restoredSnapshot && session?.mode === 'codex' && !clearedForBusy;
         const needsRewrite =
-          restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer;
+          clearedForBusy || (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');
