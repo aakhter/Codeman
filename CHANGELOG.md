@@ -1,5 +1,14 @@
 # aicodeman
 
+## 1.2.4
+
+### Patch Changes
+
+- Remote-session terminal fidelity: reconcile-after-foreign-resize, canonical remote scrollback, and working-state detection (COD-179, COD-180, COD-181).
+  - COD-179: when another client resizes a shared session's PTY mid-turn, codex/gemini repaint at the new geometry and viewers at other dims rendered those cursor-addressed frames misaligned (orphan stale "Working" rows). `Session.resize()` now emits a `resized` event broadcast as SSE `session:resized`; the frontend debounces foreign resizes on the active codex/gemini tab and rewrites from the tmux capture, plus a final reconcile on `session:idle`. The reconcile path never re-asserts its own dims (no resize ping-pong between two live viewers). Session create also passes the creating browser's cols/rows so new tmux windows spawn at the real size instead of 120x40, removing the startup resize storm.
+  - COD-180: a remote session's canonical scrollback lives only on the remote tmux server — the local wrapper is a nested-tmux client repainted in place with ~one screen of history, so reloads served ~30 lines and live redraw traffic mangled browser scrollback (lost/detached table rows). New `captureRemotePaneBuffer()` captures over ssh on the remote tmux (same connection options as the launcher); `/terminal` prefers it for remote sessions, degrading to byte history + local capture (reported as `mux-visible` so the frontend never replaces scrollback with one screen). The remote launch command now sets `history-limit` before `new-session` (remote default was 2000 lines). Remote codex/gemini tabs also self-heal from the canonical capture on idle and on a 25s at-bottom periodic tick (unchanged capture = no-op).
+  - COD-181: remote codex sessions never flipped to busy — the per-chunk "Working (…esc to interrupt)" match is defeated by nested-tmux partial repaints (prod showed "idle" 34 minutes into a turn, degrading idle detection, respawn cycling, and notifications). Remote external-CLI sessions now poll the local wrapper's rendered visible frame every 2s (local capture-pane, no ssh), strip SGR, and feed matches into the shared busy/quiet-window path. Verified live against a real remote host: busy 2s after turn start, idle 5s after completion.
+
 ## 1.2.3
 
 ### Patch Changes
