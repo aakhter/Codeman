@@ -117,15 +117,16 @@ const IDLE_DETECTION_DELAY_MS = 2000;
  *  finished turn flips to idle promptly (COD-175). */
 const EXTERNAL_CLI_IDLE_DELAY_MS = 5000;
 
-/** COD-181 — remote external-CLI sessions poll the RENDERED local frame for
- *  the working pattern. Their live stream is nested-tmux repaint traffic: the
- *  Working line arrives as partial cell updates split across chunks, so the
- *  per-chunk literal match in _detectWorkingState never fires and the session
- *  stays "idle" through 30-minute turns. The local wrapper's visible frame
- *  mirrors the remote screen with the line fully assembled. Must be shorter
- *  than EXTERNAL_CLI_IDLE_DELAY_MS so positive polls keep re-arming the
+/** COD-181/182 — external-CLI sessions poll the RENDERED local frame for the
+ *  working pattern. Every Codeman session runs inside tmux, so the stream is
+ *  tmux-client repaint traffic (doubly nested for remote sessions): the
+ *  Working line arrives as partial cell updates split across chunks, and the
+ *  per-chunk literal match in _detectWorkingState never fires — sessions
+ *  stayed "idle" through 30-minute turns. The local tmux window's visible
+ *  frame always has the line fully assembled. Must be shorter than
+ *  EXTERNAL_CLI_IDLE_DELAY_MS so positive polls keep re-arming the
  *  quiet-window timer. */
-const REMOTE_WORKING_POLL_MS = 2000;
+const WORKING_FRAME_POLL_MS = 2000;
 
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
@@ -355,8 +356,8 @@ export class Session extends EventEmitter {
   private _lastPromptTime: number = 0;
   private activityTimeout: NodeJS.Timeout | null = null;
   private _externalCliIdleTimer: NodeJS.Timeout | null = null;
-  /** COD-181 — rendered-frame working poller for remote external-CLI sessions */
-  private _remoteWorkingPollTimer: NodeJS.Timeout | null = null;
+  /** COD-181/182 — rendered-frame working poller for external-CLI sessions (local AND remote) */
+  private _workingFramePollTimer: NodeJS.Timeout | null = null;
   private _awaitingIdleConfirmation: boolean = false; // Prevents timeout reset during idle detection
   private _trustDialogAccepted: boolean = false; // Prevents repeated trust dialog auto-accept
   private _taskTracker: TaskTracker;
@@ -1699,11 +1700,12 @@ export class Session extends EventEmitter {
     // once at spawn/attach; working frames re-arm it as they tick (COD-175).
     if (isExternalCliMode(this.mode)) {
       this._armExternalCliIdleTimer();
-      // COD-181: remote sessions can't rely on stream-chunk matching at all —
-      // poll the rendered frame for the working pattern instead.
-      if (this._remote) {
-        this._startRemoteWorkingPoller();
-      }
+      // COD-181/182: external-CLI sessions can't rely on stream-chunk matching
+      // — LOCAL sessions run inside tmux too, so the attach client delivers
+      // the Working line as partial cell updates just like the remote nested
+      // case (a local codex sleep-20 turn never flipped busy in COD-182 e2e).
+      // Poll the rendered frame for the working pattern instead.
+      this._startWorkingFramePoller();
     }
 
     this.ptyProcess.onExit(({ exitCode }) => {
@@ -2204,16 +2206,17 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * COD-181 — remote external-CLI sessions never match the working pattern on
-   * stream chunks (nested-tmux delivers the Working line as partial cell
-   * updates), so poll the local wrapper's RENDERED visible frame instead: it
-   * mirrors the remote screen with the line fully assembled. Local
-   * capture-pane only — no ssh, a few ms every 2s. Only positive signals feed
-   * in; idle still comes from the existing quiet-window timer.
+   * COD-181/182 — external-CLI sessions never reliably match the working
+   * pattern on stream chunks: every Codeman session runs inside tmux, and the
+   * attach client delivers the Working line as partial cell updates (doubly
+   * so for remote nested-tmux sessions). Poll the local tmux window's
+   * RENDERED visible frame instead — it always has the line fully assembled.
+   * Local capture-pane only — no ssh, a few ms every 2s. Only positive
+   * signals feed in; idle still comes from the existing quiet-window timer.
    */
-  private _startRemoteWorkingPoller(): void {
-    if (this._remoteWorkingPollTimer) clearInterval(this._remoteWorkingPollTimer);
-    this._remoteWorkingPollTimer = setInterval(() => {
+  private _startWorkingFramePoller(): void {
+    if (this._workingFramePollTimer) clearInterval(this._workingFramePollTimer);
+    this._workingFramePollTimer = setInterval(() => {
       if (this._isStopped) return;
       const muxName = this._muxSession?.muxName;
       if (!muxName || typeof this._mux?.captureActivePaneBuffer !== 'function') return;
@@ -2225,7 +2228,7 @@ export class Session extends EventEmitter {
       if (detectExternalCliWorkingFrame(plain, this.mode)) {
         this._noteExternalWorkingFrame();
       }
-    }, REMOTE_WORKING_POLL_MS);
+    }, WORKING_FRAME_POLL_MS);
   }
 
   /**
@@ -2265,9 +2268,9 @@ export class Session extends EventEmitter {
     }
 
     // Clear the COD-181 remote working-frame poller
-    if (this._remoteWorkingPollTimer) {
-      clearInterval(this._remoteWorkingPollTimer);
-      this._remoteWorkingPollTimer = null;
+    if (this._workingFramePollTimer) {
+      clearInterval(this._workingFramePollTimer);
+      this._workingFramePollTimer = null;
     }
 
     // Clear line buffer flush timer
