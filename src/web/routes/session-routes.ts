@@ -128,6 +128,43 @@ const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[h
 
 const REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS = 15_000;
 
+function stripAnsiForReplayComparison(value: string): string {
+  return (
+    value
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[()][0-2A-Z]/g, '')
+  );
+}
+
+function hasDuplicateCodexPromptTail(accumulatedBuffer: string, liveMuxBuffer: string): boolean {
+  const normalize = (value: string) =>
+    stripAnsiForReplayComparison(value)
+      .replace(/\r/g, '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+  const liveLines = normalize(liveMuxBuffer);
+  let promptIndex = -1;
+  for (let i = liveLines.length - 1; i >= 0; i--) {
+    if (liveLines[i].startsWith('› ')) {
+      promptIndex = i;
+      break;
+    }
+  }
+  if (promptIndex < 0) return false;
+
+  const liveTail = liveLines.slice(promptIndex, promptIndex + 4);
+  if (liveTail.length < 2) return false;
+
+  const accumulatedTail = normalize(accumulatedBuffer).slice(-80).join('\n');
+  return accumulatedTail.includes(liveTail.join('\n'));
+}
+
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
  * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA) to animate
@@ -1184,9 +1221,14 @@ export function registerSessionRoutes(
         : 'history';
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? session.terminalBufferLength > 0
-          ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
-          : liveMuxBuffer
+        ? isFullReload &&
+          session.mode === 'codex' &&
+          session.terminalBufferLength > 0 &&
+          hasDuplicateCodexPromptTail(session.terminalBuffer, liveMuxBuffer)
+          ? liveMuxBuffer
+          : session.terminalBufferLength > 0
+            ? `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
+            : liveMuxBuffer
         : session.terminalBuffer;
     const fullSize = rawBuffer.length;
     let truncated = false;

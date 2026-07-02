@@ -686,7 +686,32 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer).toContain('SHELL_SCROLLBACK_003000');
     });
 
-    it('preserves accumulated history before the live mux pane snapshot for Codex TUI replay', async () => {
+    it('does not duplicate the latest Codex prompt tail when full tmux history already contains it', async () => {
+      const duplicateTail =
+        '› Find and fix a bug in @filename\n' + 'gpt-5.5 medium · ~/syncthing/contexts/openshift-base-install';
+      harness.ctx._session.terminalBuffer = `hello world\nlater accumulated history\n${duplicateTail}`;
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        () => `tmux full history\n${duplicateTail}`
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toBe(`tmux full history\n${duplicateTail}`);
+      expect(body.data.terminalBuffer).not.toContain('hello world');
+      expect(body.data.terminalBuffer).not.toContain('\x1b[H\x1b[2J');
+      expect(body.data.terminalBuffer.match(/Find and fix a bug in @filename/g)).toHaveLength(1);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
+    it('preserves accumulated history before the visible mux pane snapshot on tab switch', async () => {
       harness.ctx._session.terminalBuffer = 'hello world\nlater accumulated history';
       harness.ctx._session.mode = 'codex';
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
@@ -695,7 +720,7 @@ describe('session-routes', () => {
 
       const res = await harness.app.inject({
         method: 'GET',
-        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=65536`,
       });
 
       expect(res.statusCode).toBe(200);
@@ -706,9 +731,7 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
-        fullHistory: true,
-      });
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
     });
 
     // ── COD-47: full tmux scrollback replay on full page reload ──
