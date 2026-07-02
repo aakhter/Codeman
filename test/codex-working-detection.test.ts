@@ -83,3 +83,78 @@ describe('Codex idle transition (COD-175)', () => {
     return claude.stop();
   });
 });
+
+describe('COD-181 remote working-frame poller', () => {
+  let session: Session;
+  let frame: string;
+
+  const WORKING_FRAME =
+    '\x1b[1m•\x1b[0m \x1b[1mWorking\x1b[0m (3m 12s • esc to interrupt) · 1 background terminal running\r\n' +
+    '\x1b[1m›\x1b[0m type your message\r\n';
+  const IDLE_FRAME = '• Done.\r\n\x1b[1m›\x1b[0m Summarize recent commits\r\n  gpt-5.5 medium · /tmp\r\n';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      remote: { hostId: 'mac-mini', label: 'mac-mini', host: '10.0.0.9', username: 'u', remotePath: '/tmp' },
+    });
+    frame = IDLE_FRAME;
+    const s = session as unknown as {
+      _mux: unknown;
+      _muxSession: unknown;
+      _startRemoteWorkingPoller(): void;
+    };
+    s._mux = { captureActivePaneBuffer: vi.fn(() => frame) };
+    s._muxSession = { muxName: 'codeman-test1234' };
+    s._startRemoteWorkingPoller();
+  });
+
+  afterEach(async () => {
+    await session.stop();
+    vi.useRealTimers();
+  });
+
+  it('flips to busy from a rendered Working frame (SGR escapes inside the line)', () => {
+    const workingEvents: number[] = [];
+    session.on('working', () => workingEvents.push(Date.now()));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100); // one poll tick
+    expect(session.isWorking).toBe(true);
+    expect(session.status).toBe('busy');
+    expect(workingEvents.length).toBe(1);
+  });
+
+  it('stays busy while the frame keeps showing Working (polls re-arm the quiet window)', () => {
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    expect(session.isWorking).toBe(true);
+    // 30 more seconds of a long turn — well past the 5s quiet window, but each
+    // 2s poll sees the Working line and re-arms it.
+    vi.advanceTimersByTime(30_000);
+    expect(session.isWorking).toBe(true);
+  });
+
+  it('flips to idle via the quiet window once the Working line disappears', () => {
+    const idleEvents: number[] = [];
+    session.on('idle', () => idleEvents.push(Date.now()));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(4_200);
+    expect(session.isWorking).toBe(true);
+
+    frame = IDLE_FRAME;
+    vi.advanceTimersByTime(7_000); // > EXTERNAL_CLI_IDLE_DELAY_MS with no positive polls
+    expect(session.isWorking).toBe(false);
+    expect(session.status).toBe('idle');
+    expect(idleEvents.length).toBe(1);
+  });
+
+  it('never flips busy from an idle frame', () => {
+    frame = IDLE_FRAME;
+    vi.advanceTimersByTime(20_000);
+    expect(session.isWorking).toBe(false);
+  });
+});

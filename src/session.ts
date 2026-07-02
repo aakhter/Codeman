@@ -117,6 +117,16 @@ const IDLE_DETECTION_DELAY_MS = 2000;
  *  finished turn flips to idle promptly (COD-175). */
 const EXTERNAL_CLI_IDLE_DELAY_MS = 5000;
 
+/** COD-181 — remote external-CLI sessions poll the RENDERED local frame for
+ *  the working pattern. Their live stream is nested-tmux repaint traffic: the
+ *  Working line arrives as partial cell updates split across chunks, so the
+ *  per-chunk literal match in _detectWorkingState never fires and the session
+ *  stays "idle" through 30-minute turns. The local wrapper's visible frame
+ *  mirrors the remote screen with the line fully assembled. Must be shorter
+ *  than EXTERNAL_CLI_IDLE_DELAY_MS so positive polls keep re-arming the
+ *  quiet-window timer. */
+const REMOTE_WORKING_POLL_MS = 2000;
+
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
 /** Graceful shutdown delay when stopping session (100ms) */
@@ -345,6 +355,8 @@ export class Session extends EventEmitter {
   private _lastPromptTime: number = 0;
   private activityTimeout: NodeJS.Timeout | null = null;
   private _externalCliIdleTimer: NodeJS.Timeout | null = null;
+  /** COD-181 — rendered-frame working poller for remote external-CLI sessions */
+  private _remoteWorkingPollTimer: NodeJS.Timeout | null = null;
   private _awaitingIdleConfirmation: boolean = false; // Prevents timeout reset during idle detection
   private _trustDialogAccepted: boolean = false; // Prevents repeated trust dialog auto-accept
   private _taskTracker: TaskTracker;
@@ -1687,6 +1699,11 @@ export class Session extends EventEmitter {
     // once at spawn/attach; working frames re-arm it as they tick (COD-175).
     if (isExternalCliMode(this.mode)) {
       this._armExternalCliIdleTimer();
+      // COD-181: remote sessions can't rely on stream-chunk matching at all —
+      // poll the rendered frame for the working pattern instead.
+      if (this._remote) {
+        this._startRemoteWorkingPoller();
+      }
     }
 
     this.ptyProcess.onExit(({ exitCode }) => {
@@ -2154,7 +2171,10 @@ export class Session extends EventEmitter {
     // Fast path: check spinner characters on raw data (Unicode, never in ANSI sequences)
     const hasSpinner = SPINNER_PATTERN.test(data);
     const hasExternalWorkingFrame = detectExternalCliWorkingFrame(data, this.mode);
-    if (hasSpinner || hasExternalWorkingFrame) {
+    if (hasExternalWorkingFrame) {
+      // Sets busy AND re-arms the quiet-window timer (turn over when frames stop).
+      this._noteExternalWorkingFrame();
+    } else if (hasSpinner) {
       if (!this._isWorking) {
         this._isWorking = true;
         this._status = 'busy';
@@ -2164,12 +2184,48 @@ export class Session extends EventEmitter {
       this._awaitingIdleConfirmation = false;
       if (this.activityTimeout) clearTimeout(this.activityTimeout);
     }
+  }
 
-    // External CLI idle: each working frame re-arms a quiet-window timer; when
-    // frames stop ticking the turn is over.
-    if (hasExternalWorkingFrame) {
-      this._armExternalCliIdleTimer();
+  /**
+   * Positive external-CLI working signal — from a stream chunk match OR from
+   * the COD-181 rendered-frame poller. Marks the session busy and re-arms the
+   * quiet-window timer; idle comes from that timer expiring.
+   */
+  private _noteExternalWorkingFrame(): void {
+    if (!this._isWorking) {
+      this._isWorking = true;
+      this._status = 'busy';
+      this.emit('working');
+      this._autoOps.notifyWorking();
     }
+    this._awaitingIdleConfirmation = false;
+    if (this.activityTimeout) clearTimeout(this.activityTimeout);
+    this._armExternalCliIdleTimer();
+  }
+
+  /**
+   * COD-181 — remote external-CLI sessions never match the working pattern on
+   * stream chunks (nested-tmux delivers the Working line as partial cell
+   * updates), so poll the local wrapper's RENDERED visible frame instead: it
+   * mirrors the remote screen with the line fully assembled. Local
+   * capture-pane only — no ssh, a few ms every 2s. Only positive signals feed
+   * in; idle still comes from the existing quiet-window timer.
+   */
+  private _startRemoteWorkingPoller(): void {
+    if (this._remoteWorkingPollTimer) clearInterval(this._remoteWorkingPollTimer);
+    this._remoteWorkingPollTimer = setInterval(() => {
+      if (this._isStopped) return;
+      const muxName = this._muxSession?.muxName;
+      if (!muxName || typeof this._mux?.captureActivePaneBuffer !== 'function') return;
+      const frame = this._mux.captureActivePaneBuffer(muxName);
+      if (!frame) return;
+      // The -e capture carries SGR escapes that can sit inside the pattern
+      // (e.g. bold around "Working") — strip before matching.
+      const plain = frame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
+      if (detectExternalCliWorkingFrame(plain, this.mode)) {
+        this._noteExternalWorkingFrame();
+      }
+    }, REMOTE_WORKING_POLL_MS);
   }
 
   /**
@@ -2206,6 +2262,12 @@ export class Session extends EventEmitter {
     if (this._externalCliIdleTimer) {
       clearTimeout(this._externalCliIdleTimer);
       this._externalCliIdleTimer = null;
+    }
+
+    // Clear the COD-181 remote working-frame poller
+    if (this._remoteWorkingPollTimer) {
+      clearInterval(this._remoteWorkingPollTimer);
+      this._remoteWorkingPollTimer = null;
     }
 
     // Clear line buffer flush timer
