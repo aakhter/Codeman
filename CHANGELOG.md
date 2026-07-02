@@ -1,5 +1,15 @@
 # aicodeman
 
+## 1.2.3
+
+### Patch Changes
+
+- Fix stacked stale Codex banner boxes in terminal replay (COD-178, supersedes COD-177's heuristic).
+  - COD-178: for codex/gemini sessions, `GET /api/sessions/:id/terminal` no longer replays the raw PTY byte history. That history is a pile of full-screen `\x1b[H` redraw frames painted at historical window sizes (session spawns at 120x40, then the browser resizes to its real rows); replaying a frame taller than the browser's current viewport scrolls it, orphaning the previous frame's rows into scrollback — new codex tabs (worst on remote/nested-tmux sessions) showed a stack of empty banner box outlines above the real welcome banner. The route now ships the tmux capture only (full-history capture on both full reload and tab switch — tmux already applied every redraw in place, so the capture is line-based, has no cursor addressing, and replays cleanly at any terminal size), falling back to the byte history when the capture is unavailable. claude/shell/opencode replay is unchanged.
+  - COD-177: interim `hasDuplicateCodexPromptTail` dedupe heuristic for the duplicated Codex prompt tail on full reload — removed again by COD-178's structural fix (the real prod byte stream renders the prompt with erase-char + cursor-forward instead of a literal space, which defeats text comparison).
+
+  Verified with new route tests (heuristic-miss reload, tail capture-only, gemini, capture-unavailable fallback), a Playwright e2e on a live codex session (resize storm across 6 window heights → reload + tab-switch rounds: exactly 1 banner box on the fixed build, stacked duplicates on the old build), and the 212-check realistic smoke harness.
+
 ## 1.2.2
 
 ### Patch Changes
