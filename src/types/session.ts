@@ -178,6 +178,8 @@ export interface CodexConfig {
   resumeSessionId?: string;
   /** Bypass approval prompts (passes --dangerously-bypass-approvals-and-sandbox) */
   dangerouslyBypassApprovals?: boolean;
+  /** Bypass Codex hook trust prompts for externally-sandboxed automation. */
+  dangerouslyBypassHookTrust?: boolean;
   /** Browser rendering strategy for Codex sessions. Hybrid TUI is the only supported mode. */
   renderMode?: CodexRenderMode;
 }

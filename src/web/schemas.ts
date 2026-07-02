@@ -148,6 +148,7 @@ const CodexConfigSchema = z
       .regex(/^[a-zA-Z0-9_-]+$/)
       .optional(),
     dangerouslyBypassApprovals: z.boolean().optional(),
+    dangerouslyBypassHookTrust: z.boolean().optional(),
     renderMode: z
       .enum(['scrollback', 'hybrid'])
       .optional()

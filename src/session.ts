@@ -111,6 +111,12 @@ const MUX_STARTUP_DELAY_MS = 300;
 /** Delay before declaring session idle after last output (2 seconds) */
 const IDLE_DETECTION_DELAY_MS = 2000;
 
+/** Quiet window after the last external-CLI working frame before declaring
+ *  idle. Codex ticks its "Working (Ns • esc to interrupt)" counter about once
+ *  per second while a turn runs, so a few missed frames are tolerated but a
+ *  finished turn flips to idle promptly (COD-175). */
+const EXTERNAL_CLI_IDLE_DELAY_MS = 5000;
+
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
 /** Graceful shutdown delay when stopping session (100ms) */
@@ -139,6 +145,16 @@ const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 export function isExternalCliMode(mode: SessionMode): boolean {
   return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
+}
+
+export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
+  if (mode === 'codex') {
+    // Codex renders "Working (2s • esc to interrupt)", "Working (4m 03s • …)"
+    // and sometimes unit-less "Working (31 • …)" (COD-175 prod screenshot), so
+    // only anchor on "Working (<digits>" plus the interrupt hint in-parens.
+    return /\bWorking \(\d+[^)\n]*esc to interrupt\)/.test(data);
+  }
+  return false;
 }
 
 function getModeLabel(mode: SessionMode): string {
@@ -326,6 +342,7 @@ export class Session extends EventEmitter {
   private _isWorking: boolean = false;
   private _lastPromptTime: number = 0;
   private activityTimeout: NodeJS.Timeout | null = null;
+  private _externalCliIdleTimer: NodeJS.Timeout | null = null;
   private _awaitingIdleConfirmation: boolean = false; // Prevents timeout reset during idle detection
   private _trustDialogAccepted: boolean = false; // Prevents repeated trust dialog auto-accept
   private _taskTracker: TaskTracker;
@@ -1618,44 +1635,7 @@ export class Session extends EventEmitter {
       }
 
       // === Idle/working detection runs on every chunk (latency-sensitive) ===
-      // Detect if Claude is working or at prompt
-      // The prompt line contains "❯" when waiting for input
-      if (data.includes('❯') || data.includes('\u276f')) {
-        // Only start a new timeout if we're not already awaiting idle confirmation
-        // This prevents status bar redraws (which include ❯) from resetting the timer
-        if (!this._awaitingIdleConfirmation) {
-          if (this.activityTimeout) clearTimeout(this.activityTimeout);
-          this._awaitingIdleConfirmation = true;
-          this.activityTimeout = setTimeout(() => {
-            this._awaitingIdleConfirmation = false;
-            // Emit idle if either:
-            // 1. Claude was working and is now at prompt (normal case)
-            // 2. Session just started and is ready (status is 'busy' but _isWorking is false)
-            const wasWorking = this._isWorking;
-            const isInitialReady = this._status === 'busy' && !this._isWorking;
-            if (wasWorking || isInitialReady) {
-              this._isWorking = false;
-              this._status = 'idle';
-              this._lastPromptTime = Date.now();
-              this.emit('idle');
-            }
-          }, IDLE_DETECTION_DELAY_MS);
-        }
-      }
-
-      // Detect when Claude starts working (thinking, writing, etc)
-      // Fast path: check spinner characters on raw data (Unicode, never in ANSI sequences)
-      const hasSpinner = SPINNER_PATTERN.test(data);
-      if (hasSpinner) {
-        if (!this._isWorking) {
-          this._isWorking = true;
-          this._status = 'busy';
-          this.emit('working');
-          this._autoOps.notifyWorking();
-        }
-        this._awaitingIdleConfirmation = false;
-        if (this.activityTimeout) clearTimeout(this.activityTimeout);
-      }
+      this._detectWorkingState(data);
 
       // === Expensive processing (ANSI strip, Ralph, bash parser) is throttled ===
       // Instead of running regex-heavy parsers on every PTY chunk, we accumulate
@@ -1695,6 +1675,13 @@ export class Session extends EventEmitter {
       }
     });
 
+    // External CLIs never print the Claude '❯' prompt, so the initial-ready →
+    // idle transition must come from the quiet-window timer instead. Arm it
+    // once at spawn/attach; working frames re-arm it as they tick (COD-175).
+    if (isExternalCliMode(this.mode)) {
+      this._armExternalCliIdleTimer();
+    }
+
     this.ptyProcess.onExit(({ exitCode }) => {
       console.log('[Session] Interactive PTY exited with code:', exitCode);
       // COD-118: record the exit in the circuit breaker BEFORE status bookkeeping.
@@ -1708,6 +1695,10 @@ export class Session extends EventEmitter {
       if (this.activityTimeout) {
         clearTimeout(this.activityTimeout);
         this.activityTimeout = null;
+      }
+      if (this._externalCliIdleTimer) {
+        clearTimeout(this._externalCliIdleTimer);
+        this._externalCliIdleTimer = null;
       }
       if (this._promptCheckInterval) {
         clearInterval(this._promptCheckInterval);
@@ -2114,11 +2105,98 @@ export class Session extends EventEmitter {
     this._lastActivityAt = Date.now();
   }
 
+  /**
+   * Working/idle detection for interactive sessions, run on every PTY chunk.
+   *
+   * Claude mode: the prompt line contains "❯" when waiting for input; spinner
+   * glyphs mean working. External CLI mode (codex): the TUI renders a
+   * "Working (Ns • esc to interrupt)" frame roughly once per second while a
+   * turn runs, and its idle prompt is "›" (U+203A) which never matches the
+   * Claude path — so idle is declared when working frames stop for
+   * EXTERNAL_CLI_IDLE_DELAY_MS (COD-175; previously codex sessions stayed
+   * busy/isWorking forever once a turn started).
+   */
+  private _detectWorkingState(data: string): void {
+    // Detect if Claude is at prompt — the prompt line contains "❯" when waiting for input
+    if (data.includes('❯')) {
+      // Only start a new timeout if we're not already awaiting idle confirmation
+      // This prevents status bar redraws (which include ❯) from resetting the timer
+      if (!this._awaitingIdleConfirmation) {
+        if (this.activityTimeout) clearTimeout(this.activityTimeout);
+        this._awaitingIdleConfirmation = true;
+        this.activityTimeout = setTimeout(() => {
+          this._awaitingIdleConfirmation = false;
+          // Emit idle if either:
+          // 1. Claude was working and is now at prompt (normal case)
+          // 2. Session just started and is ready (status is 'busy' but _isWorking is false)
+          const wasWorking = this._isWorking;
+          const isInitialReady = this._status === 'busy' && !this._isWorking;
+          if (wasWorking || isInitialReady) {
+            this._isWorking = false;
+            this._status = 'idle';
+            this._lastPromptTime = Date.now();
+            this.emit('idle');
+          }
+        }, IDLE_DETECTION_DELAY_MS);
+      }
+    }
+
+    // Detect when the agent starts working (thinking, writing, etc)
+    // Fast path: check spinner characters on raw data (Unicode, never in ANSI sequences)
+    const hasSpinner = SPINNER_PATTERN.test(data);
+    const hasExternalWorkingFrame = detectExternalCliWorkingFrame(data, this.mode);
+    if (hasSpinner || hasExternalWorkingFrame) {
+      if (!this._isWorking) {
+        this._isWorking = true;
+        this._status = 'busy';
+        this.emit('working');
+        this._autoOps.notifyWorking();
+      }
+      this._awaitingIdleConfirmation = false;
+      if (this.activityTimeout) clearTimeout(this.activityTimeout);
+    }
+
+    // External CLI idle: each working frame re-arms a quiet-window timer; when
+    // frames stop ticking the turn is over.
+    if (hasExternalWorkingFrame) {
+      this._armExternalCliIdleTimer();
+    }
+  }
+
+  /**
+   * (Re-)arm the external-CLI quiet-window timer. Fires idle when no working
+   * frame has been seen for EXTERNAL_CLI_IDLE_DELAY_MS — covering both a turn
+   * that just finished (wasWorking) and a freshly spawned/attached session
+   * whose _resetBuffers() 'busy' status would otherwise never clear because
+   * codex's '›' prompt can't match the Claude '❯' initial-ready path.
+   */
+  private _armExternalCliIdleTimer(): void {
+    if (this._externalCliIdleTimer) clearTimeout(this._externalCliIdleTimer);
+    this._externalCliIdleTimer = setTimeout(() => {
+      this._externalCliIdleTimer = null;
+      if (this._isStopped) return;
+      const wasWorking = this._isWorking;
+      const isInitialReady = this._status === 'busy' && !this._isWorking;
+      if (wasWorking || isInitialReady) {
+        this._isWorking = false;
+        this._status = 'idle';
+        this._lastPromptTime = Date.now();
+        this.emit('idle');
+      }
+    }, EXTERNAL_CLI_IDLE_DELAY_MS);
+  }
+
   private _clearAllTimers(): void {
     // Clear activity timeout to prevent memory leak
     if (this.activityTimeout) {
       clearTimeout(this.activityTimeout);
       this.activityTimeout = null;
+    }
+
+    // Clear external CLI idle quiet-window timer
+    if (this._externalCliIdleTimer) {
+      clearTimeout(this._externalCliIdleTimer);
+      this._externalCliIdleTimer = null;
     }
 
     // Clear line buffer flush timer

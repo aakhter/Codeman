@@ -77,6 +77,42 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     expect(fetchBlock).toContain('this._sessionsLoadedSincePageOpen.add(sessionId)');
   });
 
+  it('does not preserve a restored Codex snapshot over a full-history replay', () => {
+    const source = appSource();
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const fullHistoryDecision = source.indexOf('const requestFullHistory', selectStart);
+    const preserveDecision = source.indexOf('const preserveSnapshotScrollback', fullHistoryDecision);
+    const rewriteDecision = source.indexOf('const needsRewrite', preserveDecision);
+    const block = source.slice(fullHistoryDecision, rewriteDecision + 220);
+
+    expect(fullHistoryDecision).toBeGreaterThan(selectStart);
+    expect(preserveDecision).toBeGreaterThan(fullHistoryDecision);
+    expect(block).toContain('!requestFullHistory');
+    expect(block).toContain('preserveSnapshotScrollback');
+  });
+
+  it('never preserves a stale snapshot over changed canonical output (COD-175)', () => {
+    const source = appSource();
+    const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
+    const preserveDecision = source.indexOf('const preserveSnapshotScrollback', selectStart);
+    const rewriteDecision = source.indexOf('const needsRewrite', preserveDecision);
+    const block = source.slice(preserveDecision, rewriteDecision);
+
+    expect(preserveDecision).toBeGreaterThan(selectStart);
+    // Preserve is only allowed when nothing new happened since the cached
+    // canonical buffer, or while live output is still streaming (busy) to
+    // reconcile the viewport. Otherwise the fetched frame must be replayed —
+    // an idle codex tab frozen on "Working (31" was caused by preserving
+    // unconditionally while the fetch that contained the finished response
+    // was discarded.
+    expect(block).toContain('canonicalUnchanged');
+    expect(block).toContain('sessionIsBusy');
+    const canonicalDecl = source.indexOf('const canonicalUnchanged', selectStart);
+    expect(canonicalDecl).toBeGreaterThan(selectStart);
+    expect(canonicalDecl).toBeLessThan(rewriteDecision);
+    expect(source.slice(canonicalDecl, canonicalDecl + 120)).toContain('data.terminalBuffer === cachedBuffer');
+  });
+
   it('restores Codex snapshots even while the session is busy', () => {
     const source = appSource();
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');

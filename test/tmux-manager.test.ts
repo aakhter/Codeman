@@ -146,6 +146,14 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('codex command builder', () => {
+    it('passes hook trust bypass only when explicitly configured for automation', () => {
+      expect(buildCodexCommand()).not.toContain('--dangerously-bypass-hook-trust');
+
+      expect(buildCodexCommand({ dangerouslyBypassHookTrust: true })).toContain('--dangerously-bypass-hook-trust');
+    });
+  });
+
   describe('getAttachCommand', () => {
     it('should return tmux', () => {
       expect(manager.getAttachCommand()).toBe('tmux');

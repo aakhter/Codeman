@@ -4354,10 +4354,20 @@ class CodemanApp {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.
-        // A restored Codex snapshot intentionally keeps the browser's richer
-        // scrollback. Other snapshot restores and busy-clears still replay the
-        // fetched frame because it is the canonical terminal state.
-        const preserveSnapshotScrollback = restoredSnapshot && session?.mode === 'codex' && !clearedForBusy;
+        // A restored Codex snapshot keeps the browser's richer scrollback ONLY
+        // while it is provably not stale: either nothing new happened since the
+        // cached canonical buffer, or live output is still streaming (busy) and
+        // will reconcile the viewport. Inactive tabs unsubscribe from terminal
+        // output, so the fetched frame is the only way an idle tab learns about
+        // output produced while the user was away — preserving unconditionally
+        // left tabs frozen on a mid-turn frame forever (COD-175).
+        const canonicalUnchanged = data.terminalBuffer === cachedBuffer;
+        const preserveSnapshotScrollback =
+          restoredSnapshot &&
+          session?.mode === 'codex' &&
+          !clearedForBusy &&
+          !requestFullHistory &&
+          (canonicalUnchanged || sessionIsBusy);
         const needsRewrite =
           clearedForBusy || (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
         if (needsRewrite) {
