@@ -1397,6 +1397,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       truecolorEnabled,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
       remote,
+      initialCols,
+      initialRows,
     } = options;
     const muxName = `codeman-${sessionId.slice(0, 8)}`;
 
@@ -1498,7 +1500,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         stdio: 'ignore',
         env: cleanEnv,
       });
-      this.resizeWindow(muxName, 120, 40);
+      // Spawn at the creating browser's dims when known (COD-179) so the TUI's
+      // first frames are already the right geometry; 120x40 is the legacy
+      // fallback for API/CLI creates that carry no viewport.
+      this.resizeWindow(muxName, initialCols ?? 120, initialRows ?? 40);
 
       // Set remain-on-exit now that the server is running — must be before respawn-pane
       try {

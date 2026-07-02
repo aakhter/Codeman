@@ -196,6 +196,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_DELETED, '_onSessionDeleted'],
   [SSE_EVENTS.SESSION_TERMINAL, '_onSSETerminal'],
   [SSE_EVENTS.SESSION_NEEDS_REFRESH, '_onSSENeedsRefresh'],
+  [SSE_EVENTS.SESSION_RESIZED, '_onSessionResized'],
   [SSE_EVENTS.SESSION_CLEAR_TERMINAL, '_onSSEClearTerminal'],
   [SSE_EVENTS.SESSION_COMPLETION, '_onSessionCompletion'],
   [SSE_EVENTS.SESSION_ERROR, '_onSessionError'],
@@ -691,6 +692,8 @@ class CodemanApp {
     // Notification system
     this.notificationManager = new NotificationManager(this);
     this.idleTimers = new Map(); // Map<sessionId, timeout> for stuck detection
+    this._foreignResizeTimer = null; // COD-179 debounce for reconcile-after-foreign-resize
+    this._foreignResizeDirty = null; // sessionId dirtied by a foreign resize mid-turn (final reconcile on idle)
 
     // DOM element cache for performance (avoid repeated getElementById calls)
     this._elemCache = {};
@@ -2085,6 +2088,54 @@ class CodemanApp {
     }
   }
 
+  /**
+   * COD-179: another client resized the shared PTY. Codex/gemini full-repaint at
+   * the new geometry; if OUR xterm has different dims, those cursor-addressed
+   * frames land misaligned and leave orphan rows (stale "Working" lines) in our
+   * buffer. tmux itself stays clean, so a capture rewrite heals us. Debounced —
+   * resize storms send several events; only the settled state matters. We do
+   * NOT re-assert our own dims here: two live viewers would ping-pong resizes.
+   */
+  _onSessionResized(data) {
+    if (data.id !== this.activeSessionId || !this.terminal) return;
+    const session = this.sessions.get(data.id);
+    if (session?.mode !== 'codex' && session?.mode !== 'gemini') return;
+    // Our own resize (or one that happens to match us) can't misalign our view.
+    if (this.terminal.cols === data.cols && this.terminal.rows === data.rows) return;
+    this._foreignResizeDirty = data.id;
+    clearTimeout(this._foreignResizeTimer);
+    this._foreignResizeTimer = setTimeout(() => {
+      this._reconcileForeignResize(data.id);
+    }, FOREIGN_RESIZE_SETTLE_MS);
+  }
+
+  /** Rewrite the active terminal from the tmux capture after a foreign resize (COD-179). */
+  async _reconcileForeignResize(sessionId) {
+    if (sessionId !== this.activeSessionId || !this.terminal) {
+      // Tab switched — selectSession's own rewrite paints a clean state.
+      this._foreignResizeDirty = null;
+      return;
+    }
+    // A buffer load is already repainting; keep the dirty flag so the idle
+    // fallback re-checks later rather than racing two clear+rewrite cycles.
+    if (this._isLoadingBuffer) return;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/terminal`);
+      const data = (await res.json())?.data ?? {};
+      if (sessionId !== this.activeSessionId || this._isLoadingBuffer) return;
+      if (data.terminalBuffer) {
+        this.terminal.clear();
+        this.terminal.reset();
+        await this.chunkedTerminalWrite(data.terminalBuffer);
+        this.terminal.scrollToBottom();
+        this._localEchoOverlay?.rerender();
+        this._foreignResizeDirty = null;
+      }
+    } catch (err) {
+      console.error('foreign-resize reconcile failed:', err);
+    }
+  }
+
   async _onSessionClearTerminal(data) {
     if (data.id === this.activeSessionId) {
       // Skip if selectSession is already loading the buffer — clearTerminal arriving
@@ -2155,6 +2206,15 @@ class CodemanApp {
       this.renderSessionTabs();
       this.sendPendingCtrlL(data.id);
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
+    }
+    // COD-179: a foreign resize dirtied this view mid-turn — later repaints may
+    // have re-corrupted it after the debounced rewrite. Now that the turn is
+    // over the frame is stable, so do one final reconcile.
+    if (data.id === this.activeSessionId && this._foreignResizeDirty === data.id) {
+      clearTimeout(this._foreignResizeTimer);
+      this._foreignResizeTimer = setTimeout(() => {
+        this._reconcileForeignResize(data.id);
+      }, TUI_REDRAW_SETTLE_MS);
     }
     // Start stuck detection timer (only if no respawn running)
     if (!this.respawnStatus[data.id]?.enabled) {

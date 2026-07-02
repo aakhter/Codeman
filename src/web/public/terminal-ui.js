@@ -1740,6 +1740,7 @@ Object.assign(CodemanApp.prototype, {
           resumeSessionId: sessionId,
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           ...(effort ? { effort } : {}),
+          ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
         }),
       });
       const createData = await createRes.json();

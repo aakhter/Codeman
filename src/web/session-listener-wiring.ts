@@ -33,6 +33,7 @@ export interface SessionListenerRefs {
   terminal: (data: string) => void;
   clearTerminal: () => void;
   needsRefresh: () => void;
+  resized: (data: { cols: number; rows: number }) => void;
   message: (msg: ClaudeMessage) => void;
   error: (error: string) => void;
   completion: (result: string, cost: number) => void;
@@ -105,6 +106,11 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
     /** Broadcasts `session:needsRefresh` — tells clients to reload buffer */
     needsRefresh: () => {
       deps.broadcast(SseEvent.SessionNeedsRefresh, { id: session.id });
+    },
+
+    /** Broadcasts `session:resized` — PTY geometry changed; other-dims viewers reconcile (COD-179) */
+    resized: (data: { cols: number; rows: number }) => {
+      deps.broadcast(SseEvent.SessionResized, { id: session.id, cols: data.cols, rows: data.rows });
     },
 
     // ─── Session Messages & Errors ──────────────────────────
@@ -408,6 +414,7 @@ export function attachSessionListeners(session: Session, refs: SessionListenerRe
   session.on('terminal', refs.terminal);
   session.on('clearTerminal', refs.clearTerminal);
   session.on('needsRefresh', refs.needsRefresh);
+  session.on('resized', refs.resized);
   session.on('message', refs.message);
   session.on('error', refs.error);
   session.on('completion', refs.completion);
@@ -444,6 +451,7 @@ export function detachSessionListeners(session: Session, refs: SessionListenerRe
   session.off('terminal', refs.terminal);
   session.off('clearTerminal', refs.clearTerminal);
   session.off('needsRefresh', refs.needsRefresh);
+  session.off('resized', refs.resized);
   session.off('message', refs.message);
   session.off('error', refs.error);
   session.off('completion', refs.completion);

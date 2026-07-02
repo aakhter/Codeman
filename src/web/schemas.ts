@@ -213,6 +213,14 @@ export const CreateSessionSchema = z.object({
         .regex(/^codeman-[a-zA-Z0-9._-]+$/, 'remoteSessionName must be a codeman-* tmux session name'),
     })
     .optional(),
+  /**
+   * COD-179 — the creating browser's terminal dims. New tmux windows spawn at
+   * this size instead of the 120x40 legacy default, avoiding the startup
+   * resize storm whose mismatched TUI repaints pollute the byte history.
+   * Bounds mirror ResizeSchema.
+   */
+  cols: z.number().int().min(1).max(500).optional(),
+  rows: z.number().int().min(1).max(200).optional(),
 });
 
 /**

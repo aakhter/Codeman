@@ -322,6 +322,8 @@ export class Session extends EventEmitter {
   private readonly _terminalBufferTrimSize: number;
   private readonly _tmuxHistoryLimit: number;
   private readonly _remote?: SessionRemote;
+  /** Creating browser's terminal dims — new tmux windows spawn at this size instead of 120x40 (COD-179) */
+  private readonly _initialDims?: { cols: number; rows: number };
   // Use BufferAccumulator for hot-path buffers to reduce GC pressure
   private _terminalBuffer: BufferAccumulator;
   private _textOutput = new BufferAccumulator(MAX_TEXT_OUTPUT_SIZE, TEXT_OUTPUT_TRIM_SIZE);
@@ -507,6 +509,8 @@ export class Session extends EventEmitter {
       tmuxHistoryLimit?: number;
       /** Remote execution metadata for sessions launched through SSH inside local tmux. */
       remote?: SessionRemote;
+      /** Creating browser's terminal dims — new tmux windows spawn at this size instead of 120x40 (COD-179). */
+      initialDims?: { cols: number; rows: number };
     }
   ) {
     super();
@@ -529,6 +533,7 @@ export class Session extends EventEmitter {
     this._terminalBufferTrimSize = config.terminalBufferConfig?.trimBytes ?? TERMINAL_BUFFER_TRIM_SIZE;
     this._tmuxHistoryLimit = config.tmuxHistoryLimit ?? DEFAULT_TMUX_HISTORY_LIMIT;
     this._remote = config.remote;
+    this._initialDims = config.initialDims;
     this._terminalBuffer = new BufferAccumulator(this._terminalBufferMaxSize, this._terminalBufferTrimSize);
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
@@ -1517,6 +1522,8 @@ export class Session extends EventEmitter {
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
+            initialCols: this._initialDims?.cols,
+            initialRows: this._initialDims?.rows,
           },
           spawnErrLabel: 'mux attachment',
         });
@@ -1873,6 +1880,8 @@ export class Session extends EventEmitter {
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
+            initialCols: this._initialDims?.cols,
+            initialRows: this._initialDims?.rows,
           },
           spawnErrLabel: 'shell mux attachment',
         });
@@ -2739,6 +2748,14 @@ export class Session extends EventEmitter {
         this.ptyProcess.resize(cols, rows);
       } catch {
         this.ptyProcess = null;
+      }
+      // COD-179: tell every connected client the shared geometry changed. A
+      // viewer whose xterm has different dims renders the subsequent TUI
+      // repaint frames misaligned (orphan "Working" rows in scrollback) and
+      // needs to reconcile by rewriting from the tmux capture. Only a real
+      // geometry change matters — a forced same-size SIGWINCH can't misalign.
+      if (dimsChanged) {
+        this.emit('resized', { cols, rows });
       }
     }
   }

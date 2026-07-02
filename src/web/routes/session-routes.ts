@@ -588,6 +588,7 @@ export function registerSessionRoutes(
         maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
         trimBytes: terminalHistoryConfig.terminalBufferTrimBytes,
       },
+      initialDims: body.cols && body.rows ? { cols: body.cols, rows: body.rows } : undefined,
     });
 
     ctx.addSession(session);

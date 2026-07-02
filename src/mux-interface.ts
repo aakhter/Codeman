@@ -83,6 +83,13 @@ export interface CreateSessionOptions {
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
   remote?: SessionRemote;
+  /**
+   * Initial window geometry (COD-179). Spawning at the creating browser's real
+   * dims avoids the 120x40 → real-size resize storm whose mismatched TUI
+   * repaint frames stack stale banner boxes in the byte history (COD-178).
+   */
+  initialCols?: number;
+  initialRows?: number;
 }
 
 /** Options for respawning a dead pane. */

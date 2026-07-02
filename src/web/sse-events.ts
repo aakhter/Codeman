@@ -58,6 +58,8 @@ export const SessionDeleted = 'session:deleted' as const;
 export const SessionTerminal = 'session:terminal' as const;
 /** Client should re-fetch the full terminal buffer (e.g. after reconnect). */
 export const SessionNeedsRefresh = 'session:needsRefresh' as const;
+/** PTY geometry changed ({id, cols, rows}) — viewers at other dims reconcile via capture rewrite (COD-179). */
+export const SessionResized = 'session:resized' as const;
 /** Terminal buffer cleared (e.g. /clear command). */
 export const SessionClearTerminal = 'session:clearTerminal' as const;
 /** Claude finished a prompt — includes result and cost. */
@@ -391,6 +393,7 @@ export const SseEvent = {
   SessionDeleted,
   SessionTerminal,
   SessionNeedsRefresh,
+  SessionResized,
   SessionClearTerminal,
   SessionCompletion,
   SessionError,

@@ -1376,6 +1376,38 @@ describe('session-routes', () => {
       });
     });
 
+    it('COD-179: passes the creating browser dims through to Session initialDims', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'shell', name: 'Sized', cols: 178, rows: 33 },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const added = (harness.ctx.addSession as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+      expect(added).toBeDefined();
+      expect((added as unknown as { _initialDims?: { cols: number; rows: number } })._initialDims).toEqual({
+        cols: 178,
+        rows: 33,
+      });
+    });
+
+    it('COD-179: rejects out-of-bounds create dims', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'shell', cols: 10_000, rows: 33 },
+      });
+
+      expect(JSON.parse(res.body).success).toBe(false);
+    });
+
     it('quick-start creates remote case sessions through ssh metadata', async () => {
       const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
       try {

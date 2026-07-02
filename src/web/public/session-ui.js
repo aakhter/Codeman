@@ -573,6 +573,9 @@ Object.assign(CodemanApp.prototype, {
             // — see the comment in session-routes create). Disabling the setting
             // removes it via the App Settings toggle path (system-routes), not here.
             statusLineTelemetry: globalSettings.showPlanUsageLimits === true,
+            // COD-179: spawn the tmux window at this browser's real dims so the
+            // TUI's first frames aren't painted at the 120x40 legacy default.
+            ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
           })
         }).then(r => r.json())
       );
@@ -704,7 +707,12 @@ Object.assign(CodemanApp.prototype, {
         fetch('/api/sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...(isRemoteCase ? { caseName } : { workingDir }), mode: 'shell', name })
+          body: JSON.stringify({
+            ...(isRemoteCase ? { caseName } : { workingDir }),
+            mode: 'shell',
+            name,
+            ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
+          })
         }).then(r => r.json())
       );
       const createResults = await Promise.all(createPromises);
@@ -2293,6 +2301,7 @@ Object.assign(CodemanApp.prototype, {
           mode: 'shell',
           name: remoteSessionName,
           attachRemoteSession: { hostId, remoteSessionName },
+          ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
         })
       });
       const createData = await createRes.json();
