@@ -1185,22 +1185,41 @@ export function registerSessionRoutes(
     // even on tab switch for these modes (bounded by tmux history-limit).
     const isCaptureOnlyTuiMode = session.mode === 'codex' || session.mode === 'gemini';
     const muxName = session.muxName;
-    const liveMuxBuffer =
-      muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
-        ? ctx.mux.captureActivePaneBuffer(
-            muxName,
-            isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true } : undefined
-          )
-        : null;
+    // COD-180: a remote session's canonical scrollback lives ONLY on the remote
+    // tmux server — the local wrapper is a nested-tmux client repainted in
+    // place, so its own history is ~one screen. Capture over ssh first; on
+    // failure fall back to local data, and for capture-only TUI modes ALSO
+    // re-enable the byte history in that case (30 lines of local capture must
+    // not replace the session's whole scrollback).
+    let liveMuxBuffer: string | null = null;
+    let remoteCaptureFailed = false;
+    if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true });
+      if (liveMuxBuffer === null || liveMuxBuffer.length === 0) {
+        remoteCaptureFailed = true;
+        liveMuxBuffer = null;
+      }
+    }
+    if (liveMuxBuffer === null && muxName && typeof ctx.mux.captureActivePaneBuffer === 'function') {
+      liveMuxBuffer = ctx.mux.captureActivePaneBuffer(
+        muxName,
+        isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true } : undefined
+      );
+    }
+    const captureOnly = isCaptureOnlyTuiMode && !(session.remote && remoteCaptureFailed);
+    // `source` doubles as the frontend's reconcile safety gate: only a
+    // 'mux-full-history' response may REPLACE a terminal's contents
+    // (_reconcileForeignResize). A remote session degraded to the local wrapper
+    // capture reports 'mux-visible' — content-wise that capture IS one screen.
     const source: 'history' | 'mux-visible' | 'mux-full-history' =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? isFullReload || isCaptureOnlyTuiMode
+        ? (isFullReload || isCaptureOnlyTuiMode) && !(session.remote && remoteCaptureFailed)
           ? 'mux-full-history'
           : 'mux-visible'
         : 'history';
     const rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
-        ? isCaptureOnlyTuiMode || session.terminalBufferLength === 0
+        ? captureOnly || session.terminalBufferLength === 0
           ? liveMuxBuffer
           : `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
         : session.terminalBuffer;

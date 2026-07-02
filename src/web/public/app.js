@@ -694,6 +694,9 @@ class CodemanApp {
     this.idleTimers = new Map(); // Map<sessionId, timeout> for stuck detection
     this._foreignResizeTimer = null; // COD-179 debounce for reconcile-after-foreign-resize
     this._foreignResizeDirty = null; // sessionId dirtied by a foreign resize mid-turn (final reconcile on idle)
+    this._lastReconcileWrite = null; // {id, buf} of the last reconcile rewrite — unchanged capture = no-op tick
+    // COD-180: heal busy remote TUI tabs on a cadence (all guards live in the tick)
+    this._remoteReconcileInterval = setInterval(() => this._remoteReconcileTick(), REMOTE_RECONCILE_TICK_MS);
 
     // DOM element cache for performance (avoid repeated getElementById calls)
     this._elemCache = {};
@@ -2109,7 +2112,14 @@ class CodemanApp {
     }, FOREIGN_RESIZE_SETTLE_MS);
   }
 
-  /** Rewrite the active terminal from the tmux capture after a foreign resize (COD-179). */
+  /**
+   * Rewrite the active terminal from the tmux capture (COD-179 foreign resize,
+   * COD-180 idle/periodic remote reconcile). Only a canonical full-history
+   * capture may REPLACE the terminal (`source === 'mux-full-history'`) — a
+   * degraded response (remote ssh capture failed → one local screen, or raw
+   * byte history) must never wipe accumulated scrollback. A repeat of the last
+   * written buffer is skipped so a periodic tick with no changes is a no-op.
+   */
   async _reconcileForeignResize(sessionId) {
     if (sessionId !== this.activeSessionId || !this.terminal) {
       // Tab switched — selectSession's own rewrite paints a clean state.
@@ -2123,17 +2133,51 @@ class CodemanApp {
       const res = await fetch(`/api/sessions/${sessionId}/terminal`);
       const data = (await res.json())?.data ?? {};
       if (sessionId !== this.activeSessionId || this._isLoadingBuffer) return;
+      if (data.source !== 'mux-full-history') return;
       if (data.terminalBuffer) {
+        if (this._lastReconcileWrite?.id === sessionId && this._lastReconcileWrite.buf === data.terminalBuffer) {
+          this._foreignResizeDirty = null;
+          return;
+        }
         this.terminal.clear();
         this.terminal.reset();
         await this.chunkedTerminalWrite(data.terminalBuffer);
         this.terminal.scrollToBottom();
         this._localEchoOverlay?.rerender();
+        this._lastReconcileWrite = { id: sessionId, buf: data.terminalBuffer };
         this._foreignResizeDirty = null;
       }
     } catch (err) {
       console.error('foreign-resize reconcile failed:', err);
     }
+  }
+
+  /** COD-180: remote codex/gemini sessions — the live nested-tmux stream corrupts scrollback; reconcile heals it. */
+  _isRemoteTuiSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    return !!session?.remote && (session.mode === 'codex' || session.mode === 'gemini');
+  }
+
+  /**
+   * COD-180: periodic mid-turn reconcile for busy REMOTE TUI sessions. Their
+   * live stream is nested-tmux repaint traffic that mangles what lands in
+   * browser scrollback (lost table rows, partial frames); a capture rewrite
+   * every tick bounds any corruption's lifetime to ~25s. Skipped unless the
+   * user is parked at the bottom (never yank someone reading scrollback); an
+   * unchanged capture is a no-op via the compare in _reconcileForeignResize.
+   */
+  _remoteReconcileTick() {
+    const id = this.activeSessionId;
+    if (!id || !this.terminal || this._isLoadingBuffer) return;
+    if (!this._isRemoteTuiSession(id)) return;
+    // Deliberately NOT gated on busy status: remote codex sessions often never
+    // flip to busy (their "Working (…)" frames arrive as partial cell updates
+    // split across chunks, defeating the working-state match — see COD-180
+    // notes), and an unchanged capture makes an idle tick a cheap no-op via
+    // the content-compare in _reconcileForeignResize.
+    const buf = this.terminal.buffer.active;
+    if (buf.viewportY !== buf.baseY) return; // scrolled up — don't yank
+    this._reconcileForeignResize(id);
   }
 
   async _onSessionClearTerminal(data) {
@@ -2208,9 +2252,14 @@ class CodemanApp {
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
     }
     // COD-179: a foreign resize dirtied this view mid-turn — later repaints may
-    // have re-corrupted it after the debounced rewrite. Now that the turn is
-    // over the frame is stable, so do one final reconcile.
-    if (data.id === this.activeSessionId && this._foreignResizeDirty === data.id) {
+    // have re-corrupted it after the debounced rewrite. COD-180: remote TUI
+    // sessions ALWAYS reconcile on idle — their live stream is nested-tmux
+    // repaint traffic that corrupts browser scrollback, and the end of a turn
+    // is the natural stable point to swap in the canonical remote capture.
+    if (
+      data.id === this.activeSessionId &&
+      (this._foreignResizeDirty === data.id || this._isRemoteTuiSession(data.id))
+    ) {
       clearTimeout(this._foreignResizeTimer);
       this._foreignResizeTimer = setTimeout(() => {
         this._reconcileForeignResize(data.id);

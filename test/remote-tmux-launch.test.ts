@@ -162,4 +162,37 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(a).toBe(b);
     expect(a).toContain(`-s ${EXPECTED_NAME}`);
   });
+
+  // ── COD-180: remote tmux history-limit ──
+  it('sets history-limit BEFORE new-session so the initial pane gets it', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'shell',
+      sessionId: SESSION_ID,
+      remote: baseRemote,
+      historyLimit: 50000,
+    });
+    // history-limit only applies to panes created AFTER it is set — order matters.
+    const setIdx = command.indexOf('set -g history-limit 50000');
+    const newSessionIdx = command.indexOf('new-session -A');
+    expect(setIdx).toBeGreaterThan(-1);
+    expect(newSessionIdx).toBeGreaterThan(-1);
+    expect(setIdx).toBeLessThan(newSessionIdx);
+  });
+
+  it('omits history-limit when not provided (legacy callers unchanged)', () => {
+    const command = buildRemoteLaunchCommand({ mode: 'shell', sessionId: SESSION_ID, remote: baseRemote });
+    expect(command).not.toContain('history-limit');
+    expect(command).toContain('tmux -L codeman new-session -A');
+  });
+
+  it('floors a fractional history-limit (never emits a non-integer into the shell command)', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'shell',
+      sessionId: SESSION_ID,
+      remote: baseRemote,
+      historyLimit: 12345.9,
+    });
+    expect(command).toContain('set -g history-limit 12345');
+    expect(command).not.toContain('12345.9');
+  });
 });

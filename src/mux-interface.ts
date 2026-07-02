@@ -257,4 +257,16 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Pass `{ fullHistory: true }` to capture the entire scrollback (COD-47).
    */
   captureActivePaneBuffer?(muxName: string, opts?: { fullHistory?: boolean }): string | null;
+
+  /**
+   * COD-180 — capture a REMOTE session's pane buffer on the remote tmux server
+   * over ssh. The remote history is the canonical scrollback for remote
+   * sessions (the local wrapper accumulates none). Returns null on failure so
+   * callers can fall back to local data.
+   */
+  captureRemotePaneBuffer?(
+    remote: SessionRemote,
+    muxName: string,
+    opts?: { fullHistory?: boolean }
+  ): Promise<string | null>;
 }

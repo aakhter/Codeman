@@ -808,6 +808,89 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer).not.toContain('stale gemini redraw frames');
     });
 
+    // ── COD-180: remote sessions capture from the REMOTE tmux server — the
+    // local wrapper accumulates no history (nested tmux repaints in place). ──
+    it('COD-180: remote codex session replays the remote tmux capture only', async () => {
+      harness.ctx._session.terminalBuffer = 'stale local byte history';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx._session as { remote?: unknown }).remote = {
+        hostId: 'mac-mini',
+        host: '192.168.21.109',
+        username: 'saqebakhter',
+        remotePath: '/tmp/case',
+      };
+      const remoteSpy = vi.fn(async () => 'remote canonical scrollback\n› prompt');
+      const localSpy = vi.fn(() => 'local wrapper single screen');
+      (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remoteSpy;
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = localSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('remote canonical scrollback');
+      expect(body.data.terminalBuffer).not.toContain('stale local byte history');
+      expect(body.data.terminalBuffer).not.toContain('local wrapper single screen');
+      expect(body.data.source).toBe('mux-full-history');
+      expect(remoteSpy).toHaveBeenCalledWith(
+        (harness.ctx._session as { remote?: unknown }).remote,
+        harness.ctx._session.muxName,
+        { fullHistory: true }
+      );
+      expect(localSpy).not.toHaveBeenCalled();
+    });
+
+    it('COD-180: remote codex keeps byte history when the remote capture fails (never one local screen)', async () => {
+      harness.ctx._session.terminalBuffer = 'accumulated byte history scrollback';
+      harness.ctx._session.mode = 'codex';
+      (harness.ctx._session as { remote?: unknown }).remote = {
+        hostId: 'mac-mini',
+        host: '192.168.21.109',
+        username: 'saqebakhter',
+        remotePath: '/tmp/case',
+      };
+      (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = vi.fn(async () => null);
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        () => 'local wrapper single screen'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      // Degraded mode: byte history + separator + local screen — NOT capture-only,
+      // so the session's whole scrollback is never replaced by ~30 local lines.
+      expect(body.data.terminalBuffer).toContain('accumulated byte history scrollback');
+      expect(body.data.terminalBuffer).toContain('\x1b[H\x1b[2Jlocal wrapper single screen');
+      // A degraded response must not advertise itself as a canonical rewrite source.
+      expect(body.data.source).toBe('mux-visible');
+    });
+
+    it('COD-180: local sessions never attempt a remote capture', async () => {
+      harness.ctx._session.terminalBuffer = 'local history';
+      harness.ctx._session.mode = 'codex';
+      const remoteSpy = vi.fn(async () => 'should not be called');
+      (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remoteSpy;
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        () => 'local full capture'
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(remoteSpy).not.toHaveBeenCalled();
+      expect(JSON.parse(res.body).data.terminalBuffer).toContain('local full capture');
+    });
+
     it('COD-178: codex falls back to raw byte history when capture is unavailable', async () => {
       harness.ctx._session.terminalBuffer = 'accumulated byte history fallback';
       harness.ctx._session.mode = 'codex';

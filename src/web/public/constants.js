@@ -61,6 +61,7 @@ const SYNC_WAIT_TIMEOUT_MS = 50;            // Wait timeout for terminal sync
 const STATS_POLLING_INTERVAL_MS = 2000;     // System stats polling
 const TUI_REDRAW_SETTLE_MS = 400;           // Grace for a TUI to redraw after a real resize, before fetching its buffer
 const FOREIGN_RESIZE_SETTLE_MS = 1200;      // Debounce for reconciling after ANOTHER client resized the shared PTY (COD-179)
+const REMOTE_RECONCILE_TICK_MS = 25000;     // Periodic mid-turn reconcile cadence for busy REMOTE TUI sessions (COD-180)
 
 // Z-index base values for layered floating windows
 const ZINDEX_SUBAGENT_BASE = 1000;

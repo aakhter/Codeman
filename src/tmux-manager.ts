@@ -22,10 +22,15 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { execSync, exec } from 'node:child_process';
+import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+/** ssh roundtrip budget for a remote pane capture (COD-180) — LAN is ~100-300ms; WAN gets headroom. */
+const REMOTE_CAPTURE_TIMEOUT_MS = 10_000;
+/** Remote full-history captures can span tens of thousands of lines with SGR escapes. */
+const REMOTE_CAPTURE_MAX_BUFFER = 64 * 1024 * 1024;
 import { existsSync, statSync, readFileSync, mkdirSync } from 'node:fs';
 import { writeFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -63,6 +68,7 @@ import type {
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import {
   buildSshConnectionArgs,
+  buildSshConnectionArgv,
   defaultRemoteCommandForMode,
   remoteSshTarget,
   withRemotePathBootstrap,
@@ -840,8 +846,10 @@ export function buildRemoteLaunchCommand(options: {
   remote: SessionRemote;
   sessionId: string;
   codexConfig?: CodexConfig;
+  /** Remote tmux history-limit (COD-180). Set BEFORE new-session so the initial pane gets it. */
+  historyLimit?: number;
 }): string {
-  const { mode, remote, sessionId, codexConfig } = options;
+  const { mode, remote, sessionId, codexConfig, historyLimit } = options;
   const modeCommand =
     remote.commands?.[mode] ||
     (mode === 'codex' ? `exec ${buildCodexCommand(codexConfig)}` : defaultRemoteCommandForMode(mode));
@@ -854,19 +862,30 @@ export function buildRemoteLaunchCommand(options: {
 
   // The tmux command line, with `\;` separating commands so the config `set`s
   // apply on the SAME connection (and are idempotent on reattach).
+  //
+  // COD-180 — the remote tmux history is the CANONICAL scrollback for a remote
+  // session (the local wrapper accumulates none: nested tmux repaints in
+  // place). Without an explicit history-limit the remote server runs the tmux
+  // default (2000 lines) and long sessions silently lose their oldest history.
+  // It must run BEFORE new-session (any tmux command auto-starts the server)
+  // because history-limit only applies to panes created after it is set.
+  const historyLimitPrefix =
+    historyLimit && Number.isFinite(historyLimit) ? [`set -g history-limit ${Math.floor(historyLimit)}`] : [];
   const tmuxInvocation = withRemotePathBootstrap(
-    [
-      `tmux -L codeman new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`,
-      'set -g status off',
-      'set -g mouse off',
-      'set -sg escape-time 0',
-      'set -g prefix C-q',
-      // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
-      // to the SMALLEST attached client, so two Codemans at different viewports
-      // would fight (clamp to the smaller). `window-size latest` sizes to the
-      // most-recently-active client instead, so concurrent clients coexist.
-      'set -g window-size latest',
-    ].join(' \\; ')
+    'tmux -L codeman ' +
+      [
+        ...historyLimitPrefix,
+        `new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`,
+        'set -g status off',
+        'set -g mouse off',
+        'set -sg escape-time 0',
+        'set -g prefix C-q',
+        // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
+        // to the SMALLEST attached client, so two Codemans at different viewports
+        // would fight (clamp to the smaller). `window-size latest` sizes to the
+        // most-recently-active client instead, so concurrent clients coexist.
+        'set -g window-size latest',
+      ].join(' \\; ')
   );
 
   // ssh runs its trailing args through the remote login shell, so the entire
@@ -959,13 +978,19 @@ function buildRemoteSessionCommand(
   mode: SessionMode,
   remote: SessionRemote,
   sessionId: string,
-  options: { codexConfig?: CodexConfig } = {}
+  options: { codexConfig?: CodexConfig; historyLimit?: number } = {}
 ): string {
   if (remote.owned === false) {
     const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId);
     return buildRemoteAttachCommand(remote, target);
   }
-  return buildRemoteLaunchCommand({ mode, remote, sessionId, codexConfig: options.codexConfig });
+  return buildRemoteLaunchCommand({
+    mode,
+    remote,
+    sessionId,
+    codexConfig: options.codexConfig,
+    historyLimit: options.historyLimit,
+  });
 }
 
 /**
@@ -1479,7 +1504,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     try {
       // Build the full command to run inside tmux
       const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
-      const fullCmd = remote ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig }) : localFullCmd;
+      const fullCmd = remote
+        ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig, historyLimit })
+        : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
@@ -1742,7 +1769,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);
     const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
-    const fullCmd = remote ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig }) : localFullCmd;
+    const fullCmd = remote
+      ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig, historyLimit })
+      : localFullCmd;
 
     try {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn
@@ -2862,6 +2891,50 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return target ? this.capturePaneBuffer(muxName, target, opts) : null;
     } catch (err) {
       console.error('[TmuxManager] Failed to resolve active pane for capture:', err);
+      return null;
+    }
+  }
+
+  /**
+   * COD-180 — capture a REMOTE session's pane buffer over ssh.
+   *
+   * For remote sessions the canonical scrollback lives ONLY on the remote tmux
+   * server: the local wrapper window is a nested-tmux client that gets repainted
+   * in place, so its own history is essentially empty (~one screen). Replay,
+   * tab-switch rewrite, and the COD-179 reconcile must therefore capture from
+   * the remote server, not the local wrapper.
+   *
+   * Connects with the same `buildSshConnectionArgv` options as the launch/probe
+   * paths (COD-107) and targets the remote session by its deterministic
+   * `codeman-<id8>` name (or `remote.remoteSessionName` for attached, non-owned
+   * sessions). Returns null on any failure — callers fall back to local data.
+   */
+  async captureRemotePaneBuffer(
+    remote: SessionRemote,
+    muxName: string,
+    opts?: { fullHistory?: boolean }
+  ): Promise<string | null> {
+    if (IS_TEST_MODE) return '';
+    const target = remote.remoteSessionName || muxName;
+    if (!isValidMuxName(target)) {
+      console.error('[TmuxManager] Invalid remote session name in captureRemotePaneBuffer:', target);
+      return null;
+    }
+    // The remote login shell may not have tmux on PATH (macOS non-interactive
+    // zsh lacks /opt/homebrew/bin) — bootstrap PATH exactly like the launcher.
+    const captureCmd = withRemotePathBootstrap(
+      `tmux -L codeman capture-pane -p -e ${opts?.fullHistory ? '-S - ' : ''}-t ${shellescape(target)}`
+    );
+    const argv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), captureCmd];
+    try {
+      const { stdout } = await execFileAsync('ssh', argv, {
+        encoding: 'utf-8',
+        timeout: REMOTE_CAPTURE_TIMEOUT_MS,
+        maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
+      });
+      return normalizeScrollbackEol(stdout.replace(/\n+$/g, ''));
+    } catch (err) {
+      console.error('[TmuxManager] Remote pane capture failed (falling back to local):', err);
       return null;
     }
   }
