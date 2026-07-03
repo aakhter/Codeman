@@ -75,12 +75,17 @@ Object.assign(CodemanApp.prototype, {
         const now = Date.now();
         // Post-exit cooldown: a trackpad's inertia tail must not immediately re-enter.
         if (now - (this._historyExitAt || 0) < HISTORY_REENTRY_COOLDOWN_MS) return 'swallowed';
+        // COD-190: start fetching history on the FIRST up-tick — by the time
+        // the entry threshold is reached the response is usually in hand,
+        // hiding the fetch latency (dominant on remote sessions: ssh RTT).
+        this._prefetchHistory?.();
         if (now - (this._historyEntryAccumAt || 0) > HISTORY_ENTRY_WINDOW_MS) this._historyEntryAccum = 0;
         this._historyEntryAccumAt = now;
         this._historyEntryAccum += -lines;
         if (this._historyEntryAccum >= HISTORY_ENTRY_LINES) {
+          const carryLines = this._historyEntryAccum;
           this._historyEntryAccum = 0;
-          this._enterHistoryView?.();
+          this._enterHistoryView?.(carryLines);
           return 'entered-history';
         }
       }

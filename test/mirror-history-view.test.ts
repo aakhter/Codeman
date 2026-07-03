@@ -60,7 +60,7 @@ describe('COD-187 live-mirror structural guards', () => {
       'this.terminal.options.scrollback = this._isMirrorSession(sessionId) ? 0 : this._userScrollback();'
     );
     // enter raises, exit trims
-    const enter = appJs.indexOf('async _enterHistoryView()');
+    const enter = appJs.indexOf('async _enterHistoryView(');
     expect(appJs.slice(enter, enter + 1200)).toContain('options.scrollback = this._userScrollback()');
     const exit = appJs.indexOf('_exitHistoryView() {');
     expect(appJs.slice(exit, exit + 1200)).toContain('options.scrollback = 0');
@@ -96,6 +96,35 @@ describe('COD-187 live-mirror structural guards', () => {
     const body = termUi.slice(start, start + 1200);
     expect(body).toContain("this._viewMode === 'history'");
     expect(body).toContain('_exitHistoryView');
+  });
+
+  it('COD-190: history entry is an atomic DEC-2026 swap with no-jump bottom landing', () => {
+    const start = appJs.indexOf('async _enterHistoryView(');
+    const body = appJs.slice(start, start + 4000);
+    // one synchronized write — never a visible blank between clear and repaint
+    expect(body).toContain('?2026h');
+    expect(body).toContain('?2026l');
+    expect(body).toContain('DEC_SYNC_STRIP_RE'); // embedded markers must not terminate our window
+    expect(body).not.toContain('_resetTerminalForReplay'); // reset() would drop sync mode
+    // land on the exact pixels the user was watching, then apply their gesture
+    const bottom = body.indexOf('scrollToBottom()');
+    const carry = body.indexOf('scrollLines(-carryLines)');
+    expect(bottom).toBeGreaterThan(-1);
+    expect(carry).toBeGreaterThan(bottom);
+  });
+
+  it('COD-190: first up-tick prefetches history (latency hidden behind the entry threshold)', () => {
+    const funnel = termUi.slice(
+      termUi.indexOf('_handleUserScrollIntent(lines) {'),
+      termUi.indexOf('_handleUserScrollIntent(lines) {') + 2000
+    );
+    const prefetch = funnel.indexOf('_prefetchHistory?.()');
+    const threshold = funnel.indexOf('HISTORY_ENTRY_LINES');
+    expect(prefetch).toBeGreaterThan(-1);
+    expect(prefetch).toBeLessThan(threshold); // fires BEFORE the threshold check
+    // and the entry consumes it
+    expect(appJs).toContain('this._historyPrefetch = null;');
+    expect(appJs.indexOf('_prefetchHistory() {')).toBeGreaterThan(-1);
   });
 
   it('liveMirrorEnabled is per-device: stripped from the server PUT and in displayKeys', () => {

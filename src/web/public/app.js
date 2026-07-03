@@ -706,6 +706,7 @@ class CodemanApp {
     this._lastMirrorFrame = null; // {id, buf} dedupe for _refreshMirrorFrame
     this._historyExitAt = 0; // history re-entry cooldown timestamp
     this._historyPartial = false; // COD-187 lazy load: history view holds only the last N lines
+    this._historyPrefetch = null; // COD-190 speculative prefetch {id, at, promise}
     this._historyExpandInFlight = false;
     this._historyEntryAccum = 0; // wheel-up accumulation toward history entry
     this._historyEntryAccumAt = 0;
@@ -2269,7 +2270,26 @@ class CodemanApp {
    * canonical tmux full-history capture (remote-sourced for remote sessions,
    * COD-180) and freeze it under a pill. tmux copy-mode semantics.
    */
-  async _enterHistoryView() {
+  /**
+   * COD-190: speculative history prefetch — fired on the FIRST upward scroll
+   * tick so the fetch (dominated by the ssh RTT on remote sessions) overlaps
+   * the entry threshold instead of following it. Short TTL: the capture's
+   * last screen must still match the live frame for the no-jump landing.
+   */
+  _prefetchHistory() {
+    const id = this.activeSessionId;
+    if (!id || !this._isMirrorSession(id) || this._viewMode !== 'live') return;
+    if (this._historyPrefetch?.id === id && Date.now() - this._historyPrefetch.at < HISTORY_PREFETCH_TTL_MS) return;
+    this._historyPrefetch = {
+      id,
+      at: Date.now(),
+      promise: fetch(`/api/sessions/${id}/terminal?lines=${HISTORY_INITIAL_LINES}`)
+        .then((r) => r.json())
+        .catch(() => null),
+    };
+  }
+
+  async _enterHistoryView(carryLines = 0) {
     const sessionId = this.activeSessionId;
     if (!sessionId || !this.terminal) return;
     if (!this._isMirrorSession(sessionId) || this._viewMode !== 'live') return;
@@ -2280,11 +2300,16 @@ class CodemanApp {
     this._showHistoryPill('History — loading…');
     this.terminal.options.scrollback = this._userScrollback();
     try {
-      // Fast first page (COD-187 lazy load): last HISTORY_INITIAL_LINES lines —
-      // small capture, small payload (matters over ssh), fast write. The full
-      // depth loads on demand when the user reaches the partial top.
-      const res = await fetch(`/api/sessions/${sessionId}/terminal?lines=${HISTORY_INITIAL_LINES}`);
-      const data = (await res.json())?.data ?? {};
+      // Fast first page (COD-187 lazy load): last HISTORY_INITIAL_LINES lines.
+      // Prefer the speculative prefetch (COD-190) started on the first
+      // up-tick; single-use — consume and clear.
+      const prefetch =
+        this._historyPrefetch?.id === sessionId && Date.now() - this._historyPrefetch.at < HISTORY_PREFETCH_TTL_MS
+          ? this._historyPrefetch.promise
+          : null;
+      this._historyPrefetch = null;
+      const json = await (prefetch ?? fetch(`/api/sessions/${sessionId}/terminal?lines=${HISTORY_INITIAL_LINES}`).then((r) => r.json()));
+      const data = json?.data ?? {};
       if (gen !== this._historyLoadGen || sessionId !== this.activeSessionId || this._viewMode !== 'history') return;
       if (data.source !== 'mux-full-history' || !data.terminalBuffer) {
         this.showToast?.('History unavailable for this session', 'warning');
@@ -2292,13 +2317,23 @@ class CodemanApp {
         return;
       }
       this._historyPartial = data.historyPartial === true;
+      // COD-190 atomic swap: ONE write wrapped in DEC 2026 synchronized-update
+      // markers — xterm 6 holds rendering until the terminator, so the blank
+      // clear frame never paints. Embedded 2026 markers are stripped from the
+      // content so they can't terminate our window early. No terminal.reset()
+      // here (it would drop sync mode); \x1b[3J\x1b[H\x1b[2J clears
+      // scrollback + screen in place.
       const owner = this._beginBufferLoad(`history-${gen}`);
-      this._resetTerminalForReplay();
-      await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, owner);
+      const content = data.terminalBuffer.replace(DEC_SYNC_STRIP_RE, '');
+      await new Promise((resolve) => this.terminal.write(`\x1b[?2026h\x1b[3J\x1b[H\x1b[2J${content}\x1b[?2026l`, resolve));
+      this._finishBufferLoad(owner);
       if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
-      // Land one page above the live screen — the context the user scrolled up for.
-      const buf = this.terminal.buffer.active;
-      this.terminal.scrollToLine(Math.max(0, buf.baseY - Math.max(1, this.terminal.rows - 2)));
+      // COD-190 no-jump landing: the capture's last screen is pixel-identical
+      // to the live frame — land at the BOTTOM (same pixels the user was
+      // already looking at), then apply their accumulated wheel delta so
+      // their own gesture carries them up into history smoothly.
+      this.terminal.scrollToBottom();
+      if (carryLines > 0) this.terminal.scrollLines(-carryLines);
       this._updateHistoryPill();
     } catch (err) {
       console.error('history view load failed:', err);
@@ -4337,6 +4372,7 @@ class CodemanApp {
       this._viewMode = 'live';
       this._historyLoadGen++;
       this._historyMissedOutput = false;
+      this._historyPrefetch = null;
       this._hideHistoryPill?.();
     }
     if (

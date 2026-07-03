@@ -66,6 +66,7 @@ const HISTORY_ENTRY_LINES = 3;              // COD-187: accumulated up-scroll li
 const HISTORY_ENTRY_WINDOW_MS = 300;        // COD-187: accumulation window for history entry (rejects trackpad jitter)
 const HISTORY_REENTRY_COOLDOWN_MS = 300;    // COD-187: ignore up-scroll right after leaving history (inertia tail)
 const HISTORY_INITIAL_LINES = 2000;         // COD-187: fast first page of the history view; full depth loads on scroll-to-top
+const HISTORY_PREFETCH_TTL_MS = 2500;       // COD-190: speculative history prefetch validity (bottom frame must stay fresh)
 
 // Z-index base values for layered floating windows
 const ZINDEX_SUBAGENT_BASE = 1000;
