@@ -104,11 +104,11 @@ describe('COD-181 remote working-frame poller', () => {
     const s = session as unknown as {
       _mux: unknown;
       _muxSession: unknown;
-      _startRemoteWorkingPoller(): void;
+      _startWorkingFramePoller(): void;
     };
     s._mux = { captureActivePaneBuffer: vi.fn(() => frame) };
     s._muxSession = { muxName: 'codeman-test1234' };
-    s._startRemoteWorkingPoller();
+    s._startWorkingFramePoller();
   });
 
   afterEach(async () => {

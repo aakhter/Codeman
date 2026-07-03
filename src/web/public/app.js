@@ -2152,10 +2152,15 @@ class CodemanApp {
     }
   }
 
+  /** COD-182: any codex/gemini tab — stale rows can appear locally too (reattach/reconnect churn). */
+  _isTuiSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    return session?.mode === 'codex' || session?.mode === 'gemini';
+  }
+
   /** COD-180: remote codex/gemini sessions — the live nested-tmux stream corrupts scrollback; reconcile heals it. */
   _isRemoteTuiSession(sessionId) {
-    const session = this.sessions.get(sessionId);
-    return !!session?.remote && (session.mode === 'codex' || session.mode === 'gemini');
+    return this._isTuiSession(sessionId) && !!this.sessions.get(sessionId)?.remote;
   }
 
   /**
@@ -2252,14 +2257,14 @@ class CodemanApp {
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
     }
     // COD-179: a foreign resize dirtied this view mid-turn — later repaints may
-    // have re-corrupted it after the debounced rewrite. COD-180: remote TUI
-    // sessions ALWAYS reconcile on idle — their live stream is nested-tmux
-    // repaint traffic that corrupts browser scrollback, and the end of a turn
-    // is the natural stable point to swap in the canonical remote capture.
-    if (
-      data.id === this.activeSessionId &&
-      (this._foreignResizeDirty === data.id || this._isRemoteTuiSession(data.id))
-    ) {
+    // have re-corrupted it after the debounced rewrite. COD-180/182: ALL TUI
+    // tabs (remote AND local codex/gemini) reconcile on idle — remote live
+    // streams are nested-tmux repaint traffic that corrupts scrollback, and
+    // local tabs pick up stale rows from reattach/reconnect churn (COD-182:
+    // duplicated composer placeholder after a deploy restart). Turn end is the
+    // stable point to swap in the canonical capture; an unchanged capture is
+    // a no-op via the content compare.
+    if (data.id === this.activeSessionId && (this._foreignResizeDirty === data.id || this._isTuiSession(data.id))) {
       clearTimeout(this._foreignResizeTimer);
       this._foreignResizeTimer = setTimeout(() => {
         this._reconcileForeignResize(data.id);
@@ -2473,8 +2478,20 @@ class CodemanApp {
       if (this._ws === ws) {
         this._wsReady = true;
         this._wsState = 'connected';
+        // COD-182: a RECONNECT (attempts > 0) means the server or link dropped
+        // mid-session — the reattach/redraw churn in that window leaves stale
+        // rows in TUI tabs (e.g. duplicated composer placeholder after a
+        // deploy restart). Schedule a one-shot capture reconcile once output
+        // settles. First-connects skip this: selectSession just painted.
+        const wasReconnect = this._wsReconnectAttempts > 0;
         this._wsReconnectAttempts = 0;
         this._updateConnectionIndicator();
+        if (wasReconnect && this._isTuiSession(sessionId)) {
+          clearTimeout(this._foreignResizeTimer);
+          this._foreignResizeTimer = setTimeout(() => {
+            this._reconcileForeignResize(sessionId);
+          }, FOREIGN_RESIZE_SETTLE_MS);
+        }
         // Send a typed resize over the fresh socket: syncs PTY dims after
         // (re)connects AND registers the desktop sizing claim server-side —
         // selectSession's earlier resizes ran before this WS existed, so they
