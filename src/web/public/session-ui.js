@@ -740,9 +740,11 @@ Object.assign(CodemanApp.prototype, {
         ));
       }
 
-      // Switch to first session
+      // Switch to first session. Do NOT pre-set activeSessionId — that trips
+      // selectSession's same-session early-return, leaving the WebSocket, SSE
+      // subscription, and terminal paint on the PREVIOUS tab (typing appears
+      // dead and the new shell renders stale content — COD-187 e2e catch).
       if (sessionIds.length > 0) {
-        this.activeSessionId = sessionIds[0];
         await this.selectSession(sessionIds[0]);
       }
 
@@ -2318,7 +2320,7 @@ Object.assign(CodemanApp.prototype, {
       }
       this.closeCreateCaseModal();
       this.showToast(`Attached to ${remoteSessionName} (detach on close)`, 'success');
-      this.activeSessionId = id;
+      // See runShell: pre-setting activeSessionId would dead-end selectSession.
       await this.selectSession(id);
       if (this.terminal && typeof this.terminal.focus === 'function') this.terminal.focus();
     } catch (err) {

@@ -1154,7 +1154,7 @@ export function registerSessionRoutes(
   //   frame=1     - COD-187 live mirror: ONLY the current visible frame
   app.get('/api/sessions/:id/terminal', async (req) => {
     const { id } = req.params as { id: string };
-    const query = req.query as { tail?: string; frame?: string };
+    const query = req.query as { tail?: string; frame?: string; lines?: string };
     const session = findSessionOrFail(ctx, id);
 
     // COD-187 (live mirror): `frame=1` returns ONLY the current visible frame —
@@ -1196,6 +1196,12 @@ export function registerSessionRoutes(
     // capture only the visible frame, which stays fast.
     const tailBytes = query.tail ? parseInt(query.tail, 10) : 0;
     const isFullReload = tailBytes <= 0;
+    // COD-187 (history view lazy load): `lines=N` bounds the full-history
+    // capture to the last N lines — the fast first page. The frontend expands
+    // to the unbounded capture only when the user scrolls to the partial top.
+    const rawLines = query.lines ? parseInt(query.lines, 10) : 0;
+    const lastLines =
+      Number.isFinite(rawLines) && rawLines > 0 ? Math.min(100_000, Math.max(100, rawLines)) : undefined;
 
     // Prepend the live tmux pane buffer so tab-switch replay shows the current
     // on-screen frame, not just the accumulated byte history. This matters for
@@ -1226,7 +1232,7 @@ export function registerSessionRoutes(
     let liveMuxBuffer: string | null = null;
     let remoteCaptureFailed = false;
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true });
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true, lastLines });
       if (liveMuxBuffer === null || liveMuxBuffer.length === 0) {
         remoteCaptureFailed = true;
         liveMuxBuffer = null;
@@ -1235,7 +1241,7 @@ export function registerSessionRoutes(
     if (liveMuxBuffer === null && muxName && typeof ctx.mux.captureActivePaneBuffer === 'function') {
       liveMuxBuffer = ctx.mux.captureActivePaneBuffer(
         muxName,
-        isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true } : undefined
+        isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true, lastLines } : undefined
       );
     }
     const captureOnly = isCaptureOnlyTuiMode && !(session.remote && remoteCaptureFailed);
@@ -1320,12 +1326,22 @@ export function registerSessionRoutes(
       }
     }
 
+    // COD-187: a `lines=N` capture that came back with >= N lines almost
+    // certainly has older history above it — the frontend shows a
+    // "scroll to top for older" affordance and expands on demand.
+    const historyPartial =
+      lastLines !== undefined &&
+      source === 'mux-full-history' &&
+      cleanBuffer.length > 0 &&
+      cleanBuffer.split('\n').length >= lastLines;
+
     return {
       terminalBuffer: cleanBuffer,
       status: session.status,
       fullSize,
       truncated,
       source,
+      historyPartial,
     };
   });
 

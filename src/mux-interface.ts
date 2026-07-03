@@ -250,13 +250,17 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Pass `{ fullHistory: true }` to capture the entire scrollback (`-S -`)
    * as linear text instead of just the visible single-screen frame (COD-47).
    */
-  capturePaneBuffer?(muxName: string, paneTarget?: string, opts?: { fullHistory?: boolean }): string | null;
+  capturePaneBuffer?(
+    muxName: string,
+    paneTarget?: string,
+    opts?: { fullHistory?: boolean; lastLines?: number }
+  ): string | null;
 
   /**
    * Capture the active pane's current tmux buffer with ANSI escape codes preserved.
    * Pass `{ fullHistory: true }` to capture the entire scrollback (COD-47).
    */
-  captureActivePaneBuffer?(muxName: string, opts?: { fullHistory?: boolean }): string | null;
+  captureActivePaneBuffer?(muxName: string, opts?: { fullHistory?: boolean; lastLines?: number }): string | null;
 
   /**
    * COD-180 — capture a REMOTE session's pane buffer on the remote tmux server
@@ -267,6 +271,6 @@ export interface TerminalMultiplexer extends EventEmitter {
   captureRemotePaneBuffer?(
     remote: SessionRemote,
     muxName: string,
-    opts?: { fullHistory?: boolean; visibleFrame?: boolean }
+    opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
   ): Promise<string | null>;
 }

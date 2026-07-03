@@ -981,6 +981,52 @@ describe('session-routes', () => {
         expect(body.data.terminalBuffer).toBe('');
       });
 
+      it('COD-187 lazy history: lines=N bounds the capture and flags partial history', async () => {
+        harness.ctx._session.mode = 'codex';
+        const manyLines = Array.from({ length: 2000 }, (_, i) => `H${i}`).join('\n');
+        const localSpy = vi.fn((_n: string, opts?: { fullHistory?: boolean; lastLines?: number }) =>
+          opts?.fullHistory ? manyLines : 'visible'
+        );
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = localSpy;
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?lines=2000`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(localSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, { fullHistory: true, lastLines: 2000 });
+        expect(body.data.source).toBe('mux-full-history');
+        expect(body.data.historyPartial).toBe(true);
+      });
+
+      it('COD-187 lazy history: short capture (fewer lines than requested) is NOT partial', async () => {
+        harness.ctx._session.mode = 'codex';
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'only\nfour\nshort\nlines' : 'v')
+        );
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?lines=2000`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.historyPartial).toBe(false);
+      });
+
+      it('COD-187 lazy history: unbounded request never sets historyPartial', async () => {
+        harness.ctx._session.mode = 'codex';
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'a\nb\nc' : 'v')
+        );
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+        });
+        expect(JSON.parse(res.body).data.historyPartial).toBe(false);
+      });
+
       it('frame wins over tail', async () => {
         harness.ctx._session.terminalBuffer = 'byte history';
         harness.ctx._session.mode = 'codex';

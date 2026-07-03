@@ -705,6 +705,8 @@ class CodemanApp {
     this._historyMissedOutput = false; // live output arrived while frozen in history
     this._lastMirrorFrame = null; // {id, buf} dedupe for _refreshMirrorFrame
     this._historyExitAt = 0; // history re-entry cooldown timestamp
+    this._historyPartial = false; // COD-187 lazy load: history view holds only the last N lines
+    this._historyExpandInFlight = false;
     this._historyEntryAccum = 0; // wheel-up accumulation toward history entry
     this._historyEntryAccumAt = 0;
     // Cached setting flag (hot path) — read storage directly: the settings-ui
@@ -2273,7 +2275,10 @@ class CodemanApp {
     this._showHistoryPill('History — loading…');
     this.terminal.options.scrollback = this._userScrollback();
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/terminal`);
+      // Fast first page (COD-187 lazy load): last HISTORY_INITIAL_LINES lines —
+      // small capture, small payload (matters over ssh), fast write. The full
+      // depth loads on demand when the user reaches the partial top.
+      const res = await fetch(`/api/sessions/${sessionId}/terminal?lines=${HISTORY_INITIAL_LINES}`);
       const data = (await res.json())?.data ?? {};
       if (gen !== this._historyLoadGen || sessionId !== this.activeSessionId || this._viewMode !== 'history') return;
       if (data.source !== 'mux-full-history' || !data.terminalBuffer) {
@@ -2281,6 +2286,7 @@ class CodemanApp {
         this._exitHistoryView();
         return;
       }
+      this._historyPartial = data.historyPartial === true;
       const owner = this._beginBufferLoad(`history-${gen}`);
       this._resetTerminalForReplay();
       await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, owner);
@@ -2295,12 +2301,51 @@ class CodemanApp {
     }
   }
 
+  /**
+   * COD-187 lazy load: the user hit the top of the partial history — replace
+   * it with the unbounded capture, preserving the reading position (anchored
+   * by distance from the bottom, which both captures share).
+   */
+  async _expandHistoryFull() {
+    const sessionId = this.activeSessionId;
+    if (!sessionId || this._viewMode !== 'history' || !this._historyPartial) return;
+    if (this._historyExpandInFlight) return;
+    this._historyExpandInFlight = true;
+    const gen = this._historyLoadGen;
+    this._showHistoryPill('History — loading older…');
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/terminal`);
+      const data = (await res.json())?.data ?? {};
+      if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
+      if (data.source !== 'mux-full-history' || !data.terminalBuffer) {
+        this._historyPartial = false;
+        this._updateHistoryPill();
+        return;
+      }
+      const bufBefore = this.terminal.buffer.active;
+      const distFromBottom = bufBefore.baseY - bufBefore.viewportY;
+      const owner = this._beginBufferLoad(`history-${gen}-full`);
+      this._resetTerminalForReplay();
+      await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, owner);
+      if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
+      this._historyPartial = false;
+      const buf = this.terminal.buffer.active;
+      this.terminal.scrollToLine(Math.max(0, buf.baseY - distFromBottom));
+      this._updateHistoryPill();
+    } catch (err) {
+      console.error('history expand failed:', err);
+    } finally {
+      this._historyExpandInFlight = false;
+    }
+  }
+
   /** COD-187: leave history — trim scrollback back to 0 and repaint the live frame. */
   _exitHistoryView() {
     if (this._viewMode !== 'history') return;
     this._viewMode = 'live';
     this._historyLoadGen++;
     this._historyMissedOutput = false;
+    this._historyPartial = false;
     this._historyExitAt = Date.now();
     this._hideHistoryPill();
     // Stale sticky-scroll grace must not survive into live mode.
@@ -2321,7 +2366,8 @@ class CodemanApp {
 
   _updateHistoryPill() {
     if (this._viewMode !== 'history') return;
-    const base = 'History (frozen) — Esc or scroll to bottom to resume';
+    let base = 'History (frozen) — Esc or scroll to bottom to resume';
+    if (this._historyPartial) base += ' · scroll to top for older';
     this._showHistoryPill(this._historyMissedOutput ? `${base} · new output below` : base);
   }
 

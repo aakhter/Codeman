@@ -92,6 +92,10 @@ Object.assign(CodemanApp.prototype, {
     if (this._viewMode === 'history' && lines > 0 && this.isTerminalAtBottom()) {
       this._exitHistoryView?.();
     }
+    // COD-187 lazy load: reaching the top of a PARTIAL history pulls the full depth.
+    if (this._viewMode === 'history' && lines < 0 && this.terminal.buffer.active.viewportY === 0) {
+      this._expandHistoryFull?.();
+    }
     return 'scrolled';
   },
 
@@ -173,6 +177,7 @@ Object.assign(CodemanApp.prototype, {
         if (ev.key === 'PageUp' || ev.key === 'PageDown') {
           this.terminal.scrollLines((ev.key === 'PageUp' ? -1 : 1) * Math.max(1, this.terminal.rows - 2));
           if (ev.key === 'PageDown' && this.isTerminalAtBottom()) this._exitHistoryView?.();
+          if (ev.key === 'PageUp' && this.terminal.buffer.active.viewportY === 0) this._expandHistoryFull?.();
           return false;
         }
       }

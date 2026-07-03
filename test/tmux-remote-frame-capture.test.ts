@@ -9,7 +9,12 @@
  * Pure helpers — no ssh, no tmux. Port: N/A.
  */
 import { describe, it, expect } from 'vitest';
-import { buildRemoteFrameCommand, parseRemoteFrameCapture, formatPaneSnapshot } from '../src/tmux-manager.js';
+import {
+  buildRemoteFrameCommand,
+  parseRemoteFrameCapture,
+  formatPaneSnapshot,
+  captureStartFlag,
+} from '../src/tmux-manager.js';
 
 const DELIM = '__CODEMAN_GEOM__';
 
@@ -51,5 +56,17 @@ describe('COD-187 parseRemoteFrameCapture', () => {
   it('returns null for an empty capture so callers fall back to the local wrapper', () => {
     expect(parseRemoteFrameCapture(`\n${DELIM}\n80 24 0 0\n`)).toBeNull();
     expect(parseRemoteFrameCapture('')).toBeNull();
+  });
+});
+
+describe('COD-187 captureStartFlag (history lazy load)', () => {
+  it('bounds the capture to the last N lines when provided', () => {
+    expect(captureStartFlag(2000)).toBe('-S -2000');
+    expect(captureStartFlag(2000.9)).toBe('-S -2000'); // floored — never a non-integer in the shell command
+  });
+  it('falls back to unbounded scrollback', () => {
+    expect(captureStartFlag()).toBe('-S -');
+    expect(captureStartFlag(0)).toBe('-S -');
+    expect(captureStartFlag(NaN)).toBe('-S -');
   });
 });

@@ -620,6 +620,18 @@ export function formatPaneSnapshot(
 }
 
 /**
+ * COD-187 — capture start flag: full scrollback (`-S -`) or, for the history
+ * view's fast first page, only the last N lines (`-S -N`). Bounded so a
+ * hostile/buggy value can't inject anything (integer, floored).
+ */
+export function captureStartFlag(lastLines?: number): string {
+  if (lastLines && Number.isFinite(lastLines) && lastLines > 0) {
+    return `-S -${Math.floor(lastLines)}`;
+  }
+  return '-S -';
+}
+
+/**
  * COD-187 — the combined remote frame-fetch command: visible-frame capture,
  * a delimiter line, then the pane geometry. One ssh roundtrip fetches both so
  * the snapshot and its cursor position are consistent.
@@ -2877,7 +2889,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    *   final captured status row (COD-185). Caveat: lines tmux has already
    *   evicted past its history-limit are gone.
    */
-  capturePaneBuffer(muxName: string, paneTarget?: string, opts?: { fullHistory?: boolean }): string | null {
+  capturePaneBuffer(
+    muxName: string,
+    paneTarget?: string,
+    opts?: { fullHistory?: boolean; lastLines?: number }
+  ): string | null {
     if (IS_TEST_MODE) return '';
     const target = resolveTmuxPaneTarget(muxName, paneTarget);
     if (!target) {
@@ -2889,7 +2905,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     try {
       // `-S -` extends the capture start to the very top of the scrollback.
-      const captureFlags = fullHistory ? 'capture-pane -p -e -S -' : 'capture-pane -p -e';
+      const captureFlags = fullHistory
+        ? `capture-pane -p -e ${captureStartFlag(opts?.lastLines)}`
+        : 'capture-pane -p -e';
       const buffer = execSync(`${this.tmux()} ${captureFlags} -t ${shellescape(target)}`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
@@ -2946,7 +2964,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Pane ids are not stable across respawns or restores, so callers should not
    * assume the first pane remains `%0`.
    */
-  captureActivePaneBuffer(muxName: string, opts?: { fullHistory?: boolean }): string | null {
+  captureActivePaneBuffer(muxName: string, opts?: { fullHistory?: boolean; lastLines?: number }): string | null {
     if (IS_TEST_MODE) return '';
     if (!isValidMuxName(muxName)) {
       console.error('[TmuxManager] Invalid session name in captureActivePaneBuffer:', muxName);
@@ -2983,7 +3001,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   async captureRemotePaneBuffer(
     remote: SessionRemote,
     muxName: string,
-    opts?: { fullHistory?: boolean; visibleFrame?: boolean }
+    opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
   ): Promise<string | null> {
     if (IS_TEST_MODE) return '';
     const target = remote.remoteSessionName || muxName;
@@ -3012,7 +3030,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // The remote login shell may not have tmux on PATH (macOS non-interactive
     // zsh lacks /opt/homebrew/bin) — bootstrap PATH exactly like the launcher.
     const captureCmd = withRemotePathBootstrap(
-      `tmux -L codeman capture-pane -p -e ${opts?.fullHistory ? '-S - ' : ''}-t ${shellescape(target)}`
+      `tmux -L codeman capture-pane -p -e ${opts?.fullHistory ? `${captureStartFlag(opts?.lastLines)} ` : ''}-t ${shellescape(target)}`
     );
     const argv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), captureCmd];
     try {

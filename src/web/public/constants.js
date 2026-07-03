@@ -65,6 +65,7 @@ const REMOTE_RECONCILE_TICK_MS = 25000;     // Periodic mid-turn reconcile caden
 const HISTORY_ENTRY_LINES = 3;              // COD-187: accumulated up-scroll lines before a mirror tab opens history
 const HISTORY_ENTRY_WINDOW_MS = 300;        // COD-187: accumulation window for history entry (rejects trackpad jitter)
 const HISTORY_REENTRY_COOLDOWN_MS = 300;    // COD-187: ignore up-scroll right after leaving history (inertia tail)
+const HISTORY_INITIAL_LINES = 2000;         // COD-187: fast first page of the history view; full depth loads on scroll-to-top
 
 // Z-index base values for layered floating windows
 const ZINDEX_SUBAGENT_BASE = 1000;
