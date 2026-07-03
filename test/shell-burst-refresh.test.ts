@@ -10,8 +10,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Session } from '../src/session.js';
 
-function track(session: Session, bytes: number): void {
-  (session as unknown as { _trackShellBurst(n: number): void })._trackShellBurst(bytes);
+// A jump-scroll-shaped chunk: home repaint + payload (the detector requires
+// BOTH byte volume and repeated full-screen repaints).
+function track(session: Session, bytes: number, repaint = true): void {
+  const chunk = (repaint ? '\x1b[H\x1b[2J' : '') + 'x'.repeat(bytes);
+  (session as unknown as { _trackShellBurst(d: string): void })._trackShellBurst(chunk);
 }
 
 describe('COD-189 shell burst refresh', () => {
@@ -54,6 +57,12 @@ describe('COD-189 shell burst refresh', () => {
       track(session, 1024);
       vi.advanceTimersByTime(1_000); // spread across windows
     }
+    vi.advanceTimersByTime(5_000);
+    expect(refreshes).toBe(0);
+  });
+
+  it('large LINEAR output without repaints never triggers (build logs are not bursts)', () => {
+    for (let i = 0; i < 20; i++) track(session, 16 * 1024, false);
     vi.advanceTimersByTime(5_000);
     expect(refreshes).toBe(0);
   });

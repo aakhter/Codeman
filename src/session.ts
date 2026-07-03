@@ -124,7 +124,8 @@ const EXTERNAL_CLI_IDLE_DELAY_MS = 5000;
  *  streams more than SHELL_BURST_BYTES within SHELL_BURST_WINDOW_MS, emit
  *  'needsRefresh' once output settles: the client full-reloads from the
  *  (capture-canonical since COD-189) /terminal response. */
-const SHELL_BURST_BYTES = 64 * 1024;
+const SHELL_BURST_BYTES = 24 * 1024;
+const SHELL_BURST_REPAINTS = 4;
 const SHELL_BURST_WINDOW_MS = 5000;
 const SHELL_BURST_SETTLE_MS = 1500;
 
@@ -371,6 +372,7 @@ export class Session extends EventEmitter {
   private _workingFramePollTimer: NodeJS.Timeout | null = null;
   /** COD-189 — shell burst tracking (heal live scrollback from capture after big bursts) */
   private _shellBurstBytes = 0;
+  private _shellBurstRepaints = 0;
   private _shellBurstWindowStart = 0;
   private _shellBurstActive = false;
   private _shellBurstSettleTimer: NodeJS.Timeout | null = null;
@@ -1672,7 +1674,7 @@ export class Session extends EventEmitter {
 
       // === Idle/working detection runs on every chunk (latency-sensitive) ===
       this._detectWorkingState(data);
-      if (this.mode === 'shell') this._trackShellBurst(data.length);
+      if (this.mode === 'shell') this._trackShellBurst(data);
 
       // === Expensive processing (ANSI strip, Ralph, bash parser) is throttled ===
       // Instead of running regex-heavy parsers on every PTY chunk, we accumulate
@@ -2237,21 +2239,33 @@ export class Session extends EventEmitter {
    * in place (jump-scroll), so live-streamed scrollback is sparse or absent;
    * only the pane history is contiguous.
    */
-  private _trackShellBurst(bytes: number): void {
+  private _trackShellBurst(data: string): void {
     const now = Date.now();
     if (now - this._shellBurstWindowStart > SHELL_BURST_WINDOW_MS) {
       this._shellBurstWindowStart = now;
       this._shellBurstBytes = 0;
+      this._shellBurstRepaints = 0;
       if (!this._shellBurstSettleTimer) this._shellBurstActive = false;
     }
-    this._shellBurstBytes += bytes;
-    if (this._shellBurstBytes >= SHELL_BURST_BYTES) this._shellBurstActive = true;
+    this._shellBurstBytes += data.length;
+    // Jump-scroll's fingerprint is repeated home/clear repaints, and tmux
+    // compresses the byte volume hard (a 10k-line seq burst reached the
+    // server as ~37KB) — so require BOTH a modest byte volume AND several
+    // full-screen repaints before treating output as a burst.
+    let idx = -1;
+    while ((idx = data.indexOf('\x1b[H', idx + 1)) !== -1) this._shellBurstRepaints++;
+    let jdx = -1;
+    while ((jdx = data.indexOf('\x1b[2J', jdx + 1)) !== -1) this._shellBurstRepaints++;
+    if (this._shellBurstBytes >= SHELL_BURST_BYTES && this._shellBurstRepaints >= SHELL_BURST_REPAINTS) {
+      this._shellBurstActive = true;
+    }
     if (this._shellBurstActive) {
       if (this._shellBurstSettleTimer) clearTimeout(this._shellBurstSettleTimer);
       this._shellBurstSettleTimer = setTimeout(() => {
         this._shellBurstSettleTimer = null;
         this._shellBurstActive = false;
         this._shellBurstBytes = 0;
+        this._shellBurstRepaints = 0;
         if (!this._isStopped) this.emit('needsRefresh');
       }, SHELL_BURST_SETTLE_MS);
     }
