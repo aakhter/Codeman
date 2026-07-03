@@ -563,6 +563,37 @@ export function normalizeScrollbackEol(buffer: string): string {
   return buffer.replace(/\r?\n/g, '\r\n');
 }
 
+function parsePaneGeometry(output: string): { cols: number; rows: number; cursorX: number; cursorY: number } | null {
+  const [cursorX, cursorY, cols, rows] = output
+    .trim()
+    .split(/\s+/)
+    .map((value) => parseInt(value, 10));
+  if (
+    Number.isFinite(cursorX) &&
+    Number.isFinite(cursorY) &&
+    Number.isFinite(cols) &&
+    Number.isFinite(rows) &&
+    cursorX >= 0 &&
+    cursorY >= 0 &&
+    cols > 0 &&
+    rows > 0
+  ) {
+    return { cols, rows, cursorX, cursorY };
+  }
+  return null;
+}
+
+export function formatFullHistoryCapture(
+  buffer: string,
+  geometry?: { cols: number; rows: number; cursorX: number; cursorY: number } | null
+): string {
+  const normalized = normalizeScrollbackEol(buffer);
+  if (!geometry || geometry.cols <= 0 || geometry.rows <= 0) return normalized;
+  const cursorX = Math.max(0, Math.min(geometry.cols - 1, geometry.cursorX));
+  const cursorY = Math.max(0, Math.min(geometry.rows - 1, geometry.cursorY));
+  return `${normalized}\x1b[${cursorY + 1};${cursorX + 1}H`;
+}
+
 export function formatPaneSnapshot(
   lines: string[],
   geometry: { cols: number; rows: number; cursorX: number; cursorY: number }
@@ -2804,10 +2835,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    *   the browser xterm reproduces the live frame. Used for fast tab switches.
    * - Full history (`opts.fullHistory`): `capture-pane -p -e -S -` grabs the
    *   ENTIRE tmux scrollback (COD-47), returned as linear scrollback text with
-   *   SGR codes preserved (NOT repositioned — a multi-screen history can't be
-   *   painted into a single visible frame, so the snapshot repaint is skipped).
-   *   Used for full page reloads so the user gets back their scroll history.
-   *   Caveat: lines tmux has already evicted past its history-limit are gone.
+   *   SGR codes preserved. Multi-screen history cannot be repainted row-by-row
+   *   into one visible frame, so we replay it linearly, then append the live
+   *   pane cursor position so xterm does not leave the cursor at the end of the
+   *   final captured status row (COD-185). Caveat: lines tmux has already
+   *   evicted past its history-limit are gone.
    */
   capturePaneBuffer(muxName: string, paneTarget?: string, opts?: { fullHistory?: boolean }): string | null {
     if (IS_TEST_MODE) return '';
@@ -2832,7 +2864,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // xterm (convertEol:false) starts each replayed line at column 0 instead
       // of staircasing diagonally (COD-138).
       if (fullHistory) {
-        return normalizeScrollbackEol(buffer);
+        try {
+          const cursor = execSync(
+            `${this.tmux()} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`,
+            {
+              encoding: 'utf-8',
+              timeout: EXEC_TIMEOUT_MS,
+            }
+          );
+          return formatFullHistoryCapture(buffer, parsePaneGeometry(cursor));
+        } catch (cursorErr) {
+          console.error('[TmuxManager] Failed to query pane cursor after full-history capture:', cursorErr);
+          return formatFullHistoryCapture(buffer);
+        }
       }
       try {
         const cursor = execSync(
@@ -2842,18 +2886,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             timeout: EXEC_TIMEOUT_MS,
           }
         ).trim();
-        const [cursorX, cursorY, cols, rows] = cursor.split(/\s+/).map((value) => parseInt(value, 10));
-        if (
-          Number.isFinite(cursorX) &&
-          Number.isFinite(cursorY) &&
-          Number.isFinite(cols) &&
-          Number.isFinite(rows) &&
-          cursorX >= 0 &&
-          cursorY >= 0 &&
-          cols > 0 &&
-          rows > 0
-        ) {
-          return formatPaneSnapshot(buffer.split('\n'), { cols, rows, cursorX, cursorY });
+        const geometry = parsePaneGeometry(cursor);
+        if (geometry) {
+          return formatPaneSnapshot(buffer.split('\n'), geometry);
         }
       } catch (cursorErr) {
         console.error('[TmuxManager] Failed to query pane cursor after capture:', cursorErr);
@@ -2932,7 +2967,25 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         timeout: REMOTE_CAPTURE_TIMEOUT_MS,
         maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
       });
-      return normalizeScrollbackEol(stdout.replace(/\n+$/g, ''));
+      const buffer = stdout.replace(/\n+$/g, '');
+      if (!opts?.fullHistory) {
+        return normalizeScrollbackEol(buffer);
+      }
+      try {
+        const cursorCmd = withRemotePathBootstrap(
+          `tmux -L codeman display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
+        );
+        const cursorArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), cursorCmd];
+        const { stdout: cursor } = await execFileAsync('ssh', cursorArgv, {
+          encoding: 'utf-8',
+          timeout: REMOTE_CAPTURE_TIMEOUT_MS,
+          maxBuffer: 1024,
+        });
+        return formatFullHistoryCapture(buffer, parsePaneGeometry(cursor));
+      } catch (cursorErr) {
+        console.error('[TmuxManager] Remote pane cursor query failed after full-history capture:', cursorErr);
+        return formatFullHistoryCapture(buffer);
+      }
     } catch (err) {
       console.error('[TmuxManager] Remote pane capture failed (falling back to local):', err);
       return null;
