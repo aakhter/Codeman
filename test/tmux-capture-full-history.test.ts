@@ -35,7 +35,7 @@ describe('tmux full-history pane capture (COD-47)', () => {
 
   it('returns full-history capture as raw scrollback (skips the single-screen repaint)', () => {
     const sig = source.indexOf('capturePaneBuffer(');
-    const body = source.slice(sig, sig + 2400);
+    const body = source.slice(sig, sig + 3400);
     // When fullHistory, return the raw buffer BEFORE the formatPaneSnapshot
     // repaint (which is single-screen and would clip a multi-screen history).
     const earlyReturn = body.indexOf('if (fullHistory)');

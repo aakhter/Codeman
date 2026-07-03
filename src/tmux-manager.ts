@@ -2917,10 +2917,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const captureFlags = fullHistory
         ? `capture-pane -p -e ${captureStartFlag(opts?.lastLines)}`
         : 'capture-pane -p -e';
-      const buffer = execSync(`${this.tmux()} ${captureFlags} -t ${shellescape(target)}`, {
+      const rawCapture = execSync(`${this.tmux()} ${captureFlags} -t ${shellescape(target)}`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
-      }).replace(/\n+$/g, '');
+      });
+      // COD-190: fullHistory keeps the final screen's trailing blank rows so a
+      // replayed buffer reproduces the exact tmux screen geometry (the
+      // history-view no-jump landing and the appended cursor CSI both depend
+      // on it); only the terminating newline is trimmed. Visible-frame mode is
+      // row-positioned by formatPaneSnapshot and never needed the blanks.
+      const buffer = fullHistory ? rawCapture.replace(/\n$/, '') : rawCapture.replace(/\n+$/g, '');
       // Full-history spans many screens — return it as raw linear scrollback
       // rather than repainting rows at single-screen absolute positions. tmux
       // joins scrollback rows with a bare `\n`; normalize to `\r\n` so a fresh
@@ -3048,7 +3054,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         timeout: REMOTE_CAPTURE_TIMEOUT_MS,
         maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
       });
-      const buffer = stdout.replace(/\n+$/g, '');
+      // COD-190: same trailing-blank preservation as the local fullHistory path.
+      const buffer = opts?.fullHistory ? stdout.replace(/\n$/, '') : stdout.replace(/\n+$/g, '');
       if (!opts?.fullHistory) {
         return normalizeScrollbackEol(buffer);
       }
