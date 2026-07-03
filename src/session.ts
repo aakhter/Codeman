@@ -1410,6 +1410,10 @@ export class Session extends EventEmitter {
   }
 
   private _handleTerminalOutput(data: string): void {
+    // COD-189: shell burst tracking runs on the SHARED output path — shell
+    // sessions have their own onData handlers and never pass through the
+    // interactive-session hooks.
+    if (this.mode === 'shell') this._trackShellBurst(data);
     // Codex AND Claude Code emit sequences that wipe xterm.js scrollback, plus
     // mouse-tracking enables that hijack the scroll wheel so the user can't reach
     // scrollback. Claude Code does this intermittently (e.g. full-screen pickers /
@@ -1674,7 +1678,6 @@ export class Session extends EventEmitter {
 
       // === Idle/working detection runs on every chunk (latency-sensitive) ===
       this._detectWorkingState(data);
-      if (this.mode === 'shell') this._trackShellBurst(data);
 
       // === Expensive processing (ANSI strip, Ralph, bash parser) is throttled ===
       // Instead of running regex-heavy parsers on every PTY chunk, we accumulate
