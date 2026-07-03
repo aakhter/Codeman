@@ -2227,7 +2227,11 @@ class CodemanApp {
    * which must keep excluding claude exactly as before.
    */
   _isMirrorSession(sessionId) {
-    if (!this._liveMirrorEnabled) return false;
+    return this._liveMirrorEnabled && this._isMirrorEligible(sessionId);
+  }
+
+  /** Modes the live mirror applies to when the setting is ON. */
+  _isMirrorEligible(sessionId) {
     const mode = this.sessions.get(sessionId)?.mode;
     return mode === 'codex' || mode === 'gemini' || mode === 'claude';
   }
@@ -2238,7 +2242,7 @@ class CodemanApp {
     if (this._liveMirrorEnabled === on) return;
     this._liveMirrorEnabled = on;
     const id = this.activeSessionId;
-    if (id && this._isTuiSession(id)) {
+    if (id && this._isMirrorEligible(id)) {
       this.selectSession(id, { forceReload: true });
     }
   }
