@@ -117,6 +117,17 @@ const IDLE_DETECTION_DELAY_MS = 2000;
  *  finished turn flips to idle promptly (COD-175). */
 const EXTERNAL_CLI_IDLE_DELAY_MS = 5000;
 
+/** COD-189 — shell burst healing: during fast output bursts tmux's attach
+ *  client jump-scrolls (repaints rows in place instead of scrolling), so the
+ *  browser's live scrollback ends up sparse or missing entirely — the
+ *  contiguous truth lives only in the pane history. When a shell session
+ *  streams more than SHELL_BURST_BYTES within SHELL_BURST_WINDOW_MS, emit
+ *  'needsRefresh' once output settles: the client full-reloads from the
+ *  (capture-canonical since COD-189) /terminal response. */
+const SHELL_BURST_BYTES = 64 * 1024;
+const SHELL_BURST_WINDOW_MS = 5000;
+const SHELL_BURST_SETTLE_MS = 1500;
+
 /** COD-181/182 — external-CLI sessions poll the RENDERED local frame for the
  *  working pattern. Every Codeman session runs inside tmux, so the stream is
  *  tmux-client repaint traffic (doubly nested for remote sessions): the
@@ -358,6 +369,11 @@ export class Session extends EventEmitter {
   private _externalCliIdleTimer: NodeJS.Timeout | null = null;
   /** COD-181/182 — rendered-frame working poller for external-CLI sessions (local AND remote) */
   private _workingFramePollTimer: NodeJS.Timeout | null = null;
+  /** COD-189 — shell burst tracking (heal live scrollback from capture after big bursts) */
+  private _shellBurstBytes = 0;
+  private _shellBurstWindowStart = 0;
+  private _shellBurstActive = false;
+  private _shellBurstSettleTimer: NodeJS.Timeout | null = null;
   private _awaitingIdleConfirmation: boolean = false; // Prevents timeout reset during idle detection
   private _trustDialogAccepted: boolean = false; // Prevents repeated trust dialog auto-accept
   private _taskTracker: TaskTracker;
@@ -1656,6 +1672,7 @@ export class Session extends EventEmitter {
 
       // === Idle/working detection runs on every chunk (latency-sensitive) ===
       this._detectWorkingState(data);
+      if (this.mode === 'shell') this._trackShellBurst(data.length);
 
       // === Expensive processing (ANSI strip, Ralph, bash parser) is throttled ===
       // Instead of running regex-heavy parsers on every PTY chunk, we accumulate
@@ -2214,6 +2231,32 @@ export class Session extends EventEmitter {
    * Local capture-pane only — no ssh, a few ms every 2s. Only positive
    * signals feed in; idle still comes from the existing quiet-window timer.
    */
+  /**
+   * COD-189 — detect a large shell output burst and, once it settles, tell
+   * clients to reload from the canonical capture. During bursts tmux repaints
+   * in place (jump-scroll), so live-streamed scrollback is sparse or absent;
+   * only the pane history is contiguous.
+   */
+  private _trackShellBurst(bytes: number): void {
+    const now = Date.now();
+    if (now - this._shellBurstWindowStart > SHELL_BURST_WINDOW_MS) {
+      this._shellBurstWindowStart = now;
+      this._shellBurstBytes = 0;
+      if (!this._shellBurstSettleTimer) this._shellBurstActive = false;
+    }
+    this._shellBurstBytes += bytes;
+    if (this._shellBurstBytes >= SHELL_BURST_BYTES) this._shellBurstActive = true;
+    if (this._shellBurstActive) {
+      if (this._shellBurstSettleTimer) clearTimeout(this._shellBurstSettleTimer);
+      this._shellBurstSettleTimer = setTimeout(() => {
+        this._shellBurstSettleTimer = null;
+        this._shellBurstActive = false;
+        this._shellBurstBytes = 0;
+        if (!this._isStopped) this.emit('needsRefresh');
+      }, SHELL_BURST_SETTLE_MS);
+    }
+  }
+
   private _startWorkingFramePoller(): void {
     if (this._workingFramePollTimer) clearInterval(this._workingFramePollTimer);
     this._workingFramePollTimer = setInterval(() => {
@@ -2271,6 +2314,12 @@ export class Session extends EventEmitter {
     if (this._workingFramePollTimer) {
       clearInterval(this._workingFramePollTimer);
       this._workingFramePollTimer = null;
+    }
+
+    // Clear the COD-189 shell burst settle timer
+    if (this._shellBurstSettleTimer) {
+      clearTimeout(this._shellBurstSettleTimer);
+      this._shellBurstSettleTimer = null;
     }
 
     // Clear line buffer flush timer
