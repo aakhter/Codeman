@@ -61,11 +61,19 @@ Object.assign(CodemanApp.prototype, {
   // Terminal Setup — xterm.js config and input handling
   // ═══════════════════════════════════════════════════════════════
 
-  initTerminal() {
-    // Load scrollback setting from localStorage, treating DEFAULT_SCROLLBACK as a floor
-    // so users who picked up the previous (smaller) default get the new minimum on upgrade.
+  /**
+   * The user's configured scrollback (localStorage 'codeman-scrollback'),
+   * floored at DEFAULT_SCROLLBACK. Shared by initTerminal and the COD-187
+   * live-mirror scrollback writers (selectSession, history enter/exit) so the
+   * two can never drift.
+   */
+  _userScrollback() {
     const stored = parseInt(localStorage.getItem('codeman-scrollback'));
-    const scrollback = Number.isFinite(stored) && stored > 0 ? Math.max(stored, DEFAULT_SCROLLBACK) : DEFAULT_SCROLLBACK;
+    return Number.isFinite(stored) && stored > 0 ? Math.max(stored, DEFAULT_SCROLLBACK) : DEFAULT_SCROLLBACK;
+  },
+
+  initTerminal() {
+    const scrollback = this._userScrollback();
 
     this.terminal = new Terminal({
       theme: { ...window.codemanCurrentXtermTheme() },

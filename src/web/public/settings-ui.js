@@ -332,6 +332,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsTunnelEnabled').checked = settings.tunnelEnabled ?? false;
     this.loadTunnelStatus();
     document.getElementById('appSettingsLocalEcho').checked = settings.localEchoEnabled ?? MobileDetection.isTouchDevice();
+    document.getElementById('appSettingsLiveMirror').checked = settings.liveMirrorEnabled ?? defaults.liveMirrorEnabled ?? true;
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
@@ -1573,6 +1574,7 @@ Object.assign(CodemanApp.prototype, {
       imageWatcherEnabled: document.getElementById('appSettingsImageWatcherEnabled').checked,
       tunnelEnabled: document.getElementById('appSettingsTunnelEnabled').checked,
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
+      liveMirrorEnabled: document.getElementById('appSettingsLiveMirror').checked,
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
@@ -1623,6 +1625,7 @@ Object.assign(CodemanApp.prototype, {
     this.saveAppSettingsToStorage(settings);
     localStorage.setItem('codeman-scrollback', String(settings.terminalScrollbackLines));
     this._updateLocalEchoState();
+    this._applyLiveMirrorSetting(settings.liveMirrorEnabled); // COD-187
 
     // Save voice settings to localStorage + include in server payload for cross-device sync
     const voiceSettings = {
@@ -1744,6 +1747,7 @@ Object.assign(CodemanApp.prototype, {
       skin: _skin,
       showPlanUsageLimits: _pul,
       showAttachmentsButton: _ahb,
+      liveMirrorEnabled: _lmr,
       ...serverSettings
     } = settings;
     try {
@@ -1968,6 +1972,7 @@ Object.assign(CodemanApp.prototype, {
         // Plan usage limits header chip (upstream)
         showPlanUsageLimits: false,
         showAttachmentsButton: false,
+        liveMirrorEnabled: true, // COD-187 live mirror for codex/gemini terminals
         showRedrawButton: false,
         // Input
         gestureControlEnabled: false,
@@ -2518,7 +2523,7 @@ Object.assign(CodemanApp.prototype, {
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
-          'skin', 'showPlanUsageLimits', 'showAttachmentsButton',
+          'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'liveMirrorEnabled',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (default OFF): desktop
         // can show it while mobile stays hidden. It used to sync, so an older
@@ -2543,6 +2548,7 @@ Object.assign(CodemanApp.prototype, {
           }
         }
         this.saveAppSettingsToStorage(merged);
+        this._applyLiveMirrorSetting(merged.liveMirrorEnabled); // COD-187
         if (merged.terminalScrollbackLines) {
           localStorage.setItem('codeman-scrollback', String(merged.terminalScrollbackLines));
         }
