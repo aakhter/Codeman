@@ -400,14 +400,20 @@ Object.assign(CodemanApp.prototype, {
 
     // Always use mouse wheel for terminal scrollback, never forward to application.
     // Prevents Claude's Ink UI (plan mode selector) from capturing scroll as option navigation.
+    // COD-187: CAPTURE phase + stopPropagation — xterm's internal viewport wheel
+    // handler stops propagation itself, so a bubble listener here never fires for
+    // wheels over the terminal canvas (it only ever saw container gutter wheels).
+    // Capturing makes this funnel the single wheel owner: exactly one scroll per
+    // event, and mirror tabs can turn up-scroll intent into the history view.
     container.addEventListener(
       'wheel',
       (ev) => {
         ev.preventDefault();
+        ev.stopPropagation();
         const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
         this._handleUserScrollIntent(lines);
       },
-      { passive: false }
+      { passive: false, capture: true }
     );
 
     // Touch scrolling — use terminal.scrollLines() for all devices.

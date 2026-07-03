@@ -1625,7 +1625,7 @@ Object.assign(CodemanApp.prototype, {
     this.saveAppSettingsToStorage(settings);
     localStorage.setItem('codeman-scrollback', String(settings.terminalScrollbackLines));
     this._updateLocalEchoState();
-    this._applyLiveMirrorSetting(settings.liveMirrorEnabled); // COD-187
+    this._applyLiveMirrorSetting?.(settings.liveMirrorEnabled); // COD-187
 
     // Save voice settings to localStorage + include in server payload for cross-device sync
     const voiceSettings = {
@@ -2548,7 +2548,7 @@ Object.assign(CodemanApp.prototype, {
           }
         }
         this.saveAppSettingsToStorage(merged);
-        this._applyLiveMirrorSetting(merged.liveMirrorEnabled); // COD-187
+        this._applyLiveMirrorSetting?.(merged.liveMirrorEnabled); // COD-187
         if (merged.terminalScrollbackLines) {
           localStorage.setItem('codeman-scrollback', String(merged.terminalScrollbackLines));
         }
