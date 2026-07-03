@@ -12188,3 +12188,26 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   background: linear-gradient(135deg, #7c3aed, #8b5cf6);
   box-shadow: 0 0 28px -4px rgba(124, 58, 237, 0.5);
 }
+
+/* ── COD-187: live-mirror history view pill ─────────────────────── */
+.history-pill {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: rgba(30, 41, 59, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.history-pill:hover {
+  border-color: rgba(148, 163, 184, 0.6);
+}

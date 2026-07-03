@@ -400,7 +400,7 @@ const KeyboardHandler = {
         // Shrink .main's paddingBottom by the gap so the terminal fills flush
         // to the accessory bar.
         this._shrinkPaddingToFit();
-        app.terminal.scrollToBottom();
+        if (app._viewMode !== 'history') app.terminal.scrollToBottom(); // COD-187: don't yank the frozen history view
         app._syncMobileHelperTextareaToCursor?.();
         app._localEchoOverlay?.rerender?.();
         // Send resize to server so PTY dimensions match xterm
@@ -429,7 +429,7 @@ const KeyboardHandler = {
         try {
           app.fitAddon.fit();
         } catch {}
-        if (app.terminal) app.terminal.scrollToBottom();
+        if (app.terminal && app._viewMode !== 'history') app.terminal.scrollToBottom(); // COD-187
         // Send resize to server to restore full terminal size
         this._sendTerminalResize();
       }

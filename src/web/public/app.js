@@ -2258,6 +2258,79 @@ class CodemanApp {
   }
 
   /**
+   * COD-187: open the frozen history view — raise scrollback, fetch the
+   * canonical tmux full-history capture (remote-sourced for remote sessions,
+   * COD-180) and freeze it under a pill. tmux copy-mode semantics.
+   */
+  async _enterHistoryView() {
+    const sessionId = this.activeSessionId;
+    if (!sessionId || !this.terminal) return;
+    if (!this._isMirrorSession(sessionId) || this._viewMode !== 'live') return;
+    if (this._isLoadingBuffer) return;
+    this._viewMode = 'history';
+    this._historyMissedOutput = false;
+    const gen = ++this._historyLoadGen;
+    this._showHistoryPill('History — loading…');
+    this.terminal.options.scrollback = this._userScrollback();
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/terminal`);
+      const data = (await res.json())?.data ?? {};
+      if (gen !== this._historyLoadGen || sessionId !== this.activeSessionId || this._viewMode !== 'history') return;
+      if (data.source !== 'mux-full-history' || !data.terminalBuffer) {
+        this.showToast?.('History unavailable for this session', 'warning');
+        this._exitHistoryView();
+        return;
+      }
+      const owner = this._beginBufferLoad(`history-${gen}`);
+      this._resetTerminalForReplay();
+      await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, owner);
+      if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
+      // Land one page above the live screen — the context the user scrolled up for.
+      const buf = this.terminal.buffer.active;
+      this.terminal.scrollToLine(Math.max(0, buf.baseY - Math.max(1, this.terminal.rows - 2)));
+      this._updateHistoryPill();
+    } catch (err) {
+      console.error('history view load failed:', err);
+      if (gen === this._historyLoadGen && this._viewMode === 'history') this._exitHistoryView();
+    }
+  }
+
+  /** COD-187: leave history — trim scrollback back to 0 and repaint the live frame. */
+  _exitHistoryView() {
+    if (this._viewMode !== 'history') return;
+    this._viewMode = 'live';
+    this._historyLoadGen++;
+    this._historyMissedOutput = false;
+    this._historyExitAt = Date.now();
+    this._hideHistoryPill();
+    // Stale sticky-scroll grace must not survive into live mode.
+    this._lastUserScrollUpAt = null;
+    if (this.terminal && this.activeSessionId && this._isMirrorSession(this.activeSessionId)) {
+      this.terminal.options.scrollback = 0; // trims the freeze-frame instantly
+      this._lastMirrorFrame = null; // force the repaint even if the frame text matches
+      this._refreshMirrorFrame(this.activeSessionId);
+    }
+  }
+
+  _showHistoryPill(text) {
+    const pill = document.getElementById('historyPill');
+    if (!pill) return;
+    pill.textContent = text;
+    pill.hidden = false;
+  }
+
+  _updateHistoryPill() {
+    if (this._viewMode !== 'history') return;
+    const base = 'History (frozen) — Esc or scroll to bottom to resume';
+    this._showHistoryPill(this._historyMissedOutput ? `${base} · new output below` : base);
+  }
+
+  _hideHistoryPill() {
+    const pill = document.getElementById('historyPill');
+    if (pill) pill.hidden = true;
+  }
+
+  /**
    * COD-180: periodic mid-turn reconcile for busy REMOTE TUI sessions. Their
    * live stream is nested-tmux repaint traffic that mangles what lands in
    * browser scrollback (lost table rows, partial frames); a capture rewrite

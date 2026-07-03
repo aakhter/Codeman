@@ -62,6 +62,40 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   /**
+   * COD-187 — single funnel for user scroll intent (wheel, touch, momentum).
+   * Mirror tabs run at scrollback 0, so an up-scroll can't move the viewport;
+   * instead, accumulated up-intent opens the frozen history view. Returns
+   * 'entered-history' so touch callers can zero their momentum, 'swallowed'
+   * when there is nothing to scroll, 'scrolled' otherwise.
+   */
+  _handleUserScrollIntent(lines) {
+    const id = this.activeSessionId;
+    if (id && this._isMirrorSession?.(id) && this._viewMode !== 'history') {
+      if (lines < 0) {
+        const now = Date.now();
+        // Post-exit cooldown: a trackpad's inertia tail must not immediately re-enter.
+        if (now - (this._historyExitAt || 0) < HISTORY_REENTRY_COOLDOWN_MS) return 'swallowed';
+        if (now - (this._historyEntryAccumAt || 0) > HISTORY_ENTRY_WINDOW_MS) this._historyEntryAccum = 0;
+        this._historyEntryAccumAt = now;
+        this._historyEntryAccum += -lines;
+        if (this._historyEntryAccum >= HISTORY_ENTRY_LINES) {
+          this._historyEntryAccum = 0;
+          this._enterHistoryView?.();
+          return 'entered-history';
+        }
+      }
+      return 'swallowed';
+    }
+    this._noteTerminalUserScroll(lines);
+    this.terminal.scrollLines(lines);
+    // Scrolling back down to the bottom of the history view resumes the live mirror.
+    if (this._viewMode === 'history' && lines > 0 && this.isTerminalAtBottom()) {
+      this._exitHistoryView?.();
+    }
+    return 'scrolled';
+  },
+
+  /**
    * The user's configured scrollback (localStorage 'codeman-scrollback'),
    * floored at DEFAULT_SCROLLBACK. Shared by initTerminal and the COD-187
    * live-mirror scrollback writers (selectSession, history enter/exit) so the
@@ -127,6 +161,34 @@ Object.assign(CodemanApp.prototype, {
     // during composition, causing duplicate or garbled input.
     this.terminal.attachCustomKeyEventHandler((ev) => {
       if (ev.isComposing || ev.keyCode === 229) return false;
+
+      // ── COD-187 history view keys ──
+      // Esc EXITS the frozen history view and must NEVER reach the PTY (a
+      // leaked \x1b cancels a running codex turn). Gated strictly on history.
+      if (ev.type === 'keydown' && this._viewMode === 'history') {
+        if (ev.key === 'Escape') {
+          this._exitHistoryView?.();
+          return false;
+        }
+        if (ev.key === 'PageUp' || ev.key === 'PageDown') {
+          this.terminal.scrollLines((ev.key === 'PageUp' ? -1 : 1) * Math.max(1, this.terminal.rows - 2));
+          if (ev.key === 'PageDown' && this.isTerminalAtBottom()) this._exitHistoryView?.();
+          return false;
+        }
+      }
+      // Shift+PageUp opens history on a live mirror tab (plain PageUp keeps
+      // flowing to the PTY — TUIs consume it).
+      if (
+        ev.type === 'keydown' &&
+        ev.key === 'PageUp' &&
+        ev.shiftKey &&
+        this.activeSessionId &&
+        this._isMirrorSession?.(this.activeSessionId) &&
+        this._viewMode !== 'history'
+      ) {
+        this._enterHistoryView?.();
+        return false;
+      }
 
       // Let the app's Alt/Option session-nav and Command Palette shortcuts reach the document keydown handler
       // (app.js switches tabs by PHYSICAL e.code) instead of xterm injecting ESC<char> into
@@ -343,8 +405,7 @@ Object.assign(CodemanApp.prototype, {
       (ev) => {
         ev.preventDefault();
         const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
-        this._noteTerminalUserScroll(lines);
-        this.terminal.scrollLines(lines);
+        this._handleUserScrollIntent(lines);
       },
       { passive: false }
     );
@@ -369,7 +430,10 @@ Object.assign(CodemanApp.prototype, {
         if (!isTouching && Math.abs(velocity) > 0.3) {
           // Momentum phase — convert pixel velocity to lines
           const lines = Math.round(velocity / cellHeight());
-          if (lines !== 0) this.terminal.scrollLines(lines);
+          if (lines !== 0) {
+            const intent = this._handleUserScrollIntent(lines);
+            if (intent === 'entered-history' || intent === 'swallowed') velocity = 0;
+          }
           velocity *= 0.92;
           scrollFrame = requestAnimationFrame(scrollLoop);
         } else if (!isTouching) {
@@ -430,9 +494,12 @@ Object.assign(CodemanApp.prototype, {
             const ch = cellHeight();
             const lines = Math.trunc(pixelAccum / ch);
             if (lines !== 0) {
-              this._noteTerminalUserScroll(lines);
-              this.terminal.scrollLines(lines);
+              const intent = this._handleUserScrollIntent(lines);
               pixelAccum -= lines * ch;
+              if (intent === 'entered-history') {
+                velocity = 0;
+                pixelAccum = 0;
+              }
             }
           }
         },
@@ -646,6 +713,15 @@ Object.assign(CodemanApp.prototype, {
       // tapping to move the cursor silently does nothing whenever Chinese input
       // is on, because cjkActive stays true the whole time the field is visible.
       const isMouseReport = /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data);
+      // COD-187: typing exits the frozen history view first, then the
+      // keystroke flows into the live session (tmux copy-mode semantics).
+      if (
+        this._viewMode === 'history' &&
+        !isMouseReport &&
+        !window.CodemanTerminalInput?.shouldSuppressTerminalQueryResponse(data)
+      ) {
+        this._exitHistoryView?.();
+      }
       // CJK input has focus — block xterm from sending keystrokes to PTY
       if (!isMouseReport && (window.cjkActive || document.activeElement?.id === 'cjkInput')) return;
       if (this.activeSessionId) {
