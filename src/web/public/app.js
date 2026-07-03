@@ -2108,10 +2108,15 @@ class CodemanApp {
     }
     try {
       const activeSession = this.sessions.get(this.activeSessionId);
+      // COD-189: shell recovery must use the FULL reload (capture-canonical) —
+      // the byte-history tail is sparse after a fast burst (tmux jump-scroll
+      // + the 128KB render-cap drops that triggered this very recovery), so a
+      // tail refetch would faithfully reproduce the holes it should heal.
+      // Claude keeps the fast tail (its byte history IS the conversation).
       const terminalUrl =
-        activeSession?.mode === 'codex'
-          ? `/api/sessions/${this.activeSessionId}/terminal`
-          : `/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+        activeSession?.mode === 'claude'
+          ? `/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`
+          : `/api/sessions/${this.activeSessionId}/terminal`;
       const res = await fetch(terminalUrl);
       const data = (await res.json())?.data ?? {};
       if (data.terminalBuffer) {

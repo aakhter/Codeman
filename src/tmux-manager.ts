@@ -1600,12 +1600,21 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // launched in TMUX_LAUNCH_CWD (/tmp) rather than the real workingDir: a FUSE/rclone
       // mount that isn't ready yet makes `getcwd` fail and breaks the spawn (see #110). The
       // pane cd's into workingDir below via respawn-pane.
-      execSync(`${this.tmux()} new-session -ds "${muxName}" -c ${TMUX_LAUNCH_CWD}`, {
-        cwd: TMUX_LAUNCH_CWD,
-        timeout: EXEC_TIMEOUT_MS,
-        stdio: 'ignore',
-        env: cleanEnv,
-      });
+      // COD-189: history-limit only applies to panes created AFTER it is set,
+      // and respawn-pane below REUSES this pane — so the limit must land in
+      // the same invocation, before new-session (exact COD-180 remote
+      // pattern). The fire-and-forget per-session set in configPromises never
+      // reached this pane: local shells retained only tmux's 2000-line
+      // default and a 10k-line burst lost its head (COD-189 measurement).
+      execSync(
+        `${this.tmux()} set-option -g history-limit ${Math.floor(historyLimit)} \\; new-session -ds "${muxName}" -c ${TMUX_LAUNCH_CWD}`,
+        {
+          cwd: TMUX_LAUNCH_CWD,
+          timeout: EXEC_TIMEOUT_MS,
+          stdio: 'ignore',
+          env: cleanEnv,
+        }
+      );
       // Spawn at the creating browser's dims when known (COD-179) so the TUI's
       // first frames are already the right geometry; 120x40 is the legacy
       // fallback for API/CLI creates that carry no viewport.

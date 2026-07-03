@@ -1244,7 +1244,13 @@ export function registerSessionRoutes(
         isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true, lastLines } : undefined
       );
     }
-    const captureOnly = isCaptureOnlyTuiMode && !(session.remote && remoteCaptureFailed);
+    // COD-189: shell FULL reloads are capture-canonical too. Fast bursts make
+    // the byte history sparse (tmux attach-client jump-scroll skips output),
+    // while the pane history is contiguous — with the history-limit fix the
+    // capture retains the whole burst. Byte history remains the fallback and
+    // the tail/tab-switch fast path is unchanged.
+    const isShellFullReload = session.mode === 'shell' && isFullReload;
+    const captureOnly = (isCaptureOnlyTuiMode || isShellFullReload) && !(session.remote && remoteCaptureFailed);
     // `source` doubles as the frontend's reconcile safety gate: only a
     // 'mux-full-history' response may REPLACE a terminal's contents
     // (_reconcileForeignResize). A remote session degraded to the local wrapper

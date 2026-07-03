@@ -891,6 +891,40 @@ describe('session-routes', () => {
       expect(JSON.parse(res.body).data.terminalBuffer).toContain('local full capture');
     });
 
+    // ── COD-189: shell FULL reloads are capture-canonical (byte history is
+    // sparse after fast bursts — tmux jump-scroll); tail path unchanged. ──
+    it('COD-189: shell full reload replays the capture only (no sparse byte history)', async () => {
+      harness.ctx._session.terminalBuffer = 'sparse burst history with holes';
+      harness.ctx._session.mode = 'shell';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'contiguous pane history' : 'visible')
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('contiguous pane history');
+      expect(body.data.terminalBuffer).not.toContain('sparse burst history');
+      expect(body.data.source).toBe('mux-full-history');
+    });
+
+    it('COD-189: shell tail/tab-switch path still serves byte history (fast path unchanged)', async () => {
+      harness.ctx._session.terminalBuffer = 'recent shell history';
+      harness.ctx._session.mode = 'shell';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => 'visible frame');
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=65536`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('recent shell history');
+    });
+
     // ── COD-187: live mirror — ?frame=1 returns ONLY the current visible frame ──
     describe('COD-187 ?frame=1', () => {
       it('local session: returns the visible-frame capture with source mux-frame, no history/tail processing', async () => {

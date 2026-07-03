@@ -53,3 +53,14 @@ describe('tmux full-history pane capture (COD-47)', () => {
     expect(body).toContain('this.capturePaneBuffer(muxName, target, opts)');
   });
 });
+
+describe('COD-189 local history-limit ordering', () => {
+  const source = readFileSync(resolve(import.meta.dirname, '../src/tmux-manager.ts'), 'utf8');
+
+  it('sets -g history-limit in the SAME invocation, BEFORE new-session (pane inherits it)', () => {
+    // history-limit only applies to panes created after it is set, and
+    // respawn-pane reuses the initial pane — an after-the-fact set never lands.
+    const combined = source.indexOf('set-option -g history-limit ${Math.floor(historyLimit)} \\\\; new-session -ds');
+    expect(combined).toBeGreaterThan(-1);
+  });
+});
