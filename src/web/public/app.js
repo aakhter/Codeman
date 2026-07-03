@@ -2298,6 +2298,18 @@ class CodemanApp {
     this._historyMissedOutput = false;
     const gen = ++this._historyLoadGen;
     this._showHistoryPill('History — loading…');
+    // COD-190 no-jump anchor: remember which viewport row the last non-empty
+    // line sits on. The capture strips trailing blank rows, so "bottom of
+    // buffer" lands HIGHER than the live frame — anchoring on content keeps
+    // the entry pixel-stable instead.
+    const preBuf = this.terminal.buffer.active;
+    let anchorRow = -1;
+    for (let r = this.terminal.rows - 1; r >= 0; r--) {
+      if ((preBuf.getLine(preBuf.viewportY + r)?.translateToString(true) ?? '').trim()) {
+        anchorRow = r;
+        break;
+      }
+    }
     this.terminal.options.scrollback = this._userScrollback();
     try {
       // Fast first page (COD-187 lazy load): last HISTORY_INITIAL_LINES lines.
@@ -2328,11 +2340,24 @@ class CodemanApp {
       await new Promise((resolve) => this.terminal.write(`\x1b[?2026h\x1b[3J\x1b[H\x1b[2J${content}\x1b[?2026l`, resolve));
       this._finishBufferLoad(owner);
       if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
-      // COD-190 no-jump landing: the capture's last screen is pixel-identical
-      // to the live frame — land at the BOTTOM (same pixels the user was
-      // already looking at), then apply their accumulated wheel delta so
-      // their own gesture carries them up into history smoothly.
-      this.terminal.scrollToBottom();
+      // COD-190 no-jump landing: place the history's last non-empty line on
+      // the SAME viewport row it occupied in the live frame (content-anchored
+      // — the capture trims trailing blanks, so plain scrollToBottom would
+      // shift everything up). Then apply the user's accumulated wheel delta
+      // so their own gesture carries them up into history smoothly.
+      const nb = this.terminal.buffer.active;
+      let lastContent = -1;
+      for (let i = nb.baseY + this.terminal.rows - 1; i >= 0; i--) {
+        if ((nb.getLine(i)?.translateToString(true) ?? '').trim()) {
+          lastContent = i;
+          break;
+        }
+      }
+      if (anchorRow >= 0 && lastContent >= 0) {
+        this.terminal.scrollToLine(Math.max(0, Math.min(nb.baseY, lastContent - anchorRow)));
+      } else {
+        this.terminal.scrollToBottom();
+      }
       if (carryLines > 0) this.terminal.scrollLines(-carryLines);
       this._updateHistoryPill();
     } catch (err) {
