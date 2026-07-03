@@ -15,14 +15,18 @@ describe('tmux full-history pane capture (COD-47)', () => {
   const source = readFileSync(resolve(import.meta.dirname, '../src/tmux-manager.ts'), 'utf8');
 
   it('capturePaneBuffer accepts a fullHistory option', () => {
-    const sig = source.indexOf('capturePaneBuffer(muxName: string');
+    const sig = source.indexOf('capturePaneBuffer(');
     expect(sig).toBeGreaterThan(-1);
-    // The method signature must carry the opts.fullHistory channel.
-    expect(source.slice(sig, sig + 160)).toContain('fullHistory');
+    // The method signature must carry the opts.fullHistory channel (COD-187
+    // reformatted it multi-line and added lastLines for the lazy history page).
+    expect(source.slice(sig, sig + 240)).toContain('fullHistory');
   });
 
-  it('full-history mode requests the entire scrollback with -S -', () => {
-    expect(source).toContain('capture-pane -p -e -S -');
+  it('full-history mode requests the entire scrollback with -S - (via captureStartFlag)', () => {
+    // COD-187: the start flag is templated so the lazy history page can bound
+    // the capture (`-S -N`); unbounded remains the default.
+    expect(source).toContain('capture-pane -p -e ${captureStartFlag(opts?.lastLines)}');
+    expect(source).toContain("return '-S -';");
   });
 
   it('still offers the visible single-screen capture for fast tab switches', () => {
@@ -30,7 +34,7 @@ describe('tmux full-history pane capture (COD-47)', () => {
   });
 
   it('returns full-history capture as raw scrollback (skips the single-screen repaint)', () => {
-    const sig = source.indexOf('capturePaneBuffer(muxName: string');
+    const sig = source.indexOf('capturePaneBuffer(');
     const body = source.slice(sig, sig + 2400);
     // When fullHistory, return the raw buffer BEFORE the formatPaneSnapshot
     // repaint (which is single-screen and would clip a multi-screen history).
