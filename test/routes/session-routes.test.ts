@@ -891,6 +891,54 @@ describe('session-routes', () => {
       expect(JSON.parse(res.body).data.terminalBuffer).toContain('local full capture');
     });
 
+    // ── COD-187 claude expansion: history-view requests are capture-only for
+    // any mode; claude's legacy no-param reload keeps its concat. ──
+    it('claude lines= request is capture-only (history view first page)', async () => {
+      harness.ctx._session.terminalBuffer = 'claude byte history';
+      harness.ctx._session.mode = 'claude';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'claude pane history' : 'v')
+      );
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?lines=2000`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('claude pane history');
+      expect(body.data.terminalBuffer).not.toContain('claude byte history');
+      expect(body.data.source).toBe('mux-full-history');
+    });
+
+    it('claude capture=1 request is capture-only (history view full expansion)', async () => {
+      harness.ctx._session.terminalBuffer = 'claude byte history';
+      harness.ctx._session.mode = 'claude';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'claude full capture' : 'v')
+      );
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?capture=1`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('claude full capture');
+      expect(body.data.terminalBuffer).not.toContain('claude byte history');
+    });
+
+    it('claude legacy full reload keeps byte history + capture concat (unchanged)', async () => {
+      harness.ctx._session.terminalBuffer = 'claude byte history';
+      harness.ctx._session.mode = 'claude';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'claude full capture' : 'v')
+      );
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toContain('claude byte history');
+      expect(body.data.terminalBuffer).toContain('claude full capture');
+    });
+
     // ── COD-189: shell FULL reloads are capture-canonical (byte history is
     // sparse after fast bursts — tmux jump-scroll); tail path unchanged. ──
     it('COD-189: shell full reload replays the capture only (no sparse byte history)', async () => {

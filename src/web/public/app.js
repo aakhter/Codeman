@@ -2218,9 +2218,18 @@ class CodemanApp {
     return this._isTuiSession(sessionId) && !!this.sessions.get(sessionId)?.remote;
   }
 
-  /** COD-187: live-mirror mode — codex/gemini tab with the per-device setting ON (default). */
+  /**
+   * COD-187: live-mirror mode — agent-TUI tab with the per-device setting ON
+   * (default). Includes claude (user opt-in expansion): mirror is purely a
+   * client rendering mode, so claude's server-side stream parsing (tokens,
+   * Ralph, prompt detection) is untouched. Deliberately NOT built on
+   * _isTuiSession — that helper also gates LEGACY (setting-OFF) repair paths,
+   * which must keep excluding claude exactly as before.
+   */
   _isMirrorSession(sessionId) {
-    return this._liveMirrorEnabled && this._isTuiSession(sessionId);
+    if (!this._liveMirrorEnabled) return false;
+    const mode = this.sessions.get(sessionId)?.mode;
+    return mode === 'codex' || mode === 'gemini' || mode === 'claude';
   }
 
   /** COD-187: settings hook — flips the cached flag and re-selects the active TUI tab so the mode applies immediately. */
@@ -2379,7 +2388,7 @@ class CodemanApp {
     const gen = this._historyLoadGen;
     this._showHistoryPill('History — loading older…');
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/terminal`);
+      const res = await fetch(`/api/sessions/${sessionId}/terminal?capture=1`);
       const data = (await res.json())?.data ?? {};
       if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
       if (data.source !== 'mux-full-history' || !data.terminalBuffer) {

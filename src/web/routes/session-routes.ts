@@ -1154,7 +1154,7 @@ export function registerSessionRoutes(
   //   frame=1     - COD-187 live mirror: ONLY the current visible frame
   app.get('/api/sessions/:id/terminal', async (req) => {
     const { id } = req.params as { id: string };
-    const query = req.query as { tail?: string; frame?: string; lines?: string };
+    const query = req.query as { tail?: string; frame?: string; lines?: string; capture?: string };
     const session = findSessionOrFail(ctx, id);
 
     // COD-187 (live mirror): `frame=1` returns ONLY the current visible frame —
@@ -1250,7 +1250,13 @@ export function registerSessionRoutes(
     // capture retains the whole burst. Byte history remains the fallback and
     // the tail/tab-switch fast path is unchanged.
     const isShellFullReload = session.mode === 'shell' && isFullReload;
-    const captureOnly = (isCaptureOnlyTuiMode || isShellFullReload) && !(session.remote && remoteCaptureFailed);
+    // COD-187 claude expansion: the history view's requests (`lines=N` first
+    // page, `capture=1` full expansion) are capture-only for EVERY mode —
+    // tailing byte history by "lines" is meaningless, and claude's legacy
+    // no-param full reload keeps its byte-history+capture concat untouched.
+    const isCaptureRequest = lastLines !== undefined || query.capture === '1';
+    const captureOnly =
+      (isCaptureOnlyTuiMode || isShellFullReload || isCaptureRequest) && !(session.remote && remoteCaptureFailed);
     // `source` doubles as the frontend's reconcile safety gate: only a
     // 'mux-full-history' response may REPLACE a terminal's contents
     // (_reconcileForeignResize). A remote session degraded to the local wrapper
