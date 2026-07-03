@@ -635,7 +635,13 @@ describe('TmuxManager (unit)', () => {
         const newSessionCall = mockedExecSync.mock.calls.find(
           ([cmd]) => typeof cmd === 'string' && cmd.includes(' new-session ')
         );
-        expect(newSessionCall?.[0]).toBe(`tmux -L 'codeman' new-session -ds "codeman-abc12345" -c /tmp`);
+        // COD-189: history-limit rides in the SAME invocation, BEFORE new-session,
+        // so the initial pane (reused by respawn-pane) inherits the configured limit.
+        expect(newSessionCall?.[0]).toContain(`set-option -g history-limit`);
+        expect(newSessionCall?.[0]).toContain(`new-session -ds "codeman-abc12345" -c /tmp`);
+        expect(String(newSessionCall?.[0]).indexOf('history-limit')).toBeLessThan(
+          String(newSessionCall?.[0]).indexOf('new-session')
+        );
         expect(newSessionCall?.[1]).toEqual(expect.objectContaining({ cwd: '/tmp' }));
 
         const respawnCall = mockedExecSync.mock.calls.find(

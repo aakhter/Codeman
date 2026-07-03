@@ -137,7 +137,11 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
 
     expect(refreshStart).toBeGreaterThan(-1);
     expect(fetchLine).toBeGreaterThan(refreshStart);
-    expect(block).toContain("activeSession?.mode === 'codex'");
+    // COD-189: full reload for everything EXCEPT claude (codex/gemini/shell
+    // all heal from the canonical capture; claude's byte history IS the
+    // conversation and keeps the fast tail).
+    expect(block).toContain("activeSession?.mode === 'claude'");
+    expect(block).toContain('?tail=');
     expect(block).toContain('`/api/sessions/${this.activeSessionId}/terminal`');
     expect(block).toContain('`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
   });
