@@ -31,6 +31,8 @@ const execFileAsync = promisify(execFile);
 const REMOTE_CAPTURE_TIMEOUT_MS = 10_000;
 /** Remote full-history captures can span tens of thousands of lines with SGR escapes. */
 const REMOTE_CAPTURE_MAX_BUFFER = 64 * 1024 * 1024;
+/** COD-187 — separates capture output from the geometry line in the combined remote frame fetch. */
+const REMOTE_FRAME_GEOM_DELIM = '__CODEMAN_GEOM__';
 import { existsSync, statSync, readFileSync, mkdirSync } from 'node:fs';
 import { writeFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -615,6 +617,40 @@ export function formatPaneSnapshot(
   const cursorY = Math.max(0, Math.min(rows - 1, geometry.cursorY));
   parts.push(`\x1b[${cursorY + 1};${cursorX + 1}H`);
   return parts.join('');
+}
+
+/**
+ * COD-187 — the combined remote frame-fetch command: visible-frame capture,
+ * a delimiter line, then the pane geometry. One ssh roundtrip fetches both so
+ * the snapshot and its cursor position are consistent.
+ */
+export function buildRemoteFrameCommand(target: string): string {
+  return (
+    `tmux -L codeman capture-pane -p -e -t ${shellescape(target)}; ` +
+    `printf '${REMOTE_FRAME_GEOM_DELIM}\\n'; ` +
+    `tmux -L codeman display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
+  );
+}
+
+/**
+ * COD-187 — parse the combined remote frame-fetch output. With valid geometry
+ * the frame is repainted at absolute positions (parity with the local visible
+ * path); on delimiter/geometry failure it degrades to linear one-screen text
+ * (paints acceptably into a reset terminal; cursor lands at end). Returns null
+ * for an empty capture so callers fall back to the local wrapper frame.
+ */
+export function parseRemoteFrameCapture(stdout: string): string | null {
+  const delim = `\n${REMOTE_FRAME_GEOM_DELIM}\n`;
+  const delimIdx = stdout.indexOf(delim);
+  if (delimIdx >= 0) {
+    const capture = stdout.slice(0, delimIdx);
+    const geometry = parsePaneGeometry(stdout.slice(delimIdx + delim.length));
+    if (geometry && capture.length > 0) {
+      return formatPaneSnapshot(capture.split('\n'), geometry);
+    }
+  }
+  const raw = stdout.split(delim)[0].replace(/\n+$/g, '');
+  return raw.length > 0 ? normalizeScrollbackEol(raw) : null;
 }
 
 /** Characters unsafe in paths — shell metacharacters, quotes, and control chars */
@@ -2947,13 +2983,31 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   async captureRemotePaneBuffer(
     remote: SessionRemote,
     muxName: string,
-    opts?: { fullHistory?: boolean }
+    opts?: { fullHistory?: boolean; visibleFrame?: boolean }
   ): Promise<string | null> {
     if (IS_TEST_MODE) return '';
     const target = remote.remoteSessionName || muxName;
     if (!isValidMuxName(target)) {
       console.error('[TmuxManager] Invalid remote session name in captureRemotePaneBuffer:', target);
       return null;
+    }
+    // COD-187 (live mirror) — visible-frame snapshot with cursor positioning,
+    // parity with the local visible path (formatPaneSnapshot). ONE combined ssh
+    // invocation fetches capture + geometry; a delimiter line separates them.
+    if (opts?.visibleFrame) {
+      const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target));
+      const frameArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), frameCmd];
+      try {
+        const { stdout } = await execFileAsync('ssh', frameArgv, {
+          encoding: 'utf-8',
+          timeout: REMOTE_CAPTURE_TIMEOUT_MS,
+          maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
+        });
+        return parseRemoteFrameCapture(stdout);
+      } catch (err) {
+        console.error('[TmuxManager] Remote frame capture failed (falling back to local wrapper):', err);
+        return null;
+      }
     }
     // The remote login shell may not have tmux on PATH (macOS non-interactive
     // zsh lacks /opt/homebrew/bin) — bootstrap PATH exactly like the launcher.

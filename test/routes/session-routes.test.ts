@@ -891,6 +891,114 @@ describe('session-routes', () => {
       expect(JSON.parse(res.body).data.terminalBuffer).toContain('local full capture');
     });
 
+    // ── COD-187: live mirror — ?frame=1 returns ONLY the current visible frame ──
+    describe('COD-187 ?frame=1', () => {
+      it('local session: returns the visible-frame capture with source mux-frame, no history/tail processing', async () => {
+        harness.ctx._session.terminalBuffer = 'byte history that must NOT appear';
+        harness.ctx._session.mode = 'codex';
+        const localSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+          opts?.fullHistory ? 'FULL_HISTORY' : 'VISIBLE_FRAME_SNAPSHOT'
+        );
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = localSpy;
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('mux-frame');
+        expect(body.data.terminalBuffer).toBe('VISIBLE_FRAME_SNAPSHOT');
+        expect(body.data.truncated).toBe(false);
+        expect(localSpy).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      });
+
+      it('remote session: uses the remote visibleFrame capture', async () => {
+        harness.ctx._session.mode = 'codex';
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'mac-mini',
+          host: '192.168.21.109',
+          username: 'saqebakhter',
+          remotePath: '/tmp/case',
+        };
+        const remoteSpy = vi.fn(async () => 'REMOTE_FRAME');
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remoteSpy;
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          () => 'LOCAL_WRAPPER_FRAME'
+        );
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('mux-frame');
+        expect(body.data.terminalBuffer).toBe('REMOTE_FRAME');
+        expect(remoteSpy).toHaveBeenCalledWith(
+          (harness.ctx._session as { remote?: unknown }).remote,
+          harness.ctx._session.muxName,
+          { visibleFrame: true }
+        );
+      });
+
+      it('remote session: falls back to the local wrapper frame (still mux-frame — the wrapper shows the same screen)', async () => {
+        harness.ctx._session.mode = 'codex';
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'mac-mini',
+          host: '192.168.21.109',
+          username: 'saqebakhter',
+          remotePath: '/tmp/case',
+        };
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = vi.fn(async () => null);
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          () => 'LOCAL_WRAPPER_FRAME'
+        );
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('mux-frame');
+        expect(body.data.terminalBuffer).toBe('LOCAL_WRAPPER_FRAME');
+      });
+
+      it('no capture available: source history, empty buffer (frontend leaves screen to live repaint)', async () => {
+        harness.ctx._session.terminalBuffer = 'byte history that must NOT appear';
+        harness.ctx._session.mode = 'codex';
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('history');
+        expect(body.data.terminalBuffer).toBe('');
+      });
+
+      it('frame wins over tail', async () => {
+        harness.ctx._session.terminalBuffer = 'byte history';
+        harness.ctx._session.mode = 'codex';
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          (_n: string, opts?: { fullHistory?: boolean }) => (opts?.fullHistory ? 'FULL' : 'FRAME_ONLY')
+        );
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1&tail=65536`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('mux-frame');
+        expect(body.data.terminalBuffer).toBe('FRAME_ONLY');
+      });
+    });
+
     it('COD-178: codex falls back to raw byte history when capture is unavailable', async () => {
       harness.ctx._session.terminalBuffer = 'accumulated byte history fallback';
       harness.ctx._session.mode = 'codex';

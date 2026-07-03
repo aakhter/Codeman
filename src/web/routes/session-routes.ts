@@ -1151,10 +1151,42 @@ export function registerSessionRoutes(
 
   // Query params:
   //   tail=<bytes> - Only return last N bytes (faster initial load)
+  //   frame=1     - COD-187 live mirror: ONLY the current visible frame
   app.get('/api/sessions/:id/terminal', async (req) => {
     const { id } = req.params as { id: string };
-    const query = req.query as { tail?: string };
+    const query = req.query as { tail?: string; frame?: string };
     const session = findSessionOrFail(ctx, id);
+
+    // COD-187 (live mirror): `frame=1` returns ONLY the current visible frame —
+    // a cursor-positioned snapshot of the pane's screen, no byte history, no
+    // scrollback, no strip/tail processing (captures contain none of that).
+    // Remote sessions capture the remote pane over ssh; the LOCAL nested-tmux
+    // wrapper displays the identical screen, so falling back to the local
+    // capture is correct (unlike history, which lives only remotely).
+    // `mux-frame` is a distinct source: frame consumers accept only it, and the
+    // full-history consumers ('mux-full-history' gate) never accept a frame.
+    if (query.frame === '1') {
+      const frameMuxName = session.muxName;
+      let frame: string | null = null;
+      if (frameMuxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
+        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, frameMuxName, { visibleFrame: true });
+      }
+      if (
+        (frame === null || frame.length === 0) &&
+        frameMuxName &&
+        typeof ctx.mux.captureActivePaneBuffer === 'function'
+      ) {
+        frame = ctx.mux.captureActivePaneBuffer(frameMuxName);
+      }
+      const frameBuffer = frame !== null && frame.length > 0 ? frame : '';
+      return {
+        terminalBuffer: frameBuffer,
+        status: session.status,
+        fullSize: frameBuffer.length,
+        truncated: false,
+        source: frameBuffer.length > 0 ? ('mux-frame' as const) : ('history' as const),
+      };
+    }
 
     // A request WITHOUT a `tail` param is a FULL RELOAD (the browser reloaded the
     // page and needs the whole scroll history back). A request WITH `tail` is a
