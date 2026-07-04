@@ -448,6 +448,7 @@ Object.assign(CodemanApp.prototype, {
     }
 
     sessionItems.push(this._buildCommandPaletteNewSessionItem(query));
+    sessionItems.push({ id: 'browse-sessions', type: 'browse-sessions', title: 'Browse all sessions…', subtitle: 'Open Session Manager' });
     return sessionItems;
   },
 
@@ -515,9 +516,10 @@ Object.assign(CodemanApp.prototype, {
     list.innerHTML = items
       .map((item, index) => {
         const active = index === this.commandPaletteActiveIndex ? ' active' : '';
-        const icon = item.type === 'new-session' ? '+' : '›';
+        const icon = item.type === 'new-session' ? '+' : item.type === 'browse-sessions' ? '≡' : '›';
+        const browse = item.type === 'browse-sessions' ? ' command-palette-item--browse' : '';
         return `
-          <button class="command-palette-item${active}" type="button" data-command-index="${index}">
+          <button class="command-palette-item${active}${browse}" type="button" data-command-index="${index}">
             <span class="command-palette-icon" aria-hidden="true">${icon}</span>
             <span class="command-palette-text">
               <span class="command-palette-title">${escapeHtml(item.title)}</span>
@@ -543,6 +545,10 @@ Object.assign(CodemanApp.prototype, {
     this.closeCommandPalette();
     if (item.type === 'session' && item.sessionId) {
       await this.selectSession(item.sessionId);
+      return;
+    }
+    if (item.type === 'browse-sessions') {
+      this.openSessionManager();
       return;
     }
     if (item.type === 'new-session') {
