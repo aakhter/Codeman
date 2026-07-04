@@ -1440,6 +1440,11 @@
               </select>
               <span class="form-hint">Default effort for new Claude sessions — soft default, switchable anytime in-session via /effort (e.g. /effort ultracode)</span>
             </div>
+            <div class="form-row">
+              <label>Claude Launcher Script</label>
+              <input type="text" id="appSettingsClaudeLauncherScript" class="form-input" placeholder="e.g. /home/user/.local/bin/claude-tmux">
+              <span class="form-hint">Absolute path to a script that wraps the Claude binary (receives full Claude argv, must exec "$@"). Leave blank to use Claude directly. Example: claude-tmux adds tmux PgUp passthrough.</span>
+            </div>
             <!-- Nice Priority Section -->
             <div class="form-section-header">Nice Priority</div>
             <div class="form-row form-row-switch">

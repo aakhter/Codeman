@@ -632,6 +632,7 @@ export class WebServer extends EventEmitter {
       getClaudeModeConfig: this.getClaudeModeConfig.bind(this),
       getTerminalHistoryConfig: this.getTerminalHistoryConfig.bind(this),
       getTruecolorEnabled: this.getTruecolorEnabled.bind(this),
+      getClaudeLauncherScript: this.getClaudeLauncherScript.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
       getLightSessionsState: this.getLightSessionsState.bind(this),
@@ -1533,6 +1534,13 @@ export class WebServer extends EventEmitter {
   private async getTruecolorEnabled(): Promise<boolean> {
     const settings = await this.readSettings();
     return settings.truecolorEnabled === true;
+  }
+
+  // COD-194: optional launcher script path wrapping the Claude binary.
+  private async getClaudeLauncherScript(): Promise<string | undefined> {
+    const settings = await this.readSettings();
+    const val = (settings as Record<string, unknown>).claudeLauncherScript;
+    return typeof val === 'string' && val.trim() !== '' ? val.trim() : undefined;
   }
 
   // Helper to get model configuration from settings
