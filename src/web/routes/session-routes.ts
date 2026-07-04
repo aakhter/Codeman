@@ -565,7 +565,6 @@ export function registerSessionRoutes(
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
-    const claudeLauncherScript = await ctx.getClaudeLauncherScript();
     const session = new Session({
       workingDir,
       mode,
@@ -583,7 +582,6 @@ export function registerSessionRoutes(
       envOverrides: body.envOverrides,
       effort: body.effort,
       truecolorEnabled,
-      claudeLauncherScript,
       remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
@@ -1730,7 +1728,6 @@ export function registerSessionRoutes(
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
-    const qsClaudeLauncherScript = await ctx.getClaudeLauncherScript();
     const session = new Session({
       workingDir: casePath,
       mux: ctx.mux,
@@ -1746,7 +1743,6 @@ export function registerSessionRoutes(
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
-      claudeLauncherScript: qsClaudeLauncherScript,
       remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {

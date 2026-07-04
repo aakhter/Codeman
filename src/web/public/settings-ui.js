@@ -363,7 +363,6 @@ Object.assign(CodemanApp.prototype, {
     // Claude Permissions settings
     document.getElementById('appSettingsAgentTeams').checked = settings.agentTeamsEnabled ?? false;
     document.getElementById('appSettingsClaudeModel').value = settings.claudeModel ?? '';
-    document.getElementById('appSettingsClaudeLauncherScript').value = settings.claudeLauncherScript ?? '';
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
     document.getElementById('appSettingsRemoteAutoReconnect').checked = settings.remoteAutoReconnect ?? true;
@@ -1596,7 +1595,6 @@ Object.assign(CodemanApp.prototype, {
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       claudeModel: document.getElementById('appSettingsClaudeModel').value,
-      claudeLauncherScript: document.getElementById('appSettingsClaudeLauncherScript').value.trim(),
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
       truecolorEnabled: document.getElementById('appSettingsTruecolor').checked,
       remoteAutoReconnect: document.getElementById('appSettingsRemoteAutoReconnect').checked,

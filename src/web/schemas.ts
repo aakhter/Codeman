@@ -565,8 +565,6 @@ export const SettingsUpdateSchema = z
     allowedTools: z.string().max(2000).optional(),
     /** Model for new Claude sessions (e.g. "claude-fable-5[1m]", "opus[1m]"); takes precedence over opusContext1mEnabled */
     claudeModel: z.string().max(50).optional(),
-    /** COD-194: absolute path to a launcher script wrapping the Claude binary (e.g. claude-tmux). */
-    claudeLauncherScript: z.string().max(500).optional(),
     /** Hide/show the response-viewer (eye) header button */
     showResponseViewer: z.boolean().optional(),
     // Codex CLI settings

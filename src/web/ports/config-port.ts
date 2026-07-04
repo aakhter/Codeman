@@ -19,8 +19,6 @@ export interface ConfigPort {
   getTerminalHistoryConfig(): Promise<TerminalHistoryConfig>;
   /** COD-75: whether new Claude/non-codex sessions opt into COLORTERM=truecolor (settings.json, default off). */
   getTruecolorEnabled(): Promise<boolean>;
-  /** COD-194: optional launcher script that wraps the Claude binary (absolute path, must be executable). */
-  getClaudeLauncherScript(): Promise<string | undefined>;
   getDefaultClaudeMdPath(): Promise<string | undefined>;
   getLightState(): unknown;
   getLightSessionsState(): unknown[];

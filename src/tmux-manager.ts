@@ -854,8 +854,6 @@ function buildSpawnCommand(options: {
   geminiConfig?: GeminiConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
-  /** COD-194: absolute path to a launcher script wrapping the Claude binary. */
-  claudeLauncherScript?: string;
 }): string {
   if (options.mode === 'claude') {
     // Validate model to prevent command injection
@@ -868,18 +866,12 @@ function buildSpawnCommand(options: {
     const safeResumeId =
       options.resumeSessionId && /^[a-f0-9-]+$/.test(options.resumeSessionId) ? options.resumeSessionId : undefined;
     const permFlags = buildClaudePermissionFlags(options.claudeMode, options.allowedTools);
-    // COD-194: validate launcher path (absolute, no shell metacharacters) to prevent injection.
-    const launcher =
-      options.claudeLauncherScript && /^\/[^\s'"\\;|&<>$`!#*?[\]{}()]+$/.test(options.claudeLauncherScript)
-        ? options.claudeLauncherScript
-        : undefined;
-    const prefix = launcher ? `${launcher} ` : '';
     if (safeResumeId) {
-      const resumeCmd = `${prefix}claude${permFlags} --resume "${safeResumeId}"${modelFlag}${effortFlag}`;
-      const fallbackCmd = `${prefix}claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}`;
+      const resumeCmd = `claude${permFlags} --resume "${safeResumeId}"${modelFlag}${effortFlag}`;
+      const fallbackCmd = `claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}`;
       return `${resumeCmd} || ${fallbackCmd}`;
     }
-    return `${prefix}claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}`;
+    return `claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}`;
   }
   if (options.mode === 'opencode') {
     return buildOpenCodeCommand(options.openCodeConfig);
@@ -1511,7 +1503,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       remote,
       initialCols,
       initialRows,
-      claudeLauncherScript,
     } = options;
     const muxName = `codeman-${sessionId.slice(0, 8)}`;
 
@@ -1584,7 +1575,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       geminiConfig,
       resumeSessionId,
       effort,
-      claudeLauncherScript,
     });
 
     const config = niceConfig || DEFAULT_NICE_CONFIG;
@@ -1821,7 +1811,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       truecolorEnabled,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
       remote,
-      claudeLauncherScript,
     } = options;
     const session = this.sessions.get(sessionId);
     if (!session) return null;
@@ -1864,7 +1853,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       geminiConfig,
       resumeSessionId,
       effort,
-      claudeLauncherScript,
     });
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);

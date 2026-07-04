@@ -463,10 +463,6 @@ export class Session extends EventEmitter {
   // Default off → COLORTERM is unset (avoids tmux→PTY→xterm.js color glitches).
   private _truecolorEnabled: boolean = false;
 
-  // COD-194: optional launcher script path. When set, Claude is spawned as
-  // `<launcher> claude <args>` so the script can set pane-scoped tmux options etc.
-  private _claudeLauncherScript: string | undefined;
-
   // Session color for visual differentiation
   private _color: import('./types.js').SessionColor = 'default';
 
@@ -536,8 +532,6 @@ export class Session extends EventEmitter {
       effort?: EffortLevel;
       /** Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75 app setting; default off). */
       truecolorEnabled?: boolean;
-      /** COD-194: absolute path to a launcher script wrapping the Claude binary (e.g. ~/.local/bin/claude-tmux). */
-      claudeLauncherScript?: string;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Per-session terminal buffer limits; applies to this server-side session buffer. */
@@ -628,7 +622,6 @@ export class Session extends EventEmitter {
     if (config.truecolorEnabled !== undefined) {
       this._truecolorEnabled = config.truecolorEnabled;
     }
-    this._claudeLauncherScript = config.claudeLauncherScript;
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
     }
@@ -1413,7 +1406,6 @@ export class Session extends EventEmitter {
       truecolorEnabled: this._truecolorEnabled,
       historyLimit: this._tmuxHistoryLimit,
       remote: this._remote,
-      claudeLauncherScript: this._claudeLauncherScript,
     };
   }
 
@@ -1567,7 +1559,6 @@ export class Session extends EventEmitter {
             remote: this._remote,
             initialCols: this._initialDims?.cols,
             initialRows: this._initialDims?.rows,
-            claudeLauncherScript: this._claudeLauncherScript,
           },
           spawnErrLabel: 'mux attachment',
         });
@@ -1646,8 +1637,7 @@ export class Session extends EventEmitter {
         // Pass --session-id to use the SAME ID as the Codeman session
         // This ensures subagents can be directly matched to the correct tab
         const args = buildInteractiveArgs(this.id, this._claudeMode, this._model, this._allowedTools, this._effort);
-        const [spawnCmd, spawnArgs] = this._resolveSpawn('claude', args);
-        this.ptyProcess = pty.spawn(spawnCmd, spawnArgs, {
+        this.ptyProcess = pty.spawn('claude', args, {
           name: 'xterm-256color',
           cols: 120,
           rows: 40,
@@ -2061,10 +2051,9 @@ export class Session extends EventEmitter {
         );
 
         const args = buildPromptArgs(prompt, model);
-        const [spawnCmd2, spawnArgs2] = this._resolveSpawn('claude', args);
 
         try {
-          this.ptyProcess = pty.spawn(spawnCmd2, spawnArgs2, {
+          this.ptyProcess = pty.spawn('claude', args, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
@@ -2282,23 +2271,6 @@ export class Session extends EventEmitter {
         this._shellBurstRepaints = 0;
         if (!this._isStopped) this.emit('needsRefresh');
       }, SHELL_BURST_SETTLE_MS);
-    }
-  }
-
-  /**
-   * COD-194: Resolve the spawn command and args for a Claude invocation.
-   * When claudeLauncherScript is set and executable, prepends it as the binary
-   * (e.g. `claude-tmux claude --flags...`). Falls back to direct `claude` on any error.
-   */
-  private _resolveSpawn(binary: string, args: string[]): [string, string[]] {
-    const launcher = this._claudeLauncherScript;
-    if (!launcher) return [binary, args];
-    try {
-      fs.accessSync(launcher, fs.constants.X_OK);
-      return [launcher, [binary, ...args]];
-    } catch {
-      console.warn(`[Session] claudeLauncherScript not executable, falling back to direct spawn: ${launcher}`);
-      return [binary, args];
     }
   }
 
