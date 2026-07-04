@@ -457,6 +457,13 @@ const DEFAULT_SHORTCUTS = [
     label: 'Close Panels',
     displayBindings: ['Escape'],
   },
+  {
+    id: 'rename-tab',
+    group: 'Session',
+    label: 'Rename Tab',
+    bindings: [{ modifiers: [], key: 'F2', code: 'F2' }],
+    action: 'renameActiveTab',
+  },
 ];
 
 // ═══════════════════════════════════════════════════════════════
@@ -5197,6 +5204,11 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
   // Kill Sessions
   // ═══════════════════════════════════════════════════════════════
+
+  renameActiveTab() {
+    if (!this.activeSessionId) return;
+    this.startInlineRename(this.activeSessionId);
+  }
 
   async killActiveSession() {
     if (!this.activeSessionId) {
