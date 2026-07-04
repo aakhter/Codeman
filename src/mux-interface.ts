@@ -90,6 +90,8 @@ export interface CreateSessionOptions {
    */
   initialCols?: number;
   initialRows?: number;
+  /** COD-194: absolute path to a launcher script wrapping the Claude binary (e.g. claude-tmux). */
+  claudeLauncherScript?: string;
 }
 
 /** Options for respawning a dead pane. */
@@ -116,6 +118,8 @@ export interface RespawnPaneOptions {
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
   remote?: SessionRemote;
+  /** COD-194: absolute path to a launcher script wrapping the Claude binary (e.g. claude-tmux). */
+  claudeLauncherScript?: string;
 }
 
 /**

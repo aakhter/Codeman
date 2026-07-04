@@ -1413,6 +1413,7 @@ export class Session extends EventEmitter {
       truecolorEnabled: this._truecolorEnabled,
       historyLimit: this._tmuxHistoryLimit,
       remote: this._remote,
+      claudeLauncherScript: this._claudeLauncherScript,
     };
   }
 
@@ -1566,6 +1567,7 @@ export class Session extends EventEmitter {
             remote: this._remote,
             initialCols: this._initialDims?.cols,
             initialRows: this._initialDims?.rows,
+            claudeLauncherScript: this._claudeLauncherScript,
           },
           spawnErrLabel: 'mux attachment',
         });
