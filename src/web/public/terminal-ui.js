@@ -257,6 +257,15 @@ Object.assign(CodemanApp.prototype, {
         return false;
       }
 
+      // Suppress keys claimed by app-level shortcut registry so they don't
+      // also forward raw bytes (e.g. ^K kill-line) to the PTY.
+      if (ev.type === 'keydown') {
+        const registry = this.getShortcutRegistry?.() || [];
+        for (const shortcut of registry) {
+          if (this.matchesShortcutEvent?.(ev, shortcut)) return false;
+        }
+      }
+
       return true;
     });
 

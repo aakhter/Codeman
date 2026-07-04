@@ -329,9 +329,10 @@ Object.assign(CodemanApp.prototype, {
 
   shouldOpenCommandPaletteFromShortcut(e) {
     if (!e) return false;
-    const key = (e.key || '').toLowerCase();
-    if (key !== 'k' && e.code !== 'KeyK') return false;
-    if (!(e.metaKey || e.ctrlKey || e.altKey)) return false;
+    const paletteShortcut = (this.getShortcutRegistry?.() || []).find(
+      (s) => s.id === 'command-palette' && !s.disabled
+    );
+    if (!paletteShortcut || !this.matchesShortcutEvent?.(e, paletteShortcut)) return false;
 
     const target = e.target;
     if (!target) return true;
