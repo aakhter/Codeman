@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.2.5
+
+### Patch Changes
+
+- Fix OpenCode session scrolling by letting OpenCode own its TUI scrollback.
+
 ## 1.2.4
 
 ### Patch Changes
