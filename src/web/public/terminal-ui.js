@@ -105,6 +105,17 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * COD-209: OpenCode is a pure foreground TUI with its own scrollable middle
+   * pane. In live mode, wheel/touch gestures must reach xterm so xterm can
+   * forward mouse-wheel reports to OpenCode instead of entering Codeman history
+   * mode or moving browser scrollback.
+   */
+  _shouldForwardScrollToForegroundTui() {
+    const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+    return session?.mode === 'opencode' && this._viewMode === 'live';
+  },
+
+  /**
    * The user's configured scrollback (localStorage 'codeman-scrollback'),
    * floored at DEFAULT_SCROLLBACK. Shared by initTerminal and the COD-187
    * live-mirror scrollback writers (selectSession, history enter/exit) so the
@@ -428,6 +439,7 @@ Object.assign(CodemanApp.prototype, {
     container.addEventListener(
       'wheel',
       (ev) => {
+        if (this._shouldForwardScrollToForegroundTui()) return;
         ev.preventDefault();
         ev.stopPropagation();
         const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
@@ -443,6 +455,7 @@ Object.assign(CodemanApp.prototype, {
     // calls, matching the wheel handler above.
     {
       const cellHeight = () => this.terminal._core?._renderService?.dimensions?.css?.cell?.height || 13;
+      let touchLastX = 0;
       let touchLastY = 0;
       let velocity = 0;
       let lastTime = 0;
@@ -454,6 +467,12 @@ Object.assign(CodemanApp.prototype, {
         lastTime = timestamp;
 
         if (!isTouching && Math.abs(velocity) > 0.3) {
+          if (this._shouldForwardScrollToForegroundTui()) {
+            this._dispatchSyntheticTerminalWheel(velocity, touchLastX, touchLastY);
+            velocity *= 0.92;
+            scrollFrame = requestAnimationFrame(scrollLoop);
+            return;
+          }
           // Momentum phase — convert pixel velocity to lines
           const lines = Math.round(velocity / cellHeight());
           if (lines !== 0) {
@@ -480,6 +499,7 @@ Object.assign(CodemanApp.prototype, {
         'touchstart',
         (ev) => {
           if (ev.touches.length === 1) {
+            touchLastX = ev.touches[0].clientX;
             touchLastY = ev.touches[0].clientY;
             touchStartY = touchLastY;
             velocity = 0;
@@ -500,6 +520,7 @@ Object.assign(CodemanApp.prototype, {
         'touchmove',
         (ev) => {
           if (ev.touches.length === 1 && isTouching) {
+            const touchX = ev.touches[0].clientX;
             const touchY = ev.touches[0].clientY;
             if (!didScroll && Math.abs(touchY - touchStartY) >= TAP_THRESHOLD) {
               didScroll = true;
@@ -513,9 +534,14 @@ Object.assign(CodemanApp.prototype, {
             if (!didScroll) return;
             ev.preventDefault();
             const delta = touchLastY - touchY; // positive = scroll down
-            pixelAccum += delta;
             velocity = delta * 1.2;
+            touchLastX = touchX;
             touchLastY = touchY;
+            if (this._shouldForwardScrollToForegroundTui()) {
+              this._dispatchSyntheticTerminalWheel(delta, touchX, touchY);
+              return;
+            }
+            pixelAccum += delta;
             // Convert accumulated pixels to whole lines
             const ch = cellHeight();
             const lines = Math.trunc(pixelAccum / ch);
@@ -2611,6 +2637,32 @@ Object.assign(CodemanApp.prototype, {
       el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
     } catch {
       /* MouseEvent constructor unavailable — tap-to-position simply no-ops */
+    }
+  },
+
+  // Dispatch a wheel event at terminal coords so touch scrolling can use the
+  // same xterm mouse-wheel reporting path as desktop trackpads/mice. This is
+  // used for OpenCode, whose foreground TUI owns the scrollable conversation
+  // pane (COD-209).
+  _dispatchSyntheticTerminalWheel(deltaY, clientX, clientY) {
+    const el = this.terminal?.element;
+    if (!el || !Number.isFinite(deltaY) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+    try {
+      el.dispatchEvent(
+        new WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX,
+          clientY,
+          screenX: clientX,
+          screenY: clientY,
+          deltaY,
+          deltaMode: 0,
+        })
+      );
+    } catch {
+      /* WheelEvent constructor unavailable — touch scroll forwarding no-ops */
     }
   },
 

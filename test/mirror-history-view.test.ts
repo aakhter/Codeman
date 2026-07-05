@@ -140,7 +140,7 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(tui).not.toContain("'claude'"); // legacy (setting-OFF) repair paths must not change for claude
   });
 
-  it('opencode mode is mirror-eligible and follows the same _isMirrorSession path as claude/codex/gemini', () => {
+  it('COD-209: opencode mode is not mirror-eligible; its own TUI owns scrollback/history', () => {
     const mirror = appJs.slice(
       appJs.indexOf('_isMirrorSession(sessionId) {'),
       appJs.indexOf('_isMirrorSession(sessionId) {') + 500
@@ -150,7 +150,23 @@ describe('COD-187 live-mirror structural guards', () => {
       appJs.indexOf('_isMirrorEligible(sessionId) {') + 500
     );
     expect(mirror).toContain('this._isMirrorEligible(sessionId)');
-    expect(eligible).toContain("mode === 'opencode'");
+    expect(eligible).not.toContain("mode === 'opencode'");
+  });
+
+  it('COD-209: opencode scroll gestures are forwarded to the foreground TUI instead of Codeman history', () => {
+    const wheel = termUi.indexOf("addEventListener(\n      'wheel'");
+    const wheelBody = termUi.slice(wheel, wheel + 900);
+    expect(wheelBody).toContain('_shouldForwardScrollToForegroundTui()');
+    expect(wheelBody.indexOf('_shouldForwardScrollToForegroundTui()')).toBeLessThan(
+      wheelBody.indexOf('preventDefault')
+    );
+
+    const helper = termUi.slice(
+      termUi.indexOf('_shouldForwardScrollToForegroundTui() {'),
+      termUi.indexOf('_shouldForwardScrollToForegroundTui() {') + 500
+    );
+    expect(helper).toContain("session?.mode === 'opencode'");
+    expect(helper).toContain("this._viewMode === 'live'");
   });
 
   it('liveMirrorEnabled is per-device: stripped from the server PUT and in displayKeys', () => {
