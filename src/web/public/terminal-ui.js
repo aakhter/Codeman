@@ -163,6 +163,7 @@ Object.assign(CodemanApp.prototype, {
 
     const container = document.getElementById('terminalContainer');
     this.terminal.open(container);
+    this._installTerminalSelectionAutoCopy();
     this._installMobileTapMouseGuard();
 
     // Suppress xterm key handling during CJK IME composition.
@@ -2519,6 +2520,44 @@ Object.assign(CodemanApp.prototype, {
       this.showToast('Copied to clipboard', 'success');
     } catch (err) {
       this.showToast('Failed to copy', 'error');
+    }
+  },
+
+  _installTerminalSelectionAutoCopy() {
+    const terminal = this.terminal;
+    if (!terminal || typeof terminal.onSelectionChange !== 'function') return;
+
+    if (this._terminalSelectionAutoCopyDisposable?.dispose) {
+      this._terminalSelectionAutoCopyDisposable.dispose();
+    }
+
+    this._terminalSelectionAutoCopyTimer = null;
+    this._terminalSelectionAutoCopyPendingText = '';
+    this._terminalSelectionAutoCopyLastText = '';
+    this._terminalSelectionAutoCopyDisposable = terminal.onSelectionChange(() => {
+      const text = typeof terminal.getSelection === 'function' ? terminal.getSelection() : '';
+      if (!text) return;
+      this._terminalSelectionAutoCopyPendingText = text;
+      if (this._terminalSelectionAutoCopyTimer) clearTimeout(this._terminalSelectionAutoCopyTimer);
+      this._terminalSelectionAutoCopyTimer = setTimeout(() => {
+        this._terminalSelectionAutoCopyTimer = null;
+        this._copyTerminalSelectionToClipboard(this._terminalSelectionAutoCopyPendingText);
+      }, 80);
+    });
+  },
+
+  async _copyTerminalSelectionToClipboard(text) {
+    if (!text || text === this._terminalSelectionAutoCopyLastText) return;
+    this._terminalSelectionAutoCopyLastText = text;
+    try {
+      const copied =
+        typeof this._copyText === 'function'
+          ? await this._copyText(text)
+          : !!(navigator.clipboard?.writeText && (await navigator.clipboard.writeText(text), true));
+      if (!copied && this._terminalSelectionAutoCopyLastText === text) this._terminalSelectionAutoCopyLastText = '';
+    } catch (err) {
+      if (this._terminalSelectionAutoCopyLastText === text) this._terminalSelectionAutoCopyLastText = '';
+      console.warn('Terminal selection auto-copy failed:', err);
     }
   },
 
