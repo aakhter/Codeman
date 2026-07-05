@@ -53,6 +53,7 @@ interface SkillEntry {
   source: string | null;
   pack: string | null;
   klass: string;
+  mirrorInstalled: boolean | null; // true=present, false=missing, null=N/A (agents/commands)
 }
 
 interface SkillDetailResult {
@@ -140,7 +141,8 @@ function remoteParentPath(path: string): string | null {
 }
 
 function toSkillEntry(e: InstallEntry): SkillEntry {
-  return { kind: e.kind, name: e.name, source: e.source, pack: e.pack, klass: e.klass };
+  const mirrorInstalled = e.mirrorPath ? existsSync(e.mirrorPath) : null;
+  return { kind: e.kind, name: e.name, source: e.source, pack: e.pack, klass: e.klass, mirrorInstalled };
 }
 
 async function getSkillDetail(casePath: string): Promise<SkillDetailResult> {

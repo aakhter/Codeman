@@ -12402,7 +12402,17 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   font-size: 0.82rem;
 }
 .user-skill-entry .skill-icon { font-family: var(--font-mono); opacity: 0.6; min-width: 24px; }
-.user-skill-entry .skill-kind-badge { font-size: 0.68rem; color: var(--text-dim); opacity: 0.7; min-width: 40px; }
+.user-skill-entry .skill-kind-badge { font-size: 0.68rem; color: var(--text-dim); opacity: 0.7; min-width: 44px; }
 .user-skill-entry .skill-name { flex: 1; }
+.user-skill-entry .skill-source { min-width: 80px; }
+.user-skill-entry.user-skill-header { opacity: 0.5; font-size: 0.7rem; padding-bottom: 4px; border-bottom: 1px solid var(--border-faint, rgba(255,255,255,0.12)); }
+.skill-platform-col { min-width: 46px; text-align: center; font-size: 0.75rem; }
+.platform-dot { font-size: 0.8rem; }
+.platform-dot--yes { color: var(--success, #4caf50); }
+.platform-dot--missing { color: var(--warning, #e6a817); }
+.platform-dot--na { opacity: 0.35; }
 .btn-remove-user-skill { margin-left: 4px; background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 1px 5px; border-radius: 3px; opacity: 0.4; transition: opacity 0.1s; }
 .user-skill-entry:hover .btn-remove-user-skill { opacity: 1; }
+.user-skill-legend { margin-top: 8px; padding-top: 6px; font-size: 0.7rem; opacity: 0.55; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.user-skill-legend strong { opacity: 0.8; }
+.user-skill-legend .legend-sep { opacity: 0.3; }

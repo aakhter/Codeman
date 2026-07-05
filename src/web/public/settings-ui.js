@@ -2841,31 +2841,89 @@ Object.assign(CodemanApp.prototype, {
       container.appendChild(msg);
       return;
     }
-    const iconMap = { real: '[*]', 'linked-managed': '[*]', foreign: '[!]', dangling: '[!]', 'available-managed': '[ ]' };
+    // Column header
+    const header = document.createElement('div');
+    header.className = 'user-skill-entry user-skill-header';
+    const hIcon = document.createElement('span'); hIcon.className = 'skill-icon'; hIcon.textContent = '';
+    const hKind = document.createElement('span'); hKind.className = 'skill-kind-badge'; hKind.textContent = '';
+    const hName = document.createElement('span'); hName.className = 'skill-name'; hName.textContent = 'name';
+    const hClaude = document.createElement('span'); hClaude.className = 'skill-platform-col'; hClaude.textContent = 'Claude';
+    const hCodex = document.createElement('span'); hCodex.className = 'skill-platform-col'; hCodex.textContent = 'Codex';
+    const hSrc = document.createElement('span'); hSrc.className = 'skill-source'; hSrc.textContent = 'source';
+    header.append(hIcon, hKind, hName, hClaude, hCodex, hSrc);
+    container.appendChild(header);
+
+    const iconMap = { 'linked-managed': '[*]', real: '[F]', foreign: '[?]', dangling: '[!]', 'available-managed': '[ ]' };
     for (const e of entries) {
+      const isReal = e.klass === 'real';
       const row = document.createElement('div');
       row.className = 'user-skill-entry';
+
       const icon = document.createElement('span');
       icon.className = 'skill-icon';
       icon.textContent = iconMap[e.klass] ?? '[ ]';
+      if (isReal) icon.title = 'Direct file — not managed by skill-install';
+
       const kind = document.createElement('span');
       kind.className = 'skill-kind-badge';
       kind.textContent = e.kind;
+
       const name = document.createElement('span');
       name.className = 'skill-name';
       name.textContent = e.name;
+
+      // Claude column — always present if in this list
+      const claudeCol = document.createElement('span');
+      claudeCol.className = 'skill-platform-col';
+      claudeCol.innerHTML = '<span class="platform-dot platform-dot--yes" title="Installed in ~/.claude/skills">●</span>';
+
+      // Codex column — only skills get a mirror; null = N/A
+      const codexCol = document.createElement('span');
+      codexCol.className = 'skill-platform-col';
+      if (e.mirrorInstalled === null) {
+        codexCol.innerHTML = '<span class="platform-dot platform-dot--na" title="Not applicable for this kind">—</span>';
+      } else if (e.mirrorInstalled) {
+        codexCol.innerHTML = '<span class="platform-dot platform-dot--yes" title="Installed in ~/.agents/skills">●</span>';
+      } else {
+        codexCol.innerHTML = '<span class="platform-dot platform-dot--missing" title="Missing from ~/.agents/skills — run skill-install --user --sync">○</span>';
+      }
+
       const src = document.createElement('span');
       src.className = 'skill-source';
       src.style.cssText = 'opacity:0.55;font-size:0.75rem;';
-      src.textContent = e.source || '';
-      const rmBtn = document.createElement('button');
-      rmBtn.className = 'btn-remove-user-skill';
-      rmBtn.title = 'Remove from user scope';
-      rmBtn.textContent = '×';
-      rmBtn.dataset.skillId = e.name + (e.pack ? ':' + e.pack : '');
-      row.append(icon, kind, name, src, rmBtn);
+      src.textContent = isReal ? '(not a symlink)' : (e.source || '');
+      if (isReal) src.title = 'Remove manually from ~/.claude/skills or ~/.agents/skills';
+
+      if (isReal) {
+        row.append(icon, kind, name, claudeCol, codexCol, src);
+      } else {
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'btn-remove-user-skill';
+        rmBtn.title = 'Remove from user scope';
+        rmBtn.textContent = '×';
+        rmBtn.dataset.skillId = e.name + (e.pack ? ':' + e.pack : '');
+        row.append(icon, kind, name, claudeCol, codexCol, src, rmBtn);
+      }
       container.appendChild(row);
     }
+
+    // Legend
+    const legend = document.createElement('div');
+    legend.className = 'user-skill-legend';
+    legend.innerHTML = [
+      '<strong>Icons:</strong>',
+      '<span title="Managed symlink">[*] managed symlink</span>',
+      '<span title="Direct file, not managed">[F] direct file</span>',
+      '<span title="Foreign symlink pointing outside known sources">[?] foreign symlink</span>',
+      '<span title="Dangling symlink — target missing">[!] dangling</span>',
+      '<span title="Available to install but not installed">[ ] available</span>',
+      '<span class="legend-sep">|</span>',
+      '<strong>Dots:</strong>',
+      '<span><span class="platform-dot platform-dot--yes">●</span> installed</span>',
+      '<span><span class="platform-dot platform-dot--missing">○</span> missing (run --sync)</span>',
+      '<span><span class="platform-dot platform-dot--na">—</span> n/a for this kind</span>',
+    ].join(' ');
+    container.appendChild(legend);
     container.addEventListener('click', (ev) => {
       const btn = ev.target.closest('.btn-remove-user-skill');
       if (btn) this.removeUserSkill(btn.dataset.skillId);
