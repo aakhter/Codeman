@@ -39,8 +39,9 @@ import {
 } from '../../remote-hosts.js';
 import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readSources, buildCatalog } from '../../skill-install-reader.js';
+import { readSources, buildCatalog, readUserManifest } from '../../skill-install-reader.js';
 import { classifyScope, summarize, type InstallEntry } from '../../skill-install-classifier.js';
+import { stringify as stringifyToml } from 'smol-toml';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -53,6 +54,11 @@ interface SkillEntry {
   source: string | null;
   pack: string | null;
   klass: string;
+  mirrorInstalled: boolean | null; // true=present, false=missing, null=N/A (agents/commands)
+  claudePath: string; // prettified path in ~/.claude/...
+  target: string | null; // symlink target (prettified), null for real files
+  mirrorPath: string | null; // prettified ~/.agents/skills/... path (skills only)
+  description: string; // bundle description if in a pack, else source description
 }
 
 interface SkillDetailResult {
@@ -139,8 +145,28 @@ function remoteParentPath(path: string): string | null {
   return parent === normalized ? null : parent;
 }
 
-function toSkillEntry(e: InstallEntry): SkillEntry {
-  return { kind: e.kind, name: e.name, source: e.source, pack: e.pack, klass: e.klass };
+function toSkillEntry(e: InstallEntry, sources: import('../../skill-install-reader.js').SkillSource[]): SkillEntry {
+  const mirrorInstalled = e.mirrorPath ? existsSync(e.mirrorPath) : null;
+  const home = homedir();
+  const prettify = (p: string | null) => (p ? p.replace(home, '~') : null);
+  let description = '';
+  if (e.source) {
+    const src = sources.find((s) => s.name === e.source);
+    if (e.pack && src) description = src.bundles[e.pack]?.description ?? '';
+    if (!description && src) description = src.description;
+  }
+  return {
+    kind: e.kind,
+    name: e.name,
+    source: e.source,
+    pack: e.pack,
+    klass: e.klass,
+    mirrorInstalled,
+    claudePath: prettify(e.claudePath) ?? e.claudePath,
+    target: prettify(e.target),
+    mirrorPath: prettify(e.mirrorPath),
+    description,
+  };
 }
 
 async function getSkillDetail(casePath: string): Promise<SkillDetailResult> {
@@ -153,8 +179,10 @@ async function getSkillDetail(casePath: string): Promise<SkillDetailResult> {
   ]);
   return {
     hasManifest: true,
-    projectEntries: projectRaw.map(toSkillEntry),
-    userEntries: userRaw.filter((e) => e.klass === 'linked-managed' || e.klass === 'real').map(toSkillEntry),
+    projectEntries: projectRaw.map((e) => toSkillEntry(e, sources)),
+    userEntries: userRaw
+      .filter((e) => e.klass === 'linked-managed' || e.klass === 'real')
+      .map((e) => toSkillEntry(e, sources)),
   };
 }
 
@@ -1074,7 +1102,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
     if (!sources.length) return { hasManifest: false, entries: [] };
     const catalog = await buildCatalog(sources);
     const raw = await classifyScope(sources, catalog, homedir());
-    return { hasManifest: true, entries: raw.map(toSkillEntry) };
+    return { hasManifest: true, entries: raw.map((e) => toSkillEntry(e, sources)) };
   }
 
   app.get('/api/skills/user', async (): Promise<ApiResponse<UserSkillsResult>> => {
@@ -1105,6 +1133,154 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
     }
     try {
       await execFileAsync('skill-install', ['--user', '--remove', skillId], { timeout: 60000 });
+      return { success: true, data: await getUserSkills() };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err));
+    }
+  });
+
+  // ========== Skill Adopt ==========
+
+  interface AdoptSource {
+    name: string;
+    description: string;
+    skillsDir: string; // prettified resolved path where skills land
+  }
+
+  const SAFE_SKILL_NAME = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/;
+  const SAFE_SOURCE_NAME = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/;
+
+  function expandHome(p: string): string {
+    return p.startsWith('~/') || p === '~' ? join(homedir(), p.slice(2)) : p;
+  }
+
+  app.get('/api/skills/adopt-sources', async (): Promise<ApiResponse<{ sources: AdoptSource[] }>> => {
+    try {
+      const sources = await readSources();
+      const result: AdoptSource[] = [];
+      for (const src of sources) {
+        const skillArtifact = src.artifacts['skill'];
+        if (!skillArtifact?.root) continue;
+        const srcPath = expandHome(src.path);
+        if (!existsSync(srcPath)) continue;
+        const skillsDir = join(srcPath, skillArtifact.root);
+        if (!existsSync(skillsDir)) continue;
+        result.push({ name: src.name, description: src.description, skillsDir: skillsDir.replace(homedir(), '~') });
+      }
+      return { success: true, data: { sources: result } };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err));
+    }
+  });
+
+  app.post('/api/skills/user/adopt', async (req): Promise<ApiResponse<UserSkillsResult>> => {
+    const body = req.body as Partial<{
+      skillName: string;
+      sourceName: string;
+      forceOverwrite: boolean;
+      codexSupport: boolean;
+      codexYaml: string;
+    }>;
+    const { skillName, sourceName, forceOverwrite = false, codexSupport = false, codexYaml } = body;
+
+    if (!skillName || !SAFE_SKILL_NAME.test(skillName))
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid skillName');
+    if (!sourceName || !SAFE_SOURCE_NAME.test(sourceName))
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid sourceName');
+    if (codexSupport && (!codexYaml || typeof codexYaml !== 'string'))
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'codexYaml required when codexSupport is true');
+
+    try {
+      const sources = await readSources();
+      const source = sources.find((s) => s.name === sourceName);
+      if (!source) return createErrorResponse(ApiErrorCode.NOT_FOUND, `Source '${sourceName}' not found`);
+
+      const skillArtifact = source.artifacts['skill'];
+      if (!skillArtifact?.root)
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Source '${sourceName}' has no skill artifact config`);
+
+      const destDir = join(expandHome(source.path), skillArtifact.root, skillName);
+
+      // Verify the skill exists as a real file in user scope
+      const catalog = await buildCatalog(sources);
+      const userEntries = await classifyScope(sources, catalog, homedir());
+      const entry = userEntries.find(
+        (e) => (e.name === skillName || e.name === `${skillName}.md`) && e.klass === 'real'
+      );
+      if (!entry)
+        return createErrorResponse(
+          ApiErrorCode.NOT_FOUND,
+          `'${skillName}' is not a real (non-symlink) skill in user scope`
+        );
+
+      // Conflict check
+      if (existsSync(destDir) && !forceOverwrite)
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `Destination already exists: ${destDir.replace(homedir(), '~')}`
+        );
+
+      // Create destination and copy content
+      await fs.mkdir(destDir, { recursive: true });
+      const realPath = entry.claudePath;
+      const realStat = await fs.stat(realPath);
+      if (realStat.isDirectory()) {
+        await fs.cp(realPath, destDir, { recursive: true });
+      } else {
+        // Single .md file → place as SKILL.md
+        const content = await fs.readFile(realPath, 'utf-8');
+        await fs.writeFile(join(destDir, 'SKILL.md'), content, 'utf-8');
+      }
+
+      // Write agents/openai.yaml if Codex support requested
+      if (codexSupport && codexYaml) {
+        await fs.mkdir(join(destDir, 'agents'), { recursive: true });
+        await fs.writeFile(join(destDir, 'agents', 'openai.yaml'), codexYaml, 'utf-8');
+      }
+
+      // Remove original real file/dir
+      if (realStat.isDirectory()) {
+        await fs.rm(realPath, { recursive: true, force: true });
+      } else {
+        await fs.unlink(realPath);
+      }
+
+      // Create Claude symlink: ~/.claude/skills/<skillName> → destDir
+      const claudeSkillsDir = join(homedir(), '.claude', 'skills');
+      const claudeLink = join(claudeSkillsDir, skillName);
+      const claudeLinkMd = join(claudeSkillsDir, `${skillName}.md`);
+      if (existsSync(claudeLinkMd)) await fs.unlink(claudeLinkMd);
+      if (existsSync(claudeLink)) await fs.unlink(claudeLink);
+      await fs.symlink(destDir, claudeLink);
+
+      // Create Codex symlink: ~/.agents/skills/<skillName> → destDir
+      if (codexSupport) {
+        const codexSkillsDir = join(homedir(), '.agents', 'skills');
+        await fs.mkdir(codexSkillsDir, { recursive: true });
+        const codexLink = join(codexSkillsDir, skillName);
+        if (existsSync(codexLink)) await fs.unlink(codexLink);
+        await fs.symlink(destDir, codexLink);
+      }
+
+      // Update user-manifest.toml
+      const manifestPath = join(expandHome('~/.config/skill-install'), 'user-manifest.toml');
+      const manifest = await readUserManifest();
+      const newEntry = `${sourceName}/${skillName}`;
+      if (!manifest.skills.includes(newEntry)) {
+        manifest.skills.push(newEntry);
+        const tomlContent = stringifyToml({
+          bundles: manifest.bundles,
+          skills: manifest.skills,
+          agents: manifest.agents,
+          commands: manifest.commands,
+          exclude: manifest.exclude,
+        });
+        await fs.writeFile(
+          manifestPath,
+          '# Managed by skill-install. Run `skill-install --user --sync` to apply.\n\n' + tomlContent
+        );
+      }
+
       return { success: true, data: await getUserSkills() };
     } catch (err) {
       return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err));

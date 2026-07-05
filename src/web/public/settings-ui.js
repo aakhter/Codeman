@@ -2819,7 +2819,8 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
       const { hasManifest, entries } = body.data;
-      this._renderUserSkillsInto(list, entries, hasManifest);
+      const refreshList = () => this.loadUserSkillsSection();
+      this._renderUserSkillsInto(list, entries, hasManifest, refreshList);
       if (warning) warning.style.display = entries.length > 10 ? '' : 'none';
     } catch {
       list.textContent = '';
@@ -2830,7 +2831,166 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  _renderUserSkillsInto(container, entries, hasManifest) {
+  async _openAdoptWizard(section, entry, refreshList) {
+    // Replace the "Adopt to repo…" button with the wizard form
+    section.textContent = '';
+    section.classList.add('skill-adopt-wizard');
+
+    const status = document.createElement('div');
+    status.className = 'skill-adopt-status';
+    status.textContent = 'Loading sources…';
+    section.appendChild(status);
+
+    let adoptSources = [];
+    try {
+      const res = await fetch('/api/skills/adopt-sources', { credentials: 'include' });
+      const body = await res.json();
+      if (!body.success) throw new Error(body.error);
+      adoptSources = body.data.sources;
+    } catch (e) {
+      status.textContent = `Failed to load sources: ${e.message}`;
+      return;
+    }
+
+    if (!adoptSources.length) {
+      status.textContent = 'No eligible sources found. Ensure at least one source in sources.d/ has a skills directory.';
+      return;
+    }
+    section.removeChild(status);
+
+    // Source selector
+    const sourceRow = document.createElement('div');
+    sourceRow.className = 'skill-adopt-row';
+    const sourceLabel = document.createElement('label');
+    sourceLabel.textContent = 'Target source';
+    const sourceSelect = document.createElement('select');
+    sourceSelect.className = 'skill-adopt-select';
+    for (const src of adoptSources) {
+      const opt = document.createElement('option');
+      opt.value = src.name;
+      opt.textContent = `${src.name}`;
+      sourceSelect.appendChild(opt);
+    }
+    sourceRow.append(sourceLabel, sourceSelect);
+
+    // Resolved destination path display
+    const destRow = document.createElement('div');
+    destRow.className = 'skill-adopt-row skill-adopt-dest';
+    const destLabel = document.createElement('span');
+    destLabel.className = 'skill-adopt-dest-label';
+    destLabel.textContent = 'Destination';
+    const destPath = document.createElement('span');
+    destPath.className = 'skill-adopt-dest-path';
+    destRow.append(destLabel, destPath);
+
+    function updateDest() {
+      const src = adoptSources.find((s) => s.name === sourceSelect.value);
+      destPath.textContent = src ? `${src.skillsDir}/${entry.name}/` : '';
+    }
+    sourceSelect.addEventListener('change', updateDest);
+    updateDest();
+
+    // Codex support toggle
+    const codexRow = document.createElement('div');
+    codexRow.className = 'skill-adopt-row';
+    const codexLabel = document.createElement('label');
+    codexLabel.className = 'skill-adopt-codex-label';
+    const codexCheck = document.createElement('input');
+    codexCheck.type = 'checkbox';
+    codexCheck.className = 'skill-adopt-codex-check';
+    codexLabel.append(codexCheck, document.createTextNode(' Add Codex support (agents/openai.yaml)'));
+    codexRow.appendChild(codexLabel);
+
+    // YAML textarea (hidden until codex toggled on)
+    const yamlRow = document.createElement('div');
+    yamlRow.className = 'skill-adopt-yaml-row';
+    const yamlLabel = document.createElement('div');
+    yamlLabel.className = 'skill-adopt-yaml-label';
+    yamlLabel.textContent = 'agents/openai.yaml — review and edit before adopting:';
+    const yamlArea = document.createElement('textarea');
+    yamlArea.className = 'skill-adopt-yaml';
+    yamlArea.rows = 6;
+    // Generate skeleton from skill entry
+    const displayName = entry.name.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    const shortDesc = entry.description || `Use this skill to perform ${entry.name} tasks.`;
+    yamlArea.value = `interface:\n  display_name: "${displayName}"\n  short_description: "${shortDesc.slice(0, 100)}"\n  default_prompt: "Use $${entry.name} to ..."`;
+    yamlRow.append(yamlLabel, yamlArea);
+
+    codexCheck.addEventListener('change', () => { yamlRow.style.display = codexCheck.checked ? 'flex' : 'none'; });
+
+    // Action buttons
+    const btnRow = document.createElement('div');
+    btnRow.className = 'skill-adopt-btn-row';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'skill-adopt-confirm';
+    confirmBtn.textContent = 'Adopt';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'skill-adopt-cancel';
+    cancelBtn.textContent = 'Cancel';
+    const errMsg = document.createElement('span');
+    errMsg.className = 'skill-adopt-error';
+    btnRow.append(confirmBtn, cancelBtn, errMsg);
+
+    cancelBtn.addEventListener('click', () => {
+      section.classList.remove('skill-adopt-wizard');
+      section.textContent = '';
+      const btn = document.createElement('button');
+      btn.className = 'skill-adopt-btn';
+      btn.textContent = 'Adopt to repo…';
+      btn.addEventListener('click', () => this._openAdoptWizard(section, entry, refreshList));
+      section.appendChild(btn);
+    });
+
+    async function doAdopt(forceOverwrite = false) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Adopting…';
+      errMsg.textContent = '';
+      try {
+        const res = await fetch('/api/skills/user/adopt', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            skillName: entry.name,
+            sourceName: sourceSelect.value,
+            forceOverwrite,
+            codexSupport: codexCheck.checked,
+            codexYaml: codexCheck.checked ? yamlArea.value : undefined,
+          }),
+        });
+        const body = await res.json();
+        if (!body.success) {
+          if (body.error && body.error.includes('already exists') && !forceOverwrite) {
+            errMsg.textContent = `${body.error}. `;
+            const overBtn = document.createElement('button');
+            overBtn.textContent = 'Overwrite';
+            overBtn.className = 'skill-adopt-overwrite';
+            overBtn.addEventListener('click', () => { overBtn.remove(); doAdopt(true); });
+            errMsg.appendChild(overBtn);
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Adopt';
+          } else {
+            errMsg.textContent = body.error;
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Adopt';
+          }
+          return;
+        }
+        // Success — refresh the list
+        if (refreshList) refreshList();
+      } catch (e) {
+        errMsg.textContent = `Error: ${e.message}`;
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Adopt';
+      }
+    }
+
+    confirmBtn.addEventListener('click', () => doAdopt(false));
+    section.append(sourceRow, destRow, codexRow, yamlRow, btnRow);
+  },
+
+  _renderUserSkillsInto(container, entries, hasManifest, refreshList = null) {
+    const self = this;
     container.textContent = '';
     if (!hasManifest || !entries.length) {
       const msg = document.createElement('span');
@@ -2841,31 +3001,135 @@ Object.assign(CodemanApp.prototype, {
       container.appendChild(msg);
       return;
     }
-    const iconMap = { real: '[*]', 'linked-managed': '[*]', foreign: '[!]', dangling: '[!]', 'available-managed': '[ ]' };
+    // Column header
+    const header = document.createElement('div');
+    header.className = 'user-skill-entry user-skill-header';
+    const hIcon = document.createElement('span'); hIcon.className = 'skill-icon'; hIcon.textContent = '';
+    const hKind = document.createElement('span'); hKind.className = 'skill-kind-badge'; hKind.textContent = '';
+    const hName = document.createElement('span'); hName.className = 'skill-name'; hName.textContent = 'name';
+    const hClaude = document.createElement('span'); hClaude.className = 'skill-platform-col'; hClaude.textContent = 'Claude';
+    const hCodex = document.createElement('span'); hCodex.className = 'skill-platform-col'; hCodex.textContent = 'Codex';
+    const hSrc = document.createElement('span'); hSrc.className = 'skill-source'; hSrc.textContent = 'source';
+    header.append(hIcon, hKind, hName, hClaude, hCodex, hSrc);
+    container.appendChild(header);
+
+    const iconMap = { 'linked-managed': '[*]', real: '[F]', foreign: '[?]', dangling: '[!]', 'available-managed': '[ ]' };
+    let openDetail = null;
+    let openName = null;
     for (const e of entries) {
+      const isReal = e.klass === 'real';
       const row = document.createElement('div');
       row.className = 'user-skill-entry';
+
       const icon = document.createElement('span');
       icon.className = 'skill-icon';
       icon.textContent = iconMap[e.klass] ?? '[ ]';
+      if (isReal) icon.title = 'Direct file — not managed by skill-install';
+
       const kind = document.createElement('span');
       kind.className = 'skill-kind-badge';
       kind.textContent = e.kind;
+
       const name = document.createElement('span');
-      name.className = 'skill-name';
+      name.className = 'skill-name skill-name--clickable';
       name.textContent = e.name;
+      name.title = 'Click for details';
+
+      // Claude column — always present if in this list
+      const claudeCol = document.createElement('span');
+      claudeCol.className = 'skill-platform-col';
+      claudeCol.innerHTML = '<span class="platform-dot platform-dot--yes" title="Installed in ~/.claude/skills">●</span>';
+
+      // Codex column — only skills get a mirror; null = N/A
+      const codexCol = document.createElement('span');
+      codexCol.className = 'skill-platform-col';
+      if (e.mirrorInstalled === null) {
+        codexCol.innerHTML = '<span class="platform-dot platform-dot--na" title="Not applicable for this kind">—</span>';
+      } else if (e.mirrorInstalled) {
+        codexCol.innerHTML = '<span class="platform-dot platform-dot--yes" title="Installed in ~/.agents/skills">●</span>';
+      } else {
+        codexCol.innerHTML = '<span class="platform-dot platform-dot--missing" title="Missing from ~/.agents/skills — run skill-install --user --sync">○</span>';
+      }
+
       const src = document.createElement('span');
       src.className = 'skill-source';
       src.style.cssText = 'opacity:0.55;font-size:0.75rem;';
-      src.textContent = e.source || '';
-      const rmBtn = document.createElement('button');
-      rmBtn.className = 'btn-remove-user-skill';
-      rmBtn.title = 'Remove from user scope';
-      rmBtn.textContent = '×';
-      rmBtn.dataset.skillId = e.name + (e.pack ? ':' + e.pack : '');
-      row.append(icon, kind, name, src, rmBtn);
+      src.textContent = isReal ? '(not a symlink)' : (e.source || '');
+      if (isReal) src.title = 'Remove manually from ~/.claude/skills or ~/.agents/skills';
+
+      if (isReal) {
+        row.append(icon, kind, name, claudeCol, codexCol, src);
+      } else {
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'btn-remove-user-skill';
+        rmBtn.title = 'Remove from user scope';
+        rmBtn.textContent = '×';
+        rmBtn.dataset.skillId = e.name + (e.pack ? ':' + e.pack : '');
+        row.append(icon, kind, name, claudeCol, codexCol, src, rmBtn);
+      }
+      // Detail panel — toggled on name click (accordion: only one open at a time)
+      const detail = document.createElement('div');
+      detail.className = 'user-skill-detail';
+      const rows = [];
+      if (e.description) rows.push(['Description', e.description]);
+      if (e.pack) rows.push(['Pack', e.pack]);
+      if (e.source) rows.push(['Source', e.source]);
+      rows.push(['Claude path', e.claudePath]);
+      if (e.target) rows.push(['→ target', e.target]);
+      if (e.mirrorPath) rows.push(['Codex mirror', e.mirrorPath + (e.mirrorInstalled ? '' : ' (missing)')]);
+      rows.push(['Type', e.klass]);
+      for (const [label, value] of rows) {
+        const dl = document.createElement('div');
+        dl.className = 'skill-detail-row';
+        const dt = document.createElement('span');
+        dt.className = 'skill-detail-label';
+        dt.textContent = label;
+        const dd = document.createElement('span');
+        dd.className = 'skill-detail-value';
+        dd.textContent = value;
+        dl.append(dt, dd);
+        detail.appendChild(dl);
+      }
+      // Adopt wizard — appended to detail panel for real entries
+      if (isReal) {
+        const adoptSection = document.createElement('div');
+        adoptSection.className = 'skill-adopt-section';
+        const adoptBtn = document.createElement('button');
+        adoptBtn.className = 'skill-adopt-btn';
+        adoptBtn.textContent = 'Adopt to repo…';
+        adoptBtn.addEventListener('click', () => self._openAdoptWizard(adoptSection, e, refreshList));
+        adoptSection.appendChild(adoptBtn);
+        detail.appendChild(adoptSection);
+      }
+
+      name.addEventListener('click', () => {
+        const isOpen = detail.classList.contains('is-open');
+        if (openDetail) { openDetail.classList.remove('is-open'); openName.classList.remove('skill-name--expanded'); }
+        if (!isOpen) { detail.classList.add('is-open'); name.classList.add('skill-name--expanded'); openDetail = detail; openName = name; }
+        else { openDetail = null; openName = null; }
+      });
+
       container.appendChild(row);
+      container.appendChild(detail);
     }
+
+    // Legend
+    const legend = document.createElement('div');
+    legend.className = 'user-skill-legend';
+    legend.innerHTML = [
+      '<strong>Icons:</strong>',
+      '<span title="Managed symlink">[*] managed symlink</span>',
+      '<span title="Direct file, not managed">[F] direct file</span>',
+      '<span title="Foreign symlink pointing outside known sources">[?] foreign symlink</span>',
+      '<span title="Dangling symlink — target missing">[!] dangling</span>',
+      '<span title="Available to install but not installed">[ ] available</span>',
+      '<span class="legend-sep">|</span>',
+      '<strong>Dots:</strong>',
+      '<span><span class="platform-dot platform-dot--yes">●</span> installed</span>',
+      '<span><span class="platform-dot platform-dot--missing">○</span> missing (run --sync)</span>',
+      '<span><span class="platform-dot platform-dot--na">—</span> n/a for this kind</span>',
+    ].join(' ');
+    container.appendChild(legend);
     container.addEventListener('click', (ev) => {
       const btn = ev.target.closest('.btn-remove-user-skill');
       if (btn) this.removeUserSkill(btn.dataset.skillId);

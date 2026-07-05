@@ -12402,7 +12402,48 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   font-size: 0.82rem;
 }
 .user-skill-entry .skill-icon { font-family: var(--font-mono); opacity: 0.6; min-width: 24px; }
-.user-skill-entry .skill-kind-badge { font-size: 0.68rem; color: var(--text-dim); opacity: 0.7; min-width: 40px; }
+.user-skill-entry .skill-kind-badge { font-size: 0.68rem; color: var(--text-dim); opacity: 0.7; min-width: 44px; }
 .user-skill-entry .skill-name { flex: 1; }
+.user-skill-entry .skill-source { min-width: 80px; }
+.user-skill-entry.user-skill-header { opacity: 0.5; font-size: 0.7rem; padding-bottom: 4px; border-bottom: 1px solid var(--border-faint, rgba(255,255,255,0.12)); }
+.skill-platform-col { min-width: 46px; text-align: center; font-size: 0.75rem; }
+.platform-dot { font-size: 0.8rem; }
+.platform-dot--yes { color: var(--success, #4caf50); }
+.platform-dot--missing { color: var(--warning, #e6a817); }
+.platform-dot--na { opacity: 0.35; }
 .btn-remove-user-skill { margin-left: 4px; background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 1px 5px; border-radius: 3px; opacity: 0.4; transition: opacity 0.1s; }
 .user-skill-entry:hover .btn-remove-user-skill { opacity: 1; }
+.user-skill-legend { margin-top: 8px; padding-top: 6px; font-size: 0.7rem; opacity: 0.55; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.user-skill-legend strong { opacity: 0.8; }
+.user-skill-legend .legend-sep { opacity: 0.3; }
+.skill-name--clickable { cursor: pointer; text-decoration-line: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
+.skill-name--clickable:hover { opacity: 0.8; }
+.skill-name--expanded { text-decoration-style: solid; }
+.user-skill-detail { display: none; grid-template-columns: 120px 1fr; gap: 2px 10px; padding: 6px 8px 8px 28px; background: rgba(255,255,255,0.04); border-left: 2px solid var(--border-faint, rgba(255,255,255,0.12)); margin: 0 0 2px 0; border-radius: 0 4px 4px 0; }
+.user-skill-detail.is-open { display: grid; }
+.skill-detail-row { display: contents; }
+.skill-detail-label { font-size: 0.68rem; opacity: 0.5; padding-top: 2px; white-space: nowrap; }
+.skill-detail-value { font-size: 0.72rem; word-break: break-all; padding-top: 2px; font-family: var(--mono-font, monospace); }
+
+/* Adopt wizard */
+.user-skill-detail .skill-adopt-section { grid-column: 1 / -1; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-faint, rgba(255,255,255,0.1)); display: flex; flex-direction: column; gap: 6px; }
+.skill-adopt-btn { align-self: flex-start; font-size: 0.72rem; padding: 3px 10px; border-radius: 4px; background: var(--accent, #2a6496); color: #fff; border: none; cursor: pointer; opacity: 0.9; }
+.skill-adopt-btn:hover { opacity: 1; }
+.skill-adopt-wizard { gap: 6px; }
+.skill-adopt-row { display: flex; align-items: center; gap: 8px; font-size: 0.72rem; }
+.skill-adopt-row label { opacity: 0.7; white-space: nowrap; }
+.skill-adopt-select { font-size: 0.72rem; background: var(--input-bg, rgba(255,255,255,0.08)); color: inherit; border: 1px solid var(--border-faint, rgba(255,255,255,0.15)); border-radius: 3px; padding: 2px 6px; }
+.skill-adopt-dest { gap: 8px; }
+.skill-adopt-dest-label { font-size: 0.68rem; opacity: 0.5; white-space: nowrap; }
+.skill-adopt-dest-path { font-size: 0.72rem; font-family: var(--mono-font, monospace); opacity: 0.75; word-break: break-all; }
+.skill-adopt-codex-label { display: flex; align-items: center; gap: 5px; font-size: 0.72rem; opacity: 0.8; cursor: pointer; }
+.skill-adopt-yaml-row { display: none; flex-direction: column; gap: 4px; }
+.skill-adopt-yaml-label { font-size: 0.68rem; opacity: 0.55; }
+.skill-adopt-yaml { font-family: var(--mono-font, monospace); font-size: 0.72rem; background: var(--input-bg, rgba(255,255,255,0.06)); color: inherit; border: 1px solid var(--border-faint, rgba(255,255,255,0.15)); border-radius: 3px; padding: 6px 8px; resize: vertical; width: 100%; box-sizing: border-box; }
+.skill-adopt-btn-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skill-adopt-confirm { font-size: 0.72rem; padding: 3px 12px; border-radius: 4px; background: var(--success, #4caf50); color: #fff; border: none; cursor: pointer; }
+.skill-adopt-confirm:disabled { opacity: 0.5; cursor: default; }
+.skill-adopt-cancel { font-size: 0.72rem; padding: 3px 10px; border-radius: 4px; background: transparent; color: inherit; border: 1px solid var(--border-faint, rgba(255,255,255,0.2)); cursor: pointer; opacity: 0.7; }
+.skill-adopt-cancel:hover { opacity: 1; }
+.skill-adopt-error { font-size: 0.7rem; color: var(--error, #f44336); flex: 1; }
+.skill-adopt-overwrite { font-size: 0.7rem; margin-left: 6px; padding: 1px 8px; border-radius: 3px; background: var(--warning, #e6a817); color: #000; border: none; cursor: pointer; }
