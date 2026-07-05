@@ -172,6 +172,7 @@ Object.assign(CodemanApp.prototype, {
     this.updateCasePickerInput(select.value);
     this.closeCasePicker();
     this.updateDirDisplayForCase(select.value);
+    this.updateSkillsChipForCase(select.value);
     this.updateMobileCaseLabel(select.value);
     if (save) {
       this.saveLastUsedCase(select.value);
@@ -270,17 +271,20 @@ Object.assign(CodemanApp.prototype, {
       if (selectCaseName) {
         select.value = selectCaseName;
         this.updateDirDisplayForCase(selectCaseName);
+        this.updateSkillsChipForCase(selectCaseName);
         this.updateMobileCaseLabel(selectCaseName);
       } else if (lastUsedCase && cases.some(c => c.name === lastUsedCase)) {
         // Use lastUsedCase if available and exists
         select.value = lastUsedCase;
         this.updateDirDisplayForCase(lastUsedCase);
+        this.updateSkillsChipForCase(lastUsedCase);
         this.updateMobileCaseLabel(lastUsedCase);
       } else if (cases.length > 0) {
         // Fallback to testcase or first case
         const firstCase = cases.find(c => c.name === 'testcase') || cases[0];
         select.value = firstCase.name;
         this.updateDirDisplayForCase(firstCase.name);
+        this.updateSkillsChipForCase(firstCase.name);
         this.updateMobileCaseLabel(firstCase.name);
       } else {
         // No cases exist yet - show the default case name as directory
@@ -324,6 +328,32 @@ Object.assign(CodemanApp.prototype, {
       }
     } catch (err) {
       document.getElementById('dirDisplay').textContent = caseName;
+    }
+  },
+
+  async updateSkillsChipForCase(caseName) {
+    const btn = document.getElementById('skillsChipBtn');
+    if (!btn) return;
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-state`);
+      if (!res.ok) { btn.classList.add('hidden'); return; }
+      const { data } = await res.json();
+      if (!data?.hasManifest) { btn.classList.add('hidden'); return; }
+      btn.classList.remove('hidden');
+      if (data.missing > 0 || data.drifted > 0) {
+        const n = (data.missing || 0) + (data.drifted || 0);
+        btn.textContent = `Skills: ⚠ ${n} missing`;
+        btn.dataset.state = 'drift';
+      } else if (data.installed > 0) {
+        const suffix = data.primaryPack ? ` · ${data.primaryPack}` : '';
+        btn.textContent = `Skills: ${data.installed}${suffix}`;
+        btn.dataset.state = 'clean';
+      } else {
+        btn.textContent = 'Skills: not set up';
+        btn.dataset.state = 'empty';
+      }
+    } catch {
+      btn.classList.add('hidden');
     }
   },
 
@@ -1467,6 +1497,10 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
   // Case Settings
   // ═══════════════════════════════════════════════════════════════
+
+  openSkillsDrawer() {
+    // COD-202 will implement the full drawer; placeholder for chip click handler
+  },
 
   toggleCaseSettings() {
     const popover = document.getElementById('caseSettingsPopover');

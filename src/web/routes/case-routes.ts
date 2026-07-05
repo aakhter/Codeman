@@ -37,6 +37,16 @@ import {
   writeRemoteCases,
   writeRemoteHosts,
 } from '../../remote-hosts.js';
+import { readSources, buildCatalog } from '../../skill-install-reader.js';
+import { classifyScope, summarize } from '../../skill-install-classifier.js';
+
+interface SkillStateResult {
+  hasManifest: boolean;
+  installed: number;
+  missing: number;
+  drifted: number;
+  primaryPack: string | null;
+}
 
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
 const CODEMAN_CONFIG_DIR = getDataDir();
@@ -829,5 +839,26 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
         parsed,
       },
     };
+  });
+
+  app.get('/api/cases/:name/skill-state', async (req): Promise<ApiResponse<SkillStateResult>> => {
+    const { name } = req.params as { name: string };
+    try {
+      const casePath = await resolveCasePath(name);
+      if (!existsSync(casePath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+      }
+      const sources = await readSources();
+      if (!sources.length) {
+        return { success: true, data: { hasManifest: false, installed: 0, missing: 0, drifted: 0, primaryPack: null } };
+      }
+      const catalog = await buildCatalog(sources);
+      const entries = await classifyScope(sources, catalog, casePath);
+      const { installed, missing, drifted } = summarize(entries);
+      const primaryPack = catalog.entries[0]?.pack ?? catalog.entries[0]?.source ?? null;
+      return { success: true, data: { hasManifest: true, installed, missing, drifted, primaryPack } };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
   });
 }

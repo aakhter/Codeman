@@ -63,6 +63,16 @@ vi.mock('../../src/templates/claude-md.js', () => ({
   generateClaudeMd: vi.fn(() => '# CLAUDE.md\nGenerated content'),
 }));
 
+vi.mock('../../src/skill-install-reader.js', () => ({
+  readSources: vi.fn(async () => []),
+  buildCatalog: vi.fn(async () => ({ entries: [], bundles: [] })),
+}));
+
+vi.mock('../../src/skill-install-classifier.js', () => ({
+  classifyScope: vi.fn(async () => []),
+  summarize: vi.fn(() => ({ installed: 0, missing: 0, drifted: 0 })),
+}));
+
 vi.mock('../../src/hooks-config.js', () => ({
   writeHooksConfig: vi.fn(async () => {}),
 }));
@@ -70,8 +80,14 @@ vi.mock('../../src/hooks-config.js', () => ({
 // Import mocked modules for test control
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import * as skillReader from '../../src/skill-install-reader.js';
+import * as skillClassifier from '../../src/skill-install-classifier.js';
 
 const mockedExistsSync = vi.mocked(existsSync);
+const mockedReadSources = vi.mocked(skillReader.readSources);
+const mockedBuildCatalog = vi.mocked(skillReader.buildCatalog);
+const mockedClassifyScope = vi.mocked(skillClassifier.classifyScope);
+const mockedSummarize = vi.mocked(skillClassifier.summarize);
 const mockedMkdirSync = vi.mocked(mkdirSync);
 const mockedReaddirSync = vi.mocked(readdirSync);
 const mockedReaddir = vi.mocked(fs.readdir);
@@ -943,6 +959,59 @@ describe('case-routes', () => {
         url: '/api/cases/my-case/ralph-wizard/file/research%2Fprompt.md',
       });
       expect(res.headers['cache-control']).toContain('no-store');
+    });
+  });
+
+  describe('GET /api/cases/:name/skill-state', () => {
+    it('returns hasManifest:false when no sources configured', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([]);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/testcase/skill-state' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(false);
+    });
+
+    it('returns summary when sources and catalog are present', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([
+        { name: 'my-skills', path: '/tmp/skills', description: '', available: true, artifacts: {}, bundles: {} },
+      ]);
+      mockedBuildCatalog.mockResolvedValue({
+        entries: [{ kind: 'skill', source: 'my-skills', name: 'code-review', pack: 'code-review' }],
+        bundles: [],
+      });
+      mockedClassifyScope.mockResolvedValue([
+        {
+          kind: 'skill',
+          name: 'code-review',
+          source: 'my-skills',
+          pack: 'code-review',
+          klass: 'linked-managed',
+          claudePath: '/home/u/.claude/skills/code-review',
+          mirrorPath: null,
+          target: '/tmp/skills/code-review.md',
+        },
+      ]);
+      mockedSummarize.mockReturnValue({ installed: 1, missing: 0, drifted: 0 });
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/testcase/skill-state' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(true);
+      expect(body.data.installed).toBe(1);
+      expect(body.data.missing).toBe(0);
+      expect(body.data.primaryPack).toBe('code-review');
+    });
+
+    it('returns 404 when case does not exist', async () => {
+      mockedExistsSync.mockReturnValue(false);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/no-such-case/skill-state' });
+      expect(res.statusCode).toBe(404);
     });
   });
 });
