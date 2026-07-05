@@ -37,13 +37,15 @@ import {
   writeRemoteCases,
   writeRemoteHosts,
 } from '../../remote-hosts.js';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readSources, buildCatalog } from '../../skill-install-reader.js';
 import { classifyScope, summarize, type InstallEntry } from '../../skill-install-classifier.js';
 
 const execAsync = promisify(exec);
-const SAFE_SKILL_ID = /^[a-zA-Z0-9_.-][a-zA-Z0-9_./-]*$/;
+const execFileAsync = promisify(execFile);
+// Must start with alphanumeric or underscore — no leading dash (would be a CLI flag) or dot
+const SAFE_SKILL_ID = /^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$/;
 
 interface SkillEntry {
   kind: string;
@@ -920,7 +922,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       if (!existsSync(casePath)) {
         return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
       }
-      await execAsync(`skill-install remove ${skillId}`, { cwd: casePath, timeout: 30000 });
+      await execFileAsync('skill-install', ['remove', skillId], { cwd: casePath, timeout: 30000 });
       return { success: true, data: await getSkillDetail(casePath) };
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));

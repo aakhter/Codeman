@@ -21,16 +21,20 @@ import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { registerCaseRoutes } from '../../src/web/routes/case-routes.js';
 
-const { execMock, execPromisifyMock } = vi.hoisted(() => {
+const { execMock, execPromisifyMock, execFileMock, execFilePromisifyMock } = vi.hoisted(() => {
   const promisifySymbol = Symbol.for('nodejs.util.promisify.custom');
   const execMock = vi.fn();
   const custom = vi.fn(async () => ({ stdout: '', stderr: '' }));
   (execMock as unknown as Record<symbol, unknown>)[promisifySymbol] = custom;
-  return { execMock, execPromisifyMock: custom };
+  const execFileMock = vi.fn();
+  const fileCustom = vi.fn(async () => ({ stdout: '', stderr: '' }));
+  (execFileMock as unknown as Record<symbol, unknown>)[promisifySymbol] = fileCustom;
+  return { execMock, execPromisifyMock: custom, execFileMock, execFilePromisifyMock: fileCustom };
 });
 
 vi.mock('node:child_process', () => ({
   exec: execMock,
+  execFile: execFileMock,
 }));
 
 // Mock filesystem modules
@@ -1057,9 +1061,10 @@ describe('case-routes', () => {
       expect(res.statusCode).toBe(400);
     });
 
-    it('calls exec with skill-install remove and returns fresh detail', async () => {
+    it('calls execFile with skill-install remove and returns fresh detail', async () => {
       mockedExistsSync.mockReturnValue(true);
       mockedReadSources.mockResolvedValue([]);
+      execFilePromisifyMock.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       const res = await harness.app.inject({
         method: 'POST',
@@ -1069,8 +1074,9 @@ describe('case-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      expect(execPromisifyMock).toHaveBeenCalledWith(
-        expect.stringContaining('my-skills/code-review'),
+      expect(execFilePromisifyMock).toHaveBeenCalledWith(
+        'skill-install',
+        ['remove', 'my-skills/code-review'],
         expect.objectContaining({ cwd: expect.any(String) })
       );
     });
