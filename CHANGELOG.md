@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.2.7
+
+### Patch Changes
+
+- Slow OpenCode scroll wheel forwarding by accumulating small trackpad deltas.
+
 ## 1.2.6
 
 ### Patch Changes
