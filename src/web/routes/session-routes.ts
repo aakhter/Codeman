@@ -1205,7 +1205,7 @@ export function registerSessionRoutes(
 
     // Prepend the live tmux pane buffer so tab-switch replay shows the current
     // on-screen frame, not just the accumulated byte history. This matters for
-    // TUI modes (codex/opencode) that repaint only their latest frame: the
+    // TUI modes (codex/opencode/gemini) that repaint only their latest frame: the
     // accumulated buffer alone replays as the idle banner. We clear the viewport
     // (`\x1b[H\x1b[2J`) between the history and the live pane so they don't
     // overlap. `captureActivePaneBuffer` is a no-op ('') under test mode and
@@ -1221,7 +1221,7 @@ export function registerSessionRoutes(
     // applied every redraw in place — so it replays cleanly at any size and is
     // the canonical scrollback. We therefore request the FULL history capture
     // even on tab switch for these modes (bounded by tmux history-limit).
-    const isCaptureOnlyTuiMode = session.mode === 'codex' || session.mode === 'gemini';
+    const isCaptureOnlyTuiMode = session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'opencode';
     const muxName = session.muxName;
     // COD-180: a remote session's canonical scrollback lives ONLY on the remote
     // tmux server — the local wrapper is a nested-tmux client repainted in

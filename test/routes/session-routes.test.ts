@@ -808,6 +808,71 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer).not.toContain('stale gemini redraw frames');
     });
 
+    it('COD-207: opencode lines=N capture request is capture-only and returns full-history source', async () => {
+      harness.ctx._session.terminalBuffer = 'opencode byte history';
+      harness.ctx._session.mode = 'opencode';
+      const linesCaptureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean; lastLines?: number }) =>
+        opts?.fullHistory ? 'opencode full capture' : 'visible'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = linesCaptureSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?lines=2000`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toBe('opencode full capture');
+      expect(body.data.terminalBuffer).not.toContain('opencode byte history');
+      expect(body.data.source).toBe('mux-full-history');
+      expect(linesCaptureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+        lastLines: 2000,
+      });
+    });
+
+    it('COD-207: opencode capture=1 request is capture-only and returns full-history source', async () => {
+      harness.ctx._session.terminalBuffer = 'opencode byte history';
+      harness.ctx._session.mode = 'opencode';
+      const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+        opts?.fullHistory ? 'opencode capture expansion' : 'visible'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?capture=1`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toBe('opencode capture expansion');
+      expect(body.data.terminalBuffer).not.toContain('opencode byte history');
+      expect(body.data.source).toBe('mux-full-history');
+    });
+
+    it('COD-207: opencode full reload replays the tmux capture only', async () => {
+      harness.ctx._session.terminalBuffer = 'stale opencode byte history';
+      harness.ctx._session.mode = 'opencode';
+      const fullReloadSpy = vi.fn(() => 'opencode canonical full capture');
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = fullReloadSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.terminalBuffer).toBe('opencode canonical full capture');
+      expect(body.data.terminalBuffer).not.toContain('stale opencode byte history');
+      expect(body.data.source).toBe('mux-full-history');
+      expect(fullReloadSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
     // ── COD-180: remote sessions capture from the REMOTE tmux server — the
     // local wrapper accumulates no history (nested tmux repaints in place). ──
     it('COD-180: remote codex session replays the remote tmux capture only', async () => {
@@ -1023,6 +1088,46 @@ describe('session-routes', () => {
           harness.ctx._session.muxName,
           { visibleFrame: true }
         );
+      });
+
+      it('COD-207: opencode frame request also uses the visible-frame capture path', async () => {
+        harness.ctx._session.mode = 'opencode';
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'mac-mini',
+          host: '192.168.21.109',
+          username: 'saqebakhter',
+          remotePath: '/tmp/case',
+        };
+        const remoteSpy = vi.fn(async () => 'REMOTE_FRAME');
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remoteSpy;
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          () => 'LOCAL_WRAPPER_FRAME'
+        );
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('mux-frame');
+        expect(body.data.terminalBuffer).toBe('REMOTE_FRAME');
+      });
+
+      it('COD-207: opencode frame fallback remains frame-only with no canonical rewrite source', async () => {
+        harness.ctx._session.mode = 'opencode';
+        const localFrameSpy = vi.fn(() => 'OPENCODE_VISIBLE_FRAME');
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = localFrameSpy;
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+        });
+
+        const body = JSON.parse(res.body);
+        expect(body.data.source).toBe('mux-frame');
+        expect(body.data.terminalBuffer).toBe('OPENCODE_VISIBLE_FRAME');
+        expect(localFrameSpy).toHaveBeenCalledWith(harness.ctx._session.muxName);
       });
 
       it('remote session: falls back to the local wrapper frame (still mux-frame — the wrapper shows the same screen)', async () => {
