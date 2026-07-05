@@ -2231,7 +2231,9 @@ class CodemanApp {
    * client rendering mode, so claude's server-side stream parsing (tokens,
    * Ralph, prompt detection) is untouched. Deliberately NOT built on
    * _isTuiSession — that helper also gates LEGACY (setting-OFF) repair paths,
-   * which must keep excluding claude exactly as before.
+   * which must keep excluding claude exactly as before. COD-209: OpenCode is
+   * deliberately excluded because its pure TUI owns the scrollable conversation
+   * pane; Codeman history mode would intercept gestures the foreground app needs.
    */
   _isMirrorSession(sessionId) {
     return this._liveMirrorEnabled && this._isMirrorEligible(sessionId);
@@ -2240,7 +2242,7 @@ class CodemanApp {
   /** Modes the live mirror applies to when the setting is ON. */
   _isMirrorEligible(sessionId) {
     const mode = this.sessions.get(sessionId)?.mode;
-    return mode === 'codex' || mode === 'gemini' || mode === 'claude' || mode === 'opencode';
+    return mode === 'codex' || mode === 'gemini' || mode === 'claude';
   }
 
   /** COD-187: settings hook — flips the cached flag and re-selects the active TUI tab so the mode applies immediately. */

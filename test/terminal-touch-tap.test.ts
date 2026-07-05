@@ -25,11 +25,14 @@ function loadTerminalUiHarness() {
     }
   }
 
+  class MockWheelEvent extends MockMouseEvent {}
+
   let now = 1_000;
   const context = vm.createContext({
     window: {},
     CodemanApp,
     MouseEvent: MockMouseEvent,
+    WheelEvent: MockWheelEvent,
     console: { warn: vi.fn(), log: vi.fn() },
     _crashDiag: { log: vi.fn() },
     performance: { now: () => now },
@@ -219,5 +222,26 @@ describe('terminal touch tap mouse guard', () => {
     expect(trustedDown.stopImmediatePropagation).toHaveBeenCalledOnce();
     expect(trustedUp.preventDefault).toHaveBeenCalledOnce();
     expect(trustedUp.stopImmediatePropagation).toHaveBeenCalledOnce();
+  });
+
+  it('COD-209: dispatches synthetic wheel events so touch scroll can reach OpenCode TUI scrollback', () => {
+    const { app } = loadTerminalUiHarness();
+    const { element } = createElementHarness();
+
+    app.terminal = { element };
+
+    app._dispatchSyntheticTerminalWheel(33, 120, 84);
+
+    expect(element.dispatchEvent).toHaveBeenCalledOnce();
+    const event = element.dispatchEvent.mock.calls[0]?.[0] as { [key: string]: unknown };
+    expect(event).toMatchObject({
+      type: 'wheel',
+      deltaY: 33,
+      deltaMode: 0,
+      clientX: 120,
+      clientY: 84,
+      bubbles: true,
+      cancelable: true,
+    });
   });
 });
