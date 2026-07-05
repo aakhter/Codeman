@@ -1097,6 +1097,7 @@
           <button class="modal-tab-btn" data-tab="settings-paths">Paths</button>
           <button class="modal-tab-btn" data-tab="settings-notifications">Notifications</button>
           <button class="modal-tab-btn" data-tab="settings-voice">Voice</button>
+          <button class="modal-tab-btn" data-tab="settings-skills">Skills</button>
         </div>
         <div class="modal-body">
           <!-- Display Tab -->
@@ -1800,6 +1801,20 @@
                 <input type="text" id="voiceKeyterms" placeholder="codeman, tmux, respawn, subagent" style="width: 100%; padding: 0.5rem 0.75rem; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.8rem; font-family: inherit;">
                 <span class="form-hint">Comma-separated terms to boost recognition accuracy</span>
               </div>
+            </div>
+          </div>
+          <div class="modal-tab-content hidden" id="settings-skills">
+            <div class="settings-grid">
+              <div class="settings-section-header" style="grid-column: 1 / -1;">User Scope</div>
+              <div class="settings-item-full" style="grid-column: 1 / -1;">
+                <span class="settings-item-label" style="font-size:0.78rem;opacity:0.7;">Always available in every case (~/.claude/skills, agents, commands)</span>
+              </div>
+              <div id="userSkillsList" style="grid-column: 1 / -1;"></div>
+              <div class="settings-item-full" style="grid-column: 1 / -1; display:flex; gap:6px; margin-top:4px;">
+                <input type="text" id="userSkillAddInput" placeholder="source/name or source:pack" style="flex:1; padding:0.4rem 0.6rem; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; color:var(--text); font-size:0.8rem; font-family:inherit;">
+                <button class="btn-toolbar btn-sm" onclick="app.addUserSkill()" id="userSkillAddBtn">Add</button>
+              </div>
+              <div id="userSkillsWarning" class="form-hint" style="grid-column:1/-1;color:var(--warning,#e6a817);display:none;">Consider moving project-specific skills to the per-case manifest.</div>
             </div>
           </div>
         </div>

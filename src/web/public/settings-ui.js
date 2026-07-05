@@ -467,7 +467,10 @@ Object.assign(CodemanApp.prototype, {
     this.switchSettingsTab('settings-display');
     const modal = document.getElementById('appSettingsModal');
     modal.querySelectorAll('.modal-tabs .modal-tab-btn').forEach(btn => {
-      btn.onclick = () => this.switchSettingsTab(btn.dataset.tab);
+      btn.onclick = () => {
+        this.switchSettingsTab(btn.dataset.tab);
+        if (btn.dataset.tab === 'settings-skills') this.loadUserSkillsSection();
+      };
     });
     modal.classList.add('active');
 
@@ -2789,5 +2792,131 @@ Object.assign(CodemanApp.prototype, {
       subagentsPanel.classList.remove('open');
     }
     this.subagentPanelVisible = false;
+  },
+
+  // ───────────────────────────────────────────────────────────────
+  // User-scope skills (App Settings → Skills tab)
+  // ───────────────────────────────────────────────────────────────
+
+  async loadUserSkillsSection() {
+    const list = document.getElementById('userSkillsList');
+    const warning = document.getElementById('userSkillsWarning');
+    if (!list) return;
+    list.textContent = '';
+    const placeholder = document.createElement('span');
+    placeholder.style.cssText = 'opacity:0.5;font-size:0.8rem;';
+    placeholder.textContent = 'Loading…';
+    list.appendChild(placeholder);
+    try {
+      const res = await fetch('/api/skills/user', { credentials: 'include' });
+      const body = await res.json();
+      if (!body.success) {
+        list.textContent = '';
+        const errSpan = document.createElement('span');
+        errSpan.style.color = 'var(--error)';
+        errSpan.textContent = `Error: ${body.error}`;
+        list.appendChild(errSpan);
+        return;
+      }
+      const { hasManifest, entries } = body.data;
+      this._renderUserSkillsInto(list, entries, hasManifest);
+      if (warning) warning.style.display = entries.length > 10 ? '' : 'none';
+    } catch {
+      list.textContent = '';
+      const errSpan = document.createElement('span');
+      errSpan.style.cssText = 'opacity:0.5;font-size:0.8rem;';
+      errSpan.textContent = 'Failed to load user skills.';
+      list.appendChild(errSpan);
+    }
+  },
+
+  _renderUserSkillsInto(container, entries, hasManifest) {
+    container.textContent = '';
+    if (!hasManifest || !entries.length) {
+      const msg = document.createElement('span');
+      msg.style.cssText = 'opacity:0.5;font-size:0.8rem;';
+      msg.textContent = !hasManifest
+        ? 'No skill-install manifest found (run: skill-install --user --sync).'
+        : 'No user-scope skills configured.';
+      container.appendChild(msg);
+      return;
+    }
+    const iconMap = { real: '[*]', 'linked-managed': '[*]', foreign: '[!]', dangling: '[!]', 'available-managed': '[ ]' };
+    for (const e of entries) {
+      const row = document.createElement('div');
+      row.className = 'user-skill-entry';
+      const icon = document.createElement('span');
+      icon.className = 'skill-icon';
+      icon.textContent = iconMap[e.klass] ?? '[ ]';
+      const kind = document.createElement('span');
+      kind.className = 'skill-kind-badge';
+      kind.textContent = e.kind;
+      const name = document.createElement('span');
+      name.className = 'skill-name';
+      name.textContent = e.name;
+      const src = document.createElement('span');
+      src.className = 'skill-source';
+      src.style.cssText = 'opacity:0.55;font-size:0.75rem;';
+      src.textContent = e.source || '';
+      const rmBtn = document.createElement('button');
+      rmBtn.className = 'btn-remove-user-skill';
+      rmBtn.title = 'Remove from user scope';
+      rmBtn.textContent = '×';
+      rmBtn.dataset.skillId = e.name + (e.pack ? ':' + e.pack : '');
+      row.append(icon, kind, name, src, rmBtn);
+      container.appendChild(row);
+    }
+    container.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.btn-remove-user-skill');
+      if (btn) this.removeUserSkill(btn.dataset.skillId);
+    }, { once: true });
+  },
+
+  async removeUserSkill(skillId) {
+    const list = document.getElementById('userSkillsList');
+    const warning = document.getElementById('userSkillsWarning');
+    const btn = list?.querySelector(`.btn-remove-user-skill[data-skill-id="${CSS.escape(skillId)}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      const res = await fetch('/api/skills/user/remove', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillId }),
+      });
+      const body = await res.json();
+      if (body.success && list) {
+        this._renderUserSkillsInto(list, body.data.entries, body.data.hasManifest);
+        if (warning) warning.style.display = body.data.entries.length > 10 ? '' : 'none';
+      }
+    } catch {
+      if (btn) { btn.disabled = false; btn.textContent = '×'; }
+    }
+  },
+
+  async addUserSkill() {
+    const input = document.getElementById('userSkillAddInput');
+    const addBtn = document.getElementById('userSkillAddBtn');
+    const target = input?.value.trim();
+    if (!target) return;
+    if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Adding…'; }
+    try {
+      const res = await fetch('/api/skills/user/add', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+      const body = await res.json();
+      const list = document.getElementById('userSkillsList');
+      const warning = document.getElementById('userSkillsWarning');
+      if (body.success && list) {
+        if (input) input.value = '';
+        this._renderUserSkillsInto(list, body.data.entries, body.data.hasManifest);
+        if (warning) warning.style.display = body.data.entries.length > 10 ? '' : 'none';
+      }
+    } finally {
+      if (addBtn) { addBtn.disabled = false; addBtn.textContent = 'Add'; }
+    }
   },
 });

@@ -82,6 +82,11 @@ interface SkillCatalogResult {
   individuals: SkillCatalogIndividual[];
 }
 
+interface UserSkillsResult {
+  hasManifest: boolean;
+  entries: SkillEntry[];
+}
+
 interface SkillStateResult {
   hasManifest: boolean;
   installed: number;
@@ -1059,6 +1064,50 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
         ApiErrorCode.INTERNAL_ERROR,
         err instanceof Error ? err.message : 'Failed to add skill'
       );
+    }
+  });
+
+  // ========== User-scope skills (App Settings → Skills) ==========
+
+  async function getUserSkills(): Promise<UserSkillsResult> {
+    const sources = await readSources();
+    if (!sources.length) return { hasManifest: false, entries: [] };
+    const catalog = await buildCatalog(sources);
+    const raw = await classifyScope(sources, catalog, homedir());
+    return { hasManifest: true, entries: raw.map(toSkillEntry) };
+  }
+
+  app.get('/api/skills/user', async (): Promise<ApiResponse<UserSkillsResult>> => {
+    try {
+      return { success: true, data: await getUserSkills() };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err));
+    }
+  });
+
+  app.post('/api/skills/user/add', async (req): Promise<ApiResponse<UserSkillsResult>> => {
+    const { target } = req.body as { target?: string };
+    if (!target || !SAFE_SKILL_TARGET.test(target) || target.includes('..')) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid skill target');
+    }
+    try {
+      await execFileAsync('skill-install', ['--user', '--add', target], { timeout: 60000 });
+      return { success: true, data: await getUserSkills() };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err));
+    }
+  });
+
+  app.post('/api/skills/user/remove', async (req): Promise<ApiResponse<UserSkillsResult>> => {
+    const { skillId } = req.body as { skillId?: string };
+    if (!skillId || !SAFE_SKILL_ID.test(skillId)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid skillId');
+    }
+    try {
+      await execFileAsync('skill-install', ['--user', '--remove', skillId], { timeout: 60000 });
+      return { success: true, data: await getUserSkills() };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, getErrorMessage(err));
     }
   });
 

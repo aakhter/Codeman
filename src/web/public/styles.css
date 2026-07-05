@@ -12391,3 +12391,18 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .history-pill:hover {
   border-color: rgba(148, 163, 184, 0.6);
 }
+
+/* ── User-scope skills settings panel ─────────────────────────── */
+.user-skill-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-faint, rgba(255,255,255,0.05));
+  font-size: 0.82rem;
+}
+.user-skill-entry .skill-icon { font-family: var(--font-mono); opacity: 0.6; min-width: 24px; }
+.user-skill-entry .skill-kind-badge { font-size: 0.68rem; color: var(--text-dim); opacity: 0.7; min-width: 40px; }
+.user-skill-entry .skill-name { flex: 1; }
+.btn-remove-user-skill { margin-left: 4px; background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 1px 5px; border-radius: 3px; opacity: 0.4; transition: opacity 0.1s; }
+.user-skill-entry:hover .btn-remove-user-skill { opacity: 1; }

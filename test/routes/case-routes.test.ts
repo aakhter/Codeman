@@ -1287,4 +1287,113 @@ describe('case-routes', () => {
       expect(res.statusCode).toBe(404);
     });
   });
+
+  describe('GET /api/skills/user', () => {
+    it('returns hasManifest:false when no sources configured', async () => {
+      mockedReadSources.mockResolvedValue([]);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/skills/user' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(false);
+      expect(body.data.entries).toEqual([]);
+    });
+
+    it('returns user-scope entries from classifyScope at homedir', async () => {
+      const fakeSource = { name: 'test-source', path: '/sources/test', kind: 'local' as const };
+      mockedReadSources.mockResolvedValue([fakeSource]);
+      mockedBuildCatalog.mockResolvedValue({ entries: [], bundles: [] });
+      mockedClassifyScope.mockResolvedValue([
+        { kind: 'skill', name: 'my-skill', source: 'test-source', pack: null, klass: 'real' },
+        { kind: 'agent', name: 'my-agent', source: 'test-source', pack: 'mypak', klass: 'linked-managed' },
+      ]);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/skills/user' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.data.hasManifest).toBe(true);
+      expect(body.data.entries).toHaveLength(2);
+      expect(body.data.entries[0]).toMatchObject({ kind: 'skill', name: 'my-skill', klass: 'real' });
+    });
+  });
+
+  describe('POST /api/skills/user/add', () => {
+    it('rejects missing or unsafe target', async () => {
+      const cases = [{ target: '' }, { target: '-danger' }, { target: '../traversal' }, { target: 'a/../b' }];
+      for (const payload of cases) {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: '/api/skills/user/add',
+          payload,
+          headers: { 'content-type': 'application/json' },
+        });
+        expect(res.statusCode).toBe(400);
+      }
+    });
+
+    it('calls execFile with --user --add and returns fresh user skills', async () => {
+      const fakeSource = { name: 's', path: '/p', kind: 'local' as const };
+      mockedReadSources.mockResolvedValue([fakeSource]);
+      mockedBuildCatalog.mockResolvedValue({ entries: [], bundles: [] });
+      mockedClassifyScope.mockResolvedValue([
+        { kind: 'skill', name: 'added-skill', source: 's', pack: null, klass: 'real' },
+      ]);
+      execFilePromisifyMock.mockResolvedValue({ stdout: '', stderr: '' });
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/skills/user/add',
+        payload: { target: 'test-source/my-skill' },
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(true);
+      expect(execFilePromisifyMock).toHaveBeenCalledWith(
+        'skill-install',
+        ['--user', '--add', 'test-source/my-skill'],
+        expect.objectContaining({ timeout: expect.any(Number) })
+      );
+    });
+  });
+
+  describe('POST /api/skills/user/remove', () => {
+    it('rejects missing or unsafe skillId', async () => {
+      const cases = [{ skillId: '' }, { skillId: '-danger' }, { skillId: '../traversal' }];
+      for (const payload of cases) {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: '/api/skills/user/remove',
+          payload,
+          headers: { 'content-type': 'application/json' },
+        });
+        expect(res.statusCode).toBe(400);
+      }
+    });
+
+    it('calls execFile with --user --remove and returns fresh user skills', async () => {
+      const fakeSource = { name: 's', path: '/p', kind: 'local' as const };
+      mockedReadSources.mockResolvedValue([fakeSource]);
+      mockedBuildCatalog.mockResolvedValue({ entries: [], bundles: [] });
+      mockedClassifyScope.mockResolvedValue([]);
+      execFilePromisifyMock.mockResolvedValue({ stdout: '', stderr: '' });
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/skills/user/remove',
+        payload: { skillId: 'my-skill' },
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.success).toBe(true);
+      expect(execFilePromisifyMock).toHaveBeenCalledWith(
+        'skill-install',
+        ['--user', '--remove', 'my-skill'],
+        expect.objectContaining({ timeout: expect.any(Number) })
+      );
+    });
+  });
 });
