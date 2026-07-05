@@ -17,6 +17,8 @@ import { WebServer } from '../src/web/server.js';
 
 const PORT = 3211;
 const BASE_URL = `http://localhost:${PORT}`;
+const TARGET = 'opencode';
+const targetPrefix = `[target:${TARGET}]`;
 
 let server: WebServer;
 let browser: Browser;
@@ -47,7 +49,7 @@ afterAll(async () => {
   await server?.stop();
 }, 30_000);
 
-describe('OpenCode session initial resize', () => {
+describe(`${targetPrefix} OpenCode session initial resize`, () => {
   let context: BrowserContext;
   let page: Page;
 
@@ -134,8 +136,6 @@ describe('OpenCode session initial resize', () => {
     expect(lastResize.cols).toBeGreaterThanOrEqual(40);
     expect(lastResize.rows).toBeGreaterThanOrEqual(10);
 
-    console.log(`[opencode-resize] resize sent: ${lastResize.cols}x${lastResize.rows}`);
-
     // Cleanup
     await page.evaluate(async (sid: string) => {
       await fetch(`/api/sessions/${sid}`, { method: 'DELETE' });
@@ -187,17 +187,15 @@ describe('OpenCode session initial resize', () => {
     }, sessionId);
   });
 
-  it('needsRefresh handler includes sendResize call', async () => {
-    // The needsRefresh handler is registered inside a closure (connectSSE),
-    // so we can't directly invoke it from tests. Instead, verify that the
-    // handler source code dispatched to the EventSource includes sendResize.
-    // This is a structural test — if the handler code changes, this test
-    // ensures the resize call is preserved.
+  it('needsRefresh handler updates terminal resize state', async () => {
+    // The needsRefresh handler is registered via connectSSE. For active sessions,
+    // WS-backed sessions skip SSE refresh, so force the SSE fallback state in this
+    // test before invoking _onSSENeedsRefresh.
     ({ context, page } = await freshPage());
     await navigateAndWait(page);
 
-    // Dispatch a needsRefresh event on the EventSource and intercept
-    // the resulting resize API call
+    // Force the SSE fallback path and then validate the needs-refresh + resize
+    // state transition end-to-end.
     const sessionId = await page.evaluate(async () => {
       const res = await fetch('/api/sessions', {
         method: 'POST',
@@ -218,41 +216,149 @@ describe('OpenCode session initial resize', () => {
 
     await page.waitForTimeout(300);
 
-    // Intercept resize calls
-    const resizeCalls: Array<{ url: string }> = [];
-    await page.route('**/api/sessions/*/resize', async (route) => {
-      resizeCalls.push({ url: route.request().url() });
-      await route.continue();
-    });
-
-    // Dispatch the needsRefresh event directly on the EventSource
-    // (this is how the server sends SSE events — as named events)
-    await page.evaluate((sid: string) => {
-      const app = (window as unknown as { app: { eventSource: EventSource } }).app;
-      if (app.eventSource) {
-        const event = new MessageEvent('session:needsRefresh', {
-          data: JSON.stringify({ id: sid }),
-        });
-        app.eventSource.dispatchEvent(event);
-      }
+    const stateBefore = await page.evaluate((sid) => {
+      const app = (
+        window as unknown as {
+          app: {
+            activeSessionId: string | null;
+            _wsReady: boolean;
+            _wsSessionId: string | null;
+            _isLoadingBuffer: boolean;
+            terminal: unknown;
+            fitAddon: unknown;
+            _lastResizeDims: { cols: number; rows: number } | null;
+            getTerminalDimensions: () => { cols: number; rows: number } | null;
+            sessions?: Map<string, { mode?: string }>;
+          };
+        }
+      ).app;
+      return {
+        activeSessionId: app.activeSessionId,
+        wsReady: app._wsReady,
+        wsSessionId: app._wsSessionId,
+        isLoadingBuffer: app._isLoadingBuffer,
+        liveMirrorEnabled: (app as { _liveMirrorEnabled?: boolean })._liveMirrorEnabled,
+        sessionMode: app.sessions?.get(sid as unknown as never)?.mode,
+        hasTerminal: Boolean(app.terminal),
+        hasFitAddon: Boolean(app.fitAddon),
+        lastResizeDims: app._lastResizeDims,
+        dims: app.getTerminalDimensions(),
+      };
     }, sessionId);
 
-    // Wait for the async handler (fetches /terminal buffer + sends resize)
-    await page.waitForTimeout(1500);
+    // Intercept terminal fetches so the refresh path has deterministic content.
+    const terminalRoute = '**/api/sessions/*/terminal';
 
-    // Verify resize was called
-    expect(resizeCalls.length).toBeGreaterThanOrEqual(1);
-    console.log(`[opencode-resize] needsRefresh triggered ${resizeCalls.length} resize call(s)`);
+    await page.route(terminalRoute, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            terminalBuffer: 'mock-buffer-after-needs-refresh',
+          },
+        }),
+      });
+    });
+
+    // Confirm SSE wiring is present, then invoke the SSE path in fallback mode.
+    const handlerBound = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            _sseHandlerWrappers?: Map<string, (event: { data: string }) => void>;
+            _onSSENeedsRefresh: (data: { id?: string }) => Promise<void>;
+          };
+        }
+      ).app;
+      return Boolean(app._sseHandlerWrappers?.has('session:needsRefresh'));
+    });
+
+    expect(handlerBound).toBe(true);
+
+    await page.evaluate(async (sid) => {
+      const app = (
+        window as unknown as {
+          app: {
+            _needsRefreshResizeCallCount: number;
+            _lastResizeDims: { cols: number; rows: number } | null;
+            sendResize: (sessionId: string) => Promise<unknown>;
+            _wsReady: boolean;
+            _wsSessionId: string | null;
+            _isLoadingBuffer: boolean;
+            sessions: Map<string, { mode?: string }>;
+            _liveMirrorEnabled: boolean;
+            selectSession?: (sessionId: string) => Promise<unknown>;
+            _onSSENeedsRefresh: (data: { id?: string }) => Promise<void>;
+          };
+        }
+      ).app;
+
+      // Reset to make resize tracking a stable assertion signal for this test.
+      app._lastResizeDims = null;
+      app._needsRefreshResizeCallCount = 0;
+      const originalSendResize = app.sendResize;
+      app.sendResize = async function (sessionId: string) {
+        app._needsRefreshResizeCallCount += 1;
+        return originalSendResize.call(app, sessionId);
+      };
+      app._wsReady = false;
+      app._wsSessionId = null;
+      app._isLoadingBuffer = false;
+      app._liveMirrorEnabled = false;
+      const session = app.sessions.get(sid);
+      if (session) {
+        session.mode = 'shell';
+      }
+      await app._onSSENeedsRefresh({ id: sid });
+    }, sessionId);
+
+    // Wait for the async refresh pipeline to complete.
+    await page.waitForFunction(() => {
+      const app = (window as unknown as { app: { _needsRefreshResizeCallCount?: number } }).app;
+      return (app._needsRefreshResizeCallCount ?? 0) > 0;
+    });
+
+    const stateAfter = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            activeSessionId: string | null;
+            _wsReady: boolean;
+            _wsSessionId: string | null;
+            _isLoadingBuffer: boolean;
+            terminal: { buffer?: unknown } | null;
+            _lastResizeDims: { cols: number; rows: number } | null;
+          };
+        }
+      ).app;
+      return {
+        activeSessionId: app.activeSessionId,
+        wsReady: app._wsReady,
+        wsSessionId: app._wsSessionId,
+        isLoadingBuffer: app._isLoadingBuffer,
+        lastResizeDims: app._lastResizeDims,
+      };
+    });
+
+    expect(stateAfter.lastResizeDims).toEqual(
+      expect.objectContaining({
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+      })
+    );
+    expect(stateAfter.lastResizeDims?.cols).toBeGreaterThanOrEqual(40);
+    expect(stateAfter.lastResizeDims?.rows).toBeGreaterThanOrEqual(10);
 
     // Cleanup
-    await page.route('**/api/sessions/*/resize', (route) => route.continue());
+    await page.unroute(terminalRoute);
     await page.evaluate(async (sid: string) => {
       await fetch(`/api/sessions/${sid}`, { method: 'DELETE' });
     }, sessionId);
   });
 });
 
-describe('OpenCode close modal text', () => {
+describe(`${targetPrefix} OpenCode close modal text`, () => {
   let context: BrowserContext;
   let page: Page;
 
