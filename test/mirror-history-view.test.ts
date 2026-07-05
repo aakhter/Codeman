@@ -153,13 +153,11 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(eligible).not.toContain("mode === 'opencode'");
   });
 
-  it('COD-209: opencode scroll gestures are forwarded to the foreground TUI instead of Codeman history', () => {
+  it('COD-209: opencode scroll gestures send foreground TUI wheel reports instead of Codeman history', () => {
     const wheel = termUi.indexOf("addEventListener(\n      'wheel'");
     const wheelBody = termUi.slice(wheel, wheel + 900);
-    expect(wheelBody).toContain('_shouldForwardScrollToForegroundTui()');
-    expect(wheelBody.indexOf('_shouldForwardScrollToForegroundTui()')).toBeLessThan(
-      wheelBody.indexOf('preventDefault')
-    );
+    expect(wheelBody).toContain('_handleForegroundTuiWheel(ev)');
+    expect(wheelBody.indexOf('_handleForegroundTuiWheel(ev)')).toBeLessThan(wheelBody.indexOf('preventDefault'));
 
     const helper = termUi.slice(
       termUi.indexOf('_shouldForwardScrollToForegroundTui() {'),

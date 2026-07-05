@@ -115,6 +115,35 @@ Object.assign(CodemanApp.prototype, {
     return session?.mode === 'opencode' && this._viewMode === 'live';
   },
 
+  _handleForegroundTuiWheel(ev) {
+    if (!this._shouldForwardScrollToForegroundTui()) return false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this._sendForegroundTuiWheel(ev.deltaY, ev.clientX, ev.clientY);
+    return true;
+  },
+
+  _terminalCellFromClientPoint(clientX, clientY) {
+    const screen = this.terminal?.element?.querySelector?.('.xterm-screen');
+    const rect = screen?.getBoundingClientRect?.();
+    if (!rect) return null;
+    const dims = this.terminal?._core?._renderService?.dimensions?.css?.cell;
+    const cellWidth = dims?.width || (rect.width && this.terminal?.cols ? rect.width / this.terminal.cols : 0);
+    const cellHeight = dims?.height || (rect.height && this.terminal?.rows ? rect.height / this.terminal.rows : 0);
+    if (!cellWidth || !cellHeight) return null;
+    const col = Math.max(1, Math.min(this.terminal.cols || 1, Math.floor((clientX - rect.left) / cellWidth) + 1));
+    const row = Math.max(1, Math.min(this.terminal.rows || 1, Math.floor((clientY - rect.top) / cellHeight) + 1));
+    return { col, row };
+  },
+
+  _sendForegroundTuiWheel(deltaY, clientX, clientY) {
+    if (!this.activeSessionId || !Number.isFinite(deltaY)) return;
+    const cell = this._terminalCellFromClientPoint(clientX, clientY);
+    if (!cell) return;
+    const button = deltaY > 0 ? 65 : 64;
+    this._sendInputAsync(this.activeSessionId, `\x1b[<${button};${cell.col};${cell.row}M`);
+  },
+
   /**
    * The user's configured scrollback (localStorage 'codeman-scrollback'),
    * floored at DEFAULT_SCROLLBACK. Shared by initTerminal and the COD-187
@@ -439,7 +468,7 @@ Object.assign(CodemanApp.prototype, {
     container.addEventListener(
       'wheel',
       (ev) => {
-        if (this._shouldForwardScrollToForegroundTui()) return;
+        if (this._handleForegroundTuiWheel(ev)) return;
         ev.preventDefault();
         ev.stopPropagation();
         const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
@@ -468,7 +497,7 @@ Object.assign(CodemanApp.prototype, {
 
         if (!isTouching && Math.abs(velocity) > 0.3) {
           if (this._shouldForwardScrollToForegroundTui()) {
-            this._dispatchSyntheticTerminalWheel(velocity, touchLastX, touchLastY);
+            this._sendForegroundTuiWheel(velocity, touchLastX, touchLastY);
             velocity *= 0.92;
             scrollFrame = requestAnimationFrame(scrollLoop);
             return;
@@ -538,7 +567,7 @@ Object.assign(CodemanApp.prototype, {
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
-              this._dispatchSyntheticTerminalWheel(delta, touchX, touchY);
+              this._sendForegroundTuiWheel(delta, touchX, touchY);
               return;
             }
             pixelAccum += delta;
@@ -2637,32 +2666,6 @@ Object.assign(CodemanApp.prototype, {
       el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
     } catch {
       /* MouseEvent constructor unavailable — tap-to-position simply no-ops */
-    }
-  },
-
-  // Dispatch a wheel event at terminal coords so touch scrolling can use the
-  // same xterm mouse-wheel reporting path as desktop trackpads/mice. This is
-  // used for OpenCode, whose foreground TUI owns the scrollable conversation
-  // pane (COD-209).
-  _dispatchSyntheticTerminalWheel(deltaY, clientX, clientY) {
-    const el = this.terminal?.element;
-    if (!el || !Number.isFinite(deltaY) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
-    try {
-      el.dispatchEvent(
-        new WheelEvent('wheel', {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX,
-          clientY,
-          screenX: clientX,
-          screenY: clientY,
-          deltaY,
-          deltaMode: 0,
-        })
-      );
-    } catch {
-      /* WheelEvent constructor unavailable — touch scroll forwarding no-ops */
     }
   },
 

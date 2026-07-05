@@ -25,14 +25,11 @@ function loadTerminalUiHarness() {
     }
   }
 
-  class MockWheelEvent extends MockMouseEvent {}
-
   let now = 1_000;
   const context = vm.createContext({
     window: {},
     CodemanApp,
     MouseEvent: MockMouseEvent,
-    WheelEvent: MockWheelEvent,
     console: { warn: vi.fn(), log: vi.fn() },
     _crashDiag: { log: vi.fn() },
     performance: { now: () => now },
@@ -224,24 +221,33 @@ describe('terminal touch tap mouse guard', () => {
     expect(trustedUp.stopImmediatePropagation).toHaveBeenCalledOnce();
   });
 
-  it('COD-209: dispatches synthetic wheel events so touch scroll can reach OpenCode TUI scrollback', () => {
+  it('COD-209: sends SGR wheel reports directly so OpenCode scroll does not depend on xterm mouse mode', () => {
     const { app } = loadTerminalUiHarness();
-    const { element } = createElementHarness();
+    const screen = {
+      getBoundingClientRect: () => ({ left: 100, top: 50, width: 800, height: 400 }),
+    };
 
-    app.terminal = { element };
+    app.activeSessionId = 'session-1';
+    app._sendInputAsync = vi.fn();
+    app.terminal = {
+      cols: 80,
+      rows: 24,
+      element: {
+        querySelector: vi.fn((selector: string) => (selector === '.xterm-screen' ? screen : null)),
+      },
+      _core: {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 10, height: 20 },
+            },
+          },
+        },
+      },
+    };
 
-    app._dispatchSyntheticTerminalWheel(33, 120, 84);
+    app._sendForegroundTuiWheel(33, 120, 84);
 
-    expect(element.dispatchEvent).toHaveBeenCalledOnce();
-    const event = element.dispatchEvent.mock.calls[0]?.[0] as { [key: string]: unknown };
-    expect(event).toMatchObject({
-      type: 'wheel',
-      deltaY: 33,
-      deltaMode: 0,
-      clientX: 120,
-      clientY: 84,
-      bubbles: true,
-      cancelable: true,
-    });
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x1b[<65;3;2M');
   });
 });
