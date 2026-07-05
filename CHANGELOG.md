@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.2.6
+
+### Patch Changes
+
+- Send OpenCode scroll wheel reports directly so scrolling survives terminal replay.
+
 ## 1.2.5
 
 ### Patch Changes
