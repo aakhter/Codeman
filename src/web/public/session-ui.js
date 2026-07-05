@@ -1499,7 +1499,187 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   openSkillsDrawer() {
-    // COD-202 will implement the full drawer; placeholder for chip click handler
+    const caseName = document.getElementById('quickStartCase')?.value;
+    if (!caseName) return;
+    this.ensureSkillsDrawer();
+    document.getElementById('skillsDrawer')?.classList.add('open');
+    this.skillsDrawerOpen = true;
+    this.loadSkillsDrawerContent(caseName);
+  },
+
+  closeSkillsDrawer() {
+    document.getElementById('skillsDrawer')?.classList.remove('open');
+    this.skillsDrawerOpen = false;
+  },
+
+  ensureSkillsDrawer() {
+    if (document.getElementById('skillsDrawer')) return;
+    const el = document.createElement('aside');
+    el.id = 'skillsDrawer';
+    el.className = 'skills-drawer';
+    el.setAttribute('aria-label', 'Skills');
+    el.innerHTML = `
+      <div class="skills-drawer-header">
+        <span class="skills-drawer-title">Skills</span>
+        <div class="skills-drawer-header-actions">
+          <button type="button" class="btn-icon-sm" data-action="validate" title="Validate">&#x21BB;</button>
+          <button type="button" class="btn-icon-sm" data-action="close" title="Close">&#x00D7;</button>
+        </div>
+      </div>
+      <div class="skills-drawer-body" id="skillsDrawerBody"></div>
+    `;
+    el.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-action]');
+      if (!btn) return;
+      ev.stopPropagation();
+      const action = btn.dataset.action;
+      if (action === 'close') this.closeSkillsDrawer();
+      else if (action === 'validate') this.validateSkillsDrawer();
+      else if (action === 'sync') this.syncSkills(btn.dataset.case);
+      else if (action === 'remove') this.removeSkill(btn.dataset.case, btn.dataset.skillId);
+    });
+    document.body.appendChild(el);
+  },
+
+  async loadSkillsDrawerContent(caseName) {
+    const body = document.getElementById('skillsDrawerBody');
+    if (!body) return;
+    body.innerHTML = '<div class="skills-drawer-loading">Loading…</div>';
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-detail`);
+      if (!res.ok) { body.innerHTML = '<div class="skills-drawer-empty">Failed to load skills.</div>'; return; }
+      const { data } = await res.json();
+      body.innerHTML = this._renderSkillsDrawerBody(data, caseName);
+    } catch {
+      body.innerHTML = '<div class="skills-drawer-empty">Failed to load skills.</div>';
+    }
+  },
+
+  _renderSkillsDrawerBody(data, caseName) {
+    const esc = (s) =>
+      String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    if (!data?.hasManifest) {
+      return `<div class="skills-drawer-empty">
+        <p>Skills not set up for this project.</p>
+        <button type="button" class="btn-sm" data-action="init-skills" data-case="${esc(caseName)}">Initialize</button>
+      </div>`;
+    }
+
+    const stateIcon = (klass) => {
+      if (klass === 'linked-managed' || klass === 'real') return '<span class="skill-state ok" title="Installed">[*]</span>';
+      if (klass === 'dangling') return '<span class="skill-state warn" title="Drifted">[!]</span>';
+      if (klass === 'available-managed') return '<span class="skill-state missing" title="Not synced">[ ]</span>';
+      return '<span class="skill-state dim">[?]</span>';
+    };
+
+    // Group by pack
+    const byPack = new Map();
+    const standalone = [];
+    for (const e of data.projectEntries) {
+      if (e.pack) {
+        if (!byPack.has(e.pack)) byPack.set(e.pack, []);
+        byPack.get(e.pack).push(e);
+      } else {
+        standalone.push(e);
+      }
+    }
+
+    const entryRow = (e, isChild) => `
+      <div class="skills-entry${isChild ? ' child' : ''}">
+        ${stateIcon(e.klass)}
+        <span class="skills-entry-name">${esc(e.name)}</span>
+        ${e.kind !== 'skill' ? `<span class="skills-entry-kind">${esc(e.kind)}</span>` : ''}
+        ${!isChild ? `<button type="button" class="btn-skill-remove" data-action="remove" data-case="${esc(caseName)}" data-skill-id="${esc((e.source ? e.source + '/' : '') + e.name)}" title="Remove">&times;</button>` : ''}
+      </div>`;
+
+    const standaloneHtml = standalone.map((e) => entryRow(e, false)).join('');
+
+    const packHtml = [...byPack.entries()].map(([pack, members]) => {
+      const allOk = members.every((m) => m.klass === 'linked-managed' || m.klass === 'real');
+      const anyDrifted = members.some((m) => m.klass === 'dangling' || m.klass === 'foreign');
+      const packKlass = allOk ? 'ok' : anyDrifted ? 'warn' : 'missing';
+      const packIcon = allOk ? '[*]' : anyDrifted ? '[!]' : '[ ]';
+      return `<details class="skills-pack">
+        <summary>
+          <span class="skill-state ${packKlass}">${packIcon}</span>
+          <span class="skills-pack-name">${esc(pack)}</span>
+          <span class="skills-pack-count">${members.length}</span>
+          <button type="button" class="btn-skill-remove" data-action="remove" data-case="${esc(caseName)}" data-skill-id="${esc((members[0]?.source ? members[0].source + '/' : '') + pack)}" title="Remove pack">&times;</button>
+        </summary>
+        <div class="skills-pack-members">${members.map((m) => entryRow(m, true)).join('')}</div>
+      </details>`;
+    }).join('');
+
+    const installed = data.projectEntries.filter((e) => e.klass === 'linked-managed' || e.klass === 'real').length;
+    const missing = data.projectEntries.filter((e) => e.klass === 'available-managed').length;
+
+    const projectSection = `<section class="skills-section">
+      <div class="skills-section-header">
+        <span class="skills-section-title">This project</span>
+        <div class="skills-section-actions">
+          <span class="skills-section-counts">${installed} installed${missing ? `, ${missing} missing` : ''}</span>
+          <button type="button" class="btn-sm-text" data-action="sync" data-case="${esc(caseName)}">Sync</button>
+        </div>
+      </div>
+      <div class="skills-entries">${standaloneHtml}${packHtml}</div>
+    </section>`;
+
+    const userItems = (data.userEntries || []).filter((e) => e.klass === 'linked-managed' || e.klass === 'real');
+    const userSection = `<details class="skills-section skills-section-user">
+      <summary class="skills-section-header">
+        <span class="skills-section-title">User scope</span>
+        <span class="skills-section-counts">${userItems.length} installed</span>
+      </summary>
+      <div class="skills-entries">${userItems.map((e) => entryRow(e, true)).join('') || '<div class="skills-entry-empty">None installed at user scope</div>'}</div>
+    </details>`;
+
+    return projectSection + userSection;
+  },
+
+  async validateSkillsDrawer() {
+    const caseName = document.getElementById('quickStartCase')?.value;
+    if (!caseName) return;
+    await this.loadSkillsDrawerContent(caseName);
+  },
+
+  async syncSkills(caseName) {
+    if (!caseName) return;
+    const body = document.getElementById('skillsDrawerBody');
+    const syncBtn = body?.querySelector('[data-action="sync"]');
+    if (syncBtn) { syncBtn.disabled = true; syncBtn.textContent = 'Syncing…'; }
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-sync`, { method: 'POST' });
+      const json = await res.json();
+      if (!json.success) {
+        if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = 'Sync'; }
+        return;
+      }
+      if (body) body.innerHTML = this._renderSkillsDrawerBody(json.data, caseName);
+      await this.updateSkillsChipForCase(caseName);
+    } catch {
+      if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = 'Sync'; }
+    }
+  },
+
+  async removeSkill(caseName, skillId) {
+    if (!caseName || !skillId) return;
+    const body = document.getElementById('skillsDrawerBody');
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-remove`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillId }),
+      });
+      const json = await res.json();
+      if (!json.success) return;
+      if (body) body.innerHTML = this._renderSkillsDrawerBody(json.data, caseName);
+      await this.updateSkillsChipForCase(caseName);
+    } catch { /* ignore */ }
   },
 
   toggleCaseSettings() {

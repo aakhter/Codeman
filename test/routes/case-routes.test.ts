@@ -962,6 +962,122 @@ describe('case-routes', () => {
     });
   });
 
+  // ========== GET /api/cases/:name/skill-detail ==========
+
+  describe('GET /api/cases/:name/skill-detail', () => {
+    it('returns hasManifest:false when no sources configured', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([]);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/testcase/skill-detail' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(false);
+      expect(body.data.projectEntries).toEqual([]);
+      expect(body.data.userEntries).toEqual([]);
+    });
+
+    it('returns project and user entries when sources present', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([
+        { name: 'my-skills', path: '/tmp/skills', description: '', available: true, artifacts: {}, bundles: {} },
+      ]);
+      mockedBuildCatalog.mockResolvedValue({
+        entries: [{ kind: 'skill', source: 'my-skills', name: 'code-review', pack: null }],
+        bundles: [],
+      });
+      const installedEntry = {
+        kind: 'skill',
+        name: 'code-review',
+        source: 'my-skills',
+        pack: null,
+        klass: 'linked-managed',
+        claudePath: '/home/u/.claude/skills/code-review',
+        mirrorPath: null,
+        target: '/tmp/skills/code-review.md',
+      };
+      mockedClassifyScope.mockResolvedValue([installedEntry] as never);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/testcase/skill-detail' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(true);
+      expect(body.data.projectEntries).toHaveLength(1);
+      expect(body.data.projectEntries[0].name).toBe('code-review');
+      expect(body.data.projectEntries[0].klass).toBe('linked-managed');
+      expect(body.data.userEntries).toHaveLength(1);
+    });
+
+    it('returns 404 when case does not exist', async () => {
+      mockedExistsSync.mockReturnValue(false);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/no-such-case/skill-detail' });
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  // ========== POST /api/cases/:name/skill-sync ==========
+
+  describe('POST /api/cases/:name/skill-sync', () => {
+    it('calls exec with skill-install sync and returns fresh detail', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([]);
+
+      const res = await harness.app.inject({ method: 'POST', url: '/api/cases/testcase/skill-sync' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(execPromisifyMock).toHaveBeenCalledWith(
+        expect.stringContaining('skill-install'),
+        expect.objectContaining({ cwd: expect.any(String) })
+      );
+    });
+
+    it('returns 404 when case does not exist', async () => {
+      mockedExistsSync.mockReturnValue(false);
+
+      const res = await harness.app.inject({ method: 'POST', url: '/api/cases/no-such-case/skill-sync' });
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  // ========== POST /api/cases/:name/skill-remove ==========
+
+  describe('POST /api/cases/:name/skill-remove', () => {
+    it('rejects missing or unsafe skillId', async () => {
+      mockedExistsSync.mockReturnValue(true);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/testcase/skill-remove',
+        payload: {},
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('calls exec with skill-install remove and returns fresh detail', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([]);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/testcase/skill-remove',
+        payload: { skillId: 'my-skills/code-review' },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(execPromisifyMock).toHaveBeenCalledWith(
+        expect.stringContaining('my-skills/code-review'),
+        expect.objectContaining({ cwd: expect.any(String) })
+      );
+    });
+  });
+
+  // ========== GET /api/cases/:name/skill-state ==========
+
   describe('GET /api/cases/:name/skill-state', () => {
     it('returns hasManifest:false when no sources configured', async () => {
       mockedExistsSync.mockReturnValue(true);

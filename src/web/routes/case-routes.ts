@@ -37,8 +37,27 @@ import {
   writeRemoteCases,
   writeRemoteHosts,
 } from '../../remote-hosts.js';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readSources, buildCatalog } from '../../skill-install-reader.js';
-import { classifyScope, summarize } from '../../skill-install-classifier.js';
+import { classifyScope, summarize, type InstallEntry } from '../../skill-install-classifier.js';
+
+const execAsync = promisify(exec);
+const SAFE_SKILL_ID = /^[a-zA-Z0-9_.-][a-zA-Z0-9_./-]*$/;
+
+interface SkillEntry {
+  kind: string;
+  name: string;
+  source: string | null;
+  pack: string | null;
+  klass: string;
+}
+
+interface SkillDetailResult {
+  hasManifest: boolean;
+  projectEntries: SkillEntry[];
+  userEntries: SkillEntry[];
+}
 
 interface SkillStateResult {
   hasManifest: boolean;
@@ -90,6 +109,25 @@ function remoteParentPath(path: string): string | null {
   const normalized = posixPath.normalize(path);
   const parent = posixPath.dirname(normalized);
   return parent === normalized ? null : parent;
+}
+
+function toSkillEntry(e: InstallEntry): SkillEntry {
+  return { kind: e.kind, name: e.name, source: e.source, pack: e.pack, klass: e.klass };
+}
+
+async function getSkillDetail(casePath: string): Promise<SkillDetailResult> {
+  const sources = await readSources();
+  if (!sources.length) return { hasManifest: false, projectEntries: [], userEntries: [] };
+  const catalog = await buildCatalog(sources);
+  const [projectRaw, userRaw] = await Promise.all([
+    classifyScope(sources, catalog, casePath),
+    classifyScope(sources, catalog, homedir()),
+  ]);
+  return {
+    hasManifest: true,
+    projectEntries: projectRaw.map(toSkillEntry),
+    userEntries: userRaw.filter((e) => e.klass === 'linked-managed' || e.klass === 'real').map(toSkillEntry),
+  };
 }
 
 export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & ConfigPort): void {
@@ -840,6 +878,56 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       },
     };
   });
+
+  // ========== Skill Detail (for drawer) ==========
+
+  app.get('/api/cases/:name/skill-detail', async (req): Promise<ApiResponse<SkillDetailResult>> => {
+    const { name } = req.params as { name: string };
+    try {
+      const casePath = await resolveCasePath(name);
+      if (!existsSync(casePath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+      }
+      return { success: true, data: await getSkillDetail(casePath) };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  app.post('/api/cases/:name/skill-sync', async (req): Promise<ApiResponse<SkillDetailResult>> => {
+    const { name } = req.params as { name: string };
+    try {
+      const casePath = await resolveCasePath(name);
+      if (!existsSync(casePath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+      }
+      await execAsync('skill-install sync', { cwd: casePath, timeout: 60000 });
+      return { success: true, data: await getSkillDetail(casePath) };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  app.post('/api/cases/:name/skill-remove', async (req): Promise<ApiResponse<SkillDetailResult>> => {
+    const { name } = req.params as { name: string };
+    const body = req.body as { skillId?: string };
+    const skillId = body?.skillId;
+    if (!skillId || !SAFE_SKILL_ID.test(skillId)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid skill ID');
+    }
+    try {
+      const casePath = await resolveCasePath(name);
+      if (!existsSync(casePath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+      }
+      await execAsync(`skill-install remove ${skillId}`, { cwd: casePath, timeout: 30000 });
+      return { success: true, data: await getSkillDetail(casePath) };
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ========== Skill State (chip) ==========
 
   app.get('/api/cases/:name/skill-state', async (req): Promise<ApiResponse<SkillStateResult>> => {
     const { name } = req.params as { name: string };
