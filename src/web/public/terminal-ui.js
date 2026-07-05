@@ -140,8 +140,20 @@ Object.assign(CodemanApp.prototype, {
     if (!this.activeSessionId || !Number.isFinite(deltaY)) return;
     const cell = this._terminalCellFromClientPoint(clientX, clientY);
     if (!cell) return;
+    const threshold = 50;
+    const previous = this._foregroundTuiWheelAccum || 0;
+    const next = previous + deltaY;
+    if (Math.sign(previous) !== 0 && Math.sign(previous) !== Math.sign(deltaY)) {
+      this._foregroundTuiWheelAccum = deltaY;
+      return;
+    }
+    if (Math.abs(next) < threshold) {
+      this._foregroundTuiWheelAccum = next;
+      return;
+    }
     const button = deltaY > 0 ? 65 : 64;
     this._sendInputAsync(this.activeSessionId, `\x1b[<${button};${cell.col};${cell.row}M`);
+    this._foregroundTuiWheelAccum = next % threshold;
   },
 
   /**
