@@ -3951,8 +3951,21 @@ class CodemanApp {
       return;
     }
 
-    // Measure the natural one-row overflow, then enable wrapping only if needed.
+    // Measure the natural one-row overflow against a STATE-INDEPENDENT reference
+    // frame, then enable wrapping only if needed.
+    //
+    // COD-147 couples the tab-wrap decision to the header: when tabs wrap we also add
+    // `.header--tabs-wrapped`, which shrinks `.header-right` and WIDENS the tab area.
+    // That widened clientWidth is the very number we measure below — so if we measured
+    // while the header were still wrapped, a tab set that overflows the NARROW area but
+    // fits the WIDE one would report "fits" -> unwrap -> narrow area overflows -> wrap
+    // -> ... flip-flopping 1<->2 rows on every SSE-driven tab re-render (the s1-rental
+    // flicker). Reset the header to its unwrapped baseline BEFORE measuring so the
+    // decision depends only on natural tab width vs the fixed narrow area — a stable
+    // fixed point. (No paint happens between these class writes and the measure: the
+    // browser only repaints after this synchronous frame completes.)
     container.classList.remove('tabs-auto-wrap');
+    document.querySelector('.header')?.classList.remove('header--tabs-wrapped');
     const shouldWrap = window.CodemanTabOverflow?.shouldAutoWrapTabs
       ? window.CodemanTabOverflow.shouldAutoWrapTabs({
           deviceType,
