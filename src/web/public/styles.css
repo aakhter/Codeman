@@ -6904,6 +6904,34 @@ kbd {
   border-radius: 3px;
 }
 .btn-sm-text:hover { background: rgba(255,255,255,0.08); }
+.btn-add-skill { margin-left: auto; opacity: 0.0; transition: opacity 0.1s; }
+.skills-pack > summary:hover .btn-add-skill,
+.skills-entry:hover .btn-add-skill { opacity: 1; }
+
+/* Skills search */
+.skills-search-input {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 0.72rem;
+  padding: 2px 6px;
+  width: 100px;
+  outline: none;
+}
+.skills-search-input:focus { border-color: var(--accent); }
+
+/* Catalog browse section */
+.skills-section-browse { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+.skills-section-browse > summary { cursor: pointer; }
+.skills-section-browse-body { padding: 0 8px; }
+.catalog-pack > summary { gap: 6px; }
+.skills-pack-desc { color: var(--text-dim); font-size: 0.68rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skills-browse-individuals { padding-top: 4px; }
+.skills-entry { display: flex; align-items: center; gap: 6px; padding: 2px 4px; font-size: 0.78rem; border-radius: 3px; }
+.skills-entry:hover { background: rgba(255,255,255,0.04); }
+.skills-entry-name { flex: 1; }
+.skills-entry-kind { font-size: 0.65rem; color: var(--text-dim); border: 1px solid var(--border); border-radius: 2px; padding: 0 3px; }
 
 /* Attachment History Drawer */
 .attachment-history-drawer {

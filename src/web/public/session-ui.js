@@ -1522,7 +1522,8 @@ Object.assign(CodemanApp.prototype, {
       <div class="skills-drawer-header">
         <span class="skills-drawer-title">Skills</span>
         <div class="skills-drawer-header-actions">
-          <button type="button" class="btn-icon-sm" data-action="validate" title="Validate">&#x21BB;</button>
+          <input type="search" id="skillsSearchInput" class="skills-search-input" placeholder="Search…" autocomplete="off">
+          <button type="button" class="btn-icon-sm" data-action="validate" title="Refresh">&#x21BB;</button>
           <button type="button" class="btn-icon-sm" data-action="close" title="Close">&#x00D7;</button>
         </div>
       </div>
@@ -1537,6 +1538,7 @@ Object.assign(CodemanApp.prototype, {
       else if (action === 'validate') this.validateSkillsDrawer();
       else if (action === 'sync') this.syncSkills(btn.dataset.case);
       else if (action === 'remove') this.removeSkill(btn.dataset.case, btn.dataset.skillId);
+      else if (action === 'add') this.addSkill(btn.dataset.case, btn.dataset.target);
     });
     document.body.appendChild(el);
   },
@@ -1546,16 +1548,46 @@ Object.assign(CodemanApp.prototype, {
     if (!body) return;
     body.innerHTML = '<div class="skills-drawer-loading">Loading…</div>';
     try {
-      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-detail`);
-      if (!res.ok) { body.innerHTML = '<div class="skills-drawer-empty">Failed to load skills.</div>'; return; }
-      const { data } = await res.json();
-      body.innerHTML = this._renderSkillsDrawerBody(data, caseName);
+      const [detailRes, catalogRes] = await Promise.all([
+        fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-detail`),
+        fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-catalog`),
+      ]);
+      if (!detailRes.ok) { body.innerHTML = '<div class="skills-drawer-empty">Failed to load skills.</div>'; return; }
+      const { data } = await detailRes.json();
+      const catalog = catalogRes.ok ? (await catalogRes.json()).data : null;
+      this._skillsCatalog = catalog;
+      body.innerHTML = this._renderSkillsDrawerBody(data, caseName, catalog);
+      this._initSkillsSearch(caseName);
     } catch {
       body.innerHTML = '<div class="skills-drawer-empty">Failed to load skills.</div>';
     }
   },
 
-  _renderSkillsDrawerBody(data, caseName) {
+  _initSkillsSearch(caseName) {
+    const input = document.getElementById('skillsSearchInput');
+    if (!input) return;
+    if (input._skillsHandler) input.removeEventListener('input', input._skillsHandler);
+    input._skillsHandler = () => this._filterSkillsDrawer(input.value.trim().toLowerCase());
+    input.addEventListener('input', input._skillsHandler);
+  },
+
+  _filterSkillsDrawer(q) {
+    const body = document.getElementById('skillsDrawerBody');
+    if (!body) return;
+    body.querySelectorAll('.skills-pack').forEach((el) => {
+      const text = (el.querySelector('.skills-pack-name')?.textContent ?? '').toLowerCase();
+      const src = (el.dataset.source ?? '').toLowerCase();
+      el.style.display = !q || text.includes(q) || src.includes(q) ? '' : 'none';
+    });
+    body.querySelectorAll('.skills-entry:not(.child)').forEach((el) => {
+      const text = (el.querySelector('.skills-entry-name')?.textContent ?? '').toLowerCase();
+      const kind = (el.querySelector('.skills-entry-kind')?.textContent ?? '').toLowerCase();
+      const src = (el.dataset.source ?? '').toLowerCase();
+      el.style.display = !q || text.includes(q) || kind.includes(q) || src.includes(q) ? '' : 'none';
+    });
+  },
+
+  _renderSkillsDrawerBody(data, caseName, catalog) {
     const esc = (s) =>
       String(s == null ? '' : s)
         .replace(/&/g, '&amp;')
@@ -1638,7 +1670,77 @@ Object.assign(CodemanApp.prototype, {
       <div class="skills-entries">${userItems.map((e) => entryRow(e, true)).join('') || '<div class="skills-entry-empty">None installed at user scope</div>'}</div>
     </details>`;
 
-    return projectSection + userSection;
+    const browseSection = this._renderBrowseSection(catalog, caseName, esc);
+
+    return projectSection + userSection + browseSection;
+  },
+
+  _renderBrowseSection(catalog, caseName, esc) {
+    if (!catalog?.hasManifest) return '';
+    const esc2 = esc;
+
+    const packHtml = (catalog.packs || []).map((pack) => {
+      const allInstalled = pack.installedCount === pack.totalCount;
+      const partialInstalled = !allInstalled && pack.installedCount > 0;
+      const icon = allInstalled ? '[*]' : partialInstalled ? '[~]' : '[ ]';
+      const klass = allInstalled ? 'ok' : partialInstalled ? 'warn' : 'missing';
+      const target = `${pack.source}:${pack.name}`;
+      return `<details class="skills-pack catalog-pack" data-source="${esc2(pack.source)}">
+        <summary>
+          <span class="skill-state ${klass}">${icon}</span>
+          <span class="skills-pack-name">${esc2(pack.name)}</span>
+          <span class="skills-pack-count">${pack.installedCount}/${pack.totalCount}</span>
+          ${pack.description ? `<span class="skills-pack-desc">${esc2(pack.description)}</span>` : ''}
+          <button type="button" class="btn-sm-text btn-add-skill" data-action="add" data-case="${esc2(caseName)}" data-target="${esc2(target)}" title="Add bundle">+Add</button>
+        </summary>
+      </details>`;
+    }).join('');
+
+    const individualsHtml = (catalog.individuals || []).map((item) => {
+      const installed = item.klass === 'linked-managed' || item.klass === 'real';
+      const target = `${item.source}/${item.name}`;
+      return `<div class="skills-entry" data-source="${esc2(item.source)}">
+        <span class="skill-state ${installed ? 'ok' : 'missing'}">${installed ? '[*]' : '[ ]'}</span>
+        <span class="skills-entry-name">${esc2(item.name)}</span>
+        ${item.kind !== 'skill' ? `<span class="skills-entry-kind">${esc2(item.kind)}</span>` : ''}
+        ${!installed ? `<button type="button" class="btn-sm-text btn-add-skill" data-action="add" data-case="${esc2(caseName)}" data-target="${esc2(target)}" title="Add">+Add</button>` : ''}
+      </div>`;
+    }).join('');
+
+    if (!packHtml && !individualsHtml) return '';
+
+    return `<details class="skills-section skills-section-browse">
+      <summary class="skills-section-header">
+        <span class="skills-section-title">Browse catalog</span>
+        <span class="skills-section-counts">${(catalog.packs || []).length} pack${catalog.packs?.length !== 1 ? 's' : ''}${catalog.individuals?.length ? `, ${catalog.individuals.length} individual` : ''}</span>
+      </summary>
+      <div class="skills-section-browse-body">
+        ${packHtml}
+        ${individualsHtml ? `<div class="skills-browse-individuals">${individualsHtml}</div>` : ''}
+      </div>
+    </details>`;
+  },
+
+  async addSkill(caseName, target) {
+    if (!caseName || !target) return;
+    const addBtn = document.querySelector(`[data-action="add"][data-target="${CSS.escape(target)}"]`);
+    if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Adding…'; }
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/skill-add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        if (addBtn) { addBtn.disabled = false; addBtn.textContent = '+Add'; }
+        return;
+      }
+      await this.loadSkillsDrawerContent(caseName);
+      await this.updateSkillsChipForCase(caseName);
+    } catch {
+      if (addBtn) { addBtn.disabled = false; addBtn.textContent = '+Add'; }
+    }
   },
 
   async validateSkillsDrawer() {
@@ -1659,7 +1761,8 @@ Object.assign(CodemanApp.prototype, {
         if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = 'Sync'; }
         return;
       }
-      if (body) body.innerHTML = this._renderSkillsDrawerBody(json.data, caseName);
+      if (body) body.innerHTML = this._renderSkillsDrawerBody(json.data, caseName, this._skillsCatalog);
+      this._initSkillsSearch(caseName);
       await this.updateSkillsChipForCase(caseName);
     } catch {
       if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = 'Sync'; }
@@ -1677,7 +1780,8 @@ Object.assign(CodemanApp.prototype, {
       });
       const json = await res.json();
       if (!json.success) return;
-      if (body) body.innerHTML = this._renderSkillsDrawerBody(json.data, caseName);
+      if (body) body.innerHTML = this._renderSkillsDrawerBody(json.data, caseName, this._skillsCatalog);
+      this._initSkillsSearch(caseName);
       await this.updateSkillsChipForCase(caseName);
     } catch { /* ignore */ }
   },

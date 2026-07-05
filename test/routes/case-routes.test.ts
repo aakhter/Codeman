@@ -1082,6 +1082,157 @@ describe('case-routes', () => {
     });
   });
 
+  // ========== GET /api/cases/:name/skill-catalog ==========
+
+  describe('GET /api/cases/:name/skill-catalog', () => {
+    it('returns hasManifest:false when no sources configured', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([]);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/testcase/skill-catalog' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.hasManifest).toBe(false);
+      expect(body.data.packs).toEqual([]);
+      expect(body.data.individuals).toEqual([]);
+    });
+
+    it('returns packs with install counts and individuals from catalog', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([
+        { name: 'src1', path: '/some/path', description: '', available: true, artifacts: {}, bundles: {} },
+      ] as never);
+      mockedBuildCatalog.mockResolvedValue({
+        entries: [
+          { kind: 'skill', source: 'src1', name: 'code-review', pack: 'review-tools' },
+          { kind: 'skill', source: 'src1', name: 'pr-check', pack: 'review-tools' },
+          { kind: 'skill', source: 'src1', name: 'solo-skill', pack: null },
+        ],
+        bundles: [
+          {
+            source: 'src1',
+            name: 'review-tools',
+            description: 'Code review toolset',
+            skills: ['code-review', 'pr-check'],
+            agents: [],
+            commands: [],
+          },
+        ],
+      } as never);
+      mockedClassifyScope.mockResolvedValue([
+        {
+          kind: 'skill',
+          name: 'code-review',
+          source: 'src1',
+          pack: 'review-tools',
+          klass: 'linked-managed',
+          claudePath: '/p',
+          mirrorPath: null,
+          target: null,
+        },
+        {
+          kind: 'skill',
+          name: 'pr-check',
+          source: 'src1',
+          pack: 'review-tools',
+          klass: 'available-managed',
+          claudePath: '/p',
+          mirrorPath: null,
+          target: null,
+        },
+        {
+          kind: 'skill',
+          name: 'solo-skill',
+          source: 'src1',
+          pack: null,
+          klass: 'available-managed',
+          claudePath: '/p',
+          mirrorPath: null,
+          target: null,
+        },
+      ] as never);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/testcase/skill-catalog' });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.packs).toHaveLength(1);
+      expect(body.data.packs[0].name).toBe('review-tools');
+      expect(body.data.packs[0].description).toBe('Code review toolset');
+      expect(body.data.packs[0].installedCount).toBe(1);
+      expect(body.data.packs[0].totalCount).toBe(2);
+      expect(body.data.individuals).toHaveLength(1);
+      expect(body.data.individuals[0].name).toBe('solo-skill');
+      expect(body.data.individuals[0].klass).toBe('available-managed');
+    });
+
+    it('returns 404 when case does not exist', async () => {
+      mockedExistsSync.mockReturnValue(false);
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/no-such-case/skill-catalog' });
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  // ========== POST /api/cases/:name/skill-add ==========
+
+  describe('POST /api/cases/:name/skill-add', () => {
+    it('rejects missing or unsafe target', async () => {
+      mockedExistsSync.mockReturnValue(true);
+
+      const resMissing = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/testcase/skill-add',
+        payload: {},
+      });
+      expect(resMissing.statusCode).toBe(400);
+
+      const resDash = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/testcase/skill-add',
+        payload: { target: '-dangerous' },
+      });
+      expect(resDash.statusCode).toBe(400);
+
+      const resTraversal = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/testcase/skill-add',
+        payload: { target: 'src/../etc/passwd' },
+      });
+      expect(resTraversal.statusCode).toBe(400);
+    });
+
+    it('calls execFile with skill-install add and returns fresh catalog', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      mockedReadSources.mockResolvedValue([]);
+      execFilePromisifyMock.mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/testcase/skill-add',
+        payload: { target: 'my-source:review-tools' },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(execFilePromisifyMock).toHaveBeenCalledWith(
+        'skill-install',
+        ['add', 'my-source:review-tools'],
+        expect.objectContaining({ cwd: expect.any(String) })
+      );
+    });
+
+    it('returns 404 when case does not exist', async () => {
+      mockedExistsSync.mockReturnValue(false);
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/no-such-case/skill-add',
+        payload: { target: 'src:pack' },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
   // ========== GET /api/cases/:name/skill-state ==========
 
   describe('GET /api/cases/:name/skill-state', () => {

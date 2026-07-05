@@ -61,6 +61,27 @@ interface SkillDetailResult {
   userEntries: SkillEntry[];
 }
 
+interface SkillCatalogPack {
+  source: string;
+  name: string;
+  description: string;
+  totalCount: number;
+  installedCount: number;
+}
+
+interface SkillCatalogIndividual {
+  kind: string;
+  name: string;
+  source: string;
+  klass: string;
+}
+
+interface SkillCatalogResult {
+  hasManifest: boolean;
+  packs: SkillCatalogPack[];
+  individuals: SkillCatalogIndividual[];
+}
+
 interface SkillStateResult {
   hasManifest: boolean;
   installed: number;
@@ -926,6 +947,118 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       return { success: true, data: await getSkillDetail(casePath) };
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ========== Skill Catalog (pack browser) ==========
+
+  app.get('/api/cases/:name/skill-catalog', async (req): Promise<ApiResponse<SkillCatalogResult>> => {
+    const { name } = req.params as { name: string };
+    try {
+      const casePath = await resolveCasePath(name);
+      if (!existsSync(casePath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+      }
+      const sources = await readSources();
+      if (!sources.length) {
+        return { success: true, data: { hasManifest: false, packs: [], individuals: [] } };
+      }
+      const catalog = await buildCatalog(sources);
+      const entries = await classifyScope(sources, catalog, casePath);
+      const klassMap = new Map(entries.map((e) => [`${e.kind}::${e.name}`, e.klass]));
+
+      const packs: SkillCatalogPack[] = catalog.bundles.map((bundle) => {
+        const allItems = [
+          ...bundle.skills.map((n) => ({ kind: 'skill' as const, name: n })),
+          ...bundle.agents.map((n) => ({ kind: 'agent' as const, name: n })),
+          ...bundle.commands.map((n) => ({ kind: 'command' as const, name: n })),
+        ];
+        const installedCount = allItems.filter((it) => {
+          const k = klassMap.get(`${it.kind}::${it.name}`);
+          return k === 'linked-managed' || k === 'real';
+        }).length;
+        return {
+          source: bundle.source,
+          name: bundle.name,
+          description: bundle.description,
+          totalCount: allItems.length,
+          installedCount,
+        };
+      });
+
+      const individuals: SkillCatalogIndividual[] = catalog.entries
+        .filter((e) => e.pack === null)
+        .map((e) => ({
+          kind: e.kind,
+          name: e.name,
+          source: e.source,
+          klass: klassMap.get(`${e.kind}::${e.name}`) ?? 'available-managed',
+        }));
+
+      return { success: true, data: { hasManifest: true, packs, individuals } };
+    } catch (err) {
+      return createErrorResponse(
+        ApiErrorCode.INTERNAL_ERROR,
+        err instanceof Error ? err.message : 'Failed to read catalog'
+      );
+    }
+  });
+
+  // ========== Skill Add ==========
+
+  const SAFE_SKILL_TARGET = /^[a-zA-Z0-9_][a-zA-Z0-9_./:@-]*$/;
+
+  app.post('/api/cases/:name/skill-add', async (req): Promise<ApiResponse<SkillCatalogResult>> => {
+    const { name } = req.params as { name: string };
+    const { target } = (req.body as Record<string, unknown>) ?? {};
+    if (!target || typeof target !== 'string' || !SAFE_SKILL_TARGET.test(target) || target.includes('..')) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing or unsafe target');
+    }
+    try {
+      const casePath = await resolveCasePath(name);
+      if (!existsSync(casePath)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+      }
+      await execFileAsync('skill-install', ['add', target], { cwd: casePath, timeout: 60000 });
+      const sources = await readSources();
+      if (!sources.length) {
+        return { success: true, data: { hasManifest: false, packs: [], individuals: [] } };
+      }
+      const catalog = await buildCatalog(sources);
+      const entries = await classifyScope(sources, catalog, casePath);
+      const klassMap = new Map(entries.map((e) => [`${e.kind}::${e.name}`, e.klass]));
+      const packs: SkillCatalogPack[] = catalog.bundles.map((bundle) => {
+        const allItems = [
+          ...bundle.skills.map((n) => ({ kind: 'skill' as const, name: n })),
+          ...bundle.agents.map((n) => ({ kind: 'agent' as const, name: n })),
+          ...bundle.commands.map((n) => ({ kind: 'command' as const, name: n })),
+        ];
+        const installedCount = allItems.filter((it) => {
+          const k = klassMap.get(`${it.kind}::${it.name}`);
+          return k === 'linked-managed' || k === 'real';
+        }).length;
+        return {
+          source: bundle.source,
+          name: bundle.name,
+          description: bundle.description,
+          totalCount: allItems.length,
+          installedCount,
+        };
+      });
+      const individuals: SkillCatalogIndividual[] = catalog.entries
+        .filter((e) => e.pack === null)
+        .map((e) => ({
+          kind: e.kind,
+          name: e.name,
+          source: e.source,
+          klass: klassMap.get(`${e.kind}::${e.name}`) ?? 'available-managed',
+        }));
+      return { success: true, data: { hasManifest: true, packs, individuals } };
+    } catch (err) {
+      return createErrorResponse(
+        ApiErrorCode.INTERNAL_ERROR,
+        err instanceof Error ? err.message : 'Failed to add skill'
+      );
     }
   });
 
