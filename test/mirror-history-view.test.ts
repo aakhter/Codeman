@@ -140,6 +140,19 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(tui).not.toContain("'claude'"); // legacy (setting-OFF) repair paths must not change for claude
   });
 
+  it('opencode mode is mirror-eligible and follows the same _isMirrorSession path as claude/codex/gemini', () => {
+    const mirror = appJs.slice(
+      appJs.indexOf('_isMirrorSession(sessionId) {'),
+      appJs.indexOf('_isMirrorSession(sessionId) {') + 500
+    );
+    const eligible = appJs.slice(
+      appJs.indexOf('_isMirrorEligible(sessionId) {'),
+      appJs.indexOf('_isMirrorEligible(sessionId) {') + 500
+    );
+    expect(mirror).toContain('this._isMirrorEligible(sessionId)');
+    expect(eligible).toContain("mode === 'opencode'");
+  });
+
   it('liveMirrorEnabled is per-device: stripped from the server PUT and in displayKeys', () => {
     expect(settingsUi).toContain('liveMirrorEnabled: _lmr,');
     const dk = settingsUi.indexOf('const displayKeys = new Set([');

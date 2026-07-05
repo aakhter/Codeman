@@ -2240,7 +2240,7 @@ class CodemanApp {
   /** Modes the live mirror applies to when the setting is ON. */
   _isMirrorEligible(sessionId) {
     const mode = this.sessions.get(sessionId)?.mode;
-    return mode === 'codex' || mode === 'gemini' || mode === 'claude';
+    return mode === 'codex' || mode === 'gemini' || mode === 'claude' || mode === 'opencode';
   }
 
   /** COD-187: settings hook — flips the cached flag and re-selects the active TUI tab so the mode applies immediately. */
