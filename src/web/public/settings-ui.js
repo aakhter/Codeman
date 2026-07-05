@@ -2904,7 +2904,6 @@ Object.assign(CodemanApp.prototype, {
     // YAML textarea (hidden until codex toggled on)
     const yamlRow = document.createElement('div');
     yamlRow.className = 'skill-adopt-yaml-row';
-    yamlRow.hidden = true;
     const yamlLabel = document.createElement('div');
     yamlLabel.className = 'skill-adopt-yaml-label';
     yamlLabel.textContent = 'agents/openai.yaml — review and edit before adopting:';
@@ -2917,7 +2916,7 @@ Object.assign(CodemanApp.prototype, {
     yamlArea.value = `interface:\n  display_name: "${displayName}"\n  short_description: "${shortDesc.slice(0, 100)}"\n  default_prompt: "Use $${entry.name} to ..."`;
     yamlRow.append(yamlLabel, yamlArea);
 
-    codexCheck.addEventListener('change', () => { yamlRow.hidden = !codexCheck.checked; });
+    codexCheck.addEventListener('change', () => { yamlRow.style.display = codexCheck.checked ? 'flex' : 'none'; });
 
     // Action buttons
     const btnRow = document.createElement('div');
