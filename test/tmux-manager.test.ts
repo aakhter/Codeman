@@ -205,14 +205,15 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('environment exports', () => {
-    it('keeps COLORTERM unset for OpenCode sessions', () => {
+    it('COD-210: enables COLORTERM truecolor for OpenCode sessions', () => {
       const exports = (
         manager as unknown as {
           buildEnvExports(sessionId: string, muxName: string, mode: string): string[];
         }
       ).buildEnvExports('session-1', 'codeman-abc12345', 'opencode');
 
-      expect(exports).toContain('unset COLORTERM');
+      expect(exports).toContain('export COLORTERM=truecolor');
+      expect(exports).not.toContain('unset COLORTERM');
     });
   });
 

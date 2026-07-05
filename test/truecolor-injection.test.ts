@@ -1,14 +1,15 @@
 /**
  * @fileoverview Tests for the COLORTERM=truecolor opt-in knob (COD-75).
  *
- * COLORTERM is unset for Claude/non-codex sessions by default to avoid
+ * COLORTERM is unset for Claude sessions by default to avoid
  * tmux→PTY→xterm.js color glitches. The `truecolorEnabled` app setting lets a
  * user opt Claude sessions back into 24-bit truecolor. Both spawn paths must
  * agree:
  *   - the tmux path  → `buildEnvExports()` in tmux-manager
  *   - the direct PTY → `buildClaudeEnv()`/`buildMuxAttachEnv()` in session-cli-builder
  *
- * Codex always gets `export COLORTERM=truecolor` regardless of the toggle.
+ * Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get
+ * `export COLORTERM=truecolor` regardless of the toggle.
  *
  * Port: N/A (no server needed)
  */
@@ -53,9 +54,10 @@ describe('buildEnvExports COLORTERM (tmux path)', () => {
     expect(envExports('codex', false)).not.toContain('unset COLORTERM');
   });
 
-  it('OpenCode (non-codex) honors the toggle like Claude', () => {
-    expect(envExports('opencode', false)).toContain('unset COLORTERM');
+  it('COD-210: OpenCode → exports COLORTERM=truecolor regardless of toggle', () => {
+    expect(envExports('opencode', false)).toContain('export COLORTERM=truecolor');
     expect(envExports('opencode', true)).toContain('export COLORTERM=truecolor');
+    expect(envExports('opencode', false)).not.toContain('unset COLORTERM');
   });
 });
 

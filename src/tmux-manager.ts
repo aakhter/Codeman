@@ -1360,12 +1360,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     truecolorEnabled?: boolean,
     headroomClaudeUrl?: string
   ): string[] {
-    // COLORTERM is unset for Claude/other non-codex sessions by default to avoid
-    // tmux→PTY→xterm.js color glitches (an empirical rendering choice). The
-    // `truecolorEnabled` app setting (COD-75) lets the user opt those sessions
-    // into 24-bit truecolor. Codex and Gemini always get truecolor (Ink TUIs).
+    // COLORTERM is unset for Claude sessions by default to avoid tmux→PTY→xterm.js
+    // color glitches (an empirical rendering choice). The `truecolorEnabled` app
+    // setting (COD-75) lets the user opt Claude back into 24-bit truecolor.
+    // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
+    // background/color palette negotiation matches xterm's 24-bit renderer.
     const colorTermExport =
-      mode === 'codex' || mode === 'gemini' || truecolorEnabled ? 'export COLORTERM=truecolor' : 'unset COLORTERM';
+      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || truecolorEnabled
+        ? 'export COLORTERM=truecolor'
+        : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
