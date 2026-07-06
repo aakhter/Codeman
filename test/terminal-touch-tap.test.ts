@@ -288,4 +288,34 @@ describe('terminal touch tap mouse guard', () => {
     expect(app._sendInputAsync).toHaveBeenCalledTimes(1);
     expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x1b[<65;3;2M');
   });
+
+  it('COD-211: sends SGR click reports directly so OpenCode clickable regions work after replay', () => {
+    const { app } = loadTerminalUiHarness();
+    const screen = {
+      getBoundingClientRect: () => ({ left: 100, top: 50, width: 800, height: 400 }),
+    };
+
+    app.activeSessionId = 'session-1';
+    app._sendInputAsync = vi.fn();
+    app.terminal = {
+      cols: 80,
+      rows: 24,
+      element: {
+        querySelector: vi.fn((selector: string) => (selector === '.xterm-screen' ? screen : null)),
+      },
+      _core: {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 10, height: 20 },
+            },
+          },
+        },
+      },
+    };
+
+    app._sendForegroundTuiClick(120, 84);
+
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x1b[<0;3;2M\x1b[<0;3;2m');
+  });
 });

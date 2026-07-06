@@ -167,6 +167,19 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(helper).toContain("this._viewMode === 'live'");
   });
 
+  it('COD-211: opencode click gestures are routed to foreground TUI mouse reports', () => {
+    const click = termUi.slice(termUi.indexOf("'click'"), termUi.indexOf("'click'") + 300);
+    expect(click).toContain("'click'");
+    expect(click).toContain('_handleForegroundTuiClick(ev)');
+
+    const helper = termUi.slice(
+      termUi.indexOf('_handleForegroundTuiClick(ev) {'),
+      termUi.indexOf('_handleForegroundTuiClick(ev) {') + 600
+    );
+    expect(helper).toContain('_shouldForwardScrollToForegroundTui()');
+    expect(helper).toContain('_sendForegroundTuiClick(ev.clientX, ev.clientY)');
+  });
+
   it('liveMirrorEnabled is per-device: stripped from the server PUT and in displayKeys', () => {
     expect(settingsUi).toContain('liveMirrorEnabled: _lmr,');
     const dk = settingsUi.indexOf('const displayKeys = new Set([');

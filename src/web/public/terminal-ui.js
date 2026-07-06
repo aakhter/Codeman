@@ -123,6 +123,14 @@ Object.assign(CodemanApp.prototype, {
     return true;
   },
 
+  _handleForegroundTuiClick(ev) {
+    if (!this._shouldForwardScrollToForegroundTui() || ev.button !== 0) return false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this._sendForegroundTuiClick(ev.clientX, ev.clientY);
+    return true;
+  },
+
   _terminalCellFromClientPoint(clientX, clientY) {
     const screen = this.terminal?.element?.querySelector?.('.xterm-screen');
     const rect = screen?.getBoundingClientRect?.();
@@ -154,6 +162,13 @@ Object.assign(CodemanApp.prototype, {
     const button = deltaY > 0 ? 65 : 64;
     this._sendInputAsync(this.activeSessionId, `\x1b[<${button};${cell.col};${cell.row}M`);
     this._foregroundTuiWheelAccum = next % threshold;
+  },
+
+  _sendForegroundTuiClick(clientX, clientY) {
+    if (!this.activeSessionId) return;
+    const cell = this._terminalCellFromClientPoint(clientX, clientY);
+    if (!cell) return;
+    this._sendInputAsync(this.activeSessionId, `\x1b[<0;${cell.col};${cell.row}M\x1b[<0;${cell.col};${cell.row}m`);
   },
 
   /**
@@ -489,6 +504,17 @@ Object.assign(CodemanApp.prototype, {
       { passive: false, capture: true }
     );
 
+    // OpenCode exposes clickable TUI regions (e.g. "Click to expand") via
+    // terminal mouse reports. Send them directly so clicks still work after a
+    // replay/tab switch where xterm's mouse-tracking mode may be stale.
+    container.addEventListener(
+      'click',
+      (ev) => {
+        this._handleForegroundTuiClick(ev);
+      },
+      { passive: false, capture: true }
+    );
+
     // Touch scrolling — use terminal.scrollLines() for all devices.
     // xterm.js DOM renderer doesn't populate xterm-viewport's scroll area,
     // so native CSS scrolling (overflow-y: scroll + touch-action: pan-y)
@@ -623,7 +649,9 @@ Object.assign(CodemanApp.prototype, {
             if (touch) {
               this._suppressTrustedTapMouseEvents();
             }
-            if (touch && mouseTrackingOn) {
+            if (touch && this._shouldForwardScrollToForegroundTui()) {
+              this._sendForegroundTuiClick(touch.clientX, touch.clientY);
+            } else if (touch && mouseTrackingOn) {
               this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
             }
             this._syncMobileHelperTextareaToCursor();
