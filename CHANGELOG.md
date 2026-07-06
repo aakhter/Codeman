@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.2.8
+
+### Patch Changes
+
+- Forward OpenCode TUI clicks directly so clickable regions expand after replay.
+
 ## 1.2.7
 
 ### Patch Changes
