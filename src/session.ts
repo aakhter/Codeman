@@ -1290,7 +1290,7 @@ export class Session extends EventEmitter {
     const mux = this._mux!;
 
     // Verify stale mux session — tmux may have been destroyed (e.g., killed externally)
-    if (this._muxSession && !mux.muxSessionExists(this._muxSession.muxName)) {
+    if (this._muxSession && !(await mux.muxSessionExists(this._muxSession.muxName))) {
       console.log('[Session] Stale mux session detected (tmux gone):', this._muxSession.muxName);
       this._muxSession = null;
     }
@@ -1298,7 +1298,7 @@ export class Session extends EventEmitter {
     // Check if session exists but pane is dead (remain-on-exit keeps it alive)
     // Respawn the pane instead of creating a whole new session — preserves tmux scrollback
     let needsNewSession = false;
-    if (this._muxSession && mux.isPaneDead(this._muxSession.muxName)) {
+    if (this._muxSession && (await mux.isPaneDead(this._muxSession.muxName))) {
       console.log('[Session] Dead pane detected, respawning:', this._muxSession.muxName);
       const newPid = await mux.respawnPane(options.respawnPaneOptions);
       if (!newPid) {
@@ -1368,7 +1368,7 @@ export class Session extends EventEmitter {
 
     // If tmux lost the whole session (not just a dead pane), there is nothing to
     // respawn into — a genuine death, leave it for normal recovery/reconcile.
-    if (!mux.muxSessionExists(this._muxSession.muxName)) {
+    if (!(await mux.muxSessionExists(this._muxSession.muxName))) {
       console.log('[Session] reattachRemote: mux session gone, skipping:', this._muxSession.muxName);
       return false;
     }

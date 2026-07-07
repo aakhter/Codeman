@@ -23,14 +23,19 @@
  * @module ai-checker-base
  */
 
-import { execSync, spawn as childSpawn } from 'node:child_process';
+import { exec, spawn as childSpawn } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { promisify } from 'node:util';
 import { getAugmentedPath, ANSI_ESCAPE_PATTERN_SIMPLE } from './utils/index.js';
 import { AI_CHECK_MAX_BACKOFF_MS } from './config/ai-defaults.js';
 import { getErrorMessage } from './types.js';
+
+// execSync on the shared Fastify event loop freezes ALL other requests/SSE
+// clients for the duration of the tmux call (COD-212) — use the async form.
+const execAsync = promisify(exec);
 
 // ========== Security Validation ==========
 
@@ -400,9 +405,11 @@ export abstract class AiCheckerBase<
 
     // Spawn tmux session
     try {
-      // Kill any leftover session with this name first (mux name already validated above)
+      // Kill any leftover session with this name first (mux name already validated above).
+      // Must complete before spawning below — `tmux new-session -d -s <name>` errors if a
+      // session with that name still exists.
       try {
-        execSync(`tmux kill-session -t "${this.checkMuxName}" 2>/dev/null`, { timeout: 3000 });
+        await execAsync(`tmux kill-session -t "${this.checkMuxName}" 2>/dev/null`, { timeout: 3000 });
       } catch {
         // No existing session, that's fine
       }
@@ -419,6 +426,20 @@ export abstract class AiCheckerBase<
     // Poll the temp file for completion
     return new Promise<R>((resolve, reject) => {
       const startTime = this.checkStartTime;
+
+      // COD-212: the kill-session call above now `await`s (async exec instead of
+      // execSync), which yields control back to the caller before checkResolve is
+      // set below. If cancel() runs during that window it can no longer reach into
+      // checkResolve (still null) to settle this promise, and — since checkCancelled
+      // is already true — the poll/timeout guards below would silently no-op forever,
+      // hanging check()'s `await this.runCheck(...)`. Bail out immediately so the
+      // promise always settles; check() already builds the real 'Cancelled' result
+      // from its own checkCancelled check, so the resolved value here is unused.
+      if (this.checkCancelled) {
+        resolve(this.createErrorResult('Cancelled', Date.now() - startTime));
+        return;
+      }
+
       this.checkResolve = resolve;
 
       // Guard flag to prevent both poll and timeout from resolving (race condition)
@@ -486,14 +507,15 @@ export abstract class AiCheckerBase<
       this.checkTimeoutTimer = null;
     }
 
-    // Kill the tmux session
+    // Kill the tmux session. Fire-and-forget (not awaited): cleanupCheck() is called
+    // from the sync `cancel()`/`reset()` public API (many call sites across
+    // respawn-controller.ts), so it must stay sync — mirrors the resizeWindow()
+    // precedent in tmux-manager.ts for interactive/hot paths that can't block on tmux.
     if (this.checkMuxName) {
       const muxName = this.checkMuxName;
-      try {
-        execSync(`tmux kill-session -t "${muxName}" 2>/dev/null`, { timeout: 2000 });
-      } catch {
-        // Session may already be dead
-      }
+      exec(`tmux kill-session -t "${muxName}" 2>/dev/null`, { timeout: 2000 }, () => {
+        // Session may already be dead — nothing to do either way.
+      });
       this.checkMuxName = null;
     }
 

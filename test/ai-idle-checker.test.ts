@@ -1,9 +1,20 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { AiIdleChecker, AiCheckVerdict } from '../src/ai-idle-checker.js';
+import { AiIdleChecker } from '../src/ai-idle-checker.js';
 
 // Mock child_process
 vi.mock('node:child_process', () => ({
-  execSync: vi.fn(),
+  // COD-212: source now uses the async `exec` (via promisify) instead of `execSync`
+  // to avoid blocking the Fastify event loop. The mock invokes its Node-style
+  // callback synchronously so `promisify(exec)` resolves without extra timer/
+  // microtask coordination under `vi.useFakeTimers()`; it also supports the
+  // 2-arg `(cmd, callback)` form used by the fire-and-forget cleanup call.
+  exec: vi.fn(
+    (_cmd: string, optsOrCb: unknown, cb?: (err: Error | null, result: { stdout: string; stderr: string }) => void) => {
+      const callback = typeof optsOrCb === 'function' ? (optsOrCb as typeof cb) : cb;
+      callback?.(null, { stdout: '', stderr: '' });
+      return { unref: vi.fn(), pid: 0, on: vi.fn() };
+    }
+  ),
   spawn: vi.fn(() => ({
     unref: vi.fn(),
     pid: 12345,
@@ -19,12 +30,11 @@ vi.mock('node:fs', () => ({
   writeFileSync: vi.fn(),
 }));
 
-import { execSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { exec, spawn } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 
-const mockedExecSync = vi.mocked(execSync);
+const mockedExec = vi.mocked(exec);
 const mockedSpawn = vi.mocked(spawn);
-const mockedExistsSync = vi.mocked(existsSync);
 const mockedReadFileSync = vi.mocked(readFileSync);
 const mockedWriteFileSync = vi.mocked(writeFileSync);
 
@@ -163,9 +173,10 @@ describe('AiIdleChecker', () => {
       await checkPromise;
 
       // First call should try to kill existing session
-      expect(mockedExecSync).toHaveBeenCalledWith(
+      expect(mockedExec).toHaveBeenCalledWith(
         expect.stringContaining('tmux kill-session -t "codeman-aicheck-'),
-        expect.any(Object)
+        expect.any(Object),
+        expect.any(Function)
       );
     });
 
@@ -220,7 +231,7 @@ describe('AiIdleChecker', () => {
       await checkPromise;
 
       // Should have tried to kill the tmux session (initial kill + cleanup kill)
-      const killCalls = mockedExecSync.mock.calls.filter(
+      const killCalls = mockedExec.mock.calls.filter(
         (call) => typeof call[0] === 'string' && call[0].includes('kill-session')
       );
       expect(killCalls.length).toBeGreaterThan(0);

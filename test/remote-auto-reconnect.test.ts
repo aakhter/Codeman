@@ -218,10 +218,10 @@ describe('TmuxManager remote reconnect watcher (integration)', () => {
     });
   }
 
-  it('emits remoteSessionDropped when a dead remote pane is observed, then backs off and exhausts', () => {
+  it('emits remoteSessionDropped when a dead remote pane is observed, then backs off and exhausts', async () => {
     registerRemote('aaaa1111');
     // Force the watcher to see a dead pane regardless of test-mode isPaneDead.
-    vi.spyOn(manager, 'isPaneDead').mockReturnValue(true);
+    vi.spyOn(manager, 'isPaneDead').mockResolvedValue(true);
 
     const dropped: Array<{ sessionId: string; attempt: number }> = [];
     const exhausted: Array<{ sessionId: string }> = [];
@@ -233,7 +233,7 @@ describe('TmuxManager remote reconnect watcher (integration)', () => {
     // noteRemoteReconnect(false), mirroring the real server loop.
     let now = 0;
     for (let i = 0; i < MAX_RECONNECT_ATTEMPTS + 3; i++) {
-      manager.runRemoteReconnectTick(now, /* enabled */ true);
+      await manager.runRemoteReconnectTick(now, /* enabled */ true);
       manager.noteRemoteReconnect('aaaa1111', false); // reattach failed → clear in-flight
       // jump the clock past the just-scheduled backoff window
       now += BACKOFF_SCHEDULE_MS[Math.min(i, BACKOFF_SCHEDULE_MS.length - 1)] + 1;
@@ -244,9 +244,9 @@ describe('TmuxManager remote reconnect watcher (integration)', () => {
     expect(exhausted).toEqual([{ sessionId: 'aaaa1111' }]); // fired exactly once
   });
 
-  it('emits nothing for a guarded (intentionally killed) session', () => {
+  it('emits nothing for a guarded (intentionally killed) session', async () => {
     registerRemote('bbbb2222');
-    vi.spyOn(manager, 'isPaneDead').mockReturnValue(true);
+    vi.spyOn(manager, 'isPaneDead').mockResolvedValue(true);
     manager.guardRemoteReconnect('bbbb2222'); // simulate killSession/detach guard
 
     const dropped: unknown[] = [];
@@ -254,45 +254,45 @@ describe('TmuxManager remote reconnect watcher (integration)', () => {
 
     let now = 0;
     for (let i = 0; i < 5; i++) {
-      manager.runRemoteReconnectTick(now, true);
+      await manager.runRemoteReconnectTick(now, true);
       now += 600_000;
     }
     expect(dropped).toEqual([]);
   });
 
-  it('resets backoff on a successful reattach (noteRemoteReconnect)', () => {
+  it('resets backoff on a successful reattach (noteRemoteReconnect)', async () => {
     registerRemote('cccc3333');
-    vi.spyOn(manager, 'isPaneDead').mockReturnValue(true);
+    vi.spyOn(manager, 'isPaneDead').mockResolvedValue(true);
 
     const dropped: Array<{ attempt: number }> = [];
     manager.on('remoteSessionDropped', (d) => dropped.push(d));
 
-    manager.runRemoteReconnectTick(0, true); // emit attempt 1
+    await manager.runRemoteReconnectTick(0, true); // emit attempt 1
     manager.noteRemoteReconnect('cccc3333', true); // reattach succeeded → reset
-    manager.runRemoteReconnectTick(1, true); // immediately eligible again → attempt 1
+    await manager.runRemoteReconnectTick(1, true); // immediately eligible again → attempt 1
 
     expect(dropped.map((d) => d.attempt)).toEqual([1, 1]);
   });
 
-  it('does nothing when the kill-switch (enabled=false) is off', () => {
+  it('does nothing when the kill-switch (enabled=false) is off', async () => {
     registerRemote('dddd4444');
-    vi.spyOn(manager, 'isPaneDead').mockReturnValue(true);
+    vi.spyOn(manager, 'isPaneDead').mockResolvedValue(true);
     const dropped: unknown[] = [];
     manager.on('remoteSessionDropped', (d) => dropped.push(d));
 
-    manager.runRemoteReconnectTick(0, false);
+    await manager.runRemoteReconnectTick(0, false);
     expect(dropped).toEqual([]);
   });
 
-  it('clears per-session reconnect/guard state when the session is removed', () => {
+  it('clears per-session reconnect/guard state when the session is removed', async () => {
     registerRemote('eeee5555');
     manager.guardRemoteReconnect('eeee5555');
     manager.clearRemoteReconnectState('eeee5555');
     // After clearing the guard, a fresh dead-pane observation should emit again.
-    vi.spyOn(manager, 'isPaneDead').mockReturnValue(true);
+    vi.spyOn(manager, 'isPaneDead').mockResolvedValue(true);
     const dropped: unknown[] = [];
     manager.on('remoteSessionDropped', (d) => dropped.push(d));
-    manager.runRemoteReconnectTick(0, true);
+    await manager.runRemoteReconnectTick(0, true);
     expect(dropped).toEqual([{ sessionId: 'eeee5555', attempt: 1 }]);
   });
 });

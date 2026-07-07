@@ -8,7 +8,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { resolve } from 'node:path';
 import {
   TmuxManager,
   buildRemoteLaunchCommand,
@@ -32,10 +31,20 @@ vi.mock('node:child_process', async () => {
   const actual = await vi.importActual('node:child_process');
   return {
     ...actual,
+    // NOTE: plain vi.fn() mocks don't carry Node's internal `util.promisify.custom`
+    // that the real `child_process.exec` uses to resolve `{stdout, stderr}` — without
+    // it, `promisify(exec)` resolves with just the callback's 2nd arg. So the callback
+    // here passes a single combined object (not separate stdout/stderr strings) to
+    // match what `execAsync()` callers in tmux-manager.ts destructure.
     exec: vi.fn((_cmd: string, optionsOrCallback?: unknown, maybeCallback?: unknown) => {
       const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
       if (typeof callback === 'function') {
-        setImmediate(() => callback(null, '', ''));
+        setImmediate(() =>
+          (callback as (err: null, result: { stdout: string; stderr: string }) => void)(null, {
+            stdout: '',
+            stderr: '',
+          })
+        );
       }
       return {
         on: vi.fn(),
@@ -617,6 +626,29 @@ describe('TmuxManager (unit)', () => {
         }
         return '';
       });
+      // COD-212: getPanePid/isPaneDead/sessionExists/reconcileSessions now run via the
+      // async `exec` (promisified), not `execSync` — mirror the same pane_pid response.
+      mockedExec.mockImplementation(
+        (cmd: string, optionsOrCallback?: unknown, maybeCallback?: unknown): ReturnType<typeof exec> => {
+          const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+          const respond = (stdout: string) => {
+            if (typeof callback === 'function') {
+              setImmediate(() =>
+                (callback as (err: null, result: { stdout: string; stderr: string }) => void)(null, {
+                  stdout,
+                  stderr: '',
+                })
+              );
+            }
+          };
+          if (typeof cmd === 'string' && cmd.includes('display-message') && cmd.includes('#{pane_pid}')) {
+            respond('4242\n');
+          } else {
+            respond('');
+          }
+          return { on: vi.fn(), kill: vi.fn(), pid: 12345 } as unknown as ReturnType<typeof exec>;
+        }
+      );
     });
 
     it('starts new tmux sessions from /tmp and cd-bounces into the requested workspace', async () => {
@@ -633,7 +665,7 @@ describe('TmuxManager (unit)', () => {
         expect(session.workingDir).toBe('/mnt/gdrive/project with spaces');
         expect(session.pid).toBe(4242);
 
-        const newSessionCall = mockedExecSync.mock.calls.find(
+        const newSessionCall = mockedExec.mock.calls.find(
           ([cmd]) => typeof cmd === 'string' && cmd.includes(' new-session ')
         );
         // COD-189: history-limit rides in the SAME invocation, BEFORE new-session,
@@ -645,7 +677,7 @@ describe('TmuxManager (unit)', () => {
         );
         expect(newSessionCall?.[1]).toEqual(expect.objectContaining({ cwd: '/tmp' }));
 
-        const respawnCall = mockedExecSync.mock.calls.find(
+        const respawnCall = mockedExec.mock.calls.find(
           ([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane ')
         );
         expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abc12345"`);
@@ -707,7 +739,7 @@ describe('TmuxManager (unit)', () => {
           remotePath: '/Users/saqebakhter/repos/projects/moneytrove',
         },
       });
-      const isPaneDead = vi.spyOn(nonTestManager, 'isPaneDead').mockReturnValue(true);
+      const isPaneDead = vi.spyOn(nonTestManager, 'isPaneDead').mockResolvedValue(true);
 
       try {
         const pending = nonTestManager.respawnPane({
@@ -738,11 +770,31 @@ describe('TmuxManager (unit)', () => {
         if (typeof cmd === 'string' && cmd.includes('which tmux')) {
           return '/usr/bin/tmux\n';
         }
-        if (typeof cmd === 'string' && cmd.includes('list-panes')) {
-          return 'codeman-aabb1111|111|0\ncodeman-aabb2222|222|1\n';
-        }
         return '';
       });
+      // COD-212: reconcileSessions() now lists panes and kills dead ones via the
+      // async `exec` (promisified), not `execSync`.
+      mockedExec.mockImplementation(
+        (cmd: string, optionsOrCallback?: unknown, maybeCallback?: unknown): ReturnType<typeof exec> => {
+          const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+          const respond = (stdout: string) => {
+            if (typeof callback === 'function') {
+              setImmediate(() =>
+                (callback as (err: null, result: { stdout: string; stderr: string }) => void)(null, {
+                  stdout,
+                  stderr: '',
+                })
+              );
+            }
+          };
+          if (typeof cmd === 'string' && cmd.includes('list-panes')) {
+            respond('codeman-aabb1111|111|0\ncodeman-aabb2222|222|1\n');
+          } else {
+            respond('');
+          }
+          return { on: vi.fn(), kill: vi.fn(), pid: 12345 } as unknown as ReturnType<typeof exec>;
+        }
+      );
       const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
       const nonTestManager = new NonTestTmuxManager();
 
@@ -750,11 +802,12 @@ describe('TmuxManager (unit)', () => {
         const result = await nonTestManager.reconcileSessions();
 
         expect(result.discovered).toEqual(['restored-aabb1111']);
-        expect(mockedExecSync).toHaveBeenCalledWith(
+        expect(mockedExec).toHaveBeenCalledWith(
           `tmux -L 'codeman' kill-session -t "codeman-aabb2222" 2>/dev/null`,
           {
             timeout: expect.any(Number),
-          }
+          },
+          expect.any(Function)
         );
       } finally {
         nonTestManager.destroy();
