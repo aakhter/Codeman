@@ -28,6 +28,7 @@
  */
 
 import type { RespawnConfig } from './respawn.js';
+import type { SessionSource } from './sources.js';
 import type { AttachmentDetectedType } from './tools.js';
 
 /** Status of a Claude session */
@@ -362,6 +363,8 @@ export interface SessionState {
   effort?: EffortLevel;
   /** Sanitized per-session attachment history. */
   attachmentHistory?: SessionAttachmentHistoryItem[];
+  /** Per-session reference sources (COD-65). */
+  sources?: SessionSource[];
 }
 
 /**

@@ -982,6 +982,14 @@ export const LibraryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+export const SessionSourceAddSchema = z.object({
+  type: z.enum(['file', 'url', 'highlight']),
+  title: z.string().trim().min(1, 'Title required').max(500, 'Title too long'),
+  url: z.string().trim().url('Invalid URL').optional(),
+  relativePath: z.string().trim().max(1000).optional(),
+  content: z.string().trim().max(10000).optional(),
+});
+
 export const SearchQuerySchema = z.object({
   q: z.string().trim().min(1, 'Query is required').max(200, 'Query too long (max 200 chars)'),
   types: z

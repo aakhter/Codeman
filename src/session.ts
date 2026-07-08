@@ -54,6 +54,7 @@ import {
   type EffortLevel,
   type SessionAttachmentHistoryItem,
   type SessionRemote,
+  type SessionSource,
 } from './types.js';
 import type { TerminalMultiplexer, MuxSession } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
@@ -401,6 +402,7 @@ export class Session extends EventEmitter {
   // Explicit attachment magic links already emitted from terminal output.
   private _attachmentMagicSeen = new Set<string>();
   private _attachmentHistory: SessionAttachmentHistoryItem[] = [];
+  private _sources: SessionSource[] = [];
 
   // Flicker filter setting (per-session toggle, applied on frontend)
   private _flickerFilterEnabled: boolean = false;
@@ -541,6 +543,8 @@ export class Session extends EventEmitter {
       truecolorEnabled?: boolean;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
+      /** Restored per-session reference sources (COD-65). */
+      sources?: SessionSource[];
       /** Per-session terminal buffer limits; applies to this server-side session buffer. */
       terminalBufferConfig?: { maxBytes: number; trimBytes: number };
       /** tmux history limit for newly created mux sessions. */
@@ -635,6 +639,9 @@ export class Session extends EventEmitter {
     }
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
+    }
+    if (config.sources && config.sources.length > 0) {
+      this.restoreSources(config.sources);
     }
 
     // Initialize task tracker and forward events (store handlers for cleanup)
@@ -1154,6 +1161,35 @@ export class Session extends EventEmitter {
     return this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined;
   }
 
+  // ── Sources (COD-65) ──────────────────────────────────────────────────────
+
+  get sources(): SessionSource[] {
+    return [...this._sources];
+  }
+
+  addSource(item: SessionSource): void {
+    const idx = this._sources.findIndex((s) => s.id === item.id);
+    if (idx >= 0) {
+      this._sources[idx] = { ...item };
+    } else {
+      this._sources.push({ ...item });
+    }
+  }
+
+  removeSource(id: string): void {
+    this._sources = this._sources.filter((s) => s.id !== id);
+  }
+
+  restoreSources(data: SessionSource[] | undefined): void {
+    this._sources = data ? data.map((s) => ({ ...s })) : [];
+  }
+
+  getSourcesForPersist(): SessionSource[] | undefined {
+    return this._sources.length > 0 ? this._sources.map((s) => ({ ...s })) : undefined;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   toState(): SessionState {
     return {
       id: this.id,
@@ -1202,6 +1238,7 @@ export class Session extends EventEmitter {
       resumeSessionId: this._resumeSessionId,
       effort: this._effort,
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
+      sources: this.getSourcesForPersist(),
       // envOverrides intentionally NOT on the public SessionState type — they must not
       // leak into SSE / GET /api/sessions broadcasts (schema allows OPENCODE_*, which
       // can carry secrets). For disk persistence, session-manager calls

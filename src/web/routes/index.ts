@@ -19,4 +19,5 @@ export { registerOrchestratorRoutes } from './orchestrator-routes.js';
 export { registerClipboardRoutes } from './clipboard-routes.js';
 export { registerSearchRoutes } from './search-routes.js';
 export { registerLibraryRoutes } from './library-routes.js';
+export { registerSourceRoutes } from './source-routes.js';
 export { registerWsRoutes } from './ws-routes.js';
