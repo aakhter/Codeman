@@ -2248,7 +2248,7 @@ class CodemanApp {
   _onSessionResized(data) {
     if (data.id !== this.activeSessionId || !this.terminal) return;
     const session = this.sessions.get(data.id);
-    if (session?.mode !== 'codex' && session?.mode !== 'gemini') return;
+    if (session?.mode !== 'codex' && session?.mode !== 'gemini' && session?.mode !== 'agy') return;
     // Our own resize (or one that happens to match us) can't misalign our view.
     if (this.terminal.cols === data.cols && this.terminal.rows === data.rows) return;
     this._foreignResizeDirty = data.id;
@@ -2306,10 +2306,10 @@ class CodemanApp {
     }
   }
 
-  /** COD-182: any codex/gemini tab — stale rows can appear locally too (reattach/reconnect churn). */
+  /** COD-182: any codex/gemini/agy tab — stale rows can appear locally too (reattach/reconnect churn). */
   _isTuiSession(sessionId) {
     const session = this.sessions.get(sessionId);
-    return session?.mode === 'codex' || session?.mode === 'gemini';
+    return session?.mode === 'codex' || session?.mode === 'gemini' || session?.mode === 'agy';
   }
 
   /** COD-180: remote codex/gemini sessions — the live nested-tmux stream corrupts scrollback; reconcile heals it. */
@@ -4144,7 +4144,7 @@ class CodemanApp {
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : ''}
+              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'agy' ? '<span class="tab-mode agy" aria-hidden="true">ag</span>' : ''}
               <span class="tab-name" data-session-id="${id}">${(() => { const p = parseSessionPrefix(name); return p && p.suffix ? '<span class="tab-prefix">' + escapeHtml(p.prefix) + '</span><span class="tab-suffix">: ' + escapeHtml(p.suffix) + '</span>' : escapeHtml(name); })()}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
@@ -5233,7 +5233,9 @@ class CodemanApp {
           ? 'Kill Tmux & Codex'
           : session.mode === 'gemini'
             ? 'Kill Tmux & Gemini'
-            : 'Kill Tmux & Claude Code';
+            : session.mode === 'agy'
+              ? 'Kill Tmux & Agy'
+              : 'Kill Tmux & Claude Code';
     }
 
     document.getElementById('closeConfirmModal').classList.add('active');
