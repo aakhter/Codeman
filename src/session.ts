@@ -188,6 +188,8 @@ function getModeLabel(mode: SessionMode): string {
       return 'Codex';
     case 'gemini':
       return 'Gemini';
+    case 'agy':
+      return 'Agy';
     case 'shell':
       return 'Shell';
     case 'claude':

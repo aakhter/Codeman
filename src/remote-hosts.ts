@@ -65,6 +65,7 @@ export function defaultRemoteCommandForMode(mode: SessionMode): string {
     opencode: 'exec opencode',
     codex: 'exec codex',
     gemini: 'exec gemini',
+    agy: 'exec agy',
   };
   return commands[mode as RemoteCommandMode] || commands.shell;
 }
