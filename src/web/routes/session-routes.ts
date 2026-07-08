@@ -452,6 +452,7 @@ export function registerSessionRoutes(
       body.mode !== 'opencode' &&
       body.mode !== 'codex' &&
       body.mode !== 'gemini' &&
+      body.mode !== 'agy' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       workingDir.startsWith(CASES_DIR + '/');
@@ -519,6 +520,14 @@ export function registerSessionRoutes(
       }
     }
 
+    // Check Agy availability if requested
+    if (body.mode === 'agy') {
+      const { isAgyAvailable } = await import('../../utils/agy-cli-resolver.js');
+      if (!isAgyAvailable()) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Agy CLI not found.');
+      }
+    }
+
     // Pre-validate resumeSessionId: check that the conversation file actually exists
     // in Claude's projects directory. If not, skip resume to avoid confusing
     // "No conversation found" errors from Claude CLI.
@@ -559,9 +568,11 @@ export function registerSessionRoutes(
           ? body.codexConfig?.model
           : mode === 'gemini'
             ? body.geminiConfig?.model
-            : mode !== 'shell'
-              ? modelConfig?.defaultModel || undefined
-              : undefined;
+            : mode === 'agy'
+              ? body.agyConfig?.model
+              : mode !== 'shell'
+                ? modelConfig?.defaultModel || undefined
+                : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
@@ -577,6 +588,7 @@ export function registerSessionRoutes(
       allowedTools: claudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
       codexConfig: mode === 'codex' ? body.codexConfig : undefined,
+      agyConfig: mode === 'agy' ? body.agyConfig : undefined,
       geminiConfig: mode === 'gemini' ? body.geminiConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
@@ -792,6 +804,7 @@ export function registerSessionRoutes(
         session.mode !== 'opencode' &&
         session.mode !== 'codex' &&
         session.mode !== 'gemini' &&
+        session.mode !== 'agy' &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -1221,7 +1234,8 @@ export function registerSessionRoutes(
     // applied every redraw in place — so it replays cleanly at any size and is
     // the canonical scrollback. We therefore request the FULL history capture
     // even on tab switch for these modes (bounded by tmux history-limit).
-    const isCaptureOnlyTuiMode = session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'opencode';
+    const isCaptureOnlyTuiMode =
+      session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'opencode' || session.mode === 'agy';
     const muxName = session.muxName;
     // COD-180: a remote session's canonical scrollback lives ONLY on the remote
     // tmux server — the local wrapper is a nested-tmux client repainted in
@@ -1599,6 +1613,7 @@ export function registerSessionRoutes(
       mode = 'claude',
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       envOverrides,
       effort,
@@ -1634,6 +1649,14 @@ export function registerSessionRoutes(
           ApiErrorCode.OPERATION_FAILED,
           'Gemini CLI not found. Install with: npm install -g @google/gemini-cli'
         );
+      }
+    }
+
+    // Check Agy availability if requested
+    if (mode === 'agy') {
+      const { isAgyAvailable } = await import('../../utils/agy-cli-resolver.js');
+      if (!isAgyAvailable()) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Agy CLI not found.');
       }
     }
 
@@ -1704,6 +1727,7 @@ export function registerSessionRoutes(
       mode !== 'opencode' &&
       mode !== 'codex' &&
       mode !== 'gemini' &&
+      mode !== 'agy' &&
       !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
@@ -1722,9 +1746,11 @@ export function registerSessionRoutes(
           ? codexConfig?.model
           : mode === 'gemini'
             ? geminiConfig?.model
-            : mode !== 'shell'
-              ? qsModelConfig?.defaultModel || undefined
-              : undefined;
+            : mode === 'agy'
+              ? agyConfig?.model
+              : mode !== 'shell'
+                ? qsModelConfig?.defaultModel || undefined
+                : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
@@ -1739,6 +1765,7 @@ export function registerSessionRoutes(
       allowedTools: qsClaudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
       codexConfig: mode === 'codex' ? codexConfig : undefined,
+      agyConfig: mode === 'agy' ? agyConfig : undefined,
       geminiConfig: mode === 'gemini' ? geminiConfig : undefined,
       envOverrides,
       effort,
