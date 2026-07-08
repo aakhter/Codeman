@@ -88,6 +88,11 @@ import type { SessionRemote } from '../../types.js';
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
 import { MAX_PASTE_IMAGE_BYTES } from '../../config/buffer-limits.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
+import {
+  getLastTranscriptResponse,
+  isExternalCliTranscriptMode,
+  parseExternalCliTranscript,
+} from '../response-viewer-transcript.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
@@ -1043,9 +1048,42 @@ export function registerSessionRoutes(
     return candidateSid;
   }
 
+  async function getCanonicalTranscriptBuffer(session: Session): Promise<string> {
+    if (!isExternalCliTranscriptMode(session.mode)) return session.terminalBuffer;
+
+    const muxName = session.muxName;
+    let liveMuxBuffer: string | null = null;
+
+    if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true });
+      if (liveMuxBuffer !== null && liveMuxBuffer.length === 0) {
+        liveMuxBuffer = null;
+      }
+    }
+
+    if (liveMuxBuffer === null && muxName && typeof ctx.mux.captureActivePaneBuffer === 'function') {
+      liveMuxBuffer = ctx.mux.captureActivePaneBuffer(muxName, { fullHistory: true });
+    }
+
+    return liveMuxBuffer && liveMuxBuffer.length > 0 ? liveMuxBuffer : session.terminalBuffer;
+  }
+
   app.get('/api/sessions/:id/last-response', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id);
+    const query = req.query as { context?: string };
+
+    if (isExternalCliTranscriptMode(session.mode)) {
+      const transcriptBuffer = await getCanonicalTranscriptBuffer(session);
+      const blocks = parseExternalCliTranscript(transcriptBuffer, session.mode);
+      const transcriptText = getLastTranscriptResponse(blocks);
+      return {
+        text: transcriptText,
+        timestamp: '',
+        hasContext: blocks.length > 0,
+        messages: query.context === 'full' ? blocks : undefined,
+      };
+    }
 
     // Scan ~/.claude/projects/*/ for the transcript file
     const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
@@ -1102,7 +1140,6 @@ export function registerSessionRoutes(
     }
 
     // If ?context=full, return all user+assistant messages for conversation view
-    const query = req.query as { context?: string };
     if (query.context === 'full' && transcriptText) {
       const allMessages: Array<{ role: string; text: string; timestamp?: string }> = [];
       try {
@@ -1151,12 +1188,13 @@ export function registerSessionRoutes(
       } catch {
         /* ignore */
       }
-      return { text: transcriptText, timestamp: transcriptTimestamp, messages: allMessages };
+      return { text: transcriptText, timestamp: transcriptTimestamp, hasContext: true, messages: allMessages };
     }
 
     return {
       text: transcriptText,
       timestamp: transcriptTimestamp,
+      hasContext: Boolean(transcriptText),
     };
   });
 

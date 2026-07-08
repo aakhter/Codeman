@@ -2007,6 +2007,13 @@ class CodemanApp {
     }
   }
 
+  _getResponseViewerCopySource(body) {
+    if (!body) return null;
+    const responseBlocks = body.querySelectorAll('[data-copy-role="response"] .rv-text');
+    if (responseBlocks.length > 0) return responseBlocks[responseBlocks.length - 1];
+    return body;
+  }
+
   /** Build a portable clipboard fragment from the rendered response viewer. */
   _prepareResponseViewerClipboard(body) {
     if (!body) return null;
@@ -2069,7 +2076,7 @@ class CodemanApp {
   /** Copy the currently displayed response as HTML with a plain-text fallback. */
   async copyResponseViewerRichText() {
     const body = document.getElementById('responseViewerBody');
-    const payload = this._prepareResponseViewerClipboard(body);
+    const payload = this._prepareResponseViewerClipboard(this._getResponseViewerCopySource(body));
     if (!payload) {
       this._setResponseViewerCopyState(false);
       this.showToast('No response content to copy', 'warning');
@@ -2099,6 +2106,30 @@ class CodemanApp {
     }
   }
 
+  _renderResponseViewerMessages(body, messages) {
+    body.innerHTML = '';
+    for (const msg of messages) {
+      const kind = msg.kind || (msg.role === 'user' ? 'prompt' : 'response');
+      const label = msg.label || (msg.role === 'user' ? 'You' : 'Claude');
+      const div = document.createElement('div');
+      div.className = 'rv-message rv-msg-' + kind;
+      if (kind === 'response') div.dataset.copyRole = 'response';
+
+      const role = document.createElement('div');
+      role.className = 'rv-role rv-role-' + kind;
+      role.textContent = label;
+      div.appendChild(role);
+
+      const text = document.createElement('div');
+      text.className = 'rv-text';
+      text.innerHTML = this._renderMarkdown(msg.text || '');
+      div.appendChild(text);
+
+      body.appendChild(div);
+    }
+    this._bindResponseViewerInteractions(body);
+  }
+
   async toggleResponseViewer() {
     const viewer = document.getElementById('responseViewer');
     const backdrop = document.getElementById('responseViewerBackdrop');
@@ -2113,13 +2144,15 @@ class CodemanApp {
 
     if (!this.activeSessionId) return;
     try {
+      const session = this.sessions?.get?.(this.activeSessionId);
+      const mode = session?.mode || '';
       // Source 1: Transcript JSONL (best quality — clean structured text from Claude)
       const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response`);
       const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
 
       // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
-      if (!lastResponse) {
+      if (!lastResponse && mode === 'claude') {
         const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
         const termData = (await termRes.json())?.data ?? {};
         if (termData.terminalBuffer) {
@@ -2135,7 +2168,10 @@ class CodemanApp {
       const title = document.getElementById('responseViewerTitle');
       const moreBtn = document.getElementById('responseViewerMore');
       if (title) title.textContent = 'Last Response';
-      if (moreBtn) { moreBtn.style.display = ''; moreBtn.textContent = 'More'; }
+      if (moreBtn) {
+        moreBtn.style.display = data.hasContext ? '' : 'none';
+        moreBtn.textContent = 'More';
+      }
 
       viewer.classList.add('visible');
       backdrop.classList.add('visible');
@@ -2162,28 +2198,12 @@ class CodemanApp {
         return;
       }
 
-      // Render conversation thread
-      body.innerHTML = '';
-      for (const msg of messages) {
-        const div = document.createElement('div');
-        const isUser = msg.role === 'user';
-        div.className = 'rv-message ' + (isUser ? 'rv-msg-user' : 'rv-msg-assistant');
+      this._renderResponseViewerMessages(body, messages);
 
-        const role = document.createElement('div');
-        role.className = 'rv-role ' + (isUser ? 'rv-role-user' : 'rv-role-assistant');
-        role.textContent = isUser ? 'You' : 'Claude';
-        div.appendChild(role);
-
-        const text = document.createElement('div');
-        text.className = 'rv-text';
-        text.innerHTML = this._renderMarkdown(msg.text);
-        div.appendChild(text);
-
-        body.appendChild(div);
-      }
-      this._bindResponseViewerInteractions(body);
-
-      if (title) title.textContent = `Conversation (${messages.length} messages)`;
+      const hasStructuredKinds = messages.some((msg) => typeof msg.kind === 'string');
+      if (title) title.textContent = hasStructuredKinds
+        ? `Transcript (${messages.length} blocks)`
+        : `Conversation (${messages.length} messages)`;
       if (moreBtn) moreBtn.style.display = 'none';
       // Scroll to bottom (latest message)
       body.scrollTop = body.scrollHeight;

@@ -161,6 +161,82 @@ describe('session-routes', () => {
     });
   });
 
+  describe('GET /api/sessions/:id/last-response', () => {
+    it('returns the parsed last COD response from canonical terminal history', async () => {
+      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.terminalBuffer = 'stale local byte history';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() =>
+        `
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.143.0)                           │
+╰──────────────────────────────────────────────────────╯
+
+› say again
+
+Final polished answer
+With two lines
+
+› Improve documentation in @filename
+
+gpt-5.4 medium · kb · main · Ready · Context 92% left
+`.trim()
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/sessions/test-session-1/last-response',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.text).toBe('Final polished answer\nWith two lines');
+      expect(body.data.hasContext).toBe(true);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
+    it('returns labeled COD transcript blocks for full context', async () => {
+      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.terminalBuffer = '';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() =>
+        `
+› i need to create a naming recommendation for project helix
+
+gpt-5.4 medium · kb · main · Ready · Context 100% left
+
+• Explored
+  └ Read SKILL.md
+
+Subject: Naming Recommendation for Project Helix
+
+The product helps customers move virtual machine workloads between hypervisors while keeping operations
+stable. It improves visibility into application dependencies and reduces
+the risk
+and effort involved in moving workloads.
+`.trim()
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/sessions/test-session-1/last-response?context=full',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.messages).toEqual([
+        { kind: 'prompt', label: 'Prompt', text: 'i need to create a naming recommendation for project helix' },
+        { kind: 'status', label: 'Status', text: 'gpt-5.4 medium · kb · main · Ready · Context 100% left' },
+        { kind: 'tool', label: 'Tool', text: '• Explored\n  └ Read SKILL.md' },
+        {
+          kind: 'response',
+          label: 'Response',
+          text: 'Subject: Naming Recommendation for Project Helix\n\nThe product helps customers move virtual machine workloads between hypervisors while keeping operations stable. It improves visibility into application dependencies and reduces the risk and effort involved in moving workloads.',
+        },
+      ]);
+    });
+  });
+
   // ========== POST /api/sessions/:id/paste-image ==========
 
   describe('POST /api/sessions/:id/paste-image', () => {

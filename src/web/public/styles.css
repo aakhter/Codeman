@@ -11598,6 +11598,26 @@ kbd {
   background: #161f1a;
 }
 
+.rv-message.rv-msg-prompt {
+  border-left-color: #7aa2ff;
+  background: #16182a;
+}
+
+.rv-message.rv-msg-response {
+  border-left-color: #6ddb7f;
+  background: #161f1a;
+}
+
+.rv-message.rv-msg-status {
+  border-left-color: #c9ccd8;
+  background: #1a1b24;
+}
+
+.rv-message.rv-msg-tool {
+  border-left-color: #e3b86a;
+  background: #201b12;
+}
+
 .rv-role {
   display: inline-block;
   font-size: 10.5px;
@@ -11618,6 +11638,26 @@ kbd {
 .rv-role-assistant {
   color: #6ddb7f;
   background: rgba(109, 219, 127, 0.12);
+}
+
+.rv-role-prompt {
+  color: #7aa2ff;
+  background: rgba(122, 162, 255, 0.12);
+}
+
+.rv-role-response {
+  color: #6ddb7f;
+  background: rgba(109, 219, 127, 0.12);
+}
+
+.rv-role-status {
+  color: #c9ccd8;
+  background: rgba(201, 204, 216, 0.12);
+}
+
+.rv-role-tool {
+  color: #e3b86a;
+  background: rgba(227, 184, 106, 0.12);
 }
 
 /* Markdown rendered content inside response viewer.
