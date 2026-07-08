@@ -295,6 +295,129 @@ Object.assign(CodemanApp.prototype, {
   },
 
   // ═══════════════════════════════════════════════════════════════
+  // Sources Modal (COD-65)
+  // ═══════════════════════════════════════════════════════════════
+
+  openSources() {
+    const modal = document.getElementById('sourcesModal');
+    if (modal) modal.classList.add('active');
+    this.updateSourceFormFields();
+    this.loadSources();
+  },
+
+  closeSources() {
+    const modal = document.getElementById('sourcesModal');
+    if (modal) modal.classList.remove('active');
+  },
+
+  updateSourceFormFields() {
+    const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
+    const urlRow = document.getElementById('sourcesUrlRow');
+    const pathRow = document.getElementById('sourcesPathRow');
+    const contentRow = document.getElementById('sourcesContentRow');
+    if (urlRow) urlRow.classList.toggle('sources-field-row--hidden', type !== 'url');
+    if (pathRow) pathRow.classList.toggle('sources-field-row--hidden', type !== 'file');
+    if (contentRow) contentRow.classList.toggle('sources-field-row--hidden', type !== 'highlight');
+  },
+
+  async loadSources() {
+    const container = document.getElementById('sourcesList');
+    if (!container) return;
+    const sessionId = this.activeSessionId;
+    if (!sessionId) {
+      container.innerHTML = '<p class="empty-message sources-empty">No active session.</p>';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sources`);
+      const json = await res.json();
+      if (json.success) {
+        this.renderSources(json.data.sources);
+      } else {
+        container.innerHTML = '<p class="empty-message sources-empty">Failed to load sources.</p>';
+      }
+    } catch {
+      container.innerHTML = '<p class="empty-message sources-empty">Error loading sources.</p>';
+    }
+  },
+
+  renderSources(sources) {
+    const container = document.getElementById('sourcesList');
+    if (!container) return;
+    if (!sources.length) {
+      container.innerHTML =
+        '<p class="empty-message sources-empty">No sources yet. Add a URL, file path, or highlight above.</p>';
+      return;
+    }
+    container.innerHTML = sources.map((s) => this.renderSourceCard(s)).join('');
+  },
+
+  renderSourceCard(src) {
+    const icons = { url: '\u{1F517}', file: '\u{1F4C4}', highlight: '\u{1F4AC}' };
+    const icon = icons[src.type] || '\u{1F4CB}';
+    const title = escapeHtml(src.title);
+    let detail = '';
+    if (src.url) detail = escapeHtml(src.url);
+    else if (src.relativePath) detail = escapeHtml(src.relativePath);
+    else if (src.content) detail = escapeHtml(src.content.slice(0, 100));
+    return `<div class="sources-card" data-source-id="${escapeHtml(src.id)}">
+      <span class="sources-card-icon" aria-hidden="true">${icon}</span>
+      <div class="sources-card-body">
+        <span class="sources-card-title">${title}</span>
+        ${detail ? `<span class="sources-card-detail">${detail}</span>` : ''}
+      </div>
+      <button class="sources-card-delete" onclick="app.deleteSource('${escapeHtml(src.id)}')" aria-label="Remove source" title="Remove">&times;</button>
+    </div>`;
+  },
+
+  async handleAddSource(event) {
+    event.preventDefault();
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
+    const title = document.getElementById('sourcesTitle')?.value?.trim() || '';
+    if (!title) return;
+    const body = { type, title };
+    if (type === 'url') body.url = document.getElementById('sourcesUrl')?.value?.trim() || undefined;
+    else if (type === 'file')
+      body.relativePath = document.getElementById('sourcesPath')?.value?.trim() || undefined;
+    else if (type === 'highlight')
+      body.content = document.getElementById('sourcesContent')?.value?.trim() || undefined;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (json.success) {
+        document.getElementById('sourcesTitle').value = '';
+        document.getElementById('sourcesUrl').value = '';
+        document.getElementById('sourcesPath').value = '';
+        const content = document.getElementById('sourcesContent');
+        if (content) content.value = '';
+        this.loadSources();
+      }
+    } catch {
+      // silent — network error
+    }
+  },
+
+  async deleteSource(sourceId) {
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    try {
+      await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sources/${encodeURIComponent(sourceId)}`,
+        { method: 'DELETE' }
+      );
+      this.loadSources();
+    } catch {
+      // silent
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
   // Library Modal (COD-63)
   // ═══════════════════════════════════════════════════════════════
 
