@@ -300,6 +300,8 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   async openAwayDigest(range = 'since-last-visit') {
+    const { showAwayDigest } = this.loadAppSettingsFromStorage();
+    if (!showAwayDigest) return;
     this.awayDigestRange = range;
     this._awayDigestLoadedSuccessfully = false;
     this._awayDigestSinceLastVisitGeneratedAt = undefined;
@@ -930,6 +932,8 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   async openAwayDigest(range = 'since-last-visit') {
+    const { showAwayDigest } = this.loadAppSettingsFromStorage();
+    if (!showAwayDigest) return;
     this.awayDigestRange = range;
     this._awayDigestLoadedSuccessfully = false;
     this._awayDigestSinceLastVisitGeneratedAt = undefined;

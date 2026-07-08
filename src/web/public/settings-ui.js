@@ -318,6 +318,7 @@ Object.assign(CodemanApp.prototype, {
       settings.ultracodeFloatingWindows ?? defaults.ultracodeFloatingWindows ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
+    document.getElementById('appSettingsShowAwayDigest').checked = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
     // but is only available when the instance runs with CODEMAN_GESTURE=1 (server sets
@@ -1570,6 +1571,7 @@ Object.assign(CodemanApp.prototype, {
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
+      showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
       subagentTrackingEnabled: document.getElementById('appSettingsSubagentTracking').checked,
@@ -1749,6 +1751,7 @@ Object.assign(CodemanApp.prototype, {
       extendedKeyboardBar: _ekb,
       skin: _skin,
       showPlanUsageLimits: _pul,
+      showAwayDigest: _sad,
       showAttachmentsButton: _ahb,
       liveMirrorEnabled: _lmr,
       ...serverSettings
@@ -1974,6 +1977,7 @@ Object.assign(CodemanApp.prototype, {
         headroomRouteCodex: true,
         // Plan usage limits header chip (upstream)
         showPlanUsageLimits: false,
+        showAwayDigest: false,
         showAttachmentsButton: false,
         liveMirrorEnabled: true, // COD-187 live mirror for codex/gemini terminals
         showRedrawButton: false,
@@ -2296,6 +2300,12 @@ Object.assign(CodemanApp.prototype, {
       planUsageChip.classList.toggle('header-plan-usage--hidden', !showPlanUsageLimits);
     }
 
+    const showAwayDigest = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
+    const awayDigestBtn = document.getElementById('awayDigestBtn');
+    if (awayDigestBtn) {
+      awayDigestBtn.classList.toggle('btn-away-digest--hidden', !showAwayDigest);
+    }
+
     const showRedrawButton = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     const redrawBtn = document.querySelector('.btn-redraw-terminal');
     if (redrawBtn) {
@@ -2526,7 +2536,7 @@ Object.assign(CodemanApp.prototype, {
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
-          'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'liveMirrorEnabled',
+          'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (default OFF): desktop
         // can show it while mobile stays hidden. It used to sync, so an older

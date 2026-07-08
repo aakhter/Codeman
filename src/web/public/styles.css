@@ -11234,6 +11234,10 @@ kbd {
   display: none !important;
 }
 
+.btn-away-digest--hidden {
+  display: none !important;
+}
+
 .response-viewer {
   display: none;
   position: fixed;
