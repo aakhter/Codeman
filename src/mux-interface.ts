@@ -15,6 +15,7 @@ import type {
   SessionMode,
   OpenCodeConfig,
   CodexConfig,
+  AgyConfig,
   GeminiConfig,
   EffortLevel,
   SessionRemote,
@@ -70,6 +71,7 @@ export interface CreateSessionOptions {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
@@ -103,6 +105,7 @@ export interface RespawnPaneOptions {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
   /** Resume a previous Claude conversation when respawning */
   resumeSessionId?: string;

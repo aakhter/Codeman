@@ -30,6 +30,7 @@ export { findClaudeDir, getAugmentedPath } from './claude-cli-resolver.js';
 export { resolveOpenCodeDir } from './opencode-cli-resolver.js';
 export { resolveCodexDir, isCodexAvailable } from './codex-cli-resolver.js';
 export { resolveGeminiDir, isGeminiAvailable } from './gemini-cli-resolver.js';
+export { resolveAgyDir, isAgyAvailable } from './agy-cli-resolver.js';
 export {
   detectEnvironment,
   extractVersion,

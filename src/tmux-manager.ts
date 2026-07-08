@@ -47,6 +47,7 @@ import {
   type SessionMode,
   type OpenCodeConfig,
   type CodexConfig,
+  type AgyConfig,
   type GeminiConfig,
   type EffortLevel,
   type SessionRemote,
@@ -59,6 +60,7 @@ import {
   resolveOpenCodeDir,
   resolveCodexDir,
   resolveGeminiDir,
+  resolveAgyDir,
 } from './utils/index.js';
 import type {
   TerminalMultiplexer,
@@ -826,6 +828,33 @@ function buildGeminiCommand(config?: GeminiConfig): string {
 }
 
 /**
+ * Build the Agy CLI command with appropriate flags.
+ *
+ * Uses --dangerously-skip-permissions to match Codeman's Claude default.
+ * --continue resumes the latest conversation; --conversation <id> resumes
+ * a specific one.
+ */
+function buildAgyCommand(config?: AgyConfig): string {
+  const parts = ['agy', '--dangerously-skip-permissions'];
+
+  if (config?.model) {
+    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
+    if (safeModel) parts.push('--model', safeModel);
+  }
+
+  if (config?.resumeSession) {
+    if (config.resumeSession === 'latest') {
+      parts.push('--continue');
+    } else {
+      const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeSession) ? config.resumeSession : undefined;
+      if (safeId) parts.push('--conversation', safeId);
+    }
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
@@ -851,6 +880,7 @@ function buildSpawnCommand(options: {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
@@ -881,6 +911,9 @@ function buildSpawnCommand(options: {
   }
   if (options.mode === 'gemini') {
     return buildGeminiCommand(options.geminiConfig);
+  }
+  if (options.mode === 'agy') {
+    return buildAgyCommand(options.agyConfig);
   }
   return '$SHELL';
 }
@@ -1362,14 +1395,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
     // background/color palette negotiation matches xterm's 24-bit renderer.
     const colorTermExport =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || truecolorEnabled
+      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy' || truecolorEnabled
         ? 'export COLORTERM=truecolor'
         : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
       colorTermExport,
-      ...(mode === 'codex' || mode === 'gemini' ? ['unset NO_COLOR'] : []),
+      ...(mode === 'codex' || mode === 'gemini' || mode === 'agy' ? ['unset NO_COLOR'] : []),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,
@@ -1445,6 +1478,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const dir = resolveGeminiDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
+    if (mode === 'agy') {
+      const dir = resolveAgyDir();
+      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+    }
     return { pathExport: '', dir: null };
   }
 
@@ -1491,6 +1528,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       envOverrides,
@@ -1542,6 +1580,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (mode === 'gemini' && !cliDir) {
       throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
     }
+    if (mode === 'agy' && !cliDir) {
+      throw new Error('Agy CLI not found. Install from antigravity.');
+    }
 
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
     // live desired state (toggle + proxy health) right before spawn so a down proxy
@@ -1569,6 +1610,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       effort,
@@ -1798,6 +1840,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       envOverrides,
@@ -1844,6 +1887,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       effort,
