@@ -307,6 +307,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowSystemStats').checked = settings.showSystemStats ?? defaults.showSystemStats ?? true;
     document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? true;
     document.getElementById('appSettingsShowResponseViewer').checked = settings.showResponseViewer ?? defaults.showResponseViewer ?? false;
+    document.getElementById('appSettingsShowAwayDigest').checked = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
     document.getElementById('appSettingsShowAttachmentsButton').checked = settings.showAttachmentsButton ?? defaults.showAttachmentsButton ?? false;
     document.getElementById('appSettingsSkin').value = settings.skin ?? defaults.skin ?? 'daylight-blue';
     document.getElementById('appSettingsShowMonitor').checked = settings.showMonitor ?? defaults.showMonitor ?? false;
@@ -1562,6 +1563,7 @@ Object.assign(CodemanApp.prototype, {
       showSystemStats: document.getElementById('appSettingsShowSystemStats').checked,
       showLifecycleLog: document.getElementById('appSettingsShowLifecycleLog').checked,
       showResponseViewer: document.getElementById('appSettingsShowResponseViewer').checked,
+      showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
       showAttachmentsButton: document.getElementById('appSettingsShowAttachmentsButton').checked,
       showMonitor: document.getElementById('appSettingsShowMonitor').checked,
       showProjectInsights: document.getElementById('appSettingsShowProjectInsights').checked,
@@ -1967,6 +1969,7 @@ Object.assign(CodemanApp.prototype, {
         showUltracodeAgents: false,
         ultracodeFloatingWindows: false,
         showMultiMonitorButton: false,
+        showAwayDigest: false,
         // Truecolor opt-in (COD-75) — off by default
         truecolorEnabled: false,
         // Remote auto-reconnect (COD-108) — on by default
@@ -2261,6 +2264,12 @@ Object.assign(CodemanApp.prototype, {
     const responseViewerBtn = document.querySelector('.btn-response-viewer-header');
     if (responseViewerBtn) {
       responseViewerBtn.classList.toggle('btn-response-viewer-header--hidden', !showResponseViewer);
+    }
+
+    const showAwayDigest = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
+    const awayDigestBtn = document.querySelector('.btn-away-digest');
+    if (awayDigestBtn) {
+      awayDigestBtn.classList.toggle('btn-away-digest--hidden', !showAwayDigest);
     }
 
     // Hide the attachments (history) button when disabled. Opt-in, default OFF —

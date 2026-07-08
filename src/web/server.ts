@@ -1230,6 +1230,9 @@ export class WebServer extends EventEmitter {
     if (settings.showMultiMonitorButton === true) {
       html = html.replace(' btn-multimonitor--hidden', '');
     }
+    if (settings.showAwayDigest === true) {
+      html = html.replace(' btn-away-digest--hidden', '');
+    }
     // Plan-usage chip: ships hidden (`header-plan-usage--hidden`) and is revealed
     // PER-DEVICE by the client (settings-ui.js applyHeaderVisibilitySettings). It
     // used to be server-revealed from a synced setting, but that leaked the desktop

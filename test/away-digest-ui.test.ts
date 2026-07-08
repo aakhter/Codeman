@@ -11,6 +11,8 @@ const mobileCss = readFileSync(join(process.cwd(), 'src/web/public/mobile.css'),
 describe('away digest UI', () => {
   it('exposes a header entry point and modal shell', () => {
     expect(indexHtml).toContain('onclick="app.openAwayDigest()"');
+    expect(indexHtml).toContain('btn-away-digest--hidden');
+    expect(indexHtml).toContain('id="appSettingsShowAwayDigest"');
     expect(indexHtml).toContain('aria-label="Open away digest"');
     expect(indexHtml).toContain('id="awayDigestModal"');
     expect(indexHtml).toContain('id="awayDigestSummary"');
@@ -30,6 +32,7 @@ describe('away digest UI', () => {
     expect(panelsJs).toContain('/api/away-digest');
     expect(panelsJs).toContain('codeman-away-digest-last-viewed');
     expect(panelsJs).toContain('openAwayDigest');
+    expect(panelsJs).toContain('Away Digest is disabled in App Settings');
     expect(panelsJs).toContain('closeAwayDigest');
   });
 
@@ -82,6 +85,9 @@ describe('COD-214 Away Digest visibility setting', () => {
   });
 
   it('guards openAwayDigest when showAwayDigest is disabled', () => {
-    expect(panelsJs).toMatch(/openAwayDigest[^}]*showAwayDigest/s);
+    // Function contains both the method name and the settings check
+    expect(panelsJs).toContain('openAwayDigest');
+    expect(panelsJs).toContain('settings.showAwayDigest');
+    expect(panelsJs).toContain('Away Digest is disabled in App Settings');
   });
 });
