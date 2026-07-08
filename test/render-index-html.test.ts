@@ -19,6 +19,7 @@ const TEMPLATE = [
   '</head>',
   '<body>',
   '<button class="btn-icon-header btn-multimonitor btn-multimonitor--hidden" aria-label="Open Codeman across all displays"></button>',
+  '<button class="btn-icon-header btn-away-digest btn-away-digest--hidden" aria-label="Open away digest"></button>',
   '</body>',
 ].join('\n');
 
@@ -55,6 +56,13 @@ describe('WebServer.renderIndexHtml', () => {
     const html = await render(server);
     expect(html).not.toContain('btn-multimonitor--hidden');
     expect(html).toContain('btn-multimonitor"'); // class list still present, only the marker stripped
+  });
+
+  it('reveals the away-digest button when showAwayDigest is set', async () => {
+    const { server } = makeServer({ showAwayDigest: true });
+    const html = await render(server);
+    expect(html).not.toContain('btn-away-digest--hidden');
+    expect(html).toContain('btn-away-digest"');
   });
 
   it('injects the solo global and skips settings for a /session/:id window', async () => {

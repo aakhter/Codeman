@@ -1029,6 +1029,10 @@ body {
   display: none !important;
 }
 
+.btn-away-digest--hidden {
+  display: none !important;
+}
+
 .btn-icon-header.btn-settings {
   width: 30px;
   height: 30px;

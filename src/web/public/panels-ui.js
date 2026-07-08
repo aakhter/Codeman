@@ -300,6 +300,12 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   async openAwayDigest(range = 'since-last-visit') {
+    const settings = this.loadAppSettingsFromStorage?.() || {};
+    const defaults = this.getDefaultSettings?.() || {};
+    if ((settings.showAwayDigest ?? defaults.showAwayDigest ?? false) !== true) {
+      this.showToast?.('Away Digest is disabled in App Settings', 'info');
+      return;
+    }
     this.awayDigestRange = range;
     this._awayDigestLoadedSuccessfully = false;
     this._awayDigestSinceLastVisitGeneratedAt = undefined;
@@ -930,6 +936,12 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   async openAwayDigest(range = 'since-last-visit') {
+    const settings = this.loadAppSettingsFromStorage?.() || {};
+    const defaults = this.getDefaultSettings?.() || {};
+    if ((settings.showAwayDigest ?? defaults.showAwayDigest ?? false) !== true) {
+      this.showToast?.('Away Digest is disabled in App Settings', 'info');
+      return;
+    }
     this.awayDigestRange = range;
     this._awayDigestLoadedSuccessfully = false;
     this._awayDigestSinceLastVisitGeneratedAt = undefined;

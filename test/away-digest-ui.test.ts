@@ -10,6 +10,8 @@ const mobileCss = readFileSync(join(process.cwd(), 'src/web/public/mobile.css'),
 describe('away digest UI', () => {
   it('exposes a header entry point and modal shell', () => {
     expect(indexHtml).toContain('onclick="app.openAwayDigest()"');
+    expect(indexHtml).toContain('btn-away-digest--hidden');
+    expect(indexHtml).toContain('id="appSettingsShowAwayDigest"');
     expect(indexHtml).toContain('aria-label="Open away digest"');
     expect(indexHtml).toContain('id="awayDigestModal"');
     expect(indexHtml).toContain('id="awayDigestSummary"');
@@ -29,6 +31,7 @@ describe('away digest UI', () => {
     expect(panelsJs).toContain('/api/away-digest');
     expect(panelsJs).toContain('codeman-away-digest-last-viewed');
     expect(panelsJs).toContain('openAwayDigest');
+    expect(panelsJs).toContain('Away Digest is disabled in App Settings');
     expect(panelsJs).toContain('closeAwayDigest');
   });
 
