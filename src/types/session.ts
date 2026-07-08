@@ -14,6 +14,7 @@
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
  * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, resumeSessionId)
  * - GeminiConfig — Gemini CLI-specific settings (model, approvalMode, resumeSession)
+ * - AgyConfig — Agy CLI-specific settings (model, resumeSession)
  *
  * Cross-domain relationships:
  * - SessionState.respawnConfig embeds RespawnConfig (respawn domain)
@@ -41,9 +42,9 @@ export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error';
 export type ClaudeMode = 'dangerously-skip-permissions' | 'normal' | 'allowedTools';
 
 /** Session mode: which CLI backend a session runs */
-export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini';
+export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'agy';
 
-export type RemoteCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini'>;
+export type RemoteCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'agy'>;
 
 /**
  * Advanced SSH connection options shared by RemoteHost and SessionRemote.
@@ -191,6 +192,14 @@ export interface GeminiConfig {
   /** Gemini approval mode for tool calls. */
   approvalMode?: 'default' | 'auto_edit' | 'yolo' | 'plan';
   /** Resume a previous Gemini session ("latest", index, or session id). */
+  resumeSession?: string;
+}
+
+/** Agy CLI session configuration */
+export interface AgyConfig {
+  /** Model identifier (e.g., "claude-3-5-sonnet"). Passed via --model. */
+  model?: string;
+  /** Resume a previous Agy session ("latest" for --continue, or conversation ID for --conversation). */
   resumeSession?: string;
 }
 
@@ -345,6 +354,8 @@ export interface SessionState {
   codexConfig?: CodexConfig;
   /** Gemini-specific configuration (only for mode === 'gemini') */
   geminiConfig?: GeminiConfig;
+  /** Agy-specific configuration (only for mode === 'agy') */
+  agyConfig?: AgyConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
