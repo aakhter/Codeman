@@ -385,6 +385,9 @@ Object.assign(CodemanApp.prototype, {
     if (mode === 'gemini') {
       return this.runGemini();
     }
+    if (mode === 'agy') {
+      return this.runAgy();
+    }
     return this.runClaude();
   },
 
@@ -481,7 +484,7 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : 'Run';
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'agy' ? 'Run AG' : 'Run';
     }
   },
 
@@ -876,20 +879,19 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runGemini() {
+  async runAgy() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
 
     this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln(`\x1b[1;32m Starting Agy session in ${caseName}...\x1b[0m`);
     this.terminal.writeln('');
     this.terminal.focus();
 
     try {
-      const statusRes = await fetch('/api/gemini/status');
+      const statusRes = await fetch('/api/agy/status');
       const status = (await statusRes.json()).data;
       if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
-        this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
+        this.terminal.writeln('\x1b[1;31m Agy CLI not found.\x1b[0m');
         return;
       }
 
@@ -899,13 +901,12 @@ Object.assign(CodemanApp.prototype, {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseName,
-          mode: 'gemini',
-          geminiConfig: { approvalMode: 'yolo' },
+          mode: 'agy',
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
         })
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
+      if (!data.success) throw new Error(data.error || 'Failed to start Agy');
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -958,6 +959,85 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async runGemini() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+
+    this.terminal.clear();
+    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln('');
+    this.terminal.focus();
+
+    try {
+      const statusRes = await fetch('/api/gemini/status');
+      const status = (await statusRes.json()).data;
+      if (!status.available) {
+        this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
+        this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
+        return;
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'gemini',
+          geminiConfig: { approvalMode: 'yolo' },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+    }
+  },
+
+  async runAgy() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+
+    this.terminal.clear();
+    this.terminal.writeln(`\x1b[1;32m Starting Agy session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln('');
+    this.terminal.focus();
+
+    try {
+      const statusRes = await fetch('/api/agy/status');
+      const status = (await statusRes.json()).data;
+      if (!status.available) {
+        this.terminal.writeln('\x1b[1;31m Agy CLI not found.\x1b[0m');
+        return;
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'agy',
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Agy');
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+    }
+  },
 
   // ═══════════════════════════════════════════════════════════════
   // Session Options Modal
@@ -970,7 +1050,8 @@ Object.assign(CodemanApp.prototype, {
     this.editingSessionId = sessionId;
 
     // Reset to an appropriate tab — Summary for external CLIs (Respawn/Ralph are Claude-only)
-    const isAltMode = session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini';
+    const isAltMode =
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'agy';
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -1000,7 +1081,8 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Hide Claude-specific options for external CLI sessions
-    const isExternalCli = session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini';
+    const isExternalCli =
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'agy';
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isExternalCli ? 'none' : ''; });
 
@@ -3019,6 +3101,6 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
   },
   set(mode) {
     this._runMode =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'claude' ? mode : 'claude';
+      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy' || mode === 'claude' ? mode : 'claude';
   },
 });
