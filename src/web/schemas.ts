@@ -976,6 +976,12 @@ export const SEARCH_SOURCE_TYPES = ['session', 'event', 'file'] as const;
  * integer clamped to 1..60. Validation is the first line of defense — a missing
  * or oversized `q`, an unknown type, or a non-numeric limit is rejected with 400.
  */
+export const LibraryQuerySchema = z.object({
+  q: z.string().trim().max(200).optional().default(''),
+  tag: z.string().trim().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 export const SearchQuerySchema = z.object({
   q: z.string().trim().min(1, 'Query is required').max(200, 'Query too long (max 200 chars)'),
   types: z
