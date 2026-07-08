@@ -11289,6 +11289,51 @@ kbd {
   background: #3a3a5a;
 }
 
+.response-viewer-copy {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #3a3a4f;
+  border-radius: 4px;
+  background: transparent;
+  color: #aaa;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.response-viewer-copy::before { content: '\2398'; }
+
+.response-viewer-copy:hover,
+.response-viewer-copy:active {
+  color: #e0e0ec;
+  border-color: #55556f;
+  background: #2a2a4a;
+}
+
+.response-viewer-copy:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+.response-viewer-copy.rv-copied {
+  color: #9ece6a;
+  border-color: #3a5a3a;
+}
+
+.response-viewer-copy.rv-copied::before { content: '\2713'; }
+
+.response-viewer-copy.rv-copy-failed {
+  color: #f7768e;
+  border-color: #5a3a3a;
+}
+
+.response-viewer-copy.rv-copy-failed::before { content: '\2715'; }
+
 .response-viewer-close {
   background: none;
   border: none;

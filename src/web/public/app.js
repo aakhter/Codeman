@@ -2007,6 +2007,98 @@ class CodemanApp {
     }
   }
 
+  /** Build a portable clipboard fragment from the rendered response viewer. */
+  _prepareResponseViewerClipboard(body) {
+    if (!body) return null;
+
+    const clone = body.cloneNode(true);
+    clone.querySelectorAll('.rv-code-actions').forEach((actions) => actions.remove());
+
+    // These wrappers only provide Codeman scrolling/toolbar behavior. Keep their content.
+    clone.querySelectorAll('.rv-code-wrap, .rv-table-wrap').forEach((wrapper) => {
+      wrapper.replaceWith(...Array.from(wrapper.childNodes));
+    });
+
+    // Retain semantic markup and links, but do not leak app-specific classes or data attributes.
+    const portableAttributes = new Set([
+      'alt', 'colspan', 'height', 'href', 'rowspan', 'src', 'start', 'title', 'type', 'width',
+    ]);
+    clone.querySelectorAll('*').forEach((el) => {
+      Array.from(el.attributes).forEach((attr) => {
+        if (!portableAttributes.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+      });
+    });
+
+    // Small neutral styles survive Office-style paste targets without carrying the dark theme.
+    clone.querySelectorAll('table').forEach((table) => {
+      table.style.borderCollapse = 'collapse';
+    });
+    clone.querySelectorAll('th, td').forEach((cell) => {
+      cell.style.border = '1px solid #999';
+      cell.style.padding = '4px 8px';
+    });
+    clone.querySelectorAll('pre').forEach((pre) => {
+      pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Consolas, monospace';
+      pre.style.whiteSpace = 'pre-wrap';
+    });
+    clone.querySelectorAll('code').forEach((code) => {
+      code.style.fontFamily = 'ui-monospace, SFMono-Regular, Consolas, monospace';
+    });
+    clone.querySelectorAll('blockquote').forEach((quote) => {
+      quote.style.borderLeft = '3px solid #999';
+      quote.style.marginLeft = '0';
+      quote.style.paddingLeft = '12px';
+    });
+
+    const html = clone.innerHTML.trim();
+    const text = (body.innerText || clone.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    return html || text ? { html, text } : null;
+  }
+
+  _setResponseViewerCopyState(success) {
+    const btn = document.getElementById('responseViewerCopy');
+    if (!btn) return;
+    btn.classList.remove('rv-copied', 'rv-copy-failed');
+    btn.classList.add(success ? 'rv-copied' : 'rv-copy-failed');
+    clearTimeout(btn._resetTimer);
+    btn._resetTimer = setTimeout(() => {
+      btn.classList.remove('rv-copied', 'rv-copy-failed');
+    }, 1500);
+  }
+
+  /** Copy the currently displayed response as HTML with a plain-text fallback. */
+  async copyResponseViewerRichText() {
+    const body = document.getElementById('responseViewerBody');
+    const payload = this._prepareResponseViewerClipboard(body);
+    if (!payload) {
+      this._setResponseViewerCopyState(false);
+      this.showToast('No response content to copy', 'warning');
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        throw new Error('Rich clipboard API unavailable');
+      }
+      const item = new ClipboardItem({
+        'text/html': new Blob([payload.html], { type: 'text/html' }),
+        'text/plain': new Blob([payload.text], { type: 'text/plain' }),
+      });
+      await navigator.clipboard.write([item]);
+      this._setResponseViewerCopyState(true);
+      this.showToast('Copied response as rich text', 'success');
+      return;
+    } catch { /* Fall through to the established plain-text copy path. */ }
+
+    const copied = await this._copyText(payload.text);
+    this._setResponseViewerCopyState(copied);
+    if (copied) {
+      this.showToast('Rich clipboard unavailable; copied plain text', 'warning');
+    } else {
+      this.showToast('Failed to copy response', 'error');
+    }
+  }
+
   async toggleResponseViewer() {
     const viewer = document.getElementById('responseViewer');
     const backdrop = document.getElementById('responseViewerBackdrop');
