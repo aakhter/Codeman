@@ -49,6 +49,7 @@ import {
   type SessionMode,
   type OpenCodeConfig,
   type CodexConfig,
+  type AgyConfig,
   type GeminiConfig,
   type EffortLevel,
   type SessionAttachmentHistoryItem,
@@ -167,7 +168,7 @@ const CTRL_L_PATTERN = /\x0c/g;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy';
 }
 
 export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
@@ -210,7 +211,7 @@ function getModeLabel(mode: SessionMode): string {
  * session-routes.ts.
  */
 export function isAltScreenStripMode(mode: SessionMode): boolean {
-  return mode === 'codex' || mode === 'claude' || mode === 'gemini';
+  return mode === 'codex' || mode === 'claude' || mode === 'gemini' || mode === 'agy';
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
@@ -444,6 +445,8 @@ export class Session extends EventEmitter {
   private _openCodeConfig: OpenCodeConfig | undefined;
   // Codex configuration (only for mode === 'codex')
   private _codexConfig: CodexConfig | undefined;
+  // Agy configuration (only for mode === 'agy')
+  private _agyConfig: AgyConfig | undefined;
   // Gemini configuration (only for mode === 'gemini')
   private _geminiConfig: GeminiConfig | undefined;
   // Debug capture (CODEMAN_CODEX_RAW_LOG=1): set to true after the first
@@ -524,6 +527,8 @@ export class Session extends EventEmitter {
       openCodeConfig?: OpenCodeConfig;
       /** Codex configuration (only for mode === 'codex') */
       codexConfig?: CodexConfig;
+      /** Agy configuration (only for mode === 'agy') */
+      agyConfig?: AgyConfig;
       /** Gemini configuration (only for mode === 'gemini') */
       geminiConfig?: GeminiConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
@@ -602,6 +607,10 @@ export class Session extends EventEmitter {
       this._codexConfig = config.codexConfig;
     }
 
+    // Apply Agy configuration
+    if (config.agyConfig) {
+      this._agyConfig = config.agyConfig;
+    }
     // Apply Gemini configuration
     if (config.geminiConfig) {
       this._geminiConfig = config.geminiConfig;
@@ -883,6 +892,11 @@ export class Session extends EventEmitter {
   /** Codex CLI configuration for this session. */
   get codexConfig(): CodexConfig | undefined {
     return this._codexConfig;
+  }
+
+  /** Agy CLI configuration for this session. */
+  get agyConfig(): AgyConfig | undefined {
+    return this._agyConfig;
   }
 
   // Note: _buildPermissionArgs removed — now using buildInteractiveArgs from session-cli-builder.ts
@@ -1183,6 +1197,7 @@ export class Session extends EventEmitter {
       cliLatestVersion: this._cliLatestVersion || undefined,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
+      agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       effort: this._effort,
@@ -1401,6 +1416,7 @@ export class Session extends EventEmitter {
       allowedTools: this._allowedTools,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
+      agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
@@ -1552,6 +1568,7 @@ export class Session extends EventEmitter {
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
             codexConfig: this._codexConfig,
+            agyConfig: this._agyConfig,
             geminiConfig: this._geminiConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
@@ -1634,6 +1651,9 @@ export class Session extends EventEmitter {
       // Gemini sessions require tmux for Gemini/Google auth env injection via setenv
       if (this.mode === 'gemini') {
         throw new Error('Gemini sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      if (this.mode === 'agy') {
+        throw new Error('Agy sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
