@@ -2266,12 +2266,6 @@ Object.assign(CodemanApp.prototype, {
       responseViewerBtn.classList.toggle('btn-response-viewer-header--hidden', !showResponseViewer);
     }
 
-    const showAwayDigest = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
-    const awayDigestBtn = document.querySelector('.btn-away-digest');
-    if (awayDigestBtn) {
-      awayDigestBtn.classList.toggle('btn-away-digest--hidden', !showAwayDigest);
-    }
-
     // Hide the attachments (history) button when disabled. Opt-in, default OFF —
     // marker class, base is display:inline-flex !important.
     const showAttachmentsButton = settings.showAttachmentsButton ?? defaults.showAttachmentsButton ?? false;

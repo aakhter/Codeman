@@ -294,6 +294,76 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  // ═══════════════════════════════════════════════════════════════
+  // Library Modal (COD-63)
+  // ═══════════════════════════════════════════════════════════════
+
+  openLibrary() {
+    const modal = document.getElementById('libraryModal');
+    if (modal) modal.classList.add('active');
+    this._wireLibrarySearch();
+    this.loadLibrary();
+  },
+
+  closeLibrary() {
+    const modal = document.getElementById('libraryModal');
+    if (modal) modal.classList.remove('active');
+  },
+
+  _wireLibrarySearch() {
+    if (this._librarySearchWired) return;
+    this._librarySearchWired = true;
+    const input = document.getElementById('librarySearchInput');
+    if (!input) return;
+    input.addEventListener('input', (e) => {
+      const q = e.target.value;
+      this._debouncedCall('librarySearch', () => this.loadLibrary(q), 300);
+    });
+  },
+
+  async loadLibrary(query = '') {
+    const container = document.getElementById('libraryDocuments');
+    if (!container) return;
+    try {
+      const res = await fetch(`/api/library?q=${encodeURIComponent(query)}&limit=100`);
+      const json = await res.json();
+      if (json.success) {
+        this.renderLibrary(json.data.documents);
+      } else {
+        container.innerHTML = '<p class="empty-message">Failed to load library.</p>';
+      }
+    } catch {
+      container.innerHTML = '<p class="empty-message">Error loading library.</p>';
+    }
+  },
+
+  renderLibrary(docs) {
+    const container = document.getElementById('libraryDocuments');
+    if (!container) return;
+    if (!docs.length) {
+      container.innerHTML = '<p class="empty-message library-empty">No documents found.</p>';
+      return;
+    }
+    container.innerHTML = docs.map((doc) => this.renderLibraryCard(doc)).join('');
+  },
+
+  renderLibraryCard(doc) {
+    const icon = this.getFileIcon?.(doc.extension) || '\u{1F4C4}';
+    const name = escapeHtml(doc.fileName);
+    const session = escapeHtml(doc.sessionName);
+    const path = doc.relativePath
+      ? `<span class="library-card-path">${escapeHtml(doc.relativePath)}</span>`
+      : '';
+    const date = escapeHtml(new Date(doc.addedAt).toLocaleString());
+    return `<div class="library-document-card">
+      <span class="library-card-icon" aria-hidden="true">${icon}</span>
+      <div class="library-card-body">
+        <span class="library-card-name">${name}</span>
+        ${path}
+        <span class="library-card-meta">${session} &middot; ${date}</span>
+      </div>
+    </div>`;
+  },
 
   // ═══════════════════════════════════════════════════════════════
   // Away Digest Modal
