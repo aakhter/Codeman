@@ -3966,6 +3966,7 @@ class CodemanApp {
     // decision depends only on natural tab width vs the fixed narrow area — a stable
     // fixed point. (No paint happens between these class writes and the measure: the
     // browser only repaints after this synchronous frame completes.)
+    const wasWrapped = container.classList.contains('tabs-auto-wrap');
     container.classList.remove('tabs-auto-wrap');
     document.querySelector('.header')?.classList.remove('header--tabs-wrapped');
     const shouldWrap = window.CodemanTabOverflow?.shouldAutoWrapTabs
@@ -3981,6 +3982,10 @@ class CodemanApp {
     container.classList.toggle('tabs-auto-wrap', shouldWrap);
     // COD-147: mirror the final tab-wrap state onto the header so .header-right wraps too.
     this._applyHeaderRightWrap(deviceType, manualTwoRows, shouldWrap);
+    // COD-213: when wrap state changes the header height changes, shrinking/growing the
+    // terminal container. The ResizeObserver fires but with a 300ms debounce — call
+    // fit() immediately so dimensions are correct the instant the layout settles.
+    if (shouldWrap !== wasWrapped) this.fitAddon?.fit();
   }
 
   // COD-147: toggle `header--tabs-wrapped` so the right-side cluster wraps to a
