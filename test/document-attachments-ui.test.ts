@@ -127,6 +127,12 @@ describe('document attachment UI wiring', () => {
     expect(stylesCss).toContain('.document-preview-html');
   });
 
+  it('styles source-preserved Word highlights in the selectable HTML view (COD-218)', () => {
+    expect(stylesCss).toContain('.docx-highlight');
+    expect(stylesCss).toContain('.docx-highlight--red');
+    expect(stylesCss).toContain('--docx-highlight-color: #f00');
+  });
+
   it('makes the preview overlay resizable and persists the size (COD-67)', () => {
     expect(stylesCss).toContain('resize: both');
     expect(panelsJs).toContain('_restorePreviewSize');

@@ -9844,6 +9844,33 @@ kbd {
   padding: 16px 24px;
 }
 
+/* Word highlights carry a named palette value (for example, `red`) in the
+   document XML. The HTML conversion turns that into a trusted class so source
+   markup survives without allowing untrusted inline styles into the preview. */
+.document-preview-html .docx-highlight {
+  background: var(--docx-highlight-color);
+  color: var(--docx-highlight-text, #111);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.document-preview-html .docx-highlight--black { --docx-highlight-color: #000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--blue { --docx-highlight-color: #00f; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--cyan { --docx-highlight-color: #0ff; }
+.document-preview-html .docx-highlight--dark-blue { --docx-highlight-color: #000080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-cyan { --docx-highlight-color: #008080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-gray { --docx-highlight-color: #808080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-green { --docx-highlight-color: #008000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-magenta { --docx-highlight-color: #800080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-red { --docx-highlight-color: #800000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-yellow { --docx-highlight-color: #808000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--green { --docx-highlight-color: #0f0; }
+.document-preview-html .docx-highlight--light-gray { --docx-highlight-color: #c0c0c0; }
+.document-preview-html .docx-highlight--magenta { --docx-highlight-color: #f0f; }
+.document-preview-html .docx-highlight--red { --docx-highlight-color: #f00; }
+.document-preview-html .docx-highlight--white { --docx-highlight-color: #fff; }
+.document-preview-html .docx-highlight--yellow { --docx-highlight-color: #ff0; }
+
 /* docx view switcher (COD-68). */
 .document-view-switch {
   display: inline-flex;
