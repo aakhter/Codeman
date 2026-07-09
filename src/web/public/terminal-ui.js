@@ -1085,8 +1085,9 @@ Object.assign(CodemanApp.prototype, {
 
         const links = [];
 
-        // Pattern 0: URLs (https://, http://) — matched first so they take priority
-        const urlPattern = /https?:\/\/[^\s"'<>|;&)\]\x00-\x1f]+/g;
+        // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
+        // they take priority over file-path patterns.
+        const urlPattern = /(?:https?|webexteams):\/\/[^\s"'<>|;)\]\x00-\x1f]+/g;
 
         const addUrlLink = (url, matchIndex) => {
           // Strip trailing punctuation that's likely not part of the URL
@@ -1104,7 +1105,7 @@ Object.assign(CodemanApp.prototype, {
             },
             decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
-              window.open(text, '_blank', 'noopener,noreferrer');
+              self._openTerminalUrl(text);
             },
           });
         };
@@ -1181,6 +1182,10 @@ Object.assign(CodemanApp.prototype, {
     });
 
     console.log('[LinkProvider] File path link provider registered');
+  },
+
+  _openTerminalUrl(text) {
+    window.open(text, '_blank', 'noopener,noreferrer');
   },
 
   showWelcome() {
