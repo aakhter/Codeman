@@ -38,7 +38,14 @@ interface DocxHighlightSegment {
   text: string;
 }
 
+interface DocxComment {
+  id: string;
+  author: string;
+  text: string;
+}
+
 const NAMED_ENTITIES: Record<string, string> = { amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"' };
+const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
 
 function decodeEntities(value: string): string {
   return value.replace(/&#x([0-9a-f]+);|&#([0-9]+);|&(amp|apos|gt|lt|nbsp|quot);/gi, (_match, hex, decimal, named) => {
@@ -52,6 +59,15 @@ function normalizeText(value: string): string {
   return decodeEntities(value.replace(/<br\s*\/?\s*>/gi, '\n').replace(/<[^>]+>/g, ''))
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, (character) => HTML_ESCAPES[character] || character);
+}
+
+function getWordAttribute(openingTag: string, name: string): string | null {
+  const match = new RegExp(`\\bw:${name}="([^"]*)"`).exec(openingTag);
+  return match ? decodeEntities(match[1]) : null;
 }
 
 function extractRunText(runXml: string): string {
@@ -126,6 +142,87 @@ function applyDocxHighlightClasses(html: string, documentXml: string): string {
   });
 }
 
+function extractDocxComments(commentsXml: string): DocxComment[] {
+  const comments: DocxComment[] = [];
+  const commentPattern = /<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = commentPattern.exec(commentsXml))) {
+    const id = getWordAttribute(match[1], 'id');
+    if (!id) continue;
+
+    const paragraphs: string[] = [];
+    const paragraphPattern = /<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g;
+    let paragraph: RegExpExecArray | null;
+    while ((paragraph = paragraphPattern.exec(match[2]))) {
+      const text = extractRunText(paragraph[1]).trim();
+      if (text) paragraphs.push(text);
+    }
+    const text = paragraphs.join('\n');
+    if (!text) continue;
+
+    comments.push({ id, author: getWordAttribute(match[1], 'author') || 'Unknown author', text });
+  }
+
+  return comments;
+}
+
+function extractDocxCommentAnchors(documentXml: string): Map<string, string> {
+  const anchors = new Map<string, string>();
+  const rangePattern = /<w:commentRangeStart\b([^>]*)\/>([\s\S]*?)<w:commentRangeEnd\b([^>]*)\/>/g;
+  let range: RegExpExecArray | null;
+
+  while ((range = rangePattern.exec(documentXml))) {
+    const startId = getWordAttribute(range[1], 'id');
+    const endId = getWordAttribute(range[3], 'id');
+    const text = extractRunText(range[2]);
+    if (startId && startId === endId && text) anchors.set(startId, text);
+  }
+
+  return anchors;
+}
+
+function renderDocxComments(html: string, documentXml: string, commentsXml: string): string {
+  const comments = extractDocxComments(commentsXml);
+  if (comments.length === 0) return html;
+
+  const anchors = extractDocxCommentAnchors(documentXml);
+  let renderedHtml = html;
+
+  comments.forEach((comment, index) => {
+    const anchor = anchors.get(comment.id);
+    if (!anchor) return;
+
+    let attached = false;
+    renderedHtml = renderedHtml.replace(/<mark(?:\s[^>]*)?>([\s\S]*?)<\/mark>/g, (full, contents: string) => {
+      if (attached || !normalizeText(contents).includes(normalizeText(anchor))) return full;
+      attached = true;
+      const title = escapeHtml(`Comment ${index + 1} by ${comment.author}`);
+      return `${full}<sup class="docx-comment-marker"><a href="#docx-comment-${escapeHtml(comment.id)}" title="${title}">[${index + 1}]</a></sup>`;
+    });
+  });
+
+  const items = comments
+    .map(
+      (comment, index) =>
+        `<li id="docx-comment-${escapeHtml(comment.id)}"><span class="docx-comment-author">[${index + 1}] ${escapeHtml(comment.author)}</span><p>${escapeHtml(comment.text)}</p></li>`
+    )
+    .join('');
+  return `${renderedHtml}<div class="docx-comments"><h2>Word comments</h2><ol>${items}</ol></div>`;
+}
+
+async function readDocxXmlPart(filePath: string, partPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('unzip', ['-p', filePath, partPath], {
+      timeout: PANDOC_TIMEOUT_MS,
+      maxBuffer: PANDOC_MAX_BUFFER,
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Return the diffable text content of a document, or '' for formats we don't
  * extract. md/txt are read as UTF-8; docx is converted to markdown via pandoc.
@@ -154,11 +251,12 @@ export async function convertDocxToHtml(filePath: string): Promise<string> {
     timeout: PANDOC_TIMEOUT_MS,
     maxBuffer: PANDOC_MAX_BUFFER,
   });
-  const { stdout: documentXml } = await execFileAsync('unzip', ['-p', filePath, 'word/document.xml'], {
-    timeout: PANDOC_TIMEOUT_MS,
-    maxBuffer: PANDOC_MAX_BUFFER,
-  });
-  return applyDocxHighlightClasses(stdout, documentXml);
+  const documentXml = await readDocxXmlPart(filePath, 'word/document.xml');
+  if (!documentXml) return stdout;
+
+  const html = applyDocxHighlightClasses(stdout, documentXml);
+  const commentsXml = await readDocxXmlPart(filePath, 'word/comments.xml');
+  return commentsXml ? renderDocxComments(html, documentXml, commentsXml) : html;
 }
 
 /** True when a document extension supports text-based revision diffing. */

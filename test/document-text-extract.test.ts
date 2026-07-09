@@ -72,4 +72,39 @@ describe('extractDocumentText', () => {
       expect.any(Function)
     );
   });
+
+  it('renders Word comments as linked inline markers and a visible review list', async () => {
+    mockedExecFile.mockImplementation((cmd, args, _opts, cb: (e: unknown, r: unknown) => void) => {
+      if (cmd === 'pandoc') {
+        cb(null, { stdout: '<p>Keep <mark>this review cut</mark>.</p>', stderr: '' });
+      } else if (args?.at(-1) === 'word/comments.xml') {
+        cb(null, {
+          stdout:
+            '<w:comments><w:comment w:id="0" w:author="Aamer Akhter">' +
+            '<w:p><w:r><w:t>Remove this cut.</w:t></w:r></w:p>' +
+            '</w:comment></w:comments>',
+          stderr: '',
+        });
+      } else {
+        cb(null, {
+          stdout:
+            '<w:document><w:body><w:p><w:r><w:t>Keep </w:t></w:r>' +
+            '<w:commentRangeStart w:id="0"/>' +
+            '<w:r><w:rPr><w:highlight w:val="red"/></w:rPr><w:t>this review cut</w:t></w:r>' +
+            '<w:commentRangeEnd w:id="0"/>' +
+            '<w:r><w:t>.</w:t></w:r></w:p></w:body></w:document>',
+          stderr: '',
+        });
+      }
+      return {} as never;
+    });
+
+    const html = await convertDocxToHtml('/x/review.docx');
+
+    expect(html).toContain('docx-comment-marker');
+    expect(html).toContain('href="#docx-comment-0"');
+    expect(html).toContain('<div class="docx-comments"');
+    expect(html).toContain('Aamer Akhter');
+    expect(html).toContain('Remove this cut.');
+  });
 });

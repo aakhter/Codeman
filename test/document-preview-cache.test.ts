@@ -99,6 +99,7 @@ describe('document-preview-cache', () => {
     expect(decodedCommand).toContain('.docx');
     expect(decodedCommand).toContain('$output = ');
     expect(decodedCommand).toContain('.pdf');
+    expect(decodedCommand).toContain('ExportAsFixedFormat($output, 17, $false, 0, 0, 0, 0, 7)');
     expect(mockedExecFile).not.toHaveBeenCalledWith(
       'soffice',
       expect.any(Array),

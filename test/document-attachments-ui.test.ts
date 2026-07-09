@@ -131,6 +131,8 @@ describe('document attachment UI wiring', () => {
     expect(stylesCss).toContain('.docx-highlight');
     expect(stylesCss).toContain('.docx-highlight--red');
     expect(stylesCss).toContain('--docx-highlight-color: #f00');
+    expect(stylesCss).toContain('.docx-comment-marker');
+    expect(stylesCss).toContain('.docx-comments');
   });
 
   it('makes the preview overlay resizable and persists the size (COD-67)', () => {

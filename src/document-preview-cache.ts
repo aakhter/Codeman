@@ -37,7 +37,7 @@ try {
   $word.Visible = $false
   $word.DisplayAlerts = 0
   $doc = $word.Documents.Open($source)
-  $doc.ExportAsFixedFormat($output, 17)
+  $doc.ExportAsFixedFormat($output, 17, $false, 0, 0, 0, 0, 7)
 } finally {
   if ($null -ne $doc) {
     $doc.Close($false) | Out-Null
@@ -153,7 +153,7 @@ function createDocumentPreviewCacheKey(
   converter: OfficePreviewConverter
 ): string {
   return createHash('sha256')
-    .update(JSON.stringify({ cacheVersion: 2, converter, filePath, extension, size, mtimeMs }))
+    .update(JSON.stringify({ cacheVersion: 3, converter, filePath, extension, size, mtimeMs }))
     .digest('hex')
     .slice(0, 32);
 }
