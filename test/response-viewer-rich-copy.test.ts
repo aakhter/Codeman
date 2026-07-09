@@ -90,6 +90,19 @@ describe('response viewer rich copy', () => {
     expect(payload?.text).toContain('0. Zero\n1. One');
   });
 
+  it('preserves unordered-list markers in the plain-text clipboard representation', () => {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML =
+      '<ul><li>COD-219 is complete and marked Done.<ul><li>Fixed ordered-list numbers.</li><li>Production was not deployed.</li></ul></li></ul>';
+
+    const payload = app._prepareResponseViewerClipboard(body);
+
+    expect(payload?.text).toContain(
+      '• COD-219 is complete and marked Done.\n• Fixed ordered-list numbers.\n• Production was not deployed.'
+    );
+  });
+
   it('keeps nested ordered lists on a separate plain-text line', () => {
     const body = document.getElementById('responseViewerBody');
     if (!body) throw new Error('missing response viewer body');

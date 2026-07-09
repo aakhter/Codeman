@@ -2058,6 +2058,11 @@ class CodemanApp {
         item.insertBefore(document.createTextNode(`${start + index}. `), item.firstChild);
       });
     });
+    textSource.querySelectorAll('ul').forEach((list) => {
+      Array.from(list.children)
+        .filter((child) => child.tagName === 'LI')
+        .forEach((item) => item.insertBefore(document.createTextNode('• '), item.firstChild));
+    });
     textSource.querySelectorAll('li > ol, li > ul').forEach((list) => list.before(document.createTextNode('\n')));
     textSource.querySelectorAll('tr').forEach((row) => {
       const cells = Array.from(row.children).filter((child) => child.tagName === 'TD' || child.tagName === 'TH');
