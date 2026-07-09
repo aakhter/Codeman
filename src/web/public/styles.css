@@ -11632,6 +11632,20 @@ kbd {
   background: #3a3a5a;
 }
 
+.response-viewer-copy-markdown {
+  white-space: nowrap;
+}
+
+.response-viewer-copy-markdown.rv-copied {
+  color: #9ece6a;
+  border-color: #3a5a3a;
+}
+
+.response-viewer-copy-markdown.rv-copy-failed {
+  color: #f7768e;
+  border-color: #5a3a3a;
+}
+
 .response-viewer-copy {
   width: 28px;
   height: 28px;

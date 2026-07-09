@@ -27,6 +27,7 @@ beforeEach(() => {
       <div id="responseViewerTitle"></div>
       <button id="responseViewerMore"></button>
       <button id="responseViewerCopy"></button>
+      <button id="responseViewerCopyMarkdown"></button>
       <div id="responseViewerBody"></div>
     </div>
     <div id="responseViewerBackdrop"></div>
@@ -72,10 +73,13 @@ describe('response viewer behavior', () => {
 
     expect(document.getElementById('responseViewerBody')?.textContent).toContain('Final polished answer');
     expect(document.getElementById('responseViewerMore')?.style.display).toBe('');
+    expect(app._responseViewerMarkdown).toBe('Final polished answer');
   });
 
   it('renders COD transcript blocks with labels for prompt, response, status, and tool', async () => {
     app.activeSessionId = 's1';
+    const responseMarkdown =
+      '## Final update\n\n- **Preserve** syntax\n- [Open docs](https://example.com)\n\n```ts\nconst ready = true;\n```';
 
     vi.stubGlobal(
       'fetch',
@@ -86,7 +90,7 @@ describe('response viewer behavior', () => {
               { kind: 'prompt', label: 'Prompt', text: 'Ask for naming recommendation' },
               { kind: 'status', label: 'Status', text: 'gpt-5.4 medium · kb · main · Ready · Context 92% left' },
               { kind: 'tool', label: 'Tool', text: '• Explored\n  └ Read SKILL.md' },
-              { kind: 'response', label: 'Response', text: 'Final polished answer' },
+              { kind: 'response', label: 'Response', text: responseMarkdown },
             ],
           },
         }),
@@ -102,6 +106,29 @@ describe('response viewer behavior', () => {
     expect(document.querySelector('.rv-role-response')?.textContent).toBe('Response');
     expect(document.querySelector('.rv-message.rv-msg-tool .rv-text')?.textContent).toContain('Read SKILL.md');
     expect(document.querySelectorAll('.rv-message-copy')).toHaveLength(4);
+    expect(app._responseViewerMarkdown).toBe(responseMarkdown);
+  });
+
+  it('copies raw Markdown from the latest response with success feedback', async () => {
+    const markdown =
+      '## Update\n\n- **Preserve** the syntax\n- [Open docs](https://example.com)\n\n```ts\nconst ready = true;\n```';
+    app._responseViewerMarkdown = markdown;
+
+    await app.copyResponseViewerMarkdown();
+
+    expect(app._copyText).toHaveBeenCalledWith(markdown);
+    expect(app.showToast).toHaveBeenCalledWith('Copied response as Markdown', 'success');
+    expect(document.getElementById('responseViewerCopyMarkdown')?.classList.contains('rv-copied')).toBe(true);
+  });
+
+  it('reports a Markdown copy failure', async () => {
+    app._responseViewerMarkdown = '# Update';
+    app._copyText.mockResolvedValueOnce(false);
+
+    await app.copyResponseViewerMarkdown();
+
+    expect(app.showToast).toHaveBeenCalledWith('Failed to copy response as Markdown', 'error');
+    expect(document.getElementById('responseViewerCopyMarkdown')?.classList.contains('rv-copy-failed')).toBe(true);
   });
 
   it('copies only the last response block when transcript view is showing', () => {

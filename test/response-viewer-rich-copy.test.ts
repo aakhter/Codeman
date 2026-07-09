@@ -158,5 +158,8 @@ describe('response viewer rich copy', () => {
     const html = readFileSync(join(publicDir, 'index.html'), 'utf8');
     expect(html).toContain('id="responseViewerCopy"');
     expect(html).toContain('onclick="app.copyResponseViewerRichText()"');
+    expect(html).toContain('id="responseViewerCopyMarkdown"');
+    expect(html).toContain('onclick="app.copyResponseViewerMarkdown()"');
+    expect(html).toContain('>Copy Markdown</button>');
   });
 });

@@ -490,6 +490,7 @@ class CodemanApp {
     this.terminal = null;
     this.fitAddon = null;
     this.activeSessionId = null;
+    this._responseViewerMarkdown = '';
 
     // ── Session detach / undock (beta) ───────────────────────────────────
     // A "solo window" is a popped-out browser window showing exactly one
@@ -2189,6 +2190,21 @@ class CodemanApp {
     );
   }
 
+  /** Copy the raw Markdown source of the latest response without rendering it first. */
+  async copyResponseViewerMarkdown() {
+    const button = document.getElementById('responseViewerCopyMarkdown');
+    const markdown = this._responseViewerMarkdown || '';
+    if (!markdown) {
+      this._setCopyControlState(button, false);
+      this.showToast('No response content to copy', 'warning');
+      return;
+    }
+
+    const copied = await this._copyText(markdown);
+    this._setCopyControlState(button, copied);
+    this.showToast(copied ? 'Copied response as Markdown' : 'Failed to copy response as Markdown', copied ? 'success' : 'error');
+  }
+
   _renderResponseViewerMessages(body, messages) {
     body.innerHTML = '';
     for (const msg of messages) {
@@ -2253,6 +2269,8 @@ class CodemanApp {
         }
       }
 
+      this._responseViewerMarkdown = lastResponse;
+
       const body = document.getElementById('responseViewerBody');
       body.innerHTML = this._renderMarkdown(lastResponse);
       this._bindResponseViewerInteractions(body);
@@ -2290,6 +2308,12 @@ class CodemanApp {
         body.textContent = 'No conversation history available';
         return;
       }
+
+      const lastResponse = [...messages].reverse().find((msg) => {
+        const kind = msg.kind || (msg.role === 'user' ? 'prompt' : 'response');
+        return kind === 'response';
+      });
+      if (lastResponse) this._responseViewerMarkdown = lastResponse.text || '';
 
       this._renderResponseViewerMessages(body, messages);
 
