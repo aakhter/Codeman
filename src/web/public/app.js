@@ -1861,15 +1861,32 @@ class CodemanApp {
       return `__CODEMAN_FENCE_${placeholders.length - 1}__`;
     });
 
-    // Split on blank-line paragraph boundaries; wrap any paragraph containing
-    // box-drawing/arrow chars in its own fenced block.
+    const looksLikeAsciiArtBlock = (chunk) => {
+      const lines = chunk.split('\n').filter((line) => line.trim());
+      if (lines.length === 0) return false;
+      if (lines.every((line) => /^[-*+]\s|^\d+[.)]\s/.test(line.trim()))) return false;
+      const boxLines = lines.filter((line) => BOX_PATTERN.test(line));
+      if (boxLines.length === 0) return false;
+      // Inline mentions such as "separator lines like ─────" are prose, not diagrams.
+      // Treat a chunk as ASCII art only when multiple lines carry box glyphs,
+      // or when a single non-empty line is predominantly box-drawing content.
+      if (boxLines.length >= 2) return true;
+      const onlyLine = boxLines[0];
+      const nonSpace = onlyLine.replace(/\s+/g, '');
+      const boxChars = (nonSpace.match(/[─-╿▀-▟]/g) || []).length;
+      return nonSpace.length >= 16 && boxChars / nonSpace.length >= 0.45;
+    };
+
+    // Split on blank-line paragraph boundaries; wrap actual box-drawing blocks
+    // in fenced code, but leave ordinary prose that merely mentions those glyphs
+    // alone so response text stays proportional and copy-friendly.
     const processed = masked
       .split(/(\n{2,})/)
       .map((chunk) => {
         if (/^\n{2,}$/.test(chunk)) return chunk; // keep separators
         if (!chunk.trim()) return chunk;
         if (chunk.includes('__CODEMAN_FENCE_')) return chunk;
-        if (BOX_PATTERN.test(chunk)) return '\n```\n' + chunk + '\n```\n';
+        if (looksLikeAsciiArtBlock(chunk)) return '\n```\n' + chunk + '\n```\n';
         return chunk;
       })
       .join('');
@@ -1951,6 +1968,22 @@ class CodemanApp {
     if (!body || body.dataset.rvBound === '1') return;
     body.dataset.rvBound = '1';
     body.addEventListener('click', async (ev) => {
+      const messageCopyBtn = ev.target.closest('.rv-message-copy');
+      if (messageCopyBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const message = messageCopyBtn.closest('.rv-message');
+        const source = message?.querySelector('.rv-text');
+        await this._copyResponseViewerPayload(this._prepareResponseViewerClipboard(source), {
+          controlEl: messageCopyBtn,
+          successMessage: 'Copied section as rich text',
+          fallbackMessage: 'Rich clipboard unavailable; copied section as plain text',
+          emptyMessage: 'No section content to copy',
+          failureMessage: 'Failed to copy section',
+        });
+        return;
+      }
+
       // One-click copy: lift the raw source from the sibling <pre><code>.
       const copyBtn = ev.target.closest('.rv-copy-btn');
       if (copyBtn) {
@@ -2064,6 +2097,10 @@ class CodemanApp {
 
   _setResponseViewerCopyState(success) {
     const btn = document.getElementById('responseViewerCopy');
+    this._setCopyControlState(btn, success);
+  }
+
+  _setCopyControlState(btn, success) {
     if (!btn) return;
     btn.classList.remove('rv-copied', 'rv-copy-failed');
     btn.classList.add(success ? 'rv-copied' : 'rv-copy-failed');
@@ -2073,13 +2110,23 @@ class CodemanApp {
     }, 1500);
   }
 
-  /** Copy the currently displayed response as HTML with a plain-text fallback. */
-  async copyResponseViewerRichText() {
-    const body = document.getElementById('responseViewerBody');
-    const payload = this._prepareResponseViewerClipboard(this._getResponseViewerCopySource(body));
+  async _copyResponseViewerPayload(payload, options = {}) {
+    const {
+      controlEl = null,
+      successMessage = 'Copied response as rich text',
+      fallbackMessage = 'Rich clipboard unavailable; copied plain text',
+      emptyMessage = 'No response content to copy',
+      failureMessage = 'Failed to copy response',
+    } = options;
+
+    const setState = (success) => {
+      if (controlEl) this._setCopyControlState(controlEl, success);
+      else this._setResponseViewerCopyState(success);
+    };
+
     if (!payload) {
-      this._setResponseViewerCopyState(false);
-      this.showToast('No response content to copy', 'warning');
+      setState(false);
+      this.showToast(emptyMessage, 'warning');
       return;
     }
 
@@ -2092,18 +2139,26 @@ class CodemanApp {
         'text/plain': new Blob([payload.text], { type: 'text/plain' }),
       });
       await navigator.clipboard.write([item]);
-      this._setResponseViewerCopyState(true);
-      this.showToast('Copied response as rich text', 'success');
+      setState(true);
+      this.showToast(successMessage, 'success');
       return;
     } catch { /* Fall through to the established plain-text copy path. */ }
 
     const copied = await this._copyText(payload.text);
-    this._setResponseViewerCopyState(copied);
+    setState(copied);
     if (copied) {
-      this.showToast('Rich clipboard unavailable; copied plain text', 'warning');
+      this.showToast(fallbackMessage, 'warning');
     } else {
-      this.showToast('Failed to copy response', 'error');
+      this.showToast(failureMessage, 'error');
     }
+  }
+
+  /** Copy the currently displayed response as HTML with a plain-text fallback. */
+  async copyResponseViewerRichText() {
+    const body = document.getElementById('responseViewerBody');
+    await this._copyResponseViewerPayload(
+      this._prepareResponseViewerClipboard(this._getResponseViewerCopySource(body))
+    );
   }
 
   _renderResponseViewerMessages(body, messages) {
@@ -2114,6 +2169,16 @@ class CodemanApp {
       const div = document.createElement('div');
       div.className = 'rv-message rv-msg-' + kind;
       if (kind === 'response') div.dataset.copyRole = 'response';
+
+      const actions = document.createElement('div');
+      actions.className = 'rv-message-actions';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'rv-message-copy';
+      copyBtn.type = 'button';
+      copyBtn.setAttribute('aria-label', `Copy ${label} block as rich text`);
+      copyBtn.setAttribute('title', `Copy ${label}`);
+      actions.appendChild(copyBtn);
+      div.appendChild(actions);
 
       const role = document.createElement('div');
       role.className = 'rv-role rv-role-' + kind;

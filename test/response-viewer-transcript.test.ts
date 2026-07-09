@@ -64,4 +64,37 @@ gpt-5.4 medium · kb · main · Ready · Context 92% left
 
     expect(getLastTranscriptResponse(blocks)).toBe('Final polished answer\nWith two lines');
   });
+
+  it('drops box-drawing dividers from the last response and treats worked-for lines as status', () => {
+    const transcript = `
+────────────────────────────────────────────────────────────────────────
+
+• The launcher supports CODEMAN_APP_DIR, so I can deploy this exact worktree without merging it back first.
+
+────────────────────────────────────────────────────────────────────────
+
+• Deployed.
+
+The local Codeman service is now running from the worktree at app/.worktrees/cod-215-response-viewer on
+commit 8bbcf77bafbdbf01a34653386c256b685898ad06.
+
+Verified:
+
+- process pid: 2708947
+- HTTPS health: https://127.0.0.1:3000/ returned 401 as expected
+
+One detail: I had to restart it outside the sandbox because the sandboxed launch path could not see tmux.
+
+─ Worked for 1m 51s ───────────────────────────────────────────────────
+
+› what are these lines in the middle column?
+`.trim();
+
+    const blocks = parseExternalCliTranscript(transcript, 'codex');
+
+    expect(getLastTranscriptResponse(blocks)).toContain('• Deployed.');
+    expect(getLastTranscriptResponse(blocks)).not.toContain('────────────────');
+    expect(getLastTranscriptResponse(blocks)).not.toContain('Worked for 1m 51s');
+    expect(blocks.some((block) => block.kind === 'status' && block.text === 'Worked for 1m 51s')).toBe(true);
+  });
 });

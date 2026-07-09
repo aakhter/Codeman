@@ -35,11 +35,23 @@ beforeEach(() => {
   app = Object.create(CodemanApp.prototype);
   app.showToast = vi.fn();
   app._copyText = vi.fn(async () => true);
-  app._bindResponseViewerInteractions = vi.fn();
   app.sessions = new Map();
 });
 
 describe('response viewer behavior', () => {
+  it('does not wrap ordinary prose mentioning box-drawing separators into a code block', () => {
+    const prepared = app._preprocessAsciiArt(
+      [
+        '- the COD transcript included separator lines like ────────────────...',
+        '- it also included the completion banner ─ Worked for 1m 51s ─',
+        '- my parser left those inside the last-response block',
+      ].join('\n')
+    );
+
+    expect(prepared).not.toContain('```');
+    expect(prepared).toContain('Worked for 1m 51s');
+  });
+
   it('shows More for COD sessions when the server reports transcript context', async () => {
     app.activeSessionId = 's1';
     app.sessions.set('s1', { mode: 'codex' });
@@ -89,6 +101,7 @@ describe('response viewer behavior', () => {
     expect(document.querySelector('.rv-role-tool')?.textContent).toBe('Tool');
     expect(document.querySelector('.rv-role-response')?.textContent).toBe('Response');
     expect(document.querySelector('.rv-message.rv-msg-tool .rv-text')?.textContent).toContain('Read SKILL.md');
+    expect(document.querySelectorAll('.rv-message-copy')).toHaveLength(4);
   });
 
   it('copies only the last response block when transcript view is showing', () => {
@@ -107,5 +120,50 @@ describe('response viewer behavior', () => {
     expect(payload?.text).toContain('Final answer');
     expect(payload?.text).not.toContain('Earlier answer');
     expect(payload?.text).not.toContain('User prompt');
+  });
+
+  it('copies a specific transcript block as rich text', async () => {
+    document.body.innerHTML = `
+      <button id="responseViewerCopy"></button>
+      <div id="responseViewerBody">
+        <div class="rv-message rv-msg-prompt">
+          <div class="rv-message-actions"><button class="rv-message-copy" type="button"></button></div>
+          <div class="rv-role rv-role-prompt">Prompt</div>
+          <div class="rv-text"><p>User prompt</p></div>
+        </div>
+        <div class="rv-message rv-msg-response">
+          <div class="rv-message-actions"><button class="rv-message-copy" type="button"></button></div>
+          <div class="rv-role rv-role-response">Response</div>
+          <div class="rv-text"><p>Final answer</p><pre><code>const x = 1;</code></pre></div>
+        </div>
+      </div>
+    `;
+    app._bindResponseViewerInteractions(document.getElementById('responseViewerBody'));
+    const clipboardWrite = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { write: clipboardWrite, writeText: vi.fn(async () => undefined) },
+    });
+    vi.stubGlobal(
+      'ClipboardItem',
+      class {
+        constructor(data) {
+          this.data = data;
+        }
+      }
+    );
+
+    const responseCopyBtn = document.querySelectorAll('.rv-message-copy')[1];
+    responseCopyBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await Promise.resolve();
+
+    expect(clipboardWrite).toHaveBeenCalledTimes(1);
+    const [items] = clipboardWrite.mock.calls[0];
+    const item = items[0];
+    expect(Object.keys(item.data).sort()).toEqual(['text/html', 'text/plain']);
+    expect(item.data['text/plain']).toBeTruthy();
+    expect(item.data['text/html']).toBeTruthy();
+    expect(app.showToast).toHaveBeenCalledWith('Copied section as rich text', 'success');
+    expect(responseCopyBtn.classList.contains('rv-copied')).toBe(true);
   });
 });

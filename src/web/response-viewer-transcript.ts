@@ -12,6 +12,17 @@ function isPromptLine(line: string): boolean {
   return /^\s*›\s*/.test(line);
 }
 
+function normalizeDividerStatusLine(line: string): string | null {
+  const trimmed = line.trim();
+  const matched = trimmed.match(/^[─-]+\s*(.+?)\s*[─-]{3,}$/);
+  if (!matched) return null;
+  return matched[1]?.trim() || null;
+}
+
+function isDividerOnlyLine(line: string): boolean {
+  return /^[\s─-]{8,}$/.test(line.trim());
+}
+
 function isToolHeaderLine(line: string): boolean {
   return /^\s*[•*-]\s+(Explored|Viewed|Read|Edited|Updated|Created|Deleted|Ran|Searched|Opened|Listed|Found|Applied|Patched|Used|Wrote|Executed|Modified|Analyzed|Compared|Fetched|Installed)\b/.test(
     line.trim()
@@ -29,6 +40,7 @@ function isStatusLine(line: string, mode: string): boolean {
   if (!EXTERNAL_CLI_MODES.has(mode)) return false;
   const trimmed = line.trim();
   if (!trimmed) return false;
+  if (normalizeDividerStatusLine(trimmed)) return true;
   if (/^(model|directory):\s+/i.test(trimmed)) return true;
   if (/\bContext\b.*\bleft\b/i.test(trimmed)) return true;
   if (/\b\/model to change\b/i.test(trimmed)) return true;
@@ -152,13 +164,17 @@ function pushBlock(
   lines: string[]
 ): void {
   if (!kind || lines.length === 0) return;
+  const normalizedLines =
+    kind === 'status'
+      ? lines.map((line) => normalizeDividerStatusLine(line) || line.trim()).filter((line) => line.length > 0)
+      : lines;
   const text =
     kind === 'tool' || kind === 'status'
-      ? lines
+      ? normalizedLines
           .join('\n')
           .replace(/\n{3,}/g, '\n\n')
           .trim()
-      : normalizeWrappedText(lines);
+      : normalizeWrappedText(normalizedLines);
   if (!text) return;
   const label = (kind.charAt(0).toUpperCase() + kind.slice(1)) as ResponseViewerTranscriptBlock['label'];
   blocks.push({ kind, label, text });
@@ -190,6 +206,11 @@ export function parseExternalCliTranscript(
   };
 
   for (const line of lines) {
+    if (isDividerOnlyLine(line)) {
+      flush();
+      continue;
+    }
+
     if (isPromptLine(line)) {
       flush();
       currentKind = 'prompt';

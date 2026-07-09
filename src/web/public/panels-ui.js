@@ -3690,9 +3690,20 @@ Object.assign(CodemanApp.prototype, {
     const footerEl = this.$('filePreviewFooter');
     if (!bodyEl) return;
     const bust = (url) => (data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url);
+    const st = this.filePreviewState;
+    if (st) {
+      st.previewKind = null;
+      st.previewCopyUrl = null;
+    }
+    this.filePreviewContent = '';
 
     if (data.type === 'image') {
       this.filePreviewZoom = 1;
+      const imageUrl = bust(data.previewUrl || data.url);
+      if (st) {
+        st.previewKind = 'image';
+        st.previewCopyUrl = imageUrl;
+      }
       bodyEl.innerHTML = `
         <div class="document-preview-toolbar">
           <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('out')" title="Zoom out">-</button>
@@ -3700,7 +3711,7 @@ Object.assign(CodemanApp.prototype, {
           <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('in')" title="Zoom in">+</button>
         </div>
         <div class="document-preview-stage">
-          <img class="document-preview-image" src="${bust(data.previewUrl || data.url)}" alt="${escapeHtml(filePath)}">
+          <img class="document-preview-image" src="${imageUrl}" alt="${escapeHtml(filePath)}">
         </div>
       `;
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
@@ -5083,12 +5094,46 @@ Object.assign(CodemanApp.prototype, {
   },
 
   copyFilePreviewContent() {
+    if (this.filePreviewState?.previewKind === 'image') {
+      return this._copyFilePreviewImage();
+    }
     if (this.filePreviewContent) {
       navigator.clipboard.writeText(this.filePreviewContent).then(() => {
         this.showToast('Copied to clipboard', 'success');
       }).catch(() => {
         this.showToast('Failed to copy', 'error');
       });
+    }
+  },
+
+  async _copyFilePreviewImage() {
+    const imageUrl = this.filePreviewState?.previewCopyUrl;
+    if (!imageUrl) {
+      this.showToast('Failed to copy image to clipboard', 'error');
+      return false;
+    }
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        throw new Error('Image clipboard API unavailable');
+      }
+      const res = await fetch(imageUrl);
+      if (!res.ok) throw new Error(`Failed to fetch image (${res.status})`);
+      let blob = await res.blob();
+      const contentType = res.headers?.get?.('content-type') || '';
+      if ((!blob.type || blob.type === 'application/octet-stream') && contentType.startsWith('image/')) {
+        blob = new Blob([blob], { type: contentType });
+      }
+      if (!blob.type.startsWith('image/')) {
+        throw new Error(`Unexpected clipboard type: ${blob.type || 'unknown'}`);
+      }
+      const item = new ClipboardItem({ [blob.type]: blob });
+      await navigator.clipboard.write([item]);
+      this.showToast('Copied image to clipboard', 'success');
+      return true;
+    } catch (err) {
+      console.error('Failed to copy preview image:', err);
+      this.showToast('Failed to copy image to clipboard', 'error');
+      return false;
     }
   },
 
