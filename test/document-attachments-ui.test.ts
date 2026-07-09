@@ -132,6 +132,8 @@ describe('document attachment UI wiring', () => {
     expect(stylesCss).toContain('.docx-highlight--red');
     expect(stylesCss).toContain('--docx-highlight-color: #f00');
     expect(stylesCss).toContain('.docx-comment-marker');
+    expect(stylesCss).toContain('.docx-comment-card');
+    expect(panelsJs).toContain('_bindDocxCommentInspector');
     expect(stylesCss).toContain('.docx-comments');
   });
 

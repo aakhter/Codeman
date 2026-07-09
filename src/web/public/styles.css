@@ -9877,6 +9877,52 @@ kbd {
   font-weight: 700;
   vertical-align: super;
 }
+.document-preview-html .docx-comment-button {
+  padding: 0;
+  border: 0;
+  color: var(--accent, #7aa2ff);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.document-preview-html .docx-comment-button:hover {
+  text-decoration: underline;
+}
+.document-preview-html .docx-comment-button:focus-visible,
+.document-preview-html .docx-comment-close:focus-visible {
+  outline: 2px solid var(--accent, #7aa2ff);
+  outline-offset: 2px;
+}
+.document-preview-html .docx-comment-card {
+  display: block;
+  margin: 8px 0 10px;
+  padding: 9px 10px;
+  border-left: 3px solid var(--accent, #7aa2ff);
+  border-radius: 0 5px 5px 0;
+  background: var(--bg-secondary, #161616);
+}
+.document-preview-html .docx-comment-card[hidden] {
+  display: none;
+}
+.document-preview-html .docx-comment-text {
+  display: block;
+  margin-top: 3px;
+  white-space: pre-wrap;
+}
+.document-preview-html .docx-comment-close {
+  margin: 7px 0 0;
+  padding: 2px 6px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 4px;
+  color: var(--accent, #7aa2ff);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+}
+.document-preview-html .docx-comment-close:hover {
+  background: var(--bg-hover, rgba(122, 162, 255, 0.14));
+}
 .document-preview-html .docx-comment-marker a {
   color: var(--accent, #7aa2ff);
   text-decoration: none;

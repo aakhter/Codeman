@@ -3680,6 +3680,56 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Keep imported Word comments local to their annotated passage. The generated
+   * buttons only carry sanitized IDs; this delegated handler owns all state and
+   * deliberately never changes the preview's scroll position.
+   */
+  _bindDocxCommentInspector(bodyEl) {
+    const preview = bodyEl?.querySelector('.document-preview-html');
+    if (!preview || preview.dataset.docxCommentInspectorBound) return;
+    preview.dataset.docxCommentInspectorBound = '1';
+
+    const buttonForCard = (card) =>
+      [...preview.querySelectorAll('.docx-comment-button')].find(
+        (button) => button.getAttribute('aria-controls') === card.id
+      );
+    const setOpen = (card, open, restoreFocus = false) => {
+      preview.querySelectorAll('.docx-comment-card').forEach((otherCard) => {
+        const otherButton = buttonForCard(otherCard);
+        otherCard.hidden = otherCard !== card || !open;
+        otherButton?.setAttribute('aria-expanded', otherCard === card && open ? 'true' : 'false');
+      });
+      if (restoreFocus) buttonForCard(card)?.focus();
+    };
+
+    preview.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const closeButton = target?.closest('.docx-comment-close');
+      if (closeButton) {
+        event.preventDefault();
+        const card = closeButton.closest('.docx-comment-card');
+        if (card) setOpen(card, false, true);
+        return;
+      }
+      const button = target?.closest('.docx-comment-button');
+      if (!button) return;
+      event.preventDefault();
+      const cardId = button.getAttribute('aria-controls');
+      const card = [...preview.querySelectorAll('.docx-comment-card')].find((item) => item.id === cardId);
+      if (!card) return;
+      setOpen(card, card.hidden);
+    });
+
+    preview.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const card = [...preview.querySelectorAll('.docx-comment-card')].find((item) => !item.hidden);
+      if (!card) return;
+      event.preventDefault();
+      setOpen(card, false, true);
+    });
+  },
+
+  /**
    * Render the preview body for the given metadata. Used both for the initial
    * open and for live-refresh, so it must be idempotent and not assume a loading
    * state. Markdown/plain-text re-fetch raw content; image/pdf get an mtime
@@ -3733,6 +3783,7 @@ Object.assign(CodemanApp.prototype, {
         }
         const safe = typeof this._sanitizeHtml === 'function' ? this._sanitizeHtml(html) : escapeHtml(html);
         bodyEl.innerHTML = `<div class="document-preview-html rv-text">${safe}</div>`;
+        this._bindDocxCommentInspector(bodyEl);
       } else {
         const previewUrl =
           data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;

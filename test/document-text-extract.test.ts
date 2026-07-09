@@ -73,7 +73,7 @@ describe('extractDocumentText', () => {
     );
   });
 
-  it('renders Word comments as linked inline markers and a visible review list', async () => {
+  it('renders Word comments as local inline inspectors and a visible review list', async () => {
     mockedExecFile.mockImplementation((cmd, args, _opts, cb: (e: unknown, r: unknown) => void) => {
       if (cmd === 'pandoc') {
         cb(null, { stdout: '<p>Keep <mark>this review cut</mark>.</p>', stderr: '' });
@@ -102,7 +102,11 @@ describe('extractDocumentText', () => {
     const html = await convertDocxToHtml('/x/review.docx');
 
     expect(html).toContain('docx-comment-marker');
-    expect(html).toContain('href="#docx-comment-0"');
+    expect(html).toContain('docx-comment-button');
+    expect(html).toContain('aria-controls="docx-comment-card-0"');
+    expect(html).toContain('class="docx-comment-card"');
+    expect(html).toContain('hidden');
+    expect(html).not.toContain('href="#docx-comment-0"');
     expect(html).toContain('<div class="docx-comments"');
     expect(html).toContain('Aamer Akhter');
     expect(html).toContain('Remove this cut.');

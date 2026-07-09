@@ -198,7 +198,16 @@ function renderDocxComments(html: string, documentXml: string, commentsXml: stri
       if (attached || !normalizeText(contents).includes(normalizeText(anchor))) return full;
       attached = true;
       const title = escapeHtml(`Comment ${index + 1} by ${comment.author}`);
-      return `${full}<sup class="docx-comment-marker"><a href="#docx-comment-${escapeHtml(comment.id)}" title="${title}">[${index + 1}]</a></sup>`;
+      const cardId = `docx-comment-card-${escapeHtml(comment.id)}`;
+      return (
+        `${full}<sup class="docx-comment-marker">` +
+        `<a href="#${cardId}" class="docx-comment-button" title="${title}" aria-expanded="false" aria-controls="${cardId}">[${index + 1}]</a>` +
+        `</sup><span id="${cardId}" class="docx-comment-card" hidden>` +
+        `<span class="docx-comment-author">[${index + 1}] ${escapeHtml(comment.author)}</span>` +
+        `<span class="docx-comment-text">${escapeHtml(comment.text)}</span>` +
+        `<a href="#${cardId}" class="docx-comment-close" aria-label="Close comment ${index + 1}">Close</a>` +
+        `</span>`
+      );
     });
   });
 
