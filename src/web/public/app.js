@@ -2047,6 +2047,29 @@ class CodemanApp {
     return body;
   }
 
+  _getResponseViewerPlainText(source) {
+    const textSource = source.cloneNode(true);
+    textSource.querySelectorAll('br').forEach((lineBreak) => lineBreak.replaceWith(document.createTextNode('\n')));
+    textSource.querySelectorAll('ol').forEach((list) => {
+      const parsedStart = Number.parseInt(list.getAttribute('start') || '1', 10);
+      const start = Number.isNaN(parsedStart) ? 1 : parsedStart;
+      const items = Array.from(list.children).filter((child) => child.tagName === 'LI');
+      items.forEach((item, index) => {
+        item.insertBefore(document.createTextNode(`${start + index}. `), item.firstChild);
+      });
+    });
+    textSource.querySelectorAll('li > ol, li > ul').forEach((list) => list.before(document.createTextNode('\n')));
+    textSource.querySelectorAll('tr').forEach((row) => {
+      const cells = Array.from(row.children).filter((child) => child.tagName === 'TD' || child.tagName === 'TH');
+      cells.slice(1).forEach((cell) => cell.before(document.createTextNode('\t')));
+    });
+    textSource.querySelectorAll('blockquote, div, h1, h2, h3, h4, h5, h6, hr, li, p, pre, tr').forEach((block) => {
+      block.after(document.createTextNode('\n'));
+    });
+
+    return (textSource.innerText || textSource.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
   /** Build a portable clipboard fragment from the rendered response viewer. */
   _prepareResponseViewerClipboard(body) {
     if (!body) return null;
@@ -2091,7 +2114,7 @@ class CodemanApp {
     });
 
     const html = clone.innerHTML.trim();
-    const text = (body.innerText || clone.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    const text = this._getResponseViewerPlainText(clone);
     return html || text ? { html, text } : null;
   }
 

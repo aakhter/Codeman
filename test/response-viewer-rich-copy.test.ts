@@ -69,6 +69,57 @@ describe('response viewer rich copy', () => {
     expect(payload.text).toContain('const answer = 42;');
   });
 
+  it('preserves ordered-list markers in the plain-text clipboard representation', () => {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML =
+      '<p>Priorities:</p><ol start="3"><li>Fix the copy path</li><li>Preserve <strong>all</strong> list content</li></ol><p>Then verify it.</p>';
+
+    const payload = app._prepareResponseViewerClipboard(body);
+
+    expect(payload?.text).toContain('Priorities:\n3. Fix the copy path\n4. Preserve all list content\nThen verify it.');
+  });
+
+  it('preserves a zero-based ordered-list start in the plain-text clipboard representation', () => {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML = '<ol start="0"><li>Zero</li><li>One</li></ol>';
+
+    const payload = app._prepareResponseViewerClipboard(body);
+
+    expect(payload?.text).toContain('0. Zero\n1. One');
+  });
+
+  it('keeps nested ordered lists on a separate plain-text line', () => {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML = '<ol><li>Parent<ol><li>Child</li></ol></li></ol>';
+
+    const payload = app._prepareResponseViewerClipboard(body);
+
+    expect(payload?.text).toContain('1. Parent\n1. Child');
+  });
+
+  it('separates table cells in the plain-text clipboard representation', () => {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML = '<table><tr><th>Key</th><th>Value</th></tr><tr><td>A</td><td>B</td></tr></table>';
+
+    const payload = app._prepareResponseViewerClipboard(body);
+
+    expect(payload?.text).toContain('Key\tValue\nA\tB');
+  });
+
+  it('preserves boundaries around raw block elements in plain-text copies', () => {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML = '<div>First block</div><hr><div>Second block</div>';
+
+    const payload = app._prepareResponseViewerClipboard(body);
+
+    expect(payload?.text).toContain('First block\n\nSecond block');
+  });
+
   it('writes text/html and text/plain representations in one clipboard item', async () => {
     await app.copyResponseViewerRichText();
 
