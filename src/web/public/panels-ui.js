@@ -4831,6 +4831,7 @@ Object.assign(CodemanApp.prototype, {
           <button type="button" class="attachment-preview-btn">Preview</button>
           <a href="${escapeHtml(downloadUrl)}">Download</a>
           <button type="button" class="attachment-open-btn">Open</button>
+          <button type="button" class="attachment-go-session-btn" title="Switch to this session">Go to session</button>
         </div>
       </div>
       <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
@@ -4849,6 +4850,9 @@ Object.assign(CodemanApp.prototype, {
     });
     card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
       this.openAttachmentInNewTab(sessionId, filePath, attachmentId || null);
+    });
+    card.querySelector('.attachment-go-session-btn')?.addEventListener('click', () => {
+      this.selectSession(sessionId);
     });
     card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
       this.closeAttachmentCard(cardId);
@@ -5855,6 +5859,7 @@ Object.assign(CodemanApp.prototype, {
           <button type="button" class="attachment-preview-btn">Preview</button>
           <a href="${escapeHtml(downloadUrl)}">Download</a>
           <button type="button" class="attachment-open-btn">Open</button>
+          <button type="button" class="attachment-go-session-btn" title="Switch to this session">Go to session</button>
         </div>
       </div>
       <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
@@ -5873,6 +5878,9 @@ Object.assign(CodemanApp.prototype, {
     });
     card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
       this.openAttachmentInNewTab(sessionId, filePath, attachmentId || null);
+    });
+    card.querySelector('.attachment-go-session-btn')?.addEventListener('click', () => {
+      this.selectSession(sessionId);
     });
     card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
       this.closeAttachmentCard(cardId);

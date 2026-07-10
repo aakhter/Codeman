@@ -162,4 +162,16 @@ describe('document attachment UI wiring', () => {
     expect(mobileCss).toContain('.attachment-history-drawer');
     expect(mobileCss).toContain('height: 100dvh');
   });
+
+  it('has a go-to-session button on attachment cards that switches without dismissing (COD-217)', () => {
+    // Button class must exist in the card markup
+    expect(panelsJs).toContain('attachment-go-session-btn');
+    // The button handler must call selectSession — verified by finding the listener block
+    const goHandlerIdx = panelsJs.indexOf("querySelector('.attachment-go-session-btn')");
+    expect(goHandlerIdx).toBeGreaterThan(-1);
+    const goHandlerBody = panelsJs.slice(goHandlerIdx, goHandlerIdx + 200);
+    expect(goHandlerBody).toContain('selectSession(sessionId)');
+    // The go-session handler must NOT close the card
+    expect(goHandlerBody).not.toContain('closeAttachmentCard');
+  });
 });
