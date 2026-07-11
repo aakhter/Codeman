@@ -3940,6 +3940,9 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   white-space: nowrap;
   cursor: pointer;
   transition: all var(--transition-smooth);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .btn-skills-chip:hover {
