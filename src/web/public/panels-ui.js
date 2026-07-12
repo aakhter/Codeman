@@ -3749,6 +3749,7 @@ Object.assign(CodemanApp.prototype, {
 
     if (data.type === 'image') {
       this.filePreviewZoom = 1;
+      this.filePreviewZoomMode = 'fit';
       const imageUrl = bust(data.previewUrl || data.url);
       if (st) {
         st.previewKind = 'image';
@@ -3764,6 +3765,13 @@ Object.assign(CodemanApp.prototype, {
           <img class="document-preview-image" src="${imageUrl}" alt="${escapeHtml(filePath)}">
         </div>
       `;
+      const image = bodyEl.querySelector('.document-preview-image');
+      const fitWhenReady = () => {
+        if (this.filePreviewZoomMode === 'fit') this._fitFilePreviewImage();
+      };
+      image?.addEventListener('load', fitWhenReady, { once: true });
+      // Cached images may already be complete before the load listener is bound.
+      if (image?.complete) requestAnimationFrame(fitWhenReady);
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'video') {
       bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
@@ -4646,16 +4654,47 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  _fitFilePreviewImage() {
+    const img = document.querySelector('.document-preview-image');
+    const stage = img?.closest('.document-preview-stage');
+    if (!img || !stage) return false;
+    const body = stage.parentElement;
+    const toolbar = body?.querySelector('.document-preview-toolbar');
+    const style = getComputedStyle(stage);
+    // The stage's auto height can grow to the intrinsic image height. Measure
+    // the fixed preview body instead so a tall image is fitted to the visible
+    // viewport, not to the overflow area it created itself.
+    const containerWidth = body?.clientWidth || stage.clientWidth;
+    const containerHeight = body?.clientHeight
+      ? body.clientHeight - (toolbar?.offsetHeight || 0)
+      : stage.clientHeight;
+    const availableWidth = containerWidth - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
+    const availableHeight = containerHeight - parseFloat(style.paddingTop || '0') - parseFloat(style.paddingBottom || '0');
+    const imageWidth = img.offsetWidth;
+    const imageHeight = img.offsetHeight;
+    if (availableWidth <= 0 || availableHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) return false;
+
+    this.filePreviewZoom = Math.min(1, availableWidth / imageWidth, availableHeight / imageHeight);
+    img.style.transform = `scale(${this.filePreviewZoom})`;
+    return true;
+  },
+
   setFilePreviewZoom(action) {
     const img = document.querySelector('.document-preview-image');
     if (!img) return;
     if (action === 'fit') {
-      this.filePreviewZoom = 1;
-    } else if (action === 'in') {
-      this.filePreviewZoom = Math.min(4, (this.filePreviewZoom || 1) + 0.25);
-    } else if (action === 'out') {
-      this.filePreviewZoom = Math.max(0.25, (this.filePreviewZoom || 1) - 0.25);
+      this.filePreviewZoomMode = 'fit';
+      this._fitFilePreviewImage();
+      return;
     }
+    const currentZoom = this.filePreviewZoom || 1;
+    const zoomFactor = 1.25;
+    if (action === 'in') {
+      this.filePreviewZoom = Math.min(4, currentZoom * zoomFactor);
+    } else if (action === 'out') {
+      this.filePreviewZoom = currentZoom / zoomFactor;
+    }
+    this.filePreviewZoomMode = 'manual';
     img.style.transform = `scale(${this.filePreviewZoom})`;
   },
 
@@ -4681,6 +4720,7 @@ Object.assign(CodemanApp.prototype, {
     }
     if (!this._filePreviewResizeObs && typeof ResizeObserver !== 'undefined') {
       this._filePreviewResizeObs = new ResizeObserver(() => {
+        if (this.filePreviewZoomMode === 'fit') this._fitFilePreviewImage();
         clearTimeout(this._filePreviewResizeSaveTimer);
         this._filePreviewResizeSaveTimer = setTimeout(() => {
           try {
