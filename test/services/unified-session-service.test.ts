@@ -30,6 +30,60 @@ describe('mergeUnifiedSessions', () => {
     expect(item.isWorking).toBe(true);
   });
 
+  it('folds a resumed session transcript (claudeSessionId != id) into ONE row', () => {
+    const merged = mergeUnifiedSessions({
+      live: [{ id: 'cm-1', status: 'working', claudeSessionId: 'uuid-resume' }],
+      history: [
+        {
+          sessionId: 'uuid-resume', // transcript rows are keyed by the conversation UUID
+          workingDir: '/w',
+          sizeBytes: 7000,
+          lastModified: '2026-01-03T00:00:00.000Z',
+          firstPrompt: 'resumed prompt',
+        },
+      ],
+    });
+    expect(merged).toHaveLength(1);
+    const item = merged[0];
+    expect(item.sessionId).toBe('cm-1');
+    expect([...item.sources].sort()).toEqual(['history', 'live']);
+    expect(item.firstPrompt).toBe('resumed prompt');
+    expect(item.sizeBytes).toBe(7000);
+  });
+
+  it('resolves history rows through a persisted claudeSessionId alias', () => {
+    const merged = mergeUnifiedSessions({
+      persisted: [{ id: 'cm-2', name: 'Resumed', claudeSessionId: 'uuid-p' }],
+      history: [{ sessionId: 'uuid-p', workingDir: '/w', sizeBytes: 4200, lastModified: '2026-01-04T00:00:00.000Z' }],
+    });
+    expect(merged).toHaveLength(1);
+    expect(merged[0].sessionId).toBe('cm-2');
+    expect([...merged[0].sources].sort()).toEqual(['history', 'persisted']);
+  });
+
+  it('surfaces the NEWEST lifecycle name/mode (entries arrive newest-first)', () => {
+    const merged = mergeUnifiedSessions({
+      // query() returns newest-first: the rename must win over the original
+      // name — an unconditional overwrite would leave the OLDEST standing.
+      lifecycle: [
+        { sessionId: 'del-1', name: 'Renamed', mode: 'claude', ts: 2000, event: 'deleted' },
+        { sessionId: 'del-1', name: 'Original', mode: 'shell', ts: 1000, event: 'created' },
+      ],
+      history: [
+        {
+          sessionId: 'del-1',
+          workingDir: '/w',
+          sizeBytes: 5000,
+          lastModified: '2026-01-01T00:00:00.000Z',
+          firstPrompt: 'hello',
+        },
+      ],
+    });
+    expect(merged).toHaveLength(1);
+    expect(merged[0].name).toBe('Renamed');
+    expect(merged[0].mode).toBe('claude');
+  });
+
   it('lets live status win over persisted (precedence)', () => {
     const merged = mergeUnifiedSessions({
       persisted: [{ id: 's1', status: 'idle', name: 'Persisted Name' }],
@@ -93,7 +147,6 @@ describe('mergeUnifiedSessions', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].lastActivityAt).toBe(new Date('2026-01-01T00:00:00.000Z').getTime());
   });
-
   it('surfaces projectKey from a history input onto the merged item', () => {
     const merged = mergeUnifiedSessions({
       history: [
@@ -129,10 +182,9 @@ describe('mergeUnifiedSessions', () => {
     const live = merged.find((m) => m.sessionId === 'codeman-1');
     expect(live).toBeDefined();
     expect(live!.firstPrompt).toBe('fix the bug');
-    // the history row keyed by its own UUID stays its own separate item
+    // The history row keyed by the conversation UUID folds into the live owner.
     const hist = merged.find((m) => m.sessionId === 'uuid-A');
-    expect(hist).toBeDefined();
-    expect(hist!.firstPrompt).toBe('fix the bug');
+    expect(hist).toBeUndefined();
   });
 
   it('falls back to the workingDir transcript when no uuid join exists (workingDir fallback)', () => {
@@ -233,10 +285,9 @@ describe('mergeUnifiedSessions', () => {
     const live = merged.find((m) => m.sessionId === 'codeman-l1');
     expect(live).toBeDefined();
     expect(live!.lastPrompt).toBe('now ship it');
-    // the history row keyed by its own UUID also carries lastPrompt
+    // The aliased history row does not surface as a duplicate.
     const hist = merged.find((m) => m.sessionId === 'uuid-LA');
-    expect(hist).toBeDefined();
-    expect(hist!.lastPrompt).toBe('now ship it');
+    expect(hist).toBeUndefined();
   });
 
   it('falls back to the workingDir transcript for lastPrompt when no uuid join exists (workingDir fallback)', () => {

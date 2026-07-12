@@ -399,9 +399,6 @@ Object.assign(CodemanApp.prototype, {
     // Lazy-loaded: script downloaded only on desktop (saves 244KB on mobile).
     this._webglAddon = null;
     const _params = new URLSearchParams(location.search);
-    if (_params.get('webgl') === 'force') {
-      try { localStorage.removeItem('codeman-webgl-disabled'); } catch {}
-    }
     const _stickyDisabled = (() => {
       try {
         const raw = localStorage.getItem('codeman-webgl-disabled');
@@ -416,11 +413,25 @@ Object.assign(CodemanApp.prototype, {
         return true;
       } catch { return false; }
     })();
-    const skipWebGL =
-      MobileDetection.getDeviceType() !== 'desktop' ||
-      _params.has('nowebgl') ||
-      _stickyDisabled;
-    if (_stickyDisabled) {
+    // User's "WebGL Renderer" toggle (Settings > Appearance). undefined = untouched
+    // (desktop default on); false = explicit opt-out; true = explicit opt-in.
+    const _webglSettings = this.loadAppSettingsFromStorage();
+    const _webglDefaults = this.getDefaultSettings();
+    const _webglPref = _webglSettings.webglRendererEnabled ?? _webglDefaults.webglRendererEnabled;
+    const { skip: skipWebGL, clearSticky: _clearWebglSticky } = shouldSkipWebGL({
+      deviceType: MobileDetection.getDeviceType(),
+      noWebglParam: _params.has('nowebgl'),
+      forceParam: _params.get('webgl') === 'force',
+      stickyDisabled: _stickyDisabled,
+      userPrefEnabled: _webglPref,
+    });
+    // Only ?webgl=force retires the auto-fallback marker at init — a stored
+    // toggle ON is incidental (checkbox defaults checked) and must not defeat
+    // the sticky safety net. An OFF→ON flip clears it in saveAppSettings().
+    if (_clearWebglSticky) {
+      try { localStorage.removeItem('codeman-webgl-disabled'); } catch {}
+    }
+    if (skipWebGL && _stickyDisabled) {
       console.log('[CRASH-DIAG] WebGL sticky-disabled from prior stalls — DOM renderer in use. Re-enable: ?webgl=force');
     }
     if (!skipWebGL) {
@@ -452,6 +463,25 @@ Object.assign(CodemanApp.prototype, {
       });
     }
 
+    // ── Focus router ──
+    // While the CJK field is visible, EVERY terminal.focus() call must land on
+    // the CJK field instead. Focusing xterm's hidden textarea in CJK mode sends
+    // the IME's output into a black hole: the keyboard composes normally, but
+    // onData is gated by cjkActive, so nothing reaches the field OR the PTY.
+    // Session select / SSE-reconnect restore paths call terminal.focus() and
+    // were silently stealing focus after every app switch on mobile (the
+    // intermittent "Chinese input goes nowhere" bug). One chokepoint here
+    // covers all ~15 call sites plus any future ones.
+    const _xtermFocus = this.terminal.focus.bind(this.terminal);
+    this.terminal.focus = () => {
+      const cjkEl = document.getElementById('cjkInput');
+      if (cjkEl?.classList.contains('cjk-input-visible')) {
+        cjkEl.focus();
+      } else {
+        _xtermFocus();
+      }
+    };
+
     // On mobile Safari, delay initial fit() to allow layout to settle
     // This prevents 0-column terminals caused by fit() running before container is sized
     const isMobileSafari =
@@ -470,13 +500,20 @@ Object.assign(CodemanApp.prototype, {
     // Register link provider for clickable file paths in Bash tool output
     this.registerFilePathLinkProvider();
 
-    // Always use mouse wheel for terminal scrollback, never forward to application.
-    // Prevents Claude's Ink UI (plan mode selector) from capturing scroll as option navigation.
-    // COD-187: CAPTURE phase + stopPropagation — xterm's internal viewport wheel
-    // handler stops propagation itself, so a bubble listener here never fires for
-    // wheels over the terminal canvas (it only ever saw container gutter wheels).
-    // Capturing makes this funnel the single wheel owner: exactly one scroll per
-    // event, and mirror tabs can turn up-scroll intent into the history view.
+    // Mouse wheel: forward to the TUI only for sessions verified to handle SGR
+    // wheel reports (codex, and claude 2.1.187+ — see _shouldForwardWheelToApp),
+    // local scrollback otherwise. Claude Code 2.1.187+ scrolls its own
+    // transcript on SGR wheel reports — scrolled-away tool blocks re-render
+    // live and stay clickable — and its select menus no longer capture wheel
+    // as option navigation (verified against 2.1.202: /model menu highlight
+    // ignores wheel reports); older versions DO capture wheel as option
+    // navigation, so they keep the local wheel.
+    // Shift+wheel always scrolls xterm's local scrollback (Codeman's restored
+    // history lives there), and once the viewport left the bottom the wheel
+    // stays local until the user scrolls back down — so both scrollbacks stay
+    // reachable without a mode switch. COD-187 live-mirror tabs retain first
+    // ownership of scroll intent so an up-scroll can open their frozen history.
+    // CAPTURE phase + stopPropagation makes this funnel the single wheel owner.
     container.addEventListener(
       'wheel',
       (ev) => {
@@ -484,6 +521,12 @@ Object.assign(CodemanApp.prototype, {
         ev.preventDefault();
         ev.stopPropagation();
         const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
+        const isLiveMirror =
+          this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
+        if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
+          this._sendSyntheticSgrWheel(ev.clientX, ev.clientY, lines);
+          return;
+        }
         this._handleUserScrollIntent(lines);
       },
       { passive: false, capture: true }
@@ -625,6 +668,15 @@ Object.assign(CodemanApp.prototype, {
             }
             if (touch && mouseTrackingOn) {
               this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
+            } else if (touch && this._sessionUsesServerMouseStrip()) {
+              // The server strips mouse-tracking DECSETs from claude/codex/gemini
+              // output (isAltScreenStripMode, session.ts) so the wheel keeps
+              // scrolling scrollback — which leaves THIS xterm permanently at
+              // mouseTrackingMode 'none' even though the TUI on the PTY side has
+              // tracking ON and still understands SGR reports. Encode the report
+              // ourselves and send it straight to the PTY: no DOM click is
+              // dispatched, so xterm's local selection can't trigger either.
+              this._sendSyntheticSgrTap(touch.clientX, touch.clientY);
             }
             this._syncMobileHelperTextareaToCursor();
             // Route subsequent typing to the right place: keep the CJK input
@@ -650,6 +702,16 @@ Object.assign(CodemanApp.prototype, {
         { passive: true }
       );
     }
+
+    // ── Desktop click-to-position cursor ──────────────────────────────
+    // A real mouse click normally reaches the PTY through xterm's own mouse
+    // encoder, but that encoder only runs while mouseTrackingMode is ON — and
+    // the server strips the enabling DECSETs from claude/codex/gemini output
+    // (isAltScreenStripMode, session.ts) so the wheel keeps scrolling
+    // scrollback. Desktop clicks therefore stopped reporting entirely (the
+    // same breakage the mobile touchend tap branch above works around).
+    // Hand-encode the SGR report for plain left-clicks on those sessions.
+    container.addEventListener('click', (ev) => this._handleDesktopTerminalClick(ev));
 
     // Welcome message
     this.showWelcome();
@@ -816,7 +878,28 @@ Object.assign(CodemanApp.prototype, {
         this._exitHistoryView?.();
       }
       // CJK input has focus — block xterm from sending keystrokes to PTY
-      if (!isMouseReport && (window.cjkActive || document.activeElement?.id === 'cjkInput')) return;
+      if (!isMouseReport && (window.cjkActive || document.activeElement?.id === 'cjkInput')) {
+        // Self-heal: if the CJK field is visible but focus drifted to xterm's
+        // hidden textarea (e.g. something called terminal.focus()), everything
+        // typed lands HERE and is swallowed — keyboard shows the IME composing
+        // while both the CJK field and the terminal stay empty. Route focus
+        // back so the very next keystroke lands in the CJK field again.
+        // Only GENUINE typed input qualifies: onData also fires for xterm's
+        // self-generated query replies (DA/DSR/CPR/OSC during Ink redraws),
+        // which arrive no matter what has focus — so require focus to be on
+        // xterm's own textarea and bail on query replies, or this would steal
+        // focus from the rename/search/settings inputs while output streams.
+        const cjkEl = document.getElementById('cjkInput');
+        if (
+          cjkEl?.classList.contains('cjk-input-visible') &&
+          document.activeElement === this.terminal.textarea &&
+          !window.CodemanTerminalInput?.shouldSuppressTerminalQueryResponse(data)
+        ) {
+          _crashDiag.log('CJK regain-focus (onData swallowed input)');
+          cjkEl.focus();
+        }
+        return;
+      }
       if (this.activeSessionId) {
         // Filter terminal query replies generated by xterm.js itself.
         // Forwarding them through the WebSocket injects DA/DSR/CPR replies
@@ -1107,6 +1190,12 @@ Object.assign(CodemanApp.prototype, {
             activate(_event, text) {
               self._openTerminalUrl(text);
             },
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
+            },
           });
         };
 
@@ -1144,6 +1233,12 @@ Object.assign(CodemanApp.prototype, {
             },
             activate(event, text) {
               self.openLogViewerWindow(text, self.activeSessionId);
+            },
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
             },
           });
         };
@@ -2149,7 +2244,11 @@ Object.assign(CodemanApp.prototype, {
   // CJK textarea already provides visual feedback — bypass local echo
   // buffering so each composed word reaches the PTY immediately.
   _handleCjkInput(text) {
-    if (!this.activeSessionId) return;
+    if (!this.activeSessionId) {
+      _crashDiag.log(`CJK send DROP no-session len=${text.length}`);
+      return;
+    }
+    _crashDiag.log(`CJK send→${this.activeSessionId.slice(0, 8)} len=${text.length}`);
     this._sendInputAsync(this.activeSessionId, text);
   },
 
@@ -2684,6 +2783,135 @@ Object.assign(CodemanApp.prototype, {
     } catch {
       /* MouseEvent constructor unavailable — tap-to-position simply no-ops */
     }
+  },
+
+  // Mirror of the server's isAltScreenStripMode (session.ts): session modes whose
+  // output stream has mouse-tracking DECSET sequences stripped before reaching the
+  // browser. For these, xterm's live mouseTrackingMode is useless as a gate — the
+  // PTY-side TUI keeps tracking enabled, we just never see the enable sequence.
+  _sessionUsesServerMouseStrip() {
+    const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
+    return mode === 'claude' || mode === 'codex' || mode === 'gemini';
+  },
+
+  // True when xterm's viewport shows the live PTY screen (not scrolled up into
+  // local scrollback). SGR coordinates are only meaningful then: the TUI's
+  // screen is the bottom `rows` of the buffer, so a report computed from a
+  // scrolled-up viewport would hit-test a completely different row.
+  _terminalViewportAtBottom() {
+    const buf = this.terminal?.buffer?.active;
+    return !buf || buf.viewportY >= buf.baseY;
+  },
+
+  // Map a viewport point to a 1-based terminal cell the same way xterm maps a
+  // click: offset inside .xterm-screen divided by the rendered cell size,
+  // clamped to the grid. Returns null when the terminal isn't measurable yet.
+  _clientPointToCell(clientX, clientY) {
+    if (!this.terminal || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const screen = this.terminal.element?.querySelector('.xterm-screen');
+    const cell = this.terminal._core?._renderService?.dimensions?.css?.cell;
+    if (!screen || !cell?.width || !cell?.height) return null;
+    const rect = screen.getBoundingClientRect();
+    const col = Math.max(1, Math.min(this.terminal.cols, Math.floor((clientX - rect.left) / cell.width) + 1));
+    const row = Math.max(1, Math.min(this.terminal.rows, Math.floor((clientY - rect.top) / cell.height) + 1));
+    return { col, row };
+  },
+
+  // Encode a tap as an SGR mouse report (press + release at button 0) and send it
+  // to the PTY directly, bypassing xterm's mouse encoder.
+  _sendSyntheticSgrTap(clientX, clientY) {
+    if (!this.activeSessionId) return;
+    if (!this._terminalViewportAtBottom()) return; // scrollback click → misfire, do nothing
+    const pos = this._clientPointToCell(clientX, clientY);
+    if (!pos) return;
+    this._sendInputAsync(this.activeSessionId, `\x1b[<0;${pos.col};${pos.row}M\x1b[<0;${pos.col};${pos.row}m`);
+  },
+
+  // True when a parsed CLI version string ('2.1.187' — banner-parsed on the
+  // server, delivered via session:cliInfo / SessionState.cliVersion) is known
+  // AND >= the minimum. Unknown or unparseable versions return false so
+  // callers keep the conservative behavior.
+  _cliVersionAtLeast(version, minimum) {
+    if (typeof version !== 'string') return false;
+    const parts = version.trim().replace(/^v/, '').split('.').map(Number);
+    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return false;
+    const min = minimum.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if (parts[i] !== min[i]) return parts[i] > min[i];
+    }
+    return true;
+  },
+
+  // Wheel forwarding gate for the container wheel handler: no Shift override,
+  // xterm's own encoder dormant, viewport at the bottom, and a TUI VERIFIED to
+  // scroll its transcript on SGR wheel reports: codex, or claude 2.1.187+
+  // (older Claude Code captures wheel as select-menu option navigation; an
+  // unknown version is treated as older). Gemini is a strip mode too but its
+  // wheel behavior is unverified, so it keeps the local wheel — taps/clicks
+  // are still forwarded for it (harmless no-ops at worst).
+  _shouldForwardWheelToApp(ev) {
+    if (ev.shiftKey) return false;
+    const mode = this.terminal?.modes?.mouseTrackingMode;
+    if (mode && mode !== 'none') return false;
+    const session = this.sessions?.get(this.activeSessionId);
+    const sessionMode = session?.mode || 'claude';
+    if (sessionMode === 'claude') {
+      if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
+    } else if (sessionMode !== 'codex') {
+      return false;
+    }
+    return this._terminalViewportAtBottom();
+  },
+
+  // Encode wheel ticks as SGR reports (button 64 = up, 65 = down) at the pointer
+  // cell. Reports are coalesced into one PTY write per ~40ms: a trackpad emits
+  // dozens of wheel events per second and each _sendInputAsync becomes a tmux
+  // send-keys on the server — unbatched, a single flick would spawn a process
+  // storm. Per-event tick count is capped (Claude applies its own scroll-speed
+  // multiplier and acceleration on top), and the queue is bounded so a wild
+  // scroll can't build a backlog that keeps scrolling after the finger stops.
+  _sendSyntheticSgrWheel(clientX, clientY, lines) {
+    if (!this.activeSessionId || !lines) return;
+    const pos = this._clientPointToCell(clientX, clientY);
+    if (!pos) return;
+    const btn = lines < 0 ? 64 : 65;
+    const ticks = Math.min(Math.abs(lines), 5);
+    const queued = this._wheelSgrQueue || '';
+    if (queued.length > 512) return;
+    this._wheelSgrQueue = queued + `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(ticks);
+    if (this._wheelSgrFlushTimer) return;
+    this._wheelSgrFlushTimer = setTimeout(() => this._flushWheelSgrQueue(), 40);
+  },
+
+  _flushWheelSgrQueue() {
+    this._wheelSgrFlushTimer = null;
+    const data = this._wheelSgrQueue;
+    this._wheelSgrQueue = '';
+    if (data && this.activeSessionId) this._sendInputAsync(this.activeSessionId, data);
+  },
+
+  // Desktop counterpart of the touchend tap branch: hand-encode an SGR report
+  // for a plain left-click when the server strips mouse DECSETs (see
+  // _sessionUsesServerMouseStrip). Every skip below is a click that already has
+  // a meaning elsewhere: synthetic/compat clicks after a touch tap (touchend
+  // reported already), modified clicks (shift keeps xterm's selection
+  // override), double/triple clicks (word/line selection), drag-selections,
+  // clicks on hovered links (activate() already handles the click — a second
+  // synthetic SGR press could e.g. dismiss a claude permission dialog),
+  // clicks outside the cell grid, and sessions where xterm's own encoder is
+  // live (it reported the click itself — a second report would double-move).
+  _handleDesktopTerminalClick(ev) {
+    if (!this.terminal || !ev?.isTrusted) return;
+    if (ev.button !== 0 || ev.detail !== 1) return;
+    if (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    const mode = this.terminal.modes?.mouseTrackingMode;
+    if (mode && mode !== 'none') return;
+    if (!this._sessionUsesServerMouseStrip()) return;
+    if (this.terminal.hasSelection?.()) return;
+    if (this._linkHovered) return; // link provider hover/leave callbacks (registerFilePathLinkProvider)
+    if (performance.now() <= (this._trustedTapMouseSuppressUntil || 0)) return;
+    if (!ev.target?.closest?.('.xterm-screen')) return;
+    this._sendSyntheticSgrTap(ev.clientX, ev.clientY);
   },
 
   _installMobileTapMouseGuard() {

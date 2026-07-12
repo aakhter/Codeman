@@ -1716,7 +1716,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             /* Already set globally as fallback */
           }),
         // Raise tmux scrollback from its 2000-line default so re-attach preserves
-        // more context. Defaults match the xterm-side setting.
+        // more context. Intentionally exceeds the xterm-side DEFAULT_SCROLLBACK (50k
+        // in constants.js), which stays lower to protect browser/mobile memory.
         execAsync(`${this.tmux()} set-option -t "${muxName}" history-limit ${historyLimit}`, {
           timeout: EXEC_TIMEOUT_MS,
         })
