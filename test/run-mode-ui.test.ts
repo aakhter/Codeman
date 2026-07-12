@@ -71,6 +71,19 @@ describe('run mode UI', () => {
     expect(app.runMode).toBe('gemini');
     expect(runBtnLabel.textContent).toBe('Run GM');
   });
+
+  it('preserves Shell mode from server sync instead of downgrading to Claude', async () => {
+    // Regression guard: the runMode setter allowlist omitted 'shell', so the
+    // async server-sync path (this.runMode = serverValue) silently reset a
+    // persisted Shell selection back to Claude on every reload.
+    const { app, storage, runBtnLabel } = loadRunModeHarness();
+
+    storage.set('codeman_runMode', 'shell');
+    await app.loadAppSettingsFromServer(Promise.resolve({ runMode: 'shell' }));
+
+    expect(app.runMode).toBe('shell');
+    expect(runBtnLabel.textContent).toBe('Run');
+  });
   it('passes global Codex settings into quick-start config for new sessions', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },

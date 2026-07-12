@@ -3100,7 +3100,10 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     return this._runMode || 'claude';
   },
   set(mode) {
-    this._runMode =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy' || mode === 'claude' ? mode : 'claude';
+    // Keep in sync with SessionMode (src/types/session.ts). A mode missing from
+    // this allowlist silently downgrades to 'claude' — that's how 'shell' used to
+    // reset on every reload via the server-sync path (this.runMode = serverValue).
+    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy'];
+    this._runMode = VALID_RUN_MODES.includes(mode) ? mode : 'claude';
   },
 });
