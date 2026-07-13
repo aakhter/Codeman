@@ -292,4 +292,3 @@ Expected: `local == origin/local`; upstream remains read-only. Do not deploy pro
 - [ ] **Step 3: Update Jira and the loop state**
 
 Record the root cause, commits, RED/GREEN counts, exact-path proof, focused/static/build evidence, and Bitbucket commit link on COD-231. Transition it to Done only after the pushed branch and evidence are verified; mark the correction deploy-pending in the loop state.
-
