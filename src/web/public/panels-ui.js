@@ -4160,9 +4160,16 @@ Object.assign(CodemanApp.prototype, {
     st.diffFrom = fromId;
     const sid = st.sessionId;
     const params = this._documentParams();
+    const isCurrentDiff = () => this.filePreviewState === st && st.mode === 'diff';
     try {
       const vres = await fetch(`/api/sessions/${sid}/documents/versions?${params}`);
-      const versions = vres.ok ? (await vres.json()).data?.versions || [] : [];
+      if (!isCurrentDiff()) return;
+      let versions = [];
+      if (vres.ok) {
+        const versionBody = await vres.json();
+        if (!isCurrentDiff()) return;
+        versions = versionBody.data?.versions || [];
+      }
       let diff = { ops: [], from: null, to: null };
       if (versions.length >= 2) {
         const to = versions[versions.length - 1].id;
@@ -4170,10 +4177,17 @@ Object.assign(CodemanApp.prototype, {
         const dres = await fetch(
           `/api/sessions/${sid}/documents/diff?${params}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
         );
-        if (dres.ok) diff = (await dres.json()).data;
+        if (!isCurrentDiff()) return;
+        if (dres.ok) {
+          const diffBody = await dres.json();
+          if (!isCurrentDiff()) return;
+          diff = diffBody.data;
+        }
       }
+      if (!isCurrentDiff()) return;
       this._renderDocumentDiff(versions, diff);
     } catch (err) {
+      if (!isCurrentDiff()) return;
       const bodyEl = this.$('filePreviewBody');
       if (bodyEl) bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
     }

@@ -18,7 +18,7 @@ type PreviewElement = {
   querySelector: ReturnType<typeof vi.fn>;
 };
 
-function loadPanelsUiPrototype(): Proto {
+function loadPanelsUiPrototype(contextOverrides: Record<string, unknown> = {}): Proto {
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/panels-ui.js'), 'utf8');
   const context = vm.createContext({
     console,
@@ -32,6 +32,7 @@ function loadPanelsUiPrototype(): Proto {
     requestAnimationFrame: vi.fn(),
     document: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
     window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
+    ...contextOverrides,
   });
   vm.runInContext(`${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
   return (context as { __proto: Proto }).__proto;
@@ -43,10 +44,12 @@ function previewElement(): PreviewElement {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function renderHost(
@@ -74,7 +77,127 @@ function iframeSrc(html: string): string {
   return match[1];
 }
 
+function diffHost(
+  proto: Proto,
+  state: Record<string, unknown>,
+  body: PreviewElement,
+  footer: PreviewElement,
+  metadata: Record<string, unknown>
+) {
+  return {
+    filePreviewState: state,
+    filePreviewContent: '',
+    $: vi.fn((id: string) => (id === 'filePreviewBody' ? body : id === 'filePreviewFooter' ? footer : null)),
+    formatFileSize: vi.fn(() => '31 KB'),
+    _documentParams: proto._documentParams,
+    _renderDocumentDiff: proto._renderDocumentDiff,
+    _renderFilePreviewBody: proto._renderFilePreviewBody,
+    _renderExportPdfControl: proto._renderExportPdfControl,
+    _applyCommentHighlights: vi.fn(),
+    _fetchFilePreviewMetadata: vi.fn(async () => metadata),
+    _filePreviewSignature: proto._filePreviewSignature,
+  };
+}
+
 describe('COD-238 Files-panel source download', () => {
+  it('does not let a pending attachment diff overwrite a newer Files-panel preview', async () => {
+    const versionsRequest = deferred<Record<string, unknown>>();
+    const proto = loadPanelsUiPrototype({ fetch: vi.fn(() => versionsRequest.promise) });
+    const body = previewElement();
+    const footer = previewElement();
+    const attachmentState = {
+      sessionId: 'attachment-a',
+      filePath: 'Attachment A.docx',
+      attachmentId: 'att-a',
+      metadataUrl: '/api/sessions/attachment-a/attachments/att-a',
+      signature: '1:1',
+      docxView: 'pdf',
+      mode: 'preview',
+    };
+    const filesPath = 'deliverables/Files B.docx';
+    const filesMetadata = {
+      type: 'document',
+      extension: 'docx',
+      size: 31_000,
+      mtimeMs: 2,
+      url: `/api/sessions/files-b/file-raw?path=${encodeURIComponent(filesPath)}`,
+      previewUrl: `/api/sessions/files-b/file-preview?path=${encodeURIComponent(filesPath)}`,
+    };
+    const host = diffHost(proto, attachmentState, body, footer, filesMetadata);
+
+    const pendingDiff = proto.showDocumentDiff.call(host);
+    const filesState = {
+      sessionId: 'files-b',
+      filePath: filesPath,
+      attachmentId: null,
+      metadataUrl: `/api/sessions/files-b/file-content?path=${encodeURIComponent(filesPath)}`,
+      signature: '2:31000',
+      docxView: 'pdf',
+      mode: 'preview',
+    };
+    host.filePreviewState = filesState;
+    await proto._renderFilePreviewBody.call(
+      host,
+      filesMetadata,
+      { sessionId: 'files-b', filePath: filesPath, attachmentId: null },
+      filesState
+    );
+
+    versionsRequest.resolve({ ok: true, json: async () => ({ data: { versions: [] } }) });
+    await pendingDiff;
+
+    expect(iframeSrc(body.innerHTML)).toContain('files-b');
+    expect(iframeSrc(body.innerHTML)).toContain(encodeURIComponent(filesPath));
+    expect(body.innerHTML).not.toContain('document-preview-diff');
+    expect(footer.innerHTML).toContain('Download DOCX');
+  });
+
+  it.each(['success', 'error'] as const)(
+    'does not re-enter Changes after exit when the pending diff request ends in %s',
+    async (outcome) => {
+      const versionsRequest = deferred<Record<string, unknown>>();
+      const proto = loadPanelsUiPrototype({ fetch: vi.fn(() => versionsRequest.promise) });
+      const body = previewElement();
+      const footer = previewElement();
+      const filePath = 'Published Brief.docx';
+      const metadata = {
+        type: 'document',
+        extension: 'docx',
+        size: 31_000,
+        mtimeMs: 3,
+        url: '/api/sessions/attachment-owner/attachments/att-brief/raw',
+        previewUrl: '/api/sessions/attachment-owner/attachments/att-brief/preview',
+      };
+      const state = {
+        sessionId: 'attachment-owner',
+        filePath,
+        attachmentId: 'att-brief',
+        metadataUrl: '/api/sessions/attachment-owner/attachments/att-brief',
+        signature: '2:30000',
+        docxView: 'pdf',
+        mode: 'preview',
+      };
+      const host = diffHost(proto, state, body, footer, metadata);
+
+      const pendingDiff = proto.showDocumentDiff.call(host);
+      await proto.exitDocumentDiff.call(host);
+      expect(state.mode).toBe('preview');
+      expect(iframeSrc(body.innerHTML)).toContain('/attachments/att-brief/preview');
+
+      if (outcome === 'success') {
+        versionsRequest.resolve({ ok: true, json: async () => ({ data: { versions: [] } }) });
+      } else {
+        versionsRequest.reject(new Error('versions unavailable'));
+      }
+      await pendingDiff;
+
+      expect(state.mode).toBe('preview');
+      expect(iframeSrc(body.innerHTML)).toContain('/attachments/att-brief/preview');
+      expect(body.innerHTML).not.toContain('document-preview-diff');
+      expect(body.innerHTML).not.toContain('versions unavailable');
+    }
+  );
+
   it('keeps the displayed preview and source button on the latest out-of-order open', async () => {
     const proto = loadPanelsUiPrototype();
     const firstPath = 'deliverables/First Draft.docx';
