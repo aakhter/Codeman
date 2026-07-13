@@ -5,6 +5,7 @@
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isSupportedAttachmentExtension } from './attachment-registry.js';
+import { stripAnsi } from './utils/index.js';
 
 const MAGIC_LINK_RE = /codeman:\/\/attach\?([^\s<>"']+)/g;
 const CODEX_SAVED_FILE_RE = /\bSaved to:\s*(file:\/\/[^\s<>"']+)/gi;
@@ -65,7 +66,9 @@ function parseCodexGeneratedArtifactRequests(data: string): TerminalAttachmentRe
   const results: TerminalAttachmentRequest[] = [];
   const seen = new Set<string>();
 
-  for (const match of data.matchAll(CODEX_SAVED_FILE_RE)) {
+  // Codex styles its TUI output. Strip ANSI first so a trailing SGR reset does
+  // not become part of the URL and break extension validation.
+  for (const match of stripAnsi(data).matchAll(CODEX_SAVED_FILE_RE)) {
     const rawUrl = trimTrailingPunctuation(match[1] || '');
     try {
       const filePath = fileURLToPath(rawUrl);

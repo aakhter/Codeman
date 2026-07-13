@@ -10,7 +10,9 @@
 
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, join, posix as posixPath } from 'node:path';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -24,14 +26,13 @@ const execFileAsync = promisify(execFile);
 const MAX_GENERATED_ARTIFACT_BYTES = 50 * 1024 * 1024;
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 
-const CODEX_GENERATED_DIR_MARKERS = [
-  '/.codex-personal/generated_images/',
-  '/.codex/generated_images/',
-  '/.codex-personal/generated_artifacts/',
-  '/.codex/generated_artifacts/',
+const CODEX_GENERATED_DIRS = [
+  '.codex-personal/generated_images',
+  '.codex/generated_images',
+  '.codex-personal/generated_artifacts',
+  '.codex/generated_artifacts',
 ];
 
-const SUPERPOWERS_WORKTREE_MARKER = '/.config/superpowers/worktrees/';
 const SUPERPOWERS_ARTIFACT_DIR_MARKERS = ['/output/', '/docs/mockups/'];
 
 export interface GeneratedArtifactRegistrationOptions {
@@ -45,32 +46,54 @@ export async function registerGeneratedArtifactAttachment(
   options: GeneratedArtifactRegistrationOptions
 ): Promise<AttachmentRegistrationResult> {
   if (options.remote) {
-    if (!isAllowedGeneratedArtifactPath(options.filePath, options.remote.remotePath)) {
+    if (!isAllowedRemoteGeneratedArtifactPath(options.filePath, options.remote)) {
       throw new Error('Generated artifact path is outside allowed remote locations');
     }
     const localPath = await materializeRemoteGeneratedArtifact(options.sessionId, options.remote, options.filePath);
     return registerExternalAttachment(options.sessionId, localPath, { sessionWorkingDir: options.sessionWorkingDir });
   }
 
-  const forceWorkspaceConfinement = !isAllowedGeneratedArtifactPath(options.filePath, options.sessionWorkingDir);
+  let resolvedPath = options.filePath;
+  let resolvedWorkingDir = options.sessionWorkingDir;
+  try {
+    resolvedPath = realpathSync(options.filePath);
+  } catch {
+    // Missing/unresolvable files stay force-confined; registration reports the final error.
+  }
+  try {
+    resolvedWorkingDir = realpathSync(options.sessionWorkingDir);
+  } catch {
+    // Keep the configured workspace path when it cannot be resolved.
+  }
+  const forceWorkspaceConfinement = !isAllowedGeneratedArtifactPath(resolvedPath, resolvedWorkingDir);
   return registerExternalAttachment(options.sessionId, options.filePath, {
     sessionWorkingDir: options.sessionWorkingDir,
     forceWorkspaceConfinement,
   });
 }
 
-export function isAllowedGeneratedArtifactPath(filePath: string, workingDir: string): boolean {
+export function isAllowedGeneratedArtifactPath(
+  filePath: string,
+  workingDir: string,
+  homeDir: string = homedir()
+): boolean {
   const normalizedPath = posixPath.normalize(filePath);
   if (isPathInside(normalizedPath, workingDir)) return true;
-  if (isAllowedSuperpowersArtifactPath(normalizedPath)) return true;
-  return CODEX_GENERATED_DIR_MARKERS.some((marker) => normalizedPath.includes(marker));
+  if (CODEX_GENERATED_DIRS.some((dir) => isPathInside(normalizedPath, posixPath.join(homeDir, dir)))) return true;
+  return isAllowedSuperpowersArtifactPath(normalizedPath, homeDir);
 }
 
-function isAllowedSuperpowersArtifactPath(normalizedPath: string): boolean {
-  const worktreeIndex = normalizedPath.indexOf(SUPERPOWERS_WORKTREE_MARKER);
-  if (worktreeIndex < 0) return false;
-  const pathInWorktrees = normalizedPath.slice(worktreeIndex + SUPERPOWERS_WORKTREE_MARKER.length);
+function isAllowedSuperpowersArtifactPath(normalizedPath: string, homeDir: string): boolean {
+  const worktreeRoot = posixPath.join(homeDir, '.config/superpowers/worktrees');
+  if (!isPathInside(normalizedPath, worktreeRoot)) return false;
+  const pathInWorktrees = normalizedPath.slice(ensureTrailingSlash(posixPath.normalize(worktreeRoot)).length);
   return SUPERPOWERS_ARTIFACT_DIR_MARKERS.some((marker) => pathInWorktrees.includes(marker));
+}
+
+function isAllowedRemoteGeneratedArtifactPath(filePath: string, remote: SessionRemote): boolean {
+  const candidateHomes =
+    remote.username === 'root' ? ['/root'] : [`/home/${remote.username}`, `/Users/${remote.username}`];
+  return candidateHomes.some((home) => isAllowedGeneratedArtifactPath(filePath, remote.remotePath, home));
 }
 
 function isPathInside(filePath: string, rootPath: string): boolean {
@@ -115,13 +138,7 @@ export function buildRemoteGeneratedArtifactCachePath(
 }
 
 export function buildRemoteGeneratedArtifactFetchArgs(remote: SessionRemote, remotePath: string): string[] {
-  return [
-    ...buildSshConnectionArgv(remote),
-    '-o',
-    'ConnectTimeout=10',
-    remoteSshTarget(remote),
-    `cat -- ${shellescape(remotePath)}`,
-  ];
+  return [...buildSshConnectionArgv(remote), remoteSshTarget(remote), `cat -- ${shellescape(remotePath)}`];
 }
 
 function sanitizeCacheFileName(fileName: string): string {

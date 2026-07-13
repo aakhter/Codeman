@@ -1851,6 +1851,23 @@
       </div>
     </div>
 
+    <!-- Shortcut Overlay Modal -->
+    <div class="modal shortcut-overlay-modal" id="shortcutOverlayModal" tabindex="-1">
+      <div class="modal-backdrop" onclick="app.closeShortcutOverlay()"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <span class="modal-title">Keyboard Shortcuts</span>
+          <button class="modal-close" onclick="app.closeShortcutOverlay()" aria-label="Close">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+          <div id="shortcutOverlayList"></div>
+          <div class="shortcut-overlay-footer">
+            <button class="btn btn-sm" onclick="app.closeShortcutOverlay(); app.showHelp()">Full shortcut reference</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Create Case Modal -->
     <div class="modal" id="createCaseModal">
       <div class="modal-backdrop" onclick="app.closeCreateCaseModal()"></div>
@@ -2497,6 +2514,7 @@
   <script defer src="respawn-ui.js"></script>
   <script defer src="ralph-panel.js"></script>
   <script defer src="orchestrator-panel.js"></script>
+  <script defer src="cron-ui.js"></script>
   <script defer src="settings-ui.js"></script>
   <script defer src="panels-ui.js"></script>
   <script defer src="ultracode-panel.js"></script>

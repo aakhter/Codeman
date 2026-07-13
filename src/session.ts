@@ -1237,6 +1237,11 @@ export class Session extends EventEmitter {
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       effort: this._effort,
+      // COD-118: runtime-only — surfaced so the frontend can require explicit user
+      // intent before restarting a crash-looped session. Deliberately NOT restored
+      // by the constructor: a Codeman restart starts with a fresh breaker so boot
+      // recovery can re-attach.
+      respawnBlocked: this._respawnBlocked || undefined,
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
       sources: this.getSourcesForPersist(),
       // envOverrides intentionally NOT on the public SessionState type — they must not
@@ -2765,8 +2770,26 @@ export class Session extends EventEmitter {
    * ```
    */
   write(data: string): void {
+    this._trackCodexSubmit(data);
     if (this.ptyProcess) {
       this.ptyProcess.write(data);
+    }
+  }
+
+  // ── Codex thread tracking ─────────────────────────────────────────────
+  // When a codex pane last submitted a message (Enter). The response-viewer
+  // correlates this against ~/.codex/history.jsonl entry timestamps to find
+  // the thread the pane is ACTUALLY on — the only signal that survives
+  // /resume, /new and /fork typed inside the codex TUI itself.
+  private _codexLastSubmitAt = 0;
+
+  get codexLastSubmitAt(): number {
+    return this._codexLastSubmitAt;
+  }
+
+  private _trackCodexSubmit(data: string): void {
+    if (this.mode === 'codex' && (data.includes('\r') || data.includes('\n'))) {
+      this._codexLastSubmitAt = Date.now();
     }
   }
 
@@ -2823,6 +2846,7 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
+    this._trackCodexSubmit(data);
     if (this._mux && this._muxSession) {
       return this._mux.sendInput(this.id, data);
     }

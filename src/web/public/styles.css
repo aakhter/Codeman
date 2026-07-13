@@ -643,6 +643,15 @@ body {
   flex-shrink: 0;
 }
 
+.connection-dot.connected {
+  background: var(--green);
+}
+
+.connection-dot.fallback {
+  background: var(--yellow);
+  box-shadow: 0 0 6px var(--yellow);
+}
+
 .connection-dot.offline {
   background: var(--red);
   box-shadow: 0 0 6px var(--red);
@@ -4946,6 +4955,94 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   .shortcut-binding-input {
     grid-column: 2 / -1;
   }
+}
+
+/* Registry-driven shortcut editor */
+.shortcut-setting-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 190px) auto auto auto;
+  padding: 0.4rem 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+}
+
+.shortcut-setting-row:last-child {
+  border-bottom: none;
+}
+
+.shortcut-capture-btn,
+.shortcut-reset-btn {
+  padding: 0.3rem 0.6rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--btn-radius);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all var(--transition-smooth);
+}
+
+.shortcut-capture-btn:hover,
+.shortcut-reset-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.shortcut-reset-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.shortcut-enabled-checkbox {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.shortcut-overlay-modal .modal-content {
+  max-width: 560px;
+}
+
+.shortcut-overlay-group {
+  margin-bottom: 1rem;
+}
+
+.shortcut-overlay-group:last-child {
+  margin-bottom: 0;
+}
+
+.shortcut-overlay-group-label {
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.shortcut-overlay-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.3rem 0;
+}
+
+.shortcut-overlay-label {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.shortcut-overlay-keys {
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.shortcut-overlay-footer {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  text-align: right;
 }
 
 /* Status badge in settings */

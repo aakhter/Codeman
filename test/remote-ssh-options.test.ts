@@ -13,7 +13,7 @@
  *    `-o ProxyCommand=…` token; the local shell must not expand/mangle them).
  *  - a leading `~`/`$HOME` in `identityFile` is expanded to an absolute path at
  *    build time (ssh does NOT expand `~` in `-i`), then shellescaped.
- *  - empty options ⇒ byte-identical ssh to today (full back-compat).
+ *  - every connection has a bounded default timeout unless explicitly overridden.
  *
  * Pure command-string construction; no real tmux, no ssh. Port: N/A.
  */
@@ -57,7 +57,7 @@ const SESSION_ID = 'cod107chk';
 
 describe('COD-107 buildSshConnectionArgs — shared ssh connection tokens', () => {
   it('always leads with -o BatchMode=yes', () => {
-    expect(buildSshConnectionArgs(baseRemote)).toEqual(['ssh', '-o BatchMode=yes']);
+    expect(buildSshConnectionArgs(baseRemote)).toEqual(['ssh', '-o BatchMode=yes', '-o ConnectTimeout=10']);
   });
 
   it('emits the full aa-desktop option set in order with escaping + %h %p intact', () => {
@@ -80,13 +80,15 @@ describe('COD-107 buildSshConnectionArgs — shared ssh connection tokens', () =
     // The escape-hatch extra option, shellescaped.
     expect(joined).toContain("-o 'StrictHostKeyChecking=accept-new'");
 
-    // Ordering: BatchMode -> port -> identity -> ProxyCommand -> extras.
+    // Ordering: BatchMode -> timeout -> port -> identity -> ProxyCommand -> extras.
     const idxBatch = joined.indexOf('BatchMode=yes');
+    const idxTimeout = joined.indexOf('ConnectTimeout=10');
     const idxPort = joined.indexOf('-p 2222');
     const idxIdentity = joined.indexOf('-i ');
     const idxProxy = joined.indexOf('ProxyCommand=');
     const idxExtra = joined.indexOf('StrictHostKeyChecking');
-    expect(idxBatch).toBeLessThan(idxPort);
+    expect(idxBatch).toBeLessThan(idxTimeout);
+    expect(idxTimeout).toBeLessThan(idxPort);
     expect(idxPort).toBeLessThan(idxIdentity);
     expect(idxIdentity).toBeLessThan(idxProxy);
     expect(idxProxy).toBeLessThan(idxExtra);
@@ -112,10 +114,19 @@ describe('COD-107 buildSshConnectionArgs — shared ssh connection tokens', () =
     expect(args.join(' ')).toContain(`-i '${HOME}/.ssh/id_ed25519'`);
   });
 
-  it('empty options ⇒ exactly the historical token set (back-compat)', () => {
-    // Today: ssh -o BatchMode=yes (+ -p only when set). Nothing else.
-    expect(buildSshConnectionArgs(baseRemote)).toEqual(['ssh', '-o BatchMode=yes']);
-    expect(buildSshConnectionArgs({ ...baseRemote, port: 2200 })).toEqual(['ssh', '-o BatchMode=yes', '-p 2200']);
+  it('adds a default timeout and allows an explicit timeout override', () => {
+    expect(buildSshConnectionArgs(baseRemote)).toEqual(['ssh', '-o BatchMode=yes', '-o ConnectTimeout=10']);
+    expect(buildSshConnectionArgs({ ...baseRemote, port: 2200 })).toEqual([
+      'ssh',
+      '-o BatchMode=yes',
+      '-o ConnectTimeout=10',
+      '-p 2200',
+    ]);
+    expect(buildSshConnectionArgs({ ...baseRemote, extraSshOptions: ['ConnectTimeout=3'] })).toEqual([
+      'ssh',
+      '-o BatchMode=yes',
+      "-o 'ConnectTimeout=3'",
+    ]);
   });
 });
 
@@ -175,7 +186,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
       remote: { ...baseRemote, port: 2222 },
       sessionId: SESSION_ID,
     });
-    expect(command).toMatch(/^ssh -o BatchMode=yes -o ConnectTimeout=10 -t -p 2222 ubuntu@10\.0\.0\.42 /);
+    expect(command).toMatch(/^ssh -o BatchMode=yes -o ConnectTimeout=10 -p 2222 -t ubuntu@10\.0\.0\.42 /);
   });
 });
 

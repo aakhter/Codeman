@@ -131,7 +131,7 @@ When user says "COM":
 3. **Consume the changeset**: `npm run version-packages` (auto-bumps `package.json` files, updates `CHANGELOG.md`, runs `npm install --package-lock-only`, and verifies lockfile sync via `scripts/check-lockfile-sync.mjs` — all in one command; never hand-edit `CHANGELOG.md` or `package-lock.json` versions)
 4. **Sync CLAUDE.md version**: Update the `**Version**` line below to match the new version from `package.json`
 5. **Commit and deploy**: `git add -A && git commit -m "chore: version packages" && git push && npm run build && systemctl --user restart codeman-web`
-6. **Wait for CI**: after `git push`, find the run with `gh run list -L 1 --json databaseId,headBranch -q '.[0].databaseId'` and watch it with `gh run watch <id> --exit-status`. Confirm all checks pass before considering the release done.
+6. **Wait for CI**: after `git push`, TWO workflows fire per master push — `CI` and `Release` (the npm publish + GitHub release). List both runs for the pushed commit with `gh run list --commit $(git rev-parse HEAD) --json databaseId,workflowName` and watch EACH with `gh run watch <id> --exit-status`. Confirm both pass before considering the release done (`gh run list -L 1` returns only one of the two).
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
@@ -158,7 +158,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | Domain | Key files | Notes |
 |--------|-----------|-------|
 | **Entry** | `src/index.ts`, `src/cli.ts` | |
-| **Session** | `src/session.ts` ★, `src/session-manager.ts`, `src/session-auto-ops.ts`, `src/session-cli-builder.ts`, `src/session-lifecycle-log.ts`, `src/session-task-cache.ts`, `src/usage-limit-patterns.ts`, `src/usage-telemetry.ts` | |
+| **Session** | `src/session.ts` ★, `src/session-manager.ts`, `src/session-auto-ops.ts`, `src/session-cli-builder.ts`, `src/session-lifecycle-log.ts`, `src/session-task-cache.ts`, `src/session-pty-exit-breaker.ts`, `src/usage-limit-patterns.ts`, `src/usage-telemetry.ts`; `src/services/unified-session-service.ts` (merges live/persisted/lifecycle/transcript rows for `GET /api/sessions/unified`) | |
 | **Mux** | `src/mux-interface.ts`, `src/mux-factory.ts`, `src/tmux-manager.ts` ★ | |
 | **Respawn** | `src/respawn-controller.ts` ★ + 4 helpers (`-adaptive-timing`, `-health`, `-metrics`, `-patterns`) | Read `docs/respawn-state-machine.md` first |
 | **Ralph** | `src/ralph-tracker.ts` ★, `src/ralph-loop.ts` + 5 helpers (`-config`, `-fix-plan-watcher`, `-plan-tracker`, `-stall-detector`, `-status-parser`) | Read `docs/ralph-wiggum-guide.md` first |
@@ -193,7 +193,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 ### Key Patterns
 
-**Input**: `session.writeViaMux()` for programmatic/curl input — tmux `send-keys -l` (literal) + `send-keys Enter`. Single-line only (fire-and-once). Interactive **browser** input goes through a durable **exactly-once** layer: each frame carries a stable `clientId` + monotonic per-session `seq`, persisted to localStorage until the server ACKs (`{t:'ia',seq}` over WS, or HTTP 2xx), so a dropped link/reconnect can't lose or double-deliver a prompt.
+**Input**: `session.writeViaMux()` for programmatic/curl input — tmux `send-keys -l` (literal) + `send-keys Enter`. Single-line only (fire-and-once). Interactive **browser** input goes through a durable **exactly-once** layer: each frame carries a stable `clientId` + monotonic per-session `seq`, persisted to localStorage until the server ACKs (`{t:'ia',seq}` over WS, or HTTP 2xx), so a dropped link/reconnect can't lose or double-deliver a prompt. **WS resilience** (#149): the upgrade URL carries `cid = clientId + ':' + perTabNonce`, and `ws-connection-registry.ts` supersedes only same-TAB reconnects (two tabs on one session coexist; input frames keep the bare `clientId` for seq dedup); reconnects back off exponentially (attempts preserved across `_connectWs`), and the header connection chip renders from a real `_wsState` lifecycle (`connecting`/`connected`/`fallback`/`reconnecting`/`disconnected`).
 
 **Idle detection**: Multi-layer (completion message → AI check → output silence → token stability). See `docs/respawn-state-machine.md`.
 
@@ -215,7 +215,9 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 **Agent Teams**: `TeamWatcher` polls `~/.claude/teams/`, matches to sessions via `leadSessionId`. Teammates are in-process threads appearing as subagents. Enable: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. See `docs/agent-teams/`.
 
-**Circuit breaker**: Prevents respawn thrashing. States: `CLOSED` → `HALF_OPEN` → `OPEN`. Reset: `/api/sessions/:id/ralph-circuit-breaker/reset`.
+**Circuit breaker**: Prevents respawn thrashing. States: `CLOSED` → `HALF_OPEN` → `OPEN`. Reset: `/api/sessions/:id/ralph-circuit-breaker/reset`. **Distinct: PTY-exit breaker** (COD-115/118/#147, `session-pty-exit-breaker.ts`) trips after repeated rapid PTY exits (crash loops on attach), blocks further auto-restarts, broadcasts SSE `session:respawnBreakerTripped` + push (in `PUSH_EVENT_MAP`). Reset ONLY via an explicit `{clearBreaker:true}` body on `POST /api/sessions/:id/interactive` (sent by the user-facing restart control) — the frontend's auto-reattach in `selectSession()` sends no body and must never clear it. Sessions also scrub inherited `TMUX`/`TMUX_PANE` env so Codeman-in-tmux doesn't nest. Tests: `test/respawn-pty-breaker.test.ts`.
+
+**Full-scrollback replay** (COD-164/#148): `GET /api/sessions/:id/terminal?full=1` returns the ENTIRE tmux scrollback (capture-pane `-e -S -<lines>` bounded by the configured history limit, explicit `maxBuffer` from the terminal-history config, early byte-cap before normalization, CRLF-normalized for shell panes). On success the capture is returned ALONE (`source='mux-full-history'` — it supersedes the byte buffer; no duplication). Only the FIRST buffer load after a page load requests `full=1` (one-shot `_initialFullBufferLoad` flag in app.js); tab switches keep the cheap `?tail=` visible-frame path. Tests: `test/tmux-capture-full-history.test.ts`, `test/tmux-scrollback-eol.test.ts`.
 
 **Self-update** (App Settings → Updates): in-app updater for **git-clone installs** supervised by systemd/launchd (npm installs are non-updatable). Because it restarts the very process running it, a DETACHED `scripts/self-update.sh` does the `git checkout <tag> && npm install && npm run build && restart` and writes `dataPath('update-status.json')`, which the browser polls across the connection drop. `src/web/self-update.ts` splits PURE helpers (unit-tested) from IO wrappers. Routes under `/api/system/update`. Full design (supervisor detection, reconcile-on-boot): `docs/self-update.md`.
 
@@ -234,14 +236,14 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 | **QR Auth** | Single-use 6-char tokens (60s TTL) for tunnel login. See `docs/qr-auth-plan.md` |
 | **Sessions** | 24h cookie (`codeman_session`), auto-extend, device context audit |
 | **Rate limit** | 10 failed auth/IP → 429 (15min decay). QR has separate limiter |
-| **Hook bypass** | `/api/hook-event` (and `/api/status-telemetry`, the statusLine exporter) exempt from auth (localhost-only, schema-validated). While the **managed tunnel** runs, the bypass additionally requires the per-instance `X-Codeman-Hook-Secret` header (COD-54, `config/hook-secret.ts`): hook curls cat the secret file at exec time via `$CODEMAN_HOOK_SECRET_FILE` (session env), failures rate-limit in a dedicated bucket (never lock out login). External loopback proxies (own cloudflared/`tailscale serve`) aren't detected — plain bypass still applies there. Tunnel enable **refuses** without `CODEMAN_PASSWORD` unless exposure is acknowledged — via `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` (env, COD-55) **or** the per-request `acknowledgeUnauthTunnel:true` action field (1.1.9): the welcome/settings tunnel toggle pops a security confirm dialog and, on confirm, resends with that flag (server logs a loud warning on every passwordless tunnel start; curl/API stay refused without password/env/flag). The flag is an action field, never persisted |
+| **Hook bypass** | `/api/hook-event` (and `/api/status-telemetry`, the statusLine exporter) skip Basic auth (localhost-only, schema-validated). When auth is active (`CODEMAN_PASSWORD` set), the loopback bypass requires the per-instance `X-Codeman-Hook-Secret` header **unconditionally** — COD-54 introduced it tunnel-gated; COD-91 (PR #127) made it always-on because Codeman can't detect a user's own loopback reverse proxy (own cloudflared/`tailscale serve`/nginx → 127.0.0.1), closing that residual plain-bypass gap. Hook curls cat the secret file at exec time via `$CODEMAN_HOOK_SECRET_FILE` (session env, `config/hook-secret.ts`); a missing/wrong secret gets 401 and rate-limits in a dedicated bucket (never locks out login). Tunnel enable **refuses** without `CODEMAN_PASSWORD` unless exposure is acknowledged — via `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1` (env, COD-55) **or** the per-request `acknowledgeUnauthTunnel:true` action field (1.1.9): the welcome/settings tunnel toggle pops a security confirm dialog and, on confirm, resends with that flag (server logs a loud warning on every passwordless tunnel start; curl/API stay refused without password/env/flag). The flag is an action field, never persisted |
 | **Env vars** | `CODEMAN_MUX` (managed session), `CODEMAN_API_URL` (auto-set for hooks), `CODEMAN_ALLOWED_HOSTS` (extra Host/Origin allowlist entries for reverse proxies, comma-separated; bare `.suffix` matches subdomains) |
-| **Validation** | Zod schemas, path allowlist regex, env prefix allowlist (`CLAUDE_CODE_*`/`OPENCODE_*`/`CODEX_*`) |
+| **Validation** | Zod schemas, path allowlist regex, env prefix allowlist (`CLAUDE_CODE_*`/`OPENCODE_*`/`CODEX_*`/`GEMINI_*`/`GOOGLE_*`) |
 | **Headers** | CORS localhost-only, CSP, X-Frame-Options, HSTS if HTTPS |
 
 ### SSE Event Registry
 
-~127 event types in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). Both must be kept in sync.
+~133 event types in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). Both must be kept in sync.
 
 ### API Routes
 
@@ -304,7 +306,7 @@ Raw `npx vitest` skips `config/vitest.config.ts`; always use `npm test --` or pa
 
 **Config**: Vitest with `globals: true`, `fileParallelism: false`. Timeout 30s, teardown 60s. `config/vitest.ci.config.ts` = same minus the browser/perf excludes — keep the two configs in sync when changing shared options.
 
-**Tmux safety**: under vitest (`VITEST` env var, set automatically), `TmuxManager` no-ops ALL shell commands and becomes a pure in-memory mock — tests physically cannot create/kill/attach real tmux sessions (`IS_TEST_MODE` in `src/tmux-manager.ts`). `test/setup.ts` additionally strips `CODEMAN_PASSWORD`/`CODEMAN_USERNAME` so auth state from the running instance can't leak into tests.
+**Tmux safety**: under vitest (`VITEST` env var, set automatically), `TmuxManager` no-ops ALL shell commands and becomes a pure in-memory mock — tests physically cannot create/kill/attach real tmux sessions (`IS_TEST_MODE` in `src/tmux-manager.ts`). `test/setup.ts` additionally strips `CODEMAN_PASSWORD`/`CODEMAN_USERNAME` (so auth state from the running instance can't leak into tests) and `CODEMAN_GESTURE` (a shell-exported gesture flag would flip render-injection assertions).
 
 **Ports**: Pick unique ports manually. Search `const PORT =` before adding new tests.
 
@@ -324,7 +326,7 @@ Mobile screenshots: `~/.codeman/screenshots/`, accessed via `GET/POST /api/scree
 
 ### Performance & Limits
 
-Target: 20 sessions, 50 agent windows at 60fps. Limits in `src/config/`: terminal 2MB, text 1MB, messages 1000, max agents 500, max sessions 50, max SSE clients 100. **Image upload** (`image-input.js` / `config/buffer-limits.ts`): up to `_maxBatchImages` 20 images/batch (bounded concurrency 3), per-file `MAX_PASTE_IMAGE_BYTES` 50MB (env `CODEMAN_MAX_PASTE_IMAGE_BYTES`); the mobile camera-roll picker auto-downscales to fit before upload. Use `LRUMap` for bounded caches, `StaleExpirationMap` for TTL cleanup. Anti-flicker pipeline: `docs/terminal-anti-flicker.md`.
+Target: 20 sessions, 50 agent windows at 60fps. Limits in `src/config/`: terminal 32MB (see below), text 1MB, messages 1000, max agents 500, max sessions 50, max SSE clients 100. **Terminal history** (`src/config/terminal-history.ts`, COD-80): tmux history-limit 100k lines, PTY buffer 32MB max / 24MB trim (env `CODEMAN_MAX_TERMINAL_BUFFER`/`CODEMAN_TRIM_TERMINAL_TO`; the env-derived trim is clamped ≤75% of max — trim ≥ max would disable `BufferAccumulator` trimming entirely = unbounded memory); browser xterm scrollback stays a separate hardcoded 50k (`DEFAULT_SCROLLBACK` in constants.js — 100k/tab is a mobile-memory hazard). Settings keys `terminalScrollbackLines`/`terminalBufferMaxBytes`/`terminalBufferTrimBytes` are schema-validated but inert (only `tmuxHistoryLimit` is wired live); `buffer-limits.ts` re-exports the defaults. Text/message limits are env-overridable too (`CODEMAN_MAX_TEXT_OUTPUT`/`CODEMAN_TRIM_TEXT_TO`/`CODEMAN_MAX_MESSAGES`). **Image upload** (`image-input.js` / `config/buffer-limits.ts`): up to `_maxBatchImages` 20 images/batch (bounded concurrency 3), per-file `MAX_PASTE_IMAGE_BYTES` 50MB (env `CODEMAN_MAX_PASTE_IMAGE_BYTES`); the mobile camera-roll picker auto-downscales to fit before upload. **HEIC paste uploads** (#151): converted server-side to JPEG in a `worker_threads` worker (`web/heic-jpeg-worker.ts`, resourceLimits + 30s timeout) gated by `runWithConversionLimit()`; detection is magic-byte based (covers Android/MIUI HEIFs mislabeled as JPEG); headers declaring > 64MP are rejected 415 BEFORE decode (decompression-bomb guard). Deps: `heic-decode` + `jpeg-js`. Use `LRUMap` for bounded caches, `StaleExpirationMap` for TTL cleanup. Anti-flicker pipeline: `docs/terminal-anti-flicker.md`.
 
 **Memory leaks (24+ hour sessions)**: use `CleanupManager`, clear Maps in `stop()`, guard async with `if (this.cleanup.isStopped) return`. Frontend: store handler refs, clean in `close*()`. Verify: `npm test -- test/memory-leak-prevention.test.ts`.
 

@@ -62,7 +62,7 @@ describe('remote-hosts domain', () => {
   it('returns safe mode defaults and remote display values', () => {
     expect(defaultRemoteCommandForMode('shell')).toBe('exec bash -l');
     expect(defaultRemoteCommandForMode('codex')).toBe('exec codex');
-    expect(defaultRemoteCommandForMode('claude')).toBe('exec claude');
+    expect(defaultRemoteCommandForMode('claude')).toBe('exec claude --dangerously-skip-permissions');
     expect(remoteSshTarget({ id: 'h1', label: 'H1', host: 'box.local', username: 'aamer' })).toBe('aamer@box.local');
     expect(remoteDisplayPath({ username: 'aamer', host: 'box.local', path: '/opt/work' })).toBe(
       'aamer@box.local:/opt/work'

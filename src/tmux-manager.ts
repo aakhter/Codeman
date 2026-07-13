@@ -116,7 +116,6 @@ const DEFAULT_STATS_INTERVAL_MS = 2000;
 const DEFAULT_REMOTE_RECONNECT_INTERVAL_MS = 5000;
 
 /** Remote SSH connects should fail fast; TCP default retries can hang UI actions for minutes. */
-const REMOTE_SSH_CONNECT_TIMEOUT_OPTION = '-o ConnectTimeout=10';
 
 /** Wait slightly longer than SSH ConnectTimeout before accepting a remote respawn as connected. */
 const REMOTE_RESPAWN_CONNECT_VERIFY_WAIT_MS = 10_500;
@@ -1005,19 +1004,10 @@ export function buildRemoteLaunchCommand(options: {
   //
   // COD-107 — connection options (port, identity, SOCKS ProxyCommand, jump host,
   // arbitrary -o) come from the shared `buildSshConnectionArgs` so the launch and
-  // the tmux-prereq probe connect IDENTICALLY. `-t` is inserted right after
-  // `ssh -o BatchMode=yes` (preserving the historical token order), then the rest
-  // of the connection args, then the target and the quoted tmux invocation.
-  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [
-    ssh,
-    batchMode,
-    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
-    '-t',
-    ...connectionArgs,
-    remoteSshTarget(remote),
-    shellescape(tmuxInvocation),
-  ];
+  // the tmux-prereq probe connect IDENTICALLY. The shared builder includes the
+  // bounded connection timeout; `-t` follows all connection options.
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(remote);
+  const sshParts = [ssh, ...connectionArgs, '-t', remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
@@ -1038,21 +1028,13 @@ export function buildRemoteLaunchCommand(options: {
  *   single token inside the quoted tmux invocation.
  * - COD-107 — connection options (`-p`, `-i`, `-J`, SOCKS `-o ProxyCommand`,
  *   arbitrary `-o`) come from the shared `buildSshConnectionArgs`, so attach
- *   connects identically to launch / discovery / the prereq probe. `-t` sits
- *   right after `ssh -o BatchMode=yes` (a PTY is required for interactive tmux).
+ *   connects identically to launch / discovery / the prereq probe. `-t` follows
+ *   the connection options (a PTY is required for interactive tmux).
  */
 export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionName: string): string {
   const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman attach -t ${shellescape(remoteSessionName)}`);
-  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [
-    ssh,
-    batchMode,
-    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
-    '-t',
-    ...connectionArgs,
-    remoteSshTarget(remote),
-    shellescape(tmuxInvocation),
-  ];
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(remote);
+  const sshParts = [ssh, ...connectionArgs, '-t', remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
@@ -1066,15 +1048,7 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
  */
 export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
   const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`);
-  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [
-    ssh,
-    batchMode,
-    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
-    ...connectionArgs,
-    remoteSshTarget(remote),
-    shellescape(tmuxInvocation),
-  ];
+  const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
@@ -3007,7 +2981,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // diagonally in a fresh xterm (COD-138, same reason as the fullHistory path).
       return normalizeScrollbackEol(buffer);
     } catch (err) {
-      console.error('[TmuxManager] Failed to capture pane buffer:', err);
+      // ENOBUFS carries the truncated multi-MB stdout on the error object —
+      // log a concise line instead of dumping it into the journal.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOBUFS') {
+        console.error('[TmuxManager] Pane capture exceeded maxBuffer (ENOBUFS); falling back to byte history');
+      } else {
+        console.error('[TmuxManager] Failed to capture pane buffer:', err);
+      }
       return null;
     }
   }

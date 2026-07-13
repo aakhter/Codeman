@@ -93,6 +93,34 @@ describe('TmuxManager restart recovery (test mode safety)', () => {
     expect(result.discovered).toHaveLength(0);
   });
 
+  it('preserves remote SSH metadata across reconcile (mux-sessions.json round-trip source)', async () => {
+    manager.registerSession({
+      sessionId: 'remote-recovery-1',
+      muxName: 'codeman-de51ecaf',
+      pid: 1,
+      createdAt: Date.now(),
+      workingDir: '/home/ubuntu/work',
+      mode: 'claude',
+      attached: false,
+      name: 'Remote Recovery',
+      remote: {
+        hostId: 'gpu-box',
+        label: 'GPU Box',
+        host: '10.0.0.42',
+        username: 'ubuntu',
+        remotePath: '/home/ubuntu/work',
+      },
+    });
+
+    const result = await manager.reconcileSessions();
+    expect(result.alive).toContain('remote-recovery-1');
+
+    // restoreMuxSessions() reads MuxSession.remote off exactly this map to rebuild
+    // the recovered Session — if it were dropped here the session would respawn LOCAL.
+    const recovered = manager.getSession('remote-recovery-1');
+    expect(recovered?.remote).toMatchObject({ hostId: 'gpu-box', host: '10.0.0.42', remotePath: '/home/ubuntu/work' });
+  });
+
   it('should not execute any tmux commands in test mode', async () => {
     manager.registerSession({
       sessionId: 'alive-session',

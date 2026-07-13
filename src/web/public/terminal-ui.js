@@ -1388,6 +1388,7 @@ Object.assign(CodemanApp.prototype, {
    * @param {Array} cases linked cases (for #caseName label)
    * @param {object} [options]
    * @param {boolean} [options.showViewAll=true] show "View all in folder" button in detail panel
+   * @param {Function} [options.onActivate] main-row click handler override (default: resume the conversation)
    */
   _buildHistoryItem(s, cases, options) {
     const showViewAll = options?.showViewAll !== false;

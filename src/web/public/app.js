@@ -235,6 +235,12 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SCHEDULED_COMPLETED, '_onScheduledCompleted'],
   [SSE_EVENTS.SCHEDULED_STOPPED, '_onScheduledStopped'],
 
+  // Scheduled jobs (cron-style scheduler)
+  [SSE_EVENTS.CRON_JOBS_CHANGED, '_onCronJobsChanged'],
+  [SSE_EVENTS.CRON_JOB_DELETED, '_onCronJobsChanged'],
+  [SSE_EVENTS.CRON_RUN_CREATED, '_onCronRunChanged'],
+  [SSE_EVENTS.CRON_RUN_UPDATED, '_onCronRunChanged'],
+
   // Respawn
   [SSE_EVENTS.RESPAWN_STARTED, '_onRespawnStarted'],
   [SSE_EVENTS.RESPAWN_STOPPED, '_onRespawnStopped'],
@@ -505,6 +511,14 @@ class CodemanApp {
     this._clientId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : 'c-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    // Per-TAB nonce for the WS registry key (COD-137). _loadReliableState()
+    // later replaces _clientId with the browser-wide localStorage identity
+    // (shared by every tab/window of this profile), so the WS upgrade sends
+    // `clientId:nonce` instead — a same-tab reconnect still supersedes its own
+    // socket, but two tabs on one session coexist instead of evicting each
+    // other in a 4010 ping-pong. Input frames keep the bare clientId for seq
+    // dedup.
+    this._wsTabNonce = this._clientId;
     this.terminal = null;
     this.fitAddon = null;
     this.activeSessionId = null;
@@ -528,6 +542,7 @@ class CodemanApp {
     this._initGeneration = 0;     // dedup concurrent handleInit calls
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
+    this._initialFullBufferLoad = true; // first buffer load after a page load fetches full tmux scrollback (COD-47)
     this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
@@ -1031,9 +1046,11 @@ class CodemanApp {
       const override = shortcutOverrides[shortcut.id];
       if (!override || typeof override !== 'object') return shortcut;
       const next = { ...shortcut };
-      if (override.disabled === true) next.disabled = true;
-      if (Array.isArray(override.bindings)) next.bindings = this.normalizeShortcutBindings(override.bindings);
-      if (Array.isArray(override.displayBindings)) next.displayBindings = override.displayBindings.filter(Boolean);
+      if (typeof override.disabled === 'boolean') next.disabled = override.disabled;
+      if (Array.isArray(override.bindings)) {
+        next.bindings = this.normalizeShortcutBindings(override.bindings);
+        delete next.displayBindings;
+      }
       return next;
     });
   }
@@ -1061,17 +1078,18 @@ class CodemanApp {
 
   matchesShortcutEvent(e, shortcut) {
     if (!shortcut || shortcut.disabled || !Array.isArray(shortcut.bindings)) return false;
-    const eventKey = this.shortcutEventKey(e);
     return shortcut.bindings.some((binding) => {
-      const modifiers = new Set(binding.modifiers || []);
-      const ctrlOrMeta = modifiers.has('ctrl') ? (e.ctrlKey || e.metaKey) : true;
-      const meta = modifiers.has('meta') ? e.metaKey : true;
-      const alt = modifiers.has('alt') ? e.altKey : !e.altKey;
-      const keyNeedsShift = ['?', '+', '{', '}'].includes(binding.key);
-      const shift = modifiers.has('shift') ? e.shiftKey : (!e.shiftKey || keyNeedsShift);
-      const codeMatch = !binding.key && binding.code && e.code === binding.code;
-      const keyMatch = binding.key && String(eventKey).toLowerCase() === String(binding.key).toLowerCase();
-      return ctrlOrMeta && meta && alt && shift && (codeMatch || keyMatch);
+      const modifiers = binding.modifiers || [];
+      const wantsPrimary = modifiers.includes('ctrl') || modifiers.includes('meta');
+      if (wantsPrimary !== !!(e.ctrlKey || e.metaKey)) return false;
+      if (modifiers.includes('shift') !== !!e.shiftKey) return false;
+      if (modifiers.includes('alt') !== !!e.altKey) return false;
+      if (binding.code && e.code === binding.code) return true;
+      return !!(
+        binding.key &&
+        typeof e.key === 'string' &&
+        e.key.toLowerCase() === String(binding.key).toLowerCase()
+      );
     });
   }
 
@@ -1114,25 +1132,32 @@ class CodemanApp {
   renderShortcutOverlay() {
     const list = document.getElementById('shortcutOverlayList');
     if (!list) return;
-    const groups = new Map();
+    const groups = {};
     for (const shortcut of this.getShortcutRegistry()) {
       if (shortcut.disabled) continue;
-      if (!groups.has(shortcut.group)) groups.set(shortcut.group, []);
-      groups.get(shortcut.group).push(shortcut);
+      const group = shortcut.group || 'General';
+      if (!groups[group]) groups[group] = [];
+      groups[group].push(shortcut);
     }
-    const html = [];
-    for (const [group, shortcuts] of groups) {
-      html.push(`<section class="shortcut-section"><h4>${escapeHtml(group)}</h4><div class="shortcuts-grid">`);
-      for (const shortcut of shortcuts) {
-        const displayBindings = shortcut.displayBindings || shortcut.bindings || [];
-        const keys = displayBindings
-          .map((binding) => this.formatShortcutBinding(binding).split('+').map((part) => `<kbd>${escapeHtml(part)}</kbd>`).join('+'))
-          .join(' / ');
-        html.push(`<div>${keys}</div><div>${escapeHtml(shortcut.label)}</div>`);
-      }
-      html.push('</div></section>');
-    }
-    list.innerHTML = html.join('');
+    const formatBindings = (shortcut) => {
+      const bindings = shortcut.displayBindings || shortcut.bindings || [];
+      return bindings
+        .map((binding) => `<kbd>${escapeHtml(this.formatShortcutBinding(binding))}</kbd>`)
+        .join(' / ');
+    };
+    list.innerHTML = Object.entries(groups)
+      .map(
+        ([group, shortcuts]) =>
+          `<div class="shortcut-overlay-group"><div class="shortcut-overlay-group-label">${escapeHtml(group)}</div>` +
+          shortcuts
+            .map(
+              (shortcut) =>
+                `<div class="shortcut-overlay-row"><span class="shortcut-overlay-label">${escapeHtml(shortcut.label)}</span><span class="shortcut-overlay-keys">${formatBindings(shortcut)}</span></div>`
+            )
+            .join('') +
+          '</div>'
+      )
+      .join('');
   }
 
   showShortcutOverlay() {
@@ -1163,6 +1188,12 @@ class CodemanApp {
       // Don't intercept keys during CJK IME composition
       if (e.isComposing || e.keyCode === 229) return;
       if (this._capturingShortcutId || e.target?.classList?.contains('shortcut-binding-input')) return;
+
+      if (this.shouldOpenCommandPaletteFromShortcut?.(e)) {
+        e.preventDefault();
+        this.openCommandPalette();
+        return;
+      }
 
       if (this.shouldOpenCommandPaletteFromShortcut?.(e)) {
         e.preventDefault();
@@ -2290,8 +2321,12 @@ class CodemanApp {
       this._responseViewerMarkdown = lastResponse;
 
       const body = document.getElementById('responseViewerBody');
-      body.innerHTML = this._renderMarkdown(lastResponse);
-      this._bindResponseViewerInteractions(body);
+      if (lastResponse) {
+        body.innerHTML = this._renderMarkdown(lastResponse);
+        this._bindResponseViewerInteractions(body);
+      } else {
+        body.textContent = 'No response yet — send a message in this session first.';
+      }
 
       // Reset state for fresh open
       const title = document.getElementById('responseViewerTitle');
@@ -3014,14 +3049,15 @@ class CodemanApp {
    */
   _connectWs(sessionId) {
     this._disconnectWs();
+    this._wsState = 'connecting';
+    this._updateConnectionIndicator();
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Pass the stable per-browser clientId on the upgrade URL so the server's
-    // connection registry scopes the per-session limit by client (COD-137): a
-    // reconnect supersedes its own socket instead of consuming a new slot and
-    // tripping a spurious 4008. Omitted if clientId is unavailable (server then
-    // treats the upgrade as anonymous — still admitted up to the limit).
-    const cidQuery = this._clientId ? `?cid=${encodeURIComponent(this._clientId)}` : '';
+    // Scope registry identity per tab: reconnects from this tab supersede their
+    // own socket, while two tabs sharing the browser-wide clientId can coexist.
+    // Input frames keep the bare clientId for durable sequence deduplication.
+    const cid = this._clientId ? `${this._clientId}:${this._wsTabNonce}` : '';
+    const cidQuery = cid ? `?cid=${encodeURIComponent(cid)}` : '';
     const url = `${proto}//${location.host}/ws/sessions/${sessionId}/terminal${cidQuery}`;
     const ws = new WebSocket(url);
     this._ws = ws;
@@ -3168,7 +3204,11 @@ class CodemanApp {
   /** Close the active WebSocket connection (if any). */
   _disconnectWs() {
     this._clearTimer('_wsReconnectTimer');
-    this._wsReconnectAttempts = 0;
+    // Deliberately do NOT reset _wsReconnectAttempts here: _connectWs() calls
+    // this first, so a reset would restart the exponential backoff ladder at
+    // attempt 0 on every retry (≈0ms tight reconnect loop during an outage).
+    // ws.onopen zeroes the counter once a connection actually succeeds.
+    this._wsState = 'disconnected';
     this._stopMobileResizeRetry();
     if (this._ws) {
       this._ws.onclose = null; // Prevent re-entrant cleanup
@@ -4915,17 +4955,40 @@ class CodemanApp {
     // Track working directory for path normalization in Project Insights
     this.currentSessionWorkingDir = session?.workingDir || null;
     if (session && session.pid === null) {
-      // Session has no PTY attached — either restored after server restart
-      // or detached for some other reason. Re-attach regardless of status.
-      try {
-        const endpoint = session.mode === 'shell'
-          ? `/api/sessions/${sessionId}/shell`
-          : `/api/sessions/${sessionId}/interactive`;
-        await fetch(endpoint, { method: 'POST' });
-        // Update local session state
-        session.status = 'busy';
-      } catch (err) {
-        console.error('Failed to attach to restored session:', err);
+      if (session.respawnBlocked) {
+        // COD-118: the PTY-exit circuit breaker tripped for this session — the
+        // automatic re-attach must NOT silently clear it (that would re-arm the
+        // crash loop on every tab click / page load). Restart only on explicit
+        // user confirmation; the confirmed request carries clearBreaker:true.
+        const label = session.name || 'Session';
+        if (window.confirm(`${label} was stopped after crashing repeatedly. Restart it?`)) {
+          try {
+            await fetch(`/api/sessions/${sessionId}/interactive`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clearBreaker: true }),
+            });
+            session.respawnBlocked = false;
+            session.status = 'busy';
+          } catch (err) {
+            console.error('Failed to restart crash-looped session:', err);
+          }
+        }
+      } else {
+        // Session has no PTY attached — either restored after server restart
+        // or detached for some other reason. Re-attach regardless of status.
+        // Deliberately NO body: this automatic path must never clear a tripped
+        // PTY-exit breaker (COD-118).
+        try {
+          const endpoint = session.mode === 'shell'
+            ? `/api/sessions/${sessionId}/shell`
+            : `/api/sessions/${sessionId}/interactive`;
+          await fetch(endpoint, { method: 'POST' });
+          // Update local session state
+          session.status = 'busy';
+        } catch (err) {
+          console.error('Failed to attach to restored session:', err);
+        }
       }
     }
 

@@ -289,6 +289,8 @@ export interface SessionState {
   autoCompactThreshold?: number;
   /** Auto-compact prompt */
   autoCompactPrompt?: string;
+  /** PTY-exit circuit breaker tripped; explicit restart is required. */
+  respawnBlocked?: boolean;
   /** Agent-initiated checkpoint (compact-or-clear, then continue) enabled */
   checkpointEnabled?: boolean;
   /**
