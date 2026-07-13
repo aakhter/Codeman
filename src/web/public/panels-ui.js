@@ -3469,6 +3469,9 @@ Object.assign(CodemanApp.prototype, {
       const result = await res.json();
       if (!result.success) throw new Error(result.error || 'Failed to load files');
 
+      // Keep the rendered tree bound to the session that produced it. The active
+      // terminal tab can change independently while this panel remains open.
+      this.fileBrowserSessionId = sessionId;
       this.fileBrowserData = result.data;
       this.renderFileBrowserTree();
 
@@ -3485,9 +3488,10 @@ Object.assign(CodemanApp.prototype, {
 
   renderFileBrowserTree() {
     const treeEl = this.$('fileBrowserTree');
-    if (!treeEl || !this.fileBrowserData) return;
+    if (!treeEl || !this.fileBrowserData || !this.fileBrowserSessionId) return;
 
     const { tree } = this.fileBrowserData;
+    const fileBrowserSessionId = this.fileBrowserSessionId;
     if (!tree || tree.length === 0) {
       treeEl.innerHTML = '<div class="file-browser-empty">No files found</div>';
       return;
@@ -3525,7 +3529,7 @@ Object.assign(CodemanApp.prototype, {
       const nameClass = isDir ? 'file-tree-name directory' : 'file-tree-name';
 
       const downloadBtn = !isDir
-        ? `<a class="file-tree-download" href="/api/sessions/${this.activeSessionId}/file-raw?path=${encodeURIComponent(node.path)}&download=true" title="Download" onclick="event.stopPropagation()">&#x2B07;</a>`
+        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" title="Download" onclick="event.stopPropagation()">&#x2B07;</a>`
         : '';
 
       html.push(`
@@ -3561,7 +3565,7 @@ Object.assign(CodemanApp.prototype, {
         if (type === 'directory') {
           this.toggleFileBrowserFolder(path);
         } else {
-          this.openFilePreview(path);
+          this.openFilePreview(path, fileBrowserSessionId);
         }
       });
     });
