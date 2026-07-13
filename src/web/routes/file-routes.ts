@@ -742,6 +742,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       const truncatedContent = allLines.length > maxLines;
       const displayContent = truncatedContent ? allLines.slice(0, maxLines).join('\n') : content;
 
+      // COD-234: classify text vs. markdown so the shared document viewer renders
+      // markdown as rich prose (outline, reading view, export) instead of a raw
+      // <pre> dump, matching the attachment viewer. Markdown family aligns with the
+      // PDF-export renderer (isMarkdownExtension: md/markdown/mdown) for consistency.
+      const markdownExts = new Set(['md', 'markdown', 'mdown']);
+      const textType = markdownExts.has(ext) ? 'markdown' : 'text';
       return {
         success: true,
         data: {
@@ -752,6 +758,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           totalLines: allLines.length,
           truncated: truncatedContent,
           extension: ext,
+          type: textType,
         },
       };
     } catch (err) {

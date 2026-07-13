@@ -251,6 +251,35 @@ describe('file-routes', () => {
       expect(body.data.extension).toBe('ts');
     });
 
+    it('classifies markdown files as type "markdown" so the file panel renders rich prose (COD-234)', async () => {
+      const fileContent = '# Title\n\nBody text';
+      mockedReadFile.mockResolvedValue(fileContent as never);
+      mockedStat.mockResolvedValue({ size: fileContent.length, mtimeMs: 1 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=notes.md`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.type).toBe('markdown');
+    });
+
+    it('classifies non-markdown text files as type "text" (not markdown, not document)', async () => {
+      const fileContent = 'const x = 1;\n';
+      mockedReadFile.mockResolvedValue(fileContent as never);
+      mockedStat.mockResolvedValue({ size: fileContent.length, mtimeMs: 1 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=src/app.js`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.type).toBe('text');
+      expect(body.data.content).toBe(fileContent);
+    });
+
     it('includes mtimeMs in text file metadata (freshness signal for live preview)', async () => {
       const fileContent = 'draft v1';
       mockedReadFile.mockResolvedValue(fileContent as never);
