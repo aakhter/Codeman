@@ -1205,6 +1205,37 @@ describe('file-routes', () => {
       expect(res.headers['content-type']).toBe('image/png');
     });
 
+    it.each([
+      [
+        'docx',
+        'deliverables/Market Story Final.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ],
+      [
+        'pptx',
+        'deliverables/Executive Brief Final.pptx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      ],
+    ])(
+      'downloads the exact workspace %s source with its original spaced name and official media type',
+      async (_extension, filePath, mediaType) => {
+        const content = Buffer.from('PK\u0003\u0004 exact original office bytes');
+        mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
+        mockedStat.mockResolvedValue({ size: content.length } as never);
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=${encodeURIComponent(filePath)}&download=true`,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.headers['content-type']).toBe(mediaType);
+        expect(res.headers['content-disposition']).toBe(`attachment; filename="${filePath.split('/').at(-1)}"`);
+        expect(res.rawPayload).toEqual(content);
+        expect(mockedCreateReadStream).toHaveBeenCalledWith(`${harness.ctx._session.workingDir}/${filePath}`);
+      }
+    );
+
     it('serves workspace SVG as an untrusted attachment instead of inline image/svg+xml', async () => {
       const content = Buffer.from('<svg><script>alert("xss")</script></svg>');
       mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);

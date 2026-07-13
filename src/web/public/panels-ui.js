@@ -3886,6 +3886,12 @@ Object.assign(CodemanApp.prototype, {
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
       const st = this.filePreviewState;
+      const sourceExtension = String(data.extension || '')
+        .toLowerCase();
+      const isWorkspaceOfficePreview =
+        !attachmentId &&
+        ((data.type === 'document' && sourceExtension === 'docx') ||
+          (data.type === 'presentation' && sourceExtension === 'pptx'));
       // .docx supports a view switcher: rendered PDF (default), selectable HTML, and Changes (COD-68).
       const isDocx = data.type === 'document' && !!attachmentId;
       const view = isDocx ? st?.docxView || 'pdf' : 'pdf';
@@ -3903,7 +3909,13 @@ Object.assign(CodemanApp.prototype, {
       } else {
         const previewUrl =
           data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
-        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bust(previewUrl)}" title="${escapeHtml(filePath)}"></iframe>`;
+        const bustedPreviewUrl = bust(previewUrl);
+        // A Files-panel Office preview is a converted PDF, not the source file.
+        // Suppress the embedded PDF toolbar so its download icon cannot present
+        // that conversion as the primary download; the footer below provides an
+        // explicit guarded source download and a separately-labelled PDF export.
+        const framedPreviewUrl = isWorkspaceOfficePreview ? `${bustedPreviewUrl}#toolbar=0` : bustedPreviewUrl;
+        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${framedPreviewUrl}" title="${escapeHtml(filePath)}"></iframe>`;
       }
       const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
       const switcher = isDocx
@@ -3921,10 +3933,13 @@ Object.assign(CodemanApp.prototype, {
       // One-click PDF export of the open document (COD-61). docx/pptx reuse the
       // LibreOffice preview-PDF cache server-side; raw PDFs are already PDFs but
       // the control downloads them consistently via the export endpoint.
+      const sourceDownload = isWorkspaceOfficePreview
+        ? ` <button class="btn-icon-sm document-source-download-btn" onclick="app.downloadFilePreviewSource()" title="Download the original ${sourceExtension.toUpperCase()} file">Download ${sourceExtension.toUpperCase()}</button>`
+        : '';
       const exportPdf = this._renderExportPdfControl();
       footerEl.innerHTML = `${escapeHtml(
         `${this.formatFileSize(data.size)} \u2022 ${label}`
-      )}${switcher}${comment}${exportPdf}`;
+      )}${switcher}${comment}${sourceDownload}${exportPdf}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
@@ -4083,6 +4098,16 @@ Object.assign(CodemanApp.prototype, {
     // resolves the extension from the attachment record and 400s if unsupported.
     if (st.filePath && !exportable.includes(ext)) return '';
     return ` <button class="btn-icon-sm document-export-btn" onclick="app.exportDocumentPdf()" title="Download a PDF of this document">Export PDF</button>`;
+  },
+
+  /** Download the original workspace Office source shown by the Files panel. */
+  downloadFilePreviewSource() {
+    const st = this.filePreviewState;
+    if (!st?.sessionId || !st.filePath || st.attachmentId) {
+      this.showToast?.('No source file to download', 'error');
+      return;
+    }
+    this.downloadWorkspaceFile(st.sessionId, st.filePath);
   },
 
   /** Download a PDF of the open document via the export endpoint (COD-61). */
