@@ -41,6 +41,14 @@ function previewElement(): PreviewElement {
   return { innerHTML: '', textContent: '', querySelector: vi.fn(() => null) };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function renderHost(
   proto: Proto,
   state: { sessionId: string; filePath: string; attachmentId: string | null; docxView: string }
@@ -67,6 +75,78 @@ function iframeSrc(html: string): string {
 }
 
 describe('COD-238 Files-panel source download', () => {
+  it('keeps the displayed preview and source button on the latest out-of-order open', async () => {
+    const proto = loadPanelsUiPrototype();
+    const firstPath = 'deliverables/First Draft.docx';
+    const secondPath = 'deliverables/Approved Final.docx';
+    const firstMetadata = deferred<Record<string, unknown>>();
+    const secondMetadata = deferred<Record<string, unknown>>();
+    const body = previewElement();
+    const footer = previewElement();
+    const title = previewElement();
+    const overlay = { classList: { add: vi.fn() } };
+    const downloadWorkspaceFile = vi.fn();
+    const startFilePreviewPolling = vi.fn();
+    const host = {
+      filePreviewState: null as Record<string, unknown> | null,
+      filePreviewContent: '',
+      _annotations: [],
+      downloadWorkspaceFile,
+      formatFileSize: vi.fn(() => '31 KB'),
+      $: vi.fn((id: string) => {
+        if (id === 'filePreviewOverlay') return overlay;
+        if (id === 'filePreviewTitle') return title;
+        if (id === 'filePreviewBody') return body;
+        if (id === 'filePreviewFooter') return footer;
+        return null;
+      }),
+      _restorePreviewSize: vi.fn(),
+      _closeAnnotationTray: vi.fn(),
+      _stopFilePreviewPolling: proto._stopFilePreviewPolling,
+      _startFilePreviewPolling: startFilePreviewPolling,
+      _fetchFilePreviewMetadata: vi.fn((url: string) =>
+        url.includes('first-session') ? firstMetadata.promise : secondMetadata.promise
+      ),
+      _filePreviewSignature: proto._filePreviewSignature,
+      _renderFilePreviewBody: proto._renderFilePreviewBody,
+      _renderExportPdfControl: proto._renderExportPdfControl,
+      _documentParams: proto._documentParams,
+    };
+
+    const firstOpen = proto.openFilePreview.call(host, firstPath, 'first-session', null);
+    const secondOpen = proto.openFilePreview.call(host, secondPath, 'second-session', null);
+
+    secondMetadata.resolve({
+      type: 'document',
+      extension: 'docx',
+      size: 31_000,
+      mtimeMs: 2,
+      url: `/api/sessions/second-session/file-raw?path=${encodeURIComponent(secondPath)}`,
+      previewUrl: `/api/sessions/second-session/file-preview?path=${encodeURIComponent(secondPath)}`,
+    });
+    await secondOpen;
+
+    firstMetadata.resolve({
+      type: 'document',
+      extension: 'docx',
+      size: 30_000,
+      mtimeMs: 1,
+      url: `/api/sessions/first-session/file-raw?path=${encodeURIComponent(firstPath)}`,
+      previewUrl: `/api/sessions/first-session/file-preview?path=${encodeURIComponent(firstPath)}`,
+    });
+    await firstOpen;
+
+    expect(title.textContent).toBe(secondPath);
+    expect(iframeSrc(body.innerHTML)).toContain('second-session');
+    expect(iframeSrc(body.innerHTML)).toContain(encodeURIComponent(secondPath));
+    expect(iframeSrc(body.innerHTML)).not.toContain('first-session');
+    expect(startFilePreviewPolling).toHaveBeenCalledOnce();
+    expect(host.filePreviewState).toMatchObject({ sessionId: 'second-session', filePath: secondPath });
+
+    proto.downloadFilePreviewSource.call(host);
+    expect(downloadWorkspaceFile).toHaveBeenCalledWith('second-session', secondPath);
+  });
+
   it.each([
     ['document', 'docx', 'deliverables/Market Story Final.docx', 'Download DOCX'],
     ['presentation', 'pptx', 'deliverables/Executive Brief Final.pptx', 'Download PPTX'],

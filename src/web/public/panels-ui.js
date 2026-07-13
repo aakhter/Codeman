@@ -3751,17 +3751,23 @@ Object.assign(CodemanApp.prototype, {
     const metadataUrl = attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
       : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
-    this.filePreviewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
+    const previewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
+    this.filePreviewState = previewState;
     this._annotations = [];
     this._closeAnnotationTray();
 
     try {
       const data = await this._fetchFilePreviewMetadata(metadataUrl);
-      this.filePreviewState.signature = this._filePreviewSignature(data);
-      await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId });
+      // A newer open/close owns the overlay now. Never let this stale response
+      // overwrite its body or start a poller for the wrong document.
+      if (this.filePreviewState !== previewState) return;
+      previewState.signature = this._filePreviewSignature(data);
+      const rendered = await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, previewState);
+      if (!rendered || this.filePreviewState !== previewState) return;
       // Auto-refresh the open preview as the agent rewrites the file (COD-58).
       this._startFilePreviewPolling();
     } catch (err) {
+      if (this.filePreviewState !== previewState) return;
       console.error('Failed to preview file:', err);
       bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
     }
@@ -3843,10 +3849,12 @@ Object.assign(CodemanApp.prototype, {
    * state. Markdown/plain-text re-fetch raw content; image/pdf get an mtime
    * cache-bust so a rewritten file actually reloads.
    */
-  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId }) {
+  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, expectedState = null) {
+    const isCurrentPreview = () => !expectedState || this.filePreviewState === expectedState;
+    if (!isCurrentPreview()) return false;
     const bodyEl = this.$('filePreviewBody');
     const footerEl = this.$('filePreviewFooter');
-    if (!bodyEl) return;
+    if (!bodyEl) return false;
     const bust = (url) => (data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url);
     const st = this.filePreviewState;
     if (st) {
@@ -3903,6 +3911,7 @@ Object.assign(CodemanApp.prototype, {
         } catch {
           /* fall through to empty */
         }
+        if (!isCurrentPreview()) return false;
         const safe = typeof this._sanitizeHtml === 'function' ? this._sanitizeHtml(html) : escapeHtml(html);
         bodyEl.innerHTML = `<div class="document-preview-html rv-text">${safe}</div>`;
         this._bindDocxCommentInspector(bodyEl);
@@ -3947,8 +3956,10 @@ Object.assign(CodemanApp.prototype, {
       const rawUrl =
         data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
       const textRes = await fetch(bust(rawUrl));
+      if (!isCurrentPreview()) return false;
       if (!textRes.ok) throw new Error('Failed to load file');
       const text = await textRes.text();
+      if (!isCurrentPreview()) return false;
       this.filePreviewContent = text;
       // Reset any prior outline scroll-spy before re-rendering (no observer leaks).
       this._teardownOutlineScrollSpy();
@@ -4026,6 +4037,7 @@ Object.assign(CodemanApp.prototype, {
       const truncNote = data.truncated ? ` (showing 500/${data.totalLines} lines)` : '';
       footerEl.textContent = `${data.totalLines} lines \u2022 ${this.formatFileSize(data.size)}${truncNote}`;
     }
+    return true;
   },
 
   _startFilePreviewPolling() {
@@ -4050,6 +4062,7 @@ Object.assign(CodemanApp.prototype, {
     this._filePreviewPolling = true;
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      if (this.filePreviewState !== st) return;
       const sig = this._filePreviewSignature(data);
       if (sig === st.signature) return; // unchanged
       st.signature = sig;
@@ -4061,11 +4074,16 @@ Object.assign(CodemanApp.prototype, {
       const SCROLLERS = '.document-preview-markdown, .document-preview-text, .document-preview-stage, .document-preview-diff';
       const bodyEl = this.$('filePreviewBody');
       const prevTop = bodyEl?.querySelector(SCROLLERS)?.scrollTop || 0;
-      await this._renderFilePreviewBody(data, {
-        sessionId: st.sessionId,
-        filePath: st.filePath,
-        attachmentId: st.attachmentId,
-      });
+      const rendered = await this._renderFilePreviewBody(
+        data,
+        {
+          sessionId: st.sessionId,
+          filePath: st.filePath,
+          attachmentId: st.attachmentId,
+        },
+        st
+      );
+      if (!rendered || this.filePreviewState !== st) return;
       const newScroller = this.$('filePreviewBody')?.querySelector(SCROLLERS);
       if (newScroller) newScroller.scrollTop = prevTop;
     } catch {
@@ -4220,12 +4238,17 @@ Object.assign(CodemanApp.prototype, {
     st.diffFrom = null;
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      if (this.filePreviewState !== st) return;
       st.signature = this._filePreviewSignature(data);
-      await this._renderFilePreviewBody(data, {
-        sessionId: st.sessionId,
-        filePath: st.filePath,
-        attachmentId: st.attachmentId,
-      });
+      await this._renderFilePreviewBody(
+        data,
+        {
+          sessionId: st.sessionId,
+          filePath: st.filePath,
+          attachmentId: st.attachmentId,
+        },
+        st
+      );
     } catch {
       // Leave the diff in place if the document can't be re-read right now.
     }
@@ -4265,12 +4288,17 @@ Object.assign(CodemanApp.prototype, {
     st.docxView = view;
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      if (this.filePreviewState !== st) return;
       st.signature = this._filePreviewSignature(data);
-      await this._renderFilePreviewBody(data, {
-        sessionId: st.sessionId,
-        filePath: st.filePath,
-        attachmentId: st.attachmentId,
-      });
+      await this._renderFilePreviewBody(
+        data,
+        {
+          sessionId: st.sessionId,
+          filePath: st.filePath,
+          attachmentId: st.attachmentId,
+        },
+        st
+      );
     } catch {
       /* keep current view on error */
     }
