@@ -62,14 +62,15 @@ export function validateSessionFilePath(
   sessionWorkingDir: string,
   filePath: string
 ): { resolvedPath: string; relativePath: string } | null {
-  const fullPath = resolve(sessionWorkingDir, filePath);
+  let resolvedWorkingDir: string;
   let resolvedPath: string;
   try {
-    resolvedPath = realpathSync(fullPath);
+    resolvedWorkingDir = realpathSync(sessionWorkingDir);
+    resolvedPath = realpathSync(resolve(sessionWorkingDir, filePath));
   } catch {
     return null;
   }
-  const relativePath = relative(sessionWorkingDir, resolvedPath);
+  const relativePath = relative(resolvedWorkingDir, resolvedPath);
   if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
     return null;
   }
