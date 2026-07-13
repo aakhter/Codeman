@@ -1131,12 +1131,147 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * Register a custom link provider for xterm.js that detects file paths
-   * in terminal output and makes them clickable.
-   * When clicked, opens a floating log viewer window with live streaming.
+   * Register a custom link provider for xterm.js that detects URLs, live-log
+   * paths, and previewable workspace documents in terminal output.
    */
   registerFilePathLinkProvider() {
     const self = this;
+    const previewExtensions = new Set([
+      'pdf',
+      'md',
+      'txt',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'svg',
+      'docx',
+      'pptx',
+      'json',
+      'yaml',
+      'yml',
+      'csv',
+      'xml',
+      'sh',
+      'py',
+      'ts',
+      'js',
+    ]);
+
+    const normalizePathParts = (path, absolute) => {
+      const parts = path.split('/');
+      const normalized = [];
+      for (let index = 0; index < parts.length; index++) {
+        const part = parts[index];
+        if (!part) {
+          if (absolute && index === 0) continue;
+          return null;
+        }
+        if (part === '.') continue;
+        if (part === '..') return null;
+        normalized.push(part);
+      }
+      if (!normalized.length) return null;
+      return `${absolute ? '/' : ''}${normalized.join('/')}`;
+    };
+
+    const normalizePreviewPath = (candidate, workingDir) => {
+      if (!candidate || candidate.length > 1000 || candidate.includes('\\') || candidate.includes('://')) return null;
+      if (!candidate.includes('/')) return null;
+
+      const extension = candidate.slice(candidate.lastIndexOf('.') + 1).toLowerCase();
+      if (!previewExtensions.has(extension)) return null;
+
+      if (candidate.startsWith('/')) {
+        if (!workingDir || !workingDir.startsWith('/')) return null;
+        const normalizedCandidate = normalizePathParts(candidate, true);
+        const normalizedWorkingDir = normalizePathParts(workingDir.replace(/\/$/, ''), true);
+        if (!normalizedCandidate || !normalizedWorkingDir) return null;
+        const prefix = `${normalizedWorkingDir}/`;
+        return normalizedCandidate.startsWith(prefix) ? normalizedCandidate.slice(prefix.length) : null;
+      }
+
+      return normalizePathParts(candidate, false);
+    };
+
+    // Scan once instead of using an ambiguous, backtracking-heavy expression.
+    // Quoted/backticked spans are kept intact so workspace paths may contain spaces.
+    const findPreviewReferences = (lineText, workingDir) => {
+      const references = [];
+      const isHardDelimiter = (char) => !char || /[\s\x00-\x1f<>|;&]/.test(char);
+      const isTokenDelimiter = (char) => isHardDelimiter(char) || char === '"' || char === "'" || char === '`';
+      const addCandidate = (raw, rawStart) => {
+        let startTrim = 0;
+        let endTrim = raw.length;
+        while (startTrim < endTrim && /[([{]/.test(raw[startTrim])) startTrim++;
+        while (endTrim > startTrim && /[.,;:!?\])}]/.test(raw[endTrim - 1])) endTrim--;
+        const text = raw.slice(startTrim, endTrim);
+        const relativePath = normalizePreviewPath(text, workingDir);
+        if (!relativePath) return;
+        references.push({ text, relativePath, startIndex: rawStart + startTrim, endIndex: rawStart + endTrim });
+      };
+
+      let index = 0;
+      while (index < lineText.length) {
+        while (index < lineText.length && isHardDelimiter(lineText[index])) index++;
+        if (index >= lineText.length) break;
+
+        const delimiter = lineText[index];
+        if (delimiter === '"' || delimiter === "'" || delimiter === '`') {
+          const end = lineText.indexOf(delimiter, index + 1);
+          if (end === -1) {
+            index++;
+            continue;
+          }
+          addCandidate(lineText.slice(index + 1, end), index + 1);
+          index = end + 1;
+          continue;
+        }
+
+        const start = index;
+        while (index < lineText.length && !isTokenDelimiter(lineText[index])) index++;
+        addCandidate(lineText.slice(start, index), start);
+      }
+      return references;
+    };
+
+    const readLogicalLine = (buffer, bufferLineNumber) => {
+      let startRow = bufferLineNumber - 1;
+      let line = buffer.getLine(startRow);
+      if (!line) return null;
+
+      while (startRow > 0 && line.isWrapped) {
+        startRow--;
+        line = buffer.getLine(startRow);
+        if (!line) return null;
+      }
+
+      let endRow = startRow;
+      while (buffer.getLine(endRow + 1)?.isWrapped) endRow++;
+
+      const rows = [];
+      let lineText = '';
+      for (let row = startRow; row <= endRow; row++) {
+        const current = buffer.getLine(row);
+        if (!current) break;
+        const text = current.translateToString(row === endRow);
+        rows.push({ y: row + 1, startIndex: lineText.length, length: text.length });
+        lineText += text;
+      }
+      return { lineText, rows };
+    };
+
+    const positionForOffset = (logicalLine, offset) => {
+      for (let index = 0; index < logicalLine.rows.length; index++) {
+        const row = logicalLine.rows[index];
+        const rowEnd = row.startIndex + row.length;
+        if (offset <= rowEnd || index === logicalLine.rows.length - 1) {
+          return { x: Math.max(1, offset - row.startIndex + 1), y: row.y };
+        }
+      }
+      return { x: 1, y: logicalLine.rows[0]?.y || 1 };
+    };
 
     // Debug: Track if provider is being invoked
     let lastInvokedLine = -1;
@@ -1158,8 +1293,8 @@ Object.assign(CodemanApp.prototype, {
           return;
         }
 
-        // Get line text - translateToString handles wrapped lines
-        const lineText = line.translateToString(true);
+        const logicalLine = readLogicalLine(buffer, bufferLineNumber);
+        const lineText = logicalLine?.lineText || '';
 
         if (!lineText || !lineText.includes('/')) {
           callback(undefined);
@@ -1167,6 +1302,34 @@ Object.assign(CodemanApp.prototype, {
         }
 
         const links = [];
+        const occupiedRanges = [];
+        const originatingSessionId = self.activeSessionId;
+        const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
+
+        const overlapsExistingLink = (startIndex, endIndex) =>
+          occupiedRanges.some((range) => startIndex < range.endIndex && endIndex > range.startIndex);
+
+        const addLink = ({ text, startIndex, endIndex, activate }) => {
+          if (!logicalLine || startIndex < 0 || endIndex <= startIndex || overlapsExistingLink(startIndex, endIndex)) {
+            return;
+          }
+          occupiedRanges.push({ startIndex, endIndex });
+          links.push({
+            text,
+            range: {
+              start: positionForOffset(logicalLine, startIndex),
+              end: positionForOffset(logicalLine, endIndex),
+            },
+            decorations: { pointerCursor: true, underline: true },
+            activate,
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
+            },
+          });
+        };
 
         // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
         // they take priority over file-path patterns.
@@ -1175,26 +1338,12 @@ Object.assign(CodemanApp.prototype, {
         const addUrlLink = (url, matchIndex) => {
           // Strip trailing punctuation that's likely not part of the URL
           const cleaned = url.replace(/[.,;:!?)]+$/, '');
-          const startCol = lineText.indexOf(cleaned, matchIndex);
-          if (startCol === -1) return;
-
-          if (links.some((l) => l.range.start.x === startCol + 1)) return;
-
-          links.push({
+          addLink({
             text: cleaned,
-            range: {
-              start: { x: startCol + 1, y: bufferLineNumber },
-              end: { x: startCol + cleaned.length + 1, y: bufferLineNumber },
-            },
-            decorations: { pointerCursor: true, underline: true },
+            startIndex: matchIndex,
+            endIndex: matchIndex + cleaned.length,
             activate(_event, text) {
               self._openTerminalUrl(text);
-            },
-            hover() {
-              self._linkHovered = true;
-            },
-            leave() {
-              self._linkHovered = false;
             },
           });
         };
@@ -1207,38 +1356,21 @@ Object.assign(CodemanApp.prototype, {
         // the whole tab on hover. Non-empty token + bounded reps is O(n).
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
-        // Pattern 2: Paths with common extensions
-        const extPattern =
-          /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js))\b/g;
+        // Pattern 2: Standalone live-log paths
+        const extPattern = /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.log)\b/g;
 
         // Pattern 3: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
-        const addLink = (filePath, matchIndex) => {
-          const startCol = lineText.indexOf(filePath, matchIndex);
-          if (startCol === -1) return;
-
-          // Skip if already have link at this position
-          if (links.some((l) => l.range.start.x === startCol + 1)) return;
-
-          links.push({
+        const addLogLink = (filePath, matchIndex) => {
+          const startIndex = lineText.indexOf(filePath, matchIndex);
+          if (startIndex === -1) return;
+          addLink({
             text: filePath,
-            range: {
-              start: { x: startCol + 1, y: bufferLineNumber }, // 1-based
-              end: { x: startCol + filePath.length + 1, y: bufferLineNumber },
-            },
-            decorations: {
-              pointerCursor: true,
-              underline: true,
-            },
-            activate(event, text) {
-              self.openLogViewerWindow(text, self.activeSessionId);
-            },
-            hover() {
-              self._linkHovered = true;
-            },
-            leave() {
-              self._linkHovered = false;
+            startIndex,
+            endIndex: startIndex + filePath.length,
+            activate(_event, text) {
+              self.openLogViewerWindow(text, originatingSessionId);
             },
           });
         };
@@ -1253,18 +1385,33 @@ Object.assign(CodemanApp.prototype, {
 
         cmdPattern.lastIndex = 0;
         while ((match = cmdPattern.exec(lineText)) !== null) {
-          addLink(match[2], match.index);
+          addLogLink(match[2], match.index);
         }
 
         extPattern.lastIndex = 0;
         while ((match = extPattern.exec(lineText)) !== null) {
-          addLink(match[1], match.index);
+          addLogLink(match[1], match.index);
         }
 
         bashPattern.lastIndex = 0;
         while ((match = bashPattern.exec(lineText)) !== null) {
-          addLink(match[1], match.index);
+          addLogLink(match[1], match.index);
         }
+
+        if (originatingSessionId) {
+          for (const reference of findPreviewReferences(lineText, workingDir)) {
+            addLink({
+              text: reference.text,
+              startIndex: reference.startIndex,
+              endIndex: reference.endIndex,
+              activate() {
+                self.openFilePreview(reference.relativePath, originatingSessionId);
+              },
+            });
+          }
+        }
+
+        links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 
         if (links.length > 0) {
           console.debug(
