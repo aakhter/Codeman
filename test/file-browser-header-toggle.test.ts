@@ -4,7 +4,7 @@
  * state is derived from the canonical file-browser panel, including non-header entry points.
  */
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import postcss from 'postcss';
@@ -17,7 +17,7 @@ let CodemanApp: { new (): any };
 beforeAll(() => {
   const combined =
     'var marked, MobileDetection = { isMobile: function(){ return false; }, isTouchDevice: function(){ return false; }, getDeviceType: function(){ return "desktop"; } }, ' +
-    'KeyboardHandler = {}, SwipeHandler = {}, VoiceInput = {}, DeepgramProvider = {}, ' +
+    'KeyboardHandler = {}, SwipeHandler = {}, VoiceInput = { cleanup: function(){} }, DeepgramProvider = {}, ' +
     'NotificationManager = function(){}, FocusTrap = function(){ return { activate(){}, deactivate(){} }; };\n' +
     readPublic('constants.js') +
     '\n' +
@@ -26,6 +26,8 @@ beforeAll(() => {
     readPublic('panels-ui.js') +
     '\n' +
     readPublic('settings-ui.js') +
+    '\n' +
+    readPublic('session-ui.js') +
     '\n;globalThis.__Cod235App = CodemanApp;';
   (0, eval)(combined);
   CodemanApp = (globalThis as any).__Cod235App as { new (): any };
@@ -56,6 +58,10 @@ function makeApp(activeSessionId: string | null = null): any {
 
 beforeEach(() => {
   mountFileBrowserDom();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('COD-235 Files header markup and phone policy', () => {
@@ -197,15 +203,33 @@ describe('COD-235 canonical Files header behavior', () => {
     expect(app.updateFileBrowserHeaderButton).toHaveBeenCalledOnce();
   });
 
-  it('keeps an already-visible panel bound to its owner when session selection finishes', () => {
-    const source = CodemanApp.prototype.selectSession.toString();
-    const fileBrowserBlock = source.match(/\/\/ Load file browser if enabled([\s\S]*?)\n\s*}\);/i)?.[1] ?? '';
+  it('post-selection sync canonically reveals a configured hidden panel for the selected session', () => {
+    const app = makeApp('selected-session');
+    app.loadAppSettingsFromStorage.mockReturnValue({ showFileBrowser: true });
+    app.showFileBrowserPanel = vi.fn();
 
-    expect(fileBrowserBlock).toContain("classList.contains('visible')");
-    expect(fileBrowserBlock).toContain('this.showFileBrowserPanel(sessionId)');
-    expect(fileBrowserBlock).not.toContain("classList.add('visible')");
-    expect(fileBrowserBlock).not.toContain('this.loadFileBrowser(sessionId)');
-    expect(fileBrowserBlock).not.toContain('this.makeWindowDraggable');
+    expect(app.showConfiguredFileBrowserPanel).toBeTypeOf('function');
+    app.showConfiguredFileBrowserPanel('selected-session');
+
+    expect(app.showFileBrowserPanel).toHaveBeenCalledOnce();
+    expect(app.showFileBrowserPanel).toHaveBeenCalledWith('selected-session');
+  });
+
+  it('post-selection sync retains an already-visible panel owner without loading or drag rebinding', () => {
+    const { panel } = mountFileBrowserDom();
+    panel.classList.add('visible');
+    const app = makeApp('new-active-session');
+    app.fileBrowserSessionId = 'existing-owner-session';
+    app.loadAppSettingsFromStorage.mockReturnValue({ showFileBrowser: true });
+    app.showFileBrowserPanel = vi.fn();
+
+    expect(app.showConfiguredFileBrowserPanel).toBeTypeOf('function');
+    app.showConfiguredFileBrowserPanel('new-active-session');
+
+    expect(app.showFileBrowserPanel).not.toHaveBeenCalled();
+    expect(app.loadFileBrowser).not.toHaveBeenCalled();
+    expect(app.makeWindowDraggable).not.toHaveBeenCalled();
+    expect(app.fileBrowserSessionId).toBe('existing-owner-session');
   });
 
   it('preserves Session Manager Open folder routing through canonical reveal', () => {
@@ -214,5 +238,63 @@ describe('COD-235 canonical Files header behavior', () => {
 
     expect(openFolderBlock).toContain('this.selectSession(s.sessionId)');
     expect(openFolderBlock).toContain('this.showFileBrowserPanel?.(s.sessionId)');
+  });
+});
+
+describe('COD-235 direct active-session mutation sync', () => {
+  it('synchronizes immediately when empty init clears the active session after tab rendering', () => {
+    const app = makeApp('stale-session');
+    app._initGeneration = 0;
+    app._clearTimer = vi.fn();
+    app._updateCjkInputState = vi.fn();
+    app._applyCodemanCliHints = vi.fn();
+    app._resetAllAppState = vi.fn();
+    app.sessions = new Map();
+    app.ralphClosedSessions = new Set();
+    app.ralphStates = new Map();
+    app.sessionOrder = [];
+    app.syncSessionOrder = vi.fn();
+    app.updateCost = vi.fn();
+    app.renderSessionTabs = vi.fn();
+    app.stopSystemStatsPolling = vi.fn();
+    app.cleanupAllFloatingWindows = vi.fn();
+    app.isSoloWindow = false;
+    const observedActiveSessions: Array<string | null> = [];
+    app.updateFileBrowserHeaderButton = vi.fn(() => observedActiveSessions.push(app.activeSessionId));
+
+    app.handleInit({ sessions: [], scheduledRuns: [] });
+
+    expect(app.activeSessionId).toBeNull();
+    expect(observedActiveSessions).toEqual([null]);
+  });
+
+  it('synchronizes immediately after remote quick-start assigns its session before selectSession', async () => {
+    document.body.innerHTML = `
+      <select id="quickStartCase"><option value="remote-case" selected>remote-case</option></select>
+      <input id="shellCount" value="1">
+    `;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ json: async () => ({ data: { location: 'remote', path: '/remote/case' } }) })
+      .mockResolvedValueOnce({ json: async () => ({ success: true, data: { sessionId: 'remote-session' } }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = makeApp(null);
+    app.sessions = new Map();
+    app.cases = [];
+    app.terminal = { clear: vi.fn(), writeln: vi.fn(), focus: vi.fn() };
+    const observedActiveSessions: Array<string | null> = [];
+    app.updateFileBrowserHeaderButton = vi.fn(() => observedActiveSessions.push(app.activeSessionId));
+    app.selectSession = vi.fn(function (this: { activeSessionId: string | null }, sessionId: string) {
+      if (this.activeSessionId === sessionId) return;
+    });
+
+    await app.runShell();
+
+    expect(app.activeSessionId).toBe('remote-session');
+    expect(observedActiveSessions).toEqual(['remote-session']);
+    expect(app.updateFileBrowserHeaderButton.mock.invocationCallOrder[0]).toBeLessThan(
+      app.selectSession.mock.invocationCallOrder[0]
+    );
   });
 });

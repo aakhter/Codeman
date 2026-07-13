@@ -3445,6 +3445,14 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  showConfiguredFileBrowserPanel(sessionId) {
+    const settings = this.loadAppSettingsFromStorage();
+    const panel = this.$('fileBrowserPanel');
+    if (settings.showFileBrowser && !panel?.classList.contains('visible')) {
+      this.showFileBrowserPanel(sessionId);
+    }
+  },
+
   // Reveal the file browser panel and load the given session's files. This is the
   // ONE canonical reveal path — it does NOT consult the `showFileBrowser` App Setting
   // (that setting only gates whether settings-ui.js calls this on settings apply).

@@ -757,6 +757,7 @@ Object.assign(CodemanApp.prototype, {
         }
         if (remoteIds[0]) {
           this.activeSessionId = remoteIds[0];
+          this.updateFileBrowserHeaderButton?.();
           await this.selectSession(remoteIds[0]);
         }
         this.terminal.focus();

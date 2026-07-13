@@ -4008,6 +4008,7 @@ class CodemanApp {
 
     const previousActiveId = this.activeSessionId;
     this.activeSessionId = null;
+    this.updateFileBrowserHeaderButton?.();
     if (this.sessionOrder.length > 0) {
       // Priority: current active > localStorage > first session
       let restoreId = previousActiveId;
@@ -5333,11 +5334,7 @@ class CodemanApp {
         this.updateSubagentWindowVisibility();
 
         // Load file browser if enabled
-        const settings = this.loadAppSettingsFromStorage();
-        const fileBrowserPanel = this.$('fileBrowserPanel');
-        if (settings.showFileBrowser && !fileBrowserPanel?.classList.contains('visible')) {
-          this.showFileBrowserPanel(sessionId);
-        }
+        this.showConfiguredFileBrowserPanel?.(sessionId);
       });
 
       _crashDiag.log('FOCUS');
