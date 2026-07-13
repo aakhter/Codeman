@@ -3001,6 +3001,9 @@ Object.assign(CodemanApp.prototype, {
 
   _handleTerminalTouchTap(touch) {
     if (!touch || !this.terminal) return false;
+    // Do not let either link activation or the ordinary cursor-positioning
+    // fallback clamp a release outside xterm into an edge-cell mouse report.
+    if (!this._terminalCellFromClientPoint(touch.clientX, touch.clientY)) return false;
 
     // xterm's desktop linkifier depends on hover state, which touchscreens do
     // not provide reliably. Hit-test the retained provider before any cursor

@@ -11,6 +11,8 @@ import { join, resolve } from 'node:path';
 import { build } from 'esbuild';
 import { chromium, type Browser, type Page, type Request } from 'playwright';
 
+const previousDataDir = process.env.CODEMAN_DATA_DIR;
+const previousTmuxSocket = process.env.CODEMAN_TMUX_SOCKET;
 const isolatedDataDir = mkdtempSync(join(tmpdir(), 'cod232-browser-'));
 process.env.CODEMAN_DATA_DIR = isolatedDataDir;
 process.env.CODEMAN_TMUX_SOCKET = `cod232-browser-${process.pid}`;
@@ -234,6 +236,10 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     await browser?.close();
     await server?.stop();
     rmSync(isolatedDataDir, { recursive: true, force: true });
+    if (previousDataDir === undefined) delete process.env.CODEMAN_DATA_DIR;
+    else process.env.CODEMAN_DATA_DIR = previousDataDir;
+    if (previousTmuxSocket === undefined) delete process.env.CODEMAN_TMUX_SOCKET;
+    else process.env.CODEMAN_TMUX_SOCKET = previousTmuxSocket;
   }, 60_000);
 
   it('opens shared preview on touch activation without sending terminal input', async () => {

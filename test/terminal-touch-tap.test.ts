@@ -30,6 +30,7 @@ function loadTerminalUiHarness() {
     window: {},
     CodemanApp,
     MouseEvent: MockMouseEvent,
+    document: { getElementById: () => null },
     console: { warn: vi.fn(), log: vi.fn() },
     _crashDiag: { log: vi.fn() },
     performance: { now: () => now },
@@ -184,6 +185,29 @@ describe('terminal touch tap mouse guard', () => {
     expect(app._terminalCellFromClientPoint(810, 40)).toBeNull();
     expect(app._terminalCellFromClientPoint(50, 500)).toBeNull();
     expect(app._terminalCellFromClientPoint(10, 20)).toEqual({ col: 1, row: 1 });
+  });
+
+  it('does not dispatch an xterm mouse click for an out-of-grid touch', () => {
+    const { app } = loadTerminalUiHarness();
+    app._dispatchSyntheticTerminalClick = vi.fn();
+    app._sendSyntheticSgrTap = vi.fn();
+    app._suppressTrustedTapMouseEvents = vi.fn();
+    app.terminal = {
+      cols: 80,
+      rows: 24,
+      modes: { mouseTrackingMode: 'vt200' },
+      element: {
+        querySelector: () => ({ getBoundingClientRect: () => ({ left: 10, top: 20, width: 800, height: 480 }) }),
+      },
+      _core: { _renderService: { dimensions: { css: { cell: { width: 10, height: 20 } } } } },
+      focus: vi.fn(),
+    };
+
+    expect(app._handleTerminalTouchTap({ clientX: 900, clientY: 100 })).toBe(false);
+    expect(app._dispatchSyntheticTerminalClick).not.toHaveBeenCalled();
+    expect(app._sendSyntheticSgrTap).not.toHaveBeenCalled();
+    expect(app._suppressTrustedTapMouseEvents).not.toHaveBeenCalled();
+    expect(app.terminal.focus).not.toHaveBeenCalled();
   });
 
   it('cancels tap activation after horizontal movement', () => {
