@@ -4,6 +4,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
+import { build } from 'esbuild';
 import { chromium, type Browser, type Page, type Request } from 'playwright';
 import { WebServer } from '../src/web/server.js';
 import { TmuxManager } from '../src/tmux-manager.js';
@@ -19,6 +23,43 @@ const WORKING_DIR = '/workspace/project';
 const FILE_PATH = 'out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
 const MISSING_PATH = 'out/airdc-fy27-roadmap-mapping/deliverables/missing-story.docx';
 
+const require = createRequire(import.meta.url);
+
+async function loadXtermBrowserAssets(): Promise<Map<string, { body: string; contentType: string }>> {
+  const zerolagBundle = await build({
+    entryPoints: [resolve(import.meta.dirname, '../packages/xterm-zerolag-input/src/zerolag-input-addon.ts')],
+    bundle: true,
+    write: false,
+    format: 'iife',
+    globalName: 'XtermZerolagInput',
+    platform: 'browser',
+  });
+  const zerolagSource = `${zerolagBundle.outputFiles[0].text}
+window.LocalEchoOverlay = class extends XtermZerolagInput.ZerolagInputAddon {
+  constructor(terminal) {
+    super({ prompt: { type: 'character', char: '\u276f', offset: 2 } });
+    this.activate(terminal);
+  }
+};`;
+
+  const javascript = (packagePath: string) => ({
+    body: readFileSync(require.resolve(packagePath), 'utf8'),
+    contentType: 'application/javascript',
+  });
+  return new Map([
+    ['/vendor/xterm.min.js', javascript('@xterm/xterm/lib/xterm.js')],
+    ['/vendor/xterm-addon-fit.min.js', javascript('@xterm/addon-fit/lib/addon-fit.js')],
+    ['/vendor/xterm-addon-serialize.min.js', javascript('@xterm/addon-serialize/lib/addon-serialize.js')],
+    ['/vendor/xterm-addon-unicode11.min.js', javascript('@xterm/addon-unicode11/lib/addon-unicode11.js')],
+    ['/vendor/xterm-addon-webgl.min.js', javascript('@xterm/addon-webgl/lib/addon-webgl.js')],
+    ['/vendor/xterm-zerolag-input.js', { body: zerolagSource, contentType: 'application/javascript' }],
+    [
+      '/vendor/xterm.css',
+      { body: readFileSync(require.resolve('@xterm/xterm/css/xterm.css'), 'utf8'), contentType: 'text/css' },
+    ],
+  ]);
+}
+
 describe('COD-232 terminal document link activation in a real browser', () => {
   let server: WebServer;
   let browser: Browser;
@@ -31,6 +72,15 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 800 }, hasTouch: true });
     page.on('request', (request) => requests.push(request));
+    const xtermAssets = await loadXtermBrowserAssets();
+    await page.route('**/vendor/xterm*', async (route) => {
+      const asset = xtermAssets.get(new URL(route.request().url()).pathname);
+      if (!asset) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status: 200, ...asset });
+    });
     await page.route('**/api/sessions/**', async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === `/api/sessions/${SESSION_ID}/file-content` && url.searchParams.get('path') === FILE_PATH) {
@@ -73,23 +123,40 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     });
 
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(
-      () => document.body.classList.contains('app-loaded') && typeof (window as { app?: unknown }).app !== 'undefined'
-    );
+    await page.waitForFunction(() => {
+      const app = (window as unknown as { app?: any }).app;
+      return (
+        document.body.classList.contains('app-loaded') &&
+        app?._terminalFilePathLinkProvider &&
+        app.terminal?.element?.querySelector('.xterm-screen')
+      );
+    });
   }, 60_000);
 
-  async function writePathAndGetTouchPoint(filePath: string): Promise<{ x: number; y: number }> {
+  async function writePathAndGetTouchPoint(filePath: string): Promise<{
+    x: number;
+    y: number;
+    diagnostics: {
+      bufferLine: number;
+      cell: { col: number; row: number } | null;
+      links: Array<{
+        text: string;
+        range: { start: { x: number; y: number }; end: { x: number; y: number } };
+      }>;
+    };
+  }> {
     return page.evaluate(
       async ({ sessionId, workingDir, path }) => {
         const app = (window as unknown as { app: any }).app;
-        if (!app.terminal) app.initTerminal();
         app.activeSessionId = sessionId;
         app.sessions.set(sessionId, { id: sessionId, workingDir, mode: 'codex' });
+        app.closeFilePreview();
         app.hideWelcome();
 
         if (!app.__cod232TouchCounters) {
-          app.__cod232TouchCounters = { sgr: 0, click: 0, input: 0 };
+          app.__cod232TouchCounters = { touch: 0, sgr: 0, click: 0, input: 0 };
           for (const [name, key] of [
+            ['_handleTerminalTouchTap', 'touch'],
             ['_sendSyntheticSgrTap', 'sgr'],
             ['_dispatchSyntheticTerminalClick', 'click'],
             ['_sendInputAsync', 'input'],
@@ -101,6 +168,7 @@ describe('COD-232 terminal document link activation in a real browser', () => {
             };
           }
         }
+        app.__cod232TouchCounters.touch = 0;
         app.__cod232TouchCounters.sgr = 0;
         app.__cod232TouchCounters.click = 0;
         app.__cod232TouchCounters.input = 0;
@@ -116,13 +184,41 @@ describe('COD-232 terminal document link activation in a real browser', () => {
         const rect = screen.getBoundingClientRect();
         const cell = app.terminal._core._renderService.dimensions.css.cell;
         const pathStartColumn = 'Created '.length + 1;
-        return {
+        const point = {
           x: rect.left + (pathStartColumn - 0.5) * cell.width,
           y: rect.top + (viewportRow - 0.5) * cell.height,
+        };
+        let links = [];
+        app._terminalFilePathLinkProvider.provideLinks(bufferLine, (providedLinks) => {
+          links = (providedLinks || []).map(({ text, range }) => ({ text, range }));
+        });
+        return {
+          ...point,
+          diagnostics: {
+            bufferLine,
+            cell: app._terminalCellFromClientPoint(point.x, point.y),
+            links,
+          },
         };
       },
       { sessionId: SESSION_ID, workingDir: WORKING_DIR, path: filePath }
     );
+  }
+
+  function expectPathHit(point: Awaited<ReturnType<typeof writePathAndGetTouchPoint>>, filePath: string): void {
+    const { bufferLine, cell, links } = point.diagnostics;
+    expect(bufferLine).toBe(1);
+    expect(cell).toEqual({ col: 9, row: 1 });
+    expect(links).toEqual([
+      {
+        text: filePath,
+        range: { start: { x: 9, y: 1 }, end: { x: 8 + filePath.length, y: 1 } },
+      },
+    ]);
+    expect(cell!.row).toBeGreaterThanOrEqual(links[0].range.start.y);
+    expect(cell!.row).toBeLessThanOrEqual(links[0].range.end.y);
+    expect(cell!.col).toBeGreaterThanOrEqual(links[0].range.start.x);
+    expect(cell!.col).toBeLessThanOrEqual(links[0].range.end.x);
   }
 
   afterAll(async () => {
@@ -133,6 +229,7 @@ describe('COD-232 terminal document link activation in a real browser', () => {
   it('opens shared preview on touch activation without sending terminal input', async () => {
     requests.length = 0;
     const point = await writePathAndGetTouchPoint(FILE_PATH);
+    expectPathHit(point, FILE_PATH);
 
     await page.touchscreen.tap(point.x, point.y);
     await page.locator('#filePreviewOverlay.visible .document-preview-frame').waitFor({ state: 'attached' });
@@ -142,6 +239,7 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     expect(sessionRequests).toContain(`/api/sessions/${SESSION_ID}/file-preview`);
     expect(sessionRequests.some((pathname) => pathname.endsWith('/input'))).toBe(false);
     expect(await page.evaluate(() => (window as unknown as { app: any }).app.__cod232TouchCounters)).toEqual({
+      touch: 1,
       sgr: 0,
       click: 0,
       input: 0,
@@ -151,6 +249,7 @@ describe('COD-232 terminal document link activation in a real browser', () => {
   it('shows the API file-not-found state after touching a missing document link', async () => {
     requests.length = 0;
     const point = await writePathAndGetTouchPoint(MISSING_PATH);
+    expectPathHit(point, MISSING_PATH);
 
     await page.touchscreen.tap(point.x, point.y);
 
@@ -164,5 +263,11 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     expect(sessionRequests).toContain(`/api/sessions/${SESSION_ID}/file-content`);
     expect(sessionRequests.some((pathname) => pathname.endsWith('/file-preview'))).toBe(false);
     expect(sessionRequests.some((pathname) => pathname.endsWith('/input'))).toBe(false);
+    expect(await page.evaluate(() => (window as unknown as { app: any }).app.__cod232TouchCounters)).toEqual({
+      touch: 1,
+      sgr: 0,
+      click: 0,
+      input: 0,
+    });
   }, 30_000);
 });

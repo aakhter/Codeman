@@ -108,7 +108,6 @@ describe('COD-232 terminal document link provider', () => {
       'jpeg',
       'gif',
       'webp',
-      'svg',
       'docx',
       'pptx',
       'json',
@@ -125,6 +124,12 @@ describe('COD-232 terminal document link provider', () => {
     const { provide } = makeHarness(paths.join(' '));
 
     expect(provide().map((link) => link.text)).toEqual(paths);
+  });
+
+  it('does not link SVG files that the shared viewer cannot render inline', () => {
+    const { provide } = makeHarness('Created out/diagram.svg');
+
+    expect(provide()).toEqual([]);
   });
 
   it('normalizes ./ paths and preserves spaces inside quotes and backticks', () => {

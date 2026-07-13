@@ -1110,7 +1110,6 @@ Object.assign(CodemanApp.prototype, {
       'jpeg',
       'gif',
       'webp',
-      'svg',
       'docx',
       'pptx',
       'json',
