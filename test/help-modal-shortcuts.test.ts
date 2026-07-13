@@ -15,7 +15,7 @@ function extractElementById(html: string, id: string): string {
   const start = html.lastIndexOf('<', idIndex);
   expect(start, `expected #${id} start tag`).toBeGreaterThanOrEqual(0);
 
-  const nextSection = html.indexOf('<!-- Monitor Panel', idIndex);
+  const nextSection = html.indexOf('\n    <!--', idIndex);
   expect(nextSection, `expected section marker after #${id}`).toBeGreaterThanOrEqual(0);
 
   const end = nextSection;

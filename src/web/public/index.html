@@ -584,6 +584,7 @@
       <div class="toolbar-right">
         <!-- Orchestrator button hidden until feature is ready -->
         <!-- <button class="btn-toolbar btn-sm" onclick="app.toggleOrchestratorPanel()" title="Orchestrator Loop">&#x2699; Orchestrator</button> -->
+        <button class="btn-toolbar btn-sm" onclick="app.openCron()" title="Cron Jobs">&#x23F0; Cron</button>
         <button id="skillsChipBtn" class="btn-skills-chip hidden" title="Skills" onclick="app.openSkillsDrawer()"></button>
         <span class="version-display" id="versionDisplay" title="Codeman version">v0.0.0</span>
       </div>
@@ -644,15 +645,113 @@
       </div>
     </div>
 
-    <!-- Shortcut Overlay Modal -->
-    <div class="modal" id="shortcutOverlayModal">
-      <div class="modal-backdrop" onclick="app.closeShortcutOverlay()"></div>
-      <div class="modal-content shortcut-overlay-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutOverlayTitle">
+    <!-- Cron Jobs Modal -->
+    <div class="modal" id="cronModal">
+      <div class="modal-backdrop" onclick="app.closeCron()"></div>
+      <div class="modal-content modal-lg">
         <div class="modal-header">
-          <h3 id="shortcutOverlayTitle">Keyboard Shortcuts</h3>
-          <button class="modal-close" onclick="app.closeShortcutOverlay()" aria-label="Close shortcut overlay">&times;</button>
+          <h3>Cron Jobs</h3>
+          <button class="modal-close" onclick="app.closeCron()" aria-label="Close cron">&times;</button>
         </div>
-        <div class="modal-body" id="shortcutOverlayList"></div>
+        <div class="modal-body">
+          <p class="form-hint cron-modal-hint">Times use the server's local timezone.</p>
+          <div class="cron-toolbar">
+            <button class="btn-toolbar btn-primary" onclick="app.openCronJobForm()">+ New Job</button>
+            <button class="btn-toolbar" onclick="app.refreshCron()">Refresh</button>
+          </div>
+          <!-- Job list -->
+          <div id="cronJobList" class="cron-job-list"></div>
+
+          <!-- Create/Edit form (hidden until New/Edit) -->
+          <div id="cronJobForm" class="cron-job-form hidden">
+            <div class="cron-form-title" id="cronFormTitle">New Cron Job</div>
+            <input type="hidden" id="schJobId">
+
+            <div class="form-section-header">Basics</div>
+            <div class="form-row"><label>Name</label><input type="text" id="schName" placeholder="My nightly job"></div>
+            <div class="form-row"><label>Agent Type</label>
+              <select id="schAgentType" class="form-select" onchange="app.onCronAgentTypeChange()">
+                <option value="claude">Claude</option>
+                <option value="shell">Terminal / Shell</option>
+                <option value="opencode">OpenCode</option>
+                <option value="codex">Codex</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </div>
+            <div class="form-row"><label>Working Directory</label><input type="text" id="schWorkingDir" placeholder="/absolute/path"></div>
+            <div class="form-row hidden" id="schLaunchCommandRow"><label>Launch Command</label><input type="text" id="schLaunchCommand" placeholder="Optional — runs as the first command in the new shell"></div>
+
+            <div class="form-section-header">Prompt</div>
+            <div class="form-row"><label>Prompt Source</label>
+              <select id="schPromptMode" class="form-select" onchange="app.onCronPromptModeChange()">
+                <option value="inline_text">Inline text</option>
+                <option value="prompt_file_path">Prompt file path</option>
+              </select>
+            </div>
+            <div class="form-row" id="schPromptTextRow"><label>Prompt</label><textarea id="schPromptText" rows="4" placeholder="Prompt to send into the session"></textarea></div>
+            <div class="form-row hidden" id="schPromptFileRow"><label>Prompt File Path</label><input type="text" id="schPromptFilePath" placeholder="/absolute/path/to/prompt.md"></div>
+            <div class="form-row"><label>Input Mode</label>
+              <select id="schInputMode" class="form-select">
+                <option value="typed">Typed (via tmux)</option>
+                <option value="paste">Paste (direct)</option>
+              </select>
+            </div>
+
+            <div class="form-section-header">Schedule</div>
+            <div class="form-row"><label>Schedule Type</label>
+              <select id="schScheduleType" class="form-select" onchange="app.onCronScheduleTypeChange()">
+                <option value="once">Once</option>
+                <option value="interval">Interval</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </div>
+            <div class="form-row" id="schRunAtRow"><label>Run At</label><input type="datetime-local" id="schRunAt"></div>
+            <div class="form-row hidden" id="schIntervalRow"><label>Every (minutes)</label><input type="number" id="schIntervalMinutes" min="1" value="60"></div>
+            <div class="form-row hidden" id="schDailyRow"><label>Daily Time (HH:MM)</label><input type="time" id="schDailyTime"></div>
+            <div class="form-row hidden" id="schWeeklyDaysRow"><label>Weekdays</label>
+              <span id="schWeeklyDays" class="cron-weekdays">
+                <label><input type="checkbox" value="0">Sun</label>
+                <label><input type="checkbox" value="1">Mon</label>
+                <label><input type="checkbox" value="2">Tue</label>
+                <label><input type="checkbox" value="3">Wed</label>
+                <label><input type="checkbox" value="4">Thu</label>
+                <label><input type="checkbox" value="5">Fri</label>
+                <label><input type="checkbox" value="6">Sat</label>
+              </span>
+            </div>
+            <div class="form-row hidden" id="schWeeklyTimeRow"><label>Weekly Time (HH:MM)</label><input type="time" id="schWeeklyTime"></div>
+
+            <div class="form-section-header">Options</div>
+            <div class="form-row"><label>On auto-run, if same agent running</label>
+              <select id="schConcurrencyPolicy" class="form-select">
+                <option value="warn_only">Run anyway</option>
+                <option value="skip_if_same_agent_running">Skip this run</option>
+              </select>
+            </div>
+            <div class="form-row form-row-switch cron-switch-row">
+              <div class="cron-switch-text">
+                <span class="cron-switch-label">Auto-close previous run's session</span>
+                <span class="cron-switch-desc">Recurring schedules only: close the prior run's still-open session before the next run fires</span>
+              </div>
+              <label class="switch switch-sm"><input type="checkbox" id="schAutoClosePrev" checked><span class="slider"></span></label>
+            </div>
+            <div class="form-row form-row-switch cron-switch-row">
+              <div class="cron-switch-text">
+                <span class="cron-switch-label">Enabled</span>
+                <span class="cron-switch-desc">Off keeps the job saved but skips its schedule</span>
+              </div>
+              <label class="switch switch-sm"><input type="checkbox" id="schEnabled" checked><span class="slider"></span></label>
+            </div>
+            <div class="form-row"><label>Notes</label><input type="text" id="schNotes" placeholder="Optional"></div>
+
+            <div id="cronFormError" class="form-hint cron-form-error"></div>
+            <div class="cron-form-actions">
+              <button class="btn-toolbar" onclick="app.cancelCronJobForm()">Cancel</button>
+              <button class="btn-toolbar btn-primary" onclick="app.saveCronJob()">Save</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
