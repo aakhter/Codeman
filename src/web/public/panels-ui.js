@@ -3459,6 +3459,8 @@ Object.assign(CodemanApp.prototype, {
     const statusEl = this.$('fileBrowserStatus');
     if (!treeEl) return;
 
+    const loadGeneration = ++this.fileBrowserLoadGeneration;
+
     // Show loading state
     treeEl.innerHTML = '<div class="file-browser-loading">Loading files...</div>';
 
@@ -3468,6 +3470,7 @@ Object.assign(CodemanApp.prototype, {
 
       const result = await res.json();
       if (!result.success) throw new Error(result.error || 'Failed to load files');
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
 
       // Keep the rendered tree bound to the session that produced it. The active
       // terminal tab can change independently while this panel remains open.
@@ -3481,6 +3484,7 @@ Object.assign(CodemanApp.prototype, {
         statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
       }
     } catch (err) {
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
       console.error('Failed to load file browser:', err);
       treeEl.innerHTML = `<div class="file-browser-empty">Failed to load files: ${escapeHtml(err.message)}</div>`;
     }
@@ -3628,13 +3632,13 @@ Object.assign(CodemanApp.prototype, {
   },
 
   refreshFileBrowser() {
-    if (this.activeSessionId) {
+    if (this.fileBrowserSessionId) {
       this.fileBrowserExpandedDirs.clear();
       this.fileBrowserFilter = '';
       this.fileBrowserAllExpanded = false;
       const searchInput = this.$('fileBrowserSearch');
       if (searchInput) searchInput.value = '';
-      this.loadFileBrowser(this.activeSessionId);
+      this.loadFileBrowser(this.fileBrowserSessionId);
     }
   },
 

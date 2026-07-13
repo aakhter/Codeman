@@ -36,18 +36,41 @@ type FakeTree = {
 type Host = {
   $: ReturnType<typeof vi.fn>;
   activeSessionId: string;
-  fileBrowserSessionId?: string;
+  fileBrowserSessionId: string | null;
+  fileBrowserLoadGeneration: number;
   fileBrowserData: BrowserData | null;
   fileBrowserFilter: string;
+  fileBrowserAllExpanded: boolean;
   fileBrowserExpandedDirs: Set<string>;
   renderFileBrowserTree: () => void;
   loadFileBrowser: (sessionId: string) => Promise<void>;
+  refreshFileBrowser: () => void;
   getFileIcon: ReturnType<typeof vi.fn>;
   formatFileSize: ReturnType<typeof vi.fn>;
   hasMatchingChild: ReturnType<typeof vi.fn>;
   toggleFileBrowserFolder: ReturnType<typeof vi.fn>;
   openFilePreview: ReturnType<typeof vi.fn>;
 };
+
+type FetchResponse = {
+  ok: boolean;
+  json: () => Promise<{ success: boolean; data?: BrowserData; error?: string }>;
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function successfulResponse(data: BrowserData): FetchResponse {
+  return {
+    ok: true,
+    json: async () => ({ success: true, data }),
+  };
+}
 
 function loadPanelsUiPrototype(fetchImpl = vi.fn()): Record<string, (...args: never[]) => unknown> {
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/panels-ui.js'), 'utf8');
@@ -96,11 +119,14 @@ function renderHost(proto: Record<string, (...args: never[]) => unknown>, tree: 
     $: vi.fn((id: string) => (id === 'fileBrowserTree' ? tree : null)),
     activeSessionId: 'new-active-session',
     fileBrowserSessionId: 'tree-owner-session',
+    fileBrowserLoadGeneration: 0,
     fileBrowserData: data,
     fileBrowserFilter: '',
+    fileBrowserAllExpanded: false,
     fileBrowserExpandedDirs: new Set(),
     renderFileBrowserTree: proto.renderFileBrowserTree as Host['renderFileBrowserTree'],
     loadFileBrowser: proto.loadFileBrowser as Host['loadFileBrowser'],
+    refreshFileBrowser: proto.refreshFileBrowser as Host['refreshFileBrowser'],
     getFileIcon: vi.fn(() => 'FILE'),
     formatFileSize: vi.fn(() => '1 KB'),
     hasMatchingChild: vi.fn(() => false),
@@ -122,6 +148,8 @@ describe('COD-231 file-browser session ownership', () => {
     const host = {
       $: vi.fn((id: string) => (id === 'fileBrowserTree' ? tree : id === 'fileBrowserStatus' ? status : null)),
       activeSessionId: 'different-active-session',
+      fileBrowserSessionId: null,
+      fileBrowserLoadGeneration: 0,
       fileBrowserData: null,
       renderFileBrowserTree: vi.fn(),
     } as unknown as Host;
@@ -177,6 +205,7 @@ describe('COD-231 file-browser session ownership', () => {
       $: vi.fn((id: string) => (id === 'fileBrowserTree' ? tree : null)),
       activeSessionId: 'unrelated-active-session',
       fileBrowserSessionId: 'old-session',
+      fileBrowserLoadGeneration: 0,
       fileBrowserData: browserData('old-session/old.docx'),
       renderFileBrowserTree: vi.fn(function (this: Host) {
         snapshots.push({ data: this.fileBrowserData, sessionId: this.fileBrowserSessionId });
@@ -187,5 +216,124 @@ describe('COD-231 file-browser session ownership', () => {
     await host.loadFileBrowser('new-session');
 
     expect(snapshots).toEqual([{ data: newData, sessionId: 'new-session' }]);
+  });
+
+  it('ignores an older successful load that resolves after the latest session tree', async () => {
+    const requestA = deferred<FetchResponse>();
+    const requestB = deferred<FetchResponse>();
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => requestA.promise)
+      .mockImplementationOnce(() => requestB.promise);
+    const proto = loadPanelsUiPrototype(fetchImpl);
+    const tree = { innerHTML: '', querySelectorAll: vi.fn(() => []) };
+    const status = { textContent: '' };
+    const dataA = browserData('session-a/stale.docx');
+    const dataB = browserData('session-b/current.docx');
+    const host = {
+      $: vi.fn((id: string) => (id === 'fileBrowserTree' ? tree : id === 'fileBrowserStatus' ? status : null)),
+      activeSessionId: 'session-b',
+      fileBrowserSessionId: null,
+      fileBrowserLoadGeneration: 0,
+      fileBrowserData: null,
+      renderFileBrowserTree: vi.fn(function (this: Host) {
+        tree.innerHTML = `rendered:${this.fileBrowserSessionId}`;
+      }),
+    } as unknown as Host;
+    host.loadFileBrowser = proto.loadFileBrowser as Host['loadFileBrowser'];
+
+    const loadA = host.loadFileBrowser('session-a');
+    const loadB = host.loadFileBrowser('session-b');
+    requestB.resolve(successfulResponse(dataB));
+    await loadB;
+
+    expect(host.fileBrowserSessionId).toBe('session-b');
+    expect(host.fileBrowserData).toBe(dataB);
+    expect(tree.innerHTML).toBe('rendered:session-b');
+    expect(status.textContent).toBe('1 files, 0 dirs');
+
+    requestA.resolve(successfulResponse(dataA));
+    await loadA;
+
+    expect(host.fileBrowserSessionId).toBe('session-b');
+    expect(host.fileBrowserData).toBe(dataB);
+    expect(host.renderFileBrowserTree).toHaveBeenCalledOnce();
+    expect(tree.innerHTML).toBe('rendered:session-b');
+    expect(status.textContent).toBe('1 files, 0 dirs');
+  });
+
+  it('ignores an older failed load after the latest session tree succeeds', async () => {
+    const requestA = deferred<FetchResponse>();
+    const requestB = deferred<FetchResponse>();
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => requestA.promise)
+      .mockImplementationOnce(() => requestB.promise);
+    const proto = loadPanelsUiPrototype(fetchImpl);
+    const tree = { innerHTML: '', querySelectorAll: vi.fn(() => []) };
+    const status = { textContent: '' };
+    const dataB = browserData('session-b/current.docx');
+    const host = {
+      $: vi.fn((id: string) => (id === 'fileBrowserTree' ? tree : id === 'fileBrowserStatus' ? status : null)),
+      activeSessionId: 'session-b',
+      fileBrowserSessionId: null,
+      fileBrowserLoadGeneration: 0,
+      fileBrowserData: null,
+      renderFileBrowserTree: vi.fn(function (this: Host) {
+        tree.innerHTML = `rendered:${this.fileBrowserSessionId}`;
+      }),
+    } as unknown as Host;
+    host.loadFileBrowser = proto.loadFileBrowser as Host['loadFileBrowser'];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      const loadA = host.loadFileBrowser('session-a');
+      const loadB = host.loadFileBrowser('session-b');
+      requestB.resolve(successfulResponse(dataB));
+      await loadB;
+      requestA.resolve({ ok: false, json: async () => ({ success: false, error: 'stale failure' }) });
+      await loadA;
+
+      expect(host.fileBrowserSessionId).toBe('session-b');
+      expect(host.fileBrowserData).toBe(dataB);
+      expect(host.renderFileBrowserTree).toHaveBeenCalledOnce();
+      expect(tree.innerHTML).toBe('rendered:session-b');
+      expect(status.textContent).toBe('1 files, 0 dirs');
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('refreshes the displayed tree owner after the active tab changes', () => {
+    const proto = loadPanelsUiPrototype();
+    const searchInput = { value: 'old filter' };
+    const host = {
+      $: vi.fn((id: string) => (id === 'fileBrowserSearch' ? searchInput : null)),
+      activeSessionId: 'new-active-session',
+      fileBrowserSessionId: 'tree-owner-session',
+      fileBrowserData: browserData('tree-owner-session/story.docx'),
+      fileBrowserFilter: 'story',
+      fileBrowserAllExpanded: true,
+      fileBrowserExpandedDirs: new Set(['tree-owner-session']),
+      loadFileBrowser: vi.fn(),
+    } as unknown as Host;
+    host.refreshFileBrowser = proto.refreshFileBrowser as Host['refreshFileBrowser'];
+
+    host.refreshFileBrowser();
+
+    expect(host.loadFileBrowser).toHaveBeenCalledWith('tree-owner-session');
+    expect(host.loadFileBrowser).not.toHaveBeenCalledWith('new-active-session');
+    expect(host.fileBrowserExpandedDirs.size).toBe(0);
+    expect(host.fileBrowserFilter).toBe('');
+    expect(host.fileBrowserAllExpanded).toBe(false);
+    expect(searchInput.value).toBe('');
+  });
+
+  it('initializes the file-browser owner and load generation with the other browser state', () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+
+    expect(appSource).toContain('this.fileBrowserSessionId = null;');
+    expect(appSource).toContain('this.fileBrowserLoadGeneration = 0;');
   });
 });

@@ -633,6 +633,8 @@ class CodemanApp {
 
     // File browser state (methods in panels-ui.js)
     this.fileBrowserData = null;
+    this.fileBrowserSessionId = null;
+    this.fileBrowserLoadGeneration = 0;
     this.fileBrowserExpandedDirs = new Set();
     this.fileBrowserFilter = '';
     this.fileBrowserAllExpanded = false;
