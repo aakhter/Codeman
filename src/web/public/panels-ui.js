@@ -3532,8 +3532,12 @@ Object.assign(CodemanApp.prototype, {
 
       const nameClass = isDir ? 'file-tree-name directory' : 'file-tree-name';
 
+      // COD-233: keep a real href for graceful fallback (middle-click / new tab),
+      // but the click is intercepted below and routed through a guarded fetch so a
+      // server error surfaces as a toast instead of navigating the SPA to the raw
+      // JSON error body. data-path drives the interceptor.
       const downloadBtn = !isDir
-        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" title="Download" onclick="event.stopPropagation()">&#x2B07;</a>`
+        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
 
       html.push(`
@@ -3573,6 +3577,54 @@ Object.assign(CodemanApp.prototype, {
         }
       });
     });
+
+    // COD-233: intercept download clicks so a server error (a JSON ApiResponse
+    // envelope, not a file) surfaces as a toast instead of navigating the SPA to
+    // the raw endpoint and rendering JSON over the terminal.
+    treeEl.querySelectorAll('.file-tree-download').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
+  },
+
+  /**
+   * COD-233: download a workspace file via fetch so a non-2xx response (which
+   * file-raw returns as a JSON error envelope, not a file) surfaces as a toast
+   * instead of a top-level navigation that replaces the terminal with raw JSON.
+   * On success the blob is saved through a temporary download anchor.
+   */
+  async downloadWorkspaceFile(sessionId, path) {
+    if (!sessionId || !path) return;
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/file-raw?path=${encodeURIComponent(path)}&download=true`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        let message = `Download failed (${res.status})`;
+        try {
+          const body = await res.json();
+          if (body && body.error) message = body.error;
+        } catch {
+          // Non-JSON error body; keep the status-based message.
+        }
+        this.showToast(message, 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = path.split('/').pop() || 'download';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      this.showToast(`Download failed: ${err && err.message ? err.message : err}`, 'error');
+    }
   },
 
   hasMatchingChild(node, filter) {
