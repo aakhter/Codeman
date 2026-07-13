@@ -1029,6 +1029,18 @@ body {
   transform: rotate(45deg);
 }
 
+.btn-icon-header.btn-files:hover,
+.btn-icon-header.btn-files.active {
+  transform: none;
+  color: var(--text);
+}
+
+.btn-icon-header.btn-files:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
 /* Multi-monitor header button: hidden by default (opt-in via App Settings →
    Display → "Header Displays"). The server strips this class at render when the
    setting is on; the client toggles it live on save. */

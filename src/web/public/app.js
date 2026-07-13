@@ -4052,6 +4052,7 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
 
   renderSessionTabs() {
+    this.updateFileBrowserHeaderButton?.();
     // Don't re-render while user is typing in the inline rename input
     if (this._inlineRenameActive) return;
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
@@ -5333,30 +5334,9 @@ class CodemanApp {
 
         // Load file browser if enabled
         const settings = this.loadAppSettingsFromStorage();
-        if (settings.showFileBrowser) {
-          const fileBrowserPanel = this.$('fileBrowserPanel');
-          if (fileBrowserPanel) {
-            fileBrowserPanel.classList.add('visible');
-            this.loadFileBrowser(sessionId);
-            // Attach drag listeners if not already attached
-            if (!this.fileBrowserDragListeners) {
-              const header = fileBrowserPanel.querySelector('.file-browser-header');
-              if (header) {
-                const onFirstDrag = () => {
-                  if (!fileBrowserPanel.style.left) {
-                    const rect = fileBrowserPanel.getBoundingClientRect();
-                    fileBrowserPanel.style.left = `${rect.left}px`;
-                    fileBrowserPanel.style.top = `${rect.top}px`;
-                    fileBrowserPanel.style.right = 'auto';
-                  }
-                };
-                header.addEventListener('mousedown', onFirstDrag);
-                header.addEventListener('touchstart', onFirstDrag, { passive: true });
-                this.fileBrowserDragListeners = this.makeWindowDraggable(fileBrowserPanel, header);
-                this.fileBrowserDragListeners._onFirstDrag = onFirstDrag;
-              }
-            }
-          }
+        const fileBrowserPanel = this.$('fileBrowserPanel');
+        if (settings.showFileBrowser && !fileBrowserPanel?.classList.contains('visible')) {
+          this.showFileBrowserPanel(sessionId);
         }
       });
 

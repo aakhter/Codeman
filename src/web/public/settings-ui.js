@@ -2346,6 +2346,7 @@ Object.assign(CodemanApp.prototype, {
         this.showFileBrowserPanel(this.activeSessionId);
       } else {
         fileBrowserPanel.classList.remove('visible');
+        this.updateFileBrowserHeaderButton?.();
       }
     }
   },

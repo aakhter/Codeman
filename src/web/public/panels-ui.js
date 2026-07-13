@@ -3421,6 +3421,30 @@ Object.assign(CodemanApp.prototype, {
   // File Browser Panel
   // ═══════════════════════════════════════════════════════════════
 
+  updateFileBrowserHeaderButton() {
+    const button = this.$('fileBrowserBtn');
+    if (!button) return;
+
+    const panel = this.$('fileBrowserPanel');
+    const hasActiveSession = Boolean(this.activeSessionId);
+    const isOpen = hasActiveSession && Boolean(panel?.classList.contains('visible'));
+    button.disabled = !hasActiveSession;
+    button.classList.toggle('active', isOpen);
+    button.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  },
+
+  toggleFileBrowserPanel() {
+    if (!this.activeSessionId) return;
+    const panel = this.$('fileBrowserPanel');
+    if (!panel) return;
+
+    if (panel.classList.contains('visible')) {
+      this.closeFileBrowserPanel();
+    } else {
+      this.showFileBrowserPanel(this.activeSessionId);
+    }
+  },
+
   // Reveal the file browser panel and load the given session's files. This is the
   // ONE canonical reveal path — it does NOT consult the `showFileBrowser` App Setting
   // (that setting only gates whether settings-ui.js calls this on settings apply).
@@ -3429,6 +3453,7 @@ Object.assign(CodemanApp.prototype, {
     const panel = this.$('fileBrowserPanel');
     if (!panel) return;
     panel.classList.add('visible');
+    this.updateFileBrowserHeaderButton?.();
     // Attach drag listeners if not already attached
     if (!this.fileBrowserDragListeners) {
       const header = panel.querySelector('.file-browser-header');
@@ -3726,6 +3751,7 @@ Object.assign(CodemanApp.prototype, {
     const settings = this.loadAppSettingsFromStorage();
     settings.showFileBrowser = false;
     this.saveAppSettingsToStorage(settings);
+    this.updateFileBrowserHeaderButton?.();
   },
 
   async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null) {
