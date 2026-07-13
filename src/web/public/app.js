@@ -1205,6 +1205,11 @@ class CodemanApp {
 
       // Escape - close panels and modals (different logic: no preventDefault, no return)
       if (e.key === 'Escape') {
+        // The View Response overlay is a top-level layer: close it first and
+        // consume the key so ESC never reaches xterm/the CLI (where it has its own
+        // cancel semantics), then restore terminal focus. Explicit close (not a
+        // toggle) so a second Escape can't reopen it (COD-229).
+        if (this._maybeCloseResponseViewerOnEscape(e)) return;
         this.closeAllPanels();
         this.closeHelp();
         this.closeShortcutOverlay();
@@ -2290,6 +2295,38 @@ class CodemanApp {
     this._bindResponseViewerInteractions(body);
   }
 
+  // Explicit, idempotent close for the View Response overlay. Returns true only
+  // when it actually closed an open viewer (so the Escape handler can consume the
+  // key), false if it was already closed. Restores focus to the active terminal so
+  // a keyboard user resumes typing at the CLI prompt with no mouse click (COD-229).
+  // Shared by the × button, the backdrop, the toggle's close branch, and Escape.
+  closeResponseViewer() {
+    const viewer = document.getElementById('responseViewer');
+    if (!viewer || !viewer.classList.contains('visible')) return false;
+    const backdrop = document.getElementById('responseViewerBackdrop');
+    viewer.classList.remove('visible');
+    if (backdrop) backdrop.classList.remove('visible');
+    if (this.terminal) {
+      try {
+        this.terminal.focus();
+      } catch {
+        /* terminal may be detached mid-teardown */
+      }
+    }
+    return true;
+  }
+
+  // Escape-key seam: close the viewer if open and consume the event so ESC does not
+  // reach xterm/the CLI. Returns true when the key was consumed (COD-229).
+  _maybeCloseResponseViewerOnEscape(e) {
+    if (!this.closeResponseViewer()) return false;
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return true;
+  }
+
   async toggleResponseViewer() {
     const viewer = document.getElementById('responseViewer');
     const backdrop = document.getElementById('responseViewerBackdrop');
@@ -2297,8 +2334,7 @@ class CodemanApp {
 
     const isOpen = viewer.classList.contains('visible');
     if (isOpen) {
-      viewer.classList.remove('visible');
-      backdrop.classList.remove('visible');
+      this.closeResponseViewer();
       return;
     }
 

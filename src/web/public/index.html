@@ -426,12 +426,12 @@
           <button class="response-viewer-more" id="responseViewerMore" onclick="app.loadFullContext()">More</button>
           <button class="response-viewer-copy" id="responseViewerCopy" type="button" onclick="app.copyResponseViewerRichText()" title="Copy response as rich text" aria-label="Copy response as rich text"></button>
           <button class="response-viewer-more response-viewer-copy-markdown" id="responseViewerCopyMarkdown" type="button" onclick="app.copyResponseViewerMarkdown()" title="Copy response as Markdown" aria-label="Copy response as Markdown">Copy Markdown</button>
-          <button class="response-viewer-close" onclick="app.toggleResponseViewer()">&times;</button>
+          <button class="response-viewer-close" onclick="app.closeResponseViewer()">&times;</button>
         </div>
       </div>
       <div class="response-viewer-body" id="responseViewerBody"></div>
     </div>
-    <div class="response-viewer-backdrop" id="responseViewerBackdrop" onclick="app.toggleResponseViewer()"></div>
+    <div class="response-viewer-backdrop" id="responseViewerBackdrop" onclick="app.closeResponseViewer()"></div>
 
     <!-- Bottom Toolbar -->
     <footer class="toolbar">

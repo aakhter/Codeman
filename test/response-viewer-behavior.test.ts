@@ -193,4 +193,89 @@ describe('response viewer behavior', () => {
     expect(app.showToast).toHaveBeenCalledWith('Copied section as rich text', 'success');
     expect(responseCopyBtn.classList.contains('rv-copied')).toBe(true);
   });
+
+  describe('Escape-to-close and focus restoration (COD-229)', () => {
+    const openViewer = () => {
+      document.getElementById('responseViewer')?.classList.add('visible');
+      document.getElementById('responseViewerBackdrop')?.classList.add('visible');
+    };
+    const makeEscapeEvent = () => ({
+      key: 'Escape',
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+
+    it('closes the viewer and backdrop when Escape is pressed with Last Response open', () => {
+      openViewer();
+      app.terminal = { focus: vi.fn() };
+
+      const consumed = app._maybeCloseResponseViewerOnEscape(makeEscapeEvent());
+
+      expect(consumed).toBe(true);
+      expect(document.getElementById('responseViewer')?.classList.contains('visible')).toBe(false);
+      expect(document.getElementById('responseViewerBackdrop')?.classList.contains('visible')).toBe(false);
+    });
+
+    it('closes the viewer when the expanded More transcript is showing', () => {
+      // The More view differs only in title/content; close is visibility-based.
+      const title = document.getElementById('responseViewerTitle');
+      if (title) title.textContent = 'Transcript (4 blocks)';
+      openViewer();
+      app.terminal = { focus: vi.fn() };
+
+      const consumed = app._maybeCloseResponseViewerOnEscape(makeEscapeEvent());
+
+      expect(consumed).toBe(true);
+      expect(document.getElementById('responseViewer')?.classList.contains('visible')).toBe(false);
+    });
+
+    it('consumes the Escape key (preventDefault + stopPropagation) so it never reaches the CLI', () => {
+      openViewer();
+      app.terminal = { focus: vi.fn() };
+      const e = makeEscapeEvent();
+
+      app._maybeCloseResponseViewerOnEscape(e);
+
+      expect(e.preventDefault).toHaveBeenCalledTimes(1);
+      expect(e.stopPropagation).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores focus to the active terminal on close', () => {
+      openViewer();
+      const focus = vi.fn();
+      app.terminal = { focus };
+
+      app.closeResponseViewer();
+
+      expect(focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('does nothing viewer-specific and does not consume Escape when the viewer is already closed', () => {
+      // beforeEach leaves the viewer without the "visible" class.
+      app.terminal = { focus: vi.fn() };
+      const e = makeEscapeEvent();
+
+      const consumed = app._maybeCloseResponseViewerOnEscape(e);
+
+      expect(consumed).toBe(false);
+      expect(e.preventDefault).not.toHaveBeenCalled();
+      expect(e.stopPropagation).not.toHaveBeenCalled();
+      expect(app.terminal.focus).not.toHaveBeenCalled();
+    });
+
+    it('closeResponseViewer returns false when the viewer is already closed', () => {
+      expect(app.closeResponseViewer()).toBe(false);
+    });
+
+    it('closes cleanly via the × button / backdrop path (closeResponseViewer) without a keyboard event', () => {
+      openViewer();
+      app.terminal = { focus: vi.fn() };
+
+      const closed = app.closeResponseViewer();
+
+      expect(closed).toBe(true);
+      expect(document.getElementById('responseViewer')?.classList.contains('visible')).toBe(false);
+      expect(document.getElementById('responseViewerBackdrop')?.classList.contains('visible')).toBe(false);
+    });
+  });
 });
