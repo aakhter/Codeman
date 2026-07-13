@@ -131,9 +131,79 @@ Object.assign(CodemanApp.prototype, {
     const cellWidth = dims?.width || (rect.width && this.terminal?.cols ? rect.width / this.terminal.cols : 0);
     const cellHeight = dims?.height || (rect.height && this.terminal?.rows ? rect.height / this.terminal.rows : 0);
     if (!cellWidth || !cellHeight) return null;
+    const left = Number.isFinite(rect.left) ? rect.left : 0;
+    const top = Number.isFinite(rect.top) ? rect.top : 0;
+    const right = Number.isFinite(rect.right) ? rect.right : left + (rect.width || cellWidth * (this.terminal?.cols || 0));
+    const bottom = Number.isFinite(rect.bottom)
+      ? rect.bottom
+      : top + (rect.height || cellHeight * (this.terminal?.rows || 0));
+    if (clientX < left || clientX >= right || clientY < top || clientY >= bottom) return null;
     const col = Math.max(1, Math.min(this.terminal.cols || 1, Math.floor((clientX - rect.left) / cellWidth) + 1));
     const row = Math.max(1, Math.min(this.terminal.rows || 1, Math.floor((clientY - rect.top) / cellHeight) + 1));
     return { col, row };
+  },
+
+  _terminalTouchFromList(touches, identifier = null) {
+    if (!touches) return null;
+    for (let index = 0; index < touches.length; index++) {
+      const touch = touches[index] || touches.item?.(index);
+      if (touch && (identifier === null || touch.identifier === identifier)) return touch;
+    }
+    return null;
+  },
+
+  _createTerminalTouchGesture() {
+    return { active: false, cancelled: true, moved: false, identifier: null, startX: 0, startY: 0 };
+  },
+
+  _beginTerminalTouchGesture(state, touches) {
+    if (!state || touches?.length !== 1) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    const touch = this._terminalTouchFromList(touches);
+    if (!touch) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    state.active = true;
+    state.cancelled = false;
+    state.moved = false;
+    state.identifier = touch.identifier;
+    state.startX = touch.clientX;
+    state.startY = touch.clientY;
+    return touch;
+  },
+
+  _updateTerminalTouchGesture(state, touches, threshold) {
+    if (!state?.active || state.cancelled || touches?.length !== 1) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    const touch = this._terminalTouchFromList(touches, state.identifier);
+    if (!touch) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    if (Math.abs(touch.clientX - state.startX) >= threshold || Math.abs(touch.clientY - state.startY) >= threshold) {
+      state.moved = true;
+    }
+    return touch;
+  },
+
+  _endTerminalTouchGesture(state, changedTouches, remainingTouches) {
+    const touch = state?.active ? this._terminalTouchFromList(changedTouches, state.identifier) : null;
+    const isTap = !!touch && !state.cancelled && !state.moved && (remainingTouches?.length || 0) === 0;
+    this._cancelTerminalTouchGesture(state);
+    return isTap ? touch : null;
+  },
+
+  _cancelTerminalTouchGesture(state) {
+    if (!state) return;
+    state.active = false;
+    state.cancelled = true;
+    state.moved = true;
+    state.identifier = null;
   },
 
   _sendForegroundTuiWheel(deltaY, clientX, clientY) {
@@ -577,24 +647,27 @@ Object.assign(CodemanApp.prototype, {
       let pixelAccum = 0;
 
       let didScroll = false; // track whether touchmove fired (tap vs scroll)
-      let touchStartY = 0;
+      const touchGesture = this._createTerminalTouchGesture();
       const TAP_THRESHOLD = 8; // px — ignore micro-drift to distinguish tap from scroll
       container.addEventListener(
         'touchstart',
         (ev) => {
-          if (ev.touches.length === 1) {
-            touchLastX = ev.touches[0].clientX;
-            touchLastY = ev.touches[0].clientY;
-            touchStartY = touchLastY;
-            velocity = 0;
-            pixelAccum = 0;
-            isTouching = true;
-            didScroll = false;
-            lastTime = 0;
-            if (scrollFrame) {
-              cancelAnimationFrame(scrollFrame);
-              scrollFrame = null;
-            }
+          const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);
+          velocity = 0;
+          pixelAccum = 0;
+          lastTime = 0;
+          if (!touch) {
+            isTouching = false;
+            didScroll = true;
+            return;
+          }
+          touchLastX = touch.clientX;
+          touchLastY = touch.clientY;
+          isTouching = true;
+          didScroll = false;
+          if (scrollFrame) {
+            cancelAnimationFrame(scrollFrame);
+            scrollFrame = null;
           }
         },
         { passive: true }
@@ -603,12 +676,18 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchmove',
         (ev) => {
-          if (ev.touches.length === 1 && isTouching) {
-            const touchX = ev.touches[0].clientX;
-            const touchY = ev.touches[0].clientY;
-            if (!didScroll && Math.abs(touchY - touchStartY) >= TAP_THRESHOLD) {
+          if (isTouching) {
+            const touch = this._updateTerminalTouchGesture(touchGesture, ev.touches, TAP_THRESHOLD);
+            if (!touch) {
+              isTouching = false;
               didScroll = true;
+              velocity = 0;
+              pixelAccum = 0;
+              return;
             }
+            const touchX = touch.clientX;
+            const touchY = touch.clientY;
+            if (touchGesture.moved) didScroll = true;
             // Below the tap threshold, treat the gesture as a potential tap:
             // don't preventDefault (iOS needs click synthesis to show the
             // keyboard) and don't accumulate scroll distance or velocity. Without
@@ -645,12 +724,13 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchend',
         (ev) => {
+          const wasTouching = isTouching;
+          const touch = this._endTerminalTouchGesture(touchGesture, ev.changedTouches, ev.touches);
           isTouching = false;
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
-          if (!didScroll && this.terminal) {
-            const touch = ev.changedTouches && ev.changedTouches[0];
+          if (wasTouching && !didScroll && touch && this.terminal) {
             this._handleTerminalTouchTap(touch);
           }
         },
@@ -663,6 +743,7 @@ Object.assign(CodemanApp.prototype, {
           isTouching = false;
           velocity = 0;
           pixelAccum = 0;
+          this._cancelTerminalTouchGesture(touchGesture);
         },
         { passive: true }
       );
@@ -1215,18 +1296,39 @@ Object.assign(CodemanApp.prototype, {
       while (buffer.getLine(endRow + 1)?.isWrapped) endRow++;
 
       const rows = [];
+      const offsetPositions = [];
       let lineText = '';
       for (let row = startRow; row <= endRow; row++) {
         const current = buffer.getLine(row);
         if (!current) break;
         const text = current.translateToString(row === endRow);
         rows.push({ y: row + 1, startIndex: lineText.length, length: text.length });
+
+        // Detector offsets are JavaScript string offsets, while xterm link
+        // ranges use terminal cells. Build the bridge from the real buffer
+        // cells so wide CJK/emoji cells and combining sequences do not shift a
+        // later path's underline or touch hit target.
+        const rowPositions = [];
+        if (typeof current.getCell === 'function') {
+          for (let column = 0; column < self.terminal.cols; column++) {
+            const cell = current.getCell(column);
+            if (!cell || cell.getWidth() === 0) continue;
+            const chars = cell.getChars() || ' ';
+            for (let index = 0; index < chars.length; index++) {
+              rowPositions.push({ x: column + 1, y: row + 1 });
+            }
+          }
+        }
+        for (let index = 0; index < text.length; index++) {
+          offsetPositions.push(rowPositions[index] || { x: index + 1, y: row + 1 });
+        }
         lineText += text;
       }
-      return { lineText, rows };
+      return { lineText, rows, offsetPositions };
     };
 
     const positionForOffset = (logicalLine, offset) => {
+      if (logicalLine.offsetPositions[offset]) return logicalLine.offsetPositions[offset];
       for (let index = 0; index < logicalLine.rows.length; index++) {
         const row = logicalLine.rows[index];
         const rowEnd = row.startIndex + row.length;
@@ -2981,17 +3083,12 @@ Object.assign(CodemanApp.prototype, {
   },
 
   // Map a viewport point to a 1-based terminal cell the same way xterm maps a
-  // click: offset inside .xterm-screen divided by the rendered cell size,
-  // clamped to the grid. Returns null when the terminal isn't measurable yet.
+  // click: offset inside .xterm-screen divided by the rendered cell size.
+  // Points outside the rendered grid are rejected so a swipe/pinch release
+  // cannot be converted into terminal input at a clamped edge cell.
   _clientPointToCell(clientX, clientY) {
-    if (!this.terminal || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
-    const screen = this.terminal.element?.querySelector('.xterm-screen');
-    const cell = this.terminal._core?._renderService?.dimensions?.css?.cell;
-    if (!screen || !cell?.width || !cell?.height) return null;
-    const rect = screen.getBoundingClientRect();
-    const col = Math.max(1, Math.min(this.terminal.cols, Math.floor((clientX - rect.left) / cell.width) + 1));
-    const row = Math.max(1, Math.min(this.terminal.rows, Math.floor((clientY - rect.top) / cell.height) + 1));
-    return { col, row };
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    return this._terminalCellFromClientPoint(clientX, clientY);
   },
 
   // Encode a tap as an SGR mouse report (press + release at button 0) and send it

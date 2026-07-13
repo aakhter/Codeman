@@ -148,7 +148,7 @@ describe('terminal touch tap mouse guard', () => {
     expect(sent).toEqual([{ id: 'sess-1', data: '\x1b[<0;21;6M\x1b[<0;21;6m' }]);
   });
 
-  it('clamps SGR tap coordinates to the terminal grid', () => {
+  it('rejects SGR tap coordinates outside the terminal grid', () => {
     const { app } = loadTerminalUiHarness();
     const sent: string[] = [];
     app.activeSessionId = 'sess-1';
@@ -158,14 +158,56 @@ describe('terminal touch tap mouse guard', () => {
       cols: 80,
       rows: 24,
       element: {
-        querySelector: () => ({ getBoundingClientRect: () => ({ left: 0, top: 0 }) }),
+        querySelector: () => ({ getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 384 }) }),
       },
       _core: { _renderService: { dimensions: { css: { cell: { width: 8, height: 16 } } } } },
     };
 
     app._sendSyntheticSgrTap(-50, 99999);
 
-    expect(sent).toEqual(['\x1b[<0;1;24M\x1b[<0;1;24m']);
+    expect(sent).toEqual([]);
+  });
+
+  it('rejects link hit tests outside the rendered terminal screen', () => {
+    const { app } = loadTerminalUiHarness();
+    app.terminal = {
+      cols: 80,
+      rows: 24,
+      element: {
+        querySelector: () => ({ getBoundingClientRect: () => ({ left: 10, top: 20, width: 800, height: 480 }) }),
+      },
+      _core: { _renderService: { dimensions: { css: { cell: { width: 10, height: 20 } } } } },
+    };
+
+    expect(app._terminalCellFromClientPoint(9, 40)).toBeNull();
+    expect(app._terminalCellFromClientPoint(50, 19)).toBeNull();
+    expect(app._terminalCellFromClientPoint(810, 40)).toBeNull();
+    expect(app._terminalCellFromClientPoint(50, 500)).toBeNull();
+    expect(app._terminalCellFromClientPoint(10, 20)).toEqual({ col: 1, row: 1 });
+  });
+
+  it('cancels tap activation after horizontal movement', () => {
+    const { app } = loadTerminalUiHarness();
+    const state = app._createTerminalTouchGesture();
+    const start = { identifier: 7, clientX: 20, clientY: 30 };
+
+    expect(app._beginTerminalTouchGesture(state, [start])).toBe(start);
+    expect(app._updateTerminalTouchGesture(state, [{ identifier: 7, clientX: 40, clientY: 30 }], 8)).not.toBeNull();
+    expect(app._endTerminalTouchGesture(state, [{ identifier: 7, clientX: 40, clientY: 30 }], [])).toBeNull();
+  });
+
+  it('cancels tap activation for multitouch and ignores a different ending finger', () => {
+    const { app } = loadTerminalUiHarness();
+    const first = { identifier: 1, clientX: 20, clientY: 30 };
+    const second = { identifier: 2, clientX: 40, clientY: 50 };
+
+    const multitouch = app._createTerminalTouchGesture();
+    expect(app._beginTerminalTouchGesture(multitouch, [first, second])).toBeNull();
+    expect(app._endTerminalTouchGesture(multitouch, [first], [second])).toBeNull();
+
+    const mismatched = app._createTerminalTouchGesture();
+    app._beginTerminalTouchGesture(mismatched, [first]);
+    expect(app._endTerminalTouchGesture(mismatched, [second], [])).toBeNull();
   });
 
   it('does not treat shell sessions as server-mouse-strip mode', () => {

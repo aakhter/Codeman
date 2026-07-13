@@ -4,13 +4,20 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { build } from 'esbuild';
 import { chromium, type Browser, type Page, type Request } from 'playwright';
-import { WebServer } from '../src/web/server.js';
-import { TmuxManager } from '../src/tmux-manager.js';
+
+const isolatedDataDir = mkdtempSync(join(tmpdir(), 'cod232-browser-'));
+process.env.CODEMAN_DATA_DIR = isolatedDataDir;
+process.env.CODEMAN_TMUX_SOCKET = `cod232-browser-${process.pid}`;
+const [{ WebServer }, { TmuxManager }] = await Promise.all([
+  import('../src/web/server.js'),
+  import('../src/tmux-manager.js'),
+]);
 
 // The browser test never creates a terminal session. Avoid coupling WebServer
 // construction to the host's tmux probe (which test/setup intentionally mocks).
@@ -61,9 +68,10 @@ window.LocalEchoOverlay = class extends XtermZerolagInput.ZerolagInputAddon {
 }
 
 describe('COD-232 terminal document link activation in a real browser', () => {
-  let server: WebServer;
+  let server: InstanceType<typeof WebServer>;
   let browser: Browser;
   let page: Page;
+  let cdp: Awaited<ReturnType<ReturnType<Page['context']>['newCDPSession']>>;
   const requests: Request[] = [];
 
   beforeAll(async () => {
@@ -71,6 +79,7 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     await server.start();
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 800 }, hasTouch: true });
+    cdp = await page.context().newCDPSession(page);
     page.on('request', (request) => requests.push(request));
     const xtermAssets = await loadXtermBrowserAssets();
     await page.route('**/vendor/xterm*', async (route) => {
@@ -224,6 +233,7 @@ describe('COD-232 terminal document link activation in a real browser', () => {
   afterAll(async () => {
     await browser?.close();
     await server?.stop();
+    rmSync(isolatedDataDir, { recursive: true, force: true });
   }, 60_000);
 
   it('opens shared preview on touch activation without sending terminal input', async () => {
@@ -265,6 +275,33 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     expect(sessionRequests.some((pathname) => pathname.endsWith('/input'))).toBe(false);
     expect(await page.evaluate(() => (window as unknown as { app: any }).app.__cod232TouchCounters)).toEqual({
       touch: 1,
+      sgr: 0,
+      click: 0,
+      input: 0,
+    });
+  }, 30_000);
+
+  it('does not activate a link or terminal input for a horizontal swipe', async () => {
+    requests.length = 0;
+    const point = await writePathAndGetTouchPoint(FILE_PATH);
+    expectPathHit(point, FILE_PATH);
+
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: point.x, y: point.y, id: 7 }],
+    });
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: point.x + 20, y: point.y, id: 7 }],
+    });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+
+    await expect.poll(() => page.locator('#filePreviewOverlay.visible').count()).toBe(0);
+    const sessionRequests = requests.map((request) => new URL(request.url()).pathname);
+    expect(sessionRequests).not.toContain(`/api/sessions/${SESSION_ID}/file-content`);
+    expect(sessionRequests.some((pathname) => pathname.endsWith('/input'))).toBe(false);
+    expect(await page.evaluate(() => (window as unknown as { app: any }).app.__cod232TouchCounters)).toEqual({
+      touch: 0,
       sgr: 0,
       click: 0,
       input: 0,

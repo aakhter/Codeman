@@ -11,6 +11,23 @@ type Link = {
 
 type FakeLine = { text: string; isWrapped?: boolean };
 
+function displayCells(text: string): Array<{ chars: string; width: number }> {
+  const cells: Array<{ chars: string; width: number }> = [];
+  for (const char of Array.from(text)) {
+    if (/^\p{Mark}$/u.test(char) && cells.length > 0) {
+      const base = cells.findLast((cell) => cell.width > 0);
+      if (base) base.chars += char;
+      continue;
+    }
+    const width = /[\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(char)
+      ? 2
+      : 1;
+    cells.push({ chars: char, width });
+    if (width === 2) cells.push({ chars: '', width: 0 });
+  }
+  return cells;
+}
+
 function loadTerminalUiPrototype() {
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
   const openSpy = vi.fn();
@@ -42,24 +59,52 @@ function makeHarness(
   options: { sessionId?: string; workingDir?: string; cols?: number } = {}
 ) {
   const { proto, openSpy } = loadTerminalUiPrototype();
-  const bufferLines = (typeof lines === 'string' ? [{ text: lines }] : lines).map((line) => ({
-    isWrapped: line.isWrapped ?? false,
-    translateToString(trimRight?: boolean) {
-      return trimRight ? line.text.trimEnd() : line.text.padEnd(options.cols ?? line.text.length);
-    },
-  }));
+  const sourceLines = typeof lines === 'string' ? [{ text: lines }] : lines;
+  const cols = options.cols ?? Math.max(...sourceLines.map((line) => displayCells(line.text).length));
+  const bufferLines = sourceLines.map((line) => {
+    const cells = displayCells(line.text);
+    while (cells.length < cols) cells.push({ chars: '', width: 1 });
+    return {
+      isWrapped: line.isWrapped ?? false,
+      translateToString(trimRight?: boolean) {
+        const value = cells
+          .filter((cell) => cell.width > 0)
+          .map((cell) => cell.chars || ' ')
+          .join('');
+        return trimRight ? value.trimEnd() : value;
+      },
+      getCell(index: number) {
+        const cell = cells[index];
+        if (!cell) return undefined;
+        return {
+          getChars: () => cell.chars,
+          getWidth: () => cell.width,
+        };
+      },
+    };
+  });
   let provider: { provideLinks: (line: number, callback: (links?: Link[]) => void) => void } | undefined;
   const originalSessionId = options.sessionId ?? 'origin-session';
   const previewSpy = vi.fn();
   const logSpy = vi.fn();
   const app = {
     terminal: {
-      cols: options.cols ?? Math.max(...bufferLines.map((line) => line.translateToString(true).length)),
+      cols,
+      rows: 24,
       registerLinkProvider(value: typeof provider) {
         provider = value;
       },
+      element: {
+        querySelector(selector: string) {
+          return selector === '.xterm-screen'
+            ? { getBoundingClientRect: () => ({ left: 0, top: 0, width: cols * 10, height: 480 }) }
+            : null;
+        },
+      },
+      _core: { _renderService: { dimensions: { css: { cell: { width: 10, height: 20 } } } } },
       buffer: {
         active: {
+          viewportY: 0,
           getLine(index: number) {
             return bufferLines[index];
           },
@@ -71,6 +116,8 @@ function makeHarness(
     openFilePreview: previewSpy,
     openLogViewerWindow: logSpy,
     _openTerminalUrl: proto._openTerminalUrl,
+    _terminalCellFromClientPoint: proto._terminalCellFromClientPoint,
+    _activateTerminalLinkAtPoint: proto._activateTerminalLinkAtPoint,
     registerFilePathLinkProvider: proto.registerFilePathLinkProvider,
   };
   app.registerFilePathLinkProvider.call(app);
@@ -156,6 +203,23 @@ describe('COD-232 terminal document link provider', () => {
     expect(links.map((link) => line.slice(link.range.start.x - 1, link.range.end.x))).toEqual(
       links.map((link) => link.text)
     );
+  });
+
+  it('maps link ranges and touch hit tests through wide CJK cells', () => {
+    const path = 'out/report.pdf';
+    const { app, provide, previewSpy, originalSessionId } = makeHarness(`前置 ${path}`);
+    const [link] = provide();
+
+    expect(link.range).toEqual({ start: { x: 6, y: 1 }, end: { x: 19, y: 1 } });
+    expect(app._activateTerminalLinkAtPoint.call(app, 55, 10)).toBe(true);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
+  it('maps a combining sequence to one xterm cell before the link', () => {
+    const path = 'out/report.pdf';
+    const { provide } = makeHarness(`e\u0301 ${path}`);
+
+    expect(provide()[0].range).toEqual({ start: { x: 3, y: 1 }, end: { x: 16, y: 1 } });
   });
 
   it('does not let an unmatched prose apostrophe hide a later path', () => {
