@@ -15,7 +15,7 @@ function loadTerminalUiPrototype() {
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
   const openSpy = vi.fn();
   const context = vm.createContext({
-    console,
+    console: { ...console, debug: vi.fn(), log: vi.fn() },
     CodemanApp: class CodemanApp {},
     setInterval: vi.fn(),
     clearInterval: vi.fn(),
@@ -148,7 +148,7 @@ describe('COD-232 terminal document link provider', () => {
     const links = provide();
 
     expect(links.map((link) => link.text)).toEqual(['out/first.pdf', 'docs/second.md', 'out/third.png']);
-    expect(links.map((link) => line.slice(link.range.start.x - 1, link.range.end.x - 1))).toEqual(
+    expect(links.map((link) => line.slice(link.range.start.x - 1, link.range.end.x))).toEqual(
       links.map((link) => link.text)
     );
   });
@@ -182,6 +182,29 @@ describe('COD-232 terminal document link provider', () => {
     links[1].activate(null, links[1].text);
     expect(logSpy).toHaveBeenCalledWith('/var/log/app.log', originalSessionId);
     expect(previewSpy).toHaveBeenCalledWith('out/report.pdf', originalSessionId);
+  });
+
+  it('preserves standalone legacy text links outside the session workspace', () => {
+    const paths = ['/tmp/result.txt', '/tmp/result.json', '/tmp/result.md'];
+    const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(paths.join(' '));
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual(paths);
+    for (const link of links) link.activate(null, link.text);
+    expect(logSpy.mock.calls).toEqual(paths.map((path) => [path, originalSessionId]));
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('prefers document preview for a standalone legacy text path inside the workspace', () => {
+    const path = '/workspace/project/out/result.md';
+    const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(path);
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(previewSpy).toHaveBeenCalledWith('out/result.md', originalSessionId);
+    expect(logSpy).not.toHaveBeenCalled();
   });
 
   it('captures the originating session when links are provided', () => {
@@ -230,6 +253,28 @@ describe('COD-232 terminal document link provider', () => {
     expect(links[0].range.end.y).toBe(2);
   });
 
+  it('maps a link starting exactly at a wrapped-row boundary to column one of the next row', () => {
+    const first = 'prefix text ';
+    const second = 'out/report.pdf';
+    const { provide } = makeHarness([{ text: first }, { text: second, isWrapped: true }], { cols: first.length });
+
+    const [link] = provide(2);
+
+    expect(link.range.start).toEqual({ x: 1, y: 2 });
+    expect(link.range.end).toEqual({ x: second.length, y: 2 });
+  });
+
+  it('maps a link ending exactly at a wrapped-row boundary to the final cell of the previous row', () => {
+    const first = 'out/report.pdf';
+    const second = ' continued';
+    const { provide } = makeHarness([{ text: first }, { text: second, isWrapped: true }], { cols: first.length });
+
+    const [link] = provide(1);
+
+    expect(link.range.start).toEqual({ x: 1, y: 1 });
+    expect(link.range.end).toEqual({ x: first.length, y: 1 });
+  });
+
   it('stays linear on a long terminal line', () => {
     const line = `${'ordinary output '.repeat(20_000)}out/report.pdf`;
     const { provide } = makeHarness(line);
@@ -240,5 +285,30 @@ describe('COD-232 terminal document link provider', () => {
 
     expect(links.map((link) => link.text)).toEqual(['out/report.pdf']);
     expect(elapsed).toBeLessThan(500);
+  });
+
+  it('stays linear with thousands of distinct document references', () => {
+    const paths = Array.from({ length: 5_000 }, (_, index) => `out/f${index}.md`);
+    const { provide } = makeHarness(paths.join(' '));
+
+    const start = performance.now();
+    const links = provide();
+    const elapsed = performance.now() - start;
+
+    expect(links).toHaveLength(paths.length);
+    expect(links[0].text).toBe(paths[0]);
+    expect(links.at(-1)?.text).toBe(paths.at(-1));
+    expect(elapsed).toBeLessThan(750);
+  });
+
+  it('uses linear occupied slots instead of per-link scans or sorting', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+    const provider = source.slice(
+      source.indexOf('registerFilePathLinkProvider()'),
+      source.indexOf('_openTerminalUrl(text)')
+    );
+
+    expect(provider).not.toContain('occupiedRanges.some');
+    expect(provider).not.toContain('links.sort');
   });
 });

@@ -285,6 +285,56 @@ describe('terminal touch tap mouse guard', () => {
     expect(sent).toEqual(['\x1b[<0;7;4M\x1b[<0;7;4m']);
   });
 
+  it('touchend link activation opens preview without synthetic terminal input', () => {
+    const { app } = loadTerminalUiHarness();
+    const activate = vi.fn();
+    const suppressCompat = vi.fn();
+    const sendSgrTap = vi.fn();
+    const dispatchTerminalClick = vi.fn();
+    const sendInput = vi.fn();
+    const screen = {
+      getBoundingClientRect: () => ({ left: 10, top: 20, width: 800, height: 400 }),
+    };
+
+    app.activeSessionId = 'sess-1';
+    app.sessions = new Map([['sess-1', { mode: 'codex' }]]);
+    app._suppressTrustedTapMouseEvents = suppressCompat;
+    app._sendSyntheticSgrTap = sendSgrTap;
+    app._dispatchSyntheticTerminalClick = dispatchTerminalClick;
+    app._sendInputAsync = sendInput;
+    app._terminalFilePathLinkProvider = {
+      provideLinks: vi.fn((line: number, callback: (links: unknown[]) => void) => {
+        expect(line).toBe(14); // viewportY 10 + tapped viewport row 4
+        callback([
+          {
+            text: 'out/report.pdf',
+            range: { start: { x: 6, y: 14 }, end: { x: 20, y: 14 } },
+            activate,
+          },
+        ]);
+      }),
+    };
+    app.terminal = {
+      cols: 80,
+      rows: 24,
+      modes: { mouseTrackingMode: 'none' },
+      buffer: { active: { viewportY: 10 } },
+      element: { querySelector: (selector: string) => (selector === '.xterm-screen' ? screen : null) },
+      _core: { _renderService: { dimensions: { css: { cell: { width: 10, height: 20 } } } } },
+      focus: vi.fn(),
+    };
+
+    const handled = app._handleTerminalTouchTap({ clientX: 75, clientY: 90 }); // col 7, viewport row 4
+
+    expect(handled).toBe(true);
+    expect(activate).toHaveBeenCalledOnce();
+    expect(suppressCompat).toHaveBeenCalledOnce();
+    expect(sendSgrTap).not.toHaveBeenCalled();
+    expect(dispatchTerminalClick).not.toHaveBeenCalled();
+    expect(sendInput).not.toHaveBeenCalled();
+    expect(app.terminal.focus).not.toHaveBeenCalled();
+  });
+
   it('desktop click: skips the compat click that follows a touch tap', () => {
     const { app, setNow } = loadTerminalUiHarness();
     const sent: string[] = [];

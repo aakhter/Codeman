@@ -650,43 +650,8 @@ Object.assign(CodemanApp.prototype, {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
           if (!didScroll && this.terminal) {
-            // ── Tap-to-position cursor ──────────────────────────────────
-            // Synthesize a click from the real touch point so the foreground app
-            // moves its cursor to the tapped cell (iOS doesn't reliably do this
-            // itself under touch-action:none). CRITICAL: only when mouse tracking
-            // is ON. xterm disables its local SelectionService while mouse events
-            // are active, so the synthetic click is forwarded to the PTY as an SGR
-            // report (cursor moves). But when tracking is OFF, that same click
-            // drives xterm's LOCAL selection (detail 1/2/3 → char/word/line) — a
-            // tap on CJK text would select & copy it instead of positioning. So
-            // gate strictly on the live mouse-tracking mode.
             const touch = ev.changedTouches && ev.changedTouches[0];
-            const mouseMode = this.terminal.modes?.mouseTrackingMode;
-            const mouseTrackingOn = !!mouseMode && mouseMode !== 'none';
-            if (touch) {
-              this._suppressTrustedTapMouseEvents();
-            }
-            if (touch && mouseTrackingOn) {
-              this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
-            } else if (touch && this._sessionUsesServerMouseStrip()) {
-              // The server strips mouse-tracking DECSETs from claude/codex/gemini
-              // output (isAltScreenStripMode, session.ts) so the wheel keeps
-              // scrolling scrollback — which leaves THIS xterm permanently at
-              // mouseTrackingMode 'none' even though the TUI on the PTY side has
-              // tracking ON and still understands SGR reports. Encode the report
-              // ourselves and send it straight to the PTY: no DOM click is
-              // dispatched, so xterm's local selection can't trigger either.
-              this._sendSyntheticSgrTap(touch.clientX, touch.clientY);
-            }
-            this._syncMobileHelperTextareaToCursor();
-            // Route subsequent typing to the right place: keep the CJK input
-            // field focused when Chinese input is on, otherwise the terminal.
-            const cjkInput = document.getElementById('cjkInput');
-            if (cjkInput?.classList.contains('cjk-input-visible')) {
-              cjkInput.focus();
-            } else {
-              this.terminal.focus();
-            }
+            this._handleTerminalTouchTap(touch);
           }
         },
         { passive: true }
@@ -1266,7 +1231,7 @@ Object.assign(CodemanApp.prototype, {
       for (let index = 0; index < logicalLine.rows.length; index++) {
         const row = logicalLine.rows[index];
         const rowEnd = row.startIndex + row.length;
-        if (offset <= rowEnd || index === logicalLine.rows.length - 1) {
+        if (offset < rowEnd || index === logicalLine.rows.length - 1) {
           return { x: Math.max(1, offset - row.startIndex + 1), y: row.y };
         }
       }
@@ -1276,7 +1241,7 @@ Object.assign(CodemanApp.prototype, {
     // Debug: Track if provider is being invoked
     let lastInvokedLine = -1;
 
-    this.terminal.registerLinkProvider({
+    const provider = {
       provideLinks(bufferLineNumber, callback) {
         // Debug logging - only log if line changed to avoid spam
         if (bufferLineNumber !== lastInvokedLine) {
@@ -1301,24 +1266,29 @@ Object.assign(CodemanApp.prototype, {
           return;
         }
 
-        const links = [];
-        const occupiedRanges = [];
+        // Byte occupancy + start slots keep overlap checks and ordered emission
+        // linear in logical-line length. Accepted links occupy disjoint spans,
+        // and each detector makes at most one additional pass over a span.
+        const occupied = new Uint8Array(lineText.length);
+        const linkSlots = new Array(lineText.length);
         const originatingSessionId = self.activeSessionId;
         const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
 
-        const overlapsExistingLink = (startIndex, endIndex) =>
-          occupiedRanges.some((range) => startIndex < range.endIndex && endIndex > range.startIndex);
-
         const addLink = ({ text, startIndex, endIndex, activate }) => {
-          if (!logicalLine || startIndex < 0 || endIndex <= startIndex || overlapsExistingLink(startIndex, endIndex)) {
-            return;
+          if (!logicalLine || startIndex < 0 || endIndex <= startIndex || endIndex > lineText.length) return;
+          for (let index = startIndex; index < endIndex; index++) {
+            if (occupied[index]) return;
           }
-          occupiedRanges.push({ startIndex, endIndex });
-          links.push({
+          for (let index = startIndex; index < endIndex; index++) {
+            occupied[index] = 1;
+          }
+          linkSlots[startIndex] = {
             text,
             range: {
               start: positionForOffset(logicalLine, startIndex),
-              end: positionForOffset(logicalLine, endIndex),
+              // xterm link ranges are inclusive. endIndex is our scanner's
+              // exclusive offset, so map the final character, not the boundary.
+              end: positionForOffset(logicalLine, endIndex - 1),
             },
             decorations: { pointerCursor: true, underline: true },
             activate,
@@ -1328,7 +1298,7 @@ Object.assign(CodemanApp.prototype, {
             leave() {
               self._linkHovered = false;
             },
-          });
+          };
         };
 
         // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
@@ -1356,15 +1326,16 @@ Object.assign(CodemanApp.prototype, {
         // the whole tab on hover. Non-empty token + bounded reps is O(n).
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
-        // Pattern 2: Standalone live-log paths
-        const extPattern = /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.log)\b/g;
+        // Pattern 2: Legacy standalone absolute paths. In-workspace previewable
+        // paths are claimed by the document scanner first; this remains the
+        // live-log fallback for paths outside the session workspace.
+        const extPattern =
+          /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js))\b/g;
 
         // Pattern 3: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
-        const addLogLink = (filePath, matchIndex) => {
-          const startIndex = lineText.indexOf(filePath, matchIndex);
-          if (startIndex === -1) return;
+        const addLogLink = (filePath, startIndex) => {
           addLink({
             text: filePath,
             startIndex,
@@ -1385,17 +1356,12 @@ Object.assign(CodemanApp.prototype, {
 
         cmdPattern.lastIndex = 0;
         while ((match = cmdPattern.exec(lineText)) !== null) {
-          addLogLink(match[2], match.index);
-        }
-
-        extPattern.lastIndex = 0;
-        while ((match = extPattern.exec(lineText)) !== null) {
-          addLogLink(match[1], match.index);
+          addLogLink(match[2], match.index + match[0].lastIndexOf(match[2]));
         }
 
         bashPattern.lastIndex = 0;
         while ((match = bashPattern.exec(lineText)) !== null) {
-          addLogLink(match[1], match.index);
+          addLogLink(match[1], match.index + match[0].lastIndexOf(match[1]));
         }
 
         if (originatingSessionId) {
@@ -1411,7 +1377,15 @@ Object.assign(CodemanApp.prototype, {
           }
         }
 
-        links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
+        extPattern.lastIndex = 0;
+        while ((match = extPattern.exec(lineText)) !== null) {
+          addLogLink(match[1], match.index + match[0].indexOf(match[1]));
+        }
+
+        const links = [];
+        for (const link of linkSlots) {
+          if (link) links.push(link);
+        }
 
         if (links.length > 0) {
           console.debug(
@@ -1421,7 +1395,9 @@ Object.assign(CodemanApp.prototype, {
         }
         callback(links.length > 0 ? links : undefined);
       },
-    });
+    };
+    this._terminalFilePathLinkProvider = provider;
+    this.terminal.registerLinkProvider(provider);
 
     console.log('[LinkProvider] File path link provider registered');
   },
@@ -2900,6 +2876,60 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
   // Synthetic tap → mouse report
   // ═══════════════════════════════════════════════════════════════
+  _activateTerminalLinkAtPoint(clientX, clientY, event = null) {
+    const provider = this._terminalFilePathLinkProvider;
+    const buffer = this.terminal?.buffer?.active;
+    const cell = this._terminalCellFromClientPoint(clientX, clientY);
+    if (!provider || !buffer || !cell) return false;
+
+    const bufferLineNumber = (buffer.viewportY || 0) + cell.row;
+    let activated = false;
+    provider.provideLinks(bufferLineNumber, (links) => {
+      const link = links?.find((candidate) => {
+        const { start, end } = candidate.range;
+        const afterStart = bufferLineNumber > start.y || (bufferLineNumber === start.y && cell.col >= start.x);
+        const beforeEnd = bufferLineNumber < end.y || (bufferLineNumber === end.y && cell.col <= end.x);
+        return afterStart && beforeEnd;
+      });
+      if (!link) return;
+      link.activate(event, link.text);
+      activated = true;
+    });
+    return activated;
+  },
+
+  _handleTerminalTouchTap(touch) {
+    if (!touch || !this.terminal) return false;
+
+    // xterm's desktop linkifier depends on hover state, which touchscreens do
+    // not provide reliably. Hit-test the retained provider before any cursor
+    // positioning path can emit mouse/SGR input to the foreground CLI.
+    if (this._activateTerminalLinkAtPoint(touch.clientX, touch.clientY, touch)) {
+      this._suppressTrustedTapMouseEvents();
+      return true;
+    }
+
+    // ── Tap-to-position cursor ──────────────────────────────────
+    const mouseMode = this.terminal.modes?.mouseTrackingMode;
+    const mouseTrackingOn = !!mouseMode && mouseMode !== 'none';
+    this._suppressTrustedTapMouseEvents();
+    if (mouseTrackingOn) {
+      this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
+    } else if (this._sessionUsesServerMouseStrip()) {
+      // The server strips mouse-tracking DECSETs from claude/codex/gemini
+      // output, so encode the press/release directly for ordinary taps.
+      this._sendSyntheticSgrTap(touch.clientX, touch.clientY);
+    }
+    this._syncMobileHelperTextareaToCursor();
+    const cjkInput = document.getElementById('cjkInput');
+    if (cjkInput?.classList.contains('cjk-input-visible')) {
+      cjkInput.focus();
+    } else {
+      this.terminal.focus();
+    }
+    return false;
+  },
+
   // Dispatch a mousedown+mouseup pair at viewport coords (clientX/clientY) to
   // xterm's root element. xterm's mouse-reporting handler reads the event's
   // client coords, maps them to a terminal cell relative to .xterm-screen, and

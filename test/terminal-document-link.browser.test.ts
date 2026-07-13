@@ -17,6 +17,7 @@ const BASE_URL = `http://localhost:${PORT}`;
 const SESSION_ID = '33333333-3333-4333-8333-333333333333';
 const WORKING_DIR = '/workspace/project';
 const FILE_PATH = 'out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
+const MISSING_PATH = 'out/airdc-fy27-roadmap-mapping/deliverables/missing-story.docx';
 
 describe('COD-232 terminal document link activation in a real browser', () => {
   let server: WebServer;
@@ -49,6 +50,17 @@ describe('COD-232 terminal document link activation in a real browser', () => {
         });
         return;
       }
+      if (
+        url.pathname === `/api/sessions/${SESSION_ID}/file-content` &&
+        url.searchParams.get('path') === MISSING_PATH
+      ) {
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: false, error: 'File not found' }),
+        });
+        return;
+      }
       if (url.pathname === `/api/sessions/${SESSION_ID}/file-preview` && url.searchParams.get('path') === FILE_PATH) {
         await route.fulfill({
           status: 200,
@@ -66,60 +78,91 @@ describe('COD-232 terminal document link activation in a real browser', () => {
     );
   }, 60_000);
 
+  async function writePathAndGetTouchPoint(filePath: string): Promise<{ x: number; y: number }> {
+    return page.evaluate(
+      async ({ sessionId, workingDir, path }) => {
+        const app = (window as unknown as { app: any }).app;
+        if (!app.terminal) app.initTerminal();
+        app.activeSessionId = sessionId;
+        app.sessions.set(sessionId, { id: sessionId, workingDir, mode: 'codex' });
+        app.hideWelcome();
+
+        if (!app.__cod232TouchCounters) {
+          app.__cod232TouchCounters = { sgr: 0, click: 0, input: 0 };
+          for (const [name, key] of [
+            ['_sendSyntheticSgrTap', 'sgr'],
+            ['_dispatchSyntheticTerminalClick', 'click'],
+            ['_sendInputAsync', 'input'],
+          ]) {
+            const original = app[name].bind(app);
+            app[name] = (...args: unknown[]) => {
+              app.__cod232TouchCounters[key]++;
+              return original(...args);
+            };
+          }
+        }
+        app.__cod232TouchCounters.sgr = 0;
+        app.__cod232TouchCounters.click = 0;
+        app.__cod232TouchCounters.input = 0;
+
+        app.terminal.reset();
+        await new Promise<void>((resolve) => app.terminal.write(`Created ${path}`, resolve));
+        app.terminal.scrollToBottom();
+
+        const buffer = app.terminal.buffer.active;
+        const bufferLine = buffer.baseY + buffer.cursorY + 1;
+        const viewportRow = bufferLine - buffer.viewportY;
+        const screen = app.terminal.element.querySelector('.xterm-screen');
+        const rect = screen.getBoundingClientRect();
+        const cell = app.terminal._core._renderService.dimensions.css.cell;
+        const pathStartColumn = 'Created '.length + 1;
+        return {
+          x: rect.left + (pathStartColumn - 0.5) * cell.width,
+          y: rect.top + (viewportRow - 0.5) * cell.height,
+        };
+      },
+      { sessionId: SESSION_ID, workingDir: WORKING_DIR, path: filePath }
+    );
+  }
+
   afterAll(async () => {
     await browser?.close();
     await server?.stop();
   }, 60_000);
 
   it('opens shared preview on touch activation without sending terminal input', async () => {
-    const activated = await page.evaluate(
-      async ({ sessionId, workingDir, filePath }) => {
-        type Link = { text: string; activate: (event: PointerEvent, text: string) => void };
-        const app = (window as unknown as { app: any }).app;
-        const originalTerminal = app.terminal;
-        let provider: { provideLinks: (line: number, callback: (links?: Link[]) => void) => void } | undefined;
-        app.activeSessionId = sessionId;
-        app.sessions.set(sessionId, { id: sessionId, workingDir });
-        app.terminal = {
-          cols: 120,
-          registerLinkProvider(value: typeof provider) {
-            provider = value;
-          },
-          buffer: {
-            active: {
-              getLine() {
-                return {
-                  isWrapped: false,
-                  translateToString() {
-                    return `Created ${filePath}`;
-                  },
-                };
-              },
-            },
-          },
-        };
-        app.registerFilePathLinkProvider();
-        let links: Link[] | undefined;
-        provider!.provideLinks(1, (value) => {
-          links = value;
-        });
-        if (!links?.length) {
-          app.terminal = originalTerminal;
-          return false;
-        }
-        links[0].activate(new PointerEvent('pointerup', { pointerType: 'touch' }), links[0].text);
-        app.terminal = originalTerminal;
-        return true;
-      },
-      { sessionId: SESSION_ID, workingDir: WORKING_DIR, filePath: FILE_PATH }
-    );
+    requests.length = 0;
+    const point = await writePathAndGetTouchPoint(FILE_PATH);
 
-    expect(activated).toBe(true);
+    await page.touchscreen.tap(point.x, point.y);
     await page.locator('#filePreviewOverlay.visible .document-preview-frame').waitFor({ state: 'attached' });
 
     const sessionRequests = requests.map((request) => new URL(request.url()).pathname);
     expect(sessionRequests).toContain(`/api/sessions/${SESSION_ID}/file-content`);
     expect(sessionRequests).toContain(`/api/sessions/${SESSION_ID}/file-preview`);
+    expect(sessionRequests.some((pathname) => pathname.endsWith('/input'))).toBe(false);
+    expect(await page.evaluate(() => (window as unknown as { app: any }).app.__cod232TouchCounters)).toEqual({
+      sgr: 0,
+      click: 0,
+      input: 0,
+    });
+  }, 30_000);
+
+  it('shows the API file-not-found state after touching a missing document link', async () => {
+    requests.length = 0;
+    const point = await writePathAndGetTouchPoint(MISSING_PATH);
+
+    await page.touchscreen.tap(point.x, point.y);
+
+    const previewBody = page.locator('#filePreviewOverlay.visible #filePreviewBody');
+    await previewBody.waitFor({ state: 'visible' });
+    await page.waitForFunction(() =>
+      document.querySelector('#filePreviewBody')?.textContent?.includes('File not found')
+    );
+    expect(await previewBody.textContent()).toContain('Error: File not found');
+    const sessionRequests = requests.map((request) => new URL(request.url()).pathname);
+    expect(sessionRequests).toContain(`/api/sessions/${SESSION_ID}/file-content`);
+    expect(sessionRequests.some((pathname) => pathname.endsWith('/file-preview'))).toBe(false);
     expect(sessionRequests.some((pathname) => pathname.endsWith('/input'))).toBe(false);
   }, 30_000);
 });

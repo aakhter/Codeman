@@ -3769,8 +3769,15 @@ Object.assign(CodemanApp.prototype, {
 
   async _fetchFilePreviewMetadata(metadataUrl) {
     const res = await fetch(metadataUrl);
-    if (!res.ok) throw new Error('Failed to load file');
-    const result = await res.json();
+    let result;
+    try {
+      result = await res.json();
+    } catch {
+      throw new Error('Failed to load file');
+    }
+    if (!res.ok) {
+      throw new Error(typeof result?.error === 'string' && result.error ? result.error : 'Failed to load file');
+    }
     if (!result.success) throw new Error(result.error || 'Failed to load file');
     return result.data;
   },
