@@ -5000,7 +5000,10 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 }
 
 .shortcut-overlay-modal .modal-content {
-  max-width: 560px;
+  max-width: 620px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .shortcut-overlay-group {
@@ -5183,15 +5186,10 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   max-width: 340px;
 }
 
-.shortcut-overlay-modal {
-  max-width: 620px;
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-}
-
 .shortcut-overlay-modal .modal-body {
   overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .modal-content.modal-lg {
