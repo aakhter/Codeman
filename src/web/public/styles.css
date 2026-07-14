@@ -11830,6 +11830,87 @@ kbd {
   line-height: 1;
 }
 
+/* COD-225: transcript content filters (User / Tools / Responses). */
+.response-viewer-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  border-bottom: 1px solid #2a2a3a;
+  flex-shrink: 0;
+}
+
+.response-viewer-filters[hidden] {
+  display: none;
+}
+
+.response-viewer-filters-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #6a6a80;
+  margin-right: 2px;
+}
+
+.rv-filter-btn {
+  background: #2a2a4a;
+  border: 1px solid #3a3a5a;
+  color: #cfcfe0;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+
+.rv-filter-btn::before {
+  content: '\2713\00a0';
+  font-size: 11px;
+}
+
+.rv-filter-btn:hover {
+  border-color: #55556f;
+  background: #33335a;
+}
+
+.rv-filter-btn:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+.rv-filter-btn.rv-filter-off {
+  background: transparent;
+  color: #6a6a80;
+  border-color: #33334a;
+}
+
+.rv-filter-btn.rv-filter-off::before {
+  content: '\2715\00a0';
+}
+
+/* Category hide rules driven by classes on the body, so filtering does no refetch
+   and preserves the original chronological block order. Tools = tool + status. */
+.response-viewer-body.rv-hide-user .rv-msg-prompt,
+.response-viewer-body.rv-hide-tool .rv-msg-tool,
+.response-viewer-body.rv-hide-tool .rv-msg-status,
+.response-viewer-body.rv-hide-response .rv-msg-response {
+  display: none;
+}
+
+.response-viewer-filter-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: #7a7a90;
+  font-size: 13px;
+}
+
+.response-viewer-filter-empty[hidden] {
+  display: none;
+}
+
 /* Conversation thread messages — card-style layout for clear separation */
 .rv-message {
   margin: 0 0 18px;

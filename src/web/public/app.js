@@ -2295,6 +2295,85 @@ class CodemanApp {
     this._bindResponseViewerInteractions(body);
   }
 
+  // COD-225: independent User / Tools / Responses visibility filters for the
+  // expanded More transcript. Pure client-side show/hide (no refetch); block order
+  // is untouched. Category -> block kinds: user -> prompt; tool -> tool + status;
+  // response -> response.
+  _defaultResponseFilterState() {
+    return { user: true, tool: true, response: true };
+  }
+
+  toggleTranscriptFilter(category, btn) {
+    if (!['user', 'tool', 'response'].includes(category)) return;
+    if (!this._responseFilterState) this._responseFilterState = this._defaultResponseFilterState();
+    const on = !this._responseFilterState[category];
+    this._responseFilterState[category] = on;
+    const button = btn || document.querySelector(`.rv-filter-btn[data-rv-filter="${category}"]`);
+    if (button) {
+      button.setAttribute('aria-pressed', on ? 'true' : 'false');
+      button.classList.toggle('rv-filter-off', !on);
+    }
+    this._applyResponseFilters();
+  }
+
+  _applyResponseFilters() {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) return;
+    const st = this._responseFilterState || this._defaultResponseFilterState();
+    body.classList.toggle('rv-hide-user', !st.user);
+    body.classList.toggle('rv-hide-tool', !st.tool);
+    body.classList.toggle('rv-hide-response', !st.response);
+
+    // Derive the filtered-empty state from classes (not computed CSS display, which
+    // jsdom does not evaluate). A block is hidden when its category is toggled off.
+    const blocks = body.querySelectorAll('.rv-message');
+    let anyVisible = false;
+    blocks.forEach((b) => {
+      const hidden =
+        (!st.user && b.classList.contains('rv-msg-prompt')) ||
+        (!st.tool && (b.classList.contains('rv-msg-tool') || b.classList.contains('rv-msg-status'))) ||
+        (!st.response && b.classList.contains('rv-msg-response'));
+      if (!hidden) anyVisible = true;
+    });
+
+    let empty = body.querySelector('.response-viewer-filter-empty');
+    if (blocks.length > 0 && !anyVisible) {
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'response-viewer-filter-empty';
+        empty.textContent = 'No transcript blocks match the current filters.';
+        body.appendChild(empty);
+      }
+      empty.hidden = false;
+    } else if (empty) {
+      empty.hidden = true;
+    }
+  }
+
+  // Show the filter bar and return every category to visible, so reopening the
+  // transcript starts from a predictable all-visible default (COD-225).
+  _showResponseFilters() {
+    this._responseFilterState = this._defaultResponseFilterState();
+    const bar = document.getElementById('responseViewerFilters');
+    if (bar) {
+      bar.hidden = false;
+      bar.querySelectorAll('.rv-filter-btn').forEach((b) => {
+        b.setAttribute('aria-pressed', 'true');
+        b.classList.remove('rv-filter-off');
+      });
+    }
+    this._applyResponseFilters();
+  }
+
+  // Hide the filter bar for the Last Response single-response view (no transcript
+  // blocks to filter) and clear any lingering hide classes.
+  _hideResponseFilters() {
+    const bar = document.getElementById('responseViewerFilters');
+    if (bar) bar.hidden = true;
+    const body = document.getElementById('responseViewerBody');
+    if (body) body.classList.remove('rv-hide-user', 'rv-hide-tool', 'rv-hide-response');
+  }
+
   // Explicit, idempotent close for the View Response overlay. Returns true only
   // when it actually closed an open viewer (so the Escape handler can consume the
   // key), false if it was already closed. Restores focus to the active terminal so
@@ -2374,6 +2453,8 @@ class CodemanApp {
         moreBtn.style.display = data.hasContext ? '' : 'none';
         moreBtn.textContent = 'More';
       }
+      // Last Response is a single rendered block, not a transcript — no filters here.
+      this._hideResponseFilters();
 
       viewer.classList.add('visible');
       backdrop.classList.add('visible');
@@ -2407,6 +2488,7 @@ class CodemanApp {
       if (lastResponse) this._responseViewerMarkdown = lastResponse.text || '';
 
       this._renderResponseViewerMessages(body, messages);
+      this._showResponseFilters();
 
       const hasStructuredKinds = messages.some((msg) => typeof msg.kind === 'string');
       if (title) title.textContent = hasStructuredKinds

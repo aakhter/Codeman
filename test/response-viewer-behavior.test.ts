@@ -278,4 +278,115 @@ describe('response viewer behavior', () => {
       expect(document.getElementById('responseViewerBackdrop')?.classList.contains('visible')).toBe(false);
     });
   });
+
+  describe('transcript content filters (COD-225)', () => {
+    const MESSAGES = [
+      { kind: 'prompt', label: 'Prompt', text: 'ask something' },
+      { kind: 'status', label: 'Status', text: 'ready' },
+      { kind: 'tool', label: 'Tool', text: 'ran a tool' },
+      { kind: 'response', label: 'Response', text: 'the answer' },
+    ];
+    const btn = (cat: string) => document.querySelector(`.rv-filter-btn[data-rv-filter="${cat}"]`);
+    const setupTranscript = () => {
+      const bar = document.createElement('div');
+      bar.id = 'responseViewerFilters';
+      bar.hidden = true;
+      for (const cat of ['user', 'tool', 'response']) {
+        const b = document.createElement('button');
+        b.className = 'rv-filter-btn';
+        b.setAttribute('data-rv-filter', cat);
+        b.setAttribute('aria-pressed', 'true');
+        bar.appendChild(b);
+      }
+      document.body.appendChild(bar);
+      const body = document.getElementById('responseViewerBody');
+      if (!body) throw new Error('missing body');
+      app._renderResponseViewerMessages(body, MESSAGES);
+      app._showResponseFilters();
+      return body;
+    };
+
+    it('shows the filter bar with every category visible by default', () => {
+      const body = setupTranscript();
+      expect(document.getElementById('responseViewerFilters')?.hidden).toBe(false);
+      expect(body.classList.contains('rv-hide-user')).toBe(false);
+      expect(body.classList.contains('rv-hide-tool')).toBe(false);
+      expect(body.classList.contains('rv-hide-response')).toBe(false);
+      expect(btn('user')?.getAttribute('aria-pressed')).toBe('true');
+      expect(body.querySelectorAll('.rv-message')).toHaveLength(4);
+    });
+
+    it('hides user prompts (and only those) when the User filter is toggled off', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('user', btn('user'));
+      expect(body.classList.contains('rv-hide-user')).toBe(true);
+      expect(btn('user')?.getAttribute('aria-pressed')).toBe('false');
+      expect(btn('user')?.classList.contains('rv-filter-off')).toBe(true);
+      expect(body.classList.contains('rv-hide-tool')).toBe(false);
+      expect(body.classList.contains('rv-hide-response')).toBe(false);
+    });
+
+    it('maps both tool and status blocks to the Tools filter', () => {
+      const body = setupTranscript();
+      expect(body.querySelector('.rv-msg-tool')).not.toBeNull();
+      expect(body.querySelector('.rv-msg-status')).not.toBeNull();
+      app.toggleTranscriptFilter('tool', btn('tool'));
+      expect(body.classList.contains('rv-hide-tool')).toBe(true);
+    });
+
+    it('hides responses when the Responses filter is toggled off', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('response', btn('response'));
+      expect(body.classList.contains('rv-hide-response')).toBe(true);
+      expect(btn('response')?.getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('toggles a filter independently back on to restore visibility', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('user', btn('user'));
+      app.toggleTranscriptFilter('user', btn('user'));
+      expect(body.classList.contains('rv-hide-user')).toBe(false);
+      expect(btn('user')?.getAttribute('aria-pressed')).toBe('true');
+    });
+
+    it('shows a filtered-empty state when every category is toggled off', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('user', btn('user'));
+      app.toggleTranscriptFilter('tool', btn('tool'));
+      app.toggleTranscriptFilter('response', btn('response'));
+      const empty = body.querySelector('.response-viewer-filter-empty');
+      expect(empty).not.toBeNull();
+      expect(empty?.hidden).toBe(false);
+      expect(empty?.textContent).toContain('No transcript blocks match');
+    });
+
+    it('clears the filtered-empty state once a category is re-enabled', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('user', btn('user'));
+      app.toggleTranscriptFilter('tool', btn('tool'));
+      app.toggleTranscriptFilter('response', btn('response'));
+      expect(body.querySelector('.response-viewer-filter-empty')?.hidden).toBe(false);
+      app.toggleTranscriptFilter('response', btn('response'));
+      expect(body.querySelector('.response-viewer-filter-empty')?.hidden).toBe(true);
+    });
+
+    it('resets to all-visible when the transcript is re-rendered (predictable reopen default)', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('user', btn('user'));
+      expect(body.classList.contains('rv-hide-user')).toBe(true);
+      app._renderResponseViewerMessages(body, MESSAGES);
+      app._showResponseFilters();
+      expect(body.classList.contains('rv-hide-user')).toBe(false);
+      expect(btn('user')?.getAttribute('aria-pressed')).toBe('true');
+    });
+
+    it('hides the filter bar and clears hide classes for the Last Response view', () => {
+      const body = setupTranscript();
+      app.toggleTranscriptFilter('user', btn('user'));
+      expect(document.getElementById('responseViewerFilters')?.hidden).toBe(false);
+      app._hideResponseFilters();
+      expect(document.getElementById('responseViewerFilters')?.hidden).toBe(true);
+      expect(body.classList.contains('rv-hide-user')).toBe(false);
+    });
+  });
 });

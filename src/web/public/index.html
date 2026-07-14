@@ -430,6 +430,12 @@
           <button class="response-viewer-close" onclick="app.closeResponseViewer()">&times;</button>
         </div>
       </div>
+      <div class="response-viewer-filters" id="responseViewerFilters" role="group" aria-label="Filter transcript by content type" hidden>
+        <span class="response-viewer-filters-label">Show</span>
+        <button type="button" class="rv-filter-btn" data-rv-filter="user" aria-pressed="true" onclick="app.toggleTranscriptFilter('user', this)">User</button>
+        <button type="button" class="rv-filter-btn" data-rv-filter="tool" aria-pressed="true" onclick="app.toggleTranscriptFilter('tool', this)">Tools</button>
+        <button type="button" class="rv-filter-btn" data-rv-filter="response" aria-pressed="true" onclick="app.toggleTranscriptFilter('response', this)">Responses</button>
+      </div>
       <div class="response-viewer-body" id="responseViewerBody"></div>
     </div>
     <div class="response-viewer-backdrop" id="responseViewerBackdrop" onclick="app.closeResponseViewer()"></div>
