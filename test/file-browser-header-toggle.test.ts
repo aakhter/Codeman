@@ -56,6 +56,59 @@ function makeApp(activeSessionId: string | null = null): any {
   return app;
 }
 
+function makeSelectSessionHarness(sessionId: string): any {
+  const app = makeApp(null);
+  app.isSoloWindow = false;
+  app.detachedSessions = new Set();
+  app.sessions = new Map([
+    [sessionId, { id: sessionId, name: 'Selected session', mode: 'shell', status: 'idle', pid: 1 }],
+  ]);
+  app.terminal = {
+    options: {},
+    focus: vi.fn(),
+    reset: vi.fn(),
+    write: vi.fn((_text: string, callback?: () => void) => callback?.()),
+    scrollToBottom: vi.fn(),
+  };
+  app._selectGeneration = 0;
+  app._setTerminalLoadState = vi.fn();
+  app._clearTerminalLoadState = vi.fn();
+  app._cleanupPreviousSession = vi.fn();
+  app._isMirrorSession = vi.fn(() => false);
+  app._userScrollback = vi.fn(() => 1000);
+  app._updateSseSubscription = vi.fn();
+  app._connectWs = vi.fn();
+  app.hideWelcome = vi.fn();
+  app.clearPendingHooks = vi.fn();
+  app._updateActiveTabImmediate = vi.fn();
+  app.renderSessionTabs = vi.fn();
+  app.updateAttachmentHistoryBadge = vi.fn();
+  app.attachmentHistoryDrawerOpen = false;
+  app._updateLocalEchoState = vi.fn();
+  app._flushedOffsets = new Map();
+  app._flushedTexts = new Map();
+  app._localEchoOverlay = null;
+  app.terminalBufferCache = new Map();
+  app._xtermSnapshots = new Map();
+  app._sessionsLoadedSincePageOpen = new Set();
+  app._beginBufferLoad = vi.fn(() => 1);
+  app._isLoadingBuffer = false;
+  app._isStaleSelect = vi.fn(() => false);
+  app.sendResize = vi.fn(async () => false);
+  app._resetTerminalForReplay = vi.fn();
+  app.respawnStatus = {};
+  app.hideRespawnBanner = vi.fn();
+  app.stopCountdownInterval = vi.fn();
+  app.renderRalphStatePanel = vi.fn();
+  app.updateCliInfoDisplay = vi.fn();
+  app.renderProjectInsightsPanel = vi.fn();
+  app.updateSubagentWindowVisibility = vi.fn();
+  app.scrollToLastNonEmptyLine = vi.fn();
+  app._scheduleTerminalRepaint = vi.fn();
+  app.showConfiguredFileBrowserPanel = vi.fn();
+  return app;
+}
+
 beforeEach(() => {
   mountFileBrowserDom();
 });
@@ -230,6 +283,28 @@ describe('COD-235 canonical Files header behavior', () => {
     expect(app.loadFileBrowser).not.toHaveBeenCalled();
     expect(app.makeWindowDraggable).not.toHaveBeenCalled();
     expect(app.fileBrowserSessionId).toBe('existing-owner-session');
+  });
+
+  it('selectSession post-selection callback invokes configured Files sync with the selected session', async () => {
+    const sessionId = 'selected-session';
+    const idleCallbacks: Array<() => void> = [];
+    vi.stubGlobal(
+      'requestIdleCallback',
+      vi.fn((callback: () => void) => idleCallbacks.push(callback))
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ json: async () => ({ data: { terminalBuffer: '', truncated: false } }) }))
+    );
+    const app = makeSelectSessionHarness(sessionId);
+
+    await app.selectSession(sessionId);
+
+    expect(idleCallbacks).toHaveLength(1);
+    expect(app.showConfiguredFileBrowserPanel).not.toHaveBeenCalled();
+    idleCallbacks[0]();
+    expect(app.showConfiguredFileBrowserPanel).toHaveBeenCalledOnce();
+    expect(app.showConfiguredFileBrowserPanel).toHaveBeenCalledWith(sessionId);
   });
 
   it('preserves Session Manager Open folder routing through canonical reveal', () => {
