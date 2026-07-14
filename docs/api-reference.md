@@ -52,17 +52,17 @@ The single source of truth is `ErrorStatus` / `httpStatusForErrorCode()` in
 `src/types/api.ts`. Clients should branch on `errorCode` (stable) and may rely on
 the HTTP status.
 
-| `errorCode` | HTTP | Meaning |
-|-------------|------|---------|
-| `INVALID_INPUT` | 400 | Malformed request / failed validation |
-| `UNAUTHORIZED` | 401 | Authentication required or failed |
-| `NOT_FOUND` | 404 | Resource does not exist |
-| `SESSION_BUSY` | 409 | Session is busy |
-| `CONFLICT` | 409 | Conflicts with current state (e.g. already running) |
-| `ALREADY_EXISTS` | 409 | Resource already exists |
-| `OPERATION_FAILED` | 422 | Well-formed but could not be completed |
-| `RATE_LIMITED` | 429 | Too many requests |
-| `INTERNAL_ERROR` | 500 | Unexpected server error |
+| `errorCode`        | HTTP | Meaning                                             |
+| ------------------ | ---- | --------------------------------------------------- |
+| `INVALID_INPUT`    | 400  | Malformed request / failed validation               |
+| `UNAUTHORIZED`     | 401  | Authentication required or failed                   |
+| `NOT_FOUND`        | 404  | Resource does not exist                             |
+| `SESSION_BUSY`     | 409  | Session is busy                                     |
+| `CONFLICT`         | 409  | Conflicts with current state (e.g. already running) |
+| `ALREADY_EXISTS`   | 409  | Resource already exists                             |
+| `OPERATION_FAILED` | 422  | Well-formed but could not be completed              |
+| `RATE_LIMITED`     | 429  | Too many requests                                   |
+| `INTERNAL_ERROR`   | 500  | Unexpected server error                             |
 
 Adding a new error code is non-breaking; removing or renaming one is a major change.
 
@@ -81,6 +81,19 @@ message is `event: <name>` + `data: <json>`. The event-name registry
 the stable contract — event names are not renamed without a major bump. An
 optional `?sessions=<id,...>` filter suppresses only the high-volume terminal
 stream; lifecycle/metadata events are delivered to all clients regardless.
+
+`session:checkpoint` reports confirmed checkpoint lifecycle transitions. New
+lifecycle payloads include `sessionId`, `mode`, `phase`, and `updatedAt`; `step`,
+`attempt`, `stage`, and `reason` appear when meaningful. Phases are `requested`,
+`waiting-ready`, `command-submitted`, `operation-started`, `operation-complete`,
+`continue-submitted`, and the terminal `done`, `failed`, or `aborted`. `done`
+means the continuation was delivered and the new agent turn positively entered
+working state, not merely that text was written to tmux.
+
+For compatibility, each request first emits the legacy payload
+`{ sessionId, mode, phase: "start" }`. This legacy event intentionally precedes
+`requested` and omits `updatedAt`; consumers that need confirmed progress should
+use the lifecycle phases above.
 
 ## Consuming from JavaScript
 

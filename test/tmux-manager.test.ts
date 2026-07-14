@@ -385,6 +385,177 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('checkpoint command delivery', () => {
+    function checkpointManager(
+      execute: (command: string) => Promise<void>,
+      mode: 'codex' | 'claude' = 'codex'
+    ): TmuxManager {
+      const testManager = new TmuxManager({ checkpointExecutor: execute, checkpointDelayMs: 0 });
+      testManager.registerSession({
+        sessionId: 'checkpoint-id',
+        muxName: 'codeman-1e571234',
+        pid: 12345,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode,
+        attached: false,
+      });
+      return testManager;
+    }
+
+    it('acknowledges text then Enter through the production adapter boundary', async () => {
+      const commands: string[] = [];
+      const testManager = checkpointManager(async (command) => void commands.push(command));
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '/compact\r')).resolves.toEqual({
+        ok: true,
+        attempt: 1,
+      });
+      expect(commands).toHaveLength(2);
+      expect(commands[0]).toContain('send-keys');
+      expect(commands[0]).toContain('-l');
+      expect(commands[0]).toContain('/compact');
+      expect(commands[1]).toMatch(/send-keys.* Enter$/);
+      testManager.destroy();
+    });
+
+    it('submits a Codex $skill checkpoint with text, selection Enter, then submission Enter', async () => {
+      const commands: string[] = [];
+      const testManager = checkpointManager(async (command) => void commands.push(command));
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '$jira-autoloop\r')).resolves.toEqual({
+        ok: true,
+        attempt: 1,
+      });
+      expect(commands).toHaveLength(3);
+      expect(commands[0]).toMatch(/send-keys.* -l .*\$jira-autoloop/);
+      expect(commands.slice(1).every((command) => command.endsWith(' Enter'))).toBe(true);
+      testManager.destroy();
+    });
+
+    it('retries only the Codex $skill submission Enter without replaying text or selection', async () => {
+      const commands: string[] = [];
+      let enterAttempts = 0;
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        if (command.endsWith(' Enter') && ++enterAttempts === 2) throw new Error('submission enter failed');
+      });
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '$jira-autoloop\r')).resolves.toEqual({
+        ok: true,
+        attempt: 2,
+      });
+      expect(commands.filter((command) => command.includes(' -l '))).toHaveLength(1);
+      expect(commands.filter((command) => command.endsWith(' Enter'))).toHaveLength(3);
+      testManager.destroy();
+    });
+
+    it('reports repeated Codex $skill submission failure as enter without replaying acknowledged stages', async () => {
+      const commands: string[] = [];
+      let enterAttempts = 0;
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        if (command.endsWith(' Enter') && ++enterAttempts >= 2) throw new Error('submission enter failed');
+      });
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '$jira-autoloop\r')).resolves.toMatchObject({
+        ok: false,
+        stage: 'enter',
+        attempt: 2,
+        error: 'submission enter failed',
+      });
+      expect(commands.filter((command) => command.includes(' -l '))).toHaveLength(1);
+      expect(commands.filter((command) => command.endsWith(' Enter'))).toHaveLength(3);
+      testManager.destroy();
+    });
+
+    it.each([
+      ['ordinary Codex prompt', 'continue work\r', 'codex'],
+      ['Claude $skill text', '$jira-autoloop\r', 'claude'],
+    ] as const)('keeps one Enter for %s', async (_label, input, mode) => {
+      const commands: string[] = [];
+      const testManager = checkpointManager(async (command) => void commands.push(command), mode);
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', input)).resolves.toEqual({
+        ok: true,
+        attempt: 1,
+      });
+      expect(commands.filter((command) => command.includes(' -l '))).toHaveLength(1);
+      expect(commands.filter((command) => command.endsWith(' Enter'))).toHaveLength(1);
+      testManager.destroy();
+    });
+
+    it('retries the full submission once after a text-stage failure', async () => {
+      const commands: string[] = [];
+      let textAttempts = 0;
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        if (command.includes(' -l ') && ++textAttempts === 1) throw new Error('text failed');
+      });
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '/clear\r')).resolves.toEqual({
+        ok: true,
+        attempt: 2,
+      });
+      expect(commands.filter((command) => command.includes(' -l '))).toHaveLength(2);
+      expect(commands.filter((command) => command.endsWith(' Enter'))).toHaveLength(1);
+      testManager.destroy();
+    });
+
+    it('reports repeated text failure at the text stage without attempting Enter', async () => {
+      const commands: string[] = [];
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        if (command.includes(' -l ')) throw new Error('text failed');
+      });
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '/clear\r')).resolves.toMatchObject({
+        ok: false,
+        stage: 'text',
+        attempt: 2,
+        error: 'text failed',
+      });
+      expect(commands.filter((command) => command.includes(' -l '))).toHaveLength(2);
+      expect(commands.some((command) => command.endsWith(' Enter'))).toBe(false);
+      testManager.destroy();
+    });
+
+    it('retries Enter only without duplicating acknowledged text', async () => {
+      const commands: string[] = [];
+      let enterAttempts = 0;
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        if (command.endsWith(' Enter') && ++enterAttempts === 1) throw new Error('enter failed');
+      });
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '/init\r')).resolves.toEqual({
+        ok: true,
+        attempt: 2,
+      });
+      expect(commands.filter((command) => command.includes(' -l '))).toHaveLength(1);
+      expect(commands.filter((command) => command.endsWith(' Enter'))).toHaveLength(2);
+      testManager.destroy();
+    });
+
+    it('reports repeated Enter-only failure at the Enter stage', async () => {
+      const commands: string[] = [];
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        if (command.endsWith(' Enter')) throw new Error('enter failed');
+      });
+
+      await expect(testManager.sendCheckpointCommand('checkpoint-id', '\r')).resolves.toMatchObject({
+        ok: false,
+        stage: 'enter',
+        attempt: 2,
+        error: 'enter failed',
+      });
+      expect(commands).toHaveLength(2);
+      expect(commands.every((command) => command.endsWith(' Enter'))).toBe(true);
+      testManager.destroy();
+    });
+  });
+
   // NOTE: In test mode, reconcileSessions returns all registered sessions as
   // alive without running any real tmux commands. This prevents discovery of
   // or interaction with the user's real tmux sessions.

@@ -45,6 +45,26 @@ export type ClaudeMode = 'dangerously-skip-permissions' | 'normal' | 'allowedToo
 /** Session mode: which CLI backend a session runs */
 export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'agy';
 
+export interface SessionCheckpointState {
+  active: boolean;
+  mode: 'compact' | 'clear';
+  phase:
+    | 'requested'
+    | 'waiting-ready'
+    | 'command-submitted'
+    | 'operation-started'
+    | 'operation-complete'
+    | 'continue-submitted'
+    | 'done'
+    | 'failed'
+    | 'aborted';
+  step?: 'compact' | 'clear' | 'init' | 'continue';
+  attempt?: number;
+  stage?: 'text' | 'enter';
+  reason?: string;
+  updatedAt: number;
+}
+
 export type RemoteCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'agy'>;
 
 /**
@@ -214,6 +234,8 @@ export interface SessionConfig {
   workingDir: string;
   /** Timestamp when session was created */
   createdAt: number;
+  /** Restored last-known checkpoint status; active work is safely aborted. */
+  checkpointState?: SessionCheckpointState;
 }
 
 /**
@@ -305,6 +327,8 @@ export interface SessionState {
    * when allowed, else clear.
    */
   checkpointModes?: Array<'compact' | 'clear'>;
+  /** Durable most-recent checkpoint lifecycle record, including terminal outcomes. */
+  checkpoint?: SessionCheckpointState;
   /** Auto-resume on usage limit enabled */
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */

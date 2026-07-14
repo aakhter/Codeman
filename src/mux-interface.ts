@@ -21,6 +21,12 @@ import type {
   SessionRemote,
 } from './types.js';
 
+export type CommandDeliveryStage = 'text' | 'enter';
+
+export type CommandDeliveryResult =
+  | { ok: true; attempt?: number }
+  | { ok: false; stage: CommandDeliveryStage; error?: string; attempt?: number };
+
 /**
  * Multiplexer session metadata.
  */
@@ -176,6 +182,12 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Send input to a session via tmux send-keys.
    */
   sendInput(sessionId: string, input: string): Promise<boolean>;
+
+  /**
+   * Submit one checkpoint command with duplicate-safe text/Enter acknowledgements.
+   * Unlike generic input, the failed transport stage remains observable.
+   */
+  sendCheckpointCommand(sessionId: string, input: string): Promise<CommandDeliveryResult>;
 
   // ========== Metadata ==========
 

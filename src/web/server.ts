@@ -2286,6 +2286,7 @@ export class WebServer extends EventEmitter {
               envOverrides: savedEnvOverrides,
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
+              checkpointState: savedState?.checkpoint,
             });
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name

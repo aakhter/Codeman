@@ -68,6 +68,7 @@ import type {
   MuxSessionWithStats,
   CreateSessionOptions,
   RespawnPaneOptions,
+  CommandDeliveryResult,
 } from './mux-interface.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import {
@@ -166,6 +167,8 @@ const LEGACY_MUX_NAME_PATTERN = /^claudeman-[a-f0-9-]+$/;
 
 /** Regex to validate tmux pane targets (e.g., "%3" pane ids, "0" pane indexes, or active pane). */
 const SAFE_PANE_TARGET_PATTERN = /^(%\d+|\d+|active)$/;
+/** Bare Codex skill token that opens the interactive picker before submission. */
+const CODEX_SKILL_INVOCATION_PATTERN = /^\$[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 /** Dedicated tmux socket for new Codeman-owned sessions (instance-scoped:
  *  `codeman` for prod, `codeman-beta` on the beta branch). */
@@ -1253,9 +1256,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private reconnectGuard: Set<string> = new Set();
 
   private trueColorConfigured = false;
+  private readonly checkpointExecutor?: (command: string) => Promise<void>;
+  private readonly checkpointDelayMs: number;
 
-  constructor() {
+  constructor(options: { checkpointExecutor?: (command: string) => Promise<void>; checkpointDelayMs?: number } = {}) {
     super();
+    this.checkpointExecutor = options.checkpointExecutor;
+    this.checkpointDelayMs = options.checkpointDelayMs ?? 50;
     this.setMaxListeners(50);
     if (!IS_TEST_MODE) {
       this.loadSessions();
@@ -2745,6 +2752,89 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       console.error('[TmuxManager] Failed to send input:', err);
       return false;
     }
+  }
+
+  /**
+   * Submit checkpoint input with independently acknowledged text and Enter
+   * stages. Each stage gets one bounded retry; an acknowledged text stage is
+   * never repeated merely because Enter failed.
+   */
+  async sendCheckpointCommand(sessionId: string, input: string): Promise<CommandDeliveryResult> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return { ok: false, stage: 'text', error: `no session found for ${sessionId}`, attempt: 1 };
+    }
+    if (!isValidMuxName(session.muxName)) {
+      return { ok: false, stage: 'text', error: `invalid session name: ${session.muxName}`, attempt: 1 };
+    }
+
+    // Normal vitest instances remain a no-op for tmux safety. A deliberately
+    // injected executor exercises this exact production adapter without
+    // touching the user's tmux server.
+    if (IS_TEST_MODE && !this.checkpointExecutor) return { ok: true, attempt: 1 };
+
+    const hasCarriageReturn = input.includes('\r');
+    const textPart = input.replace(/\r/g, '').replace(/\n/g, '').trimEnd();
+    const isCodexSkillInvocation = session.mode === 'codex' && CODEX_SKILL_INVOCATION_PATTERN.test(textPart);
+    const textCommand = `${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(textPart)}`;
+    const enterCommand = `${this.tmux()} send-keys -t "${session.muxName}" Enter`;
+    let deliveryAttempt = 1;
+
+    const execute = async (command: string): Promise<void> => {
+      if (this.checkpointExecutor) {
+        await this.checkpointExecutor(command);
+        return;
+      }
+      await execAsync(command, { timeout: EXEC_TIMEOUT_MS });
+    };
+
+    const runStage = async (
+      stage: 'text' | 'enter',
+      command: string
+    ): Promise<{ ok: true } | { ok: false; result: CommandDeliveryResult }> => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        deliveryAttempt = Math.max(deliveryAttempt, attempt);
+        try {
+          await execute(command);
+          return { ok: true };
+        } catch (err) {
+          if (attempt === 2) {
+            return {
+              ok: false,
+              result: { ok: false, stage, error: getErrorMessage(err), attempt },
+            };
+          }
+        }
+      }
+      return { ok: false, result: { ok: false, stage, attempt: 2 } };
+    };
+
+    if (textPart) {
+      const text = await runStage('text', textCommand);
+      if (!text.ok) return text.result;
+    }
+
+    if (hasCarriageReturn) {
+      if (textPart && this.checkpointDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.checkpointDelayMs));
+      }
+      const enter = await runStage('enter', enterCommand);
+      if (!enter.ok) return enter.result;
+
+      if (isCodexSkillInvocation) {
+        // Codex's first Enter accepts the picker selection and stages the skill
+        // token; a second, independently acknowledged Enter submits the turn.
+        // Reusing runStage means a submission retry never replays text or the
+        // already-acknowledged selection Enter.
+        if (this.checkpointDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.checkpointDelayMs));
+        }
+        const submit = await runStage('enter', enterCommand);
+        if (!submit.ok) return submit.result;
+      }
+    }
+
+    return { ok: true, attempt: deliveryAttempt };
   }
 
   // ========== Pane Methods (for Agent Team teammate panes) ==========

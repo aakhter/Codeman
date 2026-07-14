@@ -38,7 +38,11 @@ because secrets are injected via `tmux setenv`, never on the spawn command line:
   binary is missing.
 - **Frontend**: run-mode dropdown → `runCodex()` in `session-ui.js` ("Run CX"
   label), App Settings → Codex CLI tab.
-- **Tests**: `test/run-mode-ui.test.ts` (vm-sandbox harness, no real DOM).
+- Agent checkpoints use positive rendered-frame evidence: Codex is ready only
+  when the `›` input prompt is visible and no `Working (... esc to interrupt)`
+  frame is present. A quiet-window `isWorking === false` is not readiness.
+- **Tests**: `test/run-mode-ui.test.ts` (vm-sandbox harness, no real DOM) and
+  `test/codex-working-detection.test.ts` (working frames + checkpoint prompts).
 
 ## Related
 

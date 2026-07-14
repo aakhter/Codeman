@@ -1,43 +1,87 @@
 /**
- * Tests for SessionAutoOps agent-initiated checkpoint (compact-or-clear, then continue).
+ * @fileoverview Confirmed agent-checkpoint state-machine tests (COD-240).
  *
- * Uses fake timers; the SessionAutoOps callbacks are plain mocks, so no real
- * session, tmux, or ports are involved. Port: N/A
- *
- * The ORDERING is the crux: after sending the op command (/compact or
- * /clear→/init), the continue prompt must be sent ONLY after the op actually
- * runs (the working→idle transition), not on the immediate post-send idle.
+ * These tests use semantic terminal observations rather than inferring prompt
+ * readiness from `!working`. Fake timers keep every timeout path deterministic.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { SessionAutoOps } from '../src/session-auto-ops.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  SessionAutoOps,
+  type CheckpointObservation,
+  type CheckpointProgress,
+  type CommandDeliveryResult,
+} from '../src/session-auto-ops.js';
 
-const POLL_MS = 500; // CHECKPOINT_POLL_MS in session-auto-ops.ts
+const POLL_MS = 500;
+const OP_START_TIMEOUT_MS = 8_000;
+const OP_MAX_MS = 180_000;
+const READY_TIMEOUT_MS = 30_000;
 
-describe('SessionAutoOps checkpoint', () => {
+describe('SessionAutoOps confirmed checkpoint', () => {
   let ops: SessionAutoOps;
   let writeCommand: ReturnType<typeof vi.fn>;
+  let writeCheckpointCommand: ReturnType<typeof vi.fn>;
   let working: boolean;
+  let promptVisible: boolean;
   let stopped: boolean;
   let tokens: number;
+  let revision: number;
+  let wasReady: boolean;
+  let deliveryResult: CommandDeliveryResult;
+  let progress: CheckpointProgress[];
+  let observationHook: (() => void) | undefined;
 
-  /** All command strings sent so far, in order. */
+  function observation(): CheckpointObservation {
+    observationHook?.();
+    const ready = promptVisible && !working;
+    if (ready && !wasReady) revision++;
+    wasReady = ready;
+    return { ready, working, revision };
+  }
+
   function sentCommands(): string[] {
-    return writeCommand.mock.calls.map((c) => c[0] as string);
+    return writeCheckpointCommand.mock.calls.map((call) => call[0] as string);
+  }
+
+  async function tick(ms = POLL_MS): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms);
+  }
+
+  async function acceptAndCompleteOperation(): Promise<void> {
+    working = true;
+    await tick(POLL_MS * 2);
+    working = false;
+    await tick(POLL_MS * 2);
+  }
+
+  async function finishContinuation(): Promise<void> {
+    working = true;
+    await tick(POLL_MS * 2);
   }
 
   beforeEach(() => {
     vi.useFakeTimers();
     writeCommand = vi.fn(async () => true);
     working = false;
+    promptVisible = true;
     stopped = false;
     tokens = 0;
+    revision = 0;
+    wasReady = false;
+    deliveryResult = { ok: true };
+    progress = [];
+    observationHook = undefined;
+    writeCheckpointCommand = vi.fn(async () => deliveryResult);
     ops = new SessionAutoOps({
       writeCommand,
+      writeCheckpointCommand,
+      getCheckpointObservation: observation,
       isWorking: () => working,
       isStopped: () => stopped,
       getTotalTokens: () => tokens,
       getSessionId: () => 'test-session',
     });
+    ops.on('checkpointProgress', (event: CheckpointProgress) => progress.push(event));
   });
 
   afterEach(() => {
@@ -45,252 +89,367 @@ describe('SessionAutoOps checkpoint', () => {
     vi.useRealTimers();
   });
 
-  it('does nothing when not enabled', () => {
-    const res = ops.requestCheckpoint();
-    expect(res).toEqual({ triggered: false, reason: 'not-enabled' });
-    expect(writeCommand).not.toHaveBeenCalled();
-    expect(ops.isCheckpointActive).toBe(false);
-  });
-
-  it('refuses when the session is stopped', () => {
-    ops.setCheckpoint(true, ['compact']);
+  it('preserves synchronous refusal reasons', () => {
+    expect(ops.requestCheckpoint()).toEqual({ triggered: false, reason: 'not-enabled' });
+    ops.setCheckpoint(true, []);
+    expect(ops.requestCheckpoint()).toEqual({ triggered: false, reason: 'no-mode-allowed' });
+    expect(ops.requestCheckpoint({ mode: 'compact' })).toEqual({
+      triggered: false,
+      reason: 'mode-not-allowed',
+    });
     stopped = true;
-    const res = ops.requestCheckpoint();
-    expect(res).toEqual({ triggered: false, reason: 'stopped' });
-    expect(writeCommand).not.toHaveBeenCalled();
+    expect(ops.requestCheckpoint()).toEqual({ triggered: false, reason: 'stopped' });
   });
 
-  it('compact happy path: sends /compact, waits for the op, THEN continues', async () => {
+  it('does not inject on false idle without a positive prompt', async () => {
+    promptVisible = false;
     ops.setCheckpoint(true, ['compact']);
-    const started = vi.fn();
-    const done = vi.fn();
-    ops.on('checkpointStart', started);
-    ops.on('checkpointDone', done);
+    expect(ops.requestCheckpoint()).toEqual({ triggered: true });
 
-    const res = ops.requestCheckpoint();
-    expect(res).toEqual({ triggered: true });
-    expect(ops.isCheckpointActive).toBe(true);
-    expect(started).toHaveBeenCalledWith({ mode: 'compact' });
+    await tick(POLL_MS * 6);
 
-    // Phase 1: idle → /compact is sent. Continue must NOT be sent yet.
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/compact\r');
-    expect(sentCommands()).not.toContain('continue\r');
-
-    // The op starts (working=true). Continue still must not fire mid-op:
-    // this is the trap a naive "send continue on next idle" impl falls into.
-    working = true;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 4);
-    expect(sentCommands()).not.toContain('continue\r');
-    expect(done).not.toHaveBeenCalled();
-
-    // Op completes (working→idle): NOW the continue prompt is sent.
-    working = false;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
-    expect(sentCommands()).toContain('continue\r');
-    expect(done).toHaveBeenCalledWith({ mode: 'compact' });
-    expect(ops.isCheckpointActive).toBe(false);
-
-    // ...and it came AFTER /compact.
-    const cmds = sentCommands();
-    expect(cmds.indexOf('continue\r')).toBeGreaterThan(cmds.indexOf('/compact\r'));
+    expect(writeCheckpointCommand).not.toHaveBeenCalled();
+    expect(progress.map((event) => event.phase)).toEqual(['requested', 'waiting-ready']);
   });
 
-  it('clear mode sends /clear → /init → continue in order, each gated by an op cycle', async () => {
-    ops.setCheckpoint(true, ['clear']);
+  it('accepts delayed positive readiness and submits exactly once', async () => {
+    promptVisible = false;
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS * 3);
+    expect(writeCheckpointCommand).not.toHaveBeenCalled();
+
+    promptVisible = true;
+    await tick(POLL_MS * 2);
+
+    expect(sentCommands()).toEqual(['/compact\r']);
+  });
+
+  it('fails when readiness never arrives', async () => {
+    promptVisible = false;
+    ops.setCheckpoint(true, ['compact']);
     ops.requestCheckpoint();
 
-    // Step 1: /clear
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/clear\r');
-    expect(sentCommands()).not.toContain('/init\r');
+    await tick(READY_TIMEOUT_MS + POLL_MS);
 
-    // Drive the /clear op working→idle cycle
+    expect(ops.checkpointState).toMatchObject({
+      active: false,
+      phase: 'failed',
+      reason: 'readiness-timeout',
+      step: 'compact',
+    });
+    expect(sentCommands()).toEqual([]);
+  });
+
+  it('blocks continuation when checkpoint delivery fails', async () => {
+    deliveryResult = { ok: false, stage: 'text', error: 'tmux rejected text', attempt: 2 };
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+
+    await tick(POLL_MS * 2);
+
+    expect(sentCommands()).toEqual(['/compact\r']);
+    expect(ops.checkpointState).toMatchObject({
+      active: false,
+      phase: 'failed',
+      reason: 'delivery-failed',
+      stage: 'text',
+      attempt: 2,
+    });
+  });
+
+  it('treats a false legacy write acknowledgement as delivery failure', async () => {
+    const legacyOps = new SessionAutoOps({
+      writeCommand: vi.fn(async () => false),
+      getCheckpointObservation: observation,
+      isWorking: () => working,
+      isStopped: () => stopped,
+      getTotalTokens: () => 0,
+      getSessionId: () => 'legacy-write-test',
+    });
+    legacyOps.setCheckpoint(true, ['compact']);
+    legacyOps.requestCheckpoint();
+    await tick(POLL_MS);
+
+    expect(legacyOps.checkpointState).toMatchObject({
+      active: false,
+      phase: 'failed',
+      reason: 'delivery-failed',
+      stage: 'text',
+    });
+    legacyOps.destroy();
+  });
+
+  it('fails when a submitted operation never leaves the baseline prompt', async () => {
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS * 2);
+
+    await tick(OP_START_TIMEOUT_MS + POLL_MS);
+
+    expect(sentCommands()).toEqual(['/compact\r']);
+    expect(ops.checkpointState).toMatchObject({ phase: 'failed', reason: 'operation-not-accepted' });
+  });
+
+  it('fails when an operation starts but never returns to a fresh prompt', async () => {
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS * 2);
     working = true;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
-    working = false;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    await tick(POLL_MS * 2);
 
-    // Step 2: /init
-    expect(sentCommands()).toContain('/init\r');
+    await tick(OP_MAX_MS + POLL_MS);
+
+    expect(ops.checkpointState).toMatchObject({ phase: 'failed', reason: 'operation-timeout' });
     expect(sentCommands()).not.toContain('continue\r');
+  });
 
-    // Drive the /init op working→idle cycle
-    working = true;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
-    working = false;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+  it('blocks done when continuation delivery fails', async () => {
+    writeCheckpointCommand.mockImplementation(async (command: string) =>
+      command === 'continue\r' ? { ok: false, stage: 'enter', attempt: 2 } : { ok: true }
+    );
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS * 2);
+    await acceptAndCompleteOperation();
 
-    // Final: continue
+    expect(sentCommands()).toEqual(['/compact\r', 'continue\r']);
+    expect(ops.checkpointState).toMatchObject({
+      active: false,
+      phase: 'failed',
+      reason: 'continuation-delivery-failed',
+      stage: 'enter',
+    });
+    expect(progress.some((event) => event.phase === 'done')).toBe(false);
+  });
+
+  it('blocks done when continuation never starts a new working turn', async () => {
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS * 2);
+    await acceptAndCompleteOperation();
     expect(sentCommands()).toContain('continue\r');
 
-    const cmds = sentCommands();
-    expect(cmds.indexOf('/clear\r')).toBeLessThan(cmds.indexOf('/init\r'));
-    expect(cmds.indexOf('/init\r')).toBeLessThan(cmds.indexOf('continue\r'));
+    await tick(OP_START_TIMEOUT_MS + POLL_MS);
+
+    expect(ops.checkpointState).toMatchObject({ phase: 'failed', reason: 'continuation-not-started' });
+    expect(progress.some((event) => event.phase === 'done')).toBe(false);
   });
 
-  it('uses an agent-supplied continue prompt', async () => {
+  it('runs compact through every lifecycle phase and only finishes after the new turn starts', async () => {
+    const done = vi.fn();
+    ops.on('checkpointDone', done);
     ops.setCheckpoint(true, ['compact']);
-    ops.requestCheckpoint({ continuePrompt: 'resume task X' });
+    expect(ops.requestCheckpoint({ continuePrompt: '$jira-autoloop' })).toEqual({ triggered: true });
+    await tick(POLL_MS * 2);
+    await acceptAndCompleteOperation();
 
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    working = true;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
-    working = false;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    expect(sentCommands()).toEqual(['/compact\r', '$jira-autoloop\r']);
+    expect(done).not.toHaveBeenCalled();
+    await finishContinuation();
 
-    expect(sentCommands()).toContain('resume task X\r');
-    expect(sentCommands()).not.toContain('continue\r');
+    expect(done).toHaveBeenCalledWith({ mode: 'compact' });
+    expect(progress.map((event) => event.phase)).toEqual([
+      'requested',
+      'waiting-ready',
+      'command-submitted',
+      'operation-started',
+      'operation-complete',
+      'continue-submitted',
+      'done',
+    ]);
+    expect(ops.checkpointState).toMatchObject({ active: false, phase: 'done', mode: 'compact' });
   });
 
-  it('busy guard: a second request is rejected, and token-threshold compact is suppressed', async () => {
+  it('runs clear as /clear then /init, with a confirmed cycle for each step', async () => {
+    ops.setCheckpoint(true, ['clear']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS * 2);
+    expect(sentCommands()).toEqual(['/clear\r']);
+    await acceptAndCompleteOperation();
+    expect(sentCommands()).toEqual(['/clear\r', '/init\r']);
+    await acceptAndCompleteOperation();
+    expect(sentCommands()).toEqual(['/clear\r', '/init\r', 'continue\r']);
+    await finishContinuation();
+
+    expect(ops.checkpointState).toMatchObject({ active: false, phase: 'done', mode: 'clear' });
+    expect(progress.filter((event) => event.phase === 'operation-complete').map((event) => event.step)).toEqual([
+      'clear',
+      'init',
+    ]);
+  });
+
+  it('accepts an instantaneous /clear only from a genuinely fresh ready-prompt generation', async () => {
+    ops.setCheckpoint(true, ['clear']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS);
+    expect(sentCommands()).toEqual(['/clear\r']);
+
+    // /clear reset and returned to ready entirely between driver polls.
+    revision++;
+    await tick(POLL_MS * 2);
+
+    expect(sentCommands()).toEqual(['/clear\r', '/init\r']);
+    expect(progress.filter((event) => event.step === 'clear').map((event) => event.phase)).toContain(
+      'operation-complete'
+    );
+  });
+
+  it('does not let a fresh ready generation bypass strict compact acceptance', async () => {
     ops.setCheckpoint(true, ['compact']);
-    const first = ops.requestCheckpoint();
-    expect(first).toEqual({ triggered: true });
+    ops.requestCheckpoint();
+    await tick(POLL_MS);
+    revision++;
+    await tick(POLL_MS * 2);
 
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(ops.isCheckpointActive).toBe(true);
+    expect(progress.some((event) => event.phase === 'operation-started')).toBe(false);
+    expect(sentCommands()).toEqual(['/compact\r']);
+  });
 
-    // Second request while active → busy
-    const second = ops.requestCheckpoint();
-    expect(second).toEqual({ triggered: false, reason: 'busy' });
+  it.each(['destroy', 'stop'] as const)(
+    'does not write after readiness resolves when %s wins the await boundary',
+    async (action) => {
+      ops.setCheckpoint(true, ['compact']);
+      ops.requestCheckpoint();
+      if (action === 'destroy') ops.destroy();
+      else stopped = true;
+      await Promise.resolve();
+      await Promise.resolve();
 
-    // Token-threshold auto-compact must NOT fire during an active checkpoint.
+      expect(sentCommands()).toEqual([]);
+      expect(progress.at(-1)).toMatchObject({ phase: 'aborted' });
+      expect(progress.some((event) => event.phase === 'command-submitted')).toBe(false);
+    }
+  );
+
+  it.each(['destroy', 'stop'] as const)(
+    'does not emit done when %s wins the matched-working boundary',
+    async (action) => {
+      ops.setCheckpoint(true, ['compact']);
+      ops.requestCheckpoint();
+      await tick(POLL_MS);
+      await acceptAndCompleteOperation();
+      expect(sentCommands()).toContain('continue\r');
+
+      observationHook = () => {
+        observationHook = undefined;
+        if (action === 'destroy') ops.destroy();
+        else stopped = true;
+      };
+      working = true;
+      await tick(POLL_MS);
+
+      expect(progress.at(-1)).toMatchObject({ phase: 'aborted' });
+      expect(progress.some((event) => event.phase === 'done')).toBe(false);
+    }
+  );
+
+  it.each([
+    ['waiting for readiness', async () => undefined],
+    [
+      'waiting for operation acceptance',
+      async () => {
+        await tick(POLL_MS * 2);
+      },
+    ],
+    [
+      'waiting for operation completion',
+      async () => {
+        await tick(POLL_MS * 2);
+        working = true;
+        await tick(POLL_MS * 2);
+      },
+    ],
+    [
+      'waiting for continuation start',
+      async () => {
+        await tick(POLL_MS * 2);
+        await acceptAndCompleteOperation();
+      },
+    ],
+  ])('aborts without later writes when stopped while %s', async (_label, reachWait) => {
+    if (_label === 'waiting for readiness') promptVisible = false;
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await reachWait();
+    const writesAtStop = sentCommands().length;
+    stopped = true;
+    await tick(POLL_MS * 3);
+
+    expect(sentCommands()).toHaveLength(writesAtStop);
+    expect(ops.checkpointState).toMatchObject({ active: false, phase: 'aborted', reason: 'stopped' });
+  });
+
+  it('destroy aborts an active sequence and clears future work', async () => {
+    promptVisible = false;
+    ops.setCheckpoint(true, ['compact']);
+    ops.requestCheckpoint();
+    await tick(POLL_MS);
+    ops.destroy();
+    await tick(READY_TIMEOUT_MS + POLL_MS);
+
+    expect(sentCommands()).toEqual([]);
+    expect(ops.checkpointState).toMatchObject({ active: false, phase: 'aborted', reason: 'destroyed' });
+  });
+
+  it('keeps allowed modes stable and suppresses threshold auto-ops while active', async () => {
+    promptVisible = false;
+    ops.setCheckpoint(true, ['clear', 'compact']);
+    expect(ops.checkpointModes).toEqual(['compact', 'clear']);
+    expect(ops.checkpointMode).toBe('compact');
+    ops.requestCheckpoint();
+    expect(ops.requestCheckpoint()).toEqual({ triggered: false, reason: 'busy' });
     ops.setAutoCompact(true, 1000);
     tokens = 200_000;
     ops.checkAutoCompact();
-    await vi.advanceTimersByTimeAsync(5000);
-    // The only /compact present is the checkpoint's own (exactly one).
-    const compacts = sentCommands().filter((c) => c === '/compact\r');
-    expect(compacts.length).toBe(1);
-  });
-
-  it('gating: an explicit mode the operator forbade is refused', () => {
-    ops.setCheckpoint(true, ['clear']); // compact NOT allowed
-    expect(ops.checkpointModes).toEqual(['clear']);
-    expect(ops.checkpointMode).toBe('clear'); // bare checkpoint falls to clear
-
-    const res = ops.requestCheckpoint({ mode: 'compact' });
-    expect(res).toEqual({ triggered: false, reason: 'mode-not-allowed' });
+    await tick(5_000);
     expect(writeCommand).not.toHaveBeenCalled();
-    expect(ops.isCheckpointActive).toBe(false);
   });
 
-  it('restoreCheckpoint restores flags + allowed modes without arming anything', () => {
+  it('restores checkpoint flags and modes without arming work', () => {
     ops.restoreCheckpoint(true, ['clear']);
     expect(ops.checkpointEnabled).toBe(true);
     expect(ops.checkpointModes).toEqual(['clear']);
     expect(ops.checkpointMode).toBe('clear');
     expect(ops.isCheckpointActive).toBe(false);
-    expect(writeCommand).not.toHaveBeenCalled();
+    expect(writeCheckpointCommand).not.toHaveBeenCalled();
   });
 
-  it('aborts the sequence (no continue) if the session stops mid-checkpoint', async () => {
-    ops.setCheckpoint(true, ['compact']);
-    ops.requestCheckpoint();
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/compact\r');
-
-    working = true;
-    await vi.advanceTimersByTimeAsync(POLL_MS);
-    stopped = true;
-    working = false;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 4);
-    expect(sentCommands()).not.toContain('continue\r');
-  });
-
-  // ── COD-112: both modes available (agent-selectable), compact the default ──
-
-  it('default fallback is compact when enabled without a mode (no -m given)', async () => {
-    // Operator enables checkpoint without choosing a mode; agent signals with
-    // no explicit mode → compact runs (AC: "no explicit mode → compact").
+  it('uses compact as the bare default and falls back to clear when it is the only allowed mode', async () => {
     ops.setCheckpoint(true);
-    expect(ops.checkpointMode).toBe('compact');
-
-    const res = ops.requestCheckpoint();
-    expect(res).toEqual({ triggered: true });
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/compact\r');
-    expect(sentCommands()).not.toContain('/clear\r');
-  });
-
-  it('compact default + agent picks clear per-call → /clear runs (both available)', async () => {
-    // Headline AC: operator did NOT lock the session; default is compact, yet
-    // the agent can still run a clear checkpoint by passing the mode.
-    ops.setCheckpoint(true); // default compact, no lock
-    ops.requestCheckpoint({ mode: 'clear' });
-
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/clear\r');
-    expect(sentCommands()).not.toContain('/compact\r');
-  });
-
-  it('agent runs compact then clear in one session without changing settings', async () => {
-    // AC: "an agent can trigger a compact checkpoint and a clear checkpoint
-    // within the same session without the operator changing settings."
-    ops.setCheckpoint(true); // enabled once, default compact
-
-    // 1) compact (default) — drive the full op cycle to completion.
     ops.requestCheckpoint();
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/compact\r');
-    working = true;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
-    working = false;
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
-    expect(ops.isCheckpointActive).toBe(false); // first checkpoint done
+    await tick(POLL_MS);
+    expect(sentCommands()).toEqual(['/compact\r']);
+    ops.destroy();
 
-    // 2) clear (per-call override) — same session, no setCheckpoint between.
-    const res = ops.requestCheckpoint({ mode: 'clear' });
-    expect(res).toEqual({ triggered: true });
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/clear\r');
-
-    // Both modes ran in the one session.
-    expect(sentCommands()).toContain('/compact\r');
-    expect(sentCommands()).toContain('/clear\r');
+    const clearOnly = new SessionAutoOps({
+      writeCommand,
+      writeCheckpointCommand,
+      getCheckpointObservation: observation,
+      isWorking: () => working,
+      isStopped: () => stopped,
+      getTotalTokens: () => 0,
+      getSessionId: () => 'clear-only',
+    });
+    clearOnly.setCheckpoint(true, ['clear']);
+    clearOnly.requestCheckpoint();
+    await tick(POLL_MS);
+    expect(sentCommands()).toEqual(['/compact\r', '/clear\r']);
+    clearOnly.destroy();
   });
 
-  // ── COD-112 (toggles): operator-selectable allowed-mode set + gating ──
-
-  it('enabling with no modes specified defaults to both allowed', () => {
+  it('runs compact then clear in one session without changing checkpoint settings', async () => {
     ops.setCheckpoint(true);
-    expect(ops.checkpointModes).toEqual(['compact', 'clear']);
-  });
-
-  it('allowed set is reported in stable order regardless of input order', () => {
-    ops.setCheckpoint(true, ['clear', 'compact']);
-    expect(ops.checkpointModes).toEqual(['compact', 'clear']);
-  });
-
-  it('gating: only compact allowed → clear refused, bare checkpoint runs compact', async () => {
-    ops.setCheckpoint(true, ['compact']);
-    expect(ops.checkpointModes).toEqual(['compact']);
-
-    const refused = ops.requestCheckpoint({ mode: 'clear' });
-    expect(refused).toEqual({ triggered: false, reason: 'mode-not-allowed' });
-
-    const ok = ops.requestCheckpoint(); // no -m → compact (the only allowed mode)
-    expect(ok).toEqual({ triggered: true });
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
-    expect(sentCommands()).toContain('/compact\r');
-    expect(sentCommands()).not.toContain('/clear\r');
-  });
-
-  it('gating: empty allowed set → every request is refused (no-mode-allowed)', () => {
-    ops.setCheckpoint(true, []);
-    expect(ops.checkpointModes).toEqual([]);
-    expect(ops.requestCheckpoint()).toEqual({ triggered: false, reason: 'no-mode-allowed' });
-    expect(ops.requestCheckpoint({ mode: 'compact' })).toEqual({ triggered: false, reason: 'mode-not-allowed' });
-    expect(writeCommand).not.toHaveBeenCalled();
-  });
-
-  it('only clear allowed → bare checkpoint runs clear (compact-preferred default falls through)', async () => {
-    ops.setCheckpoint(true, ['clear']);
-    expect(ops.checkpointMode).toBe('clear');
     ops.requestCheckpoint();
-    await vi.advanceTimersByTimeAsync(POLL_MS + 50);
+    await tick(POLL_MS);
+    await acceptAndCompleteOperation();
+    await finishContinuation();
+    expect(ops.checkpointState?.phase).toBe('done');
+
+    working = false;
+    expect(ops.requestCheckpoint({ mode: 'clear' })).toEqual({ triggered: true });
+    await tick(POLL_MS);
+    expect(sentCommands()).toContain('/compact\r');
     expect(sentCommands()).toContain('/clear\r');
-    expect(sentCommands()).not.toContain('/compact\r');
   });
 });

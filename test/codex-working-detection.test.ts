@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { detectExternalCliWorkingFrame, Session } from '../src/session.js';
+import { formatPaneSnapshot } from '../src/tmux-manager.js';
 
 describe('Codex working detection', () => {
   it('detects Codex TUI working frames', () => {
@@ -21,6 +22,279 @@ describe('Codex working detection', () => {
     expect(
       detectExternalCliWorkingFrame('• Starting MCP servers (3/4): bitbucket (3s • esc to interrupt)', 'codex')
     ).toBe(false);
+  });
+});
+
+describe('checkpoint prompt observations', () => {
+  function installFrame(session: Session, getFrame: () => string): void {
+    const internals = session as unknown as {
+      _mux: {
+        captureActivePaneBuffer: (muxName: string) => string;
+        sendCheckpointCommand: () => Promise<{ ok: true }>;
+      };
+      _muxSession: { muxName: string };
+    };
+    internals._mux = { captureActivePaneBuffer: getFrame, sendCheckpointCommand: async () => ({ ok: true }) };
+    internals._muxSession = { muxName: 'codeman-abc12345' };
+  }
+
+  it('requires the mode-specific rendered input prompt', async () => {
+    const codex = new Session({ workingDir: '/tmp', mode: 'codex' });
+    const claude = new Session({ workingDir: '/tmp', mode: 'claude' });
+    let codexFrame = 'false idle without a prompt';
+    let claudeFrame = 'false idle without a prompt';
+    installFrame(codex, () => codexFrame);
+    installFrame(claude, () => claudeFrame);
+
+    expect(codex.getCheckpointObservation()).toMatchObject({ ready: false, working: false });
+    expect(claude.getCheckpointObservation()).toMatchObject({ ready: false, working: false });
+    codexFrame = '› Ask Codex';
+    claudeFrame = '❯ Ask Claude';
+    expect(codex.getCheckpointObservation()).toMatchObject({ ready: true, working: false });
+    expect(claude.getCheckpointObservation()).toMatchObject({ ready: true, working: false });
+
+    codexFrame = '❯ wrong prompt';
+    claudeFrame = '› wrong prompt';
+    expect(codex.getCheckpointObservation().ready).toBe(false);
+    expect(claude.getCheckpointObservation().ready).toBe(false);
+    await codex.stop();
+    await claude.stop();
+  });
+
+  it('lets working evidence override a visible prompt', async () => {
+    const codex = new Session({ workingDir: '/tmp', mode: 'codex' });
+    const claude = new Session({ workingDir: '/tmp', mode: 'claude' });
+    installFrame(codex, () => '• Working (2s • esc to interrupt)\n› prompt');
+    installFrame(claude, () => '⠋ Thinking…\n❯ prompt');
+
+    expect(codex.getCheckpointObservation()).toMatchObject({ ready: false, working: true });
+    expect(claude.getCheckpointObservation()).toMatchObject({ ready: false, working: true });
+    await codex.stop();
+    await claude.stop();
+  });
+
+  it('does not treat retained submitted input as ready in supported Codex working layouts', async () => {
+    const codex = new Session({ workingDir: '/tmp', mode: 'codex' });
+    installFrame(codex, () => '• Working (2s)\n› ask\n  gpt-5.5 xhigh fast · codeman · Working · Context 79% left');
+
+    expect(codex.getCheckpointObservation()).toMatchObject({ ready: false, working: true });
+    await codex.stop();
+  });
+
+  it('recognizes Codex prompts in absolute-row tmux snapshots without weakening working evidence', async () => {
+    const codex = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let frame = formatPaneSnapshot(['Codex CLI', '', '› Ask Codex', '', '  gpt-5.5 medium · /tmp'], {
+      cols: 80,
+      rows: 8,
+      cursorX: 2,
+      cursorY: 2,
+    });
+    installFrame(codex, () => frame);
+
+    expect(frame).not.toContain('\n');
+    expect(codex.getCheckpointObservation()).toMatchObject({ ready: true, working: false });
+
+    frame = formatPaneSnapshot(
+      ['Codex CLI', '• Working (2s)', '› ask', '', '  gpt-5.5 xhigh · codeman · Working · Context 79% left'],
+      { cols: 80, rows: 8, cursorX: 4, cursorY: 2 }
+    );
+    expect(codex.getCheckpointObservation()).toMatchObject({ ready: false, working: true });
+    await codex.stop();
+  });
+
+  it('increments semantic revision only after leaving and returning to ready', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let frame = '› prompt';
+    installFrame(session, () => frame);
+
+    const baseline = session.getCheckpointObservation();
+    expect(session.getCheckpointObservation().revision).toBe(baseline.revision);
+    frame = 'status repaint\n› prompt';
+    expect(session.getCheckpointObservation().revision).toBe(baseline.revision);
+    frame = '• Working (1s • esc to interrupt)\n› prompt';
+    expect(session.getCheckpointObservation().ready).toBe(false);
+    frame = '› prompt';
+    expect(session.getCheckpointObservation().revision).toBe(baseline.revision + 1);
+    await session.stop();
+  });
+
+  it('does not invent a prompt transition when a rendered capture is temporarily unavailable', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let frame = '› prompt';
+    installFrame(session, () => frame);
+    const baseline = session.getCheckpointObservation();
+
+    frame = '';
+    expect(session.getCheckpointObservation()).toEqual(baseline);
+    frame = '› prompt';
+    expect(session.getCheckpointObservation()).toEqual(baseline);
+    await session.stop();
+  });
+
+  it('advances semantic prompt generation for an instantaneous clear frame but not a status redraw', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let frame = 'previous conversation output\n› prompt\n  gpt-5.5 medium · /tmp';
+    installFrame(session, () => frame);
+    const baseline = session.getCheckpointObservation();
+
+    frame = 'previous conversation output\n› prompt\n  gpt-5.5 high · /tmp';
+    expect(session.getCheckpointObservation().revision).toBe(baseline.revision);
+
+    await session.writeCheckpointViaMux('/clear\r');
+    frame = 'fresh session banner\n› prompt\n  gpt-5.5 high · /tmp';
+    expect(session.getCheckpointObservation()).toMatchObject({
+      ready: true,
+      working: false,
+      revision: baseline.revision + 1,
+    });
+    await session.stop();
+  });
+
+  it('does not advance clear generation when Codex appends a command rejection to the prior frame', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let frame = 'previous conversation output\n› prompt\n  gpt-5.5 medium · /tmp';
+    installFrame(session, () => frame);
+    const baseline = session.getCheckpointObservation();
+
+    await session.writeCheckpointViaMux('/clear\r');
+    frame = 'previous conversation output\nError: unknown command /clear\n› prompt\n  gpt-5.5 medium · /tmp';
+
+    expect(session.getCheckpointObservation()).toEqual(baseline);
+    await session.stop();
+  });
+
+  it('does not advance clear generation for an unrelated notice appended to the prior frame', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let frame = 'previous conversation output\n› prompt\n  gpt-5.5 medium · /tmp';
+    installFrame(session, () => frame);
+    const baseline = session.getCheckpointObservation();
+
+    await session.writeCheckpointViaMux('/clear\r');
+    frame = 'previous conversation output\nBackground sync complete\n› prompt\n  gpt-5.5 medium · /tmp';
+
+    expect(session.getCheckpointObservation()).toEqual(baseline);
+    await session.stop();
+  });
+
+  it('tracks a successful direct-PTY Claude clear generation while continuously ready', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const internals = session as unknown as {
+      ptyProcess: { write: (data: string) => void };
+      _lastPromptTime: number;
+      _status: 'idle';
+      _detectWorkingState(data: string): void;
+    };
+    internals.ptyProcess = { write: vi.fn() };
+    internals._lastPromptTime = 1;
+    internals._status = 'idle';
+    const baseline = session.getCheckpointObservation();
+
+    await session.writeCheckpointViaMux('/clear\r');
+    internals._detectWorkingState('\x1b[2J\x1b[Hfresh Claude prompt\n❯');
+
+    expect(session.getCheckpointObservation()).toMatchObject({
+      ready: true,
+      working: false,
+      revision: baseline.revision + 1,
+    });
+    await session.stop();
+  });
+
+  it('does not track a rejected direct-PTY Claude clear as a fresh generation', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const internals = session as unknown as {
+      ptyProcess: { write: (data: string) => void };
+      _lastPromptTime: number;
+      _status: 'idle';
+      _detectWorkingState(data: string): void;
+    };
+    internals.ptyProcess = { write: vi.fn() };
+    internals._lastPromptTime = 1;
+    internals._status = 'idle';
+    const baseline = session.getCheckpointObservation();
+
+    await session.writeCheckpointViaMux('/clear\r');
+    internals._detectWorkingState('Error: unknown command /clear\n❯');
+
+    expect(session.getCheckpointObservation()).toEqual(baseline);
+    await session.stop();
+  });
+
+  it('keeps the explicit legacy fallback for non-Claude/Codex modes', async () => {
+    const shell = new Session({ workingDir: '/tmp', mode: 'shell' });
+    expect(shell.getCheckpointObservation()).toMatchObject({ ready: true, working: false });
+    await shell.stop();
+  });
+
+  it('serializes the durable terminal checkpoint record', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    const internals = session as unknown as {
+      _mux: {
+        captureActivePaneBuffer: () => string;
+        sendCheckpointCommand: () => Promise<{ ok: false; stage: 'text'; attempt: number }>;
+      };
+      _muxSession: { muxName: string };
+    };
+    internals._mux = {
+      captureActivePaneBuffer: () => '› prompt',
+      sendCheckpointCommand: async () => ({ ok: false, stage: 'text', attempt: 2 }),
+    };
+    internals._muxSession = { muxName: 'codeman-abc12345' };
+    session.setCheckpoint(true, ['compact']);
+    session.requestCheckpoint();
+
+    await vi.waitFor(() => {
+      expect(session.toState().checkpoint).toMatchObject({
+        active: false,
+        mode: 'compact',
+        phase: 'failed',
+        step: 'compact',
+        reason: 'delivery-failed',
+        stage: 'text',
+      });
+    });
+    await session.stop();
+  });
+
+  it('restores an active persisted checkpoint as safely aborted instead of resuming it', async () => {
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      checkpointState: {
+        active: true,
+        mode: 'clear',
+        phase: 'operation-started',
+        step: 'clear',
+        updatedAt: 100,
+      },
+    });
+
+    expect(session.toState().checkpoint).toMatchObject({
+      active: false,
+      mode: 'clear',
+      phase: 'aborted',
+      step: 'clear',
+      reason: 'restarted',
+    });
+    await session.stop();
+
+    const completed = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      checkpointState: {
+        active: false,
+        mode: 'compact',
+        phase: 'done',
+        updatedAt: 200,
+      },
+    });
+    expect(completed.toState().checkpoint).toEqual({
+      active: false,
+      mode: 'compact',
+      phase: 'done',
+      updatedAt: 200,
+    });
+    await completed.stop();
   });
 });
 
