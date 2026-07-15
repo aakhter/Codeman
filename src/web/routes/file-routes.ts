@@ -4,10 +4,11 @@
  */
 
 import { FastifyInstance, type FastifyReply } from 'fastify';
-import { join, basename as pathBasename } from 'node:path';
+import { join, extname, basename as pathBasename } from 'node:path';
 import { createReadStream, realpathSync } from 'node:fs';
 import type { ReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import {
   ApiErrorCode,
   createErrorResponse,
@@ -20,11 +21,20 @@ import {
   AttachmentRegistrationError,
   attachmentRecordToEvent,
   attachmentRegistry,
+  buildAttachmentRoutes,
   buildFileThumbnailRoute,
+  getAttachmentType,
   isSupportedAttachmentExtension,
   registerExternalAttachment,
   type AttachmentRecord,
 } from '../../attachment-registry.js';
+import {
+  documentMagicMatchesExt,
+  isAllowedUploadExtension,
+  sanitizeUploadFilename,
+  UPLOAD_ALLOWED_EXTENSIONS,
+} from '../document-upload.js';
+import { MAX_PASTE_IMAGE_BYTES } from '../../config/buffer-limits.js';
 import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
@@ -470,6 +480,41 @@ function resolveDocumentTarget(
   return undefined;
 }
 
+// Per-(IP, sessionId) token bucket for document upload. 20 requests/minute.
+// Distinct from the paste-image bucket (session-routes.ts) — a private module
+// bucket here so the two disk-fill surfaces are rate-limited independently.
+// Entries are pruned when they drift > 1h stale to bound memory against a flood
+// of unique IP keys.
+const UPLOAD_RATE_TOKENS = 20;
+const UPLOAD_RATE_REFILL_PER_MS = UPLOAD_RATE_TOKENS / 60_000;
+const UPLOAD_BUCKET_TTL_MS = 60 * 60 * 1000;
+const UPLOAD_BUCKET_GC_THRESHOLD = 1000;
+const uploadRateBuckets = new Map<string, { tokens: number; lastRefill: number }>();
+
+function consumeUploadToken(key: string, now: number = Date.now()): boolean {
+  if (uploadRateBuckets.size > UPLOAD_BUCKET_GC_THRESHOLD) {
+    for (const [k, b] of uploadRateBuckets) {
+      if (now - b.lastRefill > UPLOAD_BUCKET_TTL_MS) uploadRateBuckets.delete(k);
+    }
+  }
+  let b = uploadRateBuckets.get(key);
+  if (!b) {
+    b = { tokens: UPLOAD_RATE_TOKENS, lastRefill: now };
+    uploadRateBuckets.set(key, b);
+  }
+  const delta = (now - b.lastRefill) * UPLOAD_RATE_REFILL_PER_MS;
+  b.tokens = Math.min(UPLOAD_RATE_TOKENS, b.tokens + delta);
+  b.lastRefill = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
+/** Test hook: reset the upload rate buckets between runs. */
+export function _resetUploadRateBuckets(): void {
+  uploadRateBuckets.clear();
+}
+
 export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & EventPort & ConfigPort): void {
   // File tree listing (tree mode) + server-side search (search mode, COD-236).
   // A `q` query param prunes the walk to matching entries and returns a FLAT
@@ -910,6 +955,209 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register attachment: ${getErrorMessage(err)}`)
         );
     }
+  });
+
+  // COD-241 unit 1: upload a document file (multipart) into the session
+  // workspace's .codeman-attachments/ dir and register it as an 'upload'
+  // attachment. LOCAL sessions only — remote byte transfer is a later unit.
+  // Structure mirrors the paste-image route (session-routes.ts): explicit CSRF
+  // Origin/Referer==Host check, per-(IP, sessionId) token bucket, byte-signature
+  // validation over the attacker-controlled filename/Content-Type, and the same
+  // symlink-safe (lstat + non-recursive mkdir + O_EXCL|O_NOFOLLOW) write.
+  app.post('/api/sessions/:id/attachments/upload', async (req, reply) => {
+    // CSRF defense: multipart/form-data is a "simple" CORS request (no
+    // preflight), so a cross-origin form submit would attach the session cookie.
+    // Reject unless Origin/Referer host matches req.host; non-browser clients
+    // (no Origin AND no Referer) must supply X-Codeman-CSRF (a header browsers
+    // cannot add cross-origin without a preflight our CORS config disallows).
+    const reqHost = req.headers.host;
+    const origin = req.headers.origin;
+    const referer = req.headers.referer;
+    let csrfOk = false;
+    if (origin) {
+      try {
+        csrfOk = new URL(origin).host === reqHost;
+      } catch {
+        /* invalid Origin → not ok */
+      }
+    } else if (referer) {
+      try {
+        csrfOk = new URL(referer).host === reqHost;
+      } catch {
+        /* invalid Referer → not ok */
+      }
+    } else {
+      csrfOk = !!req.headers['x-codeman-csrf'];
+    }
+    if (!csrfOk) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'CSRF check failed');
+    }
+
+    const { id } = req.params as { id: string };
+
+    // Rate limit per (IP, sessionId): 20/min. Defends against disk-fill DoS.
+    if (!consumeUploadToken(`${req.ip}:${id}`)) {
+      reply.code(429);
+      reply.header('Retry-After', '60');
+      return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
+    }
+
+    const session = findSessionOrFail(ctx, id);
+
+    // Remote sessions: byte transfer to the remote host is a later unit.
+    if (session.remote) {
+      reply.code(501);
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'Document upload is not yet supported for remote sessions'
+      );
+    }
+
+    if (!req.isMultipart()) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Expected multipart/form-data');
+    }
+
+    // Read the single file part. @fastify/multipart enforces the per-file size
+    // cap (MAX_PASTE_IMAGE_BYTES) and the 1-file/4-field count limits (server.ts).
+    let part: import('@fastify/multipart').MultipartFile | undefined;
+    try {
+      part = await req.file();
+    } catch (err: unknown) {
+      reply.code(413);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || 'Invalid multipart payload');
+    }
+    if (!part) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No document uploaded');
+    }
+    if (part.fieldname !== 'document') {
+      reply.code(400);
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        `Unexpected field "${part.fieldname}", expected "document"`
+      );
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await part.toBuffer();
+    } catch (err: unknown) {
+      reply.code(413);
+      const maxMb = Math.round(MAX_PASTE_IMAGE_BYTES / (1024 * 1024));
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || `File too large (max ${maxMb}MB)`);
+    }
+    if (bytes.length === 0) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Empty file');
+    }
+
+    // Extension from the (attacker-controlled) filename — lowercased, no dot.
+    const rawName = part.filename || '';
+    const ext = extname(rawName).toLowerCase().replace(/^\./, '');
+    if (!isAllowedUploadExtension(ext)) {
+      reply.code(415);
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        `Unsupported document type: ${ext || '(none)'}. Allowed: ${[...UPLOAD_ALLOWED_EXTENSIONS].join(', ')}`
+      );
+    }
+
+    // Byte-signature check — filename/Content-Type are attacker-supplied, bytes
+    // are not (mirrors paste-image's imageMagicMatchesExt).
+    if (!documentMagicMatchesExt(bytes, ext)) {
+      reply.code(415);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File content does not match its type');
+    }
+
+    // Destination: {workingDir}/.codeman-attachments/. Refuse a symlinked dir
+    // (an agent could plant `.codeman-attachments -> ~/.ssh/`). lstat (not stat)
+    // so we see the symlink itself; non-recursive mkdir + O_EXCL|O_NOFOLLOW on
+    // the file open keep both dir-leaf creation and the write symlink-safe.
+    const attachmentsDir = join(session.workingDir, '.codeman-attachments');
+    try {
+      const dirStat = await fs.lstat(attachmentsDir);
+      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.codeman-attachments is not a regular directory');
+      }
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      try {
+        await fs.mkdir(attachmentsDir);
+      } catch (mkErr: unknown) {
+        // Concurrent uploads race to create the dir — losers get EEXIST. Treat an
+        // already-present REAL directory as success, but re-verify it isn't a
+        // symlink a racing actor planted.
+        if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
+        const raceStat = await fs.lstat(attachmentsDir);
+        if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) {
+          reply.code(403);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.codeman-attachments is not a regular directory');
+        }
+      }
+    }
+
+    // Display base name (card label) preserves the user's original filename;
+    // the on-disk name adds a random suffix so it is collision- and traversal-safe.
+    const displayName = sanitizeUploadFilename(rawName);
+    const diskBase = sanitizeUploadFilename(rawName.replace(/\.[^.]*$/, ''));
+    const diskName = `${diskBase}-${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`;
+    const dest = join(attachmentsDir, diskName);
+
+    try {
+      const fh = await fs.open(
+        dest,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        await fh.writeFile(bytes);
+      } finally {
+        await fh.close();
+      }
+    } catch (err: unknown) {
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to write upload: ${getErrorMessage(err)}`);
+    }
+
+    // Register as an 'upload' attachment (workspace-confined). COD-241 unit 2:
+    // history + SSE AttachmentDetected on prompt-submit (a later unit) — NOT here.
+    let attachmentId: string;
+    try {
+      const event = await registerExternalAttachment(id, dest, {
+        sessionWorkingDir: session.workingDir,
+        forceWorkspaceConfinement: true,
+        source: 'upload',
+      });
+      attachmentId = event.attachmentId;
+    } catch (err) {
+      // Roll back the written file so a rejected registration leaves no orphan.
+      await fs.rm(dest, { force: true }).catch(() => {});
+      if (err instanceof AttachmentRegistrationError) {
+        reply.code(err.statusCode);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
+      }
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
+    }
+
+    const agentPath =
+      validateSessionFilePath(session.workingDir, dest)?.relativePath ?? join('.codeman-attachments', diskName);
+    const routes = buildAttachmentRoutes(id, attachmentId);
+    return {
+      success: true,
+      data: {
+        attachmentId,
+        fileName: displayName,
+        agentPath,
+        size: bytes.length,
+        extension: ext,
+        attachmentType: getAttachmentType(ext),
+        ...routes,
+      },
+    };
   });
 
   // List a session's attachment history (live session or persisted), resolving

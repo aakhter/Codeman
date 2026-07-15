@@ -27,7 +27,7 @@ const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
   'txt',
 ]);
 
-export type AttachmentSource = 'detected' | 'external';
+export type AttachmentSource = 'detected' | 'external' | 'upload';
 
 export interface AttachmentRecord {
   attachmentId: string;
@@ -171,6 +171,12 @@ export interface RegisterExternalAttachmentOptions {
    * `codeman attach` CLI (which POSTs directly when a session id is known).
    */
   forceWorkspaceConfinement?: boolean;
+  /**
+   * The provenance to stamp on the created record (default `'external'`). The
+   * document-upload route (COD-241) passes `'upload'` so a browser-uploaded file
+   * is distinguishable from a passively-detected or externally-referenced one.
+   */
+  source?: AttachmentSource;
 }
 
 export async function registerExternalAttachment(
@@ -241,7 +247,7 @@ export async function registerExternalAttachment(
     size: stat.size,
     mtimeMs: stat.mtimeMs ?? 0,
     timestamp: Date.now(),
-    source: 'external',
+    source: options.source ?? 'external',
   };
   attachmentRegistry.register(record);
   return attachmentRecordToEvent(record);

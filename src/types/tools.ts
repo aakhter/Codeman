@@ -89,7 +89,7 @@ export interface AttachmentDetectedEvent {
   /** Registered attachment id for explicit live external attachments */
   attachmentId?: string;
   /** Source of the attachment card request */
-  source?: 'detected' | 'external';
+  source?: 'detected' | 'external' | 'upload';
   /** Raw file route for explicit attachments */
   rawUrl?: string;
   /** Inline preview route for explicit attachments */
