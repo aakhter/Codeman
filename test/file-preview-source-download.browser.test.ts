@@ -35,6 +35,13 @@ describe('COD-238 Files-panel source download in a real browser', () => {
         body: SOURCE_BYTES,
       });
     });
+    // COD-239: docx/pptx previews first fetch the same-origin preview URL as a
+    // readiness probe (the endpoint blocks on the soffice conversion), then
+    // render the iframe against that same URL — CSP-safe (a blob: iframe would be
+    // blocked by default-src 'self') and a warm cache hit.
+    await page.route('https://codeman.test/api/sessions/**/file-preview?**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/pdf', body: Buffer.from('%PDF-1.4 minimal') });
+    });
     await page.setContent(`
       <base href="https://codeman.test/">
       <main id="spa-shell">terminal remains here</main>
@@ -86,9 +93,15 @@ describe('COD-238 Files-panel source download in a real browser', () => {
       { sessionId: SESSION_ID, filePath: FILE_PATH }
     );
 
+    // COD-239: rendering is now async (the office loader probes readiness first);
+    // wait for the iframe, which targets the same-origin preview URL with the
+    // #toolbar=0 fragment (CSP-safe, not a blob: URL).
+    await page.waitForSelector('.document-preview-frame');
     const frameSrc = await page.locator('.document-preview-frame').getAttribute('src');
     expect(frameSrc).not.toBeNull();
-    expect(new URL(frameSrc!, 'https://codeman.test').hash).toBe('#toolbar=0');
+    const framedUrl = new URL(frameSrc!, 'https://codeman.test');
+    expect(framedUrl.pathname).toBe(`/api/sessions/${SESSION_ID}/file-preview`);
+    expect(framedUrl.hash).toBe('#toolbar=0');
     await expect.poll(() => page.locator('.document-source-download-btn').textContent()).toBe('Download DOCX');
     await expect.poll(() => page.locator('.document-export-btn').textContent()).toBe('Export PDF');
 

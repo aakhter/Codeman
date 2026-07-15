@@ -3957,8 +3957,28 @@ Object.assign(CodemanApp.prototype, {
         // Suppress the embedded PDF toolbar so its download icon cannot present
         // that conversion as the primary download; the footer below provides an
         // explicit guarded source download and a separately-labelled PDF export.
-        const framedPreviewUrl = isWorkspaceOfficePreview ? `${bustedPreviewUrl}#toolbar=0` : bustedPreviewUrl;
-        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${framedPreviewUrl}" title="${escapeHtml(filePath)}"></iframe>`;
+        const iframeFragment = isWorkspaceOfficePreview ? '#toolbar=0' : '';
+        if (data.type === 'pdf') {
+          // Raw PDF: no server-side conversion, so embed it directly.
+          bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bustedPreviewUrl}${iframeFragment}" title="${escapeHtml(filePath)}"></iframe>`;
+        } else {
+          // docx/pptx (COD-239): the preview endpoint BLOCKS on a soffice→PDF
+          // conversion and only returns 200+PDF once it's ready (500 on failure).
+          // A bare iframe would sit blank for the whole conversion, so fetch the
+          // converted PDF to a blob behind a visible "Rendering…" state and swap
+          // in a blob-URL iframe when it lands. Fire-and-forget so the footer and
+          // loading state paint immediately; the helper re-checks staleness after
+          // every await and stores its promise for polling/tests.
+          const renderState = expectedState || this.filePreviewState;
+          const renderPromise = this._renderOfficeConversionPreview(
+            bodyEl,
+            bustedPreviewUrl,
+            iframeFragment,
+            filePath,
+            renderState
+          );
+          if (renderState) renderState.previewRenderPromise = renderPromise;
+        }
       }
       const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
       const switcher = isDocx
@@ -4074,6 +4094,96 @@ Object.assign(CodemanApp.prototype, {
     return true;
   },
 
+  /**
+   * Render a converted Office (docx/pptx) preview into the body (COD-239). The
+   * server's preview endpoint blocks on a soffice→PDF conversion, so a bare
+   * iframe pointed straight at it would sit blank for the whole conversion (the
+   * reported bug). Instead we paint a visible "Rendering document…" state and
+   * fetch the SAME-ORIGIN preview URL purely as a readiness probe (abortable,
+   * failure-detecting). On success we render the iframe against that same
+   * same-origin URL — it's a warm disk-cache hit (fast) AND allowed by the app's
+   * `default-src 'self'` CSP. We deliberately do NOT render a `blob:` URL: the
+   * CSP has no `frame-src`, so framing a blob: violates `default-src 'self'` and
+   * the browser blocks it (the preview would stay blank). An AbortController on
+   * the preview state lets a close/switch cancel the in-flight probe; staleness
+   * is re-checked after the await so a late response can't overwrite a newer
+   * preview. A failed conversion renders a Retry affordance.
+   */
+  async _renderOfficeConversionPreview(bodyEl, fetchUrl, iframeFragment, filePath, expectedState) {
+    if (!bodyEl) return;
+    const isCurrentPreview = () => !expectedState || this.filePreviewState === expectedState;
+    // Abort any prior in-flight readiness probe for this state before re-probing
+    // (e.g. a poll re-render after the document was rewritten).
+    this._teardownOfficePreviewResources(expectedState);
+    bodyEl.innerHTML = '<div class="binary-message">Rendering document…</div>';
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    if (expectedState) expectedState.previewFetchAbort = controller;
+    let res;
+    try {
+      res = await fetch(fetchUrl, controller ? { signal: controller.signal } : undefined);
+    } catch (err) {
+      if ((err && err.name === 'AbortError') || !isCurrentPreview()) return;
+      this._renderOfficePreviewError(bodyEl, null);
+      return;
+    }
+    if (!isCurrentPreview()) return;
+    if (!res || !res.ok) {
+      let message = null;
+      try {
+        const errBody = await res.json();
+        if (errBody && typeof errBody.error === 'string') message = errBody.error;
+      } catch {
+        // Non-JSON error body — fall back to a generic message.
+      }
+      if (!isCurrentPreview()) return;
+      this._renderOfficePreviewError(bodyEl, message);
+      return;
+    }
+    // Conversion succeeded and is now warm in the server/disk cache. Free the
+    // probe's response body (we never read it) and render the iframe against the
+    // same-origin URL — CSP-allowed and a fast cache hit.
+    try {
+      res.body?.cancel();
+    } catch {
+      // Body already consumed/unsupported — nothing to release.
+    }
+    if (!isCurrentPreview()) return;
+    bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${fetchUrl}${iframeFragment}" title="${escapeHtml(
+      filePath
+    )}"></iframe>`;
+  },
+
+  /** Render an Office-conversion failure state with a Retry control (COD-239). */
+  _renderOfficePreviewError(bodyEl, message) {
+    if (!bodyEl) return;
+    const text = message || 'Document preview conversion failed';
+    bodyEl.innerHTML =
+      `<div class="binary-message">${escapeHtml(text)}<br><br>` +
+      `<button class="btn-icon-sm" onclick="app.retryFilePreview()">Retry</button></div>`;
+  },
+
+  /**
+   * Cancel any in-flight Office conversion readiness probe so a close/switch
+   * can't let a late response overwrite a newer preview (COD-239). Safe to call
+   * repeatedly and on states with nothing set.
+   */
+  _teardownOfficePreviewResources(state) {
+    if (!state) return;
+    try {
+      state.previewFetchAbort?.abort();
+    } catch {
+      // Aborting an already-settled controller is a no-op.
+    }
+    state.previewFetchAbort = null;
+  },
+
+  /** Re-open the current preview from scratch (COD-239 conversion Retry). */
+  retryFilePreview() {
+    const st = this.filePreviewState;
+    if (!st) return;
+    this.openFilePreview(st.filePath, st.sessionId, st.attachmentId);
+  },
+
   _startFilePreviewPolling() {
     this._stopFilePreviewPolling(true);
     // Light cadence: a metadata stat every 1.5s while the preview is open and visible.
@@ -4085,7 +4195,12 @@ Object.assign(CodemanApp.prototype, {
       clearInterval(this._filePreviewPollTimer);
       this._filePreviewPollTimer = null;
     }
-    if (!keepState) this.filePreviewState = null;
+    // On close/switch (not a poll-cycle restart) cancel the outgoing preview's
+    // in-flight Office conversion readiness probe before dropping its state.
+    if (!keepState) {
+      this._teardownOfficePreviewResources(this.filePreviewState);
+      this.filePreviewState = null;
+    }
   },
 
   async _pollFilePreview() {

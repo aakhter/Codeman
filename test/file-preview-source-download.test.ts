@@ -30,6 +30,10 @@ function loadPanelsUiPrototype(contextOverrides: Record<string, unknown> = {}): 
     setTimeout,
     clearTimeout,
     requestAnimationFrame: vi.fn(),
+    // COD-239: docx/pptx previews fetch the same-origin preview URL as an
+    // abortable readiness probe before rendering the iframe, so the vm needs an
+    // AbortController.
+    AbortController,
     document: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
     window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
     ...contextOverrides,
@@ -67,6 +71,9 @@ function renderHost(
     $: vi.fn((id: string) => (id === 'filePreviewBody' ? body : id === 'filePreviewFooter' ? footer : null)),
     _renderExportPdfControl: proto._renderExportPdfControl,
     _documentParams: proto._documentParams,
+    _renderOfficeConversionPreview: proto._renderOfficeConversionPreview,
+    _renderOfficePreviewError: proto._renderOfficePreviewError,
+    _teardownOfficePreviewResources: proto._teardownOfficePreviewResources,
   };
   return { body, footer, downloadWorkspaceFile, host };
 }
@@ -75,6 +82,12 @@ function iframeSrc(html: string): string {
   const match = html.match(/<iframe[^>]+src="([^"]+)"/);
   if (!match) throw new Error(`missing iframe in ${html}`);
   return match[1];
+}
+
+// COD-239: docx/pptx previews fetch the same-origin preview URL as a readiness
+// probe; the body is never read. This is the "conversion succeeded" response.
+function okPreviewProbe(): { ok: true; body: { cancel: () => void } } {
+  return { ok: true, body: { cancel: () => {} } };
 }
 
 function diffHost(
@@ -93,6 +106,9 @@ function diffHost(
     _renderDocumentDiff: proto._renderDocumentDiff,
     _renderFilePreviewBody: proto._renderFilePreviewBody,
     _renderExportPdfControl: proto._renderExportPdfControl,
+    _renderOfficeConversionPreview: proto._renderOfficeConversionPreview,
+    _renderOfficePreviewError: proto._renderOfficePreviewError,
+    _teardownOfficePreviewResources: proto._teardownOfficePreviewResources,
     _applyCommentHighlights: vi.fn(),
     _fetchFilePreviewMetadata: vi.fn(async () => metadata),
     _filePreviewSignature: proto._filePreviewSignature,
@@ -102,7 +118,14 @@ function diffHost(
 describe('COD-238 Files-panel source download', () => {
   it('does not let a pending attachment diff overwrite a newer Files-panel preview', async () => {
     const versionsRequest = deferred<Record<string, unknown>>();
-    const proto = loadPanelsUiPrototype({ fetch: vi.fn(() => versionsRequest.promise) });
+    // Office previews fetch the converted PDF; version/diff calls hit the same
+    // global fetch, so route by URL: preview -> PDF blob, everything else -> the
+    // deferred versions request under test.
+    const proto = loadPanelsUiPrototype({
+      fetch: vi.fn((url: string) =>
+        /preview/.test(url) ? Promise.resolve(okPreviewProbe()) : versionsRequest.promise
+      ),
+    });
     const body = previewElement();
     const footer = previewElement();
     const attachmentState = {
@@ -142,10 +165,14 @@ describe('COD-238 Files-panel source download', () => {
       { sessionId: 'files-b', filePath: filesPath, attachmentId: null },
       filesState
     );
+    // COD-239: rendering is now async (the office loader probes readiness first);
+    // wait for the same-origin preview iframe to land.
+    await (filesState as { previewRenderPromise?: Promise<void> }).previewRenderPromise;
 
     versionsRequest.resolve({ ok: true, json: async () => ({ data: { versions: [] } }) });
     await pendingDiff;
 
+    // The newer Files-panel preview, not the stale attachment diff, wins.
     expect(iframeSrc(body.innerHTML)).toContain('files-b');
     expect(iframeSrc(body.innerHTML)).toContain(encodeURIComponent(filesPath));
     expect(body.innerHTML).not.toContain('document-preview-diff');
@@ -156,7 +183,11 @@ describe('COD-238 Files-panel source download', () => {
     'does not re-enter Changes after exit when the pending diff request ends in %s',
     async (outcome) => {
       const versionsRequest = deferred<Record<string, unknown>>();
-      const proto = loadPanelsUiPrototype({ fetch: vi.fn(() => versionsRequest.promise) });
+      const proto = loadPanelsUiPrototype({
+        fetch: vi.fn((url: string) =>
+          /preview/.test(url) ? Promise.resolve(okPreviewProbe()) : versionsRequest.promise
+        ),
+      });
       const body = previewElement();
       const footer = previewElement();
       const filePath = 'Published Brief.docx';
@@ -181,6 +212,9 @@ describe('COD-238 Files-panel source download', () => {
 
       const pendingDiff = proto.showDocumentDiff.call(host);
       await proto.exitDocumentDiff.call(host);
+      // COD-239: exit re-renders the live document; rendering is now async (the
+      // office loader probes readiness first), so wait for the iframe to land.
+      await (state as { previewRenderPromise?: Promise<void> }).previewRenderPromise;
       expect(state.mode).toBe('preview');
       expect(iframeSrc(body.innerHTML)).toContain('/attachments/att-brief/preview');
 
@@ -199,7 +233,7 @@ describe('COD-238 Files-panel source download', () => {
   );
 
   it('keeps the displayed preview and source button on the latest out-of-order open', async () => {
-    const proto = loadPanelsUiPrototype();
+    const proto = loadPanelsUiPrototype({ fetch: vi.fn(async () => okPreviewProbe()) });
     const firstPath = 'deliverables/First Draft.docx';
     const secondPath = 'deliverables/Approved Final.docx';
     const firstMetadata = deferred<Record<string, unknown>>();
@@ -233,6 +267,9 @@ describe('COD-238 Files-panel source download', () => {
       _filePreviewSignature: proto._filePreviewSignature,
       _renderFilePreviewBody: proto._renderFilePreviewBody,
       _renderExportPdfControl: proto._renderExportPdfControl,
+      _renderOfficeConversionPreview: proto._renderOfficeConversionPreview,
+      _renderOfficePreviewError: proto._renderOfficePreviewError,
+      _teardownOfficePreviewResources: proto._teardownOfficePreviewResources,
       _documentParams: proto._documentParams,
     };
 
@@ -259,7 +296,14 @@ describe('COD-238 Files-panel source download', () => {
     });
     await firstOpen;
 
+    // COD-239: rendering is now async (readiness probe first); wait for the
+    // winning preview's same-origin iframe before asserting the final body.
+    await (host.filePreviewState as { previewRenderPromise?: Promise<void> } | null)?.previewRenderPromise;
+
     expect(title.textContent).toBe(secondPath);
+    // The latest open won: the second session's same-origin preview is shown,
+    // polling started once, and the state + source download both point at the
+    // second session (the first open returned early and never rendered).
     expect(iframeSrc(body.innerHTML)).toContain('second-session');
     expect(iframeSrc(body.innerHTML)).toContain(encodeURIComponent(secondPath));
     expect(iframeSrc(body.innerHTML)).not.toContain('first-session');
@@ -276,7 +320,7 @@ describe('COD-238 Files-panel source download', () => {
   ])(
     'makes the original %s source primary while the converted PDF remains the preview',
     async (type, extension, filePath, sourceLabel) => {
-      const proto = loadPanelsUiPrototype();
+      const proto = loadPanelsUiPrototype({ fetch: vi.fn(async () => okPreviewProbe()) });
       const state = { sessionId: 'tree-owner-session', filePath, attachmentId: null, docxView: 'pdf' };
       const { body, footer, downloadWorkspaceFile, host } = renderHost(proto, state);
 
@@ -292,6 +336,9 @@ describe('COD-238 Files-panel source download', () => {
         },
         { sessionId: 'tree-owner-session', filePath, attachmentId: null }
       );
+      // COD-239: rendering is now async (readiness probe first); the iframe still
+      // targets the same-origin converted-PDF preview URL with #toolbar=0.
+      await (state as { previewRenderPromise?: Promise<void> }).previewRenderPromise;
 
       const previewUrl = new URL(iframeSrc(body.innerHTML), 'https://codeman.test');
       expect(previewUrl.pathname).toBe('/api/sessions/tree-owner-session/file-preview');
@@ -330,7 +377,7 @@ describe('COD-238 Files-panel source download', () => {
   });
 
   it('does not alter the existing attachment-card DOCX viewer behavior', async () => {
-    const proto = loadPanelsUiPrototype();
+    const proto = loadPanelsUiPrototype({ fetch: vi.fn(async () => okPreviewProbe()) });
     const filePath = 'Published Brief.docx';
     const state = { sessionId: 'attachment-owner', filePath, attachmentId: 'att_123', docxView: 'pdf' };
     const { body, footer, host } = renderHost(proto, state);
@@ -347,7 +394,11 @@ describe('COD-238 Files-panel source download', () => {
       },
       { sessionId: 'attachment-owner', filePath, attachmentId: 'att_123' }
     );
+    // COD-239: rendering is now async (readiness probe first); wait for it. The
+    // attachment preview keeps its same-origin URL with no workspace fragment.
+    await (state as { previewRenderPromise?: Promise<void> }).previewRenderPromise;
 
+    expect(iframeSrc(body.innerHTML)).toContain('/attachments/att_123/preview');
     expect(new URL(iframeSrc(body.innerHTML), 'https://codeman.test').hash).toBe('');
     expect(footer.innerHTML).not.toContain('document-source-download-btn');
     expect(footer.innerHTML).toContain('document-view-switch');
