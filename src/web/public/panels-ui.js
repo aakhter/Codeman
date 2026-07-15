@@ -3494,6 +3494,10 @@ Object.assign(CodemanApp.prototype, {
 
     const loadGeneration = ++this.fileBrowserLoadGeneration;
 
+    // A fresh tree load supersedes any in-flight search state (COD-236).
+    this.fileBrowserSearchMode = false;
+    this.fileBrowserMatches = null;
+
     // Show loading state
     treeEl.innerHTML = '<div class="file-browser-loading">Loading files...</div>';
 
@@ -3678,13 +3682,144 @@ Object.assign(CodemanApp.prototype, {
     this.renderFileBrowserTree();
   },
 
+  // COD-236: server-side search. The filter box now hits the files endpoint with
+  // a `q` param (debounced) so a large workspace prunes the walk to matches
+  // instead of shipping/rendering the whole tree. An empty query restores the
+  // cached tree. The old client-side tree filter (renderFileBrowserTree's
+  // filter branch) stays intact for the no-query case.
   filterFileBrowser(value) {
     this.fileBrowserFilter = value;
-    // Auto-expand all if filtering
-    if (value) {
-      this.expandAllDirectories(this.fileBrowserData?.tree || []);
+    if (this._fileBrowserSearchTimer) {
+      clearTimeout(this._fileBrowserSearchTimer);
+      this._fileBrowserSearchTimer = null;
     }
-    this.renderFileBrowserTree();
+    this._fileBrowserSearchTimer = setTimeout(() => {
+      this._fileBrowserSearchTimer = null;
+      const q = (value || '').trim();
+      if (!q) {
+        // Restore the cached tree.
+        this.fileBrowserSearchMode = false;
+        this.fileBrowserMatches = null;
+        this.renderFileBrowserTree();
+        const statusEl = this.$('fileBrowserStatus');
+        if (statusEl && this.fileBrowserData) {
+          const { totalFiles, totalDirectories, truncated } = this.fileBrowserData;
+          statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
+        }
+        return;
+      }
+      this.searchFileBrowser(q);
+    }, 250);
+  },
+
+  async searchFileBrowser(q) {
+    const sid = this.fileBrowserSessionId;
+    if (!sid) return;
+    const treeEl = this.$('fileBrowserTree');
+    const statusEl = this.$('fileBrowserStatus');
+    if (!treeEl) return;
+
+    // Generation guard: a slow response must not clobber a newer query.
+    const loadGeneration = ++this.fileBrowserLoadGeneration;
+    const includeHidden = this.fileBrowserShowHidden === true;
+
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sid)}/files?depth=5&showHidden=${includeHidden}&q=${encodeURIComponent(q)}`
+      );
+      if (!res.ok) throw new Error('Search failed');
+      const result = await res.json();
+      if (!result.success) throw new Error(result.error || 'Search failed');
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
+
+      this.fileBrowserSearchMode = true;
+      this.fileBrowserMatches = result.data.matches || [];
+      this.renderFileBrowserMatches();
+
+      if (statusEl) {
+        const truncated = result.data.truncated;
+        statusEl.textContent = `${this.fileBrowserMatches.length} matches for '${q}'${truncated ? ' (truncated)' : ''}`;
+      }
+    } catch (err) {
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
+      console.error('Failed to search file browser:', err);
+      treeEl.innerHTML = `<div class="file-browser-empty">Search failed: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  renderFileBrowserMatches() {
+    const treeEl = this.$('fileBrowserTree');
+    if (!treeEl || !this.fileBrowserSessionId) return;
+    const fileBrowserSessionId = this.fileBrowserSessionId;
+    const matches = this.fileBrowserMatches || [];
+
+    if (matches.length === 0) {
+      treeEl.innerHTML = '<div class="file-browser-empty">No matches</div>';
+      return;
+    }
+
+    const html = [];
+    for (const node of matches) {
+      const isDir = node.type === 'directory';
+      const icon = isDir ? '📁' : this.getFileIcon(node.extension);
+      const sizeStr =
+        !isDir && node.size !== undefined
+          ? `<span class="file-tree-size">${this.formatFileSize(node.size)}</span>`
+          : '';
+      const nameClass = isDir ? 'file-tree-name directory' : 'file-tree-name';
+
+      // COD-233: keep a real href for graceful fallback, but the click is
+      // intercepted below and routed through a guarded fetch.
+      const downloadBtn = !isDir
+        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
+        : '';
+
+      html.push(`
+        <div class="file-tree-item" data-path="${escapeHtml(node.path)}" data-type="${node.type}" data-depth="0">
+          <span class="file-tree-expand"></span>
+          <span class="file-tree-icon">${icon}</span>
+          <span class="${nameClass}">${escapeHtml(node.name)}</span>
+          ${sizeStr}
+          ${downloadBtn}
+        </div>
+      `);
+    }
+
+    treeEl.innerHTML = html.join('');
+
+    treeEl.querySelectorAll('.file-tree-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const path = item.dataset.path;
+        const type = item.dataset.type;
+        if (type === 'directory') {
+          // Open the directory in the tree: clear the search, add to the
+          // expanded set, and re-render the cached tree.
+          this.fileBrowserFilter = '';
+          this.fileBrowserSearchMode = false;
+          this.fileBrowserMatches = null;
+          const searchInput = this.$('fileBrowserSearch');
+          if (searchInput) searchInput.value = '';
+          this.fileBrowserExpandedDirs.add(path);
+          this.renderFileBrowserTree();
+          const statusEl = this.$('fileBrowserStatus');
+          if (statusEl && this.fileBrowserData) {
+            const { totalFiles, totalDirectories, truncated } = this.fileBrowserData;
+            statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
+          }
+        } else {
+          this.openFilePreview(path, fileBrowserSessionId);
+        }
+      });
+    });
+
+    // COD-233: intercept download clicks so a server error surfaces as a toast.
+    treeEl.querySelectorAll('.file-tree-download').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
   },
 
   expandAllDirectories(nodes) {
@@ -3718,8 +3853,14 @@ Object.assign(CodemanApp.prototype, {
 
   refreshFileBrowser() {
     if (this.fileBrowserSessionId) {
+      if (this._fileBrowserSearchTimer) {
+        clearTimeout(this._fileBrowserSearchTimer);
+        this._fileBrowserSearchTimer = null;
+      }
       this.fileBrowserExpandedDirs.clear();
       this.fileBrowserFilter = '';
+      this.fileBrowserSearchMode = false;
+      this.fileBrowserMatches = null;
       this.fileBrowserAllExpanded = false;
       const searchInput = this.$('fileBrowserSearch');
       if (searchInput) searchInput.value = '';

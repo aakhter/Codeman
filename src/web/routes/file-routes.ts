@@ -43,6 +43,7 @@ import {
 } from '../../document-text-extract.js';
 import { wordDiff } from '../../utils/word-diff.js';
 import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
+import { compileFileQuery } from '../../utils/file-query.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
 import { SseEvent } from '../sse-events.js';
@@ -470,15 +471,21 @@ function resolveDocumentTarget(
 }
 
 export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & EventPort & ConfigPort): void {
-  // File tree listing
+  // File tree listing (tree mode) + server-side search (search mode, COD-236).
+  // A `q` query param prunes the walk to matching entries and returns a FLAT
+  // `matches` list instead of the nested tree, so a large workspace never has to
+  // serialize/render the whole tree just to filter it. Tree mode replaces the
+  // old serial per-file stat with a bounded-concurrency stat pool so the panel
+  // paints faster.
   app.get('/api/sessions/:id/files', async (req) => {
     const { id } = req.params as { id: string };
-    const { depth, showHidden } = req.query as { depth?: string; showHidden?: string };
+    const { depth, showHidden, q } = req.query as { depth?: string; showHidden?: string; q?: string };
     const session = findSessionOrFail(ctx, id);
 
     const maxDepth = Math.min(parseInt(depth || '5', 10), 10);
     const includeHidden = showHidden === 'true';
     const workingDir = session.workingDir;
+    const matcher = compileFileQuery(q ?? '');
 
     // Default excludes - large/generated directories
     const excludeDirs = new Set([
@@ -511,7 +518,98 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     let totalDirectories = 0;
     let truncated = false;
     const maxFiles = 5000;
+    // Bounded-concurrency stat pool: stat file nodes in batches so the walk
+    // isn't serialized on one fs.stat at a time (Direction 3, AC1).
+    const STAT_CONCURRENCY = 16;
+    const extensionOf = (name: string): string | undefined =>
+      name.includes('.') ? name.split('.').pop()?.toLowerCase() : undefined;
 
+    const sortEntriesDirsFirst = (entries: import('node:fs').Dirent[]): void => {
+      entries.sort((a, b) => {
+        if (a.isDirectory() && !b.isDirectory()) return -1;
+        if (!a.isDirectory() && b.isDirectory()) return 1;
+        return a.name.localeCompare(b.name);
+      });
+    };
+
+    // ===== Search mode: collect a FLAT match list, recursing everywhere. =====
+    if (matcher) {
+      const matches: FileTreeNode[] = [];
+      const maxMatches = 1000;
+
+      const searchDirectory = async (dirPath: string, currentDepth: number): Promise<void> => {
+        if (currentDepth > maxDepth || totalFiles + totalDirectories > maxFiles || matches.length >= maxMatches) {
+          truncated = true;
+          return;
+        }
+
+        let entries: import('node:fs').Dirent[];
+        try {
+          entries = await fs.readdir(dirPath, { withFileTypes: true });
+        } catch {
+          // Can't read directory (permission denied, etc.)
+          return;
+        }
+        sortEntriesDirsFirst(entries);
+
+        for (const entry of entries) {
+          if (totalFiles + totalDirectories > maxFiles || matches.length >= maxMatches) {
+            truncated = true;
+            break;
+          }
+          if (!includeHidden && entry.name.startsWith('.')) continue;
+          if (entry.isDirectory() && excludeDirs.has(entry.name)) continue;
+
+          const fullPath = join(dirPath, entry.name);
+          const relativePath = fullPath.slice(workingDir.length + 1);
+
+          if (entry.isDirectory()) {
+            totalDirectories++;
+            if (matcher(entry.name, relativePath)) {
+              matches.push({ name: entry.name, path: relativePath, type: 'directory' });
+            }
+            // Always recurse so deeper matches are found.
+            await searchDirectory(fullPath, currentDepth + 1);
+          } else {
+            totalFiles++;
+            if (matcher(entry.name, relativePath)) {
+              let size: number | undefined;
+              try {
+                size = (await fs.stat(fullPath)).size;
+              } catch {
+                // Skip size if we can't stat the match.
+              }
+              matches.push({
+                name: entry.name,
+                path: relativePath,
+                type: 'file',
+                size,
+                extension: extensionOf(entry.name),
+              });
+            }
+          }
+        }
+      };
+
+      await searchDirectory(workingDir, 1);
+
+      return {
+        success: true,
+        data: {
+          root: workingDir,
+          tree: [],
+          matches,
+          totalFiles,
+          totalDirectories,
+          truncated,
+          matchCount: matches.length,
+          query: (q ?? '').trim(),
+          mode: 'search' as const,
+        },
+      };
+    }
+
+    // ===== Tree mode: nested tree, sizes filled via a bounded stat pool. =====
     const scanDirectory = async (dirPath: string, currentDepth: number): Promise<FileTreeNode[]> => {
       if (currentDepth > maxDepth || totalFiles + totalDirectories > maxFiles) {
         truncated = true;
@@ -520,14 +618,11 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
       try {
         const entries = await fs.readdir(dirPath, { withFileTypes: true });
-        const nodes: FileTreeNode[] = [];
+        sortEntriesDirsFirst(entries);
 
-        // Sort: directories first, then alphabetically
-        entries.sort((a, b) => {
-          if (a.isDirectory() && !b.isDirectory()) return -1;
-          if (!a.isDirectory() && b.isDirectory()) return 1;
-          return a.name.localeCompare(b.name);
-        });
+        const nodes: FileTreeNode[] = [];
+        // File nodes awaiting a size — filled in bounded batches after the loop.
+        const pendingSize: { node: FileTreeNode; fullPath: string }[] = [];
 
         for (const entry of entries) {
           if (totalFiles + totalDirectories > maxFiles) {
@@ -555,22 +650,29 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
             });
           } else {
             totalFiles++;
-            const ext = entry.name.includes('.') ? entry.name.split('.').pop()?.toLowerCase() : undefined;
-            let size: number | undefined;
-            try {
-              const stat = await fs.stat(fullPath);
-              size = stat.size;
-            } catch {
-              // Skip if can't stat
-            }
-            nodes.push({
+            const node: FileTreeNode = {
               name: entry.name,
               path: relativePath,
               type: 'file',
-              size,
-              extension: ext,
-            });
+              extension: extensionOf(entry.name),
+            };
+            nodes.push(node);
+            pendingSize.push({ node, fullPath });
           }
+        }
+
+        // Fill file sizes with bounded concurrency (Direction 3, AC1).
+        for (let i = 0; i < pendingSize.length; i += STAT_CONCURRENCY) {
+          const batch = pendingSize.slice(i, i + STAT_CONCURRENCY);
+          await Promise.all(
+            batch.map(async ({ node, fullPath }) => {
+              try {
+                node.size = (await fs.stat(fullPath)).size;
+              } catch {
+                // Skip if can't stat
+              }
+            })
+          );
         }
 
         return nodes;
@@ -590,6 +692,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         totalFiles,
         totalDirectories,
         truncated,
+        mode: 'tree' as const,
       },
     };
   });

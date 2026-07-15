@@ -24,6 +24,8 @@ export {
 export { MAX_SESSION_TOKENS } from './token-validation.js';
 export { isSafePushEndpoint } from './push-endpoint-validation.js';
 export { stringSimilarity, fuzzyPhraseMatch, todoContentHash } from './string-similarity.js';
+export { compileFileQuery, matchFileQuery } from './file-query.js';
+export type { FileQueryMatcher } from './file-query.js';
 export { assertNever } from './type-safety.js';
 export { wrapWithNice } from './nice-wrapper.js';
 export { findClaudeDir, getAugmentedPath } from './claude-cli-resolver.js';
