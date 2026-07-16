@@ -5453,6 +5453,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="attachment-history-subtitle" id="attachmentHistorySubtitle">0 files</div>
         </div>
         <div class="attachment-history-header-actions">
+          <button type="button" class="btn-icon-sm" id="attachmentHistoryAddBtn" title="Add files" aria-label="Add files">&#x2795;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryRefreshBtn" title="Refresh" aria-label="Refresh attachments">&#x21BB;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryCloseBtn" title="Close" aria-label="Close attachments">&times;</button>
         </div>
@@ -5460,6 +5461,9 @@ Object.assign(CodemanApp.prototype, {
       <div class="attachment-history-list" id="attachmentHistoryList"></div>
     `;
     document.body.appendChild(drawer);
+    drawer.querySelector('#attachmentHistoryAddBtn')?.addEventListener('click', () => {
+      this.pickDocumentsForUpload();
+    });
     drawer.querySelector('#attachmentHistoryRefreshBtn')?.addEventListener('click', () => {
       this.loadAttachmentHistory(this.activeSessionId);
     });
@@ -6090,6 +6094,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="attachment-history-subtitle" id="attachmentHistorySubtitle">0 files</div>
         </div>
         <div class="attachment-history-header-actions">
+          <button type="button" class="btn-icon-sm" id="attachmentHistoryAddBtn" title="Add files" aria-label="Add files">&#x2795;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryRefreshBtn" title="Refresh" aria-label="Refresh attachments">&#x21BB;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryCloseBtn" title="Close" aria-label="Close attachments">&times;</button>
         </div>
@@ -6097,6 +6102,9 @@ Object.assign(CodemanApp.prototype, {
       <div class="attachment-history-list" id="attachmentHistoryList"></div>
     `;
     document.body.appendChild(drawer);
+    drawer.querySelector('#attachmentHistoryAddBtn')?.addEventListener('click', () => {
+      this.pickDocumentsForUpload();
+    });
     drawer.querySelector('#attachmentHistoryRefreshBtn')?.addEventListener('click', () => {
       this.loadAttachmentHistory(this.activeSessionId);
     });

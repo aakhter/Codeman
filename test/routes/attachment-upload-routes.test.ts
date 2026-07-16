@@ -149,6 +149,35 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
     expect(record?.extension).toBe('pdf');
   });
 
+  it('surfaces the upload in attachment history and broadcasts attachment:detected', async () => {
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+      headers: MULTIPART_HEADERS,
+      payload: uploadBody(BOUNDARY, 'Brief.pdf', 'application/pdf', PDF_BYTES),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+
+    // (a) The session's attachment history now contains the uploaded file. The
+    // stored fileName is the uniquified on-disk basename (Brief-<ts>-<hex>.pdf),
+    // matching how the registry/GET path resolves upload attachments.
+    expect(harness.ctx._session.upsertAttachmentHistory).toHaveBeenCalledTimes(1);
+    const history = harness.ctx._session.attachmentHistory;
+    expect(history.length).toBe(1);
+    expect(history[0].fileName).toMatch(/^Brief-.*\.pdf$/);
+    expect(history[0].extension).toBe('pdf');
+    // State was persisted so the history survives beyond the live session.
+    expect(harness.ctx.persistSessionState).toHaveBeenCalled();
+
+    // (b) An attachment:detected event was broadcast with the registration result.
+    const detected = harness.ctx.broadcast.mock.calls.filter((c) => c[0] === 'attachment:detected');
+    expect(detected.length).toBe(1);
+    expect(detected[0][1].attachmentId).toBe(body.data.attachmentId);
+  });
+
   it('200: uploads a plain-text .txt', async () => {
     const txt = Buffer.from('just some notes\nsecond line\n');
     const res = await harness.app.inject({

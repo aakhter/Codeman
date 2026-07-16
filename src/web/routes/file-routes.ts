@@ -1122,8 +1122,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to write upload: ${getErrorMessage(err)}`);
     }
 
-    // Register as an 'upload' attachment (workspace-confined). COD-241 unit 2:
-    // history + SSE AttachmentDetected on prompt-submit (a later unit) — NOT here.
+    // Register as an 'upload' attachment (workspace-confined), then surface it
+    // in the session's attachment history and broadcast AttachmentDetected so
+    // the paperclip drawer + attachment cards update live — mirroring the tail
+    // of the external-path route above (COD-241 unit 2).
     let attachmentId: string;
     try {
       const event = await registerExternalAttachment(id, dest, {
@@ -1132,6 +1134,22 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         source: 'upload',
       });
       attachmentId = event.attachmentId;
+      const record = attachmentRegistry.get(id, event.attachmentId);
+      if (record) {
+        session.upsertAttachmentHistory(
+          buildExternalAttachmentHistoryItem({
+            sessionId: id,
+            externalPath: record.filePath,
+            fileName: record.fileName,
+            extension: record.extension,
+            size: record.size,
+            mtimeMs: record.mtimeMs,
+            timestamp: event.timestamp,
+          })
+        );
+        ctx.persistSessionState(session);
+      }
+      ctx.broadcast(SseEvent.AttachmentDetected, event);
     } catch (err) {
       // Roll back the written file so a rejected registration leaves no orphan.
       await fs.rm(dest, { force: true }).catch(() => {});
