@@ -94,6 +94,19 @@ class AttachmentRegistry {
     return undefined;
   }
 
+  /**
+   * Remove a single record by id (COD-241 unit 3). Used when a Codeman-uploaded
+   * file is deleted via DELETE …/attachments/uploaded, so the in-memory registry
+   * doesn't keep resolving routes to a file that no longer exists. Returns true
+   * when a record was removed. Best-effort — the delete route's ownership gate is
+   * the source of truth and does not depend on this call succeeding.
+   */
+  remove(sessionId: string, attachmentId: string): boolean {
+    const records = this.recordsBySession.get(sessionId);
+    if (!records) return false;
+    return records.delete(attachmentId);
+  }
+
   clearSession(sessionId: string): void {
     this.recordsBySession.delete(sessionId);
   }

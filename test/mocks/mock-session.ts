@@ -253,6 +253,12 @@ export class MockSession extends EventEmitter {
     this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined
   );
 
+  removeAttachmentHistory = vi.fn((predicate: (item: SessionAttachmentHistoryItem) => boolean) => {
+    const before = this._attachmentHistory.length;
+    this._attachmentHistory = this._attachmentHistory.filter((item) => !predicate(item));
+    return before - this._attachmentHistory.length;
+  });
+
   // ── Sources (COD-65) ──────────────────────────────────────────────────────
   private _sources: SessionSource[] = [];
 

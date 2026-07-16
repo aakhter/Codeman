@@ -5569,6 +5569,10 @@ Object.assign(CodemanApp.prototype, {
         if (action === 'download') this.downloadAttachmentHistoryItem(id);
         if (action === 'open') this.openAttachmentHistoryItem(id);
         if (action === 'reshow') this.reshowAttachmentCard(id);
+        if (action === 'remove') {
+          const it = this.getAttachmentHistoryItem(id);
+          if (it && it.relativePath) this.deleteUploadedAttachment(it.sessionId, it.relativePath);
+        }
       });
     });
   },
@@ -5587,6 +5591,15 @@ Object.assign(CodemanApp.prototype, {
         ? `<img class="attachment-history-thumb-img" src="${escapeHtml(item.thumbnailUrl)}" alt="">`
         : '';
     const disabled = item.missing ? 'disabled aria-disabled="true"' : '';
+    // COD-241 unit 3: only Codeman-uploaded copies (inside .codeman-attachments/)
+    // are removable; a detected/external reference to the user's own file is not.
+    const isOwnedUpload =
+      typeof item.relativePath === 'string' && item.relativePath.startsWith('.codeman-attachments/');
+    const removeBtn = isOwnedUpload
+      ? `<button type="button" data-attachment-action="remove" data-history-id="${escapeHtml(
+          item.id
+        )}" title="Remove uploaded file" aria-label="Remove uploaded file" ${disabled}>Remove</button>`
+      : '';
     return `
       <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
         <div class="attachment-history-thumb">
@@ -5601,6 +5614,7 @@ Object.assign(CodemanApp.prototype, {
             <button type="button" data-attachment-action="download" data-history-id="${escapeHtml(item.id)}" ${disabled}>Download</button>
             <button type="button" data-attachment-action="open" data-history-id="${escapeHtml(item.id)}" ${disabled}>Open</button>
             <button type="button" data-attachment-action="reshow" data-history-id="${escapeHtml(item.id)}" ${disabled}>Card</button>
+            ${removeBtn}
           </div>
         </div>
       </div>
@@ -6214,6 +6228,10 @@ Object.assign(CodemanApp.prototype, {
         if (action === 'download') this.downloadAttachmentHistoryItem(id);
         if (action === 'open') this.openAttachmentHistoryItem(id);
         if (action === 'reshow') this.reshowAttachmentCard(id);
+        if (action === 'remove') {
+          const it = this.getAttachmentHistoryItem(id);
+          if (it && it.relativePath) this.deleteUploadedAttachment(it.sessionId, it.relativePath);
+        }
       });
     });
   },
@@ -6229,6 +6247,15 @@ Object.assign(CodemanApp.prototype, {
       ? `<img class="attachment-history-thumb-img" src="${escapeHtml(item.thumbnailUrl)}" alt="">`
       : '';
     const disabled = item.missing ? 'disabled aria-disabled="true"' : '';
+    // COD-241 unit 3: only Codeman-uploaded copies (inside .codeman-attachments/)
+    // are removable; a detected/external reference to the user's own file is not.
+    const isOwnedUpload =
+      typeof item.relativePath === 'string' && item.relativePath.startsWith('.codeman-attachments/');
+    const removeBtn = isOwnedUpload
+      ? `<button type="button" data-attachment-action="remove" data-history-id="${escapeHtml(
+          item.id
+        )}" title="Remove uploaded file" aria-label="Remove uploaded file" ${disabled}>Remove</button>`
+      : '';
     return `
       <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
         <div class="attachment-history-thumb">
@@ -6243,6 +6270,7 @@ Object.assign(CodemanApp.prototype, {
             <button type="button" data-attachment-action="download" data-history-id="${escapeHtml(item.id)}" ${disabled}>Download</button>
             <button type="button" data-attachment-action="open" data-history-id="${escapeHtml(item.id)}" ${disabled}>Open</button>
             <button type="button" data-attachment-action="reshow" data-history-id="${escapeHtml(item.id)}" ${disabled}>Card</button>
+            ${removeBtn}
           </div>
         </div>
       </div>

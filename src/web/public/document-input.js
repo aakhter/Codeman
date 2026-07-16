@@ -18,6 +18,21 @@ Object.assign(CodemanApp.prototype, {
   // stays well under the server's per-session upload rate limit.
   _maxBatchDocuments: 10,
 
+  // Frontend copy of the server's UPLOAD_ALLOWED_EXTENSIONS (document-upload.ts).
+  // Kept in sync with the <input accept> string below; used by the terminal
+  // drag/drop splitter in image-input.js to pick documents out of a mixed drop.
+  _documentUploadExtensions: ['pdf', 'docx', 'pptx', 'md', 'markdown', 'txt'],
+
+  // True when a dropped/selected File has an allowlisted document extension.
+  // Extension-based (not MIME) because browsers report inconsistent types for
+  // .md/.docx; the server re-validates by byte signature on upload.
+  _isAllowedDocumentFile(file) {
+    const name = (file && file.name) || '';
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return false;
+    return this._documentUploadExtensions.includes(name.slice(dot + 1).toLowerCase());
+  },
+
   // Lazily create (once) a hidden multi-file <input> and click it. Resetting
   // input.value on each change lets re-picking the same file re-fire change.
   pickDocumentsForUpload() {
@@ -133,5 +148,30 @@ Object.assign(CodemanApp.prototype, {
       throw new Error(data.error || 'Upload failed');
     }
     return data.data.agentPath;
+  },
+
+  // Remove a Codeman-uploaded attachment copy (COD-241 unit 3). Only ever called
+  // for history items whose relativePath is inside .codeman-attachments/ (the
+  // "Remove" affordance is rendered under that condition in panels-ui.js). The
+  // server enforces the same ownership gate, so a user's own detected/external
+  // file can never be deleted here. On success the drawer is reloaded so the row
+  // disappears; on any non-2xx the server's error message is toasted.
+  async deleteUploadedAttachment(sessionId, relativePath) {
+    if (!sessionId || !relativePath) return;
+    try {
+      const resp = await fetch(
+        '/api/sessions/' + sessionId + '/attachments/uploaded?path=' + encodeURIComponent(relativePath),
+        { method: 'DELETE' }
+      );
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || 'HTTP ' + resp.status);
+      }
+      this.showToast('Attachment removed', 'success');
+      await this.loadAttachmentHistory(sessionId);
+    } catch (err) {
+      console.warn('Failed to remove attachment:', err);
+      this.showToast('Remove failed: ' + (err.message || 'error'), 'error');
+    }
   },
 });

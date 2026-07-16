@@ -4,7 +4,7 @@
  */
 
 import { FastifyInstance, type FastifyReply } from 'fastify';
-import { join, extname, basename as pathBasename } from 'node:path';
+import { join, extname, sep, basename as pathBasename } from 'node:path';
 import { createReadStream, realpathSync } from 'node:fs';
 import type { ReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -394,6 +394,20 @@ async function buildExternalAttachmentRouteItem(
 
   try {
     const event = await registerExternalAttachment(sessionId, item.externalPath, { sessionWorkingDir });
+    // COD-241 unit 3: expose a workspace-relative path for Codeman-uploaded
+    // copies (those inside .codeman-attachments/). The frontend gates its
+    // "Remove" affordance on `relativePath` starting with `.codeman-attachments/`
+    // and feeds that path to DELETE …/attachments/uploaded. externalPath itself
+    // stays stripped (never leaves the server); only the confined relative path
+    // is surfaced. Non-workspace published files resolve to null → no relativePath
+    // → no Remove button.
+    const validated = sessionWorkingDir ? validateSessionFilePath(sessionWorkingDir, item.externalPath) : null;
+    const ownedRelativePath =
+      validated &&
+      (validated.relativePath === '.codeman-attachments' ||
+        validated.relativePath.startsWith(`.codeman-attachments${sep}`))
+        ? validated.relativePath
+        : undefined;
     return {
       ...safe,
       fileName: event.fileName,
@@ -402,6 +416,7 @@ async function buildExternalAttachmentRouteItem(
       size: event.size,
       missing: false,
       attachmentId: event.attachmentId,
+      relativePath: ownedRelativePath,
       rawUrl: event.rawUrl,
       url: event.rawUrl,
       previewUrl: event.previewUrl,
@@ -1180,6 +1195,66 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
   // List a session's attachment history (live session or persisted), resolving
   // each entry to current metadata + routes. External entries are re-registered.
+  // COD-241 unit 3: remove a Codeman-uploaded attachment copy. Deletes ONLY
+  // files Codeman itself wrote under {workingDir}/.codeman-attachments/ — a
+  // `detected`/`external` reference to the user's own file is never in that dir,
+  // so it is refused. The ownership gate is restart-safe: it depends on the
+  // resolved path being inside the (realpath'd) attachments dir, NOT on the
+  // in-memory registry, so it holds across a server restart.
+  app.delete('/api/sessions/:id/attachments/uploaded', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rawPath = (req.query as { path?: string }).path;
+
+    const session = findSessionOrFail(ctx, id);
+
+    if (!rawPath || typeof rawPath !== 'string') {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
+    }
+
+    // Resolve (symlink-safe) and confine to the workspace. A traversal/escape or
+    // a nonexistent path returns null → 404 (also covers an already-deleted file).
+    const validated = validateSessionFilePath(session.workingDir, rawPath);
+    if (!validated) {
+      reply.code(404);
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+    }
+
+    // Ownership gate: the realpath'd target MUST sit inside the realpath'd
+    // .codeman-attachments/ dir. Comparing realpaths (not a lexical join on the
+    // raw workingDir) closes a symlinked-dir / symlinked-workingDir escape.
+    const attachmentsDir = validateSessionFilePath(session.workingDir, '.codeman-attachments');
+    const insideAttachments =
+      !!attachmentsDir &&
+      (validated.resolvedPath === attachmentsDir.resolvedPath ||
+        validated.resolvedPath.startsWith(attachmentsDir.resolvedPath + sep));
+    if (!insideAttachments) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+    }
+
+    // Delete the file. force:true tolerates a TOCTOU vanish between the gate and
+    // the unlink. fs.rm on a symlink removes the link itself, not its target.
+    try {
+      await fs.rm(validated.resolvedPath, { force: true });
+    } catch (err: unknown) {
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to remove file: ${getErrorMessage(err)}`);
+    }
+
+    // Best-effort cleanup of the in-memory registry + persisted history so the
+    // paperclip drawer stops surfacing a file that no longer exists.
+    const record = attachmentRegistry.findByFilePath(id, validated.resolvedPath);
+    if (record) attachmentRegistry.remove(id, record.attachmentId);
+
+    const removed = session.removeAttachmentHistory(
+      (item) => item.externalPath === validated.resolvedPath || item.relativePath === validated.relativePath
+    );
+    if (removed > 0) ctx.persistSessionState(session);
+
+    return { success: true, data: { removed: true, path: validated.relativePath } };
+  });
+
   app.get('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
     const sessionHistory = getSessionAttachmentHistory(ctx, id);

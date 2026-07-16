@@ -1323,6 +1323,19 @@ export class Session extends EventEmitter {
     this._attachmentHistory = upsertAttachmentHistoryList(this._attachmentHistory, item);
   }
 
+  /**
+   * Drop attachment-history entries matching `predicate` (COD-241 unit 3).
+   * Used by DELETE …/attachments/uploaded so a removed Codeman-uploaded copy
+   * stops appearing in the paperclip drawer. Returns the number of entries
+   * removed. Operates on the raw (externalPath-bearing) list so callers can
+   * match by absolute path.
+   */
+  removeAttachmentHistory(predicate: (item: SessionAttachmentHistoryItem) => boolean): number {
+    const before = this._attachmentHistory.length;
+    this._attachmentHistory = this._attachmentHistory.filter((item) => !predicate(item));
+    return before - this._attachmentHistory.length;
+  }
+
   restoreAttachmentHistory(history: SessionAttachmentHistoryItem[] | undefined): void {
     this._attachmentHistory = [];
     for (const item of [...(history ?? [])].reverse()) {
