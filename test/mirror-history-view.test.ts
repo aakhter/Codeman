@@ -85,7 +85,7 @@ describe('COD-187 live-mirror structural guards', () => {
   it('all three scroll inputs funnel through _handleUserScrollIntent', () => {
     // wheel handler no longer scrolls directly
     const wheel = termUi.indexOf("addEventListener(\n      'wheel'");
-    const wheelBody = termUi.slice(wheel, wheel + 500);
+    const wheelBody = termUi.slice(wheel, wheel + 900);
     expect(wheelBody).toContain('_handleUserScrollIntent(lines)');
     // touchmove + momentum both call the funnel
     expect(termUi.split('_handleUserScrollIntent(lines)').length - 1).toBeGreaterThanOrEqual(3);

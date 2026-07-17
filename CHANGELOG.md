@@ -1,5 +1,35 @@
 # aicodeman
 
+## 1.3.5
+
+### Patch Changes
+
+- a842f2d: fix(auth): slide the session cookie so active users aren't logged out
+
+  Re-issue the `codeman_session` cookie on every authenticated request so the
+  browser cookie lifetime tracks the server-side sliding TTL (the session store
+  already uses `refreshOnGet`). Previously the cookie was only set on the Basic
+  Auth path with a fixed 24h lifetime from login, so the browser dropped it
+  mid-use; the next request arrived cookie-less, fell through to Basic Auth and
+  popped the native username/password dialog, perceived as a random logout while
+  actively working.
+
+## 1.3.4
+
+### Patch Changes
+
+- Fix "Run Shell" not switching the terminal to the newly created shell session. Clicking Run Shell created the shell tab but left the previous session's terminal on screen, so you had to manually click the new tab to actually enter it. Root cause: `runShell()` pre-set `activeSessionId` to the new session's id right before calling `selectSession()`, and `selectSession()` early-returns when the requested id already matches the active one, so it skipped the terminal buffer load, tab activation, and focus. Removed the premature assignment in both the local and remote-SSH shell branches so `selectSession()` runs to completion (matching `runClaude`/`runCodex`/`runGemini`/`runOpenCode`, which already avoid this). Verified end-to-end in a real browser with a negative/positive control.
+
+## 1.3.3
+
+### Patch Changes
+
+- Fix terminal scroll-back in Claude sessions, especially on macOS trackpads (#154).
+  - **Deterministic CLI version detection.** `cliVersion` was often `undefined` because it was scraped from the `Claude Code vX.Y.Z` startup banner, which newer Claude Code builds (2.1.187+) don't reliably print and resumed sessions never show. With the version unknown, wheel-forwarding to Claude's transcript was silently disabled — and since repaint-mode Claude keeps no local terminal scrollback, scrolling up reached nothing. A new `getClaudeCliVersion()` probe (`claude --version`, cached, local-only) seeds the version at session start so forwarding engages. Restored sessions pick it up on restart.
+  - **Trackpad Shift+scroll.** The wheel handler now reads the dominant axis, so a macOS trackpad's Shift+two-finger scroll — which the browser reports as horizontal `deltaX` — reaches xterm's local scrollback instead of collapsing to a fixed one line per tick.
+  - **Opt-out setting.** New per-device App Settings → Input → "Wheel Scrolls Local History" (default off) pins the plain wheel to local scrollback (the pre-#144 behavior) for shell and other non-repaint sessions.
+  - **No more "queued bytes" flicker on scroll.** Wheel-scroll reports now use a fire-and-forget send path (seq-less input frame) instead of the durable exactly-once input queue, so they no longer appear in the pending-bytes connection indicator or churn localStorage. Keystrokes, taps, and clicks still use the durable queue.
+
 ## 1.3.2
 
 ### Patch Changes

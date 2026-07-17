@@ -340,6 +340,8 @@ Object.assign(CodemanApp.prototype, {
     this.loadTunnelStatus();
     document.getElementById('appSettingsLocalEcho').checked = settings.localEchoEnabled ?? MobileDetection.isTouchDevice();
     document.getElementById('appSettingsLiveMirror').checked = settings.liveMirrorEnabled ?? defaults.liveMirrorEnabled ?? true;
+    document.getElementById('appSettingsTerminalWheelLocal').checked =
+      settings.terminalWheelLocalScrollback ?? defaults.terminalWheelLocalScrollback ?? false;
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
@@ -1593,6 +1595,7 @@ Object.assign(CodemanApp.prototype, {
       tunnelEnabled: document.getElementById('appSettingsTunnelEnabled').checked,
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
       liveMirrorEnabled: document.getElementById('appSettingsLiveMirror').checked,
+      terminalWheelLocalScrollback: document.getElementById('appSettingsTerminalWheelLocal').checked,
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
@@ -1785,6 +1788,7 @@ Object.assign(CodemanApp.prototype, {
       showAttachmentsButton: _ahb,
       liveMirrorEnabled: _lmr,
       webglRendererEnabled: _wgl,
+      terminalWheelLocalScrollback: _twls,
       ...serverSettings
     } = settings;
     try {
@@ -2022,6 +2026,7 @@ Object.assign(CodemanApp.prototype, {
         ralphTrackerEnabled: false,
         tabTwoRows: false,
         cjkInputEnabled: false,
+        terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
         webglRendererEnabled: false, // mobile always uses the DOM renderer
         skin: 'daylight-blue',
       };
@@ -2475,7 +2480,7 @@ Object.assign(CodemanApp.prototype, {
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
-          'webglRendererEnabled',
+          'webglRendererEnabled', 'terminalWheelLocalScrollback',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (default OFF): desktop
         // can show it while mobile stays hidden. It used to sync, so an older

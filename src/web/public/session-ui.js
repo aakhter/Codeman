@@ -756,8 +756,8 @@ Object.assign(CodemanApp.prototype, {
           remoteIds.push(data.data.sessionId);
         }
         if (remoteIds[0]) {
-          this.activeSessionId = remoteIds[0];
-          this.updateFileBrowserHeaderButton?.();
+          // Don't pre-set activeSessionId — selectSession early-returns when the
+          // IDs match, skipping the buffer load, tab activation, and focus (see runCodex).
           await this.selectSession(remoteIds[0]);
         }
         this.terminal.focus();

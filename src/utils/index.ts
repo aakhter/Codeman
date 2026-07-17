@@ -28,7 +28,7 @@ export { compileFileQuery, matchFileQuery } from './file-query.js';
 export type { FileQueryMatcher } from './file-query.js';
 export { assertNever } from './type-safety.js';
 export { wrapWithNice } from './nice-wrapper.js';
-export { findClaudeDir, getAugmentedPath } from './claude-cli-resolver.js';
+export { findClaudeDir, getAugmentedPath, getClaudeCliVersion } from './claude-cli-resolver.js';
 export { resolveOpenCodeDir } from './opencode-cli-resolver.js';
 export { resolveCodexDir, isCodexAvailable } from './codex-cli-resolver.js';
 export { resolveGeminiDir, isGeminiAvailable } from './gemini-cli-resolver.js';

@@ -343,7 +343,7 @@ describe('COD-235 direct active-session mutation sync', () => {
     expect(observedActiveSessions).toEqual([null]);
   });
 
-  it('synchronizes immediately after remote quick-start assigns its session before selectSession', async () => {
+  it('lets selectSession assign a remote quick-start session before synchronizing the header', async () => {
     document.body.innerHTML = `
       <select id="quickStartCase"><option value="remote-case" selected>remote-case</option></select>
       <input id="shellCount" value="1">
@@ -360,16 +360,21 @@ describe('COD-235 direct active-session mutation sync', () => {
     app.terminal = { clear: vi.fn(), writeln: vi.fn(), focus: vi.fn() };
     const observedActiveSessions: Array<string | null> = [];
     app.updateFileBrowserHeaderButton = vi.fn(() => observedActiveSessions.push(app.activeSessionId));
-    app.selectSession = vi.fn(function (this: { activeSessionId: string | null }, sessionId: string) {
-      if (this.activeSessionId === sessionId) return;
+    app.selectSession = vi.fn(function (
+      this: { activeSessionId: string | null; updateFileBrowserHeaderButton: () => void },
+      sessionId: string
+    ) {
+      expect(this.activeSessionId).toBeNull();
+      this.activeSessionId = sessionId;
+      this.updateFileBrowserHeaderButton();
     });
 
     await app.runShell();
 
     expect(app.activeSessionId).toBe('remote-session');
     expect(observedActiveSessions).toEqual(['remote-session']);
-    expect(app.updateFileBrowserHeaderButton.mock.invocationCallOrder[0]).toBeLessThan(
-      app.selectSession.mock.invocationCallOrder[0]
+    expect(app.selectSession.mock.invocationCallOrder[0]).toBeLessThan(
+      app.updateFileBrowserHeaderButton.mock.invocationCallOrder[0]
     );
   });
 });
