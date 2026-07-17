@@ -8,7 +8,7 @@ import { FastifyInstance } from 'fastify';
 import { join, dirname, extname, basename, posix as pathPosix } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
@@ -76,15 +76,12 @@ import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
   checkRemoteTmuxAvailable,
-  buildSshConnectionArgv,
   readRemoteCases,
   readRemoteHosts,
-  remoteSshTarget,
-  shellescape,
   toAttachedSessionRemote,
   toSessionRemote,
-  withRemotePathBootstrap,
 } from '../../remote-hosts.js';
+import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 import type { SessionRemote } from '../../types.js';
 import { LRUMap } from '../../utils/lru-map.js';
 
@@ -257,48 +254,16 @@ function getSessionRemote(session: { toState?: () => unknown }): SessionRemote |
 }
 
 async function writeRemotePasteImage(remote: SessionRemote, imageDir: string, filepath: string, imageBytes: Buffer) {
-  const tmpPath = `${filepath}.tmp-${randomBytes(4).toString('hex')}`;
-  const script = withRemotePathBootstrap(
-    [
-      `dir=${shellescape(imageDir)}`,
-      `file=${shellescape(filepath)}`,
-      `tmp=${shellescape(tmpPath)}`,
-      'if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then echo ".claude-images is not a regular directory" >&2; exit 73; fi',
-      'if [ ! -e "$dir" ]; then mkdir "$dir"; fi',
-      'umask 077',
-      'cat > "$tmp"',
-      'mv -n "$tmp" "$file"',
-      'rm -f "$tmp"',
-    ].join('; ')
-  );
-  const args = [...buildSshConnectionArgv(remote), '-o', 'ConnectTimeout=10', remoteSshTarget(remote), script];
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn('ssh', args, { stdio: ['pipe', 'ignore', 'pipe'] });
-    const stderr: Buffer[] = [];
-    let settled = false;
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      fn();
-    };
-    const timeout = setTimeout(() => {
-      finish(() => {
-        child.kill('SIGTERM');
-        reject(new Error(`remote image upload timed out connecting to ${remote.host}`));
-      });
-    }, REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS);
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
-    child.on('error', (err) => finish(() => reject(err)));
-    child.on('close', (code) => {
-      if (code === 0) {
-        finish(resolve);
-        return;
-      }
-      const message = Buffer.concat(stderr).toString('utf8').trim();
-      finish(() => reject(new Error(message || `remote image upload failed with exit code ${code ?? 'unknown'}`)));
-    });
-    child.stdin.end(imageBytes);
+  // Thin wrapper over the shared symlink-safe atomic remote-write (COD-241). The
+  // script, ssh argv, stdin streaming, timeout, and stderr handling all live in
+  // remote-file-transfer.ts so paste-image and document-upload cannot drift.
+  await writeRemoteFileBytes(remote, {
+    dir: imageDir,
+    filePath: filepath,
+    bytes: imageBytes,
+    timeoutMs: REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS,
+    transferLabel: 'remote image upload',
+    notADirectoryMessage: '.claude-images is not a regular directory',
   });
 }
 

@@ -169,6 +169,10 @@ Object.assign(CodemanApp.prototype, {
       }
       this.showToast('Attachment removed', 'success');
       await this.loadAttachmentHistory(sessionId);
+      // a11y: the removed row's Remove button no longer exists after the list
+      // re-renders, so move focus to a stable, sensible control in the drawer
+      // (the "Add files" button) instead of letting it fall to <body>.
+      document.getElementById('attachmentHistoryAddBtn')?.focus();
     } catch (err) {
       console.warn('Failed to remove attachment:', err);
       this.showToast('Remove failed: ' + (err.message || 'error'), 'error');

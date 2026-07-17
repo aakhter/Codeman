@@ -5598,7 +5598,7 @@ Object.assign(CodemanApp.prototype, {
     const removeBtn = isOwnedUpload
       ? `<button type="button" data-attachment-action="remove" data-history-id="${escapeHtml(
           item.id
-        )}" title="Remove uploaded file" aria-label="Remove uploaded file" ${disabled}>Remove</button>`
+        )}" title="Remove uploaded file" aria-label="Remove uploaded file ${escapeHtml(item.fileName)}" ${disabled}>Remove</button>`
       : '';
     return `
       <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
@@ -6254,7 +6254,7 @@ Object.assign(CodemanApp.prototype, {
     const removeBtn = isOwnedUpload
       ? `<button type="button" data-attachment-action="remove" data-history-id="${escapeHtml(
           item.id
-        )}" title="Remove uploaded file" aria-label="Remove uploaded file" ${disabled}>Remove</button>`
+        )}" title="Remove uploaded file" aria-label="Remove uploaded file ${escapeHtml(item.fileName)}" ${disabled}>Remove</button>`
       : '';
     return `
       <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
@@ -7012,6 +7012,14 @@ Object.assign(CodemanApp.prototype, {
         this._toastContainer.className = 'toast-container';
         document.body.appendChild(this._toastContainer);
       }
+    }
+    // a11y: the container is a polite live region so toasts (e.g. document-upload
+    // progress / failure) are announced to screen readers as they appear. Set
+    // once, idempotently, whether the container was just created or adopted.
+    if (this._toastContainer.getAttribute('aria-live') !== 'polite') {
+      this._toastContainer.setAttribute('role', 'status');
+      this._toastContainer.setAttribute('aria-live', 'polite');
+      this._toastContainer.setAttribute('aria-atomic', 'false');
     }
     this._toastContainer.appendChild(toast);
 

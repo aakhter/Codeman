@@ -4,7 +4,7 @@
  */
 
 import { FastifyInstance, type FastifyReply } from 'fastify';
-import { join, extname, sep, basename as pathBasename } from 'node:path';
+import { join, extname, sep, basename as pathBasename, posix as pathPosix } from 'node:path';
 import { createReadStream, realpathSync } from 'node:fs';
 import type { ReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -57,7 +57,13 @@ import { compileFileQuery } from '../../utils/file-query.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
 import { SseEvent } from '../sse-events.js';
+import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
+import { dataPath } from '../../config/instance.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
+
+// Client-side hard timeout for the remote document-upload ssh transfer. Mirrors
+// the paste-image timeout (session-routes.ts) so both remote writes behave the same.
+const REMOTE_ATTACHMENT_SSH_TIMEOUT_MS = 15_000;
 
 const MIME_TYPES: Record<string, string> = {
   png: 'image/png',
@@ -1020,15 +1026,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     const session = findSessionOrFail(ctx, id);
 
-    // Remote sessions: byte transfer to the remote host is a later unit.
-    if (session.remote) {
-      reply.code(501);
-      return createErrorResponse(
-        ApiErrorCode.INVALID_INPUT,
-        'Document upload is not yet supported for remote sessions'
-      );
-    }
-
     if (!req.isMultipart()) {
       reply.code(400);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Expected multipart/form-data');
@@ -1086,6 +1083,116 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File content does not match its type');
     }
 
+    // Display base name (card label) preserves the user's original filename;
+    // the on-disk name adds a random suffix so it is collision- and traversal-safe.
+    // Computed BEFORE the local/remote split — the names are host-independent.
+    const displayName = sanitizeUploadFilename(rawName);
+    const diskBase = sanitizeUploadFilename(rawName.replace(/\.[^.]*$/, ''));
+    const diskName = `${diskBase}-${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`;
+
+    // ── Remote sessions (COD-241 final unit) ──────────────────────────────────
+    // The agent runs ON the remote host, so the bytes must land in the remote
+    // workspace's .codeman-attachments/ and the inserted `[Attachments: "…"]`
+    // reference must be the REMOTE path. All validation above (extension, byte
+    // signature, sanitization, empty-file) already ran on the uploaded bytes —
+    // it is host-independent, so it happens before any transfer.
+    const remote = session.remote;
+    if (remote) {
+      // 1) Push the bytes to the remote host FIRST (the primary deliverable),
+      //    reusing the exact symlink-safe, atomic, umask-077 remote-write path as
+      //    paste-image (shared remote-file-transfer.ts). A transfer failure returns
+      //    a specific 502 and leaves nothing behind locally.
+      const remoteAttachmentsDir = pathPosix.join(remote.remotePath, '.codeman-attachments');
+      const remoteFilePath = pathPosix.join(remoteAttachmentsDir, diskName);
+      const agentPath = pathPosix.join('.codeman-attachments', diskName);
+      try {
+        await writeRemoteFileBytes(remote, {
+          dir: remoteAttachmentsDir,
+          filePath: remoteFilePath,
+          bytes,
+          timeoutMs: REMOTE_ATTACHMENT_SSH_TIMEOUT_MS,
+          transferLabel: 'remote document upload',
+          notADirectoryMessage: '.codeman-attachments is not a regular directory',
+        });
+      } catch (err) {
+        reply.code(502);
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `Failed to transfer document to remote host: ${getErrorMessage(err)}`
+        );
+      }
+
+      // 2) Cache a local copy so the attachment registry can serve preview /
+      //    thumbnail / raw for the remote file — mirroring generated-artifact-
+      //    attachments.ts, which materializes remote bytes locally before
+      //    registering. We already hold the bytes in memory (no extra ssh fetch).
+      const cacheDir = dataPath('remote-attachment-uploads', id);
+      const localCachePath = join(cacheDir, diskName);
+      try {
+        await fs.mkdir(cacheDir, { recursive: true });
+        await fs.writeFile(localCachePath, bytes, { mode: 0o600 });
+      } catch (err) {
+        // The remote file is already in place (the agent can use it); we just
+        // cannot serve a local preview. Surface it rather than half-register.
+        reply.code(500);
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `Uploaded to remote but failed to cache locally: ${getErrorMessage(err)}`
+        );
+      }
+
+      // 3) Register the local cache copy as an 'upload' attachment, then history
+      //    + SSE (same tail as the local path). Confinement is OFF here: the cache
+      //    lives under the instance data dir, outside the remote workspace.
+      let remoteAttachmentId: string;
+      try {
+        const event = await registerExternalAttachment(id, localCachePath, {
+          sessionWorkingDir: session.workingDir,
+          source: 'upload',
+        });
+        remoteAttachmentId = event.attachmentId;
+        const record = attachmentRegistry.get(id, event.attachmentId);
+        if (record) {
+          session.upsertAttachmentHistory(
+            buildExternalAttachmentHistoryItem({
+              sessionId: id,
+              externalPath: record.filePath,
+              fileName: record.fileName,
+              extension: record.extension,
+              size: record.size,
+              mtimeMs: record.mtimeMs,
+              timestamp: event.timestamp,
+            })
+          );
+          ctx.persistSessionState(session);
+        }
+        ctx.broadcast(SseEvent.AttachmentDetected, event);
+      } catch (err) {
+        await fs.rm(localCachePath, { force: true }).catch(() => {});
+        if (err instanceof AttachmentRegistrationError) {
+          reply.code(err.statusCode);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
+        }
+        reply.code(500);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
+      }
+
+      const remoteRoutes = buildAttachmentRoutes(id, remoteAttachmentId);
+      return {
+        success: true,
+        data: {
+          attachmentId: remoteAttachmentId,
+          fileName: displayName,
+          agentPath,
+          size: bytes.length,
+          extension: ext,
+          attachmentType: getAttachmentType(ext),
+          ...remoteRoutes,
+        },
+      };
+    }
+
+    // ── Local sessions ────────────────────────────────────────────────────────
     // Destination: {workingDir}/.codeman-attachments/. Refuse a symlinked dir
     // (an agent could plant `.codeman-attachments -> ~/.ssh/`). lstat (not stat)
     // so we see the symlink itself; non-recursive mkdir + O_EXCL|O_NOFOLLOW on
@@ -1114,11 +1221,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       }
     }
 
-    // Display base name (card label) preserves the user's original filename;
-    // the on-disk name adds a random suffix so it is collision- and traversal-safe.
-    const displayName = sanitizeUploadFilename(rawName);
-    const diskBase = sanitizeUploadFilename(rawName.replace(/\.[^.]*$/, ''));
-    const diskName = `${diskBase}-${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`;
     const dest = join(attachmentsDir, diskName);
 
     try {

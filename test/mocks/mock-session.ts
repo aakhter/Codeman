@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionAttachmentHistoryItem } from '../../src/types/session.js';
+import type { SessionAttachmentHistoryItem, SessionRemote } from '../../src/types/session.js';
 import type { SessionSource } from '../../src/types/sources.js';
 import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
@@ -15,6 +15,8 @@ import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/se
 export class MockSession extends EventEmitter {
   id: string;
   workingDir: string = '/tmp/test-workdir';
+  /** COD-241 — set by remote-session route tests; production reads `session.remote`. */
+  remote?: SessionRemote;
   status: 'idle' | 'working' = 'idle';
   pid: number = 12345;
   isWorking: boolean = false;
