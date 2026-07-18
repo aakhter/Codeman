@@ -174,6 +174,42 @@ Answer at column zero.
       expect(getLastTranscriptResponse(blocks)).toBe('Answer at column zero.');
     });
 
+    // The two exact live roadmap-tab examples from the ticket (AC: use both verbatim).
+    it('live example 1: two-line prompt keeps the gutter continuation in the Prompt block', () => {
+      const transcript = `
+› create uid for each feature so it's easy to ref.
+  for the p200 - why is diffentiation only 2/5?
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+      const promptBlocks = blocks.filter((b) => b.kind === 'prompt');
+
+      expect(promptBlocks).toHaveLength(1);
+      expect(promptBlocks[0]?.text).toContain('create uid for each feature');
+      expect(promptBlocks[0]?.text).toContain('for the p200 - why is diffentiation only 2/5?');
+      // The continuation must not have leaked into a Response block.
+      expect(blocks.some((b) => b.kind === 'response')).toBe(false);
+    });
+
+    it('live example 2: five-line prompt (bullet + prose + blank + prose) stays one Prompt block', () => {
+      const transcript = `
+› i think we can improve this slide. or maybe a follow on slide. here is what i'm thinking:
+  * left hand side... current AI stack: (frontier model), large component cloud hosted, soverign concerns etc.
+  right hand -> future-enterprise-stack: frontier-model (optional, in cloud), on-prem: model router, OSS models, rest of stack (gpus, data, etc.)
+
+  make the point that the right hand side addresses the concerns.
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+      const promptBlocks = blocks.filter((b) => b.kind === 'prompt');
+
+      expect(promptBlocks).toHaveLength(1);
+      expect(promptBlocks[0]?.text).toContain('left hand side');
+      expect(promptBlocks[0]?.text).toContain('right hand -> future-enterprise-stack');
+      expect(promptBlocks[0]?.text).toContain('make the point that the right hand side addresses the concerns');
+      expect(blocks.some((b) => b.kind === 'response')).toBe(false);
+    });
+
     it('still separates a single-line prompt from a column-zero response (no regression)', () => {
       const transcript = `
 › say again
