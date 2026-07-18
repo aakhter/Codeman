@@ -227,4 +227,97 @@ Final polished answer at column zero.
       expect(getLastTranscriptResponse(blocks)).toBe('Final polished answer at column zero.');
     });
   });
+
+  // COD-227: Last Response must return the final assistant answer, not tool logs.
+  // A response bullet beginning with a tool-like verb (• Created …) must not be
+  // classified as Tool, and genuine • Calling / • Called blocks must be classified
+  // as Tool. Disambiguator: a verb-bullet is a tool header only when followed by a
+  // box-drawing result tree (└│├); Calling/Called are always tool markers.
+  describe('COD-227 tool-header vs response disambiguation', () => {
+    const MINIMAL_REPRO = `
+› new jira issue
+
+• The fresh read shows a formatting problem.
+
+• Calling
+└ atlassian.jira_update_issue({})
+
+• Called atlassian.jira_get_issue({})
+└ { result: true }
+
+• Created COD-226: View Response → More misclassifies multiline prompt continuations as responses.
+
+  It includes:
+
+  - Two concrete failures
+  - Regression-test criteria
+`.trim();
+
+    it('returns the final • Created … answer, not the Jira Calling/Called tool log', () => {
+      const blocks = parseExternalCliTranscript(MINIMAL_REPRO, 'codex');
+      const last = getLastTranscriptResponse(blocks);
+
+      expect(last).toContain('Created COD-226');
+      expect(last).toContain('Two concrete failures');
+      // Must exclude tool invocations, raw results, and earlier commentary.
+      expect(last).not.toContain('atlassian.jira');
+      expect(last).not.toContain('Calling');
+      expect(last).not.toContain('Called');
+      expect(last).not.toContain('fresh read');
+    });
+
+    it('classifies genuine • Calling / • Called (with box-drawing results) as Tool', () => {
+      const blocks = parseExternalCliTranscript(MINIMAL_REPRO, 'codex');
+      const toolText = blocks
+        .filter((b) => b.kind === 'tool')
+        .map((b) => b.text)
+        .join('\n');
+
+      expect(toolText).toContain('Calling');
+      expect(toolText).toContain('Called');
+      expect(toolText).toContain('atlassian.jira_update_issue');
+      // The final answer must not have been swallowed into the tool block.
+      expect(toolText).not.toContain('Created COD-226');
+    });
+
+    it('labels the repro chronologically: Prompt, Response (commentary), Tool, Response (final)', () => {
+      const blocks = parseExternalCliTranscript(MINIMAL_REPRO, 'codex');
+
+      expect(blocks.map((b) => b.kind)).toEqual(['prompt', 'response', 'tool', 'response']);
+      expect(blocks[1]?.text).toContain('fresh read');
+      expect(blocks[3]?.text).toContain('Created COD-226');
+    });
+
+    it('does not classify a verb-prefixed prose bullet as Tool when no result tree follows', () => {
+      const transcript = `
+› do it
+
+• Created COD-999: a brand new issue with a descriptive title.
+
+  Follow-up prose that belongs to the same answer.
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+
+      expect(blocks.some((b) => b.kind === 'tool')).toBe(false);
+      expect(getLastTranscriptResponse(blocks)).toContain('Created COD-999');
+      expect(getLastTranscriptResponse(blocks)).toContain('Follow-up prose');
+    });
+
+    it('does not regress a genuine verb tool block that has a box-drawing continuation', () => {
+      const transcript = `
+› look around
+
+• Explored
+  └ Read SKILL.md
+
+Here is the assistant answer at column zero.
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+
+      expect(blocks.some((b) => b.kind === 'tool' && b.text.includes('Explored'))).toBe(true);
+      expect(getLastTranscriptResponse(blocks)).toBe('Here is the assistant answer at column zero.');
+    });
+  });
 });

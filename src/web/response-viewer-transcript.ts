@@ -23,10 +23,37 @@ function isDividerOnlyLine(line: string): boolean {
   return /^[\s─-]{8,}$/.test(line.trim());
 }
 
-function isToolHeaderLine(line: string): boolean {
+// COD-227: unambiguous Codex tool-call markers. These only ever appear as internal
+// activity, never as ordinary assistant prose, so they are always a Tool block.
+function isToolActivityMarker(line: string): boolean {
+  return /^\s*[•*-]\s+(Calling|Called)\b/.test(line.trim());
+}
+
+// COD-227: action verbs that ALSO occur in ordinary assistant prose (e.g.
+// "• Created COD-226: …"). These are a Tool header only when corroborated by a
+// box-drawing result tree on the next non-blank line (see the caller); the verb
+// alone is not sufficient.
+function isToolVerbBullet(line: string): boolean {
   return /^\s*[•*-]\s+(Explored|Viewed|Read|Edited|Updated|Created|Deleted|Ran|Searched|Opened|Listed|Found|Applied|Patched|Used|Wrote|Executed|Modified|Analyzed|Compared|Fetched|Installed)\b/.test(
     line.trim()
   );
+}
+
+// A genuine Codex tool block renders its result as a box-drawing tree (└ │ ├).
+function isBoxDrawingLine(line: string): boolean {
+  return /^[│├└]/.test(line.trim());
+}
+
+// Look past blank lines from `fromIndex + 1` for the next non-blank line and report
+// whether it is a box-drawing tool-result line — the signal that a verb bullet is a
+// real tool block rather than assistant prose that happens to start with a verb.
+function nextNonBlankIsBoxDrawing(lines: string[], fromIndex: number): boolean {
+  for (let j = fromIndex + 1; j < lines.length; j += 1) {
+    const trimmed = (lines[j] || '').trim();
+    if (!trimmed) continue;
+    return isBoxDrawingLine(trimmed);
+  }
+  return false;
 }
 
 function isToolContinuationLine(line: string, currentKind: ResponseViewerTranscriptKind | null): boolean {
@@ -119,6 +146,9 @@ function normalizeWrappedText(lines: string[]): string {
 }
 
 function cleanTerminalTranscript(buffer: string): string {
+  // Stripping ANSI/OSC/DCS escape sequences and stray C0/C1 control bytes
+  // legitimately requires control characters in these patterns.
+  /* eslint-disable no-control-regex */
   return String(buffer || '')
     .replace(/\x1b\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x7E]/g, '')
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
@@ -130,6 +160,7 @@ function cleanTerminalTranscript(buffer: string): string {
     .replace(/\r/g, '\n')
     .replace(/[ \t]+$/gm, '')
     .trim();
+  /* eslint-enable no-control-regex */
 }
 
 function trimLeadingStartup(lines: string[]): string[] {
@@ -205,7 +236,8 @@ export function parseExternalCliTranscript(
     currentLines = [];
   };
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
     // COD-226: within a prompt, the 2-space Codex gutter is authoritative. Blank
     // lines and gutter-indented (2+ leading spaces) continuation lines stay in the
     // Prompt block ahead of every structural detector below, so multiline prompts —
@@ -235,7 +267,10 @@ export function parseExternalCliTranscript(
       continue;
     }
 
-    if (isToolHeaderLine(line)) {
+    // COD-227: • Calling / • Called are always tool markers; the other action verbs
+    // are a tool header only when a box-drawing result tree follows on the next
+    // non-blank line — otherwise the verb bullet is ordinary assistant prose.
+    if (isToolActivityMarker(line) || (isToolVerbBullet(line) && nextNonBlankIsBoxDrawing(lines, i))) {
       if (currentKind !== 'tool') flush();
       currentKind = 'tool';
       currentLines.push(line.trimEnd());

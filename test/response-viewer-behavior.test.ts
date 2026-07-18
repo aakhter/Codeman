@@ -109,6 +109,49 @@ describe('response viewer behavior', () => {
     expect(app._responseViewerMarkdown).toBe(responseMarkdown);
   });
 
+  // COD-227: when the final answer begins with a tool-like verb (• Created …) and the
+  // transcript also contains Jira Calling/Called tool activity, Last Response must render
+  // the final answer, not the tool log. These are the blocks the parser now emits for the
+  // ticket's minimal reproduction (kinds: prompt, response, tool, response).
+  it('renders the final • Created … answer as Last Response, not the Jira tool log (COD-227)', async () => {
+    app.activeSessionId = 's1';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        json: async () => ({
+          data: {
+            messages: [
+              { kind: 'prompt', label: 'Prompt', text: 'new jira issue' },
+              { kind: 'response', label: 'Response', text: '• The fresh read shows a formatting problem.' },
+              {
+                kind: 'tool',
+                label: 'Tool',
+                text: '• Calling\n└ atlassian.jira_update_issue({})\n\n• Called atlassian.jira_get_issue({})\n└ { result: true }',
+              },
+              {
+                kind: 'response',
+                label: 'Response',
+                text: '• Created COD-226: View Response → More misclassifies multiline prompt continuations as responses.\n\n  It includes:\n\n  - Two concrete failures\n  - Regression-test criteria',
+              },
+            ],
+          },
+        }),
+      })) as unknown as typeof fetch
+    );
+
+    await app.loadFullContext();
+
+    // The tool block renders the Jira activity...
+    expect(document.querySelector('.rv-message.rv-msg-tool .rv-text')?.textContent).toContain(
+      'atlassian.jira_update_issue'
+    );
+    // ...but the copyable Last Response is the final assistant answer, not the tool log.
+    expect(app._responseViewerMarkdown).toContain('Created COD-226');
+    expect(app._responseViewerMarkdown).not.toContain('atlassian.jira');
+    expect(app._responseViewerMarkdown).not.toContain('fresh read');
+  });
+
   it('copies raw Markdown from the latest response with success feedback', async () => {
     const markdown =
       '## Update\n\n- **Preserve** the syntax\n- [Open docs](https://example.com)\n\n```ts\nconst ready = true;\n```';
