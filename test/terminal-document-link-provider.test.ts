@@ -381,3 +381,79 @@ describe('COD-232 terminal document link provider', () => {
     expect(provider).not.toContain('links.sort');
   });
 });
+
+describe('COD-237 unquoted absolute paths with spaces (own-line)', () => {
+  const OBSERVED =
+    '/mnt/c/Users/aakhter/OneDrive - Cisco/01_Projects/Other_Strategic/Projects/Source/kb/out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
+  const OBSERVED_REL =
+    'OneDrive - Cisco/01_Projects/Other_Strategic/Projects/Source/kb/out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
+
+  it('links the exact observed WSL path with spaces as one reference and opens the DOCX', () => {
+    const { provide, previewSpy, originalSessionId } = makeHarness(OBSERVED, {
+      workingDir: '/mnt/c/Users/aakhter',
+    });
+
+    const links = provide();
+    expect(links.map((link) => link.text)).toEqual([OBSERVED]);
+
+    links[0].activate(null, links[0].text);
+    expect(previewSpy).toHaveBeenCalledWith(OBSERVED_REL, originalSessionId);
+  });
+
+  it('links a shorter own-line spaced absolute path, preserving the spaces', () => {
+    const { provide, previewSpy, originalSessionId } = makeHarness('/mnt/c/proj/My Big Docs/report.docx', {
+      workingDir: '/mnt/c/proj',
+    });
+
+    expect(provide().map((link) => link.text)).toEqual(['/mnt/c/proj/My Big Docs/report.docx']);
+    provide()[0].activate(null, provide()[0].text);
+    expect(previewSpy).toHaveBeenCalledWith('My Big Docs/report.docx', originalSessionId);
+  });
+
+  it('tolerates a single trailing sentence period after the extension', () => {
+    const { provide } = makeHarness('/mnt/c/proj/My Big Docs/report.docx.', { workingDir: '/mnt/c/proj' });
+    expect(provide().map((link) => link.text)).toEqual(['/mnt/c/proj/My Big Docs/report.docx']);
+  });
+
+  it('does not link an out-of-workspace spaced absolute path as a whole reference', () => {
+    // The spaced absolute path is outside the workspace, so the own-line heuristic
+    // must not linkify it (any pre-existing relative-tail behaviour is unchanged).
+    const { provide } = makeHarness('/etc/secret files/passwords.txt', { workingDir: '/mnt/c/proj' });
+    expect(provide().map((link) => link.text)).not.toContain('/etc/secret files/passwords.txt');
+  });
+
+  it('rejects an own-line spaced path containing a .. traversal segment', () => {
+    const { provide } = makeHarness('/mnt/c/proj/../other place/report.docx', { workingDir: '/mnt/c/proj' });
+    expect(provide().map((link) => link.text)).not.toContain('/mnt/c/proj/../other place/report.docx');
+  });
+
+  it('does not link an own-line spaced path without a previewable extension', () => {
+    const { provide } = makeHarness('/mnt/c/proj/My Big Docs/archive.tar', { workingDir: '/mnt/c/proj' });
+    expect(provide()).toEqual([]);
+  });
+
+  it('does not merge two space-separated absolute paths into one link (single-path only)', () => {
+    // Two absolute paths on one line must not collapse into one greedy reference.
+    const { provide } = makeHarness('/mnt/c/proj/a.md /mnt/c/proj/b.pdf', { workingDir: '/mnt/c/proj' });
+    const texts = provide().map((link) => link.text);
+    expect(texts).not.toContain('/mnt/c/proj/a.md /mnt/c/proj/b.pdf');
+  });
+
+  it('regression: a quoted spaced path still links (COD-232 behaviour preserved)', () => {
+    const { provide, previewSpy, originalSessionId } = makeHarness('Created "My Big Docs/report.docx" now', {
+      workingDir: '/mnt/c/proj',
+    });
+    expect(provide().map((link) => link.text)).toEqual(['My Big Docs/report.docx']);
+    provide()[0].activate(null, provide()[0].text);
+    expect(previewSpy).toHaveBeenCalledWith('My Big Docs/report.docx', originalSessionId);
+  });
+
+  it('regression: an own-line no-space absolute path still links', () => {
+    const { provide, previewSpy, originalSessionId } = makeHarness('/mnt/c/proj/docs/report.docx', {
+      workingDir: '/mnt/c/proj',
+    });
+    expect(provide().map((link) => link.text)).toEqual(['/mnt/c/proj/docs/report.docx']);
+    provide()[0].activate(null, provide()[0].text);
+    expect(previewSpy).toHaveBeenCalledWith('docs/report.docx', originalSessionId);
+  });
+});
