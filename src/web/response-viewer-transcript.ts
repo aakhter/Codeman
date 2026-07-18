@@ -206,6 +206,23 @@ export function parseExternalCliTranscript(
   };
 
   for (const line of lines) {
+    // COD-226: within a prompt, the 2-space Codex gutter is authoritative. Blank
+    // lines and gutter-indented (2+ leading spaces) continuation lines stay in the
+    // Prompt block ahead of every structural detector below, so multiline prompts —
+    // including bullets, indented dividers, and literal › lines — are not
+    // misclassified as responses. Only a non-blank, non-gutter line ends the prompt
+    // and falls through (a column-0 › then opens a NEW prompt).
+    if (currentKind === 'prompt') {
+      if (!line.trim()) {
+        currentLines.push('');
+        continue;
+      }
+      if (/^ {2,}\S/.test(line)) {
+        currentLines.push(line);
+        continue;
+      }
+    }
+
     if (isDividerOnlyLine(line)) {
       flush();
       continue;

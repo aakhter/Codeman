@@ -97,4 +97,98 @@ One detail: I had to restart it outside the sandbox because the sandboxed launch
     expect(getLastTranscriptResponse(blocks)).not.toContain('Worked for 1m 51s');
     expect(blocks.some((block) => block.kind === 'status' && block.text === 'Worked for 1m 51s')).toBe(true);
   });
+
+  // COD-226: multiline prompt continuations (2-space Codex gutter) must stay in the
+  // Prompt block, not be misclassified as Response. The gutter is authoritative ahead
+  // of every structural detector (divider, prompt-marker, tool, status).
+  describe('COD-226 multiline prompt gutter is authoritative', () => {
+    it('keeps bullet/prose continuations and internal blank lines in the Prompt block', () => {
+      const transcript = `
+› i think we can improve this slide. or maybe a follow on slide. here is what i'm thinking:
+  * left hand side: current AI stack (frontier model, cloud hosted, sovereign concerns)
+  right hand -> future enterprise stack: frontier model (optional, cloud), on-prem model router, OSS models
+
+  make the point that the right hand side addresses the concerns.
+
+gpt-5.4 medium · kb · main · Ready · Context 100% left
+
+• Explored
+  └ Read SKILL.md
+
+Here is the actual assistant answer that starts at column zero and is a real response.
+
+› next prompt
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+      const promptBlocks = blocks.filter((b) => b.kind === 'prompt');
+
+      // Exactly two prompts, and the first holds the whole multiline prompt.
+      expect(promptBlocks).toHaveLength(2);
+      expect(promptBlocks[0]?.text).toContain('left hand side');
+      expect(promptBlocks[0]?.text).toContain('right hand');
+      expect(promptBlocks[0]?.text).toContain('make the point that the right hand side');
+
+      // The continuation must NOT have leaked into a Response block.
+      const responseBlocks = blocks.filter((b) => b.kind === 'response');
+      expect(responseBlocks.some((b) => b.text.includes('make the point'))).toBe(false);
+      expect(getLastTranscriptResponse(blocks)).toContain('actual assistant answer');
+      expect(getLastTranscriptResponse(blocks)).not.toContain('make the point');
+    });
+
+    it('does not let an indented divider inside a prompt flush the Prompt block', () => {
+      const transcript = `
+› compare these two layouts
+  first layout uses a single column
+  ────────────────────────────
+  second layout uses two columns
+
+The response begins here at column zero.
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+      const promptBlocks = blocks.filter((b) => b.kind === 'prompt');
+
+      expect(promptBlocks).toHaveLength(1);
+      expect(promptBlocks[0]?.text).toContain('first layout');
+      expect(promptBlocks[0]?.text).toContain('second layout uses two columns');
+      expect(getLastTranscriptResponse(blocks)).toBe('The response begins here at column zero.');
+    });
+
+    it('treats a gutter-indented literal › as prompt content, not a new prompt', () => {
+      const transcript = `
+› here is my question about the ui
+  › should this arrow start a new prompt?
+  no it should not — it is part of my question
+
+Answer at column zero.
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+      const promptBlocks = blocks.filter((b) => b.kind === 'prompt');
+
+      // The gutter-indented › must NOT open a second prompt.
+      expect(promptBlocks).toHaveLength(1);
+      expect(promptBlocks[0]?.text).toContain('here is my question');
+      expect(promptBlocks[0]?.text).toContain('no it should not');
+      expect(getLastTranscriptResponse(blocks)).toBe('Answer at column zero.');
+    });
+
+    it('still separates a single-line prompt from a column-zero response (no regression)', () => {
+      const transcript = `
+› say again
+
+Final polished answer at column zero.
+
+› next
+`.trim();
+
+      const blocks = parseExternalCliTranscript(transcript, 'codex');
+      const promptBlocks = blocks.filter((b) => b.kind === 'prompt');
+
+      expect(promptBlocks).toHaveLength(2);
+      expect(promptBlocks[0]?.text).toBe('say again');
+      expect(getLastTranscriptResponse(blocks)).toBe('Final polished answer at column zero.');
+    });
+  });
 });
