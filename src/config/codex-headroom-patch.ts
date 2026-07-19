@@ -20,11 +20,18 @@ const TOP_END = '# <<< codeman-headroom (managed) <<<';
 const PROV_START = '# >>> codeman-headroom-provider (managed) >>>';
 const PROV_END = '# <<< codeman-headroom-provider (managed) <<<';
 
-// TOP region: the sentinel block + the trailing blank line (exactly \n\n after TOP_END)
-// PROV region: the leading \n separator + sentinel block + trailing \n
-const TOP_RE = /# >>> codeman-headroom \(managed\) >>>\n[\s\S]*?# <<< codeman-headroom \(managed\) <<<\n\n/;
-const PROV_RE =
-  /\n# >>> codeman-headroom-provider \(managed\) >>>\n[\s\S]*?# <<< codeman-headroom-provider \(managed\) <<<\n/;
+// Tolerant, global, CRLF-aware removal (COD-228). Whitespace/blank-line drift,
+// CRLF, duplicate copies, and orphan/legacy sentinel fragments must all clean.
+// TOP: paired region + up to the 2 trailing newlines the patch adds (\n\n) — so
+//   canonical (\n\n) and drifted (single \n) both clean; user blanks beyond 2 are kept.
+// PROV: paired region + the single leading \n separator the patch adds + trailing \n.
+// ORPHAN: any lone/unpaired managed sentinel LINE (START or END, either region).
+const TOP_PAIR_RE =
+  /# >>> codeman-headroom \(managed\) >>>[\s\S]*?# <<< codeman-headroom \(managed\) <<<(?:\r?\n){0,2}/g;
+const PROV_PAIR_RE =
+  /(?:\r?\n){0,1}# >>> codeman-headroom-provider \(managed\) >>>[\s\S]*?# <<< codeman-headroom-provider \(managed\) <<<(?:\r?\n){0,1}/g;
+const ORPHAN_SENTINEL_RE =
+  /^[ \t]*#[ \t]*[<>]{3}[ \t]*codeman-headroom(?:-provider)? \(managed\) [<>]{3}[ \t]*\r?\n?/gm;
 
 /** Default path: $CODEX_HOME/config.toml or ~/.codex/config.toml. */
 export function defaultCodexConfigPath(): string {
@@ -35,7 +42,7 @@ export function defaultCodexConfigPath(): string {
 
 /** Remove both managed regions, leaving non-codeman content untouched. */
 export function stripManagedRegions(text: string): string {
-  return text.replace(TOP_RE, '').replace(PROV_RE, '');
+  return text.replace(TOP_PAIR_RE, '').replace(PROV_PAIR_RE, '').replace(ORPHAN_SENTINEL_RE, '');
 }
 
 /** Pure: produce the patched file content for the given original + proxy URL. */

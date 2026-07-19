@@ -544,6 +544,23 @@ export const SettingsUpdateSchema = z
     // CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK env var. Stripped before persisting.
     acknowledgeUnauthTunnel: z.boolean().optional(),
     tabTwoRows: z.boolean().optional(),
+    // COD-242: custom keyboard shortcut overrides. Persisted server-side (settings.json)
+    // so they survive restarts, deploys, and upgrades. Keyed by shortcut id; each value
+    // carries an optional binding list (each binding an object: key/code/modifiers) and a
+    // disabled flag. The value object is permissive (.passthrough) so overrides round-trip
+    // without silently dropping fields; the client (getShortcutRegistry) tolerates missing
+    // or malformed entries by falling back to defaults.
+    shortcutOverrides: z
+      .record(
+        z.string().max(100),
+        z
+          .object({
+            bindings: z.array(z.record(z.string(), z.unknown())).max(16).optional(),
+            disabled: z.boolean().optional(),
+          })
+          .passthrough()
+      )
+      .optional(),
     agentTeamsEnabled: z.boolean().optional(),
     opusContext1mEnabled: z.boolean().optional(),
     // Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75); default off

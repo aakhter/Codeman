@@ -1244,6 +1244,28 @@ Object.assign(CodemanApp.prototype, {
     // Quoted/backticked spans are kept intact so workspace paths may contain spaces.
     const findPreviewReferences = (lineText, workingDir) => {
       const references = [];
+
+      // COD-237: an unquoted absolute path may legitimately contain spaces (e.g.
+      // "OneDrive - Cisco"). When the ENTIRE trimmed line is a single such path that
+      // resolves to a previewable in-workspace file, treat it as one reference. This
+      // own-line rule is the AC's strongest signal; it deliberately avoids guessing
+      // spaced paths embedded in prose (inherently ambiguous). Single path only —
+      // a second " /" segment (two space-separated absolute paths) is not merged.
+      const trimmedLine = lineText.trim();
+      if (
+        trimmedLine.startsWith('/') &&
+        trimmedLine.includes(' ') &&
+        !/["'`]/.test(trimmedLine) &&
+        !/ \//.test(trimmedLine)
+      ) {
+        const candidate = trimmedLine.replace(/[.,;:!?)\]}]+$/, '');
+        const relativePath = normalizePreviewPath(candidate, workingDir);
+        if (relativePath) {
+          const startIndex = lineText.length - lineText.trimStart().length;
+          return [{ text: candidate, relativePath, startIndex, endIndex: startIndex + candidate.length }];
+        }
+      }
+
       const isHardDelimiter = (char) => !char || /[\s\x00-\x1f<>|;&]/.test(char);
       const isTokenDelimiter = (char) => isHardDelimiter(char) || char === '"' || char === "'" || char === '`';
       const addCandidate = (raw, rawStart) => {
