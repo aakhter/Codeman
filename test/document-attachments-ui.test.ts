@@ -84,7 +84,12 @@ describe('document attachment UI wiring', () => {
     expect(panelsJs).toContain('No attachments yet');
     expect(panelsJs).toContain('Show a file here by running:');
     expect(panelsJs).toContain('codeman attach /absolute/path/to/file.pptx');
-    expect(panelsJs).toContain('Supports .pptx, .docx, .pdf, .png, .md, and .txt.');
+    expect(panelsJs).toContain('Supports .pptx, .docx, .xlsx, .pdf, .png, .md, and .txt.');
+  });
+
+  it('uses the existing non-preview experience for binary attachments', () => {
+    expect(panelsJs).toContain("data.type === 'binary'");
+    expect(panelsJs).toContain('Cannot preview');
   });
 
   it('previews markdown attachments as sanitized HTML and text attachments as preformatted text', () => {
