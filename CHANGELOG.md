@@ -1,5 +1,13 @@
 # aicodeman
 
+## 1.3.6
+
+### Patch Changes
+
+- Add XLSX attachment uploads with picker and drag-and-drop support, ZIP-signature validation, binary attachment registration, and Open/Download handling.
+
+  Persist keyboard shortcut overrides across upgrades and upstream refreshes. Fix Files panel path handling when the working directory has a trailing slash, linkify unquoted absolute terminal paths containing spaces, improve multiline prompt and final-response extraction, and make Headroom configuration reconciliation idempotent and reversible.
+
 ## 1.3.5
 
 ### Patch Changes
@@ -81,6 +89,7 @@
   **Docs**: CLAUDE.md accuracy audit (18 verified fixes: security hook-bypass description, env-prefix allowlist, state-file inventory, watcher/function names, counts) + documentation for all new subsystems. README gains a user walkthrough (#141).
 
   All PRs went through adversarial multi-agent review; ~60 verified findings (including 12 blockers) were fixed on the contributors' branches before merge. Full test suite green: 3,400+ tests.
+
 ## 1.2.7
 
 ### Patch Changes
