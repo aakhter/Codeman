@@ -11,7 +11,15 @@
  */
 
 /** Document extensions accepted by POST /api/sessions/:id/attachments/upload. */
-export const UPLOAD_ALLOWED_EXTENSIONS: ReadonlySet<string> = new Set(['pdf', 'docx', 'pptx', 'md', 'markdown', 'txt']);
+export const UPLOAD_ALLOWED_EXTENSIONS: ReadonlySet<string> = new Set([
+  'pdf',
+  'docx',
+  'pptx',
+  'xlsx',
+  'md',
+  'markdown',
+  'txt',
+]);
 
 /** Normalize an extension: lowercase, strip a single leading dot. */
 function normalizeExt(ext: string): string {
@@ -30,7 +38,7 @@ const TEXT_SNIFF_BYTES = 8 * 1024;
  * Byte-signature check: does `data` plausibly match the declared `ext`?
  *
  * - `pdf`  → begins with `%PDF-` (0x25 50 44 46 2D).
- * - `docx`/`pptx` → OOXML is a ZIP; accept the ZIP local-file-header
+ * - `docx`/`pptx`/`xlsx` → OOXML is a ZIP; accept the ZIP local-file-header
  *   `PK\x03\x04`, plus the empty-archive `PK\x05\x06` and spanned
  *   `PK\x07\x08` variants. We do NOT crack the zip in unit 1 — a header match
  *   is sufficient and mirrors how paste-image trusts a magic prefix.
@@ -51,7 +59,8 @@ export function documentMagicMatchesExt(data: Buffer, ext: string): boolean {
         data[4] === 0x2d
       );
     case 'docx':
-    case 'pptx': {
+    case 'pptx':
+    case 'xlsx': {
       if (data.length < 4 || data[0] !== 0x50 || data[1] !== 0x4b) return false;
       // PK\x03\x04 (local file header), PK\x05\x06 (empty archive),
       // PK\x07\x08 (spanned archive).

@@ -15,13 +15,15 @@ import {
 
 describe('UPLOAD_ALLOWED_EXTENSIONS', () => {
   it('contains exactly the supported document extensions', () => {
-    expect([...UPLOAD_ALLOWED_EXTENSIONS].sort()).toEqual(['docx', 'markdown', 'md', 'pdf', 'pptx', 'txt'].sort());
+    expect([...UPLOAD_ALLOWED_EXTENSIONS].sort()).toEqual(
+      ['docx', 'markdown', 'md', 'pdf', 'pptx', 'txt', 'xlsx'].sort()
+    );
   });
 });
 
 describe('isAllowedUploadExtension', () => {
   it('accepts allowed extensions case-insensitively', () => {
-    for (const ext of ['pdf', 'PDF', 'docx', 'Pptx', 'md', 'markdown', 'txt']) {
+    for (const ext of ['pdf', 'PDF', 'docx', 'Pptx', 'xlsx', 'XLSX', 'md', 'markdown', 'txt']) {
       expect(isAllowedUploadExtension(ext)).toBe(true);
     }
   });
@@ -29,10 +31,11 @@ describe('isAllowedUploadExtension', () => {
   it('tolerates a leading dot', () => {
     expect(isAllowedUploadExtension('.pdf')).toBe(true);
     expect(isAllowedUploadExtension('.TXT')).toBe(true);
+    expect(isAllowedUploadExtension('.XLSX')).toBe(true);
   });
 
   it('rejects unsupported / unknown extensions', () => {
-    for (const ext of ['exe', 'png', 'js', 'zip', 'doc', 'ppt', '']) {
+    for (const ext of ['exe', 'png', 'js', 'zip', 'doc', 'ppt', 'xls', '']) {
       expect(isAllowedUploadExtension(ext)).toBe(false);
     }
   });
@@ -50,10 +53,11 @@ describe('documentMagicMatchesExt', () => {
     expect(documentMagicMatchesExt(Buffer.from('%PDF1.4'), 'pdf')).toBe(false);
   });
 
-  it('accepts docx/pptx with the ZIP local-file-header magic PK\\x03\\x04', () => {
+  it('accepts docx/pptx/xlsx with the ZIP local-file-header magic PK\\x03\\x04', () => {
     const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
     expect(documentMagicMatchesExt(zip, 'docx')).toBe(true);
     expect(documentMagicMatchesExt(zip, 'pptx')).toBe(true);
+    expect(documentMagicMatchesExt(zip, 'xlsx')).toBe(true);
   });
 
   it('accepts the empty-archive (PK\\x05\\x06) and spanned (PK\\x07\\x08) ZIP variants', () => {
@@ -61,11 +65,14 @@ describe('documentMagicMatchesExt', () => {
     const spanned = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
     expect(documentMagicMatchesExt(empty, 'docx')).toBe(true);
     expect(documentMagicMatchesExt(spanned, 'pptx')).toBe(true);
+    expect(documentMagicMatchesExt(empty, 'xlsx')).toBe(true);
+    expect(documentMagicMatchesExt(spanned, 'xlsx')).toBe(true);
   });
 
-  it('rejects docx/pptx when the bytes are not a ZIP header', () => {
+  it('rejects docx/pptx/xlsx when the bytes are not a ZIP header', () => {
     expect(documentMagicMatchesExt(Buffer.from('%PDF-1.4'), 'docx')).toBe(false);
     expect(documentMagicMatchesExt(Buffer.from('plain text'), 'pptx')).toBe(false);
+    expect(documentMagicMatchesExt(Buffer.from('not a zip'), 'xlsx')).toBe(false);
   });
 
   it('accepts md/markdown/txt for plain text (no NUL byte in first 8KB)', () => {
