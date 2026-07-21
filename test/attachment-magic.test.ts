@@ -108,4 +108,9 @@ describe('attachment magic links', () => {
     expect(isSupportedAttachmentExtension('jpeg')).toBe(true);
     expect(isSupportedAttachmentExtension('webp')).toBe(true);
   });
+
+  it('supports modern Excel workbooks but not legacy XLS files', () => {
+    expect(isSupportedAttachmentExtension('xlsx')).toBe(true);
+    expect(isSupportedAttachmentExtension('xls')).toBe(false);
+  });
 });

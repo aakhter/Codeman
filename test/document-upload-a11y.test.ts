@@ -31,7 +31,7 @@ describe('document-upload a11y contract (source-level)', () => {
     const acceptMatch = documentInput.match(/input\.accept\s*=\s*'([^']+)'/);
     expect(acceptMatch).toBeTruthy();
     const accept = acceptMatch![1];
-    for (const ext of ['.pdf', '.docx', '.pptx', '.md', '.markdown', '.txt']) {
+    for (const ext of ['.pdf', '.docx', '.pptx', '.xlsx', '.md', '.markdown', '.txt']) {
       expect(accept).toContain(ext);
     }
   });
@@ -40,7 +40,7 @@ describe('document-upload a11y contract (source-level)', () => {
     // Parity guard: the two lists must not drift (mobile pickers rely on accept).
     const extsMatch = documentInput.match(/_documentUploadExtensions:\s*\[([^\]]+)\]/);
     expect(extsMatch).toBeTruthy();
-    for (const ext of ['pdf', 'docx', 'pptx', 'md', 'markdown', 'txt']) {
+    for (const ext of ['pdf', 'docx', 'pptx', 'xlsx', 'md', 'markdown', 'txt']) {
       expect(extsMatch![1]).toContain(`'${ext}'`);
     }
   });
