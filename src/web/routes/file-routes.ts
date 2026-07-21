@@ -551,6 +551,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const maxDepth = Math.min(parseInt(depth || '5', 10), 10);
     const includeHidden = showHidden === 'true';
     const workingDir = session.workingDir;
+    // Normalize the root prefix ONCE so relative-path computation is
+    // trailing-separator-safe (COD-243): a workingDir ending in `sep` made the
+    // old `slice(len + 1)` chop the first char of every relative path.
+    const rootPrefix = workingDir.endsWith(sep) ? workingDir : workingDir + sep;
     const matcher = compileFileQuery(q ?? '');
 
     // Default excludes - large/generated directories
@@ -627,7 +631,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           if (entry.isDirectory() && excludeDirs.has(entry.name)) continue;
 
           const fullPath = join(dirPath, entry.name);
-          const relativePath = fullPath.slice(workingDir.length + 1);
+          const relativePath = fullPath.slice(rootPrefix.length);
 
           if (entry.isDirectory()) {
             totalDirectories++;
@@ -703,7 +707,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           if (entry.isDirectory() && excludeDirs.has(entry.name)) continue;
 
           const fullPath = join(dirPath, entry.name);
-          const relativePath = fullPath.slice(workingDir.length + 1);
+          const relativePath = fullPath.slice(rootPrefix.length);
 
           if (entry.isDirectory()) {
             totalDirectories++;

@@ -145,4 +145,64 @@ describe('file-routes GET /api/sessions/:id/files (search + tree)', () => {
     expect(dirMatch.type).toBe('directory');
     expect(dirMatch.children).toBeUndefined();
   });
+
+  // ===== COD-243: trailing-separator-safe relative paths =====
+  // When workingDir ends in a path separator, the old `slice(len + 1)` chopped
+  // the first char of every relative path (src/index.ts -> rc/index.ts), so
+  // nested files couldn't be opened from the files panel.
+  const nestedRel = path.join('src', 'index.ts');
+
+  it('(COD-243 search) nested match path is intact when workingDir has a trailing separator', async () => {
+    harness.ctx._session.workingDir = workspace + path.sep;
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/files?q=index`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const paths = body.data.matches.map((m: { path: string }) => m.path);
+    expect(paths).toContain(nestedRel); // NOT 'rc/index.ts'
+  });
+
+  it('(COD-243 search) nested match path is intact without a trailing separator (regression)', async () => {
+    harness.ctx._session.workingDir = workspace; // no trailing sep
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/files?q=index`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const paths = body.data.matches.map((m: { path: string }) => m.path);
+    expect(paths).toContain(nestedRel);
+  });
+
+  it('(COD-243 tree) nested file path is intact when workingDir has a trailing separator', async () => {
+    harness.ctx._session.workingDir = workspace + path.sep;
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/files`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const src = body.data.tree.find((n: { name: string }) => n.name === 'src');
+    expect(src).toBeDefined();
+    expect(src.path).toBe('src'); // NOT 'rc'
+    const index = src.children.find((n: { name: string }) => n.name === 'index.ts');
+    expect(index).toBeDefined();
+    expect(index.path).toBe(nestedRel); // NOT 'rc/index.ts'
+  });
+
+  it('(COD-243 tree) nested file path is intact without a trailing separator (regression)', async () => {
+    harness.ctx._session.workingDir = workspace; // no trailing sep
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/files`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const src = body.data.tree.find((n: { name: string }) => n.name === 'src');
+    expect(src.path).toBe('src');
+    const index = src.children.find((n: { name: string }) => n.name === 'index.ts');
+    expect(index.path).toBe(nestedRel);
+  });
 });
