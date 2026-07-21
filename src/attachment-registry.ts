@@ -23,6 +23,7 @@ const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
   'pdf',
   'docx',
   'pptx',
+  'xlsx',
   'md',
   'txt',
 ]);
@@ -123,6 +124,7 @@ export function getAttachmentType(extension: string): AttachmentDetectedType {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(normalized)) return 'image';
   if (normalized === 'pdf') return 'pdf';
   if (normalized === 'pptx') return 'presentation';
+  if (normalized === 'xlsx') return 'binary';
   if (normalized === 'md') return 'markdown';
   if (normalized === 'txt') return 'text';
   return 'document';

@@ -30,6 +30,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 vi.mock('node:child_process', () => ({
+  exec: vi.fn(),
   execFile: vi.fn((_cmd, _args, _options, callback) => {
     callback(null, { stdout: '', stderr: '' });
     return {};
@@ -688,6 +689,12 @@ describe('file-routes', () => {
         '/mnt/c/decks/board update.pptx',
         'board update.pptx',
       ],
+      [
+        'xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '/mnt/c/sheets/forecast.xlsx',
+        'forecast.xlsx',
+      ],
     ])('serves %s raw attachments with an inline filename for Open', async (_extension, mimeType, path, fileName) => {
       const content = Buffer.from('office bytes');
       mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
@@ -708,6 +715,35 @@ describe('file-routes', () => {
       expect(rawRes.statusCode).toBe(200);
       expect(rawRes.headers['content-type']).toBe(mimeType);
       expect(rawRes.headers['content-disposition']).toBe(`inline; filename="${fileName}"`);
+    });
+
+    it('classifies XLSX metadata as binary and redirects preview to raw bytes', async () => {
+      mockedStat.mockResolvedValue({ size: 4096, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/sheets/forecast.xlsx' },
+      });
+
+      expect(registerRes.statusCode).toBe(200);
+      const registerBody = JSON.parse(registerRes.body);
+      expect(registerBody.data.attachmentType).toBe('binary');
+      const attachmentId = registerBody.data.attachmentId;
+
+      const metadataRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}`,
+      });
+      expect(metadataRes.statusCode).toBe(200);
+      expect(JSON.parse(metadataRes.body).data.type).toBe('binary');
+
+      const previewRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/preview`,
+      });
+      expect(previewRes.statusCode).toBe(302);
+      expect(previewRes.headers.location).toContain(`/attachments/${attachmentId}/raw`);
     });
 
     it('serves registered PNG attachment bytes with production compression enabled', async () => {
