@@ -15,10 +15,17 @@ import type {
   SessionMode,
   OpenCodeConfig,
   CodexConfig,
+  AgyConfig,
   GeminiConfig,
   EffortLevel,
   SessionRemote,
 } from './types.js';
+
+export type CommandDeliveryStage = 'text' | 'enter';
+
+export type CommandDeliveryResult =
+  | { ok: true; attempt?: number }
+  | { ok: false; stage: CommandDeliveryStage; error?: string; attempt?: number };
 
 /**
  * Multiplexer session metadata.
@@ -70,6 +77,7 @@ export interface CreateSessionOptions {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
@@ -103,6 +111,7 @@ export interface RespawnPaneOptions {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
   /** Resume a previous Claude conversation when respawning */
   resumeSessionId?: string;
@@ -174,6 +183,12 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   sendInput(sessionId: string, input: string): Promise<boolean>;
 
+  /**
+   * Submit one checkpoint command with duplicate-safe text/Enter acknowledgements.
+   * Unlike generic input, the failed transport stage remains observable.
+   */
+  sendCheckpointCommand(sessionId: string, input: string): Promise<CommandDeliveryResult>;
+
   // ========== Metadata ==========
 
   /** Update the display name of a session */
@@ -237,10 +252,10 @@ export interface TerminalMultiplexer extends EventEmitter {
   isAvailable(): boolean;
 
   /** Check if a multiplexer session actually exists (process-level check, not just tracked) */
-  muxSessionExists(muxName: string): boolean;
+  muxSessionExists(muxName: string): Promise<boolean>;
 
   /** Check if the pane in a session is dead (command exited but remain-on-exit keeps it alive) */
-  isPaneDead(muxName: string): boolean;
+  isPaneDead(muxName: string): Promise<boolean>;
 
   /** Respawn a dead pane with a fresh command. Returns the new PID or null on failure. */
   respawnPane(options: RespawnPaneOptions): Promise<number | null>;

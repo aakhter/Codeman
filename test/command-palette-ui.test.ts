@@ -177,6 +177,35 @@ describe('Command-K session palette', () => {
     ).toBe(true);
   });
 
+  it('rejects the palette chord when extra modifiers are held', () => {
+    const { app } = loadPaletteHarness();
+
+    expect(
+      app.shouldOpenCommandPaletteFromShortcut({ key: 'K', code: 'KeyK', ctrlKey: true, shiftKey: true, target: null })
+    ).toBe(false);
+  });
+
+  it('honors a disabled or rebound palette shortcut from the registry', () => {
+    const { app } = loadPaletteHarness();
+
+    app.getShortcutRegistry = () => [
+      { id: 'command-palette', disabled: true, bindings: [{ modifiers: ['ctrl'], key: 'k', code: 'KeyK' }] },
+    ];
+    app.matchesShortcutEvent = () => true;
+    expect(app.shouldOpenCommandPaletteFromShortcut({ key: 'k', code: 'KeyK', ctrlKey: true, target: null })).toBe(
+      false
+    );
+
+    app.getShortcutRegistry = () => [{ id: 'command-palette', bindings: [{ modifiers: ['ctrl'], code: 'KeyP' }] }];
+    app.matchesShortcutEvent = (e: any, shortcut: any) => e.code === shortcut.bindings[0].code;
+    expect(app.shouldOpenCommandPaletteFromShortcut({ key: 'k', code: 'KeyK', ctrlKey: true, target: null })).toBe(
+      false
+    );
+    expect(app.shouldOpenCommandPaletteFromShortcut({ key: 'p', code: 'KeyP', ctrlKey: true, target: null })).toBe(
+      true
+    );
+  });
+
   it('opens and focuses the palette search box', () => {
     const { app, elements } = loadPaletteHarness();
 
@@ -192,9 +221,10 @@ describe('Command-K session palette', () => {
 
     const results = app.buildCommandPaletteItems('bill');
 
-    expect(results.map((item: any) => item.id)).toEqual(['session:sess-beta', 'new-session']);
+    expect(results.map((item: any) => item.id)).toEqual(['session:sess-beta', 'new-session', 'browse-sessions']);
     expect(results[0]).toMatchObject({ type: 'session', sessionId: 'sess-beta', title: 'Billing prompt polish' });
     expect(results[1]).toMatchObject({ type: 'new-session', title: 'New session' });
+    expect(results[2]).toMatchObject({ type: 'browse-sessions' });
   });
 
   it('uses the tab name instead of the short session id for unnamed sessions', () => {
@@ -257,6 +287,19 @@ describe('Command-K session palette', () => {
     expect(app.run).toHaveBeenCalledTimes(1);
   });
 
+  it('routes the new-session case pick through selectQuickStartCase when the picker mixin is loaded', async () => {
+    const { app } = loadPaletteHarness();
+    app.selectQuickStartCase = vi.fn();
+
+    const newSession = app.buildCommandPaletteItems('flux').find((item: any) => item.type === 'new-session');
+    app.commandPaletteItems = [newSession];
+    app.commandPaletteActiveIndex = 0;
+    await app.activateCommandPaletteItem();
+
+    expect(app.selectQuickStartCase).toHaveBeenCalledWith('flux-player');
+    expect(app.run).toHaveBeenCalledTimes(1);
+  });
+
   it('activates the highlighted session result', async () => {
     const { app } = loadPaletteHarness();
     app.openCommandPalette();
@@ -292,6 +335,86 @@ describe('Command-K session palette', () => {
 
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
     expect(app.selectSession).toHaveBeenCalledWith('sess-alpha');
+  });
+});
+
+describe('Session Manager unified list', () => {
+  it('maps unified fields to history records and routes clicks by liveness', async () => {
+    const { app, elements } = loadPaletteHarness({
+      fetch: async (url: string) => {
+        expect(url).toBe('/api/sessions/unified?limit=200&q=api');
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            data: {
+              sessions: [
+                {
+                  sessionId: 'sess-alpha',
+                  name: 'Alpha API cleanup',
+                  workingDir: '/repo/api',
+                  lastActivityAt: 1751000000000,
+                  sources: ['live'],
+                },
+                {
+                  sessionId: 'conv-uuid-1',
+                  workingDir: '/repo/old',
+                  sizeBytes: 2048,
+                  firstPrompt: 'old prompt',
+                  lastActivityAt: 1750000000000,
+                  sources: ['history'],
+                },
+              ],
+              total: 2,
+            },
+          }),
+        };
+      },
+    });
+    elements.sessionManagerList = { replaceChildren: vi.fn(), appendChild: vi.fn() };
+    app._buildHistoryItem = vi.fn(() => ({}));
+    app.resumeHistorySession = vi.fn();
+
+    await app._loadSessionManagerList('api');
+
+    expect(app._buildHistoryItem).toHaveBeenCalledTimes(2);
+    const [liveRecord, , liveOptions] = app._buildHistoryItem.mock.calls[0];
+    expect(liveRecord).toMatchObject({
+      sessionId: 'sess-alpha',
+      workingDir: '/repo/api',
+      sizeBytes: 0,
+      firstPrompt: 'Alpha API cleanup',
+    });
+    expect(new Date(liveRecord.lastModified).getTime()).toBe(1751000000000);
+    expect(liveOptions.showViewAll).toBe(false);
+
+    liveOptions.onActivate();
+    expect(app.selectSession).toHaveBeenCalledWith('sess-alpha');
+    expect(app.resumeHistorySession).not.toHaveBeenCalled();
+
+    const [historyRecord, , historyOptions] = app._buildHistoryItem.mock.calls[1];
+    expect(historyRecord).toMatchObject({ sessionId: 'conv-uuid-1', sizeBytes: 2048, firstPrompt: 'old prompt' });
+    historyOptions.onActivate();
+    expect(app.resumeHistorySession).toHaveBeenCalledWith('conv-uuid-1', '/repo/old');
+  });
+
+  it('surfaces an endpoint error instead of an empty list', async () => {
+    const appended: any[] = [];
+    const { app, elements } = loadPaletteHarness({
+      fetch: async () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({ success: false, error: 'unified list unavailable', errorCode: 'OPERATION_FAILED' }),
+      }),
+    });
+    elements.sessionManagerList = { replaceChildren: vi.fn(), appendChild: (element: any) => appended.push(element) };
+
+    await app._loadSessionManagerList('');
+
+    expect(appended).toHaveLength(1);
+    expect(appended[0].textContent).toBe('unified list unavailable');
+    expect(appended[0].textContent).not.toBe('No sessions found');
   });
 });
 

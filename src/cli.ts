@@ -141,7 +141,8 @@ const HOOK_SECRET_HEADER = 'X-Codeman-Hook-Secret';
 /**
  * POST a hook event to `/api/hook-event` using the per-instance hook secret
  * (read from `$CODEMAN_HOOK_SECRET_FILE`) — mirrors how Claude Code hook curls
- * authenticate. Resolves the parsed JSON response body, or null on failure.
+ * authenticate. Rejects transport, HTTP, empty, and non-JSON failures so CLI
+ * callers cannot mistake them for a checkpoint refusal.
  */
 async function postHookEvent(
   apiUrl: string,
@@ -163,7 +164,7 @@ async function postHookEvent(
     }
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const headers: Record<string, string | number> = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -186,15 +187,30 @@ async function postHookEvent(
         res.setEncoding('utf-8');
         res.on('data', (chunk) => (resBody += chunk));
         res.on('end', () => {
-          try {
-            resolve(JSON.parse(resBody));
-          } catch {
-            resolve(null);
+          if (!resBody.trim()) {
+            reject(new Error(`empty response (HTTP ${res.statusCode ?? '???'})`));
+            return;
           }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(resBody);
+          } catch (err) {
+            reject(new Error(`non-JSON response (HTTP ${res.statusCode ?? '???'}): ${getErrorMessage(err)}`));
+            return;
+          }
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            const apiError =
+              parsed && typeof parsed === 'object' && typeof (parsed as { error?: unknown }).error === 'string'
+                ? `: ${(parsed as { error: string }).error}`
+                : '';
+            reject(new Error(`HTTP ${res.statusCode ?? '???'}${apiError}`));
+            return;
+          }
+          resolve(parsed);
         });
       }
     );
-    req.on('error', () => resolve(null));
+    req.on('error', (err) => reject(new Error(`request failed: ${getErrorMessage(err)}`)));
     req.write(body);
     req.end();
   });
@@ -375,9 +391,18 @@ program
     const data: Record<string, unknown> = { mode };
     if (options.continue) data.continuePrompt = String(options.continue);
 
-    const body = await postHookEvent(apiUrl, 'checkpoint', sessionId, data);
-    const result =
-      (body as { data?: { checkpoint?: { triggered?: boolean; reason?: string } } }).data?.checkpoint ?? {};
+    let body: unknown;
+    try {
+      body = await postHookEvent(apiUrl, 'checkpoint', sessionId, data);
+    } catch (err) {
+      console.error(chalk.red(`✗ checkpoint request failed: ${getErrorMessage(err)}`));
+      process.exit(1);
+    }
+    const result = interpretCheckpointResponse(body);
+    if (!result.ok) {
+      console.error(chalk.red(`✗ checkpoint request failed: ${result.error}`));
+      process.exit(1);
+    }
 
     if (result.triggered) {
       console.log(chalk.green(`✓ checkpoint ${mode} requested`));
@@ -393,8 +418,7 @@ program
       busy: 'a checkpoint or compact/clear is already running',
       stopped: 'session is stopped',
     };
-    const msg =
-      reasonMessage[result.reason ?? ''] ?? 'checkpoint not enabled for this session — enable it in Session Options';
+    const msg = reasonMessage[result.reason ?? ''] ?? `checkpoint refused${result.reason ? `: ${result.reason}` : ''}`;
     console.error(chalk.red(`✗ ${msg}`));
     process.exit(1);
   });
@@ -566,6 +590,43 @@ export function formatSessionRows(sessions: SessionRow[]): string {
  * server internals. Reported by `checkpoint --status`.
  */
 const CHECKPOINT_DEFAULT_CONTINUE = 'continue';
+
+export type CheckpointResponseInterpretation =
+  | { ok: true; triggered: true }
+  | { ok: true; triggered: false; reason: string }
+  | { ok: false; error: string };
+
+/**
+ * Validate the checkpoint hook response envelope without dereferencing through
+ * null or malformed payloads. Acceptance means only that work was requested;
+ * asynchronous completion is reported by checkpoint lifecycle status/events.
+ */
+export function interpretCheckpointResponse(body: unknown): CheckpointResponseInterpretation {
+  if (body === null || body === undefined) return { ok: false, error: 'empty response from checkpoint API' };
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, error: 'malformed response from checkpoint API' };
+  }
+  const envelope = body as { success?: unknown; data?: unknown; error?: unknown };
+  if (envelope.success === false) {
+    return {
+      ok: false,
+      error: typeof envelope.error === 'string' ? envelope.error : 'checkpoint API returned an error response',
+    };
+  }
+  if (envelope.success !== true || !envelope.data || typeof envelope.data !== 'object') {
+    return { ok: false, error: 'malformed success response from checkpoint API' };
+  }
+  const checkpoint = (envelope.data as { checkpoint?: unknown }).checkpoint;
+  if (!checkpoint || typeof checkpoint !== 'object') {
+    return { ok: false, error: 'malformed success response from checkpoint API' };
+  }
+  const result = checkpoint as { triggered?: unknown; reason?: unknown };
+  if (result.triggered === true) return { ok: true, triggered: true };
+  if (result.triggered === false && typeof result.reason === 'string' && result.reason) {
+    return { ok: true, triggered: false, reason: result.reason };
+  }
+  return { ok: false, error: 'malformed success response from checkpoint API' };
+}
 
 /**
  * Render a session's AGENT CHECKPOINT (checkpoint-and-continue) config as a

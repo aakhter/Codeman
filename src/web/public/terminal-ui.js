@@ -139,9 +139,79 @@ Object.assign(CodemanApp.prototype, {
     const cellWidth = dims?.width || (rect.width && this.terminal?.cols ? rect.width / this.terminal.cols : 0);
     const cellHeight = dims?.height || (rect.height && this.terminal?.rows ? rect.height / this.terminal.rows : 0);
     if (!cellWidth || !cellHeight) return null;
+    const left = Number.isFinite(rect.left) ? rect.left : 0;
+    const top = Number.isFinite(rect.top) ? rect.top : 0;
+    const right = Number.isFinite(rect.right) ? rect.right : left + (rect.width || cellWidth * (this.terminal?.cols || 0));
+    const bottom = Number.isFinite(rect.bottom)
+      ? rect.bottom
+      : top + (rect.height || cellHeight * (this.terminal?.rows || 0));
+    if (clientX < left || clientX >= right || clientY < top || clientY >= bottom) return null;
     const col = Math.max(1, Math.min(this.terminal.cols || 1, Math.floor((clientX - rect.left) / cellWidth) + 1));
     const row = Math.max(1, Math.min(this.terminal.rows || 1, Math.floor((clientY - rect.top) / cellHeight) + 1));
     return { col, row };
+  },
+
+  _terminalTouchFromList(touches, identifier = null) {
+    if (!touches) return null;
+    for (let index = 0; index < touches.length; index++) {
+      const touch = touches[index] || touches.item?.(index);
+      if (touch && (identifier === null || touch.identifier === identifier)) return touch;
+    }
+    return null;
+  },
+
+  _createTerminalTouchGesture() {
+    return { active: false, cancelled: true, moved: false, identifier: null, startX: 0, startY: 0 };
+  },
+
+  _beginTerminalTouchGesture(state, touches) {
+    if (!state || touches?.length !== 1) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    const touch = this._terminalTouchFromList(touches);
+    if (!touch) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    state.active = true;
+    state.cancelled = false;
+    state.moved = false;
+    state.identifier = touch.identifier;
+    state.startX = touch.clientX;
+    state.startY = touch.clientY;
+    return touch;
+  },
+
+  _updateTerminalTouchGesture(state, touches, threshold) {
+    if (!state?.active || state.cancelled || touches?.length !== 1) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    const touch = this._terminalTouchFromList(touches, state.identifier);
+    if (!touch) {
+      this._cancelTerminalTouchGesture(state);
+      return null;
+    }
+    if (Math.abs(touch.clientX - state.startX) >= threshold || Math.abs(touch.clientY - state.startY) >= threshold) {
+      state.moved = true;
+    }
+    return touch;
+  },
+
+  _endTerminalTouchGesture(state, changedTouches, remainingTouches) {
+    const touch = state?.active ? this._terminalTouchFromList(changedTouches, state.identifier) : null;
+    const isTap = !!touch && !state.cancelled && !state.moved && (remainingTouches?.length || 0) === 0;
+    this._cancelTerminalTouchGesture(state);
+    return isTap ? touch : null;
+  },
+
+  _cancelTerminalTouchGesture(state) {
+    if (!state) return;
+    state.active = false;
+    state.cancelled = true;
+    state.moved = true;
+    state.identifier = null;
   },
 
   _sendForegroundTuiWheel(deltaY, clientX, clientY) {
@@ -414,9 +484,6 @@ Object.assign(CodemanApp.prototype, {
     // Lazy-loaded: script downloaded only on desktop (saves 244KB on mobile).
     this._webglAddon = null;
     const _params = new URLSearchParams(location.search);
-    if (_params.get('webgl') === 'force') {
-      try { localStorage.removeItem('codeman-webgl-disabled'); } catch {}
-    }
     const _stickyDisabled = (() => {
       try {
         const raw = localStorage.getItem('codeman-webgl-disabled');
@@ -431,11 +498,25 @@ Object.assign(CodemanApp.prototype, {
         return true;
       } catch { return false; }
     })();
-    const skipWebGL =
-      MobileDetection.getDeviceType() !== 'desktop' ||
-      _params.has('nowebgl') ||
-      _stickyDisabled;
-    if (_stickyDisabled) {
+    // User's "WebGL Renderer" toggle (Settings > Appearance). undefined = untouched
+    // (desktop default on); false = explicit opt-out; true = explicit opt-in.
+    const _webglSettings = this.loadAppSettingsFromStorage();
+    const _webglDefaults = this.getDefaultSettings();
+    const _webglPref = _webglSettings.webglRendererEnabled ?? _webglDefaults.webglRendererEnabled;
+    const { skip: skipWebGL, clearSticky: _clearWebglSticky } = shouldSkipWebGL({
+      deviceType: MobileDetection.getDeviceType(),
+      noWebglParam: _params.has('nowebgl'),
+      forceParam: _params.get('webgl') === 'force',
+      stickyDisabled: _stickyDisabled,
+      userPrefEnabled: _webglPref,
+    });
+    // Only ?webgl=force retires the auto-fallback marker at init — a stored
+    // toggle ON is incidental (checkbox defaults checked) and must not defeat
+    // the sticky safety net. An OFF→ON flip clears it in saveAppSettings().
+    if (_clearWebglSticky) {
+      try { localStorage.removeItem('codeman-webgl-disabled'); } catch {}
+    }
+    if (skipWebGL && _stickyDisabled) {
       console.log('[CRASH-DIAG] WebGL sticky-disabled from prior stalls — DOM renderer in use. Re-enable: ?webgl=force');
     }
     if (!skipWebGL) {
@@ -467,6 +548,25 @@ Object.assign(CodemanApp.prototype, {
       });
     }
 
+    // ── Focus router ──
+    // While the CJK field is visible, EVERY terminal.focus() call must land on
+    // the CJK field instead. Focusing xterm's hidden textarea in CJK mode sends
+    // the IME's output into a black hole: the keyboard composes normally, but
+    // onData is gated by cjkActive, so nothing reaches the field OR the PTY.
+    // Session select / SSE-reconnect restore paths call terminal.focus() and
+    // were silently stealing focus after every app switch on mobile (the
+    // intermittent "Chinese input goes nowhere" bug). One chokepoint here
+    // covers all ~15 call sites plus any future ones.
+    const _xtermFocus = this.terminal.focus.bind(this.terminal);
+    this.terminal.focus = () => {
+      const cjkEl = document.getElementById('cjkInput');
+      if (cjkEl?.classList.contains('cjk-input-visible')) {
+        cjkEl.focus();
+      } else {
+        _xtermFocus();
+      }
+    };
+
     // On mobile Safari, delay initial fit() to allow layout to settle
     // This prevents 0-column terminals caused by fit() running before container is sized
     const isMobileSafari =
@@ -485,20 +585,33 @@ Object.assign(CodemanApp.prototype, {
     // Register link provider for clickable file paths in Bash tool output
     this.registerFilePathLinkProvider();
 
-    // Always use mouse wheel for terminal scrollback, never forward to application.
-    // Prevents Claude's Ink UI (plan mode selector) from capturing scroll as option navigation.
-    // COD-187: CAPTURE phase + stopPropagation — xterm's internal viewport wheel
-    // handler stops propagation itself, so a bubble listener here never fires for
-    // wheels over the terminal canvas (it only ever saw container gutter wheels).
-    // Capturing makes this funnel the single wheel owner: exactly one scroll per
-    // event, and mirror tabs can turn up-scroll intent into the history view.
+    // Mouse wheel: forward to the TUI only for sessions verified to handle SGR
+    // wheel reports (codex, and claude 2.1.187+ — see _shouldForwardWheelToApp),
+    // local scrollback otherwise. Claude Code 2.1.187+ scrolls its own
+    // transcript on SGR wheel reports — scrolled-away tool blocks re-render
+    // live and stay clickable — and its select menus no longer capture wheel
+    // as option navigation (verified against 2.1.202: /model menu highlight
+    // ignores wheel reports); older versions DO capture wheel as option
+    // navigation, so they keep the local wheel.
+    // Shift+wheel always scrolls xterm's local scrollback (Codeman's restored
+    // history lives there), and once the viewport left the bottom the wheel
+    // stays local until the user scrolls back down — so both scrollbacks stay
+    // reachable without a mode switch. COD-187 live-mirror tabs retain first
+    // ownership of scroll intent so an up-scroll can open their frozen history.
+    // CAPTURE phase + stopPropagation makes this funnel the single wheel owner.
     container.addEventListener(
       'wheel',
       (ev) => {
         if (this._handleForegroundTuiWheel(ev)) return;
         ev.preventDefault();
         ev.stopPropagation();
-        const lines = Math.round(ev.deltaY / 25) || (ev.deltaY > 0 ? 1 : -1);
+        const lines = this._wheelScrollLines(ev);
+        const isLiveMirror =
+          this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
+        if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
+          this._sendSyntheticSgrWheel(ev.clientX, ev.clientY, lines);
+          return;
+        }
         this._handleUserScrollIntent(lines);
       },
       { passive: false, capture: true }
@@ -560,24 +673,27 @@ Object.assign(CodemanApp.prototype, {
       let pixelAccum = 0;
 
       let didScroll = false; // track whether touchmove fired (tap vs scroll)
-      let touchStartY = 0;
+      const touchGesture = this._createTerminalTouchGesture();
       const TAP_THRESHOLD = 8; // px — ignore micro-drift to distinguish tap from scroll
       container.addEventListener(
         'touchstart',
         (ev) => {
-          if (ev.touches.length === 1) {
-            touchLastX = ev.touches[0].clientX;
-            touchLastY = ev.touches[0].clientY;
-            touchStartY = touchLastY;
-            velocity = 0;
-            pixelAccum = 0;
-            isTouching = true;
-            didScroll = false;
-            lastTime = 0;
-            if (scrollFrame) {
-              cancelAnimationFrame(scrollFrame);
-              scrollFrame = null;
-            }
+          const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);
+          velocity = 0;
+          pixelAccum = 0;
+          lastTime = 0;
+          if (!touch) {
+            isTouching = false;
+            didScroll = true;
+            return;
+          }
+          touchLastX = touch.clientX;
+          touchLastY = touch.clientY;
+          isTouching = true;
+          didScroll = false;
+          if (scrollFrame) {
+            cancelAnimationFrame(scrollFrame);
+            scrollFrame = null;
           }
         },
         { passive: true }
@@ -586,12 +702,18 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchmove',
         (ev) => {
-          if (ev.touches.length === 1 && isTouching) {
-            const touchX = ev.touches[0].clientX;
-            const touchY = ev.touches[0].clientY;
-            if (!didScroll && Math.abs(touchY - touchStartY) >= TAP_THRESHOLD) {
+          if (isTouching) {
+            const touch = this._updateTerminalTouchGesture(touchGesture, ev.touches, TAP_THRESHOLD);
+            if (!touch) {
+              isTouching = false;
               didScroll = true;
+              velocity = 0;
+              pixelAccum = 0;
+              return;
             }
+            const touchX = touch.clientX;
+            const touchY = touch.clientY;
+            if (touchGesture.moved) didScroll = true;
             // Below the tap threshold, treat the gesture as a potential tap:
             // don't preventDefault (iOS needs click synthesis to show the
             // keyboard) and don't accumulate scroll distance or velocity. Without
@@ -628,41 +750,14 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchend',
         (ev) => {
+          const wasTouching = isTouching;
+          const touch = this._endTerminalTouchGesture(touchGesture, ev.changedTouches, ev.touches);
           isTouching = false;
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
-          if (!didScroll && this.terminal) {
-            // ── Tap-to-position cursor ──────────────────────────────────
-            // Synthesize a click from the real touch point so the foreground app
-            // moves its cursor to the tapped cell (iOS doesn't reliably do this
-            // itself under touch-action:none). CRITICAL: only when mouse tracking
-            // is ON. xterm disables its local SelectionService while mouse events
-            // are active, so the synthetic click is forwarded to the PTY as an SGR
-            // report (cursor moves). But when tracking is OFF, that same click
-            // drives xterm's LOCAL selection (detail 1/2/3 → char/word/line) — a
-            // tap on CJK text would select & copy it instead of positioning. So
-            // gate strictly on the live mouse-tracking mode.
-            const touch = ev.changedTouches && ev.changedTouches[0];
-            const mouseMode = this.terminal.modes?.mouseTrackingMode;
-            const mouseTrackingOn = !!mouseMode && mouseMode !== 'none';
-            if (touch) {
-              this._suppressTrustedTapMouseEvents();
-            }
-            if (touch && this._shouldForwardScrollToForegroundTui()) {
-              this._sendForegroundTuiClick(touch.clientX, touch.clientY);
-            } else if (touch && mouseTrackingOn) {
-              this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
-            }
-            this._syncMobileHelperTextareaToCursor();
-            // Route subsequent typing to the right place: keep the CJK input
-            // field focused when Chinese input is on, otherwise the terminal.
-            const cjkInput = document.getElementById('cjkInput');
-            if (cjkInput?.classList.contains('cjk-input-visible')) {
-              cjkInput.focus();
-            } else {
-              this.terminal.focus();
-            }
+          if (wasTouching && !didScroll && touch && this.terminal) {
+            this._handleTerminalTouchTap(touch);
           }
         },
         { passive: true }
@@ -674,10 +769,21 @@ Object.assign(CodemanApp.prototype, {
           isTouching = false;
           velocity = 0;
           pixelAccum = 0;
+          this._cancelTerminalTouchGesture(touchGesture);
         },
         { passive: true }
       );
     }
+
+    // ── Desktop click-to-position cursor ──────────────────────────────
+    // A real mouse click normally reaches the PTY through xterm's own mouse
+    // encoder, but that encoder only runs while mouseTrackingMode is ON — and
+    // the server strips the enabling DECSETs from claude/codex/gemini output
+    // (isAltScreenStripMode, session.ts) so the wheel keeps scrolling
+    // scrollback. Desktop clicks therefore stopped reporting entirely (the
+    // same breakage the mobile touchend tap branch above works around).
+    // Hand-encode the SGR report for plain left-clicks on those sessions.
+    container.addEventListener('click', (ev) => this._handleDesktopTerminalClick(ev));
 
     // Welcome message
     this.showWelcome();
@@ -844,7 +950,28 @@ Object.assign(CodemanApp.prototype, {
         this._exitHistoryView?.();
       }
       // CJK input has focus — block xterm from sending keystrokes to PTY
-      if (!isMouseReport && (window.cjkActive || document.activeElement?.id === 'cjkInput')) return;
+      if (!isMouseReport && (window.cjkActive || document.activeElement?.id === 'cjkInput')) {
+        // Self-heal: if the CJK field is visible but focus drifted to xterm's
+        // hidden textarea (e.g. something called terminal.focus()), everything
+        // typed lands HERE and is swallowed — keyboard shows the IME composing
+        // while both the CJK field and the terminal stay empty. Route focus
+        // back so the very next keystroke lands in the CJK field again.
+        // Only GENUINE typed input qualifies: onData also fires for xterm's
+        // self-generated query replies (DA/DSR/CPR/OSC during Ink redraws),
+        // which arrive no matter what has focus — so require focus to be on
+        // xterm's own textarea and bail on query replies, or this would steal
+        // focus from the rename/search/settings inputs while output streams.
+        const cjkEl = document.getElementById('cjkInput');
+        if (
+          cjkEl?.classList.contains('cjk-input-visible') &&
+          document.activeElement === this.terminal.textarea &&
+          !window.CodemanTerminalInput?.shouldSuppressTerminalQueryResponse(data)
+        ) {
+          _crashDiag.log('CJK regain-focus (onData swallowed input)');
+          cjkEl.focus();
+        }
+        return;
+      }
       if (this.activeSessionId) {
         // Filter terminal query replies generated by xterm.js itself.
         // Forwarding them through the WebSocket injects DA/DSR/CPR replies
@@ -1076,17 +1203,194 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * Register a custom link provider for xterm.js that detects file paths
-   * in terminal output and makes them clickable.
-   * When clicked, opens a floating log viewer window with live streaming.
+   * Register a custom link provider for xterm.js that detects URLs, live-log
+   * paths, and previewable workspace documents in terminal output.
    */
   registerFilePathLinkProvider() {
     const self = this;
+    const previewExtensions = new Set([
+      'pdf',
+      'md',
+      'txt',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'docx',
+      'pptx',
+      'json',
+      'yaml',
+      'yml',
+      'csv',
+      'xml',
+      'sh',
+      'py',
+      'ts',
+      'js',
+    ]);
+
+    const normalizePathParts = (path, absolute) => {
+      const parts = path.split('/');
+      const normalized = [];
+      for (let index = 0; index < parts.length; index++) {
+        const part = parts[index];
+        if (!part) {
+          if (absolute && index === 0) continue;
+          return null;
+        }
+        if (part === '.') continue;
+        if (part === '..') return null;
+        normalized.push(part);
+      }
+      if (!normalized.length) return null;
+      return `${absolute ? '/' : ''}${normalized.join('/')}`;
+    };
+
+    const normalizePreviewPath = (candidate, workingDir) => {
+      if (!candidate || candidate.length > 1000 || candidate.includes('\\') || candidate.includes('://')) return null;
+      if (!candidate.includes('/')) return null;
+
+      const extension = candidate.slice(candidate.lastIndexOf('.') + 1).toLowerCase();
+      if (!previewExtensions.has(extension)) return null;
+
+      if (candidate.startsWith('/')) {
+        if (!workingDir || !workingDir.startsWith('/')) return null;
+        const normalizedCandidate = normalizePathParts(candidate, true);
+        const normalizedWorkingDir = normalizePathParts(workingDir.replace(/\/$/, ''), true);
+        if (!normalizedCandidate || !normalizedWorkingDir) return null;
+        const prefix = `${normalizedWorkingDir}/`;
+        return normalizedCandidate.startsWith(prefix) ? normalizedCandidate.slice(prefix.length) : null;
+      }
+
+      return normalizePathParts(candidate, false);
+    };
+
+    // Scan once instead of using an ambiguous, backtracking-heavy expression.
+    // Quoted/backticked spans are kept intact so workspace paths may contain spaces.
+    const findPreviewReferences = (lineText, workingDir) => {
+      const references = [];
+
+      // COD-237: an unquoted absolute path may legitimately contain spaces (e.g.
+      // "OneDrive - Cisco"). When the ENTIRE trimmed line is a single such path that
+      // resolves to a previewable in-workspace file, treat it as one reference. This
+      // own-line rule is the AC's strongest signal; it deliberately avoids guessing
+      // spaced paths embedded in prose (inherently ambiguous). Single path only —
+      // a second " /" segment (two space-separated absolute paths) is not merged.
+      const trimmedLine = lineText.trim();
+      if (
+        trimmedLine.startsWith('/') &&
+        trimmedLine.includes(' ') &&
+        !/["'`]/.test(trimmedLine) &&
+        !/ \//.test(trimmedLine)
+      ) {
+        const candidate = trimmedLine.replace(/[.,;:!?)\]}]+$/, '');
+        const relativePath = normalizePreviewPath(candidate, workingDir);
+        if (relativePath) {
+          const startIndex = lineText.length - lineText.trimStart().length;
+          return [{ text: candidate, relativePath, startIndex, endIndex: startIndex + candidate.length }];
+        }
+      }
+
+      const isHardDelimiter = (char) => !char || /[\s\x00-\x1f<>|;&]/.test(char);
+      const isTokenDelimiter = (char) => isHardDelimiter(char) || char === '"' || char === "'" || char === '`';
+      const addCandidate = (raw, rawStart) => {
+        let startTrim = 0;
+        let endTrim = raw.length;
+        while (startTrim < endTrim && /[([{]/.test(raw[startTrim])) startTrim++;
+        while (endTrim > startTrim && /[.,;:!?\])}]/.test(raw[endTrim - 1])) endTrim--;
+        const text = raw.slice(startTrim, endTrim);
+        const relativePath = normalizePreviewPath(text, workingDir);
+        if (!relativePath) return;
+        references.push({ text, relativePath, startIndex: rawStart + startTrim, endIndex: rawStart + endTrim });
+      };
+
+      let index = 0;
+      while (index < lineText.length) {
+        while (index < lineText.length && isHardDelimiter(lineText[index])) index++;
+        if (index >= lineText.length) break;
+
+        const delimiter = lineText[index];
+        if (delimiter === '"' || delimiter === "'" || delimiter === '`') {
+          const end = lineText.indexOf(delimiter, index + 1);
+          if (end === -1) {
+            index++;
+            continue;
+          }
+          addCandidate(lineText.slice(index + 1, end), index + 1);
+          index = end + 1;
+          continue;
+        }
+
+        const start = index;
+        while (index < lineText.length && !isTokenDelimiter(lineText[index])) index++;
+        addCandidate(lineText.slice(start, index), start);
+      }
+      return references;
+    };
+
+    const readLogicalLine = (buffer, bufferLineNumber) => {
+      let startRow = bufferLineNumber - 1;
+      let line = buffer.getLine(startRow);
+      if (!line) return null;
+
+      while (startRow > 0 && line.isWrapped) {
+        startRow--;
+        line = buffer.getLine(startRow);
+        if (!line) return null;
+      }
+
+      let endRow = startRow;
+      while (buffer.getLine(endRow + 1)?.isWrapped) endRow++;
+
+      const rows = [];
+      const offsetPositions = [];
+      let lineText = '';
+      for (let row = startRow; row <= endRow; row++) {
+        const current = buffer.getLine(row);
+        if (!current) break;
+        const text = current.translateToString(row === endRow);
+        rows.push({ y: row + 1, startIndex: lineText.length, length: text.length });
+
+        // Detector offsets are JavaScript string offsets, while xterm link
+        // ranges use terminal cells. Build the bridge from the real buffer
+        // cells so wide CJK/emoji cells and combining sequences do not shift a
+        // later path's underline or touch hit target.
+        const rowPositions = [];
+        if (typeof current.getCell === 'function') {
+          for (let column = 0; column < self.terminal.cols; column++) {
+            const cell = current.getCell(column);
+            if (!cell || cell.getWidth() === 0) continue;
+            const chars = cell.getChars() || ' ';
+            for (let index = 0; index < chars.length; index++) {
+              rowPositions.push({ x: column + 1, y: row + 1 });
+            }
+          }
+        }
+        for (let index = 0; index < text.length; index++) {
+          offsetPositions.push(rowPositions[index] || { x: index + 1, y: row + 1 });
+        }
+        lineText += text;
+      }
+      return { lineText, rows, offsetPositions };
+    };
+
+    const positionForOffset = (logicalLine, offset) => {
+      if (logicalLine.offsetPositions[offset]) return logicalLine.offsetPositions[offset];
+      for (let index = 0; index < logicalLine.rows.length; index++) {
+        const row = logicalLine.rows[index];
+        const rowEnd = row.startIndex + row.length;
+        if (offset < rowEnd || index === logicalLine.rows.length - 1) {
+          return { x: Math.max(1, offset - row.startIndex + 1), y: row.y };
+        }
+      }
+      return { x: 1, y: logicalLine.rows[0]?.y || 1 };
+    };
 
     // Debug: Track if provider is being invoked
     let lastInvokedLine = -1;
 
-    this.terminal.registerLinkProvider({
+    const provider = {
       provideLinks(bufferLineNumber, callback) {
         // Debug logging - only log if line changed to avoid spam
         if (bufferLineNumber !== lastInvokedLine) {
@@ -1103,36 +1407,62 @@ Object.assign(CodemanApp.prototype, {
           return;
         }
 
-        // Get line text - translateToString handles wrapped lines
-        const lineText = line.translateToString(true);
+        const logicalLine = readLogicalLine(buffer, bufferLineNumber);
+        const lineText = logicalLine?.lineText || '';
 
         if (!lineText || !lineText.includes('/')) {
           callback(undefined);
           return;
         }
 
-        const links = [];
+        // Byte occupancy + start slots keep overlap checks and ordered emission
+        // linear in logical-line length. Accepted links occupy disjoint spans,
+        // and each detector makes at most one additional pass over a span.
+        const occupied = new Uint8Array(lineText.length);
+        const linkSlots = new Array(lineText.length);
+        const originatingSessionId = self.activeSessionId;
+        const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
 
-        // Pattern 0: URLs (https://, http://) — matched first so they take priority
-        const urlPattern = /https?:\/\/[^\s"'<>|;&)\]\x00-\x1f]+/g;
+        const addLink = ({ text, startIndex, endIndex, activate }) => {
+          if (!logicalLine || startIndex < 0 || endIndex <= startIndex || endIndex > lineText.length) return;
+          for (let index = startIndex; index < endIndex; index++) {
+            if (occupied[index]) return;
+          }
+          for (let index = startIndex; index < endIndex; index++) {
+            occupied[index] = 1;
+          }
+          linkSlots[startIndex] = {
+            text,
+            range: {
+              start: positionForOffset(logicalLine, startIndex),
+              // xterm link ranges are inclusive. endIndex is our scanner's
+              // exclusive offset, so map the final character, not the boundary.
+              end: positionForOffset(logicalLine, endIndex - 1),
+            },
+            decorations: { pointerCursor: true, underline: true },
+            activate,
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
+            },
+          };
+        };
+
+        // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
+        // they take priority over file-path patterns.
+        const urlPattern = /(?:https?|webexteams):\/\/[^\s"'<>|;)\]\x00-\x1f]+/g;
 
         const addUrlLink = (url, matchIndex) => {
           // Strip trailing punctuation that's likely not part of the URL
           const cleaned = url.replace(/[.,;:!?)]+$/, '');
-          const startCol = lineText.indexOf(cleaned, matchIndex);
-          if (startCol === -1) return;
-
-          if (links.some((l) => l.range.start.x === startCol + 1)) return;
-
-          links.push({
+          addLink({
             text: cleaned,
-            range: {
-              start: { x: startCol + 1, y: bufferLineNumber },
-              end: { x: startCol + cleaned.length + 1, y: bufferLineNumber },
-            },
-            decorations: { pointerCursor: true, underline: true },
+            startIndex: matchIndex,
+            endIndex: matchIndex + cleaned.length,
             activate(_event, text) {
-              window.open(text, '_blank', 'noopener,noreferrer');
+              self._openTerminalUrl(text);
             },
           });
         };
@@ -1145,32 +1475,22 @@ Object.assign(CodemanApp.prototype, {
         // the whole tab on hover. Non-empty token + bounded reps is O(n).
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
-        // Pattern 2: Paths with common extensions
+        // Pattern 2: Legacy standalone absolute paths. In-workspace previewable
+        // paths are claimed by the document scanner first; this remains the
+        // live-log fallback for paths outside the session workspace.
         const extPattern =
           /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js))\b/g;
 
         // Pattern 3: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
-        const addLink = (filePath, matchIndex) => {
-          const startCol = lineText.indexOf(filePath, matchIndex);
-          if (startCol === -1) return;
-
-          // Skip if already have link at this position
-          if (links.some((l) => l.range.start.x === startCol + 1)) return;
-
-          links.push({
+        const addLogLink = (filePath, startIndex) => {
+          addLink({
             text: filePath,
-            range: {
-              start: { x: startCol + 1, y: bufferLineNumber }, // 1-based
-              end: { x: startCol + filePath.length + 1, y: bufferLineNumber },
-            },
-            decorations: {
-              pointerCursor: true,
-              underline: true,
-            },
-            activate(event, text) {
-              self.openLogViewerWindow(text, self.activeSessionId);
+            startIndex,
+            endIndex: startIndex + filePath.length,
+            activate(_event, text) {
+              self.openLogViewerWindow(text, originatingSessionId);
             },
           });
         };
@@ -1185,17 +1505,35 @@ Object.assign(CodemanApp.prototype, {
 
         cmdPattern.lastIndex = 0;
         while ((match = cmdPattern.exec(lineText)) !== null) {
-          addLink(match[2], match.index);
-        }
-
-        extPattern.lastIndex = 0;
-        while ((match = extPattern.exec(lineText)) !== null) {
-          addLink(match[1], match.index);
+          addLogLink(match[2], match.index + match[0].lastIndexOf(match[2]));
         }
 
         bashPattern.lastIndex = 0;
         while ((match = bashPattern.exec(lineText)) !== null) {
-          addLink(match[1], match.index);
+          addLogLink(match[1], match.index + match[0].lastIndexOf(match[1]));
+        }
+
+        if (originatingSessionId) {
+          for (const reference of findPreviewReferences(lineText, workingDir)) {
+            addLink({
+              text: reference.text,
+              startIndex: reference.startIndex,
+              endIndex: reference.endIndex,
+              activate() {
+                self.openFilePreview(reference.relativePath, originatingSessionId);
+              },
+            });
+          }
+        }
+
+        extPattern.lastIndex = 0;
+        while ((match = extPattern.exec(lineText)) !== null) {
+          addLogLink(match[1], match.index + match[0].indexOf(match[1]));
+        }
+
+        const links = [];
+        for (const link of linkSlots) {
+          if (link) links.push(link);
         }
 
         if (links.length > 0) {
@@ -1206,9 +1544,15 @@ Object.assign(CodemanApp.prototype, {
         }
         callback(links.length > 0 ? links : undefined);
       },
-    });
+    };
+    this._terminalFilePathLinkProvider = provider;
+    this.terminal.registerLinkProvider(provider);
 
     console.log('[LinkProvider] File path link provider registered');
+  },
+
+  _openTerminalUrl(text) {
+    window.open(text, '_blank', 'noopener,noreferrer');
   },
 
   showWelcome() {
@@ -1316,6 +1660,7 @@ Object.assign(CodemanApp.prototype, {
    * @param {Array} cases linked cases (for #caseName label)
    * @param {object} [options]
    * @param {boolean} [options.showViewAll=true] show "View all in folder" button in detail panel
+   * @param {Function} [options.onActivate] main-row click handler override (default: resume the conversation)
    */
   _buildHistoryItem(s, cases, options) {
     const showViewAll = options?.showViewAll !== false;
@@ -2172,7 +2517,11 @@ Object.assign(CodemanApp.prototype, {
   // CJK textarea already provides visual feedback — bypass local echo
   // buffering so each composed word reaches the PTY immediately.
   _handleCjkInput(text) {
-    if (!this.activeSessionId) return;
+    if (!this.activeSessionId) {
+      _crashDiag.log(`CJK send DROP no-session len=${text.length}`);
+      return;
+    }
+    _crashDiag.log(`CJK send→${this.activeSessionId.slice(0, 8)} len=${text.length}`);
     this._sendInputAsync(this.activeSessionId, text);
   },
 
@@ -2676,6 +3025,65 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
   // Synthetic tap → mouse report
   // ═══════════════════════════════════════════════════════════════
+  _activateTerminalLinkAtPoint(clientX, clientY, event = null) {
+    const provider = this._terminalFilePathLinkProvider;
+    const buffer = this.terminal?.buffer?.active;
+    const cell = this._terminalCellFromClientPoint(clientX, clientY);
+    if (!provider || !buffer || !cell) return false;
+
+    const bufferLineNumber = (buffer.viewportY || 0) + cell.row;
+    let activated = false;
+    provider.provideLinks(bufferLineNumber, (links) => {
+      const link = links?.find((candidate) => {
+        const { start, end } = candidate.range;
+        const afterStart = bufferLineNumber > start.y || (bufferLineNumber === start.y && cell.col >= start.x);
+        const beforeEnd = bufferLineNumber < end.y || (bufferLineNumber === end.y && cell.col <= end.x);
+        return afterStart && beforeEnd;
+      });
+      if (!link) return;
+      link.activate(event, link.text);
+      activated = true;
+    });
+    return activated;
+  },
+
+  _handleTerminalTouchTap(touch) {
+    if (!touch || !this.terminal) return false;
+    // Do not let either link activation or the ordinary cursor-positioning
+    // fallback clamp a release outside xterm into an edge-cell mouse report.
+    if (!this._terminalCellFromClientPoint(touch.clientX, touch.clientY)) return false;
+
+    // xterm's desktop linkifier depends on hover state, which touchscreens do
+    // not provide reliably. Hit-test the retained provider before any cursor
+    // positioning path can emit mouse/SGR input to the foreground CLI.
+    if (this._activateTerminalLinkAtPoint(touch.clientX, touch.clientY, touch)) {
+      this._suppressTrustedTapMouseEvents();
+      return true;
+    }
+
+    // ── Tap-to-position cursor ──────────────────────────────────
+    const mouseMode = this.terminal.modes?.mouseTrackingMode;
+    const mouseTrackingOn = !!mouseMode && mouseMode !== 'none';
+    this._suppressTrustedTapMouseEvents();
+    if (this._shouldForwardScrollToForegroundTui()) {
+      this._sendForegroundTuiClick(touch.clientX, touch.clientY);
+    } else if (mouseTrackingOn) {
+      this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
+    } else if (this._sessionUsesServerMouseStrip()) {
+      // The server strips mouse-tracking DECSETs from claude/codex/gemini
+      // output, so encode the press/release directly for ordinary taps.
+      this._sendSyntheticSgrTap(touch.clientX, touch.clientY);
+    }
+    this._syncMobileHelperTextareaToCursor();
+    const cjkInput = document.getElementById('cjkInput');
+    if (cjkInput?.classList.contains('cjk-input-visible')) {
+      cjkInput.focus();
+    } else {
+      this.terminal.focus();
+    }
+    return false;
+  },
+
   // Dispatch a mousedown+mouseup pair at viewport coords (clientX/clientY) to
   // xterm's root element. xterm's mouse-reporting handler reads the event's
   // client coords, maps them to a terminal cell relative to .xterm-screen, and
@@ -2707,6 +3115,151 @@ Object.assign(CodemanApp.prototype, {
     } catch {
       /* MouseEvent constructor unavailable — tap-to-position simply no-ops */
     }
+  },
+
+  // Mirror of the server's isAltScreenStripMode (session.ts): session modes whose
+  // output stream has mouse-tracking DECSET sequences stripped before reaching the
+  // browser. For these, xterm's live mouseTrackingMode is useless as a gate — the
+  // PTY-side TUI keeps tracking enabled, we just never see the enable sequence.
+  _sessionUsesServerMouseStrip() {
+    const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
+    return mode === 'claude' || mode === 'codex' || mode === 'gemini';
+  },
+
+  // True when xterm's viewport shows the live PTY screen (not scrolled up into
+  // local scrollback). SGR coordinates are only meaningful then: the TUI's
+  // screen is the bottom `rows` of the buffer, so a report computed from a
+  // scrolled-up viewport would hit-test a completely different row.
+  _terminalViewportAtBottom() {
+    const buf = this.terminal?.buffer?.active;
+    return !buf || buf.viewportY >= buf.baseY;
+  },
+
+  // Map a viewport point to a 1-based terminal cell the same way xterm maps a
+  // click: offset inside .xterm-screen divided by the rendered cell size.
+  // Points outside the rendered grid are rejected so a swipe/pinch release
+  // cannot be converted into terminal input at a clamped edge cell.
+  _clientPointToCell(clientX, clientY) {
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    return this._terminalCellFromClientPoint(clientX, clientY);
+  },
+
+  // Encode a tap as an SGR mouse report (press + release at button 0) and send it
+  // to the PTY directly, bypassing xterm's mouse encoder.
+  _sendSyntheticSgrTap(clientX, clientY) {
+    if (!this.activeSessionId) return;
+    if (!this._terminalViewportAtBottom()) return; // scrollback click → misfire, do nothing
+    const pos = this._clientPointToCell(clientX, clientY);
+    if (!pos) return;
+    this._sendInputAsync(this.activeSessionId, `\x1b[<0;${pos.col};${pos.row}M\x1b[<0;${pos.col};${pos.row}m`);
+  },
+
+  // True when a parsed CLI version string ('2.1.187' — banner-parsed on the
+  // server, delivered via session:cliInfo / SessionState.cliVersion) is known
+  // AND >= the minimum. Unknown or unparseable versions return false so
+  // callers keep the conservative behavior.
+  _cliVersionAtLeast(version, minimum) {
+    if (typeof version !== 'string') return false;
+    const parts = version.trim().replace(/^v/, '').split('.').map(Number);
+    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return false;
+    const min = minimum.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if (parts[i] !== min[i]) return parts[i] > min[i];
+    }
+    return true;
+  },
+
+  // Wheel forwarding gate for the container wheel handler: no Shift override,
+  // xterm's own encoder dormant, viewport at the bottom, and a TUI VERIFIED to
+  // scroll its transcript on SGR wheel reports: codex, or claude 2.1.187+
+  // (older Claude Code captures wheel as select-menu option navigation; an
+  // unknown version is treated as older). Gemini is a strip mode too but its
+  // wheel behavior is unverified, so it keeps the local wheel — taps/clicks
+  // are still forwarded for it (harmless no-ops at worst).
+  // Wheel delta → whole scroll lines. macOS trackpads turn Shift+two-finger
+  // scroll into a HORIZONTAL wheel (deltaY≈0, deltaX carries the magnitude), and
+  // Shift routes the wheel to local scrollback (_shouldForwardWheelToApp returns
+  // false on Shift). So under Shift, read whichever axis dominates — otherwise
+  // deltaY≈0 collapses to a fixed ±1 line/tick and the gesture can't page through
+  // history on a trackpad (issue #154). Non-Shift and mouse-wheel paths are
+  // unchanged (they carry deltaY). The `|| ±1` keeps sub-25px deltas moving.
+  _wheelScrollLines(ev) {
+    const delta = ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+    return Math.round(delta / 25) || (delta > 0 ? 1 : -1);
+  },
+
+  _shouldForwardWheelToApp(ev) {
+    if (ev.shiftKey) return false;
+    // Opt-out (App Settings → Input → "Wheel scrolls local history"): pin the
+    // plain wheel to xterm's own scrollback like pre-#144, for users who prefer
+    // it over forwarding the wheel to the CLI's transcript (issue #154). Cheap —
+    // loadAppSettingsFromStorage() is cache-backed.
+    if (this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback) return false;
+    const mode = this.terminal?.modes?.mouseTrackingMode;
+    if (mode && mode !== 'none') return false;
+    const session = this.sessions?.get(this.activeSessionId);
+    const sessionMode = session?.mode || 'claude';
+    if (sessionMode === 'claude') {
+      if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
+    } else if (sessionMode !== 'codex') {
+      return false;
+    }
+    return this._terminalViewportAtBottom();
+  },
+
+  // Encode wheel ticks as SGR reports (button 64 = up, 65 = down) at the pointer
+  // cell. Reports are coalesced into one fire-and-forget write per ~40ms: a
+  // trackpad emits dozens of wheel events per second and each send becomes a
+  // tmux send-keys on the server — unbatched, a single flick would spawn a
+  // process storm. Per-event tick count is capped (Claude applies its own
+  // scroll-speed multiplier and acceleration on top), and the queue is bounded
+  // so a wild scroll can't build a backlog that keeps scrolling after the finger
+  // stops. Flushed via _sendInputEphemeral — loss-tolerant, off the durable queue.
+  _sendSyntheticSgrWheel(clientX, clientY, lines) {
+    if (!this.activeSessionId || !lines) return;
+    const pos = this._clientPointToCell(clientX, clientY);
+    if (!pos) return;
+    const btn = lines < 0 ? 64 : 65;
+    const ticks = Math.min(Math.abs(lines), 5);
+    const queued = this._wheelSgrQueue || '';
+    if (queued.length > 512) return;
+    this._wheelSgrQueue = queued + `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(ticks);
+    if (this._wheelSgrFlushTimer) return;
+    this._wheelSgrFlushTimer = setTimeout(() => this._flushWheelSgrQueue(), 40);
+  },
+
+  _flushWheelSgrQueue() {
+    this._wheelSgrFlushTimer = null;
+    const data = this._wheelSgrQueue;
+    this._wheelSgrQueue = '';
+    // Ephemeral (fire-and-forget): wheel reports are loss-tolerant, so they skip
+    // the durable seq/ACK queue — no localStorage churn, no "Nb queued" flicker
+    // in the connection indicator on every scroll tick.
+    if (data && this.activeSessionId) this._sendInputEphemeral(this.activeSessionId, data);
+  },
+
+  // Desktop counterpart of the touchend tap branch: hand-encode an SGR report
+  // for a plain left-click when the server strips mouse DECSETs (see
+  // _sessionUsesServerMouseStrip). Every skip below is a click that already has
+  // a meaning elsewhere: synthetic/compat clicks after a touch tap (touchend
+  // reported already), modified clicks (shift keeps xterm's selection
+  // override), double/triple clicks (word/line selection), drag-selections,
+  // clicks on hovered links (activate() already handles the click — a second
+  // synthetic SGR press could e.g. dismiss a claude permission dialog),
+  // clicks outside the cell grid, and sessions where xterm's own encoder is
+  // live (it reported the click itself — a second report would double-move).
+  _handleDesktopTerminalClick(ev) {
+    if (!this.terminal || !ev?.isTrusted) return;
+    if (ev.button !== 0 || ev.detail !== 1) return;
+    if (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    const mode = this.terminal.modes?.mouseTrackingMode;
+    if (mode && mode !== 'none') return;
+    if (!this._sessionUsesServerMouseStrip()) return;
+    if (this.terminal.hasSelection?.()) return;
+    if (this._linkHovered) return; // link provider hover/leave callbacks (registerFilePathLinkProvider)
+    if (performance.now() <= (this._trustedTapMouseSuppressUntil || 0)) return;
+    if (!ev.target?.closest?.('.xterm-screen')) return;
+    this._sendSyntheticSgrTap(ev.clientX, ev.clientY);
   },
 
   _installMobileTapMouseGuard() {

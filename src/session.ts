@@ -49,12 +49,14 @@ import {
   type SessionMode,
   type OpenCodeConfig,
   type CodexConfig,
+  type AgyConfig,
   type GeminiConfig,
   type EffortLevel,
   type SessionAttachmentHistoryItem,
   type SessionRemote,
+  type SessionSource,
 } from './types.js';
-import type { TerminalMultiplexer, MuxSession } from './mux-interface.js';
+import type { TerminalMultiplexer, MuxSession, CommandDeliveryResult } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
 import { RalphTracker } from './ralph-tracker.js';
 import { BashToolParser } from './bash-tool-parser.js';
@@ -65,6 +67,7 @@ import {
   SPINNER_PATTERN,
   MAX_SESSION_TOKENS,
   execPattern,
+  getClaudeCliVersion,
 } from './utils/index.js';
 import {
   MAX_TERMINAL_BUFFER_SIZE,
@@ -83,7 +86,12 @@ import {
   buildMuxAttachEnv,
   buildShellEnv,
 } from './session-cli-builder.js';
-import { SessionAutoOps } from './session-auto-ops.js';
+import {
+  SessionAutoOps,
+  type CheckpointObservation,
+  type CheckpointProgress,
+  type CheckpointState,
+} from './session-auto-ops.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
@@ -165,9 +173,12 @@ const LEADING_ANSI_WHITESPACE_PATTERN = /^(\x1b\[\??[\d;]*[A-Za-z]|[\s\r\n])+/;
 const CTRL_L_PATTERN = /\x0c/g;
 /** Pattern to split by newlines (CR or LF) */
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
+/** Row starts emitted by TmuxManager.formatPaneSnapshot (which intentionally omits newlines). */
+// eslint-disable-next-line no-control-regex
+const TMUX_ABSOLUTE_ROW_START_PATTERN = /\x1b\[\d+;1H/g;
 
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini';
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy';
 }
 
 export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
@@ -180,6 +191,20 @@ export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): 
   return false;
 }
 
+/**
+ * Broader rendered-frame evidence used only by checkpoint readiness. Codex's
+ * stable TUI can retain the submitted `›` row while exposing work through a
+ * short `• Working (2s)` row or a `· Working ·` status footer, neither of which
+ * always carries the interrupt hint used by global quiet-window detection.
+ */
+export function detectCodexCheckpointWorkingFrame(data: string): boolean {
+  return (
+    detectExternalCliWorkingFrame(data, 'codex') ||
+    /^\s*[•·]\s+Working(?:\s*\([^\n)]*\))?(?:\s*[•·]|\s*$)/m.test(data) ||
+    /(?:^|\s)·\s*Working\s*·(?:\s|$)/m.test(data)
+  );
+}
+
 function getModeLabel(mode: SessionMode): string {
   switch (mode) {
     case 'opencode':
@@ -188,6 +213,8 @@ function getModeLabel(mode: SessionMode): string {
       return 'Codex';
     case 'gemini':
       return 'Gemini';
+    case 'agy':
+      return 'Agy';
     case 'shell':
       return 'Shell';
     case 'claude':
@@ -208,7 +235,7 @@ function getModeLabel(mode: SessionMode): string {
  * session-routes.ts.
  */
 export function isAltScreenStripMode(mode: SessionMode): boolean {
-  return mode === 'codex' || mode === 'claude' || mode === 'gemini';
+  return mode === 'codex' || mode === 'claude' || mode === 'gemini' || mode === 'agy';
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
@@ -366,6 +393,15 @@ export class Session extends EventEmitter {
   private _promptResolved: boolean = false; // Guard against race conditions in runPrompt
   private _isWorking: boolean = false;
   private _lastPromptTime: number = 0;
+  /** Semantic checkpoint prompt generation (not a raw repaint counter). */
+  private _checkpointPromptRevision = 0;
+  private _checkpointWasReady = false;
+  private _checkpointLastObservation: CheckpointObservation = { ready: false, working: false, revision: 0 };
+  private _checkpointReadyFingerprint: string | null = null;
+  /** Armed only while a delivered `/clear` may reset+return between polls. */
+  private _checkpointAwaitingInstantClear = false;
+  private _checkpointInstantClearBaseline: string | null = null;
+  private _checkpointDirectPtySawClear = false;
   private activityTimeout: NodeJS.Timeout | null = null;
   private _externalCliIdleTimer: NodeJS.Timeout | null = null;
   /** COD-181/182 — rendered-frame working poller for external-CLI sessions (local AND remote) */
@@ -398,6 +434,7 @@ export class Session extends EventEmitter {
   // Explicit attachment magic links already emitted from terminal output.
   private _attachmentMagicSeen = new Set<string>();
   private _attachmentHistory: SessionAttachmentHistoryItem[] = [];
+  private _sources: SessionSource[] = [];
 
   // Flicker filter setting (per-session toggle, applied on frontend)
   private _flickerFilterEnabled: boolean = false;
@@ -442,6 +479,8 @@ export class Session extends EventEmitter {
   private _openCodeConfig: OpenCodeConfig | undefined;
   // Codex configuration (only for mode === 'codex')
   private _codexConfig: CodexConfig | undefined;
+  // Agy configuration (only for mode === 'agy')
+  private _agyConfig: AgyConfig | undefined;
   // Gemini configuration (only for mode === 'gemini')
   private _geminiConfig: GeminiConfig | undefined;
   // Debug capture (CODEMAN_CODEX_RAW_LOG=1): set to true after the first
@@ -522,6 +561,8 @@ export class Session extends EventEmitter {
       openCodeConfig?: OpenCodeConfig;
       /** Codex configuration (only for mode === 'codex') */
       codexConfig?: CodexConfig;
+      /** Agy configuration (only for mode === 'agy') */
+      agyConfig?: AgyConfig;
       /** Gemini configuration (only for mode === 'gemini') */
       geminiConfig?: GeminiConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
@@ -534,6 +575,8 @@ export class Session extends EventEmitter {
       truecolorEnabled?: boolean;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
+      /** Restored per-session reference sources (COD-65). */
+      sources?: SessionSource[];
       /** Per-session terminal buffer limits; applies to this server-side session buffer. */
       terminalBufferConfig?: { maxBytes: number; trimBytes: number };
       /** tmux history limit for newly created mux sessions. */
@@ -600,6 +643,10 @@ export class Session extends EventEmitter {
       this._codexConfig = config.codexConfig;
     }
 
+    // Apply Agy configuration
+    if (config.agyConfig) {
+      this._agyConfig = config.agyConfig;
+    }
     // Apply Gemini configuration
     if (config.geminiConfig) {
       this._geminiConfig = config.geminiConfig;
@@ -624,6 +671,9 @@ export class Session extends EventEmitter {
     }
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
+    }
+    if (config.sources && config.sources.length > 0) {
+      this.restoreSources(config.sources);
     }
 
     // Initialize task tracker and forward events (store handlers for cleanup)
@@ -670,6 +720,8 @@ export class Session extends EventEmitter {
     // Initialize auto-compact/auto-clear automation and forward events
     this._autoOps = new SessionAutoOps({
       writeCommand: (cmd) => this.writeViaMux(cmd),
+      writeCheckpointCommand: (cmd) => this.writeCheckpointViaMux(cmd),
+      getCheckpointObservation: () => this.getCheckpointObservation(),
       isWorking: () => this._isWorking,
       isStopped: () => this._isStopped,
       getTotalTokens: () => this._totalInputTokens + this._totalOutputTokens,
@@ -684,9 +736,18 @@ export class Session extends EventEmitter {
     });
     this._autoOps.on('checkpointStart', (data) => this.emit('checkpointStart', data));
     this._autoOps.on('checkpointDone', (data) => this.emit('checkpointDone', data));
+    this._autoOps.on('checkpointProgress', (data: CheckpointProgress) => {
+      if (data.phase === 'failed' || data.phase === 'aborted' || data.phase === 'done') {
+        this._checkpointAwaitingInstantClear = false;
+        this._checkpointInstantClearBaseline = null;
+        this._checkpointDirectPtySawClear = false;
+      }
+      this.emit('checkpointProgress', data);
+    });
     this._autoOps.on('limitPauseScheduled', (data) => this.emit('limitPauseScheduled', data));
     this._autoOps.on('limitResume', (data) => this.emit('limitResume', data));
     this._autoOps.on('limitResumeCancelled', (data) => this.emit('limitResumeCancelled', data));
+    this._autoOps.restoreCheckpointState(config.checkpointState);
   }
 
   get status(): SessionStatus {
@@ -883,6 +944,11 @@ export class Session extends EventEmitter {
     return this._codexConfig;
   }
 
+  /** Agy CLI configuration for this session. */
+  get agyConfig(): AgyConfig | undefined {
+    return this._agyConfig;
+  }
+
   // Note: _buildPermissionArgs removed — now using buildInteractiveArgs from session-cli-builder.ts
 
   /**
@@ -1011,6 +1077,11 @@ export class Session extends EventEmitter {
     return this._autoOps.checkpointModes;
   }
 
+  /** Durable last-known checkpoint lifecycle record. */
+  get checkpointState(): CheckpointState | undefined {
+    return this._autoOps.checkpointState;
+  }
+
   /** Enable/disable agent-initiated checkpoints; optionally set allowed modes. */
   setCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
     this._autoOps.setCheckpoint(enabled, modes);
@@ -1027,6 +1098,137 @@ export class Session extends EventEmitter {
     reason?: string;
   } {
     return this._autoOps.requestCheckpoint(opts);
+  }
+
+  /**
+   * Return positive, mode-aware terminal evidence for checkpoint sequencing.
+   * A semantic revision advances only after an observed ready prompt is left
+   * and a ready prompt later returns; repainting the same prompt is stable.
+   */
+  getCheckpointObservation(): CheckpointObservation {
+    const muxName = this._muxSession?.muxName;
+    const rendered = muxName ? this._mux?.captureActivePaneBuffer?.(muxName) : null;
+    if (muxName && !rendered) {
+      // A failed/empty capture is absence of evidence, not evidence that the
+      // prompt disappeared. Preserve the last semantic state so a capture
+      // blip cannot fabricate an accepted/completed operation cycle.
+      if (!this._isWorking) return { ...this._checkpointLastObservation };
+      this._checkpointWasReady = false;
+      this._checkpointLastObservation = {
+        ready: false,
+        working: true,
+        revision: this._checkpointPromptRevision,
+      };
+      return { ...this._checkpointLastObservation };
+    }
+    let working = this._isWorking;
+    let ready = false;
+
+    if (rendered) {
+      // formatPaneSnapshot paints rows with absolute cursor moves and no EOLs.
+      // Restore Codex row boundaries before the generic ANSI strip so `›` and
+      // working evidence retain their line semantics. Claude stays unchanged.
+      const checkpointFrame =
+        this.mode === 'codex' ? rendered.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n') : rendered;
+      const plain = checkpointFrame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
+      const renderedWorking =
+        this.mode === 'codex'
+          ? detectCodexCheckpointWorkingFrame(plain)
+          : this.mode === 'claude'
+            ? SPINNER_PATTERN.test(plain)
+            : false;
+      working = working || renderedWorking;
+      const promptVisible =
+        this.mode === 'codex'
+          ? /^\s*›(?:\s|$)/m.test(plain)
+          : this.mode === 'claude'
+            ? /^\s*❯(?:\s|$)/m.test(plain)
+            : false;
+      ready = promptVisible && !working;
+      if (ready) {
+        const fingerprint = this._checkpointSemanticFrameFingerprint(plain);
+        if (this._checkpointAwaitingInstantClear && this._checkpointWasReady) {
+          if (this._isCheckpointClearRejection(plain)) {
+            this._checkpointAwaitingInstantClear = false;
+            this._checkpointInstantClearBaseline = null;
+          } else if (this._isConfirmedInstantClearReplacement(fingerprint)) {
+            this._checkpointPromptRevision++;
+            this._checkpointAwaitingInstantClear = false;
+            this._checkpointInstantClearBaseline = null;
+          }
+        }
+        this._checkpointReadyFingerprint = fingerprint;
+      }
+    } else if (this.mode === 'claude') {
+      // Direct-PTY Claude fallback uses the existing positively recorded prompt
+      // transition; initial `idle` alone is not sufficient evidence.
+      ready = this._lastPromptTime > 0 && this._status === 'idle' && !working;
+    } else if (this.mode !== 'codex') {
+      // Preserve legacy behavior for modes without verified prompt syntax.
+      ready = !working;
+    }
+
+    if (ready && !this._checkpointWasReady) {
+      this._checkpointPromptRevision++;
+      this._checkpointAwaitingInstantClear = false;
+      this._checkpointInstantClearBaseline = null;
+    }
+    this._checkpointWasReady = ready;
+    this._checkpointLastObservation = { ready, working, revision: this._checkpointPromptRevision };
+    return { ...this._checkpointLastObservation };
+  }
+
+  /**
+   * Normalize a ready frame to its semantic body. Prompt/status-only redraws
+   * remain stable, while `/clear` replacing the visible conversation/banner
+   * produces a new generation even if leave+return happened between polls.
+   */
+  private _checkpointSemanticFrameFingerprint(plain: string): string {
+    return plain
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !/^[›❯](?:\s|$)/.test(line))
+      .filter((line) => !/^(?:gpt-|codex\b|o\d\b).*\s·\s/i.test(line))
+      .filter((line) => !/\b(?:context left|bypass permissions)\b/i.test(line))
+      .join('\n');
+  }
+
+  private _isCheckpointClearRejection(text: string): boolean {
+    return /(?:\b(?:error|unknown command|unrecognized command|invalid command|not found|unsupported)\b[^\n]*\/clear|\/clear[^\n]*\b(?:error|unknown|unrecognized|invalid|not found|unsupported)\b)/i.test(
+      text
+    );
+  }
+
+  private _isConfirmedInstantClearReplacement(current: string): boolean {
+    const baseline = this._checkpointInstantClearBaseline;
+    if (!baseline || !current || current === baseline) return false;
+    const previousLines = baseline.split('\n').filter(Boolean);
+    const currentLines = new Set(current.split('\n').filter(Boolean));
+    // Appended errors, notices, or unrelated rows retain the entire prior
+    // semantic frame. A successful clear must remove/replace prior content.
+    return previousLines.some((line) => !currentLines.has(line));
+  }
+
+  private _noteDirectPtyCheckpointGeneration(data: string): void {
+    if (!this._checkpointAwaitingInstantClear || this.mode !== 'claude' || this._muxSession) return;
+    if (this._isCheckpointClearRejection(data)) {
+      this._checkpointAwaitingInstantClear = false;
+      this._checkpointInstantClearBaseline = null;
+      this._checkpointDirectPtySawClear = false;
+      return;
+    }
+    const sawClearScreen =
+      data.includes('\u001b[J') || data.includes('\u001b[2J') || data.includes('\u001b[3J') || data.includes('\u000c');
+    if (sawClearScreen) {
+      this._checkpointDirectPtySawClear = true;
+    }
+    if (this._checkpointDirectPtySawClear && data.includes('❯')) {
+      this._checkpointPromptRevision++;
+      this._checkpointAwaitingInstantClear = false;
+      this._checkpointInstantClearBaseline = null;
+      this._checkpointDirectPtySawClear = false;
+    }
   }
 
   get autoResumeEnabled(): boolean {
@@ -1122,6 +1324,19 @@ export class Session extends EventEmitter {
     this._attachmentHistory = upsertAttachmentHistoryList(this._attachmentHistory, item);
   }
 
+  /**
+   * Drop attachment-history entries matching `predicate` (COD-241 unit 3).
+   * Used by DELETE …/attachments/uploaded so a removed Codeman-uploaded copy
+   * stops appearing in the paperclip drawer. Returns the number of entries
+   * removed. Operates on the raw (externalPath-bearing) list so callers can
+   * match by absolute path.
+   */
+  removeAttachmentHistory(predicate: (item: SessionAttachmentHistoryItem) => boolean): number {
+    const before = this._attachmentHistory.length;
+    this._attachmentHistory = this._attachmentHistory.filter((item) => !predicate(item));
+    return before - this._attachmentHistory.length;
+  }
+
   restoreAttachmentHistory(history: SessionAttachmentHistoryItem[] | undefined): void {
     this._attachmentHistory = [];
     for (const item of [...(history ?? [])].reverse()) {
@@ -1137,6 +1352,35 @@ export class Session extends EventEmitter {
   getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] | undefined {
     return this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined;
   }
+
+  // ── Sources (COD-65) ──────────────────────────────────────────────────────
+
+  get sources(): SessionSource[] {
+    return [...this._sources];
+  }
+
+  addSource(item: SessionSource): void {
+    const idx = this._sources.findIndex((s) => s.id === item.id);
+    if (idx >= 0) {
+      this._sources[idx] = { ...item };
+    } else {
+      this._sources.push({ ...item });
+    }
+  }
+
+  removeSource(id: string): void {
+    this._sources = this._sources.filter((s) => s.id !== id);
+  }
+
+  restoreSources(data: SessionSource[] | undefined): void {
+    this._sources = data ? data.map((s) => ({ ...s })) : [];
+  }
+
+  getSourcesForPersist(): SessionSource[] | undefined {
+    return this._sources.length > 0 ? this._sources.map((s) => ({ ...s })) : undefined;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   toState(): SessionState {
     return {
@@ -1158,6 +1402,7 @@ export class Session extends EventEmitter {
       checkpointEnabled: this._autoOps.checkpointEnabled,
       checkpointMode: this._autoOps.checkpointMode,
       checkpointModes: this._autoOps.checkpointModes,
+      checkpoint: this._autoOps.checkpointState,
       autoResumeEnabled: this._autoOps.autoResumeEnabled,
       autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
       imageWatcherEnabled: this._imageWatcherEnabled,
@@ -1181,10 +1426,17 @@ export class Session extends EventEmitter {
       cliLatestVersion: this._cliLatestVersion || undefined,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
+      agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       effort: this._effort,
+      // COD-118: runtime-only — surfaced so the frontend can require explicit user
+      // intent before restarting a crash-looped session. Deliberately NOT restored
+      // by the constructor: a Codeman restart starts with a fresh breaker so boot
+      // recovery can re-attach.
+      respawnBlocked: this._respawnBlocked || undefined,
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
+      sources: this.getSourcesForPersist(),
       // envOverrides intentionally NOT on the public SessionState type — they must not
       // leak into SSE / GET /api/sessions broadcasts (schema allows OPENCODE_*, which
       // can carry secrets). For disk persistence, session-manager calls
@@ -1290,7 +1542,7 @@ export class Session extends EventEmitter {
     const mux = this._mux!;
 
     // Verify stale mux session — tmux may have been destroyed (e.g., killed externally)
-    if (this._muxSession && !mux.muxSessionExists(this._muxSession.muxName)) {
+    if (this._muxSession && !(await mux.muxSessionExists(this._muxSession.muxName))) {
       console.log('[Session] Stale mux session detected (tmux gone):', this._muxSession.muxName);
       this._muxSession = null;
     }
@@ -1298,7 +1550,7 @@ export class Session extends EventEmitter {
     // Check if session exists but pane is dead (remain-on-exit keeps it alive)
     // Respawn the pane instead of creating a whole new session — preserves tmux scrollback
     let needsNewSession = false;
-    if (this._muxSession && mux.isPaneDead(this._muxSession.muxName)) {
+    if (this._muxSession && (await mux.isPaneDead(this._muxSession.muxName))) {
       console.log('[Session] Dead pane detected, respawning:', this._muxSession.muxName);
       const newPid = await mux.respawnPane(options.respawnPaneOptions);
       if (!newPid) {
@@ -1368,7 +1620,7 @@ export class Session extends EventEmitter {
 
     // If tmux lost the whole session (not just a dead pane), there is nothing to
     // respawn into — a genuine death, leave it for normal recovery/reconcile.
-    if (!mux.muxSessionExists(this._muxSession.muxName)) {
+    if (!(await mux.muxSessionExists(this._muxSession.muxName))) {
       console.log('[Session] reattachRemote: mux session gone, skipping:', this._muxSession.muxName);
       return false;
     }
@@ -1399,6 +1651,7 @@ export class Session extends EventEmitter {
       allowedTools: this._allowedTools,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
+      agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
@@ -1533,6 +1786,27 @@ export class Session extends EventEmitter {
       `[Session] Starting interactive ${modeLabel} session` + (this._useMux ? ` (with ${this._mux!.backend})` : '')
     );
 
+    // Seed the CLI version deterministically for LOCAL Claude sessions. The
+    // banner scrape in parseClaudeCodeInfo() is unreliable — newer Claude Code
+    // builds don't print "Claude Code vX.Y.Z" at startup and resumed sessions
+    // never show it — which left cliVersion undefined and silently disabled
+    // wheel-forwarding to Claude's own transcript (the only route to history in
+    // repaint/alt-screen mode; issue #154). Remote sessions run claude on
+    // another host, so a local probe wouldn't reflect their version — skip them
+    // and let the banner scrape handle those. Cached process-wide, best-effort.
+    if (this.mode === 'claude' && !this._remote && !this._cliVersion) {
+      const probedVersion = getClaudeCliVersion();
+      if (probedVersion) {
+        this._cliVersion = probedVersion;
+        this.emit('cliInfoUpdated', {
+          version: this._cliVersion,
+          model: this._cliModel,
+          accountType: this._cliAccountType,
+          latestVersion: this._cliLatestVersion,
+        });
+      }
+    }
+
     // If mux wrapping is enabled, create or attach to a mux session
     if (this._useMux && this._mux) {
       try {
@@ -1550,6 +1824,7 @@ export class Session extends EventEmitter {
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
             codexConfig: this._codexConfig,
+            agyConfig: this._agyConfig,
             geminiConfig: this._geminiConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
@@ -1632,6 +1907,9 @@ export class Session extends EventEmitter {
       // Gemini sessions require tmux for Gemini/Google auth env injection via setenv
       if (this.mode === 'gemini') {
         throw new Error('Gemini sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      if (this.mode === 'agy') {
+        throw new Error('Agy sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
@@ -2167,6 +2445,7 @@ export class Session extends EventEmitter {
    * busy/isWorking forever once a turn started).
    */
   private _detectWorkingState(data: string): void {
+    this._noteDirectPtyCheckpointGeneration(data);
     // Detect if Claude is at prompt — the prompt line contains "❯" when waiting for input
     if (data.includes('❯')) {
       // Only start a new timeout if we're not already awaiting idle confirmation
@@ -2706,8 +2985,26 @@ export class Session extends EventEmitter {
    * ```
    */
   write(data: string): void {
+    this._trackCodexSubmit(data);
     if (this.ptyProcess) {
       this.ptyProcess.write(data);
+    }
+  }
+
+  // ── Codex thread tracking ─────────────────────────────────────────────
+  // When a codex pane last submitted a message (Enter). The response-viewer
+  // correlates this against ~/.codex/history.jsonl entry timestamps to find
+  // the thread the pane is ACTUALLY on — the only signal that survives
+  // /resume, /new and /fork typed inside the codex TUI itself.
+  private _codexLastSubmitAt = 0;
+
+  get codexLastSubmitAt(): number {
+    return this._codexLastSubmitAt;
+  }
+
+  private _trackCodexSubmit(data: string): void {
+    if (this.mode === 'codex' && (data.includes('\r') || data.includes('\n'))) {
+      this._codexLastSubmitAt = Date.now();
     }
   }
 
@@ -2764,6 +3061,7 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
+    this._trackCodexSubmit(data);
     if (this._mux && this._muxSession) {
       return this._mux.sendInput(this.id, data);
     }
@@ -2773,6 +3071,47 @@ export class Session extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Checkpoint-only delivery path. The generic boolean input contract remains
+   * unchanged; checkpoint orchestration receives the exact failed stage.
+   */
+  async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
+    const isClear = data.replace(/[\r\n]/g, '').trim() === '/clear';
+    if (isClear) {
+      this._checkpointAwaitingInstantClear = true;
+      this._checkpointInstantClearBaseline = this._checkpointReadyFingerprint;
+      this._checkpointDirectPtySawClear = false;
+    }
+    this._trackCodexSubmit(data);
+    if (this._mux && this._muxSession) {
+      const result = await this._mux.sendCheckpointCommand(this.id, data);
+      if (isClear && !result.ok) {
+        this._checkpointAwaitingInstantClear = false;
+        this._checkpointInstantClearBaseline = null;
+      }
+      return result;
+    }
+    // Claude retains its direct-PTY fallback. Codex and the other external
+    // CLIs require tmux and cannot claim delivery without it.
+    if (this.mode === 'claude' && this.ptyProcess) {
+      try {
+        this.ptyProcess.write(data);
+        return { ok: true, attempt: 1 };
+      } catch (err) {
+        if (isClear) {
+          this._checkpointAwaitingInstantClear = false;
+          this._checkpointInstantClearBaseline = null;
+        }
+        return { ok: false, stage: 'text', error: getErrorMessage(err), attempt: 1 };
+      }
+    }
+    if (isClear) {
+      this._checkpointAwaitingInstantClear = false;
+      this._checkpointInstantClearBaseline = null;
+    }
+    return { ok: false, stage: 'text', error: 'no terminal transport', attempt: 1 };
   }
 
   /** Current PTY dimensions — used to skip no-op resizes that trigger Ink redraws */

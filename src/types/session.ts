@@ -14,6 +14,7 @@
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
  * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, resumeSessionId)
  * - GeminiConfig — Gemini CLI-specific settings (model, approvalMode, resumeSession)
+ * - AgyConfig — Agy CLI-specific settings (model, resumeSession)
  *
  * Cross-domain relationships:
  * - SessionState.respawnConfig embeds RespawnConfig (respawn domain)
@@ -27,6 +28,7 @@
  */
 
 import type { RespawnConfig } from './respawn.js';
+import type { SessionSource } from './sources.js';
 import type { AttachmentDetectedType } from './tools.js';
 
 /** Status of a Claude session */
@@ -41,9 +43,29 @@ export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error';
 export type ClaudeMode = 'dangerously-skip-permissions' | 'normal' | 'allowedTools';
 
 /** Session mode: which CLI backend a session runs */
-export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini';
+export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'agy';
 
-export type RemoteCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini'>;
+export interface SessionCheckpointState {
+  active: boolean;
+  mode: 'compact' | 'clear';
+  phase:
+    | 'requested'
+    | 'waiting-ready'
+    | 'command-submitted'
+    | 'operation-started'
+    | 'operation-complete'
+    | 'continue-submitted'
+    | 'done'
+    | 'failed'
+    | 'aborted';
+  step?: 'compact' | 'clear' | 'init' | 'continue';
+  attempt?: number;
+  stage?: 'text' | 'enter';
+  reason?: string;
+  updatedAt: number;
+}
+
+export type RemoteCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'agy'>;
 
 /**
  * Advanced SSH connection options shared by RemoteHost and SessionRemote.
@@ -194,6 +216,14 @@ export interface GeminiConfig {
   resumeSession?: string;
 }
 
+/** Agy CLI session configuration */
+export interface AgyConfig {
+  /** Model identifier (e.g., "claude-3-5-sonnet"). Passed via --model. */
+  model?: string;
+  /** Resume a previous Agy session ("latest" for --continue, or conversation ID for --conversation). */
+  resumeSession?: string;
+}
+
 /**
  * Configuration for creating a new session
  */
@@ -204,6 +234,8 @@ export interface SessionConfig {
   workingDir: string;
   /** Timestamp when session was created */
   createdAt: number;
+  /** Restored last-known checkpoint status; active work is safely aborted. */
+  checkpointState?: SessionCheckpointState;
 }
 
 /**
@@ -279,6 +311,8 @@ export interface SessionState {
   autoCompactThreshold?: number;
   /** Auto-compact prompt */
   autoCompactPrompt?: string;
+  /** PTY-exit circuit breaker tripped; explicit restart is required. */
+  respawnBlocked?: boolean;
   /** Agent-initiated checkpoint (compact-or-clear, then continue) enabled */
   checkpointEnabled?: boolean;
   /**
@@ -293,6 +327,8 @@ export interface SessionState {
    * when allowed, else clear.
    */
   checkpointModes?: Array<'compact' | 'clear'>;
+  /** Durable most-recent checkpoint lifecycle record, including terminal outcomes. */
+  checkpoint?: SessionCheckpointState;
   /** Auto-resume on usage limit enabled */
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */
@@ -345,12 +381,16 @@ export interface SessionState {
   codexConfig?: CodexConfig;
   /** Gemini-specific configuration (only for mode === 'gemini') */
   geminiConfig?: GeminiConfig;
+  /** Agy-specific configuration (only for mode === 'agy') */
+  agyConfig?: AgyConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort?: EffortLevel;
   /** Sanitized per-session attachment history. */
   attachmentHistory?: SessionAttachmentHistoryItem[];
+  /** Per-session reference sources (COD-65). */
+  sources?: SessionSource[];
 }
 
 /**

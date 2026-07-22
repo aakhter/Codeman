@@ -47,6 +47,7 @@ import {
   type SessionMode,
   type OpenCodeConfig,
   type CodexConfig,
+  type AgyConfig,
   type GeminiConfig,
   type EffortLevel,
   type SessionRemote,
@@ -59,6 +60,7 @@ import {
   resolveOpenCodeDir,
   resolveCodexDir,
   resolveGeminiDir,
+  resolveAgyDir,
 } from './utils/index.js';
 import type {
   TerminalMultiplexer,
@@ -66,6 +68,7 @@ import type {
   MuxSessionWithStats,
   CreateSessionOptions,
   RespawnPaneOptions,
+  CommandDeliveryResult,
 } from './mux-interface.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import {
@@ -114,7 +117,6 @@ const DEFAULT_STATS_INTERVAL_MS = 2000;
 const DEFAULT_REMOTE_RECONNECT_INTERVAL_MS = 5000;
 
 /** Remote SSH connects should fail fast; TCP default retries can hang UI actions for minutes. */
-const REMOTE_SSH_CONNECT_TIMEOUT_OPTION = '-o ConnectTimeout=10';
 
 /** Wait slightly longer than SSH ConnectTimeout before accepting a remote respawn as connected. */
 const REMOTE_RESPAWN_CONNECT_VERIFY_WAIT_MS = 10_500;
@@ -165,6 +167,8 @@ const LEGACY_MUX_NAME_PATTERN = /^claudeman-[a-f0-9-]+$/;
 
 /** Regex to validate tmux pane targets (e.g., "%3" pane ids, "0" pane indexes, or active pane). */
 const SAFE_PANE_TARGET_PATTERN = /^(%\d+|\d+|active)$/;
+/** Bare Codex skill token that opens the interactive picker before submission. */
+const CODEX_SKILL_INVOCATION_PATTERN = /^\$[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 /** Dedicated tmux socket for new Codeman-owned sessions (instance-scoped:
  *  `codeman` for prod, `codeman-beta` on the beta branch). */
@@ -826,6 +830,33 @@ function buildGeminiCommand(config?: GeminiConfig): string {
 }
 
 /**
+ * Build the Agy CLI command with appropriate flags.
+ *
+ * Uses --dangerously-skip-permissions to match Codeman's Claude default.
+ * --continue resumes the latest conversation; --conversation <id> resumes
+ * a specific one.
+ */
+function buildAgyCommand(config?: AgyConfig): string {
+  const parts = ['agy', '--dangerously-skip-permissions'];
+
+  if (config?.model) {
+    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
+    if (safeModel) parts.push('--model', safeModel);
+  }
+
+  if (config?.resumeSession) {
+    if (config.resumeSession === 'latest') {
+      parts.push('--continue');
+    } else {
+      const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeSession) ? config.resumeSession : undefined;
+      if (safeId) parts.push('--conversation', safeId);
+    }
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
@@ -851,6 +882,7 @@ function buildSpawnCommand(options: {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
+  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
@@ -881,6 +913,9 @@ function buildSpawnCommand(options: {
   }
   if (options.mode === 'gemini') {
     return buildGeminiCommand(options.geminiConfig);
+  }
+  if (options.mode === 'agy') {
+    return buildAgyCommand(options.agyConfig);
   }
   return '$SHELL';
 }
@@ -972,19 +1007,10 @@ export function buildRemoteLaunchCommand(options: {
   //
   // COD-107 — connection options (port, identity, SOCKS ProxyCommand, jump host,
   // arbitrary -o) come from the shared `buildSshConnectionArgs` so the launch and
-  // the tmux-prereq probe connect IDENTICALLY. `-t` is inserted right after
-  // `ssh -o BatchMode=yes` (preserving the historical token order), then the rest
-  // of the connection args, then the target and the quoted tmux invocation.
-  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [
-    ssh,
-    batchMode,
-    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
-    '-t',
-    ...connectionArgs,
-    remoteSshTarget(remote),
-    shellescape(tmuxInvocation),
-  ];
+  // the tmux-prereq probe connect IDENTICALLY. The shared builder includes the
+  // bounded connection timeout; `-t` follows all connection options.
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(remote);
+  const sshParts = [ssh, ...connectionArgs, '-t', remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
@@ -1005,21 +1031,13 @@ export function buildRemoteLaunchCommand(options: {
  *   single token inside the quoted tmux invocation.
  * - COD-107 — connection options (`-p`, `-i`, `-J`, SOCKS `-o ProxyCommand`,
  *   arbitrary `-o`) come from the shared `buildSshConnectionArgs`, so attach
- *   connects identically to launch / discovery / the prereq probe. `-t` sits
- *   right after `ssh -o BatchMode=yes` (a PTY is required for interactive tmux).
+ *   connects identically to launch / discovery / the prereq probe. `-t` follows
+ *   the connection options (a PTY is required for interactive tmux).
  */
 export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionName: string): string {
   const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman attach -t ${shellescape(remoteSessionName)}`);
-  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [
-    ssh,
-    batchMode,
-    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
-    '-t',
-    ...connectionArgs,
-    remoteSshTarget(remote),
-    shellescape(tmuxInvocation),
-  ];
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(remote);
+  const sshParts = [ssh, ...connectionArgs, '-t', remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
@@ -1033,15 +1051,7 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
  */
 export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
   const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`);
-  const [ssh, batchMode, ...connectionArgs] = buildSshConnectionArgs(remote);
-  const sshParts = [
-    ssh,
-    batchMode,
-    REMOTE_SSH_CONNECT_TIMEOUT_OPTION,
-    ...connectionArgs,
-    remoteSshTarget(remote),
-    shellescape(tmuxInvocation),
-  ];
+  const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
 
@@ -1076,7 +1086,7 @@ function buildRemoteSessionCommand(
  * Set sensitive environment variables on a tmux session via setenv.
  * These are inherited by panes but not visible in ps output or tmux history.
  */
-function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): void {
+async function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
   const sensitiveVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY'];
   for (const key of sensitiveVars) {
     const val = process.env[key];
@@ -1084,10 +1094,9 @@ function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): void {
       // Shell-escape: wrap in single quotes, escape any inner single quotes
       const escaped = val.replace(/'/g, "'\\''");
       try {
-        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
+        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
           encoding: 'utf8',
           timeout: EXEC_TIMEOUT_MS,
-          stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch {
         /* Non-critical — key may not be needed */
@@ -1100,17 +1109,16 @@ function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): void {
  * Set sensitive environment variables for Codex on a tmux session via setenv.
  * Codex (OpenAI CLI) needs OPENAI_API_KEY; we also forward CODEX_* keys.
  */
-function setCodexEnvVars(tmuxCmd: string, muxName: string): void {
+async function setCodexEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
   const sensitiveVars = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
   for (const key of sensitiveVars) {
     const val = process.env[key];
     if (val) {
       const escaped = val.replace(/'/g, "'\\''");
       try {
-        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
+        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
           encoding: 'utf8',
           timeout: EXEC_TIMEOUT_MS,
-          stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch {
         /* Non-critical — key may not be needed */
@@ -1124,7 +1132,7 @@ function setCodexEnvVars(tmuxCmd: string, muxName: string): void {
  * Gemini Pro/Ultra users usually authenticate via cached Google login; these
  * variables cover API-key and Vertex AI paths without putting secrets in ps.
  */
-function setGeminiEnvVars(tmuxCmd: string, muxName: string): void {
+async function setGeminiEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
   const sensitiveVars = [
     'GEMINI_API_KEY',
     'GEMINI_MODEL',
@@ -1139,10 +1147,9 @@ function setGeminiEnvVars(tmuxCmd: string, muxName: string): void {
     if (val) {
       const escaped = val.replace(/'/g, "'\\''");
       try {
-        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
+        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
           encoding: 'utf8',
           timeout: EXEC_TIMEOUT_MS,
-          stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch {
         /* Non-critical — key may not be needed */
@@ -1155,7 +1162,7 @@ function setGeminiEnvVars(tmuxCmd: string, muxName: string): void {
  * Set OPENCODE_CONFIG_CONTENT on a tmux session via setenv.
  * Uses tmux setenv to avoid shell metacharacter injection from user-supplied JSON.
  */
-function setOpenCodeConfigContent(tmuxCmd: string, muxName: string, config?: OpenCodeConfig): void {
+async function setOpenCodeConfigContent(tmuxCmd: string, muxName: string, config?: OpenCodeConfig): Promise<void> {
   if (!config) return;
 
   let jsonContent: string | undefined;
@@ -1186,10 +1193,9 @@ function setOpenCodeConfigContent(tmuxCmd: string, muxName: string, config?: Ope
   if (jsonContent) {
     const escaped = jsonContent.replace(/'/g, "'\\''");
     try {
-      execSync(`${tmuxCmd} setenv -t '${muxName}' OPENCODE_CONFIG_CONTENT '${escaped}'`, {
+      await execAsync(`${tmuxCmd} setenv -t '${muxName}' OPENCODE_CONFIG_CONTENT '${escaped}'`, {
         encoding: 'utf8',
         timeout: EXEC_TIMEOUT_MS,
-        stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch {
       /* Non-critical */
@@ -1250,9 +1256,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private reconnectGuard: Set<string> = new Set();
 
   private trueColorConfigured = false;
+  private readonly checkpointExecutor?: (command: string) => Promise<void>;
+  private readonly checkpointDelayMs: number;
 
-  constructor() {
+  constructor(options: { checkpointExecutor?: (command: string) => Promise<void>; checkpointDelayMs?: number } = {}) {
     super();
+    this.checkpointExecutor = options.checkpointExecutor;
+    this.checkpointDelayMs = options.checkpointDelayMs ?? 50;
     this.setMaxListeners(50);
     if (!IS_TEST_MODE) {
       this.loadSessions();
@@ -1366,14 +1376,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
     // background/color palette negotiation matches xterm's 24-bit renderer.
     const colorTermExport =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || truecolorEnabled
+      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy' || truecolorEnabled
         ? 'export COLORTERM=truecolor'
         : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
       colorTermExport,
-      ...(mode === 'codex' || mode === 'gemini' ? ['unset NO_COLOR'] : []),
+      ...(mode === 'codex' || mode === 'gemini' || mode === 'agy' ? ['unset NO_COLOR'] : []),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,
@@ -1397,15 +1407,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Key validation is strict (`/^[A-Z_][A-Z0-9_]*$/`) as defense-in-depth against
    * shell-metachar injection even if upstream schema check is bypassed.
    */
-  private applyEnvOverrides(muxName: string, envOverrides?: Record<string, string>): void {
+  private async applyEnvOverrides(muxName: string, envOverrides?: Record<string, string>): Promise<void> {
     // Legacy cleanup: pre-0.7.2 set CLAUDE_CODE_EFFORT_LEVEL via setenv, which persists
     // on the tmux session and hard-locks /effort switching in every respawned pane.
     // Effort now flows as a `--settings` soft default (see buildEffortSettingsFlag),
     // so unconditionally unset the stale var before applying current overrides.
     try {
-      execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} -u CLAUDE_CODE_EFFORT_LEVEL`, {
+      await execAsync(`${this.tmux()} setenv -t ${shellescape(muxName)} -u CLAUDE_CODE_EFFORT_LEVEL`, {
         timeout: EXEC_TIMEOUT_MS,
-        stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch {
       /* Non-critical — var may not exist */
@@ -1419,9 +1428,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         continue;
       }
       try {
-        execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} ${key} ${shellescape(value)}`, {
+        await execAsync(`${this.tmux()} setenv -t ${shellescape(muxName)} ${key} ${shellescape(value)}`, {
           timeout: EXEC_TIMEOUT_MS,
-          stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (err) {
         console.warn(`[TmuxManager] Failed to set env override ${key}:`, err);
@@ -1451,6 +1459,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const dir = resolveGeminiDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
+    if (mode === 'agy') {
+      const dir = resolveAgyDir();
+      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+    }
     return { pathExport: '', dir: null };
   }
 
@@ -1459,10 +1471,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Sets sensitive API keys and config content via tmux setenv
    * (not visible in ps output or tmux history, inherited by panes).
    */
-  private _configureOpenCode(muxName: string, openCodeConfig?: OpenCodeConfig): void {
+  private async _configureOpenCode(muxName: string, openCodeConfig?: OpenCodeConfig): Promise<void> {
     const tmuxCmd = this.tmux();
-    setOpenCodeEnvVars(tmuxCmd, muxName);
-    setOpenCodeConfigContent(tmuxCmd, muxName, openCodeConfig);
+    await setOpenCodeEnvVars(tmuxCmd, muxName);
+    await setOpenCodeConfigContent(tmuxCmd, muxName, openCodeConfig);
   }
 
   /**
@@ -1470,15 +1482,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Sets OPENAI_API_KEY (and related keys) via tmux setenv so secrets don't
    * appear in the bash command line.
    */
-  private _configureCodex(muxName: string): void {
-    setCodexEnvVars(this.tmux(), muxName);
+  private async _configureCodex(muxName: string): Promise<void> {
+    await setCodexEnvVars(this.tmux(), muxName);
   }
 
   /**
    * Configure Gemini-specific environment on a tmux session.
    */
-  private _configureGemini(muxName: string): void {
-    setGeminiEnvVars(this.tmux(), muxName);
+  private async _configureGemini(muxName: string): Promise<void> {
+    await setGeminiEnvVars(this.tmux(), muxName);
   }
 
   /**
@@ -1497,6 +1509,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       envOverrides,
@@ -1548,6 +1561,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (mode === 'gemini' && !cliDir) {
       throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
     }
+    if (mode === 'agy' && !cliDir) {
+      throw new Error('Agy CLI not found. Install from antigravity.');
+    }
 
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
     // live desired state (toggle + proxy health) right before spawn so a down proxy
@@ -1575,6 +1591,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       effort,
@@ -1609,12 +1626,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // pattern). The fire-and-forget per-session set in configPromises never
       // reached this pane: local shells retained only tmux's 2000-line
       // default and a 10k-line burst lost its head (COD-189 measurement).
-      execSync(
+      await execAsync(
         `${this.tmux()} set-option -g history-limit ${Math.floor(historyLimit)} \\; new-session -ds "${muxName}" -c ${TMUX_LAUNCH_CWD}`,
         {
           cwd: TMUX_LAUNCH_CWD,
           timeout: EXEC_TIMEOUT_MS,
-          stdio: 'ignore',
           env: cleanEnv,
         }
       );
@@ -1625,9 +1641,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Set remain-on-exit now that the server is running — must be before respawn-pane
       try {
-        execSync(`${this.tmux()} set-option -t "${muxName}" remain-on-exit on`, {
+        await execAsync(`${this.tmux()} set-option -t "${muxName}" remain-on-exit on`, {
           timeout: EXEC_TIMEOUT_MS,
-          stdio: 'ignore',
         });
       } catch {
         /* Non-critical */
@@ -1636,29 +1651,28 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // For OpenCode: set sensitive env vars and config via tmux setenv
       // (not visible in ps output or tmux history, inherited by panes)
       if (mode === 'opencode') {
-        this._configureOpenCode(muxName, openCodeConfig);
+        await this._configureOpenCode(muxName, openCodeConfig);
       }
       // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv
       if (mode === 'codex') {
-        this._configureCodex(muxName);
+        await this._configureCodex(muxName);
       }
       // For Gemini: set Gemini/Google auth env vars via tmux setenv
       if (mode === 'gemini') {
-        this._configureGemini(muxName);
+        await this._configureGemini(muxName);
       }
 
       // Apply user-supplied env overrides (e.g., CLAUDE_CODE_EFFORT_LEVEL) via tmux setenv
       // so secret values stay off the bash command line. Must run before respawn-pane.
-      this.applyEnvOverrides(muxName, envOverrides);
+      await this.applyEnvOverrides(muxName, envOverrides);
 
       // Replace the shell with the actual command (no echo in terminal). Keep
       // pane launch in /tmp, then cd inside bash against the current mount table.
       const launchCmd = remote ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      execSync(
+      await execAsync(
         `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
         {
           timeout: EXEC_TIMEOUT_MS,
-          stdio: 'ignore',
         }
       );
 
@@ -1683,7 +1697,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             /* Already set globally as fallback */
           }),
         // Raise tmux scrollback from its 2000-line default so re-attach preserves
-        // more context. Defaults match the xterm-side setting.
+        // more context. Intentionally exceeds the xterm-side DEFAULT_SCROLLBACK (50k
+        // in constants.js), which stays lower to protect browser/mobile memory.
         execAsync(`${this.tmux()} set-option -t "${muxName}" history-limit ${historyLimit}`, {
           timeout: EXEC_TIMEOUT_MS,
         })
@@ -1711,10 +1726,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       void Promise.all(configPromises);
 
       // Get the PID of the pane process (retry for tmux server cold-start)
-      let pid = this.getPanePid(muxName);
+      let pid = await this.getPanePid(muxName);
       for (let i = 0; !pid && i < GET_PID_MAX_RETRIES; i++) {
         await new Promise((resolve) => setTimeout(resolve, GET_PID_RETRY_MS));
-        pid = this.getPanePid(muxName);
+        pid = await this.getPanePid(muxName);
       }
       if (!pid) {
         throw new Error('Failed to get tmux pane PID');
@@ -1746,7 +1761,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   /**
    * Get the PID of the process running in the tmux pane.
    */
-  private getPanePid(muxName: string): number | null {
+  private async getPanePid(muxName: string): Promise<number | null> {
     if (IS_TEST_MODE) return 99999;
 
     if (!isValidMuxName(muxName)) {
@@ -1755,11 +1770,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     try {
-      const output = execSync(`${this.tmux()} display-message -t "${muxName}" -p '#{pane_pid}'`, {
+      const { stdout } = await execAsync(`${this.tmux()} display-message -t "${muxName}" -p '#{pane_pid}'`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
-      }).trim();
-      const pid = parseInt(output, 10);
+      });
+      const pid = parseInt(stdout.trim(), 10);
       return Number.isNaN(pid) ? null : pid;
     } catch {
       return null;
@@ -1769,7 +1784,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   /**
    * Check if a tmux session exists.
    */
-  muxSessionExists(muxName: string): boolean {
+  async muxSessionExists(muxName: string): Promise<boolean> {
     return this.sessionExists(muxName);
   }
 
@@ -1777,15 +1792,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Check if the pane in a tmux session is dead (command exited but remain-on-exit keeps it).
    * Returns true if the session exists but the pane's command has exited.
    */
-  isPaneDead(muxName: string): boolean {
+  async isPaneDead(muxName: string): Promise<boolean> {
     if (IS_TEST_MODE) return false;
     if (!isValidMuxName(muxName)) return false;
     try {
-      const output = execSync(`${this.tmux()} display-message -t "${muxName}" -p '#{pane_dead}'`, {
+      const { stdout } = await execAsync(`${this.tmux()} display-message -t "${muxName}" -p '#{pane_dead}'`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
-      }).trim();
-      return output === '1';
+      });
+      return stdout.trim() === '1';
     } catch {
       return false;
     }
@@ -1807,6 +1822,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       envOverrides,
@@ -1853,6 +1869,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
+      agyConfig,
       geminiConfig,
       resumeSessionId,
       effort,
@@ -1867,19 +1884,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     try {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn
       if (mode === 'opencode') {
-        this._configureOpenCode(muxName, openCodeConfig);
+        await this._configureOpenCode(muxName, openCodeConfig);
       }
       // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv before respawn
       if (mode === 'codex') {
-        this._configureCodex(muxName);
+        await this._configureCodex(muxName);
       }
       // For Gemini: set Gemini/Google auth env vars via tmux setenv before respawn
       if (mode === 'gemini') {
-        this._configureGemini(muxName);
+        await this._configureGemini(muxName);
       }
 
       // Re-apply user env overrides before respawn so the new shell inherits them.
-      this.applyEnvOverrides(muxName, envOverrides);
+      await this.applyEnvOverrides(muxName, envOverrides);
       await execAsync(`${this.tmux()} set-option -t ${shellescape(muxName)} history-limit ${historyLimit}`, {
         timeout: EXEC_TIMEOUT_MS,
       }).catch(() => {
@@ -1896,16 +1913,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       );
       // Wait for the respawned process to start
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
-      const pid = this.getPanePid(muxName);
+      const pid = await this.getPanePid(muxName);
       if (!pid) return null;
       if (remote) {
         await new Promise((resolve) => setTimeout(resolve, REMOTE_RESPAWN_CONNECT_VERIFY_WAIT_MS));
-        if (this.isPaneDead(muxName)) {
+        if (await this.isPaneDead(muxName)) {
           console.error(`[TmuxManager] Remote respawn failed after SSH connect window: ${muxName}`);
           return null;
         }
       }
-      const verifiedPid = this.getPanePid(muxName) ?? pid;
+      const verifiedPid = (await this.getPanePid(muxName)) ?? pid;
       session.pid = verifiedPid;
       return verifiedPid;
     } catch (err) {
@@ -1914,12 +1931,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
-  private sessionExists(muxName: string): boolean {
+  private async sessionExists(muxName: string): Promise<boolean> {
     if (IS_TEST_MODE) return false;
     if (!isValidMuxName(muxName)) return false;
 
     try {
-      execSync(`${this.tmux()} has-session -t "${muxName}" 2>/dev/null`, {
+      await execAsync(`${this.tmux()} has-session -t "${muxName}" 2>/dev/null`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
       });
@@ -2033,7 +2050,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       if (isValidMuxName(session.muxName)) {
         try {
           // Local socket only — detaches the remote session by killing the local ssh pane.
-          execSync(`${this.tmux()} kill-session -t "${session.muxName}" 2>/dev/null`, {
+          await execAsync(`${this.tmux()} kill-session -t "${session.muxName}" 2>/dev/null`, {
             timeout: EXEC_TIMEOUT_MS,
           });
         } catch {
@@ -2059,7 +2076,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(sessionId);
       if (isValidMuxName(remoteName)) {
         try {
-          execSync(buildRemoteKillCommand(session.remote, remoteName), { timeout: EXEC_TIMEOUT_MS });
+          await execAsync(buildRemoteKillCommand(session.remote, remoteName), { timeout: EXEC_TIMEOUT_MS });
           console.log(`[TmuxManager] COD-109 killed owned remote session ${remoteName} on ${session.remote.host}`);
         } catch {
           // Remote unreachable or session already gone — local teardown still runs.
@@ -2068,7 +2085,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     // Get current PID (may have changed)
-    const currentPid = this.getPanePid(session.muxName) || session.pid;
+    const currentPid = (await this.getPanePid(session.muxName)) || session.pid;
 
     console.log(`[TmuxManager] Killing session ${session.muxName} (PID ${currentPid})`);
 
@@ -2120,7 +2137,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Strategy 3: Kill tmux session by name (guard the name before it reaches the shell)
     if (isValidMuxName(session.muxName)) {
       try {
-        execSync(`${this.tmux()} kill-session -t "${session.muxName}" 2>/dev/null`, {
+        await execAsync(`${this.tmux()} kill-session -t "${session.muxName}" 2>/dev/null`, {
           timeout: EXEC_TIMEOUT_MS,
         });
       } catch {
@@ -2209,11 +2226,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     let panes: ParsedPane[];
     let active: Map<string, number>;
     try {
-      const output = execSync(`${this.tmux()} list-panes -a -F '${PANE_LIST_FORMAT}' 2>/dev/null || true`, {
+      const { stdout } = await execAsync(`${this.tmux()} list-panes -a -F '${PANE_LIST_FORMAT}' 2>/dev/null || true`, {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
-      }).trim();
-      panes = parsePaneRecords(output);
+      });
+      panes = parsePaneRecords(stdout.trim());
       active = new Map(panes.filter((pane) => !pane.dead).map((pane) => [pane.name, pane.pid]));
     } catch (err) {
       console.error('[TmuxManager] Failed to list tmux panes:', err);
@@ -2252,7 +2269,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         continue;
       }
       try {
-        execSync(`${this.tmux()} kill-session -t "${pane.name}" 2>/dev/null`, {
+        await execAsync(`${this.tmux()} kill-session -t "${pane.name}" 2>/dev/null`, {
           timeout: EXEC_TIMEOUT_MS,
         });
         console.log(`[TmuxManager] Cleaned up untracked dead tmux session: ${pane.name}`);
@@ -2537,10 +2554,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (this.remoteReconnectInterval) {
       clearInterval(this.remoteReconnectInterval);
     }
-    this.remoteReconnectInterval = setInterval(() => {
+    this.remoteReconnectInterval = setInterval(async () => {
       if (IS_TEST_MODE) return;
       try {
-        this.runRemoteReconnectTick(Date.now(), isRemoteAutoReconnectEnabled());
+        await this.runRemoteReconnectTick(Date.now(), isRemoteAutoReconnectEnabled());
       } catch (err) {
         console.error('[TmuxManager] Remote reconnect watcher error:', err);
       }
@@ -2561,7 +2578,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * applies the pure {@link decideReconnect} decision and translates the result
    * into events + backoff/state transitions. Public for tests + the watcher.
    */
-  runRemoteReconnectTick(now: number, enabled: boolean): void {
+  async runRemoteReconnectTick(now: number, enabled: boolean): Promise<void> {
     for (const session of this.sessions.values()) {
       if (!session.remote) continue;
       const sessionId = session.sessionId;
@@ -2570,7 +2587,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         session: {
           sessionId,
           isRemote: true,
-          paneDead: this.isPaneDead(session.muxName),
+          paneDead: await this.isPaneDead(session.muxName),
         },
         state,
         guarded: this.reconnectGuard.has(sessionId),
@@ -2735,6 +2752,89 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       console.error('[TmuxManager] Failed to send input:', err);
       return false;
     }
+  }
+
+  /**
+   * Submit checkpoint input with independently acknowledged text and Enter
+   * stages. Each stage gets one bounded retry; an acknowledged text stage is
+   * never repeated merely because Enter failed.
+   */
+  async sendCheckpointCommand(sessionId: string, input: string): Promise<CommandDeliveryResult> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return { ok: false, stage: 'text', error: `no session found for ${sessionId}`, attempt: 1 };
+    }
+    if (!isValidMuxName(session.muxName)) {
+      return { ok: false, stage: 'text', error: `invalid session name: ${session.muxName}`, attempt: 1 };
+    }
+
+    // Normal vitest instances remain a no-op for tmux safety. A deliberately
+    // injected executor exercises this exact production adapter without
+    // touching the user's tmux server.
+    if (IS_TEST_MODE && !this.checkpointExecutor) return { ok: true, attempt: 1 };
+
+    const hasCarriageReturn = input.includes('\r');
+    const textPart = input.replace(/\r/g, '').replace(/\n/g, '').trimEnd();
+    const isCodexSkillInvocation = session.mode === 'codex' && CODEX_SKILL_INVOCATION_PATTERN.test(textPart);
+    const textCommand = `${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(textPart)}`;
+    const enterCommand = `${this.tmux()} send-keys -t "${session.muxName}" Enter`;
+    let deliveryAttempt = 1;
+
+    const execute = async (command: string): Promise<void> => {
+      if (this.checkpointExecutor) {
+        await this.checkpointExecutor(command);
+        return;
+      }
+      await execAsync(command, { timeout: EXEC_TIMEOUT_MS });
+    };
+
+    const runStage = async (
+      stage: 'text' | 'enter',
+      command: string
+    ): Promise<{ ok: true } | { ok: false; result: CommandDeliveryResult }> => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        deliveryAttempt = Math.max(deliveryAttempt, attempt);
+        try {
+          await execute(command);
+          return { ok: true };
+        } catch (err) {
+          if (attempt === 2) {
+            return {
+              ok: false,
+              result: { ok: false, stage, error: getErrorMessage(err), attempt },
+            };
+          }
+        }
+      }
+      return { ok: false, result: { ok: false, stage, attempt: 2 } };
+    };
+
+    if (textPart) {
+      const text = await runStage('text', textCommand);
+      if (!text.ok) return text.result;
+    }
+
+    if (hasCarriageReturn) {
+      if (textPart && this.checkpointDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.checkpointDelayMs));
+      }
+      const enter = await runStage('enter', enterCommand);
+      if (!enter.ok) return enter.result;
+
+      if (isCodexSkillInvocation) {
+        // Codex's first Enter accepts the picker selection and stages the skill
+        // token; a second, independently acknowledged Enter submits the turn.
+        // Reusing runStage means a submission retry never replays text or the
+        // already-acknowledged selection Enter.
+        if (this.checkpointDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.checkpointDelayMs));
+        }
+        const submit = await runStage('enter', enterCommand);
+        if (!submit.ok) return submit.result;
+      }
+    }
+
+    return { ok: true, attempt: deliveryAttempt };
   }
 
   // ========== Pane Methods (for Agent Team teammate panes) ==========
@@ -2971,7 +3071,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // diagonally in a fresh xterm (COD-138, same reason as the fullHistory path).
       return normalizeScrollbackEol(buffer);
     } catch (err) {
-      console.error('[TmuxManager] Failed to capture pane buffer:', err);
+      // ENOBUFS carries the truncated multi-MB stdout on the error object —
+      // log a concise line instead of dumping it into the journal.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOBUFS') {
+        console.error('[TmuxManager] Pane capture exceeded maxBuffer (ENOBUFS); falling back to byte history');
+      } else {
+        console.error('[TmuxManager] Failed to capture pane buffer:', err);
+      }
       return null;
     }
   }

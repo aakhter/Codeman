@@ -379,6 +379,16 @@ export function registerSystemRoutes(
     };
   });
 
+  // ========== Agy ==========
+
+  app.get('/api/agy/status', async () => {
+    const { isAgyAvailable, resolveAgyDir } = await import('../../utils/agy-cli-resolver.js');
+    return {
+      available: isAgyAvailable(),
+      path: resolveAgyDir(),
+    };
+  });
+
   // ========== Headroom ==========
   app.get('/api/headroom/status', async () => {
     const cfg = getHeadroomConfig();

@@ -79,6 +79,27 @@ describe('terminal link-provider regexes (shipped source)', () => {
     }
   });
 
+  it('urlPattern matches webexteams deep links', () => {
+    const url = shippedPattern('urlPattern');
+    const line =
+      'review this room webexteams://im?space=db14f330-717d-11f1-92da-c19ce73d6ecd&message=05032d90-7b3a-11f1-9f3d-f3d08f0a5540';
+    url.lastIndex = 0;
+    const m = url.exec(line);
+    expect(m).not.toBeNull();
+    expect(m![0]).toBe(
+      'webexteams://im?space=db14f330-717d-11f1-92da-c19ce73d6ecd&message=05032d90-7b3a-11f1-9f3d-f3d08f0a5540'
+    );
+  });
+
+  it('urlPattern excludes trailing punctuation from webexteams links', () => {
+    const url = shippedPattern('urlPattern');
+    const line = 'see webexteams://im?space=a&message=b).';
+    url.lastIndex = 0;
+    const m = url.exec(line);
+    expect(m).not.toBeNull();
+    expect(m![0]).toBe('webexteams://im?space=a&message=b');
+  });
+
   it('cmdPattern arg group cannot match empty tokens (the exponential trigger)', () => {
     // structural guard: the dangerous construct is an empty-matchable token
     // inside a repeated group — `[^\s\/]*\s+` repeated. Check the pattern

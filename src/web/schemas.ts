@@ -173,13 +173,29 @@ const GeminiConfigSchema = z
   })
   .optional();
 
+/** Schema for Agy CLI-specific configuration */
+const AgyConfigSchema = z
+  .object({
+    model: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._\-/]+$/)
+      .optional(),
+    resumeSession: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._-]+$/)
+      .optional(),
+  })
+  .optional();
+
 export const CreateSessionSchema = z.object({
   caseName: z
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
     .optional(),
   workingDir: safePathSchema.optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy']).optional(),
   name: z.string().max(100).optional(),
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
@@ -191,6 +207,7 @@ export const CreateSessionSchema = z.object({
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
+  agyConfig: AgyConfigSchema,
   /** Resume a previous Claude conversation by its session ID (used for reboot recovery) */
   resumeSessionId: z
     .string()
@@ -414,10 +431,11 @@ export const QuickStartSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.')
     .optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy']).optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
+  agyConfig: AgyConfigSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
@@ -526,6 +544,23 @@ export const SettingsUpdateSchema = z
     // CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK env var. Stripped before persisting.
     acknowledgeUnauthTunnel: z.boolean().optional(),
     tabTwoRows: z.boolean().optional(),
+    // COD-242: custom keyboard shortcut overrides. Persisted server-side (settings.json)
+    // so they survive restarts, deploys, and upgrades. Keyed by shortcut id; each value
+    // carries an optional binding list (each binding an object: key/code/modifiers) and a
+    // disabled flag. The value object is permissive (.passthrough) so overrides round-trip
+    // without silently dropping fields; the client (getShortcutRegistry) tolerates missing
+    // or malformed entries by falling back to defaults.
+    shortcutOverrides: z
+      .record(
+        z.string().max(100),
+        z
+          .object({
+            bindings: z.array(z.record(z.string(), z.unknown())).max(16).optional(),
+            disabled: z.boolean().optional(),
+          })
+          .passthrough()
+      )
+      .optional(),
     agentTeamsEnabled: z.boolean().optional(),
     opusContext1mEnabled: z.boolean().optional(),
     // Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75); default off
@@ -551,6 +586,7 @@ export const SettingsUpdateSchema = z
     showSubagents: z.boolean().optional(),
     showMultiMonitorButton: z.boolean().optional(),
     showPlanUsageLimits: z.boolean().optional(),
+    showAwayDigest: z.boolean().optional(),
     // Action field (NOT persisted as a setting): when true, (re)injects the
     // plan-usage statusLine exporter into active Claude sessions so live usage %
     // starts flowing. Sent on ENABLE only — the chip's DISPLAY is per-device
@@ -783,6 +819,73 @@ export const ScheduledRunSchema = z.object({
   durationMinutes: z.number().int().min(1).max(14400).optional(),
 });
 
+// ========== Cron Jobs ==========
+
+/** 'HH:MM' 24-hour time. */
+const hhmmSchema = z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'Time must be HH:MM (24-hour)');
+
+/** Prompt delivery is single-line only (writeViaMux/Ink constraint) — reject newlines outright. */
+const noNewlines = (v: string) => !/[\r\n]/.test(v);
+
+/** Shared field shape for creating/updating a scheduled job. */
+const CronJobBaseSchema = z.object({
+  name: z.string().min(1).max(200),
+  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']),
+  workingDir: safePathSchema,
+  launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
+  promptMode: z.enum(['inline_text', 'prompt_file_path']),
+  promptText: z
+    .string()
+    .max(100000)
+    .refine(noNewlines, 'promptText must be a single line (multi-line prompts are not supported)')
+    .optional(),
+  promptFilePath: safePathSchema.optional(),
+  inputMode: z.enum(['paste', 'typed']),
+  scheduleType: z.enum(['once', 'interval', 'daily', 'weekly']),
+  runAt: z.number().int().positive().optional(),
+  intervalMinutes: z.number().int().min(1).max(525600).optional(),
+  dailyTime: hhmmSchema.optional(),
+  weeklyDays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+  weeklyTime: hhmmSchema.optional(),
+  enabled: z.boolean(),
+  notes: z.string().max(2000).optional(),
+  concurrencyPolicy: z.enum(['warn_only', 'skip_if_same_agent_running']),
+  autoClosePreviousSession: z.boolean().optional(),
+});
+
+/** Cross-field validation: required fields depend on promptMode + scheduleType. */
+function refineCronJob(val: z.infer<typeof CronJobBaseSchema>, ctx: z.RefinementCtx): void {
+  const add = (message: string, path: string) => ctx.addIssue({ code: 'custom', message, path: [path] });
+
+  if (val.promptMode === 'inline_text' && !val.promptText) {
+    add('promptText is required when promptMode is inline_text', 'promptText');
+  }
+  if (val.promptMode === 'prompt_file_path' && !val.promptFilePath) {
+    add('promptFilePath is required when promptMode is prompt_file_path', 'promptFilePath');
+  }
+  if (val.scheduleType === 'once' && val.runAt === undefined) {
+    add('runAt is required for a one-time schedule', 'runAt');
+  }
+  if (val.scheduleType === 'interval' && val.intervalMinutes === undefined) {
+    add('intervalMinutes is required for an interval schedule', 'intervalMinutes');
+  }
+  if (val.scheduleType === 'daily' && !val.dailyTime) {
+    add('dailyTime is required for a daily schedule', 'dailyTime');
+  }
+  if (val.scheduleType === 'weekly' && (!val.weeklyTime || !val.weeklyDays?.length)) {
+    add('weeklyDays and weeklyTime are required for a weekly schedule', 'weeklyTime');
+  }
+}
+
+/** POST /api/cron/jobs — full job definition. */
+export const CronJobSchema = CronJobBaseSchema.superRefine(refineCronJob);
+
+/** PUT /api/cron/jobs/:id — partial update. */
+export const CronJobUpdateSchema = CronJobBaseSchema.partial();
+
+/** PUT /api/cron/jobs/:id/enabled */
+export const CronJobEnabledSchema = z.object({ enabled: z.boolean() });
+
 /** POST /api/cases/link */
 export const LinkCaseSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
@@ -857,6 +960,16 @@ export const SubagentWindowStatesSchema = z
 
 /** PUT /api/subagent-parents */
 export const SubagentParentMapSchema = z.record(z.string(), z.string());
+
+/** POST /api/sessions/:id/interactive */
+export const InteractiveStartSchema = z.object({
+  /**
+   * COD-118: explicit user-initiated restart — clears a tripped PTY-exit circuit
+   * breaker before starting. Automatic reconnect/re-attach callers (e.g. the
+   * frontend's selectSession auto-attach) must NOT send this flag.
+   */
+  clearBreaker: z.boolean().optional(),
+});
 
 /** POST /api/sessions/:id/interactive-respawn */
 export const InteractiveRespawnSchema = z.object({
@@ -957,6 +1070,20 @@ export const SEARCH_SOURCE_TYPES = ['session', 'event', 'file'] as const;
  * integer clamped to 1..60. Validation is the first line of defense — a missing
  * or oversized `q`, an unknown type, or a non-numeric limit is rejected with 400.
  */
+export const LibraryQuerySchema = z.object({
+  q: z.string().trim().max(200).optional().default(''),
+  tag: z.string().trim().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+export const SessionSourceAddSchema = z.object({
+  type: z.enum(['file', 'url', 'highlight']),
+  title: z.string().trim().min(1, 'Title required').max(500, 'Title too long'),
+  url: z.string().trim().url('Invalid URL').optional(),
+  relativePath: z.string().trim().max(1000).optional(),
+  content: z.string().trim().max(10000).optional(),
+});
+
 export const SearchQuerySchema = z.object({
   q: z.string().trim().min(1, 'Query is required').max(200, 'Query too long (max 200 chars)'),
   types: z

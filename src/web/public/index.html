@@ -119,7 +119,10 @@
         </div>
         <button class="btn-icon-header btn-redraw-terminal btn-redraw-terminal--hidden" onclick="app.restoreTerminalSize()" title="Redraw terminal to fit current screen (Ctrl+Shift+R)" aria-label="Redraw terminal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg></button>
         <button class="btn-icon-header btn-response-viewer-header btn-response-viewer-header--hidden" onclick="app.toggleResponseViewer()" title="View last response" aria-label="View last response"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
-        <button class="btn-icon-header btn-away-digest" onclick="app.openAwayDigest()" title="Away Digest" aria-label="Open away digest"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></button> <button class="btn-icon-header btn-session-manager" onclick="app.openSessionManager()" title="Session Manager" aria-label="Open session manager"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></button>
+        <button id="sourcesBtn" class="btn-icon-header btn-sources" onclick="app.openSources()" title="Session Sources" aria-label="Open session sources"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
+        <button id="fileBrowserBtn" class="btn-icon-header btn-files" onclick="app.toggleFileBrowserPanel()" title="Files" aria-label="Open files panel" aria-expanded="false" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+        <button id="libraryBtn" class="btn-icon-header btn-library" onclick="app.openLibrary()" title="Library" aria-label="Open library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></button>
+        <button id="awayDigestBtn" class="btn-icon-header btn-away-digest btn-away-digest--hidden" onclick="app.openAwayDigest()" title="Away Digest" aria-label="Open away digest"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></button> <button class="btn-icon-header btn-session-manager" onclick="app.openSessionManager()" title="Session Manager" aria-label="Open session manager"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></button>
         <button class="btn-icon-header btn-attachments-history btn-attachments-history--hidden" id="attachmentsHistoryBtn" onclick="app.toggleAttachmentHistory()" title="Attachments" aria-label="Open attachment history" aria-expanded="false">
 
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -422,12 +425,20 @@
         <span id="responseViewerTitle">Last Response</span>
         <div class="response-viewer-actions">
           <button class="response-viewer-more" id="responseViewerMore" onclick="app.loadFullContext()">More</button>
-          <button class="response-viewer-close" onclick="app.toggleResponseViewer()">&times;</button>
+          <button class="response-viewer-copy" id="responseViewerCopy" type="button" onclick="app.copyResponseViewerRichText()" title="Copy response as rich text" aria-label="Copy response as rich text"></button>
+          <button class="response-viewer-more response-viewer-copy-markdown" id="responseViewerCopyMarkdown" type="button" onclick="app.copyResponseViewerMarkdown()" title="Copy response as Markdown" aria-label="Copy response as Markdown">Copy Markdown</button>
+          <button class="response-viewer-close" onclick="app.closeResponseViewer()">&times;</button>
         </div>
+      </div>
+      <div class="response-viewer-filters" id="responseViewerFilters" role="group" aria-label="Filter transcript by content type" hidden>
+        <span class="response-viewer-filters-label">Show</span>
+        <button type="button" class="rv-filter-btn" data-rv-filter="user" aria-pressed="true" onclick="app.toggleTranscriptFilter('user', this)">User</button>
+        <button type="button" class="rv-filter-btn" data-rv-filter="tool" aria-pressed="true" onclick="app.toggleTranscriptFilter('tool', this)">Tools</button>
+        <button type="button" class="rv-filter-btn" data-rv-filter="response" aria-pressed="true" onclick="app.toggleTranscriptFilter('response', this)">Responses</button>
       </div>
       <div class="response-viewer-body" id="responseViewerBody"></div>
     </div>
-    <div class="response-viewer-backdrop" id="responseViewerBackdrop" onclick="app.toggleResponseViewer()"></div>
+    <div class="response-viewer-backdrop" id="responseViewerBackdrop" onclick="app.closeResponseViewer()"></div>
 
     <!-- Bottom Toolbar -->
     <footer class="toolbar">
@@ -495,7 +506,6 @@
             <select id="quickStartCase" class="toolbar-select case-native-select" title="Select case" aria-hidden="true" tabindex="-1">
               <option value="testcase">testcase</option>
             </select>
-            <button id="skillsChipBtn" class="btn-skills-chip hidden" title="Skills" onclick="app.openSkillsDrawer()"></button>
             <button class="btn-case-add" onclick="app.showCreateCaseModal()" title="Create new case">+</button>
             <button class="btn-case-settings" onclick="app.toggleCaseSettings()" title="Case settings">&#x2699;</button>
             <div class="case-settings-popover hidden" id="caseSettingsPopover">
@@ -581,6 +591,8 @@
       <div class="toolbar-right">
         <!-- Orchestrator button hidden until feature is ready -->
         <!-- <button class="btn-toolbar btn-sm" onclick="app.toggleOrchestratorPanel()" title="Orchestrator Loop">&#x2699; Orchestrator</button> -->
+        <button class="btn-toolbar btn-sm" onclick="app.openCron()" title="Cron Jobs">&#x23F0; Cron</button>
+        <button id="skillsChipBtn" class="btn-skills-chip hidden" title="Skills" onclick="app.openSkillsDrawer()"></button>
         <span class="version-display" id="versionDisplay" title="Codeman version">v0.0.0</span>
       </div>
     </footer>
@@ -622,6 +634,7 @@
               <div><kbd>Ctrl</kbd>+<kbd>L</kbd></div><div>Clear Terminal</div>
               <div><kbd>Ctrl</kbd>+<kbd>+</kbd></div><div>Increase Font</div>
               <div><kbd>Ctrl</kbd>+<kbd>-</kbd></div><div>Decrease Font</div>
+              <div><kbd>Shift</kbd>+<kbd>Wheel</kbd></div><div>Scroll local history when mouse passthrough is active</div>
               <div><kbd>Shift</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
               <div><kbd>Ctrl</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
               <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd></div><div>Voice Input</div>
@@ -639,15 +652,113 @@
       </div>
     </div>
 
-    <!-- Shortcut Overlay Modal -->
-    <div class="modal" id="shortcutOverlayModal">
-      <div class="modal-backdrop" onclick="app.closeShortcutOverlay()"></div>
-      <div class="modal-content shortcut-overlay-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutOverlayTitle">
+    <!-- Cron Jobs Modal -->
+    <div class="modal" id="cronModal">
+      <div class="modal-backdrop" onclick="app.closeCron()"></div>
+      <div class="modal-content modal-lg">
         <div class="modal-header">
-          <h3 id="shortcutOverlayTitle">Keyboard Shortcuts</h3>
-          <button class="modal-close" onclick="app.closeShortcutOverlay()" aria-label="Close shortcut overlay">&times;</button>
+          <h3>Cron Jobs</h3>
+          <button class="modal-close" onclick="app.closeCron()" aria-label="Close cron">&times;</button>
         </div>
-        <div class="modal-body" id="shortcutOverlayList"></div>
+        <div class="modal-body">
+          <p class="form-hint cron-modal-hint">Times use the server's local timezone.</p>
+          <div class="cron-toolbar">
+            <button class="btn-toolbar btn-primary" onclick="app.openCronJobForm()">+ New Job</button>
+            <button class="btn-toolbar" onclick="app.refreshCron()">Refresh</button>
+          </div>
+          <!-- Job list -->
+          <div id="cronJobList" class="cron-job-list"></div>
+
+          <!-- Create/Edit form (hidden until New/Edit) -->
+          <div id="cronJobForm" class="cron-job-form hidden">
+            <div class="cron-form-title" id="cronFormTitle">New Cron Job</div>
+            <input type="hidden" id="schJobId">
+
+            <div class="form-section-header">Basics</div>
+            <div class="form-row"><label>Name</label><input type="text" id="schName" placeholder="My nightly job"></div>
+            <div class="form-row"><label>Agent Type</label>
+              <select id="schAgentType" class="form-select" onchange="app.onCronAgentTypeChange()">
+                <option value="claude">Claude</option>
+                <option value="shell">Terminal / Shell</option>
+                <option value="opencode">OpenCode</option>
+                <option value="codex">Codex</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </div>
+            <div class="form-row"><label>Working Directory</label><input type="text" id="schWorkingDir" placeholder="/absolute/path"></div>
+            <div class="form-row hidden" id="schLaunchCommandRow"><label>Launch Command</label><input type="text" id="schLaunchCommand" placeholder="Optional — runs as the first command in the new shell"></div>
+
+            <div class="form-section-header">Prompt</div>
+            <div class="form-row"><label>Prompt Source</label>
+              <select id="schPromptMode" class="form-select" onchange="app.onCronPromptModeChange()">
+                <option value="inline_text">Inline text</option>
+                <option value="prompt_file_path">Prompt file path</option>
+              </select>
+            </div>
+            <div class="form-row" id="schPromptTextRow"><label>Prompt</label><textarea id="schPromptText" rows="4" placeholder="Prompt to send into the session"></textarea></div>
+            <div class="form-row hidden" id="schPromptFileRow"><label>Prompt File Path</label><input type="text" id="schPromptFilePath" placeholder="/absolute/path/to/prompt.md"></div>
+            <div class="form-row"><label>Input Mode</label>
+              <select id="schInputMode" class="form-select">
+                <option value="typed">Typed (via tmux)</option>
+                <option value="paste">Paste (direct)</option>
+              </select>
+            </div>
+
+            <div class="form-section-header">Schedule</div>
+            <div class="form-row"><label>Schedule Type</label>
+              <select id="schScheduleType" class="form-select" onchange="app.onCronScheduleTypeChange()">
+                <option value="once">Once</option>
+                <option value="interval">Interval</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </div>
+            <div class="form-row" id="schRunAtRow"><label>Run At</label><input type="datetime-local" id="schRunAt"></div>
+            <div class="form-row hidden" id="schIntervalRow"><label>Every (minutes)</label><input type="number" id="schIntervalMinutes" min="1" value="60"></div>
+            <div class="form-row hidden" id="schDailyRow"><label>Daily Time (HH:MM)</label><input type="time" id="schDailyTime"></div>
+            <div class="form-row hidden" id="schWeeklyDaysRow"><label>Weekdays</label>
+              <span id="schWeeklyDays" class="cron-weekdays">
+                <label><input type="checkbox" value="0">Sun</label>
+                <label><input type="checkbox" value="1">Mon</label>
+                <label><input type="checkbox" value="2">Tue</label>
+                <label><input type="checkbox" value="3">Wed</label>
+                <label><input type="checkbox" value="4">Thu</label>
+                <label><input type="checkbox" value="5">Fri</label>
+                <label><input type="checkbox" value="6">Sat</label>
+              </span>
+            </div>
+            <div class="form-row hidden" id="schWeeklyTimeRow"><label>Weekly Time (HH:MM)</label><input type="time" id="schWeeklyTime"></div>
+
+            <div class="form-section-header">Options</div>
+            <div class="form-row"><label>On auto-run, if same agent running</label>
+              <select id="schConcurrencyPolicy" class="form-select">
+                <option value="warn_only">Run anyway</option>
+                <option value="skip_if_same_agent_running">Skip this run</option>
+              </select>
+            </div>
+            <div class="form-row form-row-switch cron-switch-row">
+              <div class="cron-switch-text">
+                <span class="cron-switch-label">Auto-close previous run's session</span>
+                <span class="cron-switch-desc">Recurring schedules only: close the prior run's still-open session before the next run fires</span>
+              </div>
+              <label class="switch switch-sm"><input type="checkbox" id="schAutoClosePrev" checked><span class="slider"></span></label>
+            </div>
+            <div class="form-row form-row-switch cron-switch-row">
+              <div class="cron-switch-text">
+                <span class="cron-switch-label">Enabled</span>
+                <span class="cron-switch-desc">Off keeps the job saved but skips its schedule</span>
+              </div>
+              <label class="switch switch-sm"><input type="checkbox" id="schEnabled" checked><span class="slider"></span></label>
+            </div>
+            <div class="form-row"><label>Notes</label><input type="text" id="schNotes" placeholder="Optional"></div>
+
+            <div id="cronFormError" class="form-hint cron-form-error"></div>
+            <div class="cron-form-actions">
+              <button class="btn-toolbar" onclick="app.cancelCronJobForm()">Cancel</button>
+              <button class="btn-toolbar btn-primary" onclick="app.saveCronJob()">Save</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1113,8 +1224,25 @@
                   <option value="og">OG Codeman</option>
                 </select>
               </div>
+              <div class="settings-item" id="appSettingsWebglRendererItem" title="Use the GPU-accelerated WebGL terminal renderer (desktop only). Turn off to force the DOM renderer if you hit GPU glitches. Codeman also auto-falls-back to the DOM renderer after repeated GPU stalls.">
+                <span class="settings-item-label">WebGL Renderer</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsWebglRenderer">
+                  <span class="slider"></span>
+                </label>
+              </div>
               <!-- Input Section -->
               <div class="settings-section-header">Input</div>
+              <div class="settings-item settings-item-multiline" title="Scroll the terminal's own local scrollback with a plain mouse wheel / two-finger swipe, instead of forwarding the wheel to the CLI's transcript. Turn on if scrolling back through history doesn't work (e.g. macOS trackpad in Claude sessions). Shift+wheel always reaches local scrollback regardless.">
+                <div class="settings-item-text">
+                  <span class="settings-item-label">Wheel Scrolls Local History</span>
+                  <span class="settings-item-desc">Plain wheel/trackpad pages the terminal scrollback</span>
+                </div>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsTerminalWheelLocal">
+                  <span class="slider"></span>
+                </label>
+              </div>
               <div class="settings-item settings-item-multiline" title="Shows typed characters instantly via overlay while forwarding keystrokes to the server in the background. Enables Tab completion, preserves input across tab switches, and protects against session crashes. Recommended for mobile and high-latency connections.">
                 <div class="settings-item-text">
                   <span class="settings-item-label">Local Echo</span>
@@ -1175,6 +1303,13 @@
                   <span class="slider"></span>
                 </label>
               </div>
+              <div class="settings-item" title="Show the Away Digest button in the header (opt-in, off by default)">
+                <span class="settings-item-label">Away Digest</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowAwayDigest">
+                  <span class="slider"></span>
+                </label>
+              </div>
               <div class="settings-item" title="Show A-/A+ font size buttons in header">
                 <span class="settings-item-label">Font Controls</span>
                 <label class="switch switch-sm">
@@ -1200,6 +1335,13 @@
                 <span class="settings-item-label">Response Viewer</span>
                 <label class="switch switch-sm">
                   <input type="checkbox" id="appSettingsShowResponseViewer">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="settings-item" title="Show the Away Digest button in header">
+                <span class="settings-item-label">Away Digest</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowAwayDigest">
                   <span class="slider"></span>
                 </label>
               </div>
@@ -1825,6 +1967,23 @@
       </div>
     </div>
 
+    <!-- Shortcut Overlay Modal -->
+    <div class="modal shortcut-overlay-modal" id="shortcutOverlayModal" tabindex="-1">
+      <div class="modal-backdrop" onclick="app.closeShortcutOverlay()"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <span class="modal-title">Keyboard Shortcuts</span>
+          <button class="modal-close" onclick="app.closeShortcutOverlay()" aria-label="Close">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+          <div id="shortcutOverlayList"></div>
+          <div class="shortcut-overlay-footer">
+            <button class="btn btn-sm" onclick="app.closeShortcutOverlay(); app.showHelp()">Full shortcut reference</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Create Case Modal -->
     <div class="modal" id="createCaseModal">
       <div class="modal-backdrop" onclick="app.closeCreateCaseModal()"></div>
@@ -2242,6 +2401,59 @@
       <div class="notif-drawer-empty" id="notifEmpty">No notifications</div>
     </div>
 
+    <!-- Sources Modal -->
+    <div class="modal" id="sourcesModal">
+      <div class="modal-backdrop" onclick="app.closeSources()"></div>
+      <div class="modal-content sources-modal">
+        <div class="modal-header">
+          <h3>Session Sources</h3>
+          <button class="modal-close" onclick="app.closeSources()" aria-label="Close sources">&times;</button>
+        </div>
+        <div class="modal-body sources-modal-body">
+          <form class="sources-add-form" id="sourcesAddForm" onsubmit="app.handleAddSource(event)">
+            <select class="sources-type-select" id="sourcesTypeSelect" aria-label="Source type" onchange="app.updateSourceFormFields()">
+              <option value="url">URL</option>
+              <option value="file">File</option>
+              <option value="highlight">Highlight</option>
+            </select>
+            <input type="text" id="sourcesTitle" class="sources-title-input" placeholder="Title" maxlength="500" required autocomplete="off">
+            <div id="sourcesUrlRow" class="sources-field-row">
+              <input type="url" id="sourcesUrl" class="sources-url-input" placeholder="https://..." maxlength="2000" autocomplete="off">
+            </div>
+            <div id="sourcesPathRow" class="sources-field-row sources-field-row--hidden">
+              <input type="text" id="sourcesPath" class="sources-path-input" placeholder="relative/path/to/file.md" maxlength="1000" autocomplete="off">
+            </div>
+            <div id="sourcesContentRow" class="sources-field-row sources-field-row--hidden">
+              <textarea id="sourcesContent" class="sources-content-input" placeholder="Highlighted text..." maxlength="10000" rows="4"></textarea>
+            </div>
+            <button type="submit" class="btn-toolbar btn-sm sources-add-btn">Add</button>
+          </form>
+          <div class="sources-list" id="sourcesList">
+            <p class="empty-message sources-empty">No sources yet. Add a URL, file path, or highlight above.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Library Modal -->
+    <div class="modal" id="libraryModal">
+      <div class="modal-backdrop" onclick="app.closeLibrary()"></div>
+      <div class="modal-content library-modal">
+        <div class="modal-header">
+          <h3>Library</h3>
+          <button class="modal-close" onclick="app.closeLibrary()" aria-label="Close library">&times;</button>
+        </div>
+        <div class="modal-body library-modal-body">
+          <div class="library-search-row">
+            <input type="search" id="librarySearchInput" class="library-search-input" placeholder="Search documents..." autocomplete="off" maxlength="200">
+          </div>
+          <div class="library-documents" id="libraryDocuments">
+            <p class="empty-message library-empty">No documents yet.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Away Digest Modal -->
     <div class="modal" id="awayDigestModal">
       <div class="modal-backdrop" onclick="app.closeAwayDigest()"></div>
@@ -2418,6 +2630,7 @@
   <script defer src="respawn-ui.js"></script>
   <script defer src="ralph-panel.js"></script>
   <script defer src="orchestrator-panel.js"></script>
+  <script defer src="cron-ui.js"></script>
   <script defer src="settings-ui.js"></script>
   <script defer src="panels-ui.js"></script>
   <script defer src="ultracode-panel.js"></script>
@@ -2427,5 +2640,6 @@
   <script defer src="subagent-windows.js"></script>
   <script defer src="ultracode-windows.js"></script>
   <script defer src="image-input.js"></script>
+  <script defer src="document-input.js"></script>
 </body>
 </html>

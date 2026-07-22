@@ -18,6 +18,10 @@
 }
 
 :root {
+  /* All three skins are dark — tell the UA to render native controls (select
+     option popups, date/time pickers, scrollbars) in dark mode so they don't
+     flash as white OS widgets. */
+  color-scheme: dark;
   /* Carbon Aurora · Daylight — deep-but-not-black slate, surfaces step UP into the light */
   --bg-dark: #11151c;
   --bg-card: #1b222c;
@@ -643,6 +647,15 @@ body {
   flex-shrink: 0;
 }
 
+.connection-dot.connected {
+  background: var(--green);
+}
+
+.connection-dot.fallback {
+  background: var(--yellow);
+  box-shadow: 0 0 6px var(--yellow);
+}
+
 .connection-dot.offline {
   background: var(--red);
   box-shadow: 0 0 6px var(--red);
@@ -1016,6 +1029,18 @@ body {
   transform: rotate(45deg);
 }
 
+.btn-icon-header.btn-files:hover,
+.btn-icon-header.btn-files.active {
+  transform: none;
+  color: var(--text);
+}
+
+.btn-icon-header.btn-files:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
 /* Multi-monitor header button: hidden by default (opt-in via App Settings →
    Display → "Header Displays"). The server strips this class at render when the
    setting is on; the client toggles it live on save. */
@@ -1026,6 +1051,10 @@ body {
 /* Redraw terminal header button: hidden by default (opt-in via App Settings →
    Display → "Header Displays"). Pure client-side toggle. */
 .btn-redraw-terminal--hidden {
+  display: none !important;
+}
+
+.btn-away-digest--hidden {
   display: none !important;
 }
 
@@ -4352,6 +4381,24 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   transition: border-color var(--transition-smooth), box-shadow var(--transition-smooth);
 }
 
+/* Selects: strip the native (light) control so the field follows the active
+   skin instead of rendering as a white OS widget. Opaque --bg-input fill +
+   --border, a custom chevron, and color-scheme:dark (set on :root) for a dark
+   option popup. Shared by App Settings, Cron, and every other .form-select. */
+.form-select {
+  padding-right: 2rem;
+  background-color: var(--bg-input);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2398a2b1' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.75rem;
+  border-color: var(--border);
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+}
+
 .form-row input:focus,
 .form-row select:focus,
 .form-row textarea:focus,
@@ -4944,6 +4991,97 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   }
 }
 
+/* Registry-driven shortcut editor */
+.shortcut-setting-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 190px) auto auto auto;
+  padding: 0.4rem 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+}
+
+.shortcut-setting-row:last-child {
+  border-bottom: none;
+}
+
+.shortcut-capture-btn,
+.shortcut-reset-btn {
+  padding: 0.3rem 0.6rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--btn-radius);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all var(--transition-smooth);
+}
+
+.shortcut-capture-btn:hover,
+.shortcut-reset-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.shortcut-reset-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.shortcut-enabled-checkbox {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.shortcut-overlay-modal .modal-content {
+  max-width: 620px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shortcut-overlay-group {
+  margin-bottom: 1rem;
+}
+
+.shortcut-overlay-group:last-child {
+  margin-bottom: 0;
+}
+
+.shortcut-overlay-group-label {
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.shortcut-overlay-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.3rem 0;
+}
+
+.shortcut-overlay-label {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.shortcut-overlay-keys {
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.shortcut-overlay-footer {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  text-align: right;
+}
+
 /* Status badge in settings */
 .settings-status {
   font-size: 0.6rem;
@@ -5082,15 +5220,10 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   max-width: 340px;
 }
 
-.shortcut-overlay-modal {
-  max-width: 620px;
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-}
-
 .shortcut-overlay-modal .modal-body {
   overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .modal-content.modal-lg {
@@ -6066,6 +6199,224 @@ kbd {
 .away-digest-modal .modal-body {
   overflow-y: auto;
   padding: 1rem;
+}
+
+/* Library Modal */
+.library-modal {
+  max-width: 700px;
+  width: min(92vw, 700px);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.library-modal-body {
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.library-search-row {
+  margin-bottom: 0.75rem;
+}
+
+.library-search-input {
+  width: 100%;
+  padding: 0.4rem 0.7rem;
+  background: var(--input-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 4px;
+  color: var(--text-primary, #e0e0e0);
+  font-size: 0.85rem;
+  box-sizing: border-box;
+}
+
+.library-search-input:focus {
+  outline: none;
+  border-color: var(--accent, #4a9eff);
+}
+
+.library-documents {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.library-document-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  background: var(--surface-2, #1a1a1a);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 4px;
+}
+
+.library-document-card:hover {
+  background: var(--surface-hover, #252525);
+}
+
+.library-card-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.library-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.library-card-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-card-path {
+  font-size: 0.75rem;
+  color: var(--text-secondary, #999);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-card-meta {
+  font-size: 0.75rem;
+  color: var(--text-secondary, #888);
+}
+
+.library-empty {
+  color: var(--text-secondary, #888);
+  text-align: center;
+  padding: 2rem 0;
+}
+
+/* Sources modal (COD-65) */
+.sources-modal {
+  max-width: 560px;
+  width: 100%;
+}
+.sources-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px 16px;
+}
+.sources-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-start;
+}
+.sources-type-select {
+  padding: 4px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  background: var(--surface, #1e1e1e);
+  color: var(--text, #ccc);
+  font-size: 12px;
+}
+.sources-title-input,
+.sources-url-input,
+.sources-path-input {
+  flex: 1 1 140px;
+  padding: 4px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  background: var(--surface, #1e1e1e);
+  color: var(--text, #ccc);
+  font-size: 12px;
+}
+.sources-content-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  background: var(--surface, #1e1e1e);
+  color: var(--text, #ccc);
+  font-size: 12px;
+  resize: vertical;
+}
+.sources-field-row {
+  width: 100%;
+  display: flex;
+}
+.sources-field-row--hidden {
+  display: none;
+}
+.sources-add-btn {
+  white-space: nowrap;
+}
+.sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.sources-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #333);
+  background: var(--surface, #1e1e1e);
+}
+.sources-card-icon {
+  font-size: 14px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.sources-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sources-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text, #ccc);
+}
+.sources-card-detail {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sources-card-delete {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  font-size: 14px;
+  border-radius: 3px;
+}
+.sources-card-delete:hover {
+  color: var(--error, #e87979);
+  background: rgba(232, 121, 121, 0.1);
+}
+.sources-empty {
+  color: var(--text-secondary, #888);
+  text-align: center;
+  padding: 2rem 0;
+  font-size: 12px;
 }
 
 /* Command palette (COD-153) */
@@ -9622,6 +9973,123 @@ kbd {
   padding: 16px 24px;
 }
 
+/* Word highlights carry a named palette value (for example, `red`) in the
+   document XML. The HTML conversion turns that into a trusted class so source
+   markup survives without allowing untrusted inline styles into the preview. */
+.document-preview-html .docx-highlight {
+  background: var(--docx-highlight-color);
+  color: var(--docx-highlight-text, #111);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.document-preview-html .docx-highlight--black { --docx-highlight-color: #000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--blue { --docx-highlight-color: #00f; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--cyan { --docx-highlight-color: #0ff; }
+.document-preview-html .docx-highlight--dark-blue { --docx-highlight-color: #000080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-cyan { --docx-highlight-color: #008080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-gray { --docx-highlight-color: #808080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-green { --docx-highlight-color: #008000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-magenta { --docx-highlight-color: #800080; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-red { --docx-highlight-color: #800000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--dark-yellow { --docx-highlight-color: #808000; --docx-highlight-text: #fff; }
+.document-preview-html .docx-highlight--green { --docx-highlight-color: #0f0; }
+.document-preview-html .docx-highlight--light-gray { --docx-highlight-color: #c0c0c0; }
+.document-preview-html .docx-highlight--magenta { --docx-highlight-color: #f0f; }
+.document-preview-html .docx-highlight--red { --docx-highlight-color: #f00; }
+.document-preview-html .docx-highlight--white { --docx-highlight-color: #fff; }
+.document-preview-html .docx-highlight--yellow { --docx-highlight-color: #ff0; }
+
+.document-preview-html .docx-comment-marker {
+  margin-left: 2px;
+  font-size: 0.72em;
+  font-weight: 700;
+  vertical-align: super;
+}
+.document-preview-html .docx-comment-button {
+  padding: 0;
+  border: 0;
+  color: var(--accent, #7aa2ff);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.document-preview-html .docx-comment-button:hover {
+  text-decoration: underline;
+}
+.document-preview-html .docx-comment-button:focus-visible,
+.document-preview-html .docx-comment-close:focus-visible {
+  outline: 2px solid var(--accent, #7aa2ff);
+  outline-offset: 2px;
+}
+.document-preview-html .docx-comment-card {
+  display: block;
+  margin: 8px 0 10px;
+  padding: 9px 10px;
+  border-left: 3px solid var(--accent, #7aa2ff);
+  border-radius: 0 5px 5px 0;
+  background: var(--bg-secondary, #161616);
+}
+.document-preview-html .docx-comment-card[hidden] {
+  display: none;
+}
+.document-preview-html .docx-comment-text {
+  display: block;
+  margin-top: 3px;
+  white-space: pre-wrap;
+}
+.document-preview-html .docx-comment-close {
+  margin: 7px 0 0;
+  padding: 2px 6px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 4px;
+  color: var(--accent, #7aa2ff);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+}
+.document-preview-html .docx-comment-close:hover {
+  background: var(--bg-hover, rgba(122, 162, 255, 0.14));
+}
+.document-preview-html .docx-comment-marker a {
+  color: var(--accent, #7aa2ff);
+  text-decoration: none;
+}
+.document-preview-html .docx-comment-marker a:hover {
+  text-decoration: underline;
+}
+.document-preview-html .docx-comments {
+  margin-top: 28px;
+  padding: 14px 16px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  background: var(--bg-secondary, #161616);
+}
+.document-preview-html .docx-comments h2 {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+}
+.document-preview-html .docx-comments ol {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 24px;
+}
+.document-preview-html .docx-comments li:target {
+  outline: 2px solid var(--accent, #7aa2ff);
+  outline-offset: 3px;
+}
+.document-preview-html .docx-comment-author {
+  color: var(--text-muted, #aaa);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.document-preview-html .docx-comments p {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
 /* docx view switcher (COD-68). */
 .document-view-switch {
   display: inline-flex;
@@ -11234,6 +11702,10 @@ kbd {
   display: none !important;
 }
 
+.btn-away-digest--hidden {
+  display: none !important;
+}
+
 .response-viewer {
   display: none;
   position: fixed;
@@ -11289,6 +11761,65 @@ kbd {
   background: #3a3a5a;
 }
 
+.response-viewer-copy-markdown {
+  white-space: nowrap;
+}
+
+.response-viewer-copy-markdown.rv-copied {
+  color: #9ece6a;
+  border-color: #3a5a3a;
+}
+
+.response-viewer-copy-markdown.rv-copy-failed {
+  color: #f7768e;
+  border-color: #5a3a3a;
+}
+
+.response-viewer-copy {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #3a3a4f;
+  border-radius: 4px;
+  background: transparent;
+  color: #aaa;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.response-viewer-copy::before { content: '\2398'; }
+
+.response-viewer-copy:hover,
+.response-viewer-copy:active {
+  color: #e0e0ec;
+  border-color: #55556f;
+  background: #2a2a4a;
+}
+
+.response-viewer-copy:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+.response-viewer-copy.rv-copied {
+  color: #9ece6a;
+  border-color: #3a5a3a;
+}
+
+.response-viewer-copy.rv-copied::before { content: '\2713'; }
+
+.response-viewer-copy.rv-copy-failed {
+  color: #f7768e;
+  border-color: #5a3a3a;
+}
+
+.response-viewer-copy.rv-copy-failed::before { content: '\2715'; }
+
 .response-viewer-close {
   background: none;
   border: none;
@@ -11297,6 +11828,87 @@ kbd {
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
+}
+
+/* COD-225: transcript content filters (User / Tools / Responses). */
+.response-viewer-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  border-bottom: 1px solid #2a2a3a;
+  flex-shrink: 0;
+}
+
+.response-viewer-filters[hidden] {
+  display: none;
+}
+
+.response-viewer-filters-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #6a6a80;
+  margin-right: 2px;
+}
+
+.rv-filter-btn {
+  background: #2a2a4a;
+  border: 1px solid #3a3a5a;
+  color: #cfcfe0;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+
+.rv-filter-btn::before {
+  content: '\2713\00a0';
+  font-size: 11px;
+}
+
+.rv-filter-btn:hover {
+  border-color: #55556f;
+  background: #33335a;
+}
+
+.rv-filter-btn:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+.rv-filter-btn.rv-filter-off {
+  background: transparent;
+  color: #6a6a80;
+  border-color: #33334a;
+}
+
+.rv-filter-btn.rv-filter-off::before {
+  content: '\2715\00a0';
+}
+
+/* Category hide rules driven by classes on the body, so filtering does no refetch
+   and preserves the original chronological block order. Tools = tool + status. */
+.response-viewer-body.rv-hide-user .rv-msg-prompt,
+.response-viewer-body.rv-hide-tool .rv-msg-tool,
+.response-viewer-body.rv-hide-tool .rv-msg-status,
+.response-viewer-body.rv-hide-response .rv-msg-response {
+  display: none;
+}
+
+.response-viewer-filter-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: #7a7a90;
+  font-size: 13px;
+}
+
+.response-viewer-filter-empty[hidden] {
+  display: none;
 }
 
 /* Conversation thread messages — card-style layout for clear separation */
@@ -11327,6 +11939,26 @@ kbd {
   background: #161f1a;
 }
 
+.rv-message.rv-msg-prompt {
+  border-left-color: #7aa2ff;
+  background: #16182a;
+}
+
+.rv-message.rv-msg-response {
+  border-left-color: #6ddb7f;
+  background: #161f1a;
+}
+
+.rv-message.rv-msg-status {
+  border-left-color: #c9ccd8;
+  background: #1a1b24;
+}
+
+.rv-message.rv-msg-tool {
+  border-left-color: #e3b86a;
+  background: #201b12;
+}
+
 .rv-role {
   display: inline-block;
   font-size: 10.5px;
@@ -11348,6 +11980,71 @@ kbd {
   color: #6ddb7f;
   background: rgba(109, 219, 127, 0.12);
 }
+
+.rv-role-prompt {
+  color: #7aa2ff;
+  background: rgba(122, 162, 255, 0.12);
+}
+
+.rv-role-response {
+  color: #6ddb7f;
+  background: rgba(109, 219, 127, 0.12);
+}
+
+.rv-role-status {
+  color: #c9ccd8;
+  background: rgba(201, 204, 216, 0.12);
+}
+
+.rv-role-tool {
+  color: #e3b86a;
+  background: rgba(227, 184, 106, 0.12);
+}
+
+.rv-message-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 6px;
+}
+
+.rv-message-copy {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #2f2f45;
+  border-radius: 5px;
+  background: rgba(20, 20, 32, 0.92);
+  color: #8b8b97;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.rv-message-copy::before { content: '\2398'; }
+
+.rv-message-copy:hover,
+.rv-message-copy:active {
+  color: #e0e0ec;
+  border-color: #4a4a65;
+}
+
+.rv-message-copy.rv-copied {
+  color: #9ece6a;
+  border-color: #3a5a3a;
+}
+
+.rv-message-copy.rv-copied::before { content: '\2713'; }
+
+.rv-message-copy.rv-copy-failed {
+  color: #f7768e;
+  border-color: #5a3a3a;
+}
+
+.rv-message-copy.rv-copy-failed::before { content: '\2715'; }
 
 /* Markdown rendered content inside response viewer.
    Prose uses a proportional font for readability; code keeps monospace. */
@@ -12400,6 +13097,100 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   padding: 3px 0;
   border-bottom: 1px solid var(--border-faint, rgba(255,255,255,0.05));
   font-size: 0.82rem;
+}
+
+/* ── Cron Jobs ───────────────────────────────── */
+/* There is no global `.hidden{display:none}` utility in this stylesheet — each
+   component scopes its own. The cron modal shipped without one, so its
+   `.hidden`-toggled create form + conditional schedule/prompt rows never
+   actually collapsed (all fields showed at once). Scope one here. */
+#cronModal .hidden { display: none !important; }
+.cron-modal-hint { margin-bottom: 1rem; }
+.cron-toolbar {
+  display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap;
+  margin-bottom: 1.1rem; padding-bottom: 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Job list — cards that echo the App Settings item look */
+.cron-job-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.cron-job-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.9rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--btn-radius);
+  background: rgba(255, 255, 255, 0.03);
+  transition: background var(--transition-smooth), border-color var(--transition-smooth);
+}
+.cron-job-row:hover { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.1); }
+.cron-job-main { min-width: 0; flex: 1; }
+.cron-job-name { font-weight: 600; font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.cron-job-meta { font-size: 0.68rem; color: var(--text-muted); margin-top: 0.35rem; overflow: hidden; text-overflow: ellipsis; }
+.cron-job-actions { display: flex; gap: 0.35rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.cron-badge {
+  font-size: 0.6rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase;
+  padding: 0.1rem 0.45rem; border-radius: 999px;
+  background: var(--accent-bg, rgba(120, 160, 255, 0.15)); color: var(--text-dim);
+}
+.cron-badge-off { background: rgba(200, 80, 80, 0.18); color: #e88; }
+
+/* Create / edit form — sectioned + spaced to match the App Settings modal */
+.cron-job-form {
+  margin-top: 1rem; padding-top: 0.85rem; border-top: 1px solid var(--border);
+}
+.cron-form-title {
+  font-size: 0.95rem; font-weight: 600; color: var(--text); margin-bottom: 0.35rem;
+}
+#cronModal .form-row { margin-bottom: 0.85rem; }
+/* datetime-local / time inputs aren't covered by the base .form-row input rule */
+#cronModal .form-row input[type="datetime-local"],
+#cronModal .form-row input[type="time"] {
+  width: 100%; padding: 0.5rem 0.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--btn-radius);
+  color: var(--text); font-size: 0.8rem; font-family: inherit;
+  transition: border-color var(--transition-smooth), box-shadow var(--transition-smooth);
+}
+#cronModal .form-row input[type="datetime-local"]:focus,
+#cronModal .form-row input[type="time"]:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+/* Toggle rows rendered as settings cards (label + description left, switch right) */
+#cronModal .form-row-switch.cron-switch-row {
+  justify-content: space-between; gap: 0.75rem; flex-wrap: nowrap;
+  padding: 0.55rem 0.7rem; margin-bottom: 0.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--btn-radius);
+}
+.cron-switch-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.cron-switch-label { font-size: 0.75rem; color: var(--text); text-transform: none; letter-spacing: 0; margin: 0; }
+.cron-switch-desc { font-size: 0.62rem; color: var(--text-muted); line-height: 1.35; }
+
+/* Weekday selector — pill toggles instead of raw checkboxes */
+.cron-weekdays { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.cron-weekdays label {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 2.6rem; margin: 0; padding: 0.3rem 0.55rem;
+  font-size: 0.7rem; font-weight: 500; text-transform: none; letter-spacing: 0;
+  color: var(--text-dim); cursor: pointer;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  transition: background var(--transition-smooth), border-color var(--transition-smooth), color var(--transition-smooth);
+}
+.cron-weekdays label:hover { border-color: var(--accent); color: var(--text); }
+.cron-weekdays label input { position: absolute; opacity: 0; width: 0; height: 0; }
+.cron-weekdays label:has(input:checked) { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* Footer */
+.cron-form-error { color: var(--danger, #e55); margin-top: 0.4rem; }
+.cron-form-error:empty { display: none; }
+.cron-form-actions {
+  display: flex; gap: 0.5rem; justify-content: flex-end;
+  margin-top: 1rem; padding-top: 0.85rem; border-top: 1px solid var(--border);
 }
 .user-skill-entry .skill-icon { font-family: var(--font-mono); opacity: 0.6; min-width: 24px; }
 .user-skill-entry .skill-kind-badge { font-size: 0.68rem; color: var(--text-dim); opacity: 0.7; min-width: 44px; }

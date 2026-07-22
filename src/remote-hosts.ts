@@ -61,10 +61,13 @@ export async function writeRemoteCases(configDir: string, cases: RemoteCase[]): 
 export function defaultRemoteCommandForMode(mode: SessionMode): string {
   const commands: Record<RemoteCommandMode, string> = {
     shell: 'exec bash -l',
-    claude: 'exec claude',
+    // Match the local default: remote sessions cannot answer trust/permission
+    // prompts before their terminal is attached.
+    claude: 'exec claude --dangerously-skip-permissions',
     opencode: 'exec opencode',
     codex: 'exec codex',
     gemini: 'exec gemini',
+    agy: 'exec agy',
   };
   return commands[mode as RemoteCommandMode] || commands.shell;
 }
@@ -128,6 +131,8 @@ function expandIdentityPath(identityFile: string): string {
  */
 export function buildSshConnectionArgs(remote: RemoteSshOptions & Pick<RemoteHost, 'port'>): string[] {
   const parts: string[] = ['ssh', '-o BatchMode=yes'];
+  const hasConnectTimeout = (remote.extraSshOptions ?? []).some((opt) => /^ConnectTimeout=/i.test(opt));
+  if (!hasConnectTimeout) parts.push('-o ConnectTimeout=10');
   if (remote.port) parts.push(`-p ${remote.port}`);
   if (remote.identityFile) parts.push(`-i ${shellescape(expandIdentityPath(remote.identityFile))}`);
   if (remote.jumpHost) parts.push(`-J ${shellescape(remote.jumpHost)}`);
@@ -142,6 +147,8 @@ export function buildSshConnectionArgs(remote: RemoteSshOptions & Pick<RemoteHos
 
 export function buildSshConnectionArgv(remote: RemoteSshOptions & Pick<RemoteHost, 'port'>): string[] {
   const args: string[] = ['-o', 'BatchMode=yes'];
+  const hasConnectTimeout = (remote.extraSshOptions ?? []).some((opt) => /^ConnectTimeout=/i.test(opt));
+  if (!hasConnectTimeout) args.push('-o', 'ConnectTimeout=10');
   if (remote.port) args.push('-p', String(remote.port));
   if (remote.identityFile) args.push('-i', expandIdentityPath(remote.identityFile));
   if (remote.jumpHost) args.push('-J', remote.jumpHost);
@@ -168,8 +175,7 @@ export function buildSshConnectionArgv(remote: RemoteSshOptions & Pick<RemoteHos
 export function buildRemoteTmuxCheckCommand(
   host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions
 ): string {
-  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
-  const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
+  const parts = buildSshConnectionArgs(host);
   parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap('command -v tmux')));
   return parts.join(' ');
 }
@@ -185,8 +191,7 @@ export interface RemoteTmuxCheckResult {
 export function buildRemoteSshAccessCheckCommand(
   host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions
 ): string {
-  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
-  const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
+  const parts = buildSshConnectionArgs(host);
   parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap('printf codeman-ssh-ok')));
   return parts.join(' ');
 }
@@ -276,8 +281,7 @@ export async function checkRemoteTmuxAvailable(
 export function buildRemoteListSessionsCommand(
   host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions
 ): string {
-  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
-  const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
+  const parts = buildSshConnectionArgs(host);
   // The tmux list-sessions invocation is passed as ONE shell-quoted argument so
   // the remote login shell runs it verbatim. The `-F` format uses literal `\t`
   // separators (tmux expands them); `2>/dev/null` is inside the quoted command.
@@ -296,8 +300,7 @@ export function buildRemoteListDirectoriesCommand(
   host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
   remotePath: string
 ): string {
-  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
-  const parts = [ssh, connectionArgs[0], '-o ConnectTimeout=10', ...connectionArgs.slice(1)];
+  const parts = buildSshConnectionArgs(host);
   const remoteCmd = `find ${shellescape(remotePath)} -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort`;
   parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap(remoteCmd)));
   return parts.join(' ');

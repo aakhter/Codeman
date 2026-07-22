@@ -27,6 +27,7 @@ import type { RalphStatusBlock, CircuitBreakerStatus } from '../types.js';
 import { SseEvent } from './sse-events.js';
 import { getLifecycleLog } from '../session-lifecycle-log.js';
 import { fileStreamManager } from '../file-stream-manager.js';
+import type { CheckpointProgress } from '../session-auto-ops.js';
 
 /** Stored listener references for session cleanup (prevents memory leaks) */
 export interface SessionListenerRefs {
@@ -47,7 +48,7 @@ export interface SessionListenerRefs {
   autoClear: (data: { tokens: number; threshold: number }) => void;
   autoCompact: (data: { tokens: number; threshold: number; prompt?: string }) => void;
   checkpointStart: (data: { mode: 'compact' | 'clear' }) => void;
-  checkpointDone: (data: { mode: 'compact' | 'clear' }) => void;
+  checkpointProgress: (data: CheckpointProgress) => void;
   limitPauseScheduled: (data: { resetAt: number; resumeAt: number; matched: string }) => void;
   limitResume: (data: { attempt: number }) => void;
   limitResumeCancelled: (data: { reason: string }) => void;
@@ -257,16 +258,16 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       if (tracker) tracker.recordAutoCompact(data.tokens, data.threshold);
     },
 
-    /** Broadcasts `session:checkpoint` — agent-initiated checkpoint started (op about to run) */
-    checkpointStart: (data: { mode: 'compact' | 'clear' }) => {
-      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'start', ...data });
+    /** Broadcasts `session:checkpoint` — confirmed checkpoint lifecycle progress. */
+    checkpointProgress: (data: CheckpointProgress) => {
+      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, ...data });
       deps.broadcastSessionStateDebounced(session.id);
+      deps.persistSessionState(session);
     },
 
-    /** Broadcasts `session:checkpoint` — agent-initiated checkpoint completed (continue sent) */
-    checkpointDone: (data: { mode: 'compact' | 'clear' }) => {
-      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'done', ...data });
-      deps.broadcastSessionStateDebounced(session.id);
+    /** Legacy additive compatibility event; progress owns status persistence. */
+    checkpointStart: (data: { mode: 'compact' | 'clear' }) => {
+      deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'start', ...data });
     },
 
     /** Broadcasts `session:limitPauseScheduled` — usage-limit pause detected, auto-resume armed.
@@ -428,7 +429,7 @@ export function attachSessionListeners(session: Session, refs: SessionListenerRe
   session.on('autoClear', refs.autoClear);
   session.on('autoCompact', refs.autoCompact);
   session.on('checkpointStart', refs.checkpointStart);
-  session.on('checkpointDone', refs.checkpointDone);
+  session.on('checkpointProgress', refs.checkpointProgress);
   session.on('limitPauseScheduled', refs.limitPauseScheduled);
   session.on('limitResume', refs.limitResume);
   session.on('limitResumeCancelled', refs.limitResumeCancelled);
@@ -465,7 +466,7 @@ export function detachSessionListeners(session: Session, refs: SessionListenerRe
   session.off('autoClear', refs.autoClear);
   session.off('autoCompact', refs.autoCompact);
   session.off('checkpointStart', refs.checkpointStart);
-  session.off('checkpointDone', refs.checkpointDone);
+  session.off('checkpointProgress', refs.checkpointProgress);
   session.off('limitPauseScheduled', refs.limitPauseScheduled);
   session.off('limitResume', refs.limitResume);
   session.off('limitResumeCancelled', refs.limitResumeCancelled);

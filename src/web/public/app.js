@@ -61,6 +61,10 @@
 const _crashDiag = {
   _entries: [],
   _maxEntries: 50,
+  // Per-page-load id: the server keys beacons by it, so a reload (fresh id)
+  // archives the previous page's trail instead of overwriting it, and
+  // concurrent clients (desktop + phone) don't clobber each other.
+  _pageId: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
   log(msg) {
     const entry = `${new Date().toISOString().slice(11,23)} ${msg}`;
     this._entries.push(entry);
@@ -69,22 +73,36 @@ const _crashDiag = {
   }
 };
 
-// Log previous crash breadcrumbs on startup
+// Log previous crash breadcrumbs on startup, and re-beacon them under a
+// distinct page id — an iOS PWA reload wipes the in-memory trail, and without
+// this the fresh page's first beacon would be all the server ever sees.
 try {
   const prev = localStorage.getItem('codeman-crash-diag');
-  if (prev) console.log('[CRASH-DIAG] Previous session breadcrumbs:\n' + prev);
+  if (prev) {
+    console.log('[CRASH-DIAG] Previous session breadcrumbs:\n' + prev);
+    navigator.sendBeacon('/api/crash-diag', JSON.stringify({ data: prev, id: _crashDiag._pageId + '-prev' }));
+  }
 } catch {}
 _crashDiag.log('PAGE LOAD');
 
 // Heartbeat: send breadcrumbs to server every 2s so they survive tab freezes.
-setInterval(() => {
+function _crashDiagBeacon() {
   try {
-    localStorage.setItem('codeman-crash-heartbeat', String(Date.now()));
     if (_crashDiag._entries.length > 0) {
-      navigator.sendBeacon('/api/crash-diag', JSON.stringify({ data: _crashDiag._entries.join('\n') }));
+      navigator.sendBeacon('/api/crash-diag', JSON.stringify({ data: _crashDiag._entries.join('\n'), id: _crashDiag._pageId }));
     }
   } catch {}
+}
+setInterval(() => {
+  try { localStorage.setItem('codeman-crash-heartbeat', String(Date.now())); } catch {}
+  _crashDiagBeacon();
 }, 2000);
+// iOS suspends JS the instant the app is backgrounded — entries logged since
+// the last 2s tick would sit unsent until (if ever) the page resumes. Flush
+// immediately on hide so a repro right before an app switch is never lost.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') _crashDiagBeacon();
+});
 
 // rAF heartbeat — counts animation frames so we can detect rAF starvation
 // (compositor stuck, GPU process unhealthy) where longtask observer is silent
@@ -216,6 +234,12 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SCHEDULED_UPDATED, '_onScheduledUpdated'],
   [SSE_EVENTS.SCHEDULED_COMPLETED, '_onScheduledCompleted'],
   [SSE_EVENTS.SCHEDULED_STOPPED, '_onScheduledStopped'],
+
+  // Scheduled jobs (cron-style scheduler)
+  [SSE_EVENTS.CRON_JOBS_CHANGED, '_onCronJobsChanged'],
+  [SSE_EVENTS.CRON_JOB_DELETED, '_onCronJobsChanged'],
+  [SSE_EVENTS.CRON_RUN_CREATED, '_onCronRunChanged'],
+  [SSE_EVENTS.CRON_RUN_UPDATED, '_onCronRunChanged'],
 
   // Respawn
   [SSE_EVENTS.RESPAWN_STARTED, '_onRespawnStarted'],
@@ -487,9 +511,18 @@ class CodemanApp {
     this._clientId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : 'c-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    // Per-TAB nonce for the WS registry key (COD-137). _loadReliableState()
+    // later replaces _clientId with the browser-wide localStorage identity
+    // (shared by every tab/window of this profile), so the WS upgrade sends
+    // `clientId:nonce` instead — a same-tab reconnect still supersedes its own
+    // socket, but two tabs on one session coexist instead of evicting each
+    // other in a 4010 ping-pong. Input frames keep the bare clientId for seq
+    // dedup.
+    this._wsTabNonce = this._clientId;
     this.terminal = null;
     this.fitAddon = null;
     this.activeSessionId = null;
+    this._responseViewerMarkdown = '';
 
     // ── Session detach / undock (beta) ───────────────────────────────────
     // A "solo window" is a popped-out browser window showing exactly one
@@ -509,6 +542,7 @@ class CodemanApp {
     this._initGeneration = 0;     // dedup concurrent handleInit calls
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
+    this._initialFullBufferLoad = true; // first buffer load after a page load fetches full tmux scrollback (COD-47)
     this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
@@ -599,6 +633,8 @@ class CodemanApp {
 
     // File browser state (methods in panels-ui.js)
     this.fileBrowserData = null;
+    this.fileBrowserSessionId = null;
+    this.fileBrowserLoadGeneration = 0;
     this.fileBrowserExpandedDirs = new Set();
     this.fileBrowserFilter = '';
     this.fileBrowserAllExpanded = false;
@@ -1012,9 +1048,11 @@ class CodemanApp {
       const override = shortcutOverrides[shortcut.id];
       if (!override || typeof override !== 'object') return shortcut;
       const next = { ...shortcut };
-      if (override.disabled === true) next.disabled = true;
-      if (Array.isArray(override.bindings)) next.bindings = this.normalizeShortcutBindings(override.bindings);
-      if (Array.isArray(override.displayBindings)) next.displayBindings = override.displayBindings.filter(Boolean);
+      if (typeof override.disabled === 'boolean') next.disabled = override.disabled;
+      if (Array.isArray(override.bindings)) {
+        next.bindings = this.normalizeShortcutBindings(override.bindings);
+        delete next.displayBindings;
+      }
       return next;
     });
   }
@@ -1042,17 +1080,18 @@ class CodemanApp {
 
   matchesShortcutEvent(e, shortcut) {
     if (!shortcut || shortcut.disabled || !Array.isArray(shortcut.bindings)) return false;
-    const eventKey = this.shortcutEventKey(e);
     return shortcut.bindings.some((binding) => {
-      const modifiers = new Set(binding.modifiers || []);
-      const ctrlOrMeta = modifiers.has('ctrl') ? (e.ctrlKey || e.metaKey) : true;
-      const meta = modifiers.has('meta') ? e.metaKey : true;
-      const alt = modifiers.has('alt') ? e.altKey : !e.altKey;
-      const keyNeedsShift = ['?', '+', '{', '}'].includes(binding.key);
-      const shift = modifiers.has('shift') ? e.shiftKey : (!e.shiftKey || keyNeedsShift);
-      const codeMatch = !binding.key && binding.code && e.code === binding.code;
-      const keyMatch = binding.key && String(eventKey).toLowerCase() === String(binding.key).toLowerCase();
-      return ctrlOrMeta && meta && alt && shift && (codeMatch || keyMatch);
+      const modifiers = binding.modifiers || [];
+      const wantsPrimary = modifiers.includes('ctrl') || modifiers.includes('meta');
+      if (wantsPrimary !== !!(e.ctrlKey || e.metaKey)) return false;
+      if (modifiers.includes('shift') !== !!e.shiftKey) return false;
+      if (modifiers.includes('alt') !== !!e.altKey) return false;
+      if (binding.code && e.code === binding.code) return true;
+      return !!(
+        binding.key &&
+        typeof e.key === 'string' &&
+        e.key.toLowerCase() === String(binding.key).toLowerCase()
+      );
     });
   }
 
@@ -1095,25 +1134,32 @@ class CodemanApp {
   renderShortcutOverlay() {
     const list = document.getElementById('shortcutOverlayList');
     if (!list) return;
-    const groups = new Map();
+    const groups = {};
     for (const shortcut of this.getShortcutRegistry()) {
       if (shortcut.disabled) continue;
-      if (!groups.has(shortcut.group)) groups.set(shortcut.group, []);
-      groups.get(shortcut.group).push(shortcut);
+      const group = shortcut.group || 'General';
+      if (!groups[group]) groups[group] = [];
+      groups[group].push(shortcut);
     }
-    const html = [];
-    for (const [group, shortcuts] of groups) {
-      html.push(`<section class="shortcut-section"><h4>${escapeHtml(group)}</h4><div class="shortcuts-grid">`);
-      for (const shortcut of shortcuts) {
-        const displayBindings = shortcut.displayBindings || shortcut.bindings || [];
-        const keys = displayBindings
-          .map((binding) => this.formatShortcutBinding(binding).split('+').map((part) => `<kbd>${escapeHtml(part)}</kbd>`).join('+'))
-          .join(' / ');
-        html.push(`<div>${keys}</div><div>${escapeHtml(shortcut.label)}</div>`);
-      }
-      html.push('</div></section>');
-    }
-    list.innerHTML = html.join('');
+    const formatBindings = (shortcut) => {
+      const bindings = shortcut.displayBindings || shortcut.bindings || [];
+      return bindings
+        .map((binding) => `<kbd>${escapeHtml(this.formatShortcutBinding(binding))}</kbd>`)
+        .join(' / ');
+    };
+    list.innerHTML = Object.entries(groups)
+      .map(
+        ([group, shortcuts]) =>
+          `<div class="shortcut-overlay-group"><div class="shortcut-overlay-group-label">${escapeHtml(group)}</div>` +
+          shortcuts
+            .map(
+              (shortcut) =>
+                `<div class="shortcut-overlay-row"><span class="shortcut-overlay-label">${escapeHtml(shortcut.label)}</span><span class="shortcut-overlay-keys">${formatBindings(shortcut)}</span></div>`
+            )
+            .join('') +
+          '</div>'
+      )
+      .join('');
   }
 
   showShortcutOverlay() {
@@ -1151,8 +1197,19 @@ class CodemanApp {
         return;
       }
 
+      if (this.shouldOpenCommandPaletteFromShortcut?.(e)) {
+        e.preventDefault();
+        this.openCommandPalette();
+        return;
+      }
+
       // Escape - close panels and modals (different logic: no preventDefault, no return)
       if (e.key === 'Escape') {
+        // The View Response overlay is a top-level layer: close it first and
+        // consume the key so ESC never reaches xterm/the CLI (where it has its own
+        // cancel semantics), then restore terminal focus. Explicit close (not a
+        // toggle) so a second Escape can't reopen it (COD-229).
+        if (this._maybeCloseResponseViewerOnEscape(e)) return;
         this.closeAllPanels();
         this.closeHelp();
         this.closeShortcutOverlay();
@@ -1861,15 +1918,32 @@ class CodemanApp {
       return `__CODEMAN_FENCE_${placeholders.length - 1}__`;
     });
 
-    // Split on blank-line paragraph boundaries; wrap any paragraph containing
-    // box-drawing/arrow chars in its own fenced block.
+    const looksLikeAsciiArtBlock = (chunk) => {
+      const lines = chunk.split('\n').filter((line) => line.trim());
+      if (lines.length === 0) return false;
+      if (lines.every((line) => /^[-*+]\s|^\d+[.)]\s/.test(line.trim()))) return false;
+      const boxLines = lines.filter((line) => BOX_PATTERN.test(line));
+      if (boxLines.length === 0) return false;
+      // Inline mentions such as "separator lines like ─────" are prose, not diagrams.
+      // Treat a chunk as ASCII art only when multiple lines carry box glyphs,
+      // or when a single non-empty line is predominantly box-drawing content.
+      if (boxLines.length >= 2) return true;
+      const onlyLine = boxLines[0];
+      const nonSpace = onlyLine.replace(/\s+/g, '');
+      const boxChars = (nonSpace.match(/[─-╿▀-▟]/g) || []).length;
+      return nonSpace.length >= 16 && boxChars / nonSpace.length >= 0.45;
+    };
+
+    // Split on blank-line paragraph boundaries; wrap actual box-drawing blocks
+    // in fenced code, but leave ordinary prose that merely mentions those glyphs
+    // alone so response text stays proportional and copy-friendly.
     const processed = masked
       .split(/(\n{2,})/)
       .map((chunk) => {
         if (/^\n{2,}$/.test(chunk)) return chunk; // keep separators
         if (!chunk.trim()) return chunk;
         if (chunk.includes('__CODEMAN_FENCE_')) return chunk;
-        if (BOX_PATTERN.test(chunk)) return '\n```\n' + chunk + '\n```\n';
+        if (looksLikeAsciiArtBlock(chunk)) return '\n```\n' + chunk + '\n```\n';
         return chunk;
       })
       .join('');
@@ -1951,6 +2025,22 @@ class CodemanApp {
     if (!body || body.dataset.rvBound === '1') return;
     body.dataset.rvBound = '1';
     body.addEventListener('click', async (ev) => {
+      const messageCopyBtn = ev.target.closest('.rv-message-copy');
+      if (messageCopyBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const message = messageCopyBtn.closest('.rv-message');
+        const source = message?.querySelector('.rv-text');
+        await this._copyResponseViewerPayload(this._prepareResponseViewerClipboard(source), {
+          controlEl: messageCopyBtn,
+          successMessage: 'Copied section as rich text',
+          fallbackMessage: 'Rich clipboard unavailable; copied section as plain text',
+          emptyMessage: 'No section content to copy',
+          failureMessage: 'Failed to copy section',
+        });
+        return;
+      }
+
       // One-click copy: lift the raw source from the sibling <pre><code>.
       const copyBtn = ev.target.closest('.rv-copy-btn');
       if (copyBtn) {
@@ -2007,6 +2097,315 @@ class CodemanApp {
     }
   }
 
+  _getResponseViewerCopySource(body) {
+    if (!body) return null;
+    const responseBlocks = body.querySelectorAll('[data-copy-role="response"] .rv-text');
+    if (responseBlocks.length > 0) return responseBlocks[responseBlocks.length - 1];
+    return body;
+  }
+
+  _getResponseViewerPlainText(source) {
+    const textSource = source.cloneNode(true);
+    textSource.querySelectorAll('br').forEach((lineBreak) => lineBreak.replaceWith(document.createTextNode('\n')));
+    textSource.querySelectorAll('ol').forEach((list) => {
+      const parsedStart = Number.parseInt(list.getAttribute('start') || '1', 10);
+      const start = Number.isNaN(parsedStart) ? 1 : parsedStart;
+      const items = Array.from(list.children).filter((child) => child.tagName === 'LI');
+      items.forEach((item, index) => {
+        item.insertBefore(document.createTextNode(`${start + index}. `), item.firstChild);
+      });
+    });
+    textSource.querySelectorAll('ul').forEach((list) => {
+      Array.from(list.children)
+        .filter((child) => child.tagName === 'LI')
+        .forEach((item) => item.insertBefore(document.createTextNode('• '), item.firstChild));
+    });
+    textSource.querySelectorAll('li > ol, li > ul').forEach((list) => list.before(document.createTextNode('\n')));
+    textSource.querySelectorAll('tr').forEach((row) => {
+      const cells = Array.from(row.children).filter((child) => child.tagName === 'TD' || child.tagName === 'TH');
+      cells.slice(1).forEach((cell) => cell.before(document.createTextNode('\t')));
+    });
+    textSource.querySelectorAll('blockquote, div, h1, h2, h3, h4, h5, h6, hr, li, p, pre, tr').forEach((block) => {
+      block.after(document.createTextNode('\n'));
+    });
+
+    return (textSource.innerText || textSource.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  /** Build a portable clipboard fragment from the rendered response viewer. */
+  _prepareResponseViewerClipboard(body) {
+    if (!body) return null;
+
+    const clone = body.cloneNode(true);
+    clone.querySelectorAll('.rv-code-actions').forEach((actions) => actions.remove());
+
+    // These wrappers only provide Codeman scrolling/toolbar behavior. Keep their content.
+    clone.querySelectorAll('.rv-code-wrap, .rv-table-wrap').forEach((wrapper) => {
+      wrapper.replaceWith(...Array.from(wrapper.childNodes));
+    });
+
+    // Retain semantic markup and links, but do not leak app-specific classes or data attributes.
+    const portableAttributes = new Set([
+      'alt', 'colspan', 'height', 'href', 'rowspan', 'src', 'start', 'title', 'type', 'width',
+    ]);
+    clone.querySelectorAll('*').forEach((el) => {
+      Array.from(el.attributes).forEach((attr) => {
+        if (!portableAttributes.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+      });
+    });
+
+    // Small neutral styles survive Office-style paste targets without carrying the dark theme.
+    clone.querySelectorAll('table').forEach((table) => {
+      table.style.borderCollapse = 'collapse';
+    });
+    clone.querySelectorAll('th, td').forEach((cell) => {
+      cell.style.border = '1px solid #999';
+      cell.style.padding = '4px 8px';
+    });
+    clone.querySelectorAll('pre').forEach((pre) => {
+      pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Consolas, monospace';
+      pre.style.whiteSpace = 'pre-wrap';
+    });
+    clone.querySelectorAll('code').forEach((code) => {
+      code.style.fontFamily = 'ui-monospace, SFMono-Regular, Consolas, monospace';
+    });
+    clone.querySelectorAll('blockquote').forEach((quote) => {
+      quote.style.borderLeft = '3px solid #999';
+      quote.style.marginLeft = '0';
+      quote.style.paddingLeft = '12px';
+    });
+
+    const html = clone.innerHTML.trim();
+    const text = this._getResponseViewerPlainText(clone);
+    return html || text ? { html, text } : null;
+  }
+
+  _setResponseViewerCopyState(success) {
+    const btn = document.getElementById('responseViewerCopy');
+    this._setCopyControlState(btn, success);
+  }
+
+  _setCopyControlState(btn, success) {
+    if (!btn) return;
+    btn.classList.remove('rv-copied', 'rv-copy-failed');
+    btn.classList.add(success ? 'rv-copied' : 'rv-copy-failed');
+    clearTimeout(btn._resetTimer);
+    btn._resetTimer = setTimeout(() => {
+      btn.classList.remove('rv-copied', 'rv-copy-failed');
+    }, 1500);
+  }
+
+  async _copyResponseViewerPayload(payload, options = {}) {
+    const {
+      controlEl = null,
+      successMessage = 'Copied response as rich text',
+      fallbackMessage = 'Rich clipboard unavailable; copied plain text',
+      emptyMessage = 'No response content to copy',
+      failureMessage = 'Failed to copy response',
+    } = options;
+
+    const setState = (success) => {
+      if (controlEl) this._setCopyControlState(controlEl, success);
+      else this._setResponseViewerCopyState(success);
+    };
+
+    if (!payload) {
+      setState(false);
+      this.showToast(emptyMessage, 'warning');
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        throw new Error('Rich clipboard API unavailable');
+      }
+      const item = new ClipboardItem({
+        'text/html': new Blob([payload.html], { type: 'text/html' }),
+        'text/plain': new Blob([payload.text], { type: 'text/plain' }),
+      });
+      await navigator.clipboard.write([item]);
+      setState(true);
+      this.showToast(successMessage, 'success');
+      return;
+    } catch { /* Fall through to the established plain-text copy path. */ }
+
+    const copied = await this._copyText(payload.text);
+    setState(copied);
+    if (copied) {
+      this.showToast(fallbackMessage, 'warning');
+    } else {
+      this.showToast(failureMessage, 'error');
+    }
+  }
+
+  /** Copy the currently displayed response as HTML with a plain-text fallback. */
+  async copyResponseViewerRichText() {
+    const body = document.getElementById('responseViewerBody');
+    await this._copyResponseViewerPayload(
+      this._prepareResponseViewerClipboard(this._getResponseViewerCopySource(body))
+    );
+  }
+
+  /** Copy the raw Markdown source of the latest response without rendering it first. */
+  async copyResponseViewerMarkdown() {
+    const button = document.getElementById('responseViewerCopyMarkdown');
+    const markdown = this._responseViewerMarkdown || '';
+    if (!markdown) {
+      this._setCopyControlState(button, false);
+      this.showToast('No response content to copy', 'warning');
+      return;
+    }
+
+    const copied = await this._copyText(markdown);
+    this._setCopyControlState(button, copied);
+    this.showToast(copied ? 'Copied response as Markdown' : 'Failed to copy response as Markdown', copied ? 'success' : 'error');
+  }
+
+  _renderResponseViewerMessages(body, messages) {
+    body.innerHTML = '';
+    for (const msg of messages) {
+      const kind = msg.kind || (msg.role === 'user' ? 'prompt' : 'response');
+      const label = msg.label || (msg.role === 'user' ? 'You' : 'Claude');
+      const div = document.createElement('div');
+      div.className = 'rv-message rv-msg-' + kind;
+      if (kind === 'response') div.dataset.copyRole = 'response';
+
+      const actions = document.createElement('div');
+      actions.className = 'rv-message-actions';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'rv-message-copy';
+      copyBtn.type = 'button';
+      copyBtn.setAttribute('aria-label', `Copy ${label} block as rich text`);
+      copyBtn.setAttribute('title', `Copy ${label}`);
+      actions.appendChild(copyBtn);
+      div.appendChild(actions);
+
+      const role = document.createElement('div');
+      role.className = 'rv-role rv-role-' + kind;
+      role.textContent = label;
+      div.appendChild(role);
+
+      const text = document.createElement('div');
+      text.className = 'rv-text';
+      text.innerHTML = this._renderMarkdown(msg.text || '');
+      div.appendChild(text);
+
+      body.appendChild(div);
+    }
+    this._bindResponseViewerInteractions(body);
+  }
+
+  // COD-225: independent User / Tools / Responses visibility filters for the
+  // expanded More transcript. Pure client-side show/hide (no refetch); block order
+  // is untouched. Category -> block kinds: user -> prompt; tool -> tool + status;
+  // response -> response.
+  _defaultResponseFilterState() {
+    return { user: true, tool: true, response: true };
+  }
+
+  toggleTranscriptFilter(category, btn) {
+    if (!['user', 'tool', 'response'].includes(category)) return;
+    if (!this._responseFilterState) this._responseFilterState = this._defaultResponseFilterState();
+    const on = !this._responseFilterState[category];
+    this._responseFilterState[category] = on;
+    const button = btn || document.querySelector(`.rv-filter-btn[data-rv-filter="${category}"]`);
+    if (button) {
+      button.setAttribute('aria-pressed', on ? 'true' : 'false');
+      button.classList.toggle('rv-filter-off', !on);
+    }
+    this._applyResponseFilters();
+  }
+
+  _applyResponseFilters() {
+    const body = document.getElementById('responseViewerBody');
+    if (!body) return;
+    const st = this._responseFilterState || this._defaultResponseFilterState();
+    body.classList.toggle('rv-hide-user', !st.user);
+    body.classList.toggle('rv-hide-tool', !st.tool);
+    body.classList.toggle('rv-hide-response', !st.response);
+
+    // Derive the filtered-empty state from classes (not computed CSS display, which
+    // jsdom does not evaluate). A block is hidden when its category is toggled off.
+    const blocks = body.querySelectorAll('.rv-message');
+    let anyVisible = false;
+    blocks.forEach((b) => {
+      const hidden =
+        (!st.user && b.classList.contains('rv-msg-prompt')) ||
+        (!st.tool && (b.classList.contains('rv-msg-tool') || b.classList.contains('rv-msg-status'))) ||
+        (!st.response && b.classList.contains('rv-msg-response'));
+      if (!hidden) anyVisible = true;
+    });
+
+    let empty = body.querySelector('.response-viewer-filter-empty');
+    if (blocks.length > 0 && !anyVisible) {
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'response-viewer-filter-empty';
+        empty.textContent = 'No transcript blocks match the current filters.';
+        body.appendChild(empty);
+      }
+      empty.hidden = false;
+    } else if (empty) {
+      empty.hidden = true;
+    }
+  }
+
+  // Show the filter bar and return every category to visible, so reopening the
+  // transcript starts from a predictable all-visible default (COD-225).
+  _showResponseFilters() {
+    this._responseFilterState = this._defaultResponseFilterState();
+    const bar = document.getElementById('responseViewerFilters');
+    if (bar) {
+      bar.hidden = false;
+      bar.querySelectorAll('.rv-filter-btn').forEach((b) => {
+        b.setAttribute('aria-pressed', 'true');
+        b.classList.remove('rv-filter-off');
+      });
+    }
+    this._applyResponseFilters();
+  }
+
+  // Hide the filter bar for the Last Response single-response view (no transcript
+  // blocks to filter) and clear any lingering hide classes.
+  _hideResponseFilters() {
+    const bar = document.getElementById('responseViewerFilters');
+    if (bar) bar.hidden = true;
+    const body = document.getElementById('responseViewerBody');
+    if (body) body.classList.remove('rv-hide-user', 'rv-hide-tool', 'rv-hide-response');
+  }
+
+  // Explicit, idempotent close for the View Response overlay. Returns true only
+  // when it actually closed an open viewer (so the Escape handler can consume the
+  // key), false if it was already closed. Restores focus to the active terminal so
+  // a keyboard user resumes typing at the CLI prompt with no mouse click (COD-229).
+  // Shared by the × button, the backdrop, the toggle's close branch, and Escape.
+  closeResponseViewer() {
+    const viewer = document.getElementById('responseViewer');
+    if (!viewer || !viewer.classList.contains('visible')) return false;
+    const backdrop = document.getElementById('responseViewerBackdrop');
+    viewer.classList.remove('visible');
+    if (backdrop) backdrop.classList.remove('visible');
+    if (this.terminal) {
+      try {
+        this.terminal.focus();
+      } catch {
+        /* terminal may be detached mid-teardown */
+      }
+    }
+    return true;
+  }
+
+  // Escape-key seam: close the viewer if open and consume the event so ESC does not
+  // reach xterm/the CLI. Returns true when the key was consumed (COD-229).
+  _maybeCloseResponseViewerOnEscape(e) {
+    if (!this.closeResponseViewer()) return false;
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return true;
+  }
+
   async toggleResponseViewer() {
     const viewer = document.getElementById('responseViewer');
     const backdrop = document.getElementById('responseViewerBackdrop');
@@ -2014,20 +2413,21 @@ class CodemanApp {
 
     const isOpen = viewer.classList.contains('visible');
     if (isOpen) {
-      viewer.classList.remove('visible');
-      backdrop.classList.remove('visible');
+      this.closeResponseViewer();
       return;
     }
 
     if (!this.activeSessionId) return;
     try {
+      const session = this.sessions?.get?.(this.activeSessionId);
+      const mode = session?.mode || '';
       // Source 1: Transcript JSONL (best quality — clean structured text from Claude)
       const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response`);
       const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
 
       // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
-      if (!lastResponse) {
+      if (!lastResponse && mode === 'claude') {
         const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
         const termData = (await termRes.json())?.data ?? {};
         if (termData.terminalBuffer) {
@@ -2035,15 +2435,26 @@ class CodemanApp {
         }
       }
 
+      this._responseViewerMarkdown = lastResponse;
+
       const body = document.getElementById('responseViewerBody');
-      body.innerHTML = this._renderMarkdown(lastResponse);
-      this._bindResponseViewerInteractions(body);
+      if (lastResponse) {
+        body.innerHTML = this._renderMarkdown(lastResponse);
+        this._bindResponseViewerInteractions(body);
+      } else {
+        body.textContent = 'No response yet — send a message in this session first.';
+      }
 
       // Reset state for fresh open
       const title = document.getElementById('responseViewerTitle');
       const moreBtn = document.getElementById('responseViewerMore');
       if (title) title.textContent = 'Last Response';
-      if (moreBtn) { moreBtn.style.display = ''; moreBtn.textContent = 'More'; }
+      if (moreBtn) {
+        moreBtn.style.display = data.hasContext ? '' : 'none';
+        moreBtn.textContent = 'More';
+      }
+      // Last Response is a single rendered block, not a transcript — no filters here.
+      this._hideResponseFilters();
 
       viewer.classList.add('visible');
       backdrop.classList.add('visible');
@@ -2070,28 +2481,19 @@ class CodemanApp {
         return;
       }
 
-      // Render conversation thread
-      body.innerHTML = '';
-      for (const msg of messages) {
-        const div = document.createElement('div');
-        const isUser = msg.role === 'user';
-        div.className = 'rv-message ' + (isUser ? 'rv-msg-user' : 'rv-msg-assistant');
+      const lastResponse = [...messages].reverse().find((msg) => {
+        const kind = msg.kind || (msg.role === 'user' ? 'prompt' : 'response');
+        return kind === 'response';
+      });
+      if (lastResponse) this._responseViewerMarkdown = lastResponse.text || '';
 
-        const role = document.createElement('div');
-        role.className = 'rv-role ' + (isUser ? 'rv-role-user' : 'rv-role-assistant');
-        role.textContent = isUser ? 'You' : 'Claude';
-        div.appendChild(role);
+      this._renderResponseViewerMessages(body, messages);
+      this._showResponseFilters();
 
-        const text = document.createElement('div');
-        text.className = 'rv-text';
-        text.innerHTML = this._renderMarkdown(msg.text);
-        div.appendChild(text);
-
-        body.appendChild(div);
-      }
-      this._bindResponseViewerInteractions(body);
-
-      if (title) title.textContent = `Conversation (${messages.length} messages)`;
+      const hasStructuredKinds = messages.some((msg) => typeof msg.kind === 'string');
+      if (title) title.textContent = hasStructuredKinds
+        ? `Transcript (${messages.length} blocks)`
+        : `Conversation (${messages.length} messages)`;
       if (moreBtn) moreBtn.style.display = 'none';
       // Scroll to bottom (latest message)
       body.scrollTop = body.scrollHeight;
@@ -2156,7 +2558,7 @@ class CodemanApp {
   _onSessionResized(data) {
     if (data.id !== this.activeSessionId || !this.terminal) return;
     const session = this.sessions.get(data.id);
-    if (session?.mode !== 'codex' && session?.mode !== 'gemini') return;
+    if (session?.mode !== 'codex' && session?.mode !== 'gemini' && session?.mode !== 'agy') return;
     // Our own resize (or one that happens to match us) can't misalign our view.
     if (this.terminal.cols === data.cols && this.terminal.rows === data.rows) return;
     this._foreignResizeDirty = data.id;
@@ -2214,10 +2616,10 @@ class CodemanApp {
     }
   }
 
-  /** COD-182: any codex/gemini tab — stale rows can appear locally too (reattach/reconnect churn). */
+  /** COD-182: any codex/gemini/agy tab — stale rows can appear locally too (reattach/reconnect churn). */
   _isTuiSession(sessionId) {
     const session = this.sessions.get(sessionId);
-    return session?.mode === 'codex' || session?.mode === 'gemini';
+    return session?.mode === 'codex' || session?.mode === 'gemini' || session?.mode === 'agy';
   }
 
   /** COD-180: remote codex/gemini sessions — the live nested-tmux stream corrupts scrollback; reconcile heals it. */
@@ -2767,14 +3169,15 @@ class CodemanApp {
    */
   _connectWs(sessionId) {
     this._disconnectWs();
+    this._wsState = 'connecting';
+    this._updateConnectionIndicator();
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Pass the stable per-browser clientId on the upgrade URL so the server's
-    // connection registry scopes the per-session limit by client (COD-137): a
-    // reconnect supersedes its own socket instead of consuming a new slot and
-    // tripping a spurious 4008. Omitted if clientId is unavailable (server then
-    // treats the upgrade as anonymous — still admitted up to the limit).
-    const cidQuery = this._clientId ? `?cid=${encodeURIComponent(this._clientId)}` : '';
+    // Scope registry identity per tab: reconnects from this tab supersede their
+    // own socket, while two tabs sharing the browser-wide clientId can coexist.
+    // Input frames keep the bare clientId for durable sequence deduplication.
+    const cid = this._clientId ? `${this._clientId}:${this._wsTabNonce}` : '';
+    const cidQuery = cid ? `?cid=${encodeURIComponent(cid)}` : '';
     const url = `${proto}//${location.host}/ws/sessions/${sessionId}/terminal${cidQuery}`;
     const ws = new WebSocket(url);
     this._ws = ws;
@@ -2921,7 +3324,11 @@ class CodemanApp {
   /** Close the active WebSocket connection (if any). */
   _disconnectWs() {
     this._clearTimer('_wsReconnectTimer');
-    this._wsReconnectAttempts = 0;
+    // Deliberately do NOT reset _wsReconnectAttempts here: _connectWs() calls
+    // this first, so a reset would restart the exponential backoff ladder at
+    // attempt 0 on every retry (≈0ms tight reconnect loop during an outage).
+    // ws.onopen zeroes the counter once a connection actually succeeds.
+    this._wsState = 'disconnected';
     this._stopMobileResizeRetry();
     if (this._ws) {
       this._ws.onclose = null; // Prevent re-entrant cleanup
@@ -2980,6 +3387,39 @@ class CodemanApp {
   _sendInputAsync(sessionId, input, opts) {
     if (!sessionId || !input) return;
     this._reliableSend(sessionId, input, opts?.useMux === true);
+  }
+
+  /**
+   * Fire-and-forget input for EPHEMERAL, loss-tolerant streams (e.g. wheel-scroll
+   * reports). Unlike _sendInputAsync, this never enters the durable seq/ACK queue,
+   * so it isn't persisted, retried, or counted in the pending-bytes connection
+   * indicator (which was flickering "11b/22b queued" on every scroll tick). A
+   * dropped scroll tick is harmless; keystrokes still go through _sendInputAsync.
+   * The server applies a seq-less {t:'i'} frame / seq-less POST unconditionally
+   * and sends no ACK (ws-routes.ts, session-routes input handler).
+   */
+  _sendInputEphemeral(sessionId, input) {
+    if (!sessionId || !input) return;
+    if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
+      try {
+        this._ws.send(JSON.stringify({ t: 'i', d: input }));
+        return;
+      } catch {
+        // socket died mid-send — fall through to a best-effort POST
+      }
+    }
+    // No usable WS for this session: best-effort POST, not queued. Dropped on
+    // failure — a scroll tick lost while offline needs no recovery.
+    try {
+      fetch(`/api/sessions/${sessionId}/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // ignore — loss-tolerant
+    }
   }
 
   /** Record one input frame and kick delivery. The record lives until ACKed. */
@@ -3683,6 +4123,7 @@ class CodemanApp {
 
     const previousActiveId = this.activeSessionId;
     this.activeSessionId = null;
+    this.updateFileBrowserHeaderButton?.();
     if (this.sessionOrder.length > 0) {
       // Priority: current active > localStorage > first session
       let restoreId = previousActiveId;
@@ -3727,6 +4168,7 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
 
   renderSessionTabs() {
+    this.updateFileBrowserHeaderButton?.();
     // Don't re-render while user is typing in the inline rename input
     if (this._inlineRenameActive) return;
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
@@ -3966,6 +4408,7 @@ class CodemanApp {
     // decision depends only on natural tab width vs the fixed narrow area — a stable
     // fixed point. (No paint happens between these class writes and the measure: the
     // browser only repaints after this synchronous frame completes.)
+    const wasWrapped = container.classList.contains('tabs-auto-wrap');
     container.classList.remove('tabs-auto-wrap');
     document.querySelector('.header')?.classList.remove('header--tabs-wrapped');
     const shouldWrap = window.CodemanTabOverflow?.shouldAutoWrapTabs
@@ -3981,6 +4424,10 @@ class CodemanApp {
     container.classList.toggle('tabs-auto-wrap', shouldWrap);
     // COD-147: mirror the final tab-wrap state onto the header so .header-right wraps too.
     this._applyHeaderRightWrap(deviceType, manualTwoRows, shouldWrap);
+    // COD-213: when wrap state changes the header height changes, shrinking/growing the
+    // terminal container. The ResizeObserver fires but with a 300ms debounce — call
+    // fit() immediately so dimensions are correct the instant the layout settles.
+    if (shouldWrap !== wasWrapped) this.fitAddon?.fit();
   }
 
   // COD-147: toggle `header--tabs-wrapped` so the right-side cluster wraps to a
@@ -4047,7 +4494,7 @@ class CodemanApp {
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : ''}
+              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'agy' ? '<span class="tab-mode agy" aria-hidden="true">ag</span>' : ''}
               <span class="tab-name" data-session-id="${id}">${(() => { const p = parseSessionPrefix(name); return p && p.suffix ? '<span class="tab-prefix">' + escapeHtml(p.prefix) + '</span><span class="tab-suffix">: ' + escapeHtml(p.suffix) + '</span>' : escapeHtml(name); })()}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
@@ -4475,9 +4922,15 @@ class CodemanApp {
     // Close WebSocket for previous session (new one opens after buffer load)
     this._disconnectWs();
 
-    // Clear CJK textarea to prevent sending stale text to the wrong session
-    const cjkEl = document.getElementById('cjkInput');
-    if (cjkEl) cjkEl.value = '';
+    // Clear CJK input to prevent sending stale text to the wrong session.
+    // Must go through CjkInput.clear() — a raw value wipe leaves the module's
+    // pending flush timers armed and drops the phantom char it relies on.
+    if (typeof CjkInput !== 'undefined') {
+      CjkInput.clear();
+    } else {
+      const cjkEl = document.getElementById('cjkInput');
+      if (cjkEl) cjkEl.value = '';
+    }
 
     // Clean up flicker filter state when switching sessions
     this._clearTimer('flickerFilterTimeout');
@@ -4657,17 +5110,40 @@ class CodemanApp {
     // Track working directory for path normalization in Project Insights
     this.currentSessionWorkingDir = session?.workingDir || null;
     if (session && session.pid === null) {
-      // Session has no PTY attached — either restored after server restart
-      // or detached for some other reason. Re-attach regardless of status.
-      try {
-        const endpoint = session.mode === 'shell'
-          ? `/api/sessions/${sessionId}/shell`
-          : `/api/sessions/${sessionId}/interactive`;
-        await fetch(endpoint, { method: 'POST' });
-        // Update local session state
-        session.status = 'busy';
-      } catch (err) {
-        console.error('Failed to attach to restored session:', err);
+      if (session.respawnBlocked) {
+        // COD-118: the PTY-exit circuit breaker tripped for this session — the
+        // automatic re-attach must NOT silently clear it (that would re-arm the
+        // crash loop on every tab click / page load). Restart only on explicit
+        // user confirmation; the confirmed request carries clearBreaker:true.
+        const label = session.name || 'Session';
+        if (window.confirm(`${label} was stopped after crashing repeatedly. Restart it?`)) {
+          try {
+            await fetch(`/api/sessions/${sessionId}/interactive`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clearBreaker: true }),
+            });
+            session.respawnBlocked = false;
+            session.status = 'busy';
+          } catch (err) {
+            console.error('Failed to restart crash-looped session:', err);
+          }
+        }
+      } else {
+        // Session has no PTY attached — either restored after server restart
+        // or detached for some other reason. Re-attach regardless of status.
+        // Deliberately NO body: this automatic path must never clear a tripped
+        // PTY-exit breaker (COD-118).
+        try {
+          const endpoint = session.mode === 'shell'
+            ? `/api/sessions/${sessionId}/shell`
+            : `/api/sessions/${sessionId}/interactive`;
+          await fetch(endpoint, { method: 'POST' });
+          // Update local session state
+          session.status = 'busy';
+        } catch (err) {
+          console.error('Failed to attach to restored session:', err);
+        }
       }
     }
 
@@ -4973,32 +5449,7 @@ class CodemanApp {
         this.updateSubagentWindowVisibility();
 
         // Load file browser if enabled
-        const settings = this.loadAppSettingsFromStorage();
-        if (settings.showFileBrowser) {
-          const fileBrowserPanel = this.$('fileBrowserPanel');
-          if (fileBrowserPanel) {
-            fileBrowserPanel.classList.add('visible');
-            this.loadFileBrowser(sessionId);
-            // Attach drag listeners if not already attached
-            if (!this.fileBrowserDragListeners) {
-              const header = fileBrowserPanel.querySelector('.file-browser-header');
-              if (header) {
-                const onFirstDrag = () => {
-                  if (!fileBrowserPanel.style.left) {
-                    const rect = fileBrowserPanel.getBoundingClientRect();
-                    fileBrowserPanel.style.left = `${rect.left}px`;
-                    fileBrowserPanel.style.top = `${rect.top}px`;
-                    fileBrowserPanel.style.right = 'auto';
-                  }
-                };
-                header.addEventListener('mousedown', onFirstDrag);
-                header.addEventListener('touchstart', onFirstDrag, { passive: true });
-                this.fileBrowserDragListeners = this.makeWindowDraggable(fileBrowserPanel, header);
-                this.fileBrowserDragListeners._onFirstDrag = onFirstDrag;
-              }
-            }
-          }
-        }
+        this.showConfiguredFileBrowserPanel?.(sessionId);
       });
 
       _crashDiag.log('FOCUS');
@@ -5136,7 +5587,9 @@ class CodemanApp {
           ? 'Kill Tmux & Codex'
           : session.mode === 'gemini'
             ? 'Kill Tmux & Gemini'
-            : 'Kill Tmux & Claude Code';
+            : session.mode === 'agy'
+              ? 'Kill Tmux & Agy'
+              : 'Kill Tmux & Claude Code';
     }
 
     document.getElementById('closeConfirmModal').classList.add('active');

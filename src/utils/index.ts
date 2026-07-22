@@ -24,12 +24,15 @@ export {
 export { MAX_SESSION_TOKENS } from './token-validation.js';
 export { isSafePushEndpoint } from './push-endpoint-validation.js';
 export { stringSimilarity, fuzzyPhraseMatch, todoContentHash } from './string-similarity.js';
+export { compileFileQuery, matchFileQuery } from './file-query.js';
+export type { FileQueryMatcher } from './file-query.js';
 export { assertNever } from './type-safety.js';
 export { wrapWithNice } from './nice-wrapper.js';
-export { findClaudeDir, getAugmentedPath } from './claude-cli-resolver.js';
+export { findClaudeDir, getAugmentedPath, getClaudeCliVersion } from './claude-cli-resolver.js';
 export { resolveOpenCodeDir } from './opencode-cli-resolver.js';
 export { resolveCodexDir, isCodexAvailable } from './codex-cli-resolver.js';
 export { resolveGeminiDir, isGeminiAvailable } from './gemini-cli-resolver.js';
+export { resolveAgyDir, isAgyAvailable } from './agy-cli-resolver.js';
 export {
   detectEnvironment,
   extractVersion,

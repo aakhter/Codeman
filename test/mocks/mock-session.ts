@@ -4,7 +4,8 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionAttachmentHistoryItem } from '../../src/types/session.js';
+import type { SessionAttachmentHistoryItem, SessionRemote } from '../../src/types/session.js';
+import type { SessionSource } from '../../src/types/sources.js';
 import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
 /**
@@ -14,6 +15,8 @@ import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/se
 export class MockSession extends EventEmitter {
   id: string;
   workingDir: string = '/tmp/test-workdir';
+  /** COD-241 — set by remote-session route tests; production reads `session.remote`. */
+  remote?: SessionRemote;
   status: 'idle' | 'working' = 'idle';
   pid: number = 12345;
   isWorking: boolean = false;
@@ -251,6 +254,39 @@ export class MockSession extends EventEmitter {
   getAttachmentHistoryForPersist = vi.fn(() =>
     this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined
   );
+
+  removeAttachmentHistory = vi.fn((predicate: (item: SessionAttachmentHistoryItem) => boolean) => {
+    const before = this._attachmentHistory.length;
+    this._attachmentHistory = this._attachmentHistory.filter((item) => !predicate(item));
+    return before - this._attachmentHistory.length;
+  });
+
+  // ── Sources (COD-65) ──────────────────────────────────────────────────────
+  private _sources: SessionSource[] = [];
+
+  get sources(): SessionSource[] {
+    return [...this._sources];
+  }
+
+  addSource = vi.fn((item: SessionSource) => {
+    const idx = this._sources.findIndex((s) => s.id === item.id);
+    if (idx >= 0) {
+      this._sources[idx] = { ...item };
+    } else {
+      this._sources.push({ ...item });
+    }
+  });
+
+  removeSource = vi.fn((id: string) => {
+    this._sources = this._sources.filter((s) => s.id !== id);
+  });
+
+  restoreSources = vi.fn((data: SessionSource[] | undefined) => {
+    this._sources = data ? data.map((s) => ({ ...s })) : [];
+  });
+
+  getSourcesForPersist = vi.fn(() => (this._sources.length > 0 ? this._sources.map((s) => ({ ...s })) : undefined));
+  // ─────────────────────────────────────────────────────────────────────────
 
   /** Auto-resume on usage limit (token pause control) */
   autoResumeEnabled: boolean = false;

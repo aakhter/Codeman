@@ -112,6 +112,73 @@ Codeman requires tmux, so Windows users need [WSL](https://learn.microsoft.com/e
 
 ---
 
+## Using Codeman — A Human's Guide
+
+A start-to-finish walkthrough for driving Codeman from the browser. If you just installed, this is where to begin.
+
+### 1. Launch the server
+
+```bash
+codeman web                       # localhost:3000 (loopback only — safe default)
+codeman web --port 8080           # custom port (or set CODEMAN_PORT)
+codeman web --https               # self-signed TLS (only needed for remote access)
+codeman web -H 0.0.0.0            # bind LAN — REQUIRES CODEMAN_PASSWORD (see Security)
+```
+
+Open the printed URL. The page is a single dashboard; everything below happens there.
+
+### 2. Create your first session
+
+Click **+ New Session** (or **Quick Start**). A session is one AI CLI running in its own tmux-backed terminal. You choose:
+
+| Field                        | What it does                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Working directory / case** | The folder the agent operates in. A "case" is just a named working dir Codeman remembers.                           |
+| **CLI / run mode**           | `Claude` (default), `OpenCode`, `Codex`, `Gemini`, or `Terminal` (plain shell).                                     |
+| **Model**                    | Per-session model (App Settings → Claude Model). A soft default — `/model` still works in-session.                  |
+| **Effort / Ultracode**       | Reasoning effort (`low`–`max`) or `ultracode` for dynamic multi-agent workflows. Switchable anytime with `/effort`. |
+
+Hit start — Codeman spawns the CLI via a real PTY and streams it to your browser over SSE.
+
+### 3. Read the dashboard
+
+- **Tabs (top)** — one per session. `Alt+1`-`9` to jump, `Ctrl+Tab` for next, drag to reorder.
+- **Terminal (center)** — a real `xterm.js` terminal; full TUIs render correctly. Type directly and press **Enter** to send. `Shift+Enter` inserts a newline.
+- **Side panels** — Respawn, Ralph, Orchestrator, Cron, Subagents, Settings (toggled from the toolbar).
+
+### 4. Talk to the agent
+
+- **Type prompts** straight into the terminal — input is delivered exactly-once even across reconnects (a dropped link never loses or double-sends a prompt).
+- **Paste or drag-and-drop images** directly into the session.
+- **Voice input** — `Ctrl+Shift+V` (Deepgram Nova-3, with auto-silence stop).
+- **Attachments** — register external files/docs and preview Office/PDF inline.
+
+### 5. Make it autonomous
+
+| Mode             | Use it for                                                                                                                        | Where              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| **Respawn**      | Long unattended runs — auto-restarts the CLI on idle/limit, with adaptive timing. Presets: `solo-work`, `overnight-autonomous`, … | Respawn tab        |
+| **Ralph / Todo** | A self-driving loop that tracks a todo list and keeps working until done.                                                         | Ralph tab          |
+| **Orchestrator** | Turn one goal into a phased plan and drive it to completion across agents.                                                        | Orchestrator panel |
+| **Cron**         | Saved, named jobs on a schedule (`once`/`interval`/`daily`/`weekly`) that spawn a session and send a prompt when due.             | ⏰ Cron button     |
+| **Auto-resume**  | Automatically continue after a subscription rate-limit resets.                                                                    | Respawn tab (top)  |
+
+### 6. Reach it from anywhere
+
+- **Phone/tablet** — the UI is fully touch-optimized; scan the desktop **QR code** to log in without typing a password.
+- **Outside your network** — `./scripts/tunnel.sh start` opens a Cloudflare tunnel (set `CODEMAN_PASSWORD` first).
+- **SSH** — the `sc` chooser attaches to any session from a terminal (`sc` interactive, `sc 2` quick-attach, `sc -l` list).
+
+### 7. Operate & maintain
+
+- **App Settings** — model, effort, theme/skin, notifications, display toggles, per-CLI options.
+- **Self-update** — git-clone installs update in place from **Settings → Updates**.
+- **Deploy your own changes** — see [Development](#development).
+
+> ⚠️ **Safety:** if you're working _inside_ a Codeman-managed session (`echo $CODEMAN_MUX` → `1`), never run `tmux kill-session` / `pkill claude` directly — use the web UI or `./scripts/tmux-manager.sh`.
+
+---
+
 ## Mobile-Optimized Web UI
 
 The most responsive AI coding agent experience on any phone. Full xterm.js terminal with local echo, swipe navigation, and a touch-optimized interface designed for real remote work — not a desktop UI crammed onto a small screen.

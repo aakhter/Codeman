@@ -30,6 +30,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 vi.mock('node:child_process', () => ({
+  exec: vi.fn(),
   execFile: vi.fn((_cmd, _args, _options, callback) => {
     callback(null, { stdout: '', stderr: '' });
     return {};
@@ -251,6 +252,35 @@ describe('file-routes', () => {
       expect(body.data.extension).toBe('ts');
     });
 
+    it('classifies markdown files as type "markdown" so the file panel renders rich prose (COD-234)', async () => {
+      const fileContent = '# Title\n\nBody text';
+      mockedReadFile.mockResolvedValue(fileContent as never);
+      mockedStat.mockResolvedValue({ size: fileContent.length, mtimeMs: 1 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=notes.md`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.type).toBe('markdown');
+    });
+
+    it('classifies non-markdown text files as type "text" (not markdown, not document)', async () => {
+      const fileContent = 'const x = 1;\n';
+      mockedReadFile.mockResolvedValue(fileContent as never);
+      mockedStat.mockResolvedValue({ size: fileContent.length, mtimeMs: 1 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=src/app.js`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.type).toBe('text');
+      expect(body.data.content).toBe(fileContent);
+    });
+
     it('includes mtimeMs in text file metadata (freshness signal for live preview)', async () => {
       const fileContent = 'draft v1';
       mockedReadFile.mockResolvedValue(fileContent as never);
@@ -409,7 +439,9 @@ describe('file-routes', () => {
 
     it('rejects path traversal attempts', async () => {
       // realpathSync resolves the symlink to a path outside workingDir
-      mockedRealpathSync.mockReturnValue('/etc/passwd' as never);
+      mockedRealpathSync.mockImplementation((path) =>
+        String(path) === harness.ctx._session.workingDir ? (path as never) : ('/etc/passwd' as never)
+      );
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -657,6 +689,12 @@ describe('file-routes', () => {
         '/mnt/c/decks/board update.pptx',
         'board update.pptx',
       ],
+      [
+        'xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '/mnt/c/sheets/forecast.xlsx',
+        'forecast.xlsx',
+      ],
     ])('serves %s raw attachments with an inline filename for Open', async (_extension, mimeType, path, fileName) => {
       const content = Buffer.from('office bytes');
       mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
@@ -677,6 +715,35 @@ describe('file-routes', () => {
       expect(rawRes.statusCode).toBe(200);
       expect(rawRes.headers['content-type']).toBe(mimeType);
       expect(rawRes.headers['content-disposition']).toBe(`inline; filename="${fileName}"`);
+    });
+
+    it('classifies XLSX metadata as binary and redirects preview to raw bytes', async () => {
+      mockedStat.mockResolvedValue({ size: 4096, isFile: () => true, mtimeMs: 12345 } as never);
+
+      const registerRes = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: '/mnt/c/sheets/forecast.xlsx' },
+      });
+
+      expect(registerRes.statusCode).toBe(200);
+      const registerBody = JSON.parse(registerRes.body);
+      expect(registerBody.data.attachmentType).toBe('binary');
+      const attachmentId = registerBody.data.attachmentId;
+
+      const metadataRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}`,
+      });
+      expect(metadataRes.statusCode).toBe(200);
+      expect(JSON.parse(metadataRes.body).data.type).toBe('binary');
+
+      const previewRes = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/preview`,
+      });
+      expect(previewRes.statusCode).toBe(302);
+      expect(previewRes.headers.location).toContain(`/attachments/${attachmentId}/raw`);
     });
 
     it('serves registered PNG attachment bytes with production compression enabled', async () => {
@@ -1174,6 +1241,37 @@ describe('file-routes', () => {
       expect(res.headers['content-type']).toBe('image/png');
     });
 
+    it.each([
+      [
+        'docx',
+        'deliverables/Market Story Final.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ],
+      [
+        'pptx',
+        'deliverables/Executive Brief Final.pptx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      ],
+    ])(
+      'downloads the exact workspace %s source with its original spaced name and official media type',
+      async (_extension, filePath, mediaType) => {
+        const content = Buffer.from('PK\u0003\u0004 exact original office bytes');
+        mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
+        mockedStat.mockResolvedValue({ size: content.length } as never);
+
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=${encodeURIComponent(filePath)}&download=true`,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.headers['content-type']).toBe(mediaType);
+        expect(res.headers['content-disposition']).toBe(`attachment; filename="${filePath.split('/').at(-1)}"`);
+        expect(res.rawPayload).toEqual(content);
+        expect(mockedCreateReadStream).toHaveBeenCalledWith(`${harness.ctx._session.workingDir}/${filePath}`);
+      }
+    );
+
     it('serves workspace SVG as an untrusted attachment instead of inline image/svg+xml', async () => {
       const content = Buffer.from('<svg><script>alert("xss")</script></svg>');
       mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
@@ -1191,7 +1289,9 @@ describe('file-routes', () => {
     });
 
     it('rejects path traversal in raw file serving', async () => {
-      mockedRealpathSync.mockReturnValue('/etc/shadow' as never);
+      mockedRealpathSync.mockImplementation((path) =>
+        String(path) === harness.ctx._session.workingDir ? (path as never) : ('/etc/shadow' as never)
+      );
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -1322,7 +1422,9 @@ describe('file-routes', () => {
     });
 
     it('rejects symlink targets that escape the session working directory', async () => {
-      mockedRealpathSync.mockReturnValue('/tmp/outside-workdir/link.log' as never);
+      mockedRealpathSync.mockImplementation((path) =>
+        String(path) === harness.ctx._session.workingDir ? (path as never) : ('/tmp/outside-workdir/link.log' as never)
+      );
 
       const res = await harness.app.inject({
         method: 'GET',

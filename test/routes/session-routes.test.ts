@@ -41,6 +41,7 @@ const remoteStore = vi.hoisted(() => ({
     remotePath: string;
     commands?: Record<string, string>;
   }>,
+  tmuxCheck: { ok: true, tmuxPath: '/usr/bin/tmux' } as { ok: boolean; tmuxPath?: string; error?: string },
 }));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
@@ -53,8 +54,10 @@ vi.mock('../../src/remote-hosts.js', async (orig) => {
     ...actual,
     readRemoteHosts: vi.fn(async () => remoteStore.hosts),
     readRemoteCases: vi.fn(async () => remoteStore.cases),
+    checkRemoteTmuxAvailable: vi.fn(async () => remoteStore.tmuxCheck),
   };
 });
+vi.mock('../../src/web/heic-jpeg-converter.js', () => ({ convertHeicToJpeg: heicConvert }));
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 
@@ -117,6 +120,10 @@ describe('session-routes', () => {
     remoteStore.hosts = [];
     remoteStore.cases = [];
     harness = await createEnvelopeHarness(registerSessionRoutes);
+    // Reset remote store so tests start with empty hosts/cases and a passing tmux probe
+    remoteStore.hosts = [];
+    remoteStore.cases = [];
+    remoteStore.tmuxCheck = { ok: true, tmuxPath: '/usr/bin/tmux' };
   });
 
   afterEach(async () => {
@@ -158,6 +165,82 @@ describe('session-routes', () => {
       });
       expect(JSON.parse(res.body).success).toBe(false);
       expect(execFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /api/sessions/:id/last-response', () => {
+    it('returns the parsed last COD response from canonical terminal history', async () => {
+      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.terminalBuffer = 'stale local byte history';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() =>
+        `
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.143.0)                           │
+╰──────────────────────────────────────────────────────╯
+
+› say again
+
+Final polished answer
+With two lines
+
+› Improve documentation in @filename
+
+gpt-5.4 medium · kb · main · Ready · Context 92% left
+`.trim()
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/sessions/test-session-1/last-response',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.text).toBe('Final polished answer\nWith two lines');
+      expect(body.data.hasContext).toBe(true);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, {
+        fullHistory: true,
+      });
+    });
+
+    it('returns labeled COD transcript blocks for full context', async () => {
+      harness.ctx._session.mode = 'codex';
+      harness.ctx._session.terminalBuffer = '';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() =>
+        `
+› i need to create a naming recommendation for project helix
+
+gpt-5.4 medium · kb · main · Ready · Context 100% left
+
+• Explored
+  └ Read SKILL.md
+
+Subject: Naming Recommendation for Project Helix
+
+The product helps customers move virtual machine workloads between hypervisors while keeping operations
+stable. It improves visibility into application dependencies and reduces
+the risk
+and effort involved in moving workloads.
+`.trim()
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/sessions/test-session-1/last-response?context=full',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.messages).toEqual([
+        { kind: 'prompt', label: 'Prompt', text: 'i need to create a naming recommendation for project helix' },
+        { kind: 'status', label: 'Status', text: 'gpt-5.4 medium · kb · main · Ready · Context 100% left' },
+        { kind: 'tool', label: 'Tool', text: '• Explored\n  └ Read SKILL.md' },
+        {
+          kind: 'response',
+          label: 'Response',
+          text: 'Subject: Naming Recommendation for Project Helix\n\nThe product helps customers move virtual machine workloads between hypervisors while keeping operations stable. It improves visibility into application dependencies and reduces the risk and effort involved in moving workloads.',
+        },
+      ]);
     });
   });
 
@@ -248,7 +331,7 @@ describe('session-routes', () => {
       );
       const written = Buffer.concat(stdinChunks);
       expect(written.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
-      expect(heicConvert).toHaveBeenCalledWith({ buffer: heic, format: 'JPEG', quality: 0.92 });
+      expect(heicConvert).toHaveBeenCalledWith(heic);
     });
 
     it('uploads paste images for remote sessions to the remote workspace over ssh', async () => {
@@ -1593,6 +1676,54 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
+
+    // COD-118: this endpoint is ALSO the frontend's automatic re-attach path, so it
+    // must never clear a tripped PTY-exit breaker unless the request explicitly asks.
+    it('does NOT clear the PTY-exit breaker on an automatic re-attach (no body)', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx._session.resetRespawnBreaker).not.toHaveBeenCalled();
+      expect(harness.ctx._session.startInteractive).toHaveBeenCalled();
+    });
+
+    it('clears the PTY-exit breaker when the explicit restart flag is sent (COD-118)', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
+        payload: { clearBreaker: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx._session.resetRespawnBreaker).toHaveBeenCalledTimes(1);
+      expect(harness.ctx._session.startInteractive).toHaveBeenCalled();
+    });
+
+    it('rejects a non-boolean clearBreaker flag', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
+        payload: { clearBreaker: 'yes' },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe(ApiErrorCode.INVALID_INPUT);
+      expect(harness.ctx._session.resetRespawnBreaker).not.toHaveBeenCalled();
+      expect(harness.ctx._session.startInteractive).not.toHaveBeenCalled();
+    });
+
+    // COD-118: the wiring exit handler detaches ALL session listeners on PTY exit;
+    // re-attach must restore them or later trips/output go unobserved.
+    it('re-runs session listener wiring before starting', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.setupSessionListeners).toHaveBeenCalledWith(harness.ctx._session);
+    });
   });
 
   // ========== POST /api/sessions/:id/shell ==========
@@ -1607,6 +1738,8 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
       expect(harness.ctx._session.startShell).toHaveBeenCalled();
+      // COD-118: re-attach restores listener wiring detached by a prior PTY exit.
+      expect(harness.ctx.setupSessionListeners).toHaveBeenCalledWith(harness.ctx._session);
     });
 
     it('returns error if session is busy', async () => {

@@ -63,7 +63,7 @@ export interface ImageDetectedEvent {
   size: number;
 }
 
-export type AttachmentDetectedType = 'image' | 'pdf' | 'document' | 'presentation' | 'markdown' | 'text';
+export type AttachmentDetectedType = 'image' | 'pdf' | 'document' | 'presentation' | 'markdown' | 'text' | 'binary';
 
 /**
  * Event emitted when a new previewable attachment file is detected in a session's
@@ -89,7 +89,7 @@ export interface AttachmentDetectedEvent {
   /** Registered attachment id for explicit live external attachments */
   attachmentId?: string;
   /** Source of the attachment card request */
-  source?: 'detected' | 'external';
+  source?: 'detected' | 'external' | 'upload';
   /** Raw file route for explicit attachments */
   rawUrl?: string;
   /** Inline preview route for explicit attachments */

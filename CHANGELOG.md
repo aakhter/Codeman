@@ -1,5 +1,94 @@
 # aicodeman
 
+## 1.3.6
+
+### Patch Changes
+
+- Add XLSX attachment uploads with picker and drag-and-drop support, ZIP-signature validation, binary attachment registration, and Open/Download handling.
+
+  Persist keyboard shortcut overrides across upgrades and upstream refreshes. Fix Files panel path handling when the working directory has a trailing slash, linkify unquoted absolute terminal paths containing spaces, improve multiline prompt and final-response extraction, and make Headroom configuration reconciliation idempotent and reversible.
+
+## 1.3.5
+
+### Patch Changes
+
+- a842f2d: fix(auth): slide the session cookie so active users aren't logged out
+
+  Re-issue the `codeman_session` cookie on every authenticated request so the
+  browser cookie lifetime tracks the server-side sliding TTL (the session store
+  already uses `refreshOnGet`). Previously the cookie was only set on the Basic
+  Auth path with a fixed 24h lifetime from login, so the browser dropped it
+  mid-use; the next request arrived cookie-less, fell through to Basic Auth and
+  popped the native username/password dialog, perceived as a random logout while
+  actively working.
+
+## 1.3.4
+
+### Patch Changes
+
+- Fix "Run Shell" not switching the terminal to the newly created shell session. Clicking Run Shell created the shell tab but left the previous session's terminal on screen, so you had to manually click the new tab to actually enter it. Root cause: `runShell()` pre-set `activeSessionId` to the new session's id right before calling `selectSession()`, and `selectSession()` early-returns when the requested id already matches the active one, so it skipped the terminal buffer load, tab activation, and focus. Removed the premature assignment in both the local and remote-SSH shell branches so `selectSession()` runs to completion (matching `runClaude`/`runCodex`/`runGemini`/`runOpenCode`, which already avoid this). Verified end-to-end in a real browser with a negative/positive control.
+
+## 1.3.3
+
+### Patch Changes
+
+- Fix terminal scroll-back in Claude sessions, especially on macOS trackpads (#154).
+  - **Deterministic CLI version detection.** `cliVersion` was often `undefined` because it was scraped from the `Claude Code vX.Y.Z` startup banner, which newer Claude Code builds (2.1.187+) don't reliably print and resumed sessions never show. With the version unknown, wheel-forwarding to Claude's transcript was silently disabled — and since repaint-mode Claude keeps no local terminal scrollback, scrolling up reached nothing. A new `getClaudeCliVersion()` probe (`claude --version`, cached, local-only) seeds the version at session start so forwarding engages. Restored sessions pick it up on restart.
+  - **Trackpad Shift+scroll.** The wheel handler now reads the dominant axis, so a macOS trackpad's Shift+two-finger scroll — which the browser reports as horizontal `deltaX` — reaches xterm's local scrollback instead of collapsing to a fixed one line per tick.
+  - **Opt-out setting.** New per-device App Settings → Input → "Wheel Scrolls Local History" (default off) pins the plain wheel to local scrollback (the pre-#144 behavior) for shell and other non-repaint sessions.
+  - **No more "queued bytes" flicker on scroll.** Wheel-scroll reports now use a fire-and-forget send path (seq-less input frame) instead of the durable exactly-once input queue, so they no longer appear in the pending-bytes connection indicator or churn localStorage. Keystrokes, taps, and clicks still use the durable queue.
+
+## 1.3.2
+
+### Patch Changes
+
+- Make the Cron Jobs modal fully skin-aware and consistent with App Settings' design language.
+  - **Fix white dropdowns:** `.form-select` had no `appearance` reset and the app set no `color-scheme`, so native `<select>` fields rendered as white OS widgets that ignored the active skin. Selects now use `appearance: none` with an opaque `var(--bg-input)` fill, a `var(--border)` outline, and a custom chevron, so they follow the skin (daylight `#202833`, OG `#1a1a1f`). This is on the shared `.form-select` class, so App Settings, Cron, and every other select match and are fixed together.
+  - Set `color-scheme: dark` on `:root` so native select option popups, date/time pickers, and scrollbars render dark across all three (dark) skins instead of flashing white.
+  - Themed the Cron date/time inputs with `var(--bg-input)` / `var(--border)` instead of hardcoded values.
+  - Fixed the Cron toolbar: "+ New Job" / "Refresh" and the footer Save / Cancel now use the full `btn-toolbar` size (matching the App Settings footer), with a wider gap and a divider under the toolbar for better spacing.
+
+## 1.3.1
+
+### Patch Changes
+
+- Redesign the Cron Jobs modal to match the App Settings styling, and fix a bug that left its create form fully expanded.
+  - **Fix:** the cron modal's "New Cron Job" form and all of its conditional rows (Launch Command, Prompt File Path, and the once/interval/daily/weekly schedule fields) never actually collapsed — there is no global `.hidden` utility in the stylesheet and the cron modal never scoped its own, so the form opened fully expanded with every field visible at once. Added a scoped `#cronModal .hidden` rule; the form now stays collapsed until "+ New Job" and only shows the fields relevant to the selected agent type, prompt source, and schedule type.
+  - Sectioned the create/edit form into Basics / Prompt / Schedule / Options with the same section-header dividers used in App Settings, and increased row spacing.
+  - Styled the agent-type / prompt-source / input-mode / schedule-type dropdowns and the datetime-local / time inputs to share the bordered, rounded, focus-ringed field look.
+  - Converted the "Auto-close previous run's session" and "Enabled" toggles into App-Settings-style cards (label + description on the left, compact switch on the right).
+  - Replaced the raw weekday checkboxes with pill toggles that fill with the accent color when selected.
+  - Restyled the job list rows as hover-highlighted cards with pill badges (agent type, schedule, disabled) and right-aligned actions, and gave the modal a divider-topped Cancel / Save footer.
+
+## 1.3.0
+
+### Minor Changes
+
+- Community release: 16 contributor PRs reviewed (multi-agent adversarial review), fixed, and merged. Thanks to @aakhter, @TeigenZhang, @chatgptkrylor, @kvncrw, and @pirronewantlux529-coder!
+
+  **New features**
+  - **Cron jobs** (#141, @chatgptkrylor): recurring scheduled jobs (once/interval/daily/weekly) that spawn a session and send a prompt when due — CRUD + run history (`/api/cron/*`), ⏰ modal UI, per-job concurrency policy and `autoClosePreviousSession` lifecycle, pure unit-tested next-run math. Distinct from the legacy `ScheduledRun`.
+  - **Remote host SSH cases** (#145, @aakhter): link cases on remote hosts (`remote-hosts.json`/`remote-cases.json`), launch sessions over ssh into a durable remote tmux (dedicated `-L codeman-remote` socket; adoption-safe naming), per-host command overrides, injection-guarded schemas, remote tmux probe + ConnectTimeout, remote kill on delete, recovery-safe persistence.
+  - **Command-K session palette + searchable case picker + shortcut registry** (#146, @aakhter): Ctrl/Cmd/Alt+K fuzzy session palette with "Browse all sessions" Session Manager; searchable quick-start case picker (remote-aware labels); rebindable shortcut registry with App Settings → Shortcuts tab and Ctrl+? overlay.
+  - **Unified session list** (#139, @aakhter): `GET /api/sessions/unified` merges live/persisted/lifecycle/transcript sessions into one deduped list (resumed sessions fold via claudeSessionId alias map).
+  - **Unified Session Manager UX** (#153, @aakhter): unified welcome list with mode/LIVE badges + per-row kebab menu, `projectKey` plumbing for "View all in this folder", SSE-driven live list refresh, desktop Session Manager header button.
+  - **Full-scrollback replay** (#148, @aakhter): page reload replays the entire tmux scrollback (`?full=1`, bounded capture with proper maxBuffer) with CRLF normalization for shell panes.
+  - **WebSocket resilience** (#149, @aakhter): reconnect with preserved exponential backoff, per-tab connection identity (multi-tab safe), ACK re-drive, and a truthful connection chip (WS/HTTP/reconnecting states).
+  - **PTY-exit circuit breaker + TMUX scrub** (#147, @aakhter): rapid PTY crash-loops trip a breaker (SSE + critical push notification; explicit-restart-only reset); inherited TMUX vars are scrubbed so Codeman-in-tmux doesn't nest.
+  - **Codex generated-artifact attachments** (#150, @aakhter): codex sessions surface `Saved to: file://…` outputs as attachment cards (realpath-anchored trust, codex-mode-gated, jpg/gif/webp thumbnails).
+  - **Codex response viewer** (#152, @pirronewantlux529-coder): the eye button now works for Codex sessions via 4-layer rollout resolution (history pin → originator → resume-UUID → cwd) with dedup + injected-context filtering.
+  - **HEIC paste conversion** (#151, @aakhter): iPhone HEIC pastes convert to JPEG server-side in a worker thread (concurrency-capped, 64MP decompression-bomb guard, magic-byte detection for mislabeled Android HEIFs). Deps: heic-decode + jpeg-js.
+  - **WebGL renderer toggle** (#140, @kvncrw): per-device setting to switch xterm between WebGL and DOM renderers, cooperating with the GPU-stall auto-fallback marker.
+  - **Raised terminal history defaults** (#138, @aakhter): tmux history-limit 50k→100k lines, PTY buffer 2MB/1.5MB→32MB/24MB (env-clamped so trim always stays below max).
+
+  **Mobile & input fixes**
+  - CJK input loss fixes: IME state machine, focus routing, Android InputConnection recovery — with content-free diagnostics (#143, @TeigenZhang).
+  - Tap/click/wheel restored when the server strips mouse DECSETs — version-gated wheel passthrough (claude ≥ 2.1.187), link-click double-fire fix, Shift+wheel documented (#144, @TeigenZhang).
+  - Response-viewer readability on phones + iOS dvh viewport fix (#142, @TeigenZhang).
+
+  **Docs**: CLAUDE.md accuracy audit (18 verified fixes: security hook-bypass description, env-prefix allowlist, state-file inventory, watcher/function names, counts) + documentation for all new subsystems. README gains a user walkthrough (#141).
+
+  All PRs went through adversarial multi-agent review; ~60 verified findings (including 12 blockers) were fixed on the contributors' branches before merge. Full test suite green: 3,400+ tests.
 ## 1.2.8
 
 ### Patch Changes

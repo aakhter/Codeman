@@ -188,6 +188,58 @@ describe('COD-95 click-to-edit', () => {
   });
 });
 
+describe('COD-221 inline Word comment inspector', () => {
+  function wordCommentPreview(): {
+    preview: HTMLElement;
+    marker: HTMLAnchorElement;
+    card: HTMLElement;
+    close: HTMLAnchorElement;
+  } {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="document-preview-html rv-text">
+        <p>Review this <mark>passage</mark><sup class="docx-comment-marker"><a href="#docx-comment-card-0" class="docx-comment-button" aria-expanded="false" aria-controls="docx-comment-card-0">[1]</a></sup><span id="docx-comment-card-0" class="docx-comment-card" hidden><span class="docx-comment-author">[1] Reviewer</span><span class="docx-comment-text">Tighten this sentence.</span><a href="#docx-comment-card-0" class="docx-comment-close" aria-label="Close comment 1">Close</a></span>.</p>
+      </div>`;
+    document.body.appendChild(body);
+    app._bindDocxCommentInspector(body);
+    const preview = body.querySelector('.document-preview-html') as HTMLElement;
+    return {
+      preview,
+      marker: preview.querySelector('.docx-comment-button') as HTMLAnchorElement,
+      card: preview.querySelector('.docx-comment-card') as HTMLElement,
+      close: preview.querySelector('.docx-comment-close') as HTMLAnchorElement,
+    };
+  }
+
+  it('opens locally without navigation, then closes and restores focus to the marker', () => {
+    const { marker, card, close } = wordCommentPreview();
+    expect(card.hidden).toBe(true);
+
+    const openEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+    expect(marker.dispatchEvent(openEvent)).toBe(false);
+    expect(window.location.hash).toBe('');
+    expect(card.hidden).toBe(false);
+    expect(marker.getAttribute('aria-expanded')).toBe('true');
+
+    const closeEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+    expect(close.dispatchEvent(closeEvent)).toBe(false);
+    expect(card.hidden).toBe(true);
+    expect(marker.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(marker);
+  });
+
+  it('closes the open inspector with Escape and returns focus to its marker', () => {
+    const { preview, marker, card } = wordCommentPreview();
+    marker.click();
+    expect(card.hidden).toBe(false);
+
+    preview.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(card.hidden).toBe(true);
+    expect(marker.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(marker);
+  });
+});
+
 describe('COD-100 highlight in the diff/Changes view', () => {
   /** A diff-prose container, matching the real `.document-preview-diff` (COD-68). */
   function diffProse(html: string): HTMLElement {

@@ -385,6 +385,9 @@ Object.assign(CodemanApp.prototype, {
     if (mode === 'gemini') {
       return this.runGemini();
     }
+    if (mode === 'agy') {
+      return this.runAgy();
+    }
     return this.runClaude();
   },
 
@@ -481,7 +484,7 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : 'Run';
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'agy' ? 'Run AG' : 'Run';
     }
   },
 
@@ -551,6 +554,31 @@ Object.assign(CodemanApp.prototype, {
       const isRemoteCase = caseData.location === 'remote' || selectedCase?.location === 'remote';
       const workingDir = caseData.path;
       if (!workingDir) throw new Error('Case path not found');
+
+      // Remote cases run over ssh — POST /api/sessions stat-validates workingDir on
+      // the LOCAL fs (a remote user@host:/path never exists locally), so route them
+      // through /api/quick-start, which resolves the remote case + launches via ssh.
+      if (caseData.location === 'remote') {
+        const remoteIds = [];
+        for (let i = 0; i < tabCount; i++) {
+          const res = await fetch('/api/quick-start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ caseName, mode: 'claude' })
+          });
+          const data = await res.json();
+          if (!data.success) throw new Error(data.error || 'Failed to start remote Claude session');
+          remoteIds.push(data.data.sessionId);
+        }
+        this.terminal.writeln(`\x1b[90m All ${tabCount} remote session(s) ready\x1b[0m`);
+        if (remoteIds[0]) {
+          await this.selectSession(remoteIds[0]);
+          this.loadQuickStartCases();
+        }
+        this.terminal.focus();
+        return;
+      }
+
       let firstSessionId = null;
 
       // Find the highest existing w-number for THIS case to avoid duplicates
@@ -714,6 +742,28 @@ Object.assign(CodemanApp.prototype, {
       const workingDir = caseData.path;
       if (!workingDir) throw new Error('Case path not found');
 
+      // Remote cases run over ssh — route through /api/quick-start (see runClaude).
+      if (caseData.location === 'remote') {
+        const remoteIds = [];
+        for (let i = 0; i < shellCount; i++) {
+          const res = await fetch('/api/quick-start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ caseName, mode: 'shell' })
+          });
+          const data = await res.json();
+          if (!data.success) throw new Error(data.error || 'Failed to start remote shell session');
+          remoteIds.push(data.data.sessionId);
+        }
+        if (remoteIds[0]) {
+          // Don't pre-set activeSessionId — selectSession early-returns when the
+          // IDs match, skipping the buffer load, tab activation, and focus (see runCodex).
+          await this.selectSession(remoteIds[0]);
+        }
+        this.terminal.focus();
+        return;
+      }
+
       // Find the highest existing s-number for THIS case to avoid duplicates
       let startNumber = 1;
       for (const [, session] of this.sessions) {
@@ -786,6 +836,9 @@ Object.assign(CodemanApp.prototype, {
 
   async runOpenCode() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // Remote cases run the CLI on the REMOTE host — the local /api/opencode/status
+    // probe and the local-only config/env below don't apply (quick-start rejects them).
+    const isRemote = (this.cases || []).find(c => c.name === caseName)?.location === 'remote';
 
     this.terminal.clear();
     this.terminal.writeln(`\x1b[1;32m Starting OpenCode session in ${caseName}...\x1b[0m`);
@@ -794,13 +847,15 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.focus();
 
     try {
-      // Check if OpenCode is available
-      const statusRes = await fetch('/api/opencode/status');
-      const status = (await statusRes.json()).data;
-      if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m OpenCode CLI not found.\x1b[0m');
-        this.terminal.writeln('\x1b[90m Install with: curl -fsSL https://opencode.ai/install | bash\x1b[0m');
-        return;
+      // Check if OpenCode is available (local sessions only)
+      if (!isRemote) {
+        const statusRes = await fetch('/api/opencode/status');
+        const status = (await statusRes.json()).data;
+        if (!status.available) {
+          this.terminal.writeln('\x1b[1;31m OpenCode CLI not found.\x1b[0m');
+          this.terminal.writeln('\x1b[90m Install with: curl -fsSL https://opencode.ai/install | bash\x1b[0m');
+          return;
+        }
       }
 
       // Quick-start with opencode mode (auto-allow tools by default).
@@ -812,8 +867,10 @@ Object.assign(CodemanApp.prototype, {
         body: JSON.stringify({
           caseName,
           mode: 'opencode',
-          openCodeConfig: { autoAllowTools: true },
-          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(isRemote ? {} : {
+            openCodeConfig: { autoAllowTools: true },
+            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          }),
         })
       });
       const data = await res.json();
@@ -833,6 +890,9 @@ Object.assign(CodemanApp.prototype, {
 
   async runCodex() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // Remote cases run Codex on the REMOTE host — skip the local status probe and the
+    // local-only config/env below (quick-start rejects them for remote cases).
+    const isRemote = (this.cases || []).find(c => c.name === caseName)?.location === 'remote';
 
     this.terminal.clear();
     this.terminal.writeln(`\x1b[1;32m Starting Codex session in ${caseName}...\x1b[0m`);
@@ -840,12 +900,14 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.focus();
 
     try {
-      const statusRes = await fetch('/api/codex/status');
-      const status = (await statusRes.json()).data;
-      if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m Codex CLI not found.\x1b[0m');
-        this.terminal.writeln('\x1b[90m Install with: npm install -g @openai/codex\x1b[0m');
-        return;
+      if (!isRemote) {
+        const statusRes = await fetch('/api/codex/status');
+        const status = (await statusRes.json()).data;
+        if (!status.available) {
+          this.terminal.writeln('\x1b[1;31m Codex CLI not found.\x1b[0m');
+          this.terminal.writeln('\x1b[90m Install with: npm install -g @openai/codex\x1b[0m');
+          return;
+        }
       }
 
       const globalSettings = this.loadAppSettingsFromStorage();
@@ -856,11 +918,13 @@ Object.assign(CodemanApp.prototype, {
         body: JSON.stringify({
           caseName,
           mode: 'codex',
-          codexConfig: {
-            dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
-            renderMode: 'hybrid',
-          },
-          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(isRemote ? {} : {
+            codexConfig: {
+              dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
+              renderMode: 'hybrid',
+            },
+            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          }),
         })
       });
       const data = await res.json();
@@ -876,20 +940,19 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runGemini() {
+  async runAgy() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
 
     this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln(`\x1b[1;32m Starting Agy session in ${caseName}...\x1b[0m`);
     this.terminal.writeln('');
     this.terminal.focus();
 
     try {
-      const statusRes = await fetch('/api/gemini/status');
+      const statusRes = await fetch('/api/agy/status');
       const status = (await statusRes.json()).data;
       if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
-        this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
+        this.terminal.writeln('\x1b[1;31m Agy CLI not found.\x1b[0m');
         return;
       }
 
@@ -899,9 +962,56 @@ Object.assign(CodemanApp.prototype, {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseName,
-          mode: 'gemini',
-          geminiConfig: { approvalMode: 'yolo' },
+          mode: 'agy',
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Agy');
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+    }
+  },
+
+  async runGemini() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // Remote cases run Gemini on the REMOTE host — skip the local status probe and the
+    // local-only config/env below (quick-start rejects them for remote cases).
+    const isRemote = (this.cases || []).find(c => c.name === caseName)?.location === 'remote';
+
+    this.terminal.clear();
+    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln('');
+    this.terminal.focus();
+
+    try {
+      if (!isRemote) {
+        const statusRes = await fetch('/api/gemini/status');
+        const status = (await statusRes.json()).data;
+        if (!status.available) {
+          this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
+          this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
+          return;
+        }
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'gemini',
+          ...(isRemote ? {} : {
+            geminiConfig: { approvalMode: 'yolo' },
+            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          }),
         })
       });
       const data = await res.json();
@@ -958,6 +1068,44 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async runAgy() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+
+    this.terminal.clear();
+    this.terminal.writeln(`\x1b[1;32m Starting Agy session in ${caseName}...\x1b[0m`);
+    this.terminal.writeln('');
+    this.terminal.focus();
+
+    try {
+      const statusRes = await fetch('/api/agy/status');
+      const status = (await statusRes.json()).data;
+      if (!status.available) {
+        this.terminal.writeln('\x1b[1;31m Agy CLI not found.\x1b[0m');
+        return;
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'agy',
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Agy');
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+    }
+  },
 
   // ═══════════════════════════════════════════════════════════════
   // Session Options Modal
@@ -970,7 +1118,8 @@ Object.assign(CodemanApp.prototype, {
     this.editingSessionId = sessionId;
 
     // Reset to an appropriate tab — Summary for external CLIs (Respawn/Ralph are Claude-only)
-    const isAltMode = session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini';
+    const isAltMode =
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'agy';
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -1000,7 +1149,8 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Hide Claude-specific options for external CLI sessions
-    const isExternalCli = session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini';
+    const isExternalCli =
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'agy';
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isExternalCli ? 'none' : ''; });
 
@@ -2872,6 +3022,10 @@ Object.assign(CodemanApp.prototype, {
         // Refresh the dropdown
         const select = document.getElementById('quickStartCase');
         const currentCase = select.value;
+        if (currentCase === name) {
+          // Blur the native picker before reload so it doesn't show the stale value
+          select.blur?.();
+        }
         await this.loadQuickStartCases(currentCase === name ? null : currentCase);
         if (currentCase === name) {
           await this.saveLastUsedCase(document.getElementById('quickStartCase')?.value || 'testcase');
@@ -3018,7 +3172,10 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     return this._runMode || 'claude';
   },
   set(mode) {
-    this._runMode =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'claude' ? mode : 'claude';
+    // Keep in sync with SessionMode (src/types/session.ts). A mode missing from
+    // this allowlist silently downgrades to 'claude' — that's how 'shell' used to
+    // reset on every reload via the server-sync path (this.runMode = serverValue).
+    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy'];
+    this._runMode = VALID_RUN_MODES.includes(mode) ? mode : 'claude';
   },
 });

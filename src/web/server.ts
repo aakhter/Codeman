@@ -178,9 +178,13 @@ import {
   registerPlanRoutes,
   registerClipboardRoutes,
   registerSearchRoutes,
+  registerLibraryRoutes,
+  registerSourceRoutes,
   registerOrchestratorRoutes,
+  registerCronRoutes,
   registerWsRoutes,
 } from './routes/index.js';
+import { CronService } from '../cron/cron-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -202,6 +206,7 @@ import {
   ITERATION_PAUSE_MS,
   STATS_COLLECTION_INTERVAL_MS,
   INACTIVITY_TIMEOUT_MS,
+  CRON_TICK_INTERVAL,
 } from '../config/server-timing.js';
 
 /**
@@ -250,6 +255,8 @@ export class WebServer extends EventEmitter {
   // Store session listener references for explicit cleanup (prevents memory leaks)
   private sessionListenerRefs: Map<string, SessionListenerRefs> = new Map();
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
+  /** Cron service (assigned in setupRoutes). */
+  private cronService!: CronService;
   private sse: SseStreamManager;
   private store = getStore();
   private host: string;
@@ -877,7 +884,13 @@ export class WebServer extends EventEmitter {
     // Keep the body as a RAW STRING and parse it inside the handler — a global
     // text/plain -> JSON parser would let a cross-site "simple request" (no CORS
     // preflight) submit JSON to any route. See security review C2.
-    let _crashBreadcrumbs = '';
+    // Keyed by the client's per-page-load id so (a) a page reload (fresh id)
+    // ARCHIVES the previous page's breadcrumbs instead of overwriting them —
+    // iOS PWA reloads used to wipe the trace of the very bug being chased —
+    // and (b) concurrent clients (desktop + phone) don't clobber each other.
+    // Same id replaces in place (each beacon carries the full ring buffer).
+    const MAX_CRASH_PAGES = 10;
+    const _crashPages = new Map<string, { at: number; data: string }>();
     this.app.addContentTypeParser('text/plain;charset=UTF-8', { parseAs: 'string' }, (_req, body, done) => {
       done(null, body);
     });
@@ -887,17 +900,28 @@ export class WebServer extends EventEmitter {
     this.app.post('/api/crash-diag', (req, reply) => {
       const raw = typeof req.body === 'string' ? req.body : '';
       let data = raw;
+      let pageId = 'legacy';
       try {
-        const parsed = JSON.parse(raw) as { data?: unknown };
+        const parsed = JSON.parse(raw) as { data?: unknown; id?: unknown };
         if (parsed && typeof parsed.data === 'string') data = parsed.data;
+        if (parsed && typeof parsed.id === 'string' && parsed.id) pageId = parsed.id.slice(0, 64);
       } catch {
         /* not JSON — treat the raw beacon text as the breadcrumbs */
       }
-      _crashBreadcrumbs = String(data || '');
+      _crashPages.delete(pageId); // re-insert = move to MRU end
+      _crashPages.set(pageId, { at: Date.now(), data: String(data || '') });
+      if (_crashPages.size > MAX_CRASH_PAGES) {
+        const oldest = _crashPages.keys().next().value;
+        if (oldest !== undefined) _crashPages.delete(oldest);
+      }
       reply.code(204).send();
     });
     this.app.get('/api/crash-diag', (_req, reply) => {
-      reply.code(200).send({ breadcrumbs: _crashBreadcrumbs, timestamp: Date.now() });
+      const pages = [..._crashPages.entries()].map(([id, p]) => ({ id, at: p.at, data: p.data }));
+      const breadcrumbs = pages
+        .map((p) => `═══ page ${p.id} (last beacon ${new Date(p.at).toISOString()}) ═══\n${p.data}`)
+        .join('\n\n');
+      reply.code(200).send({ breadcrumbs, pages, timestamp: Date.now() });
     });
 
     // Register all route modules
@@ -917,7 +941,16 @@ export class WebServer extends EventEmitter {
     registerPlanRoutes(this.app, ctx);
     registerClipboardRoutes(this.app, ctx);
     registerSearchRoutes(this.app, ctx);
+    registerLibraryRoutes(this.app, ctx);
+    registerSourceRoutes(this.app, ctx);
     registerOrchestratorRoutes(this.app, ctx);
+
+    // Cron: build the service from the same context, recompute
+    // due times for any persisted jobs, then expose it to its routes.
+    this.cronService = new CronService(ctx);
+    this.cronService.init();
+    registerCronRoutes(this.app, { ...ctx, cron: this.cronService });
+
     registerWsRoutes(this.app, ctx, () => this.getHostPolicy());
   }
 
@@ -1230,6 +1263,9 @@ export class WebServer extends EventEmitter {
     if (settings.showMultiMonitorButton === true) {
       html = html.replace(' btn-multimonitor--hidden', '');
     }
+    if (settings.showAwayDigest === true) {
+      html = html.replace(' btn-away-digest--hidden', '');
+    }
     // Plan-usage chip: ships hidden (`header-plan-usage--hidden`) and is revealed
     // PER-DEVICE by the client (settings-ui.js applyHeaderVisibilitySettings). It
     // used to be server-revealed from a synced setting, but that leaked the desktop
@@ -1310,6 +1346,13 @@ export class WebServer extends EventEmitter {
   }
 
   private async setupSessionListeners(session: Session): Promise<void> {
+    // Idempotent: the wiring exit handler detaches ALL listeners on every PTY exit
+    // (removeSessionListenerRefs), so the re-attach routes (/interactive,
+    // /interactive-respawn, /shell) call this again to restore observability
+    // (terminal SSE, error/exit broadcasts, the COD-118 respawnBreakerTripped
+    // handler). Skip when the refs are still attached to avoid double-wiring.
+    if (this.sessionListenerRefs.has(session.id)) return;
+
     // Create run summary tracker for this session
     const summaryTracker = new RunSummaryTracker(session.id, session.name);
     this.runSummaryTrackers.set(session.id, summaryTracker);
@@ -1388,8 +1431,12 @@ export class WebServer extends EventEmitter {
    * session workspace — passive magic links can't expose arbitrary host files.
    * Deliberate cross-workspace attachment goes through the explicit,
    * Origin-guarded `POST /attachments` route (and `codeman attach`, which POSTs
-   * directly inside a managed session). Registration also enforces the COD-53
-   * blocklist as defense-in-depth.
+   * directly inside a managed session). Codex-mode `Saved to:` requests
+   * (`source: 'codex-generated'`) instead go through
+   * registerGeneratedArtifactAttachment, which stays force-confined unless the
+   * realpath-resolved target is inside the workspace or a home-anchored
+   * `~/.codex*` generated-artifact directory. Registration also enforces the
+   * COD-53 blocklist as defense-in-depth.
    */
   private async registerAttachment(
     sessionId: string,
@@ -1841,6 +1888,7 @@ export class WebServer extends EventEmitter {
     [SseEvent.HookStop]: { title: 'Response Complete', urgency: 'info' },
     [SseEvent.SessionError]: { title: 'Session Error', urgency: 'critical' },
     [SseEvent.RespawnBlocked]: { title: 'Respawn Blocked', urgency: 'critical' },
+    [SseEvent.SessionRespawnBreakerTripped]: { title: 'Session crash loop stopped', urgency: 'critical' },
     [SseEvent.SessionRalphCompletionDetected]: { title: 'Task Complete', urgency: 'warning' },
   };
 
@@ -1873,6 +1921,9 @@ export class WebServer extends EventEmitter {
     } else if (event === SseEvent.SessionRalphCompletionDetected && data.phrase) {
       body += body ? ' ' : '';
       body += String(data.phrase);
+    } else if (event === SseEvent.SessionRespawnBreakerTripped && data.count) {
+      body += body ? ' ' : '';
+      body += `Stopped after ${Number(data.count)} rapid crashes — restart the session to retry`;
     } else if (event === SseEvent.HookPermissionPrompt && data.tool_name) {
       body += body ? ' ' : '';
       body += `Tool: ${String(data.tool_name)}`;
@@ -2035,6 +2086,17 @@ export class WebServer extends EventEmitter {
       },
       SCHEDULED_CLEANUP_INTERVAL,
       { description: 'scheduled runs cleanup' }
+    );
+
+    // Start the cron loop (fires due CronJobs).
+    this.cleanup.setInterval(
+      () => {
+        this.cronService.tickDueJobs().catch((err) => {
+          console.error('[cron] tick failed:', getErrorMessage(err));
+        });
+      },
+      CRON_TICK_INTERVAL,
+      { description: 'scheduled jobs due-checker' }
     );
 
     // Start SSE client health check timer (prevents memory leaks from dead connections)
@@ -2224,6 +2286,7 @@ export class WebServer extends EventEmitter {
               envOverrides: savedEnvOverrides,
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
+              checkpointState: savedState?.checkpoint,
             });
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name

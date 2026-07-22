@@ -24,6 +24,8 @@ export default defineConfig({
       'test/inline-rename.test.ts', // browser (Playwright)
       'test/opencode-resize.test.ts', // browser (Playwright)
       'test/webgl-fallback.test.ts', // browser (Playwright)
+      'test/file-browser-session-preview.browser.test.ts', // browser (Playwright + chromium)
+      'test/terminal-document-link.browser.test.ts', // browser/touch (Playwright + chromium)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,

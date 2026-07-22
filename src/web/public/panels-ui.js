@@ -294,12 +294,211 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  // ═══════════════════════════════════════════════════════════════
+  // Sources Modal (COD-65)
+  // ═══════════════════════════════════════════════════════════════
+
+  openSources() {
+    const modal = document.getElementById('sourcesModal');
+    if (modal) modal.classList.add('active');
+    this.updateSourceFormFields();
+    this.loadSources();
+  },
+
+  closeSources() {
+    const modal = document.getElementById('sourcesModal');
+    if (modal) modal.classList.remove('active');
+  },
+
+  updateSourceFormFields() {
+    const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
+    const urlRow = document.getElementById('sourcesUrlRow');
+    const pathRow = document.getElementById('sourcesPathRow');
+    const contentRow = document.getElementById('sourcesContentRow');
+    if (urlRow) urlRow.classList.toggle('sources-field-row--hidden', type !== 'url');
+    if (pathRow) pathRow.classList.toggle('sources-field-row--hidden', type !== 'file');
+    if (contentRow) contentRow.classList.toggle('sources-field-row--hidden', type !== 'highlight');
+  },
+
+  async loadSources() {
+    const container = document.getElementById('sourcesList');
+    if (!container) return;
+    const sessionId = this.activeSessionId;
+    if (!sessionId) {
+      container.innerHTML = '<p class="empty-message sources-empty">No active session.</p>';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sources`);
+      const json = await res.json();
+      if (json.success) {
+        this.renderSources(json.data.sources);
+      } else {
+        container.innerHTML = '<p class="empty-message sources-empty">Failed to load sources.</p>';
+      }
+    } catch {
+      container.innerHTML = '<p class="empty-message sources-empty">Error loading sources.</p>';
+    }
+  },
+
+  renderSources(sources) {
+    const container = document.getElementById('sourcesList');
+    if (!container) return;
+    if (!sources.length) {
+      container.innerHTML =
+        '<p class="empty-message sources-empty">No sources yet. Add a URL, file path, or highlight above.</p>';
+      return;
+    }
+    container.innerHTML = sources.map((s) => this.renderSourceCard(s)).join('');
+  },
+
+  renderSourceCard(src) {
+    const icons = { url: '\u{1F517}', file: '\u{1F4C4}', highlight: '\u{1F4AC}' };
+    const icon = icons[src.type] || '\u{1F4CB}';
+    const title = escapeHtml(src.title);
+    let detail = '';
+    if (src.url) detail = escapeHtml(src.url);
+    else if (src.relativePath) detail = escapeHtml(src.relativePath);
+    else if (src.content) detail = escapeHtml(src.content.slice(0, 100));
+    return `<div class="sources-card" data-source-id="${escapeHtml(src.id)}">
+      <span class="sources-card-icon" aria-hidden="true">${icon}</span>
+      <div class="sources-card-body">
+        <span class="sources-card-title">${title}</span>
+        ${detail ? `<span class="sources-card-detail">${detail}</span>` : ''}
+      </div>
+      <button class="sources-card-delete" onclick="app.deleteSource('${escapeHtml(src.id)}')" aria-label="Remove source" title="Remove">&times;</button>
+    </div>`;
+  },
+
+  async handleAddSource(event) {
+    event.preventDefault();
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
+    const title = document.getElementById('sourcesTitle')?.value?.trim() || '';
+    if (!title) return;
+    const body = { type, title };
+    if (type === 'url') body.url = document.getElementById('sourcesUrl')?.value?.trim() || undefined;
+    else if (type === 'file')
+      body.relativePath = document.getElementById('sourcesPath')?.value?.trim() || undefined;
+    else if (type === 'highlight')
+      body.content = document.getElementById('sourcesContent')?.value?.trim() || undefined;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (json.success) {
+        document.getElementById('sourcesTitle').value = '';
+        document.getElementById('sourcesUrl').value = '';
+        document.getElementById('sourcesPath').value = '';
+        const content = document.getElementById('sourcesContent');
+        if (content) content.value = '';
+        this.loadSources();
+      }
+    } catch {
+      // silent — network error
+    }
+  },
+
+  async deleteSource(sourceId) {
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    try {
+      await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sources/${encodeURIComponent(sourceId)}`,
+        { method: 'DELETE' }
+      );
+      this.loadSources();
+    } catch {
+      // silent
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Library Modal (COD-63)
+  // ═══════════════════════════════════════════════════════════════
+
+  openLibrary() {
+    const modal = document.getElementById('libraryModal');
+    if (modal) modal.classList.add('active');
+    this._wireLibrarySearch();
+    this.loadLibrary();
+  },
+
+  closeLibrary() {
+    const modal = document.getElementById('libraryModal');
+    if (modal) modal.classList.remove('active');
+  },
+
+  _wireLibrarySearch() {
+    if (this._librarySearchWired) return;
+    this._librarySearchWired = true;
+    const input = document.getElementById('librarySearchInput');
+    if (!input) return;
+    input.addEventListener('input', (e) => {
+      const q = e.target.value;
+      this._debouncedCall('librarySearch', () => this.loadLibrary(q), 300);
+    });
+  },
+
+  async loadLibrary(query = '') {
+    const container = document.getElementById('libraryDocuments');
+    if (!container) return;
+    try {
+      const res = await fetch(`/api/library?q=${encodeURIComponent(query)}&limit=100`);
+      const json = await res.json();
+      if (json.success) {
+        this.renderLibrary(json.data.documents);
+      } else {
+        container.innerHTML = '<p class="empty-message">Failed to load library.</p>';
+      }
+    } catch {
+      container.innerHTML = '<p class="empty-message">Error loading library.</p>';
+    }
+  },
+
+  renderLibrary(docs) {
+    const container = document.getElementById('libraryDocuments');
+    if (!container) return;
+    if (!docs.length) {
+      container.innerHTML = '<p class="empty-message library-empty">No documents found.</p>';
+      return;
+    }
+    container.innerHTML = docs.map((doc) => this.renderLibraryCard(doc)).join('');
+  },
+
+  renderLibraryCard(doc) {
+    const icon = this.getFileIcon?.(doc.extension) || '\u{1F4C4}';
+    const name = escapeHtml(doc.fileName);
+    const session = escapeHtml(doc.sessionName);
+    const path = doc.relativePath
+      ? `<span class="library-card-path">${escapeHtml(doc.relativePath)}</span>`
+      : '';
+    const date = escapeHtml(new Date(doc.addedAt).toLocaleString());
+    return `<div class="library-document-card">
+      <span class="library-card-icon" aria-hidden="true">${icon}</span>
+      <div class="library-card-body">
+        <span class="library-card-name">${name}</span>
+        ${path}
+        <span class="library-card-meta">${session} &middot; ${date}</span>
+      </div>
+    </div>`;
+  },
 
   // ═══════════════════════════════════════════════════════════════
   // Away Digest Modal
   // ═══════════════════════════════════════════════════════════════
 
   async openAwayDigest(range = 'since-last-visit') {
+    const settings = this.loadAppSettingsFromStorage?.() || {};
+    const defaults = this.getDefaultSettings?.() || {};
+    if ((settings.showAwayDigest ?? defaults.showAwayDigest ?? false) !== true) {
+      this.showToast?.('Away Digest is disabled in App Settings', 'info');
+      return;
+    }
     this.awayDigestRange = range;
     this._awayDigestLoadedSuccessfully = false;
     this._awayDigestSinceLastVisitGeneratedAt = undefined;
@@ -329,10 +528,26 @@ Object.assign(CodemanApp.prototype, {
 
   shouldOpenCommandPaletteFromShortcut(e) {
     if (!e) return false;
-    const paletteShortcut = (this.getShortcutRegistry?.() || []).find(
-      (s) => s.id === 'command-palette' && !s.disabled
-    );
-    if (!paletteShortcut || !this.matchesShortcutEvent?.(e, paletteShortcut)) return false;
+    // Every palette chord requires Ctrl/Cmd/Alt (capture enforces the same for
+    // rebinds), so plain typing exits before any registry work — this runs on
+    // the document AND xterm keydown hot paths.
+    if (!e.ctrlKey && !e.metaKey && !e.altKey) return false;
+
+    // Registry-aware chord check (COD-157): honors a rebound or disabled
+    // palette shortcut. Falls back to the default Ctrl/Cmd/Alt+K chord when the
+    // registry isn't available (isolated test harnesses).
+    const registryAvailable =
+      typeof this.getShortcutRegistry === 'function' && typeof this.matchesShortcutEvent === 'function';
+    const palette = registryAvailable
+      ? this.getShortcutRegistry().find((shortcut) => shortcut.id === 'command-palette')
+      : null;
+    if (palette) {
+      if (palette.disabled || !this.matchesShortcutEvent(e, palette)) return false;
+    } else {
+      const key = (e.key || '').toLowerCase();
+      if (key !== 'k' && e.code !== 'KeyK') return false;
+      if (e.shiftKey) return false;
+    }
 
     const target = e.target;
     if (!target) return true;
@@ -564,7 +779,13 @@ Object.assign(CodemanApp.prototype, {
           option.textContent = item.caseName;
           caseSelect.appendChild(option);
         }
-        caseSelect.value = item.caseName;
+        // Keep the searchable combobox, directory display, and persisted
+        // last-used case in sync when its mixin is loaded.
+        if (typeof this.selectQuickStartCase === 'function') {
+          this.selectQuickStartCase(item.caseName);
+        } else {
+          caseSelect.value = item.caseName;
+        }
       }
       await this.run();
     }
@@ -630,26 +851,12 @@ Object.assign(CodemanApp.prototype, {
     if (modal) modal.classList.remove('active');
   },
 
-  /**
-   * COD-121: live-refresh the unified session list when sessions change
-   * (created/updated/deleted via SSE). Only touches surfaces that are currently
-   * showing — the open Session Manager modal and/or the visible welcome list —
-   * and is debounced so an event burst collapses into one re-fetch. The current
-   * search query is preserved.
-   */
-  _onSessionListMaybeChanged() {
-    const modal = document.getElementById('sessionManagerModal');
-    if (modal && modal.classList.contains('active')) {
-      this._debouncedCall(
-        'sessionManagerRefresh',
-        () => this._loadSessionManagerList(this._sessionManagerQuery || ''),
-        400
-      );
-    }
-    const welcome = document.getElementById('welcomeOverlay');
-    if (welcome && welcome.classList.contains('visible')) {
-      this._debouncedCall('welcomeHistoryRefresh', () => this.loadHistorySessions(), 600);
-    }
+  _setSessionManagerMessage(list, message) {
+    list.replaceChildren();
+    const line = document.createElement('p');
+    line.className = 'empty-message';
+    line.textContent = message;
+    list.appendChild(line);
   },
 
   async _loadSessionManagerList(q = '') {
@@ -659,31 +866,42 @@ Object.assign(CodemanApp.prototype, {
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
       const res = await fetch(url);
-      const data = await res.json();
-      const sessions = data.data?.sessions || [];
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || data.success === false || !data.data) {
+        this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
+        return;
+      }
+      const sessions = data.data.sessions || [];
       list.replaceChildren();
       if (sessions.length === 0) {
-        const empty = document.createElement('p');
-        empty.className = 'empty-message';
-        empty.textContent = q ? 'No sessions match your search' : 'No sessions found';
-        list.appendChild(empty);
+        this._setSessionManagerMessage(list, q ? 'No sessions match your search' : 'No sessions found');
         return;
       }
       for (const s of sessions) {
-        const item = this._buildHistoryItem(s, this.cases, { showViewAll: false });
-        // COD-130: scope the modal-close to the main (resume) row only, in the
-        // bubble phase. The ⋯ kebab button calls stopPropagation(), so clicking
-        // it (or its menu) no longer closes the Session Manager modal.
-        item.querySelector('.history-item-main')?.addEventListener('click', () => this.closeSessionManager());
+        const record = {
+          sessionId: s.sessionId,
+          workingDir: s.workingDir || '',
+          sizeBytes: s.sizeBytes ?? 0,
+          lastModified: new Date(s.lastActivityAt ?? s.createdAt ?? Date.now()).toISOString(),
+          firstPrompt: s.firstPrompt || s.name || '',
+        };
+        const isLive = !!this.sessions?.has?.(s.sessionId);
+        const item = this._buildHistoryItem(record, this.cases, {
+          showViewAll: false,
+          onActivate: () => {
+            this.closeSessionManager();
+            if (isLive) {
+              void this.selectSession(s.sessionId);
+            } else if (record.workingDir) {
+              void this.resumeHistorySession(s.claudeSessionId || s.sessionId, record.workingDir);
+            }
+          },
+        });
         list.appendChild(item);
       }
     } catch (err) {
       console.error('[_loadSessionManagerList]', err);
-      list.replaceChildren();
-      const errLine = document.createElement('p');
-      errLine.className = 'empty-message';
-      errLine.textContent = 'Failed to load sessions';
-      list.appendChild(errLine);
+      this._setSessionManagerMessage(list, 'Failed to load sessions');
     }
   },
 
@@ -930,6 +1148,12 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   async openAwayDigest(range = 'since-last-visit') {
+    const settings = this.loadAppSettingsFromStorage?.() || {};
+    const defaults = this.getDefaultSettings?.() || {};
+    if ((settings.showAwayDigest ?? defaults.showAwayDigest ?? false) !== true) {
+      this.showToast?.('Away Digest is disabled in App Settings', 'info');
+      return;
+    }
     this.awayDigestRange = range;
     this._awayDigestLoadedSuccessfully = false;
     this._awayDigestSinceLastVisitGeneratedAt = undefined;
@@ -950,6 +1174,28 @@ Object.assign(CodemanApp.prototype, {
       }
     }
     if (modal) modal.classList.remove('active');
+  },
+
+  /**
+   * COD-121: live-refresh the unified session list when sessions change
+   * (created/updated/deleted via SSE). Only touches surfaces that are currently
+   * showing — the open Session Manager modal and/or the visible welcome list —
+   * and is debounced so an event burst collapses into one re-fetch. The current
+   * search query is preserved.
+   */
+  _onSessionListMaybeChanged() {
+    const modal = document.getElementById('sessionManagerModal');
+    if (modal && modal.classList.contains('active')) {
+      this._debouncedCall(
+        'sessionManagerRefresh',
+        () => this._loadSessionManagerList(this._sessionManagerQuery || ''),
+        400
+      );
+    }
+    const welcome = document.getElementById('welcomeOverlay');
+    if (welcome && welcome.classList.contains('visible')) {
+      this._debouncedCall('welcomeHistoryRefresh', () => this.loadHistorySessions(), 600);
+    }
   },
 
   setAwayDigestRange(range) {
@@ -3175,6 +3421,38 @@ Object.assign(CodemanApp.prototype, {
   // File Browser Panel
   // ═══════════════════════════════════════════════════════════════
 
+  updateFileBrowserHeaderButton() {
+    const button = this.$('fileBrowserBtn');
+    if (!button) return;
+
+    const panel = this.$('fileBrowserPanel');
+    const hasActiveSession = Boolean(this.activeSessionId);
+    const isOpen = hasActiveSession && Boolean(panel?.classList.contains('visible'));
+    button.disabled = !hasActiveSession;
+    button.classList.toggle('active', isOpen);
+    button.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  },
+
+  toggleFileBrowserPanel() {
+    if (!this.activeSessionId) return;
+    const panel = this.$('fileBrowserPanel');
+    if (!panel) return;
+
+    if (panel.classList.contains('visible')) {
+      this.closeFileBrowserPanel();
+    } else {
+      this.showFileBrowserPanel(this.activeSessionId);
+    }
+  },
+
+  showConfiguredFileBrowserPanel(sessionId) {
+    const settings = this.loadAppSettingsFromStorage();
+    const panel = this.$('fileBrowserPanel');
+    if (settings.showFileBrowser && !panel?.classList.contains('visible')) {
+      this.showFileBrowserPanel(sessionId);
+    }
+  },
+
   // Reveal the file browser panel and load the given session's files. This is the
   // ONE canonical reveal path — it does NOT consult the `showFileBrowser` App Setting
   // (that setting only gates whether settings-ui.js calls this on settings apply).
@@ -3183,6 +3461,7 @@ Object.assign(CodemanApp.prototype, {
     const panel = this.$('fileBrowserPanel');
     if (!panel) return;
     panel.classList.add('visible');
+    this.updateFileBrowserHeaderButton?.();
     // Attach drag listeners if not already attached
     if (!this.fileBrowserDragListeners) {
       const header = panel.querySelector('.file-browser-header');
@@ -3213,6 +3492,12 @@ Object.assign(CodemanApp.prototype, {
     const statusEl = this.$('fileBrowserStatus');
     if (!treeEl) return;
 
+    const loadGeneration = ++this.fileBrowserLoadGeneration;
+
+    // A fresh tree load supersedes any in-flight search state (COD-236).
+    this.fileBrowserSearchMode = false;
+    this.fileBrowserMatches = null;
+
     // Show loading state
     treeEl.innerHTML = '<div class="file-browser-loading">Loading files...</div>';
 
@@ -3222,7 +3507,11 @@ Object.assign(CodemanApp.prototype, {
 
       const result = await res.json();
       if (!result.success) throw new Error(result.error || 'Failed to load files');
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
 
+      // Keep the rendered tree bound to the session that produced it. The active
+      // terminal tab can change independently while this panel remains open.
+      this.fileBrowserSessionId = sessionId;
       this.fileBrowserData = result.data;
       this.renderFileBrowserTree();
 
@@ -3232,6 +3521,7 @@ Object.assign(CodemanApp.prototype, {
         statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
       }
     } catch (err) {
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
       console.error('Failed to load file browser:', err);
       treeEl.innerHTML = `<div class="file-browser-empty">Failed to load files: ${escapeHtml(err.message)}</div>`;
     }
@@ -3239,9 +3529,10 @@ Object.assign(CodemanApp.prototype, {
 
   renderFileBrowserTree() {
     const treeEl = this.$('fileBrowserTree');
-    if (!treeEl || !this.fileBrowserData) return;
+    if (!treeEl || !this.fileBrowserData || !this.fileBrowserSessionId) return;
 
     const { tree } = this.fileBrowserData;
+    const fileBrowserSessionId = this.fileBrowserSessionId;
     if (!tree || tree.length === 0) {
       treeEl.innerHTML = '<div class="file-browser-empty">No files found</div>';
       return;
@@ -3278,8 +3569,12 @@ Object.assign(CodemanApp.prototype, {
 
       const nameClass = isDir ? 'file-tree-name directory' : 'file-tree-name';
 
+      // COD-233: keep a real href for graceful fallback (middle-click / new tab),
+      // but the click is intercepted below and routed through a guarded fetch so a
+      // server error surfaces as a toast instead of navigating the SPA to the raw
+      // JSON error body. data-path drives the interceptor.
       const downloadBtn = !isDir
-        ? `<a class="file-tree-download" href="/api/sessions/${this.activeSessionId}/file-raw?path=${encodeURIComponent(node.path)}&download=true" title="Download" onclick="event.stopPropagation()">&#x2B07;</a>`
+        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
 
       html.push(`
@@ -3315,10 +3610,58 @@ Object.assign(CodemanApp.prototype, {
         if (type === 'directory') {
           this.toggleFileBrowserFolder(path);
         } else {
-          this.openFilePreview(path);
+          this.openFilePreview(path, fileBrowserSessionId);
         }
       });
     });
+
+    // COD-233: intercept download clicks so a server error (a JSON ApiResponse
+    // envelope, not a file) surfaces as a toast instead of navigating the SPA to
+    // the raw endpoint and rendering JSON over the terminal.
+    treeEl.querySelectorAll('.file-tree-download').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
+  },
+
+  /**
+   * COD-233: download a workspace file via fetch so a non-2xx response (which
+   * file-raw returns as a JSON error envelope, not a file) surfaces as a toast
+   * instead of a top-level navigation that replaces the terminal with raw JSON.
+   * On success the blob is saved through a temporary download anchor.
+   */
+  async downloadWorkspaceFile(sessionId, path) {
+    if (!sessionId || !path) return;
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/file-raw?path=${encodeURIComponent(path)}&download=true`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        let message = `Download failed (${res.status})`;
+        try {
+          const body = await res.json();
+          if (body && body.error) message = body.error;
+        } catch {
+          // Non-JSON error body; keep the status-based message.
+        }
+        this.showToast(message, 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = path.split('/').pop() || 'download';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      this.showToast(`Download failed: ${err && err.message ? err.message : err}`, 'error');
+    }
   },
 
   hasMatchingChild(node, filter) {
@@ -3339,13 +3682,144 @@ Object.assign(CodemanApp.prototype, {
     this.renderFileBrowserTree();
   },
 
+  // COD-236: server-side search. The filter box now hits the files endpoint with
+  // a `q` param (debounced) so a large workspace prunes the walk to matches
+  // instead of shipping/rendering the whole tree. An empty query restores the
+  // cached tree. The old client-side tree filter (renderFileBrowserTree's
+  // filter branch) stays intact for the no-query case.
   filterFileBrowser(value) {
     this.fileBrowserFilter = value;
-    // Auto-expand all if filtering
-    if (value) {
-      this.expandAllDirectories(this.fileBrowserData?.tree || []);
+    if (this._fileBrowserSearchTimer) {
+      clearTimeout(this._fileBrowserSearchTimer);
+      this._fileBrowserSearchTimer = null;
     }
-    this.renderFileBrowserTree();
+    this._fileBrowserSearchTimer = setTimeout(() => {
+      this._fileBrowserSearchTimer = null;
+      const q = (value || '').trim();
+      if (!q) {
+        // Restore the cached tree.
+        this.fileBrowserSearchMode = false;
+        this.fileBrowserMatches = null;
+        this.renderFileBrowserTree();
+        const statusEl = this.$('fileBrowserStatus');
+        if (statusEl && this.fileBrowserData) {
+          const { totalFiles, totalDirectories, truncated } = this.fileBrowserData;
+          statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
+        }
+        return;
+      }
+      this.searchFileBrowser(q);
+    }, 250);
+  },
+
+  async searchFileBrowser(q) {
+    const sid = this.fileBrowserSessionId;
+    if (!sid) return;
+    const treeEl = this.$('fileBrowserTree');
+    const statusEl = this.$('fileBrowserStatus');
+    if (!treeEl) return;
+
+    // Generation guard: a slow response must not clobber a newer query.
+    const loadGeneration = ++this.fileBrowserLoadGeneration;
+    const includeHidden = this.fileBrowserShowHidden === true;
+
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sid)}/files?depth=5&showHidden=${includeHidden}&q=${encodeURIComponent(q)}`
+      );
+      if (!res.ok) throw new Error('Search failed');
+      const result = await res.json();
+      if (!result.success) throw new Error(result.error || 'Search failed');
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
+
+      this.fileBrowserSearchMode = true;
+      this.fileBrowserMatches = result.data.matches || [];
+      this.renderFileBrowserMatches();
+
+      if (statusEl) {
+        const truncated = result.data.truncated;
+        statusEl.textContent = `${this.fileBrowserMatches.length} matches for '${q}'${truncated ? ' (truncated)' : ''}`;
+      }
+    } catch (err) {
+      if (loadGeneration !== this.fileBrowserLoadGeneration) return;
+      console.error('Failed to search file browser:', err);
+      treeEl.innerHTML = `<div class="file-browser-empty">Search failed: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  renderFileBrowserMatches() {
+    const treeEl = this.$('fileBrowserTree');
+    if (!treeEl || !this.fileBrowserSessionId) return;
+    const fileBrowserSessionId = this.fileBrowserSessionId;
+    const matches = this.fileBrowserMatches || [];
+
+    if (matches.length === 0) {
+      treeEl.innerHTML = '<div class="file-browser-empty">No matches</div>';
+      return;
+    }
+
+    const html = [];
+    for (const node of matches) {
+      const isDir = node.type === 'directory';
+      const icon = isDir ? '📁' : this.getFileIcon(node.extension);
+      const sizeStr =
+        !isDir && node.size !== undefined
+          ? `<span class="file-tree-size">${this.formatFileSize(node.size)}</span>`
+          : '';
+      const nameClass = isDir ? 'file-tree-name directory' : 'file-tree-name';
+
+      // COD-233: keep a real href for graceful fallback, but the click is
+      // intercepted below and routed through a guarded fetch.
+      const downloadBtn = !isDir
+        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
+        : '';
+
+      html.push(`
+        <div class="file-tree-item" data-path="${escapeHtml(node.path)}" data-type="${node.type}" data-depth="0">
+          <span class="file-tree-expand"></span>
+          <span class="file-tree-icon">${icon}</span>
+          <span class="${nameClass}">${escapeHtml(node.name)}</span>
+          ${sizeStr}
+          ${downloadBtn}
+        </div>
+      `);
+    }
+
+    treeEl.innerHTML = html.join('');
+
+    treeEl.querySelectorAll('.file-tree-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const path = item.dataset.path;
+        const type = item.dataset.type;
+        if (type === 'directory') {
+          // Open the directory in the tree: clear the search, add to the
+          // expanded set, and re-render the cached tree.
+          this.fileBrowserFilter = '';
+          this.fileBrowserSearchMode = false;
+          this.fileBrowserMatches = null;
+          const searchInput = this.$('fileBrowserSearch');
+          if (searchInput) searchInput.value = '';
+          this.fileBrowserExpandedDirs.add(path);
+          this.renderFileBrowserTree();
+          const statusEl = this.$('fileBrowserStatus');
+          if (statusEl && this.fileBrowserData) {
+            const { totalFiles, totalDirectories, truncated } = this.fileBrowserData;
+            statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
+          }
+        } else {
+          this.openFilePreview(path, fileBrowserSessionId);
+        }
+      });
+    });
+
+    // COD-233: intercept download clicks so a server error surfaces as a toast.
+    treeEl.querySelectorAll('.file-tree-download').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
   },
 
   expandAllDirectories(nodes) {
@@ -3378,13 +3852,19 @@ Object.assign(CodemanApp.prototype, {
   },
 
   refreshFileBrowser() {
-    if (this.activeSessionId) {
+    if (this.fileBrowserSessionId) {
+      if (this._fileBrowserSearchTimer) {
+        clearTimeout(this._fileBrowserSearchTimer);
+        this._fileBrowserSearchTimer = null;
+      }
       this.fileBrowserExpandedDirs.clear();
       this.fileBrowserFilter = '';
+      this.fileBrowserSearchMode = false;
+      this.fileBrowserMatches = null;
       this.fileBrowserAllExpanded = false;
       const searchInput = this.$('fileBrowserSearch');
       if (searchInput) searchInput.value = '';
-      this.loadFileBrowser(this.activeSessionId);
+      this.loadFileBrowser(this.fileBrowserSessionId);
     }
   },
 
@@ -3420,6 +3900,7 @@ Object.assign(CodemanApp.prototype, {
     const settings = this.loadAppSettingsFromStorage();
     settings.showFileBrowser = false;
     this.saveAppSettingsToStorage(settings);
+    this.updateFileBrowserHeaderButton?.();
   },
 
   async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null) {
@@ -3445,17 +3926,23 @@ Object.assign(CodemanApp.prototype, {
     const metadataUrl = attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
       : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
-    this.filePreviewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
+    const previewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
+    this.filePreviewState = previewState;
     this._annotations = [];
     this._closeAnnotationTray();
 
     try {
       const data = await this._fetchFilePreviewMetadata(metadataUrl);
-      this.filePreviewState.signature = this._filePreviewSignature(data);
-      await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId });
+      // A newer open/close owns the overlay now. Never let this stale response
+      // overwrite its body or start a poller for the wrong document.
+      if (this.filePreviewState !== previewState) return;
+      previewState.signature = this._filePreviewSignature(data);
+      const rendered = await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, previewState);
+      if (!rendered || this.filePreviewState !== previewState) return;
       // Auto-refresh the open preview as the agent rewrites the file (COD-58).
       this._startFilePreviewPolling();
     } catch (err) {
+      if (this.filePreviewState !== previewState) return;
       console.error('Failed to preview file:', err);
       bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
     }
@@ -3463,8 +3950,15 @@ Object.assign(CodemanApp.prototype, {
 
   async _fetchFilePreviewMetadata(metadataUrl) {
     const res = await fetch(metadataUrl);
-    if (!res.ok) throw new Error('Failed to load file');
-    const result = await res.json();
+    let result;
+    try {
+      result = await res.json();
+    } catch {
+      throw new Error('Failed to load file');
+    }
+    if (!res.ok) {
+      throw new Error(typeof result?.error === 'string' && result.error ? result.error : 'Failed to load file');
+    }
     if (!result.success) throw new Error(result.error || 'Failed to load file');
     return result.data;
   },
@@ -3475,19 +3969,83 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Keep imported Word comments local to their annotated passage. The generated
+   * buttons only carry sanitized IDs; this delegated handler owns all state and
+   * deliberately never changes the preview's scroll position.
+   */
+  _bindDocxCommentInspector(bodyEl) {
+    const preview = bodyEl?.querySelector('.document-preview-html');
+    if (!preview || preview.dataset.docxCommentInspectorBound) return;
+    preview.dataset.docxCommentInspectorBound = '1';
+
+    const buttonForCard = (card) =>
+      [...preview.querySelectorAll('.docx-comment-button')].find(
+        (button) => button.getAttribute('aria-controls') === card.id
+      );
+    const setOpen = (card, open, restoreFocus = false) => {
+      preview.querySelectorAll('.docx-comment-card').forEach((otherCard) => {
+        const otherButton = buttonForCard(otherCard);
+        otherCard.hidden = otherCard !== card || !open;
+        otherButton?.setAttribute('aria-expanded', otherCard === card && open ? 'true' : 'false');
+      });
+      if (restoreFocus) buttonForCard(card)?.focus();
+    };
+
+    preview.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const closeButton = target?.closest('.docx-comment-close');
+      if (closeButton) {
+        event.preventDefault();
+        const card = closeButton.closest('.docx-comment-card');
+        if (card) setOpen(card, false, true);
+        return;
+      }
+      const button = target?.closest('.docx-comment-button');
+      if (!button) return;
+      event.preventDefault();
+      const cardId = button.getAttribute('aria-controls');
+      const card = [...preview.querySelectorAll('.docx-comment-card')].find((item) => item.id === cardId);
+      if (!card) return;
+      setOpen(card, card.hidden);
+    });
+
+    preview.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const card = [...preview.querySelectorAll('.docx-comment-card')].find((item) => !item.hidden);
+      if (!card) return;
+      event.preventDefault();
+      setOpen(card, false, true);
+    });
+  },
+
+  /**
    * Render the preview body for the given metadata. Used both for the initial
    * open and for live-refresh, so it must be idempotent and not assume a loading
    * state. Markdown/plain-text re-fetch raw content; image/pdf get an mtime
    * cache-bust so a rewritten file actually reloads.
    */
-  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId }) {
+  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, expectedState = null) {
+    const isCurrentPreview = () => !expectedState || this.filePreviewState === expectedState;
+    if (!isCurrentPreview()) return false;
     const bodyEl = this.$('filePreviewBody');
     const footerEl = this.$('filePreviewFooter');
-    if (!bodyEl) return;
+    if (!bodyEl) return false;
     const bust = (url) => (data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url);
+    const st = this.filePreviewState;
+    if (st) {
+      st.previewKind = null;
+      st.previewCopyUrl = null;
+    }
+    this.filePreviewContent = '';
 
     if (data.type === 'image') {
       this.filePreviewZoom = 1;
+      this.filePreviewZoomMode = 'fit';
+      const imageUrl = bust(data.previewUrl || data.url);
+      if (st) {
+        st.previewKind = 'image';
+        st.previewCopyUrl = imageUrl;
+      }
       bodyEl.innerHTML = `
         <div class="document-preview-toolbar">
           <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('out')" title="Zoom out">-</button>
@@ -3495,15 +4053,28 @@ Object.assign(CodemanApp.prototype, {
           <button class="btn-icon-sm" onclick="app.setFilePreviewZoom('in')" title="Zoom in">+</button>
         </div>
         <div class="document-preview-stage">
-          <img class="document-preview-image" src="${bust(data.previewUrl || data.url)}" alt="${escapeHtml(filePath)}">
+          <img class="document-preview-image" src="${imageUrl}" alt="${escapeHtml(filePath)}">
         </div>
       `;
+      const image = bodyEl.querySelector('.document-preview-image');
+      const fitWhenReady = () => {
+        if (this.filePreviewZoomMode === 'fit') this._fitFilePreviewImage();
+      };
+      image?.addEventListener('load', fitWhenReady, { once: true });
+      // Cached images may already be complete before the load listener is bound.
+      if (image?.complete) requestAnimationFrame(fitWhenReady);
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'video') {
       bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
       const st = this.filePreviewState;
+      const sourceExtension = String(data.extension || '')
+        .toLowerCase();
+      const isWorkspaceOfficePreview =
+        !attachmentId &&
+        ((data.type === 'document' && sourceExtension === 'docx') ||
+          (data.type === 'presentation' && sourceExtension === 'pptx'));
       // .docx supports a view switcher: rendered PDF (default), selectable HTML, and Changes (COD-68).
       const isDocx = data.type === 'document' && !!attachmentId;
       const view = isDocx ? st?.docxView || 'pdf' : 'pdf';
@@ -3515,12 +4086,40 @@ Object.assign(CodemanApp.prototype, {
         } catch {
           /* fall through to empty */
         }
+        if (!isCurrentPreview()) return false;
         const safe = typeof this._sanitizeHtml === 'function' ? this._sanitizeHtml(html) : escapeHtml(html);
         bodyEl.innerHTML = `<div class="document-preview-html rv-text">${safe}</div>`;
+        this._bindDocxCommentInspector(bodyEl);
       } else {
         const previewUrl =
           data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
-        bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bust(previewUrl)}" title="${escapeHtml(filePath)}"></iframe>`;
+        const bustedPreviewUrl = bust(previewUrl);
+        // A Files-panel Office preview is a converted PDF, not the source file.
+        // Suppress the embedded PDF toolbar so its download icon cannot present
+        // that conversion as the primary download; the footer below provides an
+        // explicit guarded source download and a separately-labelled PDF export.
+        const iframeFragment = isWorkspaceOfficePreview ? '#toolbar=0' : '';
+        if (data.type === 'pdf') {
+          // Raw PDF: no server-side conversion, so embed it directly.
+          bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bustedPreviewUrl}${iframeFragment}" title="${escapeHtml(filePath)}"></iframe>`;
+        } else {
+          // docx/pptx (COD-239): the preview endpoint BLOCKS on a soffice→PDF
+          // conversion and only returns 200+PDF once it's ready (500 on failure).
+          // A bare iframe would sit blank for the whole conversion, so fetch the
+          // converted PDF to a blob behind a visible "Rendering…" state and swap
+          // in a blob-URL iframe when it lands. Fire-and-forget so the footer and
+          // loading state paint immediately; the helper re-checks staleness after
+          // every await and stores its promise for polling/tests.
+          const renderState = expectedState || this.filePreviewState;
+          const renderPromise = this._renderOfficeConversionPreview(
+            bodyEl,
+            bustedPreviewUrl,
+            iframeFragment,
+            filePath,
+            renderState
+          );
+          if (renderState) renderState.previewRenderPromise = renderPromise;
+        }
       }
       const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
       const switcher = isDocx
@@ -3538,10 +4137,13 @@ Object.assign(CodemanApp.prototype, {
       // One-click PDF export of the open document (COD-61). docx/pptx reuse the
       // LibreOffice preview-PDF cache server-side; raw PDFs are already PDFs but
       // the control downloads them consistently via the export endpoint.
+      const sourceDownload = isWorkspaceOfficePreview
+        ? ` <button class="btn-icon-sm document-source-download-btn" onclick="app.downloadFilePreviewSource()" title="Download the original ${sourceExtension.toUpperCase()} file">Download ${sourceExtension.toUpperCase()}</button>`
+        : '';
       const exportPdf = this._renderExportPdfControl();
       footerEl.innerHTML = `${escapeHtml(
         `${this.formatFileSize(data.size)} \u2022 ${label}`
-      )}${switcher}${comment}${exportPdf}`;
+      )}${switcher}${comment}${sourceDownload}${exportPdf}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
@@ -3549,8 +4151,10 @@ Object.assign(CodemanApp.prototype, {
       const rawUrl =
         data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
       const textRes = await fetch(bust(rawUrl));
+      if (!isCurrentPreview()) return false;
       if (!textRes.ok) throw new Error('Failed to load file');
       const text = await textRes.text();
+      if (!isCurrentPreview()) return false;
       this.filePreviewContent = text;
       // Reset any prior outline scroll-spy before re-rendering (no observer leaks).
       this._teardownOutlineScrollSpy();
@@ -3628,6 +4232,97 @@ Object.assign(CodemanApp.prototype, {
       const truncNote = data.truncated ? ` (showing 500/${data.totalLines} lines)` : '';
       footerEl.textContent = `${data.totalLines} lines \u2022 ${this.formatFileSize(data.size)}${truncNote}`;
     }
+    return true;
+  },
+
+  /**
+   * Render a converted Office (docx/pptx) preview into the body (COD-239). The
+   * server's preview endpoint blocks on a soffice→PDF conversion, so a bare
+   * iframe pointed straight at it would sit blank for the whole conversion (the
+   * reported bug). Instead we paint a visible "Rendering document…" state and
+   * fetch the SAME-ORIGIN preview URL purely as a readiness probe (abortable,
+   * failure-detecting). On success we render the iframe against that same
+   * same-origin URL — it's a warm disk-cache hit (fast) AND allowed by the app's
+   * `default-src 'self'` CSP. We deliberately do NOT render a `blob:` URL: the
+   * CSP has no `frame-src`, so framing a blob: violates `default-src 'self'` and
+   * the browser blocks it (the preview would stay blank). An AbortController on
+   * the preview state lets a close/switch cancel the in-flight probe; staleness
+   * is re-checked after the await so a late response can't overwrite a newer
+   * preview. A failed conversion renders a Retry affordance.
+   */
+  async _renderOfficeConversionPreview(bodyEl, fetchUrl, iframeFragment, filePath, expectedState) {
+    if (!bodyEl) return;
+    const isCurrentPreview = () => !expectedState || this.filePreviewState === expectedState;
+    // Abort any prior in-flight readiness probe for this state before re-probing
+    // (e.g. a poll re-render after the document was rewritten).
+    this._teardownOfficePreviewResources(expectedState);
+    bodyEl.innerHTML = '<div class="binary-message">Rendering document…</div>';
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    if (expectedState) expectedState.previewFetchAbort = controller;
+    let res;
+    try {
+      res = await fetch(fetchUrl, controller ? { signal: controller.signal } : undefined);
+    } catch (err) {
+      if ((err && err.name === 'AbortError') || !isCurrentPreview()) return;
+      this._renderOfficePreviewError(bodyEl, null);
+      return;
+    }
+    if (!isCurrentPreview()) return;
+    if (!res || !res.ok) {
+      let message = null;
+      try {
+        const errBody = await res.json();
+        if (errBody && typeof errBody.error === 'string') message = errBody.error;
+      } catch {
+        // Non-JSON error body — fall back to a generic message.
+      }
+      if (!isCurrentPreview()) return;
+      this._renderOfficePreviewError(bodyEl, message);
+      return;
+    }
+    // Conversion succeeded and is now warm in the server/disk cache. Free the
+    // probe's response body (we never read it) and render the iframe against the
+    // same-origin URL — CSP-allowed and a fast cache hit.
+    try {
+      res.body?.cancel();
+    } catch {
+      // Body already consumed/unsupported — nothing to release.
+    }
+    if (!isCurrentPreview()) return;
+    bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${fetchUrl}${iframeFragment}" title="${escapeHtml(
+      filePath
+    )}"></iframe>`;
+  },
+
+  /** Render an Office-conversion failure state with a Retry control (COD-239). */
+  _renderOfficePreviewError(bodyEl, message) {
+    if (!bodyEl) return;
+    const text = message || 'Document preview conversion failed';
+    bodyEl.innerHTML =
+      `<div class="binary-message">${escapeHtml(text)}<br><br>` +
+      `<button class="btn-icon-sm" onclick="app.retryFilePreview()">Retry</button></div>`;
+  },
+
+  /**
+   * Cancel any in-flight Office conversion readiness probe so a close/switch
+   * can't let a late response overwrite a newer preview (COD-239). Safe to call
+   * repeatedly and on states with nothing set.
+   */
+  _teardownOfficePreviewResources(state) {
+    if (!state) return;
+    try {
+      state.previewFetchAbort?.abort();
+    } catch {
+      // Aborting an already-settled controller is a no-op.
+    }
+    state.previewFetchAbort = null;
+  },
+
+  /** Re-open the current preview from scratch (COD-239 conversion Retry). */
+  retryFilePreview() {
+    const st = this.filePreviewState;
+    if (!st) return;
+    this.openFilePreview(st.filePath, st.sessionId, st.attachmentId);
   },
 
   _startFilePreviewPolling() {
@@ -3641,7 +4336,12 @@ Object.assign(CodemanApp.prototype, {
       clearInterval(this._filePreviewPollTimer);
       this._filePreviewPollTimer = null;
     }
-    if (!keepState) this.filePreviewState = null;
+    // On close/switch (not a poll-cycle restart) cancel the outgoing preview's
+    // in-flight Office conversion readiness probe before dropping its state.
+    if (!keepState) {
+      this._teardownOfficePreviewResources(this.filePreviewState);
+      this.filePreviewState = null;
+    }
   },
 
   async _pollFilePreview() {
@@ -3652,6 +4352,7 @@ Object.assign(CodemanApp.prototype, {
     this._filePreviewPolling = true;
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      if (this.filePreviewState !== st) return;
       const sig = this._filePreviewSignature(data);
       if (sig === st.signature) return; // unchanged
       st.signature = sig;
@@ -3663,11 +4364,16 @@ Object.assign(CodemanApp.prototype, {
       const SCROLLERS = '.document-preview-markdown, .document-preview-text, .document-preview-stage, .document-preview-diff';
       const bodyEl = this.$('filePreviewBody');
       const prevTop = bodyEl?.querySelector(SCROLLERS)?.scrollTop || 0;
-      await this._renderFilePreviewBody(data, {
-        sessionId: st.sessionId,
-        filePath: st.filePath,
-        attachmentId: st.attachmentId,
-      });
+      const rendered = await this._renderFilePreviewBody(
+        data,
+        {
+          sessionId: st.sessionId,
+          filePath: st.filePath,
+          attachmentId: st.attachmentId,
+        },
+        st
+      );
+      if (!rendered || this.filePreviewState !== st) return;
       const newScroller = this.$('filePreviewBody')?.querySelector(SCROLLERS);
       if (newScroller) newScroller.scrollTop = prevTop;
     } catch {
@@ -3702,6 +4408,16 @@ Object.assign(CodemanApp.prototype, {
     return ` <button class="btn-icon-sm document-export-btn" onclick="app.exportDocumentPdf()" title="Download a PDF of this document">Export PDF</button>`;
   },
 
+  /** Download the original workspace Office source shown by the Files panel. */
+  downloadFilePreviewSource() {
+    const st = this.filePreviewState;
+    if (!st?.sessionId || !st.filePath || st.attachmentId) {
+      this.showToast?.('No source file to download', 'error');
+      return;
+    }
+    this.downloadWorkspaceFile(st.sessionId, st.filePath);
+  },
+
   /** Download a PDF of the open document via the export endpoint (COD-61). */
   exportDocumentPdf() {
     const st = this.filePreviewState;
@@ -3734,9 +4450,16 @@ Object.assign(CodemanApp.prototype, {
     st.diffFrom = fromId;
     const sid = st.sessionId;
     const params = this._documentParams();
+    const isCurrentDiff = () => this.filePreviewState === st && st.mode === 'diff';
     try {
       const vres = await fetch(`/api/sessions/${sid}/documents/versions?${params}`);
-      const versions = vres.ok ? (await vres.json()).data?.versions || [] : [];
+      if (!isCurrentDiff()) return;
+      let versions = [];
+      if (vres.ok) {
+        const versionBody = await vres.json();
+        if (!isCurrentDiff()) return;
+        versions = versionBody.data?.versions || [];
+      }
       let diff = { ops: [], from: null, to: null };
       if (versions.length >= 2) {
         const to = versions[versions.length - 1].id;
@@ -3744,10 +4467,17 @@ Object.assign(CodemanApp.prototype, {
         const dres = await fetch(
           `/api/sessions/${sid}/documents/diff?${params}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
         );
-        if (dres.ok) diff = (await dres.json()).data;
+        if (!isCurrentDiff()) return;
+        if (dres.ok) {
+          const diffBody = await dres.json();
+          if (!isCurrentDiff()) return;
+          diff = diffBody.data;
+        }
       }
+      if (!isCurrentDiff()) return;
       this._renderDocumentDiff(versions, diff);
     } catch (err) {
+      if (!isCurrentDiff()) return;
       const bodyEl = this.$('filePreviewBody');
       if (bodyEl) bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
     }
@@ -3812,12 +4542,17 @@ Object.assign(CodemanApp.prototype, {
     st.diffFrom = null;
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      if (this.filePreviewState !== st) return;
       st.signature = this._filePreviewSignature(data);
-      await this._renderFilePreviewBody(data, {
-        sessionId: st.sessionId,
-        filePath: st.filePath,
-        attachmentId: st.attachmentId,
-      });
+      await this._renderFilePreviewBody(
+        data,
+        {
+          sessionId: st.sessionId,
+          filePath: st.filePath,
+          attachmentId: st.attachmentId,
+        },
+        st
+      );
     } catch {
       // Leave the diff in place if the document can't be re-read right now.
     }
@@ -3857,12 +4592,17 @@ Object.assign(CodemanApp.prototype, {
     st.docxView = view;
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
+      if (this.filePreviewState !== st) return;
       st.signature = this._filePreviewSignature(data);
-      await this._renderFilePreviewBody(data, {
-        sessionId: st.sessionId,
-        filePath: st.filePath,
-        attachmentId: st.attachmentId,
-      });
+      await this._renderFilePreviewBody(
+        data,
+        {
+          sessionId: st.sessionId,
+          filePath: st.filePath,
+          attachmentId: st.attachmentId,
+        },
+        st
+      );
     } catch {
       /* keep current view on error */
     }
@@ -4379,16 +5119,47 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  _fitFilePreviewImage() {
+    const img = document.querySelector('.document-preview-image');
+    const stage = img?.closest('.document-preview-stage');
+    if (!img || !stage) return false;
+    const body = stage.parentElement;
+    const toolbar = body?.querySelector('.document-preview-toolbar');
+    const style = getComputedStyle(stage);
+    // The stage's auto height can grow to the intrinsic image height. Measure
+    // the fixed preview body instead so a tall image is fitted to the visible
+    // viewport, not to the overflow area it created itself.
+    const containerWidth = body?.clientWidth || stage.clientWidth;
+    const containerHeight = body?.clientHeight
+      ? body.clientHeight - (toolbar?.offsetHeight || 0)
+      : stage.clientHeight;
+    const availableWidth = containerWidth - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
+    const availableHeight = containerHeight - parseFloat(style.paddingTop || '0') - parseFloat(style.paddingBottom || '0');
+    const imageWidth = img.offsetWidth;
+    const imageHeight = img.offsetHeight;
+    if (availableWidth <= 0 || availableHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) return false;
+
+    this.filePreviewZoom = Math.min(1, availableWidth / imageWidth, availableHeight / imageHeight);
+    img.style.transform = `scale(${this.filePreviewZoom})`;
+    return true;
+  },
+
   setFilePreviewZoom(action) {
     const img = document.querySelector('.document-preview-image');
     if (!img) return;
     if (action === 'fit') {
-      this.filePreviewZoom = 1;
-    } else if (action === 'in') {
-      this.filePreviewZoom = Math.min(4, (this.filePreviewZoom || 1) + 0.25);
-    } else if (action === 'out') {
-      this.filePreviewZoom = Math.max(0.25, (this.filePreviewZoom || 1) - 0.25);
+      this.filePreviewZoomMode = 'fit';
+      this._fitFilePreviewImage();
+      return;
     }
+    const currentZoom = this.filePreviewZoom || 1;
+    const zoomFactor = 1.25;
+    if (action === 'in') {
+      this.filePreviewZoom = Math.min(4, currentZoom * zoomFactor);
+    } else if (action === 'out') {
+      this.filePreviewZoom = currentZoom / zoomFactor;
+    }
+    this.filePreviewZoomMode = 'manual';
     img.style.transform = `scale(${this.filePreviewZoom})`;
   },
 
@@ -4414,6 +5185,7 @@ Object.assign(CodemanApp.prototype, {
     }
     if (!this._filePreviewResizeObs && typeof ResizeObserver !== 'undefined') {
       this._filePreviewResizeObs = new ResizeObserver(() => {
+        if (this.filePreviewZoomMode === 'fit') this._fitFilePreviewImage();
         clearTimeout(this._filePreviewResizeSaveTimer);
         this._filePreviewResizeSaveTimer = setTimeout(() => {
           try {
@@ -4564,6 +5336,7 @@ Object.assign(CodemanApp.prototype, {
           <button type="button" class="attachment-preview-btn">Preview</button>
           <a href="${escapeHtml(downloadUrl)}">Download</a>
           <button type="button" class="attachment-open-btn">Open</button>
+          <button type="button" class="attachment-go-session-btn" title="Switch to this session">Go to session</button>
         </div>
       </div>
       <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
@@ -4582,6 +5355,9 @@ Object.assign(CodemanApp.prototype, {
     });
     card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
       this.openAttachmentInNewTab(sessionId, filePath, attachmentId || null);
+    });
+    card.querySelector('.attachment-go-session-btn')?.addEventListener('click', () => {
+      this.selectSession(sessionId);
     });
     card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
       this.closeAttachmentCard(cardId);
@@ -4677,6 +5453,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="attachment-history-subtitle" id="attachmentHistorySubtitle">0 files</div>
         </div>
         <div class="attachment-history-header-actions">
+          <button type="button" class="btn-icon-sm" id="attachmentHistoryAddBtn" title="Add files" aria-label="Add files">&#x2795;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryRefreshBtn" title="Refresh" aria-label="Refresh attachments">&#x21BB;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryCloseBtn" title="Close" aria-label="Close attachments">&times;</button>
         </div>
@@ -4684,6 +5461,9 @@ Object.assign(CodemanApp.prototype, {
       <div class="attachment-history-list" id="attachmentHistoryList"></div>
     `;
     document.body.appendChild(drawer);
+    drawer.querySelector('#attachmentHistoryAddBtn')?.addEventListener('click', () => {
+      this.pickDocumentsForUpload();
+    });
     drawer.querySelector('#attachmentHistoryRefreshBtn')?.addEventListener('click', () => {
       this.loadAttachmentHistory(this.activeSessionId);
     });
@@ -4766,7 +5546,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="attachment-history-empty-title">No attachments yet</div>
           <div>Show a file here by running:</div>
           <code>codeman attach /absolute/path/to/file.pptx</code>
-          <div>Supports .pptx, .docx, .pdf, .png, .md, and .txt.</div>
+          <div>Supports .pptx, .docx, .xlsx, .pdf, .png, .md, and .txt.</div>
         </div>
       `;
       return;
@@ -4789,6 +5569,10 @@ Object.assign(CodemanApp.prototype, {
         if (action === 'download') this.downloadAttachmentHistoryItem(id);
         if (action === 'open') this.openAttachmentHistoryItem(id);
         if (action === 'reshow') this.reshowAttachmentCard(id);
+        if (action === 'remove') {
+          const it = this.getAttachmentHistoryItem(id);
+          if (it && it.relativePath) this.deleteUploadedAttachment(it.sessionId, it.relativePath);
+        }
       });
     });
   },
@@ -4807,6 +5591,15 @@ Object.assign(CodemanApp.prototype, {
         ? `<img class="attachment-history-thumb-img" src="${escapeHtml(item.thumbnailUrl)}" alt="">`
         : '';
     const disabled = item.missing ? 'disabled aria-disabled="true"' : '';
+    // COD-241 unit 3: only Codeman-uploaded copies (inside .codeman-attachments/)
+    // are removable; a detected/external reference to the user's own file is not.
+    const isOwnedUpload =
+      typeof item.relativePath === 'string' && item.relativePath.startsWith('.codeman-attachments/');
+    const removeBtn = isOwnedUpload
+      ? `<button type="button" data-attachment-action="remove" data-history-id="${escapeHtml(
+          item.id
+        )}" title="Remove uploaded file" aria-label="Remove uploaded file ${escapeHtml(item.fileName)}" ${disabled}>Remove</button>`
+      : '';
     return `
       <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
         <div class="attachment-history-thumb">
@@ -4821,6 +5614,7 @@ Object.assign(CodemanApp.prototype, {
             <button type="button" data-attachment-action="download" data-history-id="${escapeHtml(item.id)}" ${disabled}>Download</button>
             <button type="button" data-attachment-action="open" data-history-id="${escapeHtml(item.id)}" ${disabled}>Open</button>
             <button type="button" data-attachment-action="reshow" data-history-id="${escapeHtml(item.id)}" ${disabled}>Card</button>
+            ${removeBtn}
           </div>
         </div>
       </div>
@@ -4878,12 +5672,46 @@ Object.assign(CodemanApp.prototype, {
   },
 
   copyFilePreviewContent() {
+    if (this.filePreviewState?.previewKind === 'image') {
+      return this._copyFilePreviewImage();
+    }
     if (this.filePreviewContent) {
       navigator.clipboard.writeText(this.filePreviewContent).then(() => {
         this.showToast('Copied to clipboard', 'success');
       }).catch(() => {
         this.showToast('Failed to copy', 'error');
       });
+    }
+  },
+
+  async _copyFilePreviewImage() {
+    const imageUrl = this.filePreviewState?.previewCopyUrl;
+    if (!imageUrl) {
+      this.showToast('Failed to copy image to clipboard', 'error');
+      return false;
+    }
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        throw new Error('Image clipboard API unavailable');
+      }
+      const res = await fetch(imageUrl);
+      if (!res.ok) throw new Error(`Failed to fetch image (${res.status})`);
+      let blob = await res.blob();
+      const contentType = res.headers?.get?.('content-type') || '';
+      if ((!blob.type || blob.type === 'application/octet-stream') && contentType.startsWith('image/')) {
+        blob = new Blob([blob], { type: contentType });
+      }
+      if (!blob.type.startsWith('image/')) {
+        throw new Error(`Unexpected clipboard type: ${blob.type || 'unknown'}`);
+      }
+      const item = new ClipboardItem({ [blob.type]: blob });
+      await navigator.clipboard.write([item]);
+      this.showToast('Copied image to clipboard', 'success');
+      return true;
+    } catch (err) {
+      console.error('Failed to copy preview image:', err);
+      this.showToast('Failed to copy image to clipboard', 'error');
+      return false;
     }
   },
 
@@ -5280,6 +6108,7 @@ Object.assign(CodemanApp.prototype, {
           <div class="attachment-history-subtitle" id="attachmentHistorySubtitle">0 files</div>
         </div>
         <div class="attachment-history-header-actions">
+          <button type="button" class="btn-icon-sm" id="attachmentHistoryAddBtn" title="Add files" aria-label="Add files">&#x2795;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryRefreshBtn" title="Refresh" aria-label="Refresh attachments">&#x21BB;</button>
           <button type="button" class="btn-icon-sm" id="attachmentHistoryCloseBtn" title="Close" aria-label="Close attachments">&times;</button>
         </div>
@@ -5287,6 +6116,9 @@ Object.assign(CodemanApp.prototype, {
       <div class="attachment-history-list" id="attachmentHistoryList"></div>
     `;
     document.body.appendChild(drawer);
+    drawer.querySelector('#attachmentHistoryAddBtn')?.addEventListener('click', () => {
+      this.pickDocumentsForUpload();
+    });
     drawer.querySelector('#attachmentHistoryRefreshBtn')?.addEventListener('click', () => {
       this.loadAttachmentHistory(this.activeSessionId);
     });
@@ -5373,7 +6205,7 @@ Object.assign(CodemanApp.prototype, {
           <div>Show a file here by running:</div>
           <code>${cliName} attach /absolute/path/to/file.pptx</code>
           ${warning}
-          <div>Supports .pptx, .docx, .pdf, .png, .md, and .txt.</div>
+          <div>Supports .pptx, .docx, .xlsx, .pdf, .png, .md, and .txt.</div>
         </div>
       `;
       return;
@@ -5396,6 +6228,10 @@ Object.assign(CodemanApp.prototype, {
         if (action === 'download') this.downloadAttachmentHistoryItem(id);
         if (action === 'open') this.openAttachmentHistoryItem(id);
         if (action === 'reshow') this.reshowAttachmentCard(id);
+        if (action === 'remove') {
+          const it = this.getAttachmentHistoryItem(id);
+          if (it && it.relativePath) this.deleteUploadedAttachment(it.sessionId, it.relativePath);
+        }
       });
     });
   },
@@ -5411,6 +6247,15 @@ Object.assign(CodemanApp.prototype, {
       ? `<img class="attachment-history-thumb-img" src="${escapeHtml(item.thumbnailUrl)}" alt="">`
       : '';
     const disabled = item.missing ? 'disabled aria-disabled="true"' : '';
+    // COD-241 unit 3: only Codeman-uploaded copies (inside .codeman-attachments/)
+    // are removable; a detected/external reference to the user's own file is not.
+    const isOwnedUpload =
+      typeof item.relativePath === 'string' && item.relativePath.startsWith('.codeman-attachments/');
+    const removeBtn = isOwnedUpload
+      ? `<button type="button" data-attachment-action="remove" data-history-id="${escapeHtml(
+          item.id
+        )}" title="Remove uploaded file" aria-label="Remove uploaded file ${escapeHtml(item.fileName)}" ${disabled}>Remove</button>`
+      : '';
     return `
       <div class="attachment-history-item ${item.missing ? 'missing' : ''}" data-history-item="${escapeHtml(item.id)}">
         <div class="attachment-history-thumb">
@@ -5425,6 +6270,7 @@ Object.assign(CodemanApp.prototype, {
             <button type="button" data-attachment-action="download" data-history-id="${escapeHtml(item.id)}" ${disabled}>Download</button>
             <button type="button" data-attachment-action="open" data-history-id="${escapeHtml(item.id)}" ${disabled}>Open</button>
             <button type="button" data-attachment-action="reshow" data-history-id="${escapeHtml(item.id)}" ${disabled}>Card</button>
+            ${removeBtn}
           </div>
         </div>
       </div>
@@ -5554,6 +6400,7 @@ Object.assign(CodemanApp.prototype, {
           <button type="button" class="attachment-preview-btn">Preview</button>
           <a href="${escapeHtml(downloadUrl)}">Download</a>
           <button type="button" class="attachment-open-btn">Open</button>
+          <button type="button" class="attachment-go-session-btn" title="Switch to this session">Go to session</button>
         </div>
       </div>
       <button type="button" class="attachment-close-btn" title="Dismiss">&times;</button>
@@ -5572,6 +6419,9 @@ Object.assign(CodemanApp.prototype, {
     });
     card.querySelector('.attachment-open-btn')?.addEventListener('click', () => {
       this.openAttachmentInNewTab(sessionId, filePath, attachmentId || null);
+    });
+    card.querySelector('.attachment-go-session-btn')?.addEventListener('click', () => {
+      this.selectSession(sessionId);
     });
     card.querySelector('.attachment-close-btn')?.addEventListener('click', () => {
       this.closeAttachmentCard(cardId);
@@ -6162,6 +7012,14 @@ Object.assign(CodemanApp.prototype, {
         this._toastContainer.className = 'toast-container';
         document.body.appendChild(this._toastContainer);
       }
+    }
+    // a11y: the container is a polite live region so toasts (e.g. document-upload
+    // progress / failure) are announced to screen readers as they appear. Set
+    // once, idempotently, whether the container was just created or adopted.
+    if (this._toastContainer.getAttribute('aria-live') !== 'polite') {
+      this._toastContainer.setAttribute('role', 'status');
+      this._toastContainer.setAttribute('aria-live', 'polite');
+      this._toastContainer.setAttribute('aria-atomic', 'false');
     }
     this._toastContainer.appendChild(toast);
 

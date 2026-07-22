@@ -23,6 +23,7 @@ import type { SessionState } from './session.js';
 import type { TaskState } from './task.js';
 import type { RalphLoopState } from './ralph.js';
 import type { RespawnConfig } from './respawn.js';
+import type { CronJob, CronJobRun } from './cron.js';
 
 // ========== Global Stats Types ==========
 
@@ -113,6 +114,10 @@ export interface AppState {
   orchestrator?: import('./orchestrator.js').OrchestratorPersistState;
   /** Global tab order shared across devices (ordered list of sessionIds) — COD-131 */
   sessionOrder?: string[];
+  /** Cron-style scheduled jobs, keyed by job ID. */
+  cronJobs?: Record<string, CronJob>;
+  /** Scheduled job run history, keyed by run ID. */
+  cronJobRuns?: Record<string, CronJobRun>;
 }
 
 // ========== Default Configuration ==========

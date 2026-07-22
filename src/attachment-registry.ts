@@ -23,11 +23,12 @@ const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
   'pdf',
   'docx',
   'pptx',
+  'xlsx',
   'md',
   'txt',
 ]);
 
-export type AttachmentSource = 'detected' | 'external';
+export type AttachmentSource = 'detected' | 'external' | 'upload';
 
 export interface AttachmentRecord {
   attachmentId: string;
@@ -94,6 +95,19 @@ class AttachmentRegistry {
     return undefined;
   }
 
+  /**
+   * Remove a single record by id (COD-241 unit 3). Used when a Codeman-uploaded
+   * file is deleted via DELETE …/attachments/uploaded, so the in-memory registry
+   * doesn't keep resolving routes to a file that no longer exists. Returns true
+   * when a record was removed. Best-effort — the delete route's ownership gate is
+   * the source of truth and does not depend on this call succeeding.
+   */
+  remove(sessionId: string, attachmentId: string): boolean {
+    const records = this.recordsBySession.get(sessionId);
+    if (!records) return false;
+    return records.delete(attachmentId);
+  }
+
   clearSession(sessionId: string): void {
     this.recordsBySession.delete(sessionId);
   }
@@ -110,6 +124,7 @@ export function getAttachmentType(extension: string): AttachmentDetectedType {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(normalized)) return 'image';
   if (normalized === 'pdf') return 'pdf';
   if (normalized === 'pptx') return 'presentation';
+  if (normalized === 'xlsx') return 'binary';
   if (normalized === 'md') return 'markdown';
   if (normalized === 'txt') return 'text';
   return 'document';
@@ -171,6 +186,12 @@ export interface RegisterExternalAttachmentOptions {
    * `codeman attach` CLI (which POSTs directly when a session id is known).
    */
   forceWorkspaceConfinement?: boolean;
+  /**
+   * The provenance to stamp on the created record (default `'external'`). The
+   * document-upload route (COD-241) passes `'upload'` so a browser-uploaded file
+   * is distinguishable from a passively-detected or externally-referenced one.
+   */
+  source?: AttachmentSource;
 }
 
 export async function registerExternalAttachment(
@@ -241,7 +262,7 @@ export async function registerExternalAttachment(
     size: stat.size,
     mtimeMs: stat.mtimeMs ?? 0,
     timestamp: Date.now(),
-    source: 'external',
+    source: options.source ?? 'external',
   };
   attachmentRegistry.register(record);
   return attachmentRecordToEvent(record);

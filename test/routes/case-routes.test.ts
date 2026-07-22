@@ -81,6 +81,16 @@ vi.mock('../../src/hooks-config.js', () => ({
   writeHooksConfig: vi.fn(async () => {}),
 }));
 
+// Stub the remote-tmux prereq probe so remote-link tests never shell out to ssh
+// (readRemoteHosts/writeRemoteHosts stay real, backed by the mocked fs).
+vi.mock('../../src/remote-hosts.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/remote-hosts.js')>();
+  return {
+    ...actual,
+    checkRemoteTmuxAvailable: vi.fn(async () => ({ ok: true, tmuxPath: '/usr/bin/tmux' })),
+  };
+});
+
 // Import mocked modules for test control
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
