@@ -43,6 +43,49 @@ html.mobile-init .file-browser-panel {
   .session-tab .tab-detach {
     display: none !important;
   }
+
+  .mobile-header-utility-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    color: var(--text-dim);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .mobile-header-utility-toggle:active,
+  .mobile-header-utility-toggle[aria-expanded='true'] {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .header:not(.mobile-utilities-expanded) .header-right {
+    display: none;
+  }
+
+  .header.mobile-utilities-expanded {
+    flex-wrap: wrap;
+    max-height: none;
+  }
+
+  .header.mobile-utilities-expanded .header-right {
+    display: flex;
+    order: 10;
+    flex: 0 0 100%;
+    width: 100%;
+    margin-left: 0;
+    padding: 0.25rem 0 0;
+    border-left: none;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
 }
 
 /* ============================================================================
@@ -82,6 +125,14 @@ html.mobile-init .file-browser-panel {
 
   .ios-device .app {
     padding-top: calc(54px + var(--safe-area-top));
+  }
+
+  .app.mobile-header-utilities-expanded {
+    padding-top: 102px;
+  }
+
+  .ios-device .app.mobile-header-utilities-expanded {
+    padding-top: calc(102px + var(--safe-area-top));
   }
 
   /* Font controls - smaller on tablet, visibility controlled by JS */
@@ -445,6 +496,24 @@ html.mobile-init .file-browser-panel {
     gap: 0.1rem;
     flex-shrink: 0;
     border-left: none;
+  }
+
+  .mobile-header-utility-toggle {
+    width: 26px;
+    height: 26px;
+  }
+
+  .mobile-header-utility-toggle svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .app.mobile-header-utilities-expanded {
+    padding-top: 74px;
+  }
+
+  .ios-device .app.mobile-header-utilities-expanded {
+    padding-top: calc(74px + var(--safe-area-top));
   }
 
   /* Smaller header buttons on mobile */
