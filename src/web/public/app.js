@@ -4441,6 +4441,17 @@ class CodemanApp {
     header.classList.toggle('header--tabs-wrapped', wrapped);
   }
 
+  toggleMobileHeaderUtilities() {
+    const header = document.querySelector('.header');
+    const appShell = document.querySelector('.app');
+    const toggle = document.querySelector('.mobile-header-utility-toggle');
+    if (!header || !appShell || !toggle) return;
+
+    const expanded = header.classList.toggle('mobile-utilities-expanded');
+    appShell.classList.toggle('mobile-header-utilities-expanded', expanded);
+    toggle.setAttribute('aria-expanded', String(expanded));
+  }
+
   _fullRenderSessionTabs() {
     if (this._inlineRenameActive) return;
     const container = this.$('sessionTabs');

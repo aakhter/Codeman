@@ -7,7 +7,7 @@
 //   2. The attachments button (COD-39) is OPT-IN — default-hidden everywhere, shown
 //      only when App Settings → Display → "Attachments Button" is enabled. It first
 //      shipped always-visible (mobile, then desktop), which is the regression here.
-import { describe, it, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { WebServer } from '../../src/web/server.js';
 import { createTestServer, stopTestServer } from './helpers/server.js';
 import { createDevicePage, closeAllBrowsers } from './helpers/browser.js';
@@ -35,6 +35,42 @@ describe('Header button visibility (E2E)', () => {
     await page.waitForTimeout(WAIT.PAGE_SETTLE);
     await assertHidden(page, '.btn-icon-header.btn-settings');
     await assertHidden(page, '.btn-icon-header.btn-lifecycle-log');
+  });
+
+  it('collapses and expands header utilities on a 430px large phone', async () => {
+    const { page } = await createDevicePage(REPRESENTATIVE_DEVICES['large-phone'], BASE_URL);
+    await page.waitForTimeout(WAIT.PAGE_SETTLE);
+
+    const toggle = page.locator('.mobile-header-utility-toggle');
+    await assertVisible(page, '.mobile-header-utility-toggle');
+    expect(await toggle.getAttribute('aria-controls')).toBe('headerRight');
+    expect(await toggle.getAttribute('aria-expanded')).toBe('false');
+    await assertHidden(page, '#headerRight');
+
+    const collapsedPadding = await page
+      .locator('.app')
+      .evaluate((element) => parseFloat(getComputedStyle(element).paddingTop));
+
+    await toggle.click();
+
+    expect(await toggle.getAttribute('aria-expanded')).toBe('true');
+    await assertVisible(page, '#headerRight');
+    const expandedPadding = await page
+      .locator('.app')
+      .evaluate((element) => parseFloat(getComputedStyle(element).paddingTop));
+    expect(expandedPadding).toBeGreaterThan(collapsedPadding);
+
+    await toggle.click();
+
+    expect(await toggle.getAttribute('aria-expanded')).toBe('false');
+    await assertHidden(page, '#headerRight');
+  });
+
+  it('keeps desktop header utilities visible without a collapse toggle', async () => {
+    const { page } = await createDevicePage(REPRESENTATIVE_DEVICES['large-tablet'], BASE_URL);
+    await page.waitForTimeout(WAIT.PAGE_SETTLE);
+    await assertHidden(page, '.mobile-header-utility-toggle');
+    await assertVisible(page, '#headerRight');
   });
 
   it('keeps the opt-in attachments button HIDDEN by default on a desktop-class viewport', async () => {
