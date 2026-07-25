@@ -72,3 +72,4 @@ export * from './workflow-run.js';
 export * from './search.js';
 export * from './library.js';
 export * from './sources.js';
+export * from './user.js';

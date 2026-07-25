@@ -297,6 +297,8 @@ Object.assign(CodemanApp.prototype, {
   openAppSettings() {
     // Load current settings
     const settings = this.loadAppSettingsFromStorage();
+    document.getElementById('appSettingsDisplayName').value = settings.displayName || 'Codeman';
+    document.getElementById('appSettingsLanguage').value = settings.language === 'zh-CN' ? 'zh-CN' : 'en';
     document.getElementById('appSettingsClaudeMdPath').value = settings.defaultClaudeMdPath || '';
     document.getElementById('appSettingsDefaultDir').value = settings.defaultWorkingDir || '';
     // Use device-aware defaults for display settings (mobile has different defaults)
@@ -305,9 +307,11 @@ Object.assign(CodemanApp.prototype, {
     // Header visibility settings
     document.getElementById('appSettingsShowFontControls').checked = settings.showFontControls ?? defaults.showFontControls ?? false;
     document.getElementById('appSettingsShowSystemStats').checked = settings.showSystemStats ?? defaults.showSystemStats ?? true;
-    document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? true;
+    document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? false;
     document.getElementById('appSettingsShowResponseViewer').checked = settings.showResponseViewer ?? defaults.showResponseViewer ?? false;
     document.getElementById('appSettingsShowAwayDigest').checked = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
+    const fvbEl = document.getElementById('appSettingsShowFileViewerButton');
+    if (fvbEl) fvbEl.checked = settings.showFileViewerButton ?? defaults.showFileViewerButton ?? true;
     document.getElementById('appSettingsShowAttachmentsButton').checked = settings.showAttachmentsButton ?? defaults.showAttachmentsButton ?? false;
     document.getElementById('appSettingsSkin').value = settings.skin ?? defaults.skin ?? 'daylight-blue';
     // WebGL renderer (desktop only — mobile always uses the DOM renderer, so hide
@@ -326,6 +330,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowPlanUsageLimits').checked = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
     document.getElementById('appSettingsShowAwayDigest').checked = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
+    // Session Manager + Away Digest buttons default OFF; Cron button defaults ON.
+    document.getElementById('appSettingsShowSessionButton').checked = settings.showSessionButton ?? defaults.showSessionButton ?? false;
+    document.getElementById('appSettingsShowAwayDigestButton').checked = settings.showAwayDigestButton ?? defaults.showAwayDigestButton ?? false;
+    document.getElementById('appSettingsShowCronButton').checked = settings.showCronButton ?? defaults.showCronButton ?? false;
     // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
     // but is only available when the instance runs with CODEMAN_GESTURE=1 (server sets
     // window.__codemanGestureAvailable). Hide just this item otherwise so the toggle
@@ -1568,6 +1576,12 @@ Object.assign(CodemanApp.prototype, {
     // as "previously off" — used below to detect a real OFF→ON flip.
     const _prevWebglEnabled = (_prev.webglRendererEnabled ?? true) === true;
     const settings = {
+      displayName: window.CodemanI18n?.normalizeDisplayName(
+        document.getElementById('appSettingsDisplayName').value
+      ) || 'Codeman',
+      language: window.CodemanI18n?.normalizeLanguage(
+        document.getElementById('appSettingsLanguage').value
+      ) || 'en',
       defaultClaudeMdPath: document.getElementById('appSettingsClaudeMdPath').value.trim(),
       defaultWorkingDir: document.getElementById('appSettingsDefaultDir').value.trim(),
       ralphTrackerEnabled: document.getElementById('appSettingsRalphEnabled').checked,
@@ -1577,6 +1591,7 @@ Object.assign(CodemanApp.prototype, {
       showLifecycleLog: document.getElementById('appSettingsShowLifecycleLog').checked,
       showResponseViewer: document.getElementById('appSettingsShowResponseViewer').checked,
       showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
+      showFileViewerButton: !!document.getElementById('appSettingsShowFileViewerButton')?.checked,
       showAttachmentsButton: document.getElementById('appSettingsShowAttachmentsButton').checked,
       showMonitor: document.getElementById('appSettingsShowMonitor').checked,
       showProjectInsights: document.getElementById('appSettingsShowProjectInsights').checked,
@@ -1588,6 +1603,9 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
+      showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
+      showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
+      showCronButton: document.getElementById('appSettingsShowCronButton').checked,
       gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
       subagentTrackingEnabled: document.getElementById('appSettingsSubagentTracking').checked,
       subagentActiveTabOnly: document.getElementById('appSettingsSubagentActiveTabOnly').checked,
@@ -1755,6 +1773,7 @@ Object.assign(CodemanApp.prototype, {
     // Apply header visibility immediately
     this.applyHeaderVisibilitySettings();
     this.applySkin();
+    this.applyLocalization();
     this.applyTabWrapSettings();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
@@ -1783,12 +1802,19 @@ Object.assign(CodemanApp.prototype, {
       cjkInputEnabled: _cjk,
       extendedKeyboardBar: _ekb,
       skin: _skin,
+      language: _language,
       showPlanUsageLimits: _pul,
       showAwayDigest: _sad,
       showAttachmentsButton: _ahb,
       liveMirrorEnabled: _lmr,
+      showFileViewerButton: _fvb,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
+      // Per-device header/toolbar button toggles — client-only, and absent from
+      // SettingsUpdateSchema (.strict()), so sending them would 400 the PUT.
+      showSessionButton: _ssb,
+      showAwayDigestButton: _adb,
+      showCronButton: _crb,
       ...serverSettings
     } = settings;
     try {
@@ -1917,10 +1943,13 @@ Object.assign(CodemanApp.prototype, {
     return settings.ralphTrackerEnabled ?? false;
   },
 
-  // Get the settings storage key based on device type (mobile vs desktop)
+  // Keep the settings namespace stable across foldable posture changes. Layout
+  // still follows viewport width, but an unfolded phone remains the same
+  // handheld device and must not silently switch to desktop preferences.
   getSettingsStorageKey() {
-    const isMobile = MobileDetection.getDeviceType() === 'mobile';
-    return isMobile ? 'codeman-app-settings-mobile' : 'codeman-app-settings';
+    const isHandheld =
+      MobileDetection.isHandheldDevice?.() ?? MobileDetection.getDeviceType() === 'mobile';
+    return isHandheld ? 'codeman-app-settings-mobile' : 'codeman-app-settings';
   },
 
   async _refreshHeadroomStatus() {
@@ -1984,8 +2013,9 @@ Object.assign(CodemanApp.prototype, {
       terminalBufferMaxBytes: 32 * 1024 * 1024,
       terminalBufferTrimBytes: 24 * 1024 * 1024,
     };
-    const isMobile = MobileDetection.getDeviceType() === 'mobile';
-    if (isMobile) {
+    const isHandheld =
+      MobileDetection.isHandheldDevice?.() ?? MobileDetection.getDeviceType() === 'mobile';
+    if (isHandheld) {
       // Mobile defaults: minimal UI for small screens
       return {
         ...terminalDefaults,
@@ -2013,10 +2043,15 @@ Object.assign(CodemanApp.prototype, {
         headroomRouteCodex: true,
         // Plan usage limits header chip (upstream)
         showPlanUsageLimits: false,
-        showAwayDigest: false,
         showAttachmentsButton: false,
         liveMirrorEnabled: true, // COD-187 live mirror for codex/gemini terminals
+        showFileViewerButton: false,
         showRedrawButton: false,
+        showSessionButton: false,
+        showAwayDigestButton: false,
+        showCronButton: false,
+        // Remote auto-reconnect (COD-108) — on by default
+        remoteAutoReconnect: true,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile
@@ -2168,13 +2203,28 @@ Object.assign(CodemanApp.prototype, {
     if (typeof this.applyTerminalSkin === 'function') this.applyTerminalSkin(skin);
   },
 
+  // Apply the per-device language and the synced user-facing product name.
+  // The i18n layer updates both existing static nodes and future dynamic DOM.
+  applyLocalization() {
+    const settings = this.loadAppSettingsFromStorage();
+    const result = window.CodemanI18n?.configure({
+      language: settings.language,
+      displayName: settings.displayName,
+    });
+    if (result && this.notificationManager) {
+      this.notificationManager.originalTitle = document.title;
+    }
+  },
+
   applyHeaderVisibilitySettings() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const compactHeader = MobileDetection.getDeviceType() !== 'desktop';
     const showFontControls = compactHeader ? false : (settings.showFontControls ?? defaults.showFontControls ?? false);
     const showSystemStats = compactHeader ? false : (settings.showSystemStats ?? defaults.showSystemStats ?? true);
-    const showTokenCount = compactHeader ? false : (settings.showTokenCount ?? defaults.showTokenCount ?? true);
+    // Default OFF: the header stays gear + usage chips + files button unless a
+    // stored preference explicitly re-enables the token chip (no UI toggle exists).
+    const showTokenCount = compactHeader ? false : (settings.showTokenCount ?? defaults.showTokenCount ?? false);
 
     const fontControlsEl = document.querySelector('.header-font-controls');
     const systemStatsEl = document.getElementById('headerSystemStats');
@@ -2191,7 +2241,9 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Hide lifecycle log button when setting is disabled
-    const showLifecycleLog = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? true;
+    // Default OFF: the lifecycle-log document icon is opt-in; the default header
+    // keeps only WS/CPU/MEM, the file-viewer folder, usage chips, and the gear.
+    const showLifecycleLog = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? false;
     const lifecycleBtn = document.querySelector('.btn-lifecycle-log');
     if (lifecycleBtn) {
       lifecycleBtn.style.display = showLifecycleLog ? '' : 'none';
@@ -2211,6 +2263,16 @@ Object.assign(CodemanApp.prototype, {
     const attachmentsBtn = document.getElementById('attachmentsHistoryBtn');
     if (attachmentsBtn) {
       attachmentsBtn.classList.toggle('btn-attachments-history--hidden', !showAttachmentsButton);
+    }
+
+    // File Viewer header button — opt-in, default OFF. Marker class (base is
+    // display:inline-flex !important); clicking it toggles the file browser panel.
+    // Default ON (desktop): the folder button is part of the standard header now;
+    // phones still hide it via mobile.css (btn-file-viewer in the phone-hidden set).
+    const showFileViewerButton = settings.showFileViewerButton ?? defaults.showFileViewerButton ?? true;
+    const fileViewerBtn = document.querySelector('.btn-file-viewer');
+    if (fileViewerBtn) {
+      fileViewerBtn.classList.toggle('btn-file-viewer--hidden', !showFileViewerButton);
     }
 
     // Multi-monitor button — hidden by default (App Settings → Display → "Header
@@ -2252,6 +2314,22 @@ Object.assign(CodemanApp.prototype, {
     const redrawBtn = document.querySelector('.btn-redraw-terminal');
     if (redrawBtn) {
       redrawBtn.classList.toggle('btn-redraw-terminal--hidden', !showRedrawButton);
+    }
+
+    // Session Manager button — opt-in, hidden by default (App Settings → Display).
+    // Marker class (base is display:inline-flex !important); phones keep it hidden
+    // via mobile.css regardless. Sessions stay reachable via the Ctrl+K palette.
+    const showSessionButton = settings.showSessionButton ?? defaults.showSessionButton ?? false;
+    const sessionBtn = document.querySelector('.btn-session-manager');
+    if (sessionBtn) {
+      sessionBtn.classList.toggle('btn-session-manager--hidden', !showSessionButton);
+    }
+
+    // Cron button (footer toolbar) — opt-in, hidden by default. Same marker pattern.
+    const showCronButton = settings.showCronButton ?? defaults.showCronButton ?? false;
+    const cronBtn = document.querySelector('.btn-cron');
+    if (cronBtn) {
+      cronBtn.classList.toggle('btn-cron--hidden', !showCronButton);
     }
 
     // Notification bell is retired (notifications live in Settings → Notifications
@@ -2452,7 +2530,7 @@ Object.assign(CodemanApp.prototype, {
     // so mobile defaults to OFF; the desktop blob is untouched and keeps its value.
     try {
       if (
-        MobileDetection.getDeviceType() === 'mobile' &&
+        (MobileDetection.isHandheldDevice?.() ?? MobileDetection.getDeviceType() === 'mobile') &&
         !localStorage.getItem('codeman:planUsagePerDeviceMigrated')
       ) {
         const s = this.loadAppSettingsFromStorage();
@@ -2480,7 +2558,8 @@ Object.assign(CodemanApp.prototype, {
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
-          'webglRendererEnabled', 'terminalWheelLocalScrollback',
+          'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
+          'showSessionButton', 'showAwayDigestButton', 'showCronButton',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (default OFF): desktop
         // can show it while mobile stays hidden. It used to sync, so an older

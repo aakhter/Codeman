@@ -20,7 +20,7 @@ export interface ConfigPort {
   /** COD-75: whether new Claude/non-codex sessions opt into COLORTERM=truecolor (settings.json, default off). */
   getTruecolorEnabled(): Promise<boolean>;
   getDefaultClaudeMdPath(): Promise<string | undefined>;
-  getLightState(): unknown;
+  getLightState(identity?: { username: string; role: 'admin' | 'user' }): unknown;
   getLightSessionsState(): unknown[];
   startTranscriptWatcher(sessionId: string, transcriptPath: string): void;
   stopTranscriptWatcher(sessionId: string): void;

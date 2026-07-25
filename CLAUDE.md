@@ -135,7 +135,7 @@ When user says "COM":
 
 CI runs `npm run check:lockfile` on every push/PR, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 1.3.6 (must match `package.json`)
+**Version**: 1.8.0 (must match `package.json`)
 
 ## Project Overview
 

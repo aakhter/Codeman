@@ -55,7 +55,9 @@ import {
   type SessionAttachmentHistoryItem,
   type SessionRemote,
   type SessionSource,
+  type SessionDocker,
 } from './types.js';
+import { probeDockerCliVersion } from './docker-hosts.js';
 import type { TerminalMultiplexer, MuxSession, CommandDeliveryResult } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
 import { RalphTracker } from './ralph-tracker.js';
@@ -244,6 +246,8 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
 const DEFAULT_PTY_COLS = 120;
 const DEFAULT_PTY_ROWS = 40;
 const TMUX_DISPLAY_TIMEOUT_MS = 2000;
+/** Delay before the in-container Claude CLI version probe (lets the container start). */
+const DOCKER_CLI_VERSION_PROBE_DELAY_MS = 3000;
 
 /**
  * Ask tmux for the current window geometry of `muxName` so a re-attaching PTY
@@ -278,8 +282,10 @@ export function queryTmuxWindowSize(muxName: string, socket: string): { cols: nu
   return { cols: DEFAULT_PTY_COLS, rows: DEFAULT_PTY_ROWS };
 }
 
-export function resolveMuxAttachCwd(workingDir: string, remote?: SessionRemote): string {
-  return remote ? '/tmp' : workingDir;
+export function resolveMuxAttachCwd(workingDir: string, remote?: SessionRemote, docker?: SessionDocker): string {
+  // Remote and docker sessions run the CLI elsewhere (ssh / docker exec); the LOCAL
+  // wrapper pane never needs the workspace as its cwd, so launch it in /tmp.
+  return remote || docker ? '/tmp' : workingDir;
 }
 
 /**
@@ -502,6 +508,14 @@ export class Session extends EventEmitter {
   // Default off → COLORTERM is unset (avoids tmux→PTY→xterm.js color glitches).
   private _truecolorEnabled: boolean = false;
 
+  // Docker execution metadata, present when this session runs inside a container via
+  // local tmux + `docker exec`. The container is per-CASE (shared by sibling sessions).
+  private readonly _docker?: SessionDocker;
+
+  // Owning username in multi-user mode (undefined in single-user). Stamped at create
+  // from req.authUser and round-tripped through recovery like _remote/_docker.
+  private _owner?: string;
+
   // Session color for visual differentiation
   private _color: import('./types.js').SessionColor = 'default';
 
@@ -585,6 +599,10 @@ export class Session extends EventEmitter {
       remote?: SessionRemote;
       /** Creating browser's terminal dims — new tmux windows spawn at this size instead of 120x40 (COD-179). */
       initialDims?: { cols: number; rows: number };
+      /** Docker execution metadata for sessions launched inside a container via local tmux. */
+      docker?: SessionDocker;
+      /** Owning username (multi-user mode); undefined in single-user. */
+      owner?: string;
     }
   ) {
     super();
@@ -669,6 +687,8 @@ export class Session extends EventEmitter {
     if (config.truecolorEnabled !== undefined) {
       this._truecolorEnabled = config.truecolorEnabled;
     }
+    this._docker = config.docker;
+    this._owner = config.owner;
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
     }
@@ -784,6 +804,21 @@ export class Session extends EventEmitter {
 
   get claudeSessionId(): string | null {
     return this._claudeSessionId;
+  }
+
+  /** Docker execution metadata when this session runs inside a container, else undefined. */
+  get docker(): SessionDocker | undefined {
+    return this._docker;
+  }
+
+  /** Owning username in multi-user mode, else undefined. */
+  get owner(): string | undefined {
+    return this._owner;
+  }
+
+  /** Set the owning username (used by recovery to restore ownership). */
+  set owner(username: string | undefined) {
+    this._owner = username;
   }
 
   // Adopt a Claude conversation ID observed from an external source (e.g. hook
@@ -1389,6 +1424,8 @@ export class Session extends EventEmitter {
       status: this._status,
       workingDir: this.workingDir,
       remote: this._remote,
+      docker: this._docker,
+      owner: this._owner,
       currentTaskId: this._currentTaskId,
       createdAt: this.createdAt,
       lastActivityAt: this._lastActivityAt,
@@ -1586,7 +1623,7 @@ export class Session extends EventEmitter {
         name: 'xterm-256color',
         cols: ptyCols,
         rows: ptyRows,
-        cwd: resolveMuxAttachCwd(this.workingDir, this._remote),
+        cwd: resolveMuxAttachCwd(this.workingDir, this._remote, this._docker),
         env: buildMuxAttachEnv(this._truecolorEnabled),
       });
     } catch (spawnErr) {
@@ -1659,6 +1696,8 @@ export class Session extends EventEmitter {
       truecolorEnabled: this._truecolorEnabled,
       historyLimit: this._tmuxHistoryLimit,
       remote: this._remote,
+      docker: this._docker,
+      owner: this._owner,
     };
   }
 
@@ -1794,7 +1833,7 @@ export class Session extends EventEmitter {
     // repaint/alt-screen mode; issue #154). Remote sessions run claude on
     // another host, so a local probe wouldn't reflect their version — skip them
     // and let the banner scrape handle those. Cached process-wide, best-effort.
-    if (this.mode === 'claude' && !this._remote && !this._cliVersion) {
+    if (this.mode === 'claude' && !this._remote && !this._docker && !this._cliVersion) {
       const probedVersion = getClaudeCliVersion();
       if (probedVersion) {
         this._cliVersion = probedVersion;
@@ -1805,6 +1844,31 @@ export class Session extends EventEmitter {
           latestVersion: this._cliLatestVersion,
         });
       }
+    }
+
+    // Docker sessions run claude INSIDE the container, so the local probe above
+    // reports the HOST claude (wrong version, and leaving cliVersion undefined
+    // silently disables wheel-forwarding, #154). Probe the IN-CONTAINER version
+    // instead — deferred so the container is up after the mux attach below.
+    if (this.mode === 'claude' && this._docker && !this._cliVersion) {
+      const dockerMeta = this._docker;
+      setTimeout(() => {
+        if (this._isStopped || this._cliVersion) return;
+        void probeDockerCliVersion(dockerMeta, this.mode)
+          .then((version) => {
+            if (!version || this._isStopped || this._cliVersion) return;
+            this._cliVersion = version;
+            this.emit('cliInfoUpdated', {
+              version: this._cliVersion,
+              model: this._cliModel,
+              accountType: this._cliAccountType,
+              latestVersion: this._cliLatestVersion,
+            });
+          })
+          .catch(() => {
+            /* best-effort */
+          });
+      }, DOCKER_CLI_VERSION_PROBE_DELAY_MS);
     }
 
     // If mux wrapping is enabled, create or attach to a mux session
@@ -1834,6 +1898,8 @@ export class Session extends EventEmitter {
             remote: this._remote,
             initialCols: this._initialDims?.cols,
             initialRows: this._initialDims?.rows,
+            docker: this._docker,
+            owner: this._owner,
           },
           spawnErrLabel: 'mux attachment',
         });
@@ -1946,7 +2012,7 @@ export class Session extends EventEmitter {
 
       // === Auto-accept workspace trust dialog ===
       // Claude CLI 2.x shows "Yes, I trust this folder" prompt on first launch per directory.
-      // Codeman sessions always use --dangerously-skip-permissions, so auto-accept.
+      // Codeman sessions run permission-skipping or classifier-guarded (auto) modes, so auto-accept.
       if (!this._trustDialogAccepted && data.includes('trust this folder')) {
         this._trustDialogAccepted = true;
         console.log(`[Session] Auto-accepting workspace trust dialog for: ${this.id}`);
@@ -2188,6 +2254,8 @@ export class Session extends EventEmitter {
             truecolorEnabled: this._truecolorEnabled,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
+            docker: this._docker,
+            owner: this._owner,
           },
           createSessionOptions: {
             sessionId: this.id,
@@ -2201,6 +2269,8 @@ export class Session extends EventEmitter {
             remote: this._remote,
             initialCols: this._initialDims?.cols,
             initialRows: this._initialDims?.rows,
+            docker: this._docker,
+            owner: this._owner,
           },
           spawnErrLabel: 'shell mux attachment',
         });
@@ -2328,7 +2398,7 @@ export class Session extends EventEmitter {
           model ? `(model: ${model})` : ''
         );
 
-        const args = buildPromptArgs(prompt, model);
+        const args = buildPromptArgs(prompt, model, this._claudeMode, this._allowedTools);
 
         try {
           this.ptyProcess = pty.spawn('claude', args, {

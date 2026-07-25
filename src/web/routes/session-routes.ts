@@ -17,6 +17,8 @@ import {
   getErrorMessage,
   type ApiResponse,
   type SessionColor,
+  type CodexConfig,
+  type GeminiConfig,
 } from '../../types.js';
 import { Session, isAltScreenStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -42,14 +44,23 @@ import {
 import { mergeSessionOrder } from '../../session-order.js';
 import {
   autoConfigureRalph,
+  canAccessOwned,
   CASES_DIR,
   findSessionOrFail,
+  getAuthUser,
+  isAdmin,
+  isWorkingDirAllowed,
+  ownerFor,
   parseBody,
   persistAndBroadcastSession,
   readJsonConfig,
+  resolveCasesDir,
+  sessionCapacityMessage,
   SETTINGS_PATH,
   validatePathWithinBase,
 } from '../route-helpers.js';
+import { canUsernameRunPrivilegedCommands, resolveClaudeModeForUsername } from '../../user-store.js';
+import { isMultiUserMode } from '../../config/multiuser.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import {
   writeHooksConfig,
@@ -72,7 +83,6 @@ import {
   type MuxStatInput,
 } from '../../services/unified-session-service.js';
 import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
-import { MAX_CONCURRENT_SESSIONS } from '../../config/map-limits.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
   checkRemoteTmuxAvailable,
@@ -93,6 +103,17 @@ import {
   isExternalCliTranscriptMode,
   parseExternalCliTranscript,
 } from '../response-viewer-transcript.js';
+import {
+  checkDockerAvailable,
+  checkDockerConfigDrift,
+  checkDockerTmuxAvailable,
+  ensureAgentBaseImage,
+  DEFAULT_AGENT_IMAGE,
+  persistDockerCaseClaudeSessionId,
+  readDockerCases,
+  readDockerHosts,
+  toSessionDocker,
+} from '../../docker-hosts.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
@@ -300,6 +321,29 @@ export function _resetPasteRateBuckets(): void {
   pasteRateBuckets.clear();
 }
 
+/**
+ * Security (multi-user §6.3): the Claude-only permission-mode downgrade does not
+ * cover the other CLIs' bypass switches. Codex `--dangerously-bypass-approvals-and-sandbox`
+ * and Gemini `--approval-mode yolo` disable the safety classifier the non-granted-user
+ * downgrade is meant to keep on, so clamp them for a non-granted owner. buildGeminiCommand
+ * defaults an ABSENT approvalMode to yolo, so the gemini config must be MATERIALIZED
+ * (auto_edit) even when the request sent none. No-op in single-user mode / for a granted
+ * owner (canUsernameRunPrivilegedCommands returns true when !isMultiUserMode()).
+ */
+async function clampExternalCliBypassForOwner(
+  owner: string | undefined,
+  codexConfig: CodexConfig | undefined,
+  geminiConfig: GeminiConfig | undefined
+): Promise<{ codexConfig: CodexConfig | undefined; geminiConfig: GeminiConfig | undefined }> {
+  const granted = await canUsernameRunPrivilegedCommands(owner);
+  if (granted) return { codexConfig, geminiConfig };
+  // Non-granted: force codex bypass off (only meaningful when a config was sent) and
+  // materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default).
+  const clampedCodex = codexConfig ? { ...codexConfig, dangerouslyBypassApprovals: false } : codexConfig;
+  const clampedGemini: GeminiConfig = { ...(geminiConfig ?? {}), approvalMode: 'auto_edit' };
+  return { codexConfig: clampedCodex, geminiConfig: clampedGemini };
+}
+
 export function registerSessionRoutes(
   app: FastifyInstance,
   ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort
@@ -326,8 +370,12 @@ export function registerSessionRoutes(
 
   // ========== Session Listing ==========
 
-  app.get('/api/sessions', async () => {
-    return ctx.getLightSessionsState();
+  app.get('/api/sessions', async (req) => {
+    const list = ctx.getLightSessionsState();
+    if (!isMultiUserMode()) return list;
+    const user = getAuthUser(req);
+    if (user.role === 'admin') return list;
+    return (list as Array<{ owner?: string }>).filter((s) => canAccessOwned(user, s.owner));
   });
 
   // ========== Session Tab Order (global sync, COD-131) ==========
@@ -345,13 +393,10 @@ export function registerSessionRoutes(
   // ========== Session Creation ==========
 
   app.post('/api/sessions', async (req) => {
-    // Prevent unbounded session creation
-    if (ctx.sessions.size >= MAX_CONCURRENT_SESSIONS) {
-      return createErrorResponse(
-        ApiErrorCode.OPERATION_FAILED,
-        `Maximum concurrent sessions (${MAX_CONCURRENT_SESSIONS}) reached. Delete some sessions first.`
-      );
-    }
+    const owner = ownerFor(req);
+    // Global + per-user session cap.
+    const capMsg = sessionCapacityMessage(ctx.sessions, owner);
+    if (capMsg) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, capMsg);
 
     const body = parseBody(CreateSessionSchema, req.body);
     let workingDir = body.workingDir || process.cwd();
@@ -387,6 +432,20 @@ export function registerSessionRoutes(
       }
     }
 
+    // Multi-user: shell mode is arbitrary command execution as the host account,
+    // gated behind the same grant as bypass (section 6.3). Resolve the owner's grant
+    // from the store so a GRANTED regular user is not wrongly denied (AuthUser role alone can't tell).
+    if (body.mode === 'shell' && !(await canUsernameRunPrivilegedCommands(owner))) {
+      return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Shell sessions require the can-bypass-permissions grant');
+    }
+
+    // Multi-user linchpin (section 6.2): a non-admin's workingDir must resolve
+    // inside their own case space. Enforced BEFORE any disk-mutating call below so
+    // a foreign path can never be written into.
+    if (!isWorkingDirAllowed(getAuthUser(req), workingDir)) {
+      return createErrorResponse(ApiErrorCode.FORBIDDEN, 'workingDir is outside your workspace');
+    }
+
     // Validate workingDir exists and is a directory
     if ((body.workingDir || body.caseName) && !remote) {
       try {
@@ -404,9 +463,11 @@ export function registerSessionRoutes(
     // For keys the caller is actively setting, strip any stale disk entry a prior
     // Codeman version may have written. Scope limited to:
     //   - Claude mode (OpenCode/Codex/Gemini don't read .claude/settings.local.json)
-    //   - workingDir inside CASES_DIR (Codeman's managed territory — we never mutate
-    //     .claude/settings.local.json in arbitrary user repos that POST /api/sessions
-    //     can target, because those may have hand-authored values).
+    //   - workingDir inside CASES_DIR / the per-user case space (Codeman's managed
+    //     territory — we never mutate .claude/settings.local.json in arbitrary user
+    //     repos that POST /api/sessions can target, as those may have hand-authored
+    //     values).
+    const managedCasesBase = resolveCasesDir(getAuthUser(req));
     const canStripDisk =
       body.mode !== 'opencode' &&
       body.mode !== 'codex' &&
@@ -414,7 +475,7 @@ export function registerSessionRoutes(
       body.mode !== 'agy' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
-      workingDir.startsWith(CASES_DIR + '/');
+      (workingDir.startsWith(CASES_DIR + '/') || workingDir.startsWith(managedCasesBase + '/'));
     if (canStripDisk) {
       await stripCaseEnvKeys(workingDir, Object.keys(body.envOverrides!));
     }
@@ -533,6 +594,14 @@ export function registerSessionRoutes(
                 ? modelConfig?.defaultModel || undefined
                 : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
+    // Section 6.3: force non-granted users to a classifier-guarded mode.
+    const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, owner);
+    // Section 6.3: clamp Codex/Gemini bypass switches for a non-granted owner (no-op single-user/granted).
+    const { codexConfig: gatedCodexConfig, geminiConfig: gatedGeminiConfig } = await clampExternalCliBypassForOwner(
+      owner,
+      body.codexConfig,
+      body.geminiConfig
+    );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
     const session = new Session({
@@ -543,12 +612,12 @@ export function registerSessionRoutes(
       useMux: true,
       niceConfig: globalNice,
       model,
-      claudeMode: claudeModeConfig.claudeMode,
+      claudeMode: effectiveClaudeMode,
       allowedTools: claudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
-      codexConfig: mode === 'codex' ? body.codexConfig : undefined,
+      codexConfig: mode === 'codex' ? gatedCodexConfig : undefined,
       agyConfig: mode === 'agy' ? body.agyConfig : undefined,
-      geminiConfig: mode === 'gemini' ? body.geminiConfig : undefined,
+      geminiConfig: mode === 'gemini' ? gatedGeminiConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
       effort: body.effort,
@@ -560,6 +629,7 @@ export function registerSessionRoutes(
         trimBytes: terminalHistoryConfig.terminalBufferTrimBytes,
       },
       initialDims: body.cols && body.rows ? { cols: body.cols, rows: body.rows } : undefined,
+      owner,
     });
 
     ctx.addSession(session);
@@ -580,7 +650,7 @@ export function registerSessionRoutes(
   app.put('/api/sessions/:id/name', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(SessionNameSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     const name = String(body.name || '').slice(0, MAX_SESSION_NAME_LENGTH);
     session.name = name;
@@ -598,7 +668,7 @@ export function registerSessionRoutes(
   app.put('/api/sessions/:id/color', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(SessionColorSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     const validColors = ['default', 'red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
     if (!validColors.includes(body.color)) {
@@ -617,18 +687,22 @@ export function registerSessionRoutes(
     const query = req.query as { killMux?: string };
     const killMux = query.killMux !== 'false'; // Default to true
 
-    if (!ctx.sessions.has(id)) {
-      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Session not found');
-    }
+    // Security: owner-scoped lookup 404s foreign/missing sessions uniformly (no existence leak, no cross-user kill).
+    const session = findSessionOrFail(ctx, id, req);
 
-    await ctx.cleanupSession(id, killMux, 'user_delete');
+    await ctx.cleanupSession(session.id, killMux, 'user_delete');
     return {};
   });
 
   // ========== Delete All Sessions ==========
 
-  app.delete('/api/sessions', async (): Promise<ApiResponse<{ killed: number }>> => {
-    const sessionIds = Array.from(ctx.sessions.keys());
+  app.delete('/api/sessions', async (req): Promise<ApiResponse<{ killed: number }>> => {
+    // Security: scope the bulk sweep to sessions the caller can access — a non-admin
+    // must not wipe other users' sessions (canAccessOwned is allow-all for admin/single-user).
+    const user = getAuthUser(req);
+    const sessionIds = Array.from(ctx.sessions.values())
+      .filter((s) => canAccessOwned(user, s.owner))
+      .map((s) => s.id);
     let killed = 0;
 
     for (const id of sessionIds) {
@@ -645,7 +719,7 @@ export function registerSessionRoutes(
 
   app.get('/api/sessions/:id', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     // Use light state (no full buffers) — terminal buffer available via /terminal endpoint.
     // Full buffers were 2-3MB and caused slowness when polled frequently (e.g. Ralph wizard).
@@ -660,7 +734,7 @@ export function registerSessionRoutes(
 
   app.get('/api/sessions/:id/output', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     return {
       success: true,
@@ -676,7 +750,7 @@ export function registerSessionRoutes(
 
   app.get('/api/sessions/:id/ralph-state', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     return {
       success: true,
@@ -692,7 +766,7 @@ export function registerSessionRoutes(
 
   app.get('/api/sessions/:id/run-summary', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     const tracker = ctx.runSummaryTrackers.get(id);
     if (!tracker) {
@@ -712,7 +786,7 @@ export function registerSessionRoutes(
 
   app.get('/api/sessions/:id/active-tools', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     return {
       success: true,
@@ -731,7 +805,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/run', async (req) => {
     const { id } = req.params as { id: string };
     const { prompt } = parseBody(RunPromptSchema, req.body);
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (session.isBusy()) {
       return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
@@ -758,7 +832,7 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid request body');
     }
     const { clearBreaker } = bodyResult.data;
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (session.isBusy()) {
       return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
@@ -805,7 +879,7 @@ export function registerSessionRoutes(
 
   app.post('/api/sessions/:id/shell', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (session.isBusy()) {
       return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
@@ -838,7 +912,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/input', async (req) => {
     const { id } = req.params as { id: string };
     const { input, useMux, seq, clientId } = parseBody(SessionInputWithLimitSchema, req.body);
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     const inputStr = String(input);
     if (inputStr.length > MAX_INPUT_LENGTH) {
@@ -897,7 +971,7 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Key not allowed: ${key}`);
     }
 
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const muxName = session.muxName;
     if (!muxName) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No tmux session');
@@ -929,7 +1003,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/resize', async (req) => {
     const { id } = req.params as { id: string };
     const { cols, rows, viewportType, force } = parseBody(ResizeSchema, req.body);
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     session.resize(cols, rows, { viewportType, force });
     return {};
@@ -1035,7 +1109,7 @@ export function registerSessionRoutes(
 
   app.get('/api/sessions/:id/last-response', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const query = req.query as { context?: string };
 
     // Codex has a structured rollout source. Prefer it when a rollout can be
@@ -1083,6 +1157,12 @@ export function registerSessionRoutes(
     const activeId = await resolveActiveClaudeSessionIdFromHistory(session, projectsDir);
     if (activeId && activeId !== session.claudeSessionId) {
       session.adoptClaudeSessionId(activeId);
+      // Docker sessions: keep the case's resume seed following the live conversation.
+      if (session.docker) {
+        void persistDockerCaseClaudeSessionId(CODEMAN_CONFIG_DIR, session.docker.containerName, activeId).catch(
+          () => {}
+        );
+      }
     }
 
     // The Claude conversation ID (used as JSONL filename)
@@ -1514,8 +1594,8 @@ export function registerSessionRoutes(
   //   frame=1     - COD-187 live mirror: ONLY the current visible frame
   app.get('/api/sessions/:id/terminal', async (req) => {
     const { id } = req.params as { id: string };
-    const query = req.query as { tail?: string; frame?: string; lines?: string; capture?: string };
-    const session = findSessionOrFail(ctx, id);
+    const query = req.query as { tail?: string; frame?: string; lines?: string; capture?: string; full?: string };
+    const session = findSessionOrFail(ctx, id, req);
 
     // COD-187 (live mirror): `frame=1` returns ONLY the current visible frame —
     // a cursor-positioned snapshot of the pane's screen, no byte history, no
@@ -1728,7 +1808,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/auto-clear', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(AutoClearSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     session.setAutoClear(body.enabled, body.threshold);
     persistAndBroadcastSession(ctx, session);
@@ -1749,7 +1829,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/auto-compact', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(AutoCompactSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     session.setAutoCompact(body.enabled, body.threshold, body.prompt);
     persistAndBroadcastSession(ctx, session);
@@ -1771,7 +1851,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/auto-resume', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(AutoResumeSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     session.setAutoResume(body.enabled);
     persistAndBroadcastSession(ctx, session);
@@ -1792,25 +1872,43 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/pin', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(PinSessionSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
 
-    session.setPinned(body.pinned);
-    // Persist + broadcast session:updated (keeps tabs/state consistent), then a
-    // dedicated session:pinned event so the session manager list re-sorts live.
-    persistAndBroadcastSession(ctx, session);
-    ctx.broadcast(SseEvent.SessionPinned, {
-      id,
-      pinned: session.pinned,
-      pinnedAt: session.pinnedAt ?? undefined,
-    });
-
-    return {
-      success: true,
-      data: {
+    const session = ctx.sessions.get(id);
+    if (session) {
+      if (!canAccessOwned(getAuthUser(req), session.owner)) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, `Session ${id} not found`);
+      }
+      session.setPinned(body.pinned);
+      // Persist + broadcast session:updated (keeps tabs/state consistent), then a
+      // dedicated session:pinned event so the session manager list re-sorts live.
+      persistAndBroadcastSession(ctx, session);
+      ctx.broadcast(SseEvent.SessionPinned, {
+        id,
         pinned: session.pinned,
         pinnedAt: session.pinnedAt ?? undefined,
-      },
-    };
+      });
+
+      return {
+        success: true,
+        data: {
+          pinned: session.pinned,
+          pinnedAt: session.pinnedAt ?? undefined,
+        },
+      };
+    }
+
+    // COD-142 keeps a pinned session's record after kill (demoteOrRemoveSession),
+    // so pin toggles must also work WITHOUT a live Session — otherwise a
+    // pinned-then-killed record could never be unpinned (cleanup skips pinned
+    // records, and the record has no live session to route through).
+    const persisted = ctx.store.getSession(id);
+    if (!persisted || !canAccessOwned(getAuthUser(req), persisted.owner)) {
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, `Session ${id} not found`);
+    }
+    const pinnedAt = body.pinned ? Date.now() : undefined;
+    ctx.store.setSession(id, { ...persisted, pinned: body.pinned || undefined, pinnedAt });
+    ctx.broadcast(SseEvent.SessionPinned, { id, pinned: body.pinned, pinnedAt });
+    return { success: true, data: { pinned: body.pinned, pinnedAt } };
   });
 
   // ========== Checkpoint (agent-initiated compact-or-clear) ==========
@@ -1818,7 +1916,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/checkpoint', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(CheckpointSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     // Prefer the allowed-modes array; fall back to the deprecated single `mode`.
     const modes = body.modes ?? (body.mode !== undefined ? [body.mode] : undefined);
@@ -1842,7 +1940,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/image-watcher', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(ImageWatcherSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (body.enabled) {
       imageWatcher.watchSession(session.id, session.workingDir);
@@ -1867,7 +1965,7 @@ export function registerSessionRoutes(
   app.post('/api/sessions/:id/flicker-filter', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(FlickerFilterSchema, req.body, 'Invalid request body');
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     session.flickerFilterEnabled = body.enabled;
     persistAndBroadcastSession(ctx, session);
@@ -1887,13 +1985,9 @@ export function registerSessionRoutes(
   // ========== Quick Run ==========
 
   app.post('/api/run', async (req) => {
-    // Prevent unbounded session creation
-    if (ctx.sessions.size >= MAX_CONCURRENT_SESSIONS) {
-      return createErrorResponse(
-        ApiErrorCode.SESSION_BUSY,
-        `Maximum concurrent sessions (${MAX_CONCURRENT_SESSIONS}) reached`
-      );
-    }
+    const runOwner = ownerFor(req);
+    const capMsg = sessionCapacityMessage(ctx.sessions, runOwner);
+    if (capMsg) return createErrorResponse(ApiErrorCode.SESSION_BUSY, capMsg);
 
     const {
       prompt,
@@ -1905,6 +1999,11 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'prompt is required');
     }
     const dir = workingDir || process.cwd();
+
+    // Multi-user: confine a non-admin's one-shot working dir to their space.
+    if (!isWorkingDirAllowed(getAuthUser(req), dir)) {
+      return createErrorResponse(ApiErrorCode.FORBIDDEN, 'workingDir is outside your workspace');
+    }
 
     // Validate workingDir exists and is a directory
     if (workingDir) {
@@ -1918,7 +2017,17 @@ export function registerSessionRoutes(
       }
     }
 
-    const session = new Session({ workingDir: dir, envOverrides: runEnvOverrides });
+    // Section 6.3: the one-shot spawn path (runPrompt/buildPromptArgs) respects the
+    // session's claudeMode, so resolve it for the owner (bypass -> auto for non-granted).
+    const runClaudeModeConfig = await ctx.getClaudeModeConfig();
+    const runClaudeMode = await resolveClaudeModeForUsername(runClaudeModeConfig.claudeMode, runOwner);
+    const session = new Session({
+      workingDir: dir,
+      envOverrides: runEnvOverrides,
+      claudeMode: runClaudeMode,
+      allowedTools: runClaudeModeConfig.allowedTools,
+      owner: runOwner,
+    });
     ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
@@ -1948,17 +2057,15 @@ export function registerSessionRoutes(
   // ========== Quick Start ==========
 
   app.post('/api/quick-start', async (req) => {
-    // Prevent unbounded session creation
-    if (ctx.sessions.size >= MAX_CONCURRENT_SESSIONS) {
-      return createErrorResponse(
-        ApiErrorCode.SESSION_BUSY,
-        `Maximum concurrent sessions (${MAX_CONCURRENT_SESSIONS}) reached.`
-      );
-    }
+    const owner = ownerFor(req);
+    const capMsg = sessionCapacityMessage(ctx.sessions, owner);
+    if (capMsg) return createErrorResponse(ApiErrorCode.SESSION_BUSY, capMsg);
 
     const {
       caseName = 'testcase',
+      sessionName,
       mode = 'claude',
+      modelOverride,
       openCodeConfig,
       codexConfig,
       agyConfig,
@@ -1967,13 +2074,33 @@ export function registerSessionRoutes(
       effort,
     } = parseBody(QuickStartSchema, req.body);
 
+    // Multi-user: shell mode is arbitrary host-account execution, gated by the grant.
+    // Resolve the owner's grant from the store so a GRANTED regular user is not wrongly denied.
+    if (mode === 'shell' && !(await canUsernameRunPrivilegedCommands(owner))) {
+      return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Shell sessions require the can-bypass-permissions grant');
+    }
+
     // Resolve the remote case FIRST — the CLI executes on the REMOTE host over ssh,
     // so the LOCAL availability gates below (isCodexAvailable() etc.) don't apply and
     // would wrongly reject a machine that hasn't got the CLI installed locally.
     let remote = undefined;
+    let docker = undefined;
+    let dockerResumeId: string | undefined;
     let casePath: string | null = null;
+    // Security: fold ownership INTO the match (don't early-return) so a NON-OWNED
+    // same-named remote/docker case is skipped and control falls through to the caller's
+    // own LOCAL case — remote/docker names are globally unique but local names are
+    // per-user, so a name collision must not shadow the caller's own case. canAccessOwned
+    // is allow-all for admins/single-user, so flag-OFF stays byte-identical.
     const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
-    const remoteCase = remoteCases.find((item) => item.name === caseName);
+    const remoteCase = remoteCases.find(
+      (item) => item.name === caseName && canAccessOwned(getAuthUser(req), item.owner)
+    );
+    const dockerCase = remoteCase
+      ? undefined
+      : (await readDockerCases(CODEMAN_CONFIG_DIR)).find(
+          (item) => item.name === caseName && canAccessOwned(getAuthUser(req), item.owner)
+        );
     if (remoteCase) {
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
@@ -1984,6 +2111,7 @@ export function registerSessionRoutes(
       if (
         (envOverrides && Object.keys(envOverrides).length > 0) ||
         effort ||
+        modelOverride !== undefined ||
         codexConfig ||
         geminiConfig ||
         agyConfig ||
@@ -1991,7 +2119,7 @@ export function registerSessionRoutes(
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, and per-CLI config are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
+          'envOverrides, effort, modelOverride, and per-CLI config are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
         );
       }
 
@@ -2002,6 +2130,76 @@ export function registerSessionRoutes(
 
       casePath = remoteCase.remotePath;
       remote = toSessionRemote(host, remoteCase);
+    } else if (dockerCase) {
+      // Docker case: the CLI executes INSIDE a container via local tmux + `docker
+      // exec`, so the LOCAL availability gates below don't apply. Mirror the remote
+      // branch's rejection of per-session config that would not cross into the
+      // container (it would silently no-op). (Ownership is enforced in the .find above.)
+      const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === dockerCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Docker host not found');
+      if (
+        (envOverrides && Object.keys(envOverrides).length > 0) ||
+        effort ||
+        codexConfig ||
+        geminiConfig ||
+        openCodeConfig
+      ) {
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          'envOverrides, effort, and per-CLI config are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
+        );
+      }
+
+      const availability = await checkDockerAvailable(host.engine);
+      if (!availability.ok) {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          availability.error || 'docker daemon is not available'
+        );
+      }
+      const sessionDocker = toSessionDocker(host, dockerCase);
+      // Ensure the base image exists, auto-building the default image on first use so
+      // it is never a blocker. Dedup'd with any build kicked off at case-create, so
+      // this awaits the SAME in-flight build rather than starting a second one.
+      const ensured = await ensureAgentBaseImage(sessionDocker, sessionDocker.image, {
+        onProgress: (line) => ctx.broadcast(SseEvent.DockerImageBuildProgress, { name: dockerCase.name, line }),
+      });
+      if (!ensured.ok) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, ensured.error || 'base image not available');
+      }
+      if (ensured.built) {
+        ctx.broadcast(SseEvent.DockerImageBuildComplete, { name: dockerCase.name, image: sessionDocker.image });
+      }
+      // tmux is a hard prerequisite (the in-container tmux makes reconnect durable).
+      // Skip the extra container-run probe for our OWN default image (the baked
+      // Dockerfile always contains tmux); still verify a custom image.
+      if (sessionDocker.image !== DEFAULT_AGENT_IMAGE) {
+        const tmuxCheck = await checkDockerTmuxAvailable(sessionDocker);
+        if (!tmuxCheck.ok) {
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error || 'base image is missing tmux');
+        }
+      }
+
+      // Config drift (docs/docker-cases-plan.md §4): the desired create-config no
+      // longer matches the existing container's codeman.confighash label. Refuse to
+      // silently launch into the stale container — the frontend confirms a recreate
+      // (POST /api/docker-cases/:name/recreate; workspace + transcripts ride bind
+      // mounts and the conversation resumes), or the user reverts the host edit.
+      const drift = await checkDockerConfigDrift(sessionDocker);
+      if (drift.exists && drift.drifted) {
+        return createErrorResponse(
+          ApiErrorCode.CONFLICT,
+          `Container config for case "${dockerCase.name}" changed since the container was created. Recreate the container to apply it (workspace and conversation survive), or revert the docker host edit.`
+        );
+      }
+
+      casePath = dockerCase.hostWorkspacePath; // a REAL host dir (bind-mounted into the container)
+      docker = sessionDocker;
+      // Seed resume so a relaunch resumes the case's last conversation from the
+      // bind-mounted transcript (decision: resume-on-start default ON).
+      if (sessionDocker.resumeOnStart && dockerCase.lastClaudeSessionId) {
+        dockerResumeId = dockerCase.lastClaudeSessionId;
+      }
     } else {
       if (mode === 'opencode') {
         const { isOpenCodeAvailable } = await import('../../utils/opencode-cli-resolver.js');
@@ -2045,7 +2243,11 @@ export function registerSessionRoutes(
       } catch {
         // File missing or unparseable — treat as empty registry
       }
-      casePath = linkedCases[caseName] || validatePathWithinBase(caseName, CASES_DIR);
+      // Multi-user: the linked-cases registry is ownerless/global, so only admins may
+      // resolve a name to an arbitrary linked path. A non-admin resolves inside their
+      // OWN case space only (single-user: isAdmin true, so linked cases still honoured).
+      const linked = isAdmin(req) ? linkedCases[caseName] : undefined;
+      casePath = linked || validatePathWithinBase(caseName, resolveCasesDir(getAuthUser(req)));
       if (!casePath) {
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case path');
       }
@@ -2055,8 +2257,18 @@ export function registerSessionRoutes(
     // for local cases the !casePath guard above returned early. TypeScript can't narrow across the if/else.
     const resolvedCasePath = casePath as string;
 
-    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked, non-remote cases)
-    if (!remote && !existsSync(resolvedCasePath)) {
+    // Multi-user linchpin (section 6.2): confine the resolved workingDir to the caller's
+    // own case space BEFORE any mkdir/scaffold below creates or mutates it. Applies to
+    // LOCAL and DOCKER cases (docker.hostWorkspacePath is a real host dir the file routes
+    // trust); skipped for REMOTE, whose path is an ssh path that would spuriously fail
+    // realpath confinement. No-op for admins / single-user mode.
+    if (!remote && !isWorkingDirAllowed(getAuthUser(req), resolvedCasePath)) {
+      return createErrorResponse(ApiErrorCode.FORBIDDEN, 'case path is outside your workspace');
+    }
+
+    // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked, non-remote,
+    // non-docker cases — docker workspaces are scaffolded in their own block below)
+    if (!remote && !docker && !existsSync(resolvedCasePath)) {
       try {
         mkdirSync(resolvedCasePath, { recursive: true });
         mkdirSync(join(resolvedCasePath, 'src'), { recursive: true });
@@ -2076,12 +2288,39 @@ export function registerSessionRoutes(
       } catch (err) {
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to create case: ${getErrorMessage(err)}`);
       }
-    } else if (!remote && mode !== 'opencode') {
+    } else if (!remote && !docker && mode !== 'opencode') {
       // COD-91 self-heal for an EXISTING case: refresh a pre-secret hooks block so the
       // now-unconditional hook-secret gate keeps accepting its hook events. No-op when
       // the hooks aren't ours or already carry the secret. Skipped for remote cases —
       // resolvedCasePath is a REMOTE path that doesn't exist on the local filesystem.
       await refreshStaleHookSecret(resolvedCasePath).catch(() => {});
+    }
+
+    // Docker cases: the workspace is a REAL host dir bind-mounted into the container.
+    // Scaffold hooks (+ a CLAUDE.md) if MISSING so in-container permission prompts and
+    // hook-idle detection fire (decision: wire hooks now). Never clobbers an existing
+    // configured project. Skipped for external CLIs (they use their own systems).
+    if (docker && docker.hooksEnabled && mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini') {
+      try {
+        if (!existsSync(join(resolvedCasePath, 'CLAUDE.md'))) {
+          const templatePath = await ctx.getDefaultClaudeMdPath();
+          writeFileSync(join(resolvedCasePath, 'CLAUDE.md'), generateClaudeMd(caseName, '', templatePath));
+        }
+        if (!existsSync(join(resolvedCasePath, '.claude', 'settings.local.json'))) {
+          await writeHooksConfig(resolvedCasePath);
+        } else {
+          await refreshStaleHookSecret(resolvedCasePath).catch(() => {});
+        }
+      } catch {
+        /* non-fatal — the session still runs, hooks may be degraded */
+      }
+    }
+
+    // Model override → <case>/.claude/settings.local.json (claude-mode; local AND
+    // docker — the docker workspace is a real host dir, so the settings file crosses
+    // the bind mount and the in-container claude reads it). Remote was rejected above.
+    if (mode === 'claude' && modelOverride !== undefined) {
+      await updateCaseModel(resolvedCasePath, modelOverride || null);
     }
 
     // Strip stale disk entries for keys this request is actively setting (Claude only —
@@ -2115,36 +2354,47 @@ export function registerSessionRoutes(
                 ? qsModelConfig?.defaultModel || undefined
                 : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
-    const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
+    const qsEffectiveClaudeMode = await resolveClaudeModeForUsername(qsClaudeModeConfig.claudeMode, owner);
+    // Section 6.3: clamp Codex/Gemini bypass switches for a non-granted owner (no-op single-user/granted).
+    const { codexConfig: qsGatedCodexConfig, geminiConfig: qsGatedGeminiConfig } = await clampExternalCliBypassForOwner(
+      owner,
+      codexConfig,
+      geminiConfig
+    );
+    const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
     const session = new Session({
       workingDir: resolvedCasePath,
+      name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
       mux: ctx.mux,
       useMux: true,
       mode: mode,
       niceConfig: niceConfig,
       model: qsModel,
-      claudeMode: qsClaudeModeConfig.claudeMode,
+      claudeMode: qsEffectiveClaudeMode,
       allowedTools: qsClaudeModeConfig.allowedTools,
+      owner,
       openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
-      codexConfig: mode === 'codex' ? codexConfig : undefined,
+      codexConfig: mode === 'codex' ? qsGatedCodexConfig : undefined,
       agyConfig: mode === 'agy' ? agyConfig : undefined,
-      geminiConfig: mode === 'gemini' ? geminiConfig : undefined,
+      geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
       remote,
-      tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
+      docker,
+      resumeSessionId: dockerResumeId,
+      tmuxHistoryLimit: qsTerminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
-        maxBytes: terminalHistoryConfig.terminalBufferMaxBytes,
-        trimBytes: terminalHistoryConfig.terminalBufferTrimBytes,
+        maxBytes: qsTerminalHistoryConfig.terminalBufferMaxBytes,
+        trimBytes: qsTerminalHistoryConfig.terminalBufferTrimBytes,
       },
     });
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
-    if (mode === 'claude' && !remote && ctx.store.getConfig().ralphEnabled) {
-      autoConfigureRalph(session, casePath, ctx);
+    if (mode === 'claude' && !remote && !docker && ctx.store.getConfig().ralphEnabled) {
+      autoConfigureRalph(session, resolvedCasePath, ctx);
       if (!session.ralphTracker.enabled) {
         session.ralphTracker.enable();
         session.ralphTracker.enableAutoEnable(); // Allow re-enabling on restart
@@ -2186,6 +2436,19 @@ export function registerSessionRoutes(
         ctx.broadcast(SseEvent.SessionInteractive, { id: session.id, mode });
       }
       ctx.broadcast(SseEvent.SessionUpdated, { session: ctx.getSessionStateWithRespawn(session) });
+
+      // Docker + claude: the pane command pins the conversation id (--session-id /
+      // --resume, claudeDockerPaneCommand), so persist it as the case's resume seed
+      // NOW — a later container stop/reboot relaunch resumes this conversation even
+      // if no in-container hook ever reaches the host (loopback bind, no bridge
+      // listener). Hook/last-response adoption updates it again after /clear.
+      if (docker && mode === 'claude') {
+        void persistDockerCaseClaudeSessionId(
+          CODEMAN_CONFIG_DIR,
+          docker.containerName,
+          session.claudeSessionId || session.id
+        ).catch(() => {});
+      }
 
       // Save lastUsedCase to settings for TUI/web sync
       try {
@@ -2546,6 +2809,12 @@ export function registerSessionRoutes(
 
     const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
     const headBuf = Buffer.alloc(16384);
+    // Multi-user: this scans the host-wide ~/.claude/projects tree, so a non-admin
+    // must only see history whose decoded workingDir is inside their own case space.
+    // Do NOT trust the caller-supplied projectKey — confine on the decoded path.
+    // No-op for admins / single-user mode.
+    const user = getAuthUser(req);
+    const scopeHistory = isMultiUserMode() && user.role !== 'admin';
 
     // Single-folder drill-down: when projectKey is provided, scan only that
     // directory, bypass the 50-cap, and honor offset/limit pagination.
@@ -2557,13 +2826,15 @@ export function registerSessionRoutes(
       const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
       const limit = Math.min(100, Math.max(1, parseInt(query.limit || '20', 10) || 20));
       const projPath = join(projectsDir, query.projectKey);
-      const all = await scanProjectDir(projPath, query.projectKey, headBuf);
+      let all = await scanProjectDir(projPath, query.projectKey, headBuf);
+      // Confine to the caller's workspace (a projectKey maps to a single foreign cwd).
+      if (scopeHistory) all = all.filter((r) => isWorkingDirAllowed(user, r.workingDir));
       all.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
       return { sessions: all.slice(offset, offset + limit), total: all.length };
     }
 
     // Global overview: scan all projects, return up to 50 most-recent sessions.
-    const results: HistorySession[] = [];
+    let results: HistorySession[] = [];
     try {
       const projectDirs = await fs.readdir(projectsDir);
       for (const projDir of projectDirs) {
@@ -2575,6 +2846,8 @@ export function registerSessionRoutes(
       // Projects dir may not exist
     }
 
+    // Multi-user: drop rows outside the non-admin caller's own case space.
+    if (scopeHistory) results = results.filter((r) => isWorkingDirAllowed(user, r.workingDir));
     results.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
     return { sessions: results.slice(0, 50) };
   });
@@ -2687,7 +2960,37 @@ export function registerSessionRoutes(
       // Mux stats are optional.
     }
 
-    const merged = mergeUnifiedSessions({ live, persisted, lifecycle, history, mux });
+    // Multi-user: a non-admin only sees their own sessions; host-wide transcript
+    // history (not tied to an owned session) is admin-only.
+    let sLive = live;
+    let sPersisted = persisted;
+    let sLifecycle = lifecycle;
+    let sHistory = history;
+    const uUser = getAuthUser(req);
+    if (isMultiUserMode() && uUser.role !== 'admin') {
+      const ownedLive = new Set(
+        [...ctx.sessions.values()].filter((s) => canAccessOwned(uUser, s.owner)).map((s) => s.id)
+      );
+      const stored = ctx.store.getState().sessions as Record<string, { id: string; owner?: string }>;
+      const ownedPersisted = new Set(
+        Object.values(stored)
+          .filter((p) => canAccessOwned(uUser, p.owner))
+          .map((p) => p.id)
+      );
+      const isOwned = (id: string) => ownedLive.has(id) || ownedPersisted.has(id);
+      sLive = live.filter((l) => isOwned(l.id));
+      sPersisted = persisted.filter((p) => isOwned(p.id));
+      sLifecycle = lifecycle.filter((e) => isOwned(e.sessionId));
+      sHistory = [];
+    }
+
+    const merged = mergeUnifiedSessions({
+      live: sLive,
+      persisted: sPersisted,
+      lifecycle: sLifecycle,
+      history: sHistory,
+      mux,
+    });
     const offset = query.offset !== undefined ? parseInt(query.offset, 10) : undefined;
     const limit = query.limit !== undefined ? parseInt(query.limit, 10) : undefined;
     return filterAndPaginate(merged, {
@@ -2746,7 +3049,7 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Rate limit exceeded (30 uploads/min per session)');
     }
 
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!req.isMultipart()) {
       reply.code(400);

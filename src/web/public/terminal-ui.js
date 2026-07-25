@@ -1708,13 +1708,17 @@ Object.assign(CodemanApp.prototype, {
     // Main row: clickable surface that triggers resume (or focuses the live tab).
     const mainRow = document.createElement('div');
     mainRow.className = 'history-item-main';
-    mainRow.addEventListener('click', () => {
-      if (isLive && this.sessions.has(s.sessionId)) {
-        this.selectSession(s.sessionId);
-      } else {
-        this.resumeHistorySession(s.sessionId, s.workingDir || '', s.name);
-      }
-    });
+    mainRow.addEventListener(
+      'click',
+      options?.onActivate ||
+        (() => {
+          if (isLive && this.sessions.has(s.sessionId)) {
+            this.selectSession(s.sessionId);
+          } else {
+            this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name);
+          }
+        })
+    );
 
     const textCol = document.createElement('div');
     textCol.className = 'history-item-text';
@@ -1946,7 +1950,9 @@ Object.assign(CodemanApp.prototype, {
         if (isLiveOpen) {
           this.selectSession(s.sessionId);
         } else {
-          this.resumeHistorySession(s.sessionId, s.workingDir || '', s.name);
+          // Resume by the Claude conversation UUID when present (resumed sessions
+          // carry theirs separately from their Codeman id).
+          this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name);
         }
         this.closeSessionManager?.();
         closeMenu();
@@ -2030,6 +2036,32 @@ Object.assign(CodemanApp.prototype, {
     window.addEventListener('resize', onScrollResize, true);
 
     this._openRowMenuEl = menu;
+  },
+
+  /**
+   * COD-139: Toggle a session's pin via POST /api/sessions/:id/pin.
+   * Pinned sessions float to the top of the session manager list. Returns true
+   * on success. The live re-sort happens when the session:pinned SSE event
+   * fires (handled in app.js), so callers don't need to re-render themselves.
+   * @param {string} sessionId
+   * @param {boolean} pinned explicit desired pin state (idempotent)
+   * @returns {Promise<boolean>}
+   */
+  async _setSessionPinned(sessionId, pinned) {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ pinned }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      return data?.success === true;
+    } catch (err) {
+      console.error('[_setSessionPinned]', err);
+      return false;
+    }
   },
 
   /**

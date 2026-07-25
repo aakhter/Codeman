@@ -883,6 +883,7 @@ class CodemanApp {
     this.applyHeaderVisibilitySettings();
     this.restorePlanUsageChip();
     this.applySkin();
+    this.applyLocalization();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
     // Remove mobile-init class now that JS has applied visibility settings.
@@ -941,6 +942,7 @@ class CodemanApp {
     this.loadAppSettingsFromServer(settingsPromise).then(() => {
       this.applyHeaderVisibilitySettings();
       this.applySkin();
+      this.applyLocalization();
       this.applyTabWrapSettings();
       this.applyMonitorVisibility();
       // ultracodeFloatingWindows syncs from the server (non-display key), but on a
@@ -1532,7 +1534,7 @@ class CodemanApp {
     if (titleEl) { titleEl.textContent = name; titleEl.style.display = ''; }
     const redock = document.getElementById('soloRedockBtn');
     if (redock) redock.style.display = '';
-    document.title = name + ' — Codeman';
+    document.title = name + ' — ' + (window.CodemanI18n?.displayName || 'Codeman');
     if (this.notificationManager) this.notificationManager.originalTitle = document.title;
     // Neutralize the dashboard-only brand click in a solo window.
     const logo = document.querySelector('.header-brand .logo');
@@ -1550,7 +1552,8 @@ class CodemanApp {
       + '<p>This session has ended or is no longer available.</p>'
       + '<button class="btn-primary" onclick="window.close()">Close window</button>';
     document.body.appendChild(el);
-    document.title = 'Session ended — Codeman';
+    document.title = (window.codemanT?.('Session ended') || 'Session ended')
+      + ' — ' + (window.CodemanI18n?.displayName || 'Codeman');
   }
 
   connectSSE() {
@@ -1662,6 +1665,73 @@ class CodemanApp {
     for (const event of [SSE_EVENTS.SESSION_CREATED, SSE_EVENTS.SESSION_UPDATED, SSE_EVENTS.SESSION_DELETED]) {
       addListener(event, () => this._onSessionListMaybeChanged());
     }
+
+    // Docker export/import: toast + refresh the Manage-tab exports list on completion.
+    addListener(SSE_EVENTS.DOCKER_EXPORT_COMPLETE, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Docker export ready: ${d.bundle} (${Math.round((d.sizeBytes || 0) / 1e6)} MB)`, 'success');
+        this.refreshDockerExports?.();
+      } catch (err) {
+        console.error('[SSE] docker export complete:', err);
+      }
+    });
+    addListener(SSE_EVENTS.DOCKER_EXPORT_FAILED, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Docker export failed: ${d.error || 'unknown error'}`, 'error');
+      } catch (err) {
+        console.error('[SSE] docker export failed:', err);
+      }
+    });
+    // Import + drift-recreate completions: refresh case lists in EVERY open tab
+    // (the initiating tab already refreshes via its own fetch response).
+    addListener(SSE_EVENTS.DOCKER_IMPORT_COMPLETE, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Docker bundle imported as case "${d.name}"`, 'success');
+        this.loadQuickStartCases?.();
+        this.refreshDockerExports?.();
+      } catch (err) {
+        console.error('[SSE] docker import complete:', err);
+      }
+    });
+    addListener(SSE_EVENTS.DOCKER_CONTAINER_RECREATED, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Container for "${d.name}" removed — next launch recreates it with the new config`, 'info');
+      } catch (err) {
+        console.error('[SSE] docker container recreated:', err);
+      }
+    });
+    // Multi-user admin: live-refresh whichever admin views (panel/Users tab) are open.
+    addListener(SSE_EVENTS.ADMIN_USERS_CHANGED, () => {
+      window.codemanAdmin?.onUsersChanged?.();
+    });
+    // Base image auto-build on first Docker case (build-on-first-use). A single
+    // multi-minute event; surface start/finish so the Run spinner is explained.
+    addListener(SSE_EVENTS.DOCKER_IMAGE_BUILD_STARTED, () => {
+      this.showToast('Building the Codeman agent image (first Docker case, a few minutes)...', 'info', {
+        duration: 8000,
+      });
+    });
+    addListener(SSE_EVENTS.DOCKER_IMAGE_BUILD_COMPLETE, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        if (d.error) this.showToast(`Agent image build failed: ${d.error}`, 'error');
+        else this.showToast('Agent image ready. Starting the container...', 'success');
+      } catch (err) {
+        console.error('[SSE] docker image build complete:', err);
+      }
+    });
+    addListener(SSE_EVENTS.DOCKER_IMAGE_BUILD_FAILED, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Agent image build failed: ${d.error || 'unknown error'}`, 'error');
+      } catch (err) {
+        console.error('[SSE] docker image build failed:', err);
+      }
+    });
 
     // COD-139: a session:pinned event updates the local live-session pin flag (so
     // a subsequent render is consistent) and re-sorts the open session manager /
@@ -2442,7 +2512,9 @@ class CodemanApp {
         body.innerHTML = this._renderMarkdown(lastResponse);
         this._bindResponseViewerInteractions(body);
       } else {
-        body.textContent = 'No response yet — send a message in this session first.';
+        body.textContent =
+          window.codemanT?.('No response yet — send a message in this session first.') ||
+          'No response yet — send a message in this session first.';
       }
 
       // Reset state for fresh open

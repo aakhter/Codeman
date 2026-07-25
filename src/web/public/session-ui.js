@@ -45,7 +45,18 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   formatCasePickerLabel(c) {
-    return c?.location === 'remote' && c.remote?.hostId ? `${c.name} @ ${c.remote.hostId}` : c?.name || '';
+    if (c?.location === 'remote' && c.remote?.hostId) return `${c.name} @ ${c.remote.hostId}`;
+    if (c?.location === 'docker') return `${c.name} (${this.dockerCaseTag(c.docker?.hostId)})`;
+    return c?.name || '';
+  },
+
+  // Short parenthetical tag for a dockerized case: '(docker)' for the default /
+  // auto-provisioned host (one-click "Run in Docker", the Docker-tab 'local'
+  // default, or a per-case 'q-<name>' resource-override host), otherwise the custom
+  // docker host id the user named (e.g. '(gpu-box)'). Keeps the case name short.
+  dockerCaseTag(hostId) {
+    if (!hostId || hostId === 'default' || hostId === 'local' || /^q-/.test(hostId)) return 'docker';
+    return hostId;
   },
 
   buildCasePickerOptions(cases = []) {
@@ -70,7 +81,10 @@ Object.assign(CodemanApp.prototype, {
           c.location,
           c.remote?.hostId,
           c.remote?.label,
-          c.remote?.path
+          c.remote?.path,
+          c.docker?.container,
+          c.docker?.image,
+          c.docker?.path
         ].filter(Boolean).join(' ').toLowerCase();
         return { name: c.name, label, case: c, searchText };
       })
@@ -373,22 +387,63 @@ Object.assign(CodemanApp.prototype, {
     return this.run();
   },
 
+  /** Ensure a newly-created session is visible without waiting for the SSE event.
+   *  The POST response and session:created can arrive in either order, so the
+   *  normal idempotent SSE handler remains the single state-upsert path. */
+  async _ensureCreatedSessionVisible(sessionId, sessionSnapshot) {
+    if (!sessionId) return;
+
+    let session = sessionSnapshot;
+    if (!session && !this.sessions?.has(sessionId)) {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to load the new session');
+      session = data.data?.session || data.data;
+    }
+
+    if (session?.id) this._onSessionCreated(session);
+    // session:created normally uses the debounced renderer. The direct POST path
+    // needs the tab in the DOM before selectSession() marks it active.
+    this._renderSessionTabsImmediate?.();
+  },
+
   /** Run using the selected mode (Claude Code, OpenCode, Codex, or Gemini) */
   async run() {
-    const mode = this._runMode || 'claude';
-    if (mode === 'opencode') {
-      return this.runOpenCode();
+    if (this._runInFlight) return;
+
+    const startedAt = Date.now();
+    const minLockMs = Number.isFinite(this._runMinLockMs) ? this._runMinLockMs : 500;
+    const runBtn = document.getElementById('runBtn');
+    this._runInFlight = true;
+    if (runBtn) {
+      runBtn.disabled = true;
+      runBtn.setAttribute('aria-busy', 'true');
     }
-    if (mode === 'codex') {
-      return this.runCodex();
+
+    try {
+      const mode = this._runMode || 'claude';
+      if (mode === 'opencode') {
+        return await this.runOpenCode();
+      }
+      if (mode === 'codex') {
+        return await this.runCodex();
+      }
+      if (mode === 'gemini') {
+        return await this.runGemini();
+      }
+      if (mode === 'agy') {
+        return await this.runAgy();
+      }
+      return await this.runClaude();
+    } finally {
+      const remaining = minLockMs - (Date.now() - startedAt);
+      if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+      this._runInFlight = false;
+      if (runBtn) {
+        runBtn.disabled = false;
+        runBtn.removeAttribute('aria-busy');
+      }
     }
-    if (mode === 'gemini') {
-      return this.runGemini();
-    }
-    if (mode === 'agy') {
-      return this.runAgy();
-    }
-    return this.runClaude();
   },
 
   /** Get/set the run mode, persisted in localStorage */
@@ -519,6 +574,22 @@ Object.assign(CodemanApp.prototype, {
     input.value = Math.max(1, current - 1);
   },
 
+  // Next free <prefix><n> index for a case's session tabs (e.g. w1-<case>,
+  // w2-<case> for agents, s1-<case> for shells), shared by the local and
+  // remote/docker launch paths so all tabs follow the same naming convention.
+  _nextCaseSessionStartNumber(caseName, prefix = 'w') {
+    const re = new RegExp(`^${prefix}(\\d+)-([a-zA-Z0-9_-]+)`);
+    let startNumber = 1;
+    for (const [, session] of this.sessions || []) {
+      const match = session.name && session.name.match(re);
+      if (match && match[2] === caseName) {
+        const num = parseInt(match[1]);
+        if (num >= startNumber) startNumber = num + 1;
+      }
+    }
+    return startNumber;
+  },
+
   async runClaude() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     const tabCount = Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
@@ -558,16 +629,56 @@ Object.assign(CodemanApp.prototype, {
       // Remote cases run over ssh — POST /api/sessions stat-validates workingDir on
       // the LOCAL fs (a remote user@host:/path never exists locally), so route them
       // through /api/quick-start, which resolves the remote case + launches via ssh.
-      if (caseData.location === 'remote') {
+      if (caseData.location === 'remote' || caseData.location === 'docker') {
+        // Name remote/docker tabs with the same w<n>-<case> convention as local
+        // sessions (quick-start would otherwise auto-generate codeman-<id>).
+        const startNumber = this._nextCaseSessionStartNumber(caseName);
+        // Docker (NOT remote): the App Settings Claude Model choice applies — the
+        // workspace is a real host dir, so quick-start writes it to the case's
+        // .claude/settings.local.json and the in-container claude reads it.
+        // Remote quick-starts REJECT modelOverride (the file would land on the
+        // wrong machine), so never send it there.
+        let dockerModelOverride;
+        if (caseData.location === 'docker') {
+          const dockerGlobalSettings = this.loadAppSettingsFromStorage();
+          const dockerCaseSettings = this.getCaseSettings(caseName);
+          const dockerUseOpus1m = dockerCaseSettings.opusContext1m || dockerGlobalSettings.opusContext1mEnabled;
+          dockerModelOverride = dockerGlobalSettings.claudeModel || (dockerUseOpus1m ? 'opus[1m]' : '');
+        }
         const remoteIds = [];
+        let driftHandled = false;
         for (let i = 0; i < tabCount; i++) {
-          const res = await fetch('/api/quick-start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ caseName, mode: 'claude' })
+          const quickStartBody = JSON.stringify({
+            caseName, mode: 'claude', sessionName: `w${startNumber + i}-${caseName}`,
+            ...(dockerModelOverride !== undefined ? { modelOverride: dockerModelOverride } : {})
           });
-          const data = await res.json();
+          const doQuickStart = async () => {
+            const res = await fetch('/api/quick-start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: quickStartBody
+            });
+            return res.json();
+          };
+          let data = await doQuickStart();
+          // Docker config drift: the host config changed since the container was
+          // created (CONFLICT from quick-start). Confirm once, recreate, retry.
+          if (!data.success && data.errorCode === 'CONFLICT' && caseData.location === 'docker' && !driftHandled) {
+            driftHandled = true;
+            const recreate = confirm(
+              `Container config for "${caseName}" changed since its container was created.\n\n` +
+              'Recreate the container to apply the new config? Workspace files and the ' +
+              'conversation survive (the conversation resumes on launch).'
+            );
+            if (recreate) {
+              const recRes = await fetch(`/api/docker-cases/${encodeURIComponent(caseName)}/recreate`, { method: 'POST' });
+              const recData = await recRes.json();
+              if (!recData.success) throw new Error(recData.error || 'Failed to recreate container');
+              data = await doQuickStart();
+            }
+          }
           if (!data.success) throw new Error(data.error || 'Failed to start remote Claude session');
+          await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
           remoteIds.push(data.data.sessionId);
         }
         this.terminal.writeln(`\x1b[90m All ${tabCount} remote session(s) ready\x1b[0m`);
@@ -582,16 +693,7 @@ Object.assign(CodemanApp.prototype, {
       let firstSessionId = null;
 
       // Find the highest existing w-number for THIS case to avoid duplicates
-      let startNumber = 1;
-      for (const [, session] of this.sessions) {
-        const match = session.name && session.name.match(/^w(\d+)-([a-zA-Z0-9_-]+)/);
-        if (match && match[2] === caseName) {
-          const num = parseInt(match[1]);
-          if (num >= startNumber) {
-            startNumber = num + 1;
-          }
-        }
-      }
+      const startNumber = this._nextCaseSessionStartNumber(caseName);
 
       // Get global Ralph tracker setting
       const ralphEnabled = this.isRalphTrackerEnabledByDefault();
@@ -643,6 +745,7 @@ Object.assign(CodemanApp.prototype, {
       const sessionIds = [];
       for (const result of createResults) {
         if (!result.success) throw new Error(result.error);
+        await this._ensureCreatedSessionVisible(result.data.session.id, result.data.session);
         sessionIds.push(result.data.session.id);
       }
       firstSessionId = sessionIds[0];
@@ -738,21 +841,27 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const selectedCase = (this.cases || []).find(c => c.name === caseName);
-      const isRemoteCase = caseData.location === 'remote' || selectedCase?.location === 'remote';
+      const isRemoteCase =
+        caseData.location === 'remote' ||
+        caseData.location === 'docker' ||
+        selectedCase?.location === 'remote' ||
+        selectedCase?.location === 'docker';
       const workingDir = caseData.path;
       if (!workingDir) throw new Error('Case path not found');
 
       // Remote cases run over ssh — route through /api/quick-start (see runClaude).
-      if (caseData.location === 'remote') {
+      if (caseData.location === 'remote' || caseData.location === 'docker') {
+        const startNumber = this._nextCaseSessionStartNumber(caseName, 's');
         const remoteIds = [];
         for (let i = 0; i < shellCount; i++) {
           const res = await fetch('/api/quick-start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ caseName, mode: 'shell' })
+            body: JSON.stringify({ caseName, mode: 'shell', sessionName: `s${startNumber + i}-${caseName}` })
           });
           const data = await res.json();
           if (!data.success) throw new Error(data.error || 'Failed to start remote shell session');
+          await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
           remoteIds.push(data.data.sessionId);
         }
         if (remoteIds[0]) {
@@ -765,16 +874,7 @@ Object.assign(CodemanApp.prototype, {
       }
 
       // Find the highest existing s-number for THIS case to avoid duplicates
-      let startNumber = 1;
-      for (const [, session] of this.sessions) {
-        const match = session.name && session.name.match(/^s(\d+)-([a-zA-Z0-9_-]+)/);
-        if (match && match[2] === caseName) {
-          const num = parseInt(match[1]);
-          if (num >= startNumber) {
-            startNumber = num + 1;
-          }
-        }
-      }
+      const startNumber = this._nextCaseSessionStartNumber(caseName, 's');
 
       // Create all shell sessions in parallel
       const sessionNames = [];
@@ -800,6 +900,7 @@ Object.assign(CodemanApp.prototype, {
       const sessionIds = [];
       for (const result of createResults) {
         if (!result.success) throw new Error(result.error);
+        await this._ensureCreatedSessionVisible(result.data.session.id, result.data.session);
         sessionIds.push(result.data.session.id);
       }
 
@@ -838,7 +939,8 @@ Object.assign(CodemanApp.prototype, {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run the CLI on the REMOTE host — the local /api/opencode/status
     // probe and the local-only config/env below don't apply (quick-start rejects them).
-    const isRemote = (this.cases || []).find(c => c.name === caseName)?.location === 'remote';
+    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
     this.terminal.clear();
     this.terminal.writeln(`\x1b[1;32m Starting OpenCode session in ${caseName}...\x1b[0m`);
@@ -867,6 +969,7 @@ Object.assign(CodemanApp.prototype, {
         body: JSON.stringify({
           caseName,
           mode: 'opencode',
+          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
           ...(isRemote ? {} : {
             openCodeConfig: { autoAllowTools: true },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -875,6 +978,7 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start OpenCode');
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
       // Switch to the new session (don't pre-set activeSessionId — selectSession
       // early-returns when IDs match, skipping buffer load and sendResize)
@@ -892,7 +996,8 @@ Object.assign(CodemanApp.prototype, {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run Codex on the REMOTE host — skip the local status probe and the
     // local-only config/env below (quick-start rejects them for remote cases).
-    const isRemote = (this.cases || []).find(c => c.name === caseName)?.location === 'remote';
+    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
     this.terminal.clear();
     this.terminal.writeln(`\x1b[1;32m Starting Codex session in ${caseName}...\x1b[0m`);
@@ -918,6 +1023,7 @@ Object.assign(CodemanApp.prototype, {
         body: JSON.stringify({
           caseName,
           mode: 'codex',
+          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
           ...(isRemote ? {} : {
             codexConfig: {
               dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
@@ -929,6 +1035,7 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Codex');
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -983,7 +1090,8 @@ Object.assign(CodemanApp.prototype, {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run Gemini on the REMOTE host — skip the local status probe and the
     // local-only config/env below (quick-start rejects them for remote cases).
-    const isRemote = (this.cases || []).find(c => c.name === caseName)?.location === 'remote';
+    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
     this.terminal.clear();
     this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
@@ -1008,6 +1116,7 @@ Object.assign(CodemanApp.prototype, {
         body: JSON.stringify({
           caseName,
           mode: 'gemini',
+          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
           ...(isRemote ? {} : {
             geminiConfig: { approvalMode: 'yolo' },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -1016,6 +1125,7 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -2110,9 +2220,18 @@ Object.assign(CodemanApp.prototype, {
     if (tabName === 'case-manage') {
       submitBtn.style.display = 'none';
       this.renderCaseManageList();
+      this.refreshDockerExports();
     } else {
       submitBtn.style.display = '';
-      submitBtn.textContent = isEditing ? 'Save' : tabName === 'case-create' ? 'Create' : tabName === 'case-remote' ? 'Link Remote' : 'Link';
+      submitBtn.textContent = isEditing
+        ? 'Save'
+        : tabName === 'case-create'
+          ? 'Create'
+          : tabName === 'case-remote'
+            ? 'Link Remote'
+            : tabName === 'case-docker'
+              ? 'Link Docker'
+              : 'Link';
     }
     // Focus appropriate input
     if (tabName === 'case-create') {
@@ -2122,6 +2241,8 @@ Object.assign(CodemanApp.prototype, {
     } else if (tabName === 'case-remote') {
       void this.loadRemoteHostsForCaseModal(document.getElementById('remoteHostSavedSelect')?.value || '');
       document.getElementById('remoteCaseName').focus();
+    } else if (tabName === 'case-docker') {
+      document.getElementById('dockerCaseName').focus();
     }
   },
 
@@ -2142,6 +2263,8 @@ Object.assign(CodemanApp.prototype, {
         await this.createCase();
       } else if (this.caseModalTab === 'case-remote') {
         await this.linkRemoteCase();
+      } else if (this.caseModalTab === 'case-docker') {
+        await this.linkDockerCase();
       } else {
         await this.linkCase();
       }
@@ -2165,21 +2288,36 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
 
+    // One-click "Run in Docker": create the case folder AND a container, then start
+    // a session inside it. Optional expandable settings override the defaults.
+    const inDocker = document.getElementById('newCaseDocker')?.checked;
+    const endpoint = inDocker ? '/api/cases/docker-quickcreate' : '/api/cases';
+    const payload = inDocker
+      ? { name, description, ...this._collectDockerQuickSettings() }
+      : { name, description };
+
     try {
-      const res = await fetch('/api/cases', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description })
+        body: JSON.stringify(payload)
       });
 
       const data = await res.json();
       if (data.success) {
         this.closeCreateCaseModal();
-        this.showToast(`Case "${name}" created`, 'success');
         // Reload cases and select the new one
         await this.loadQuickStartCases(name);
         // Save as last used case
         await this.saveLastUsedCase(name);
+        if (inDocker) {
+          const caps = data.data?.capsEnforced === false ? ' (resource caps advisory on this engine)' : '';
+          this.showToast(`Docker case "${name}" created${caps} — starting session…`, 'success');
+          // Start a session INSIDE the container (routes through quick-start).
+          await this.runClaude();
+        } else {
+          this.showToast(`Case "${name}" created`, 'success');
+        }
       } else {
         this.showToast(data.error || 'Failed to create case', 'error');
       }
@@ -2187,6 +2325,47 @@ Object.assign(CodemanApp.prototype, {
       console.error('Failed to create case:', err);
       this.showToast('Failed to create case: ' + err.message, 'error');
     }
+  },
+
+  // Fill the memory/cpu/gpu fields from a resource template. `medium` clears them so
+  // the server uses its defaults (no per-case host); `custom` leaves them editable.
+  applyDockerTemplate() {
+    const t = document.getElementById('quickDockerTemplate')?.value;
+    const presets = {
+      small: { m: '2g', c: '1', g: '' },
+      medium: { m: '', c: '', g: '' },
+      large: { m: '8g', c: '4', g: '' },
+      gpu: { m: '8g', c: '4', g: 'all' },
+    };
+    const p = presets[t];
+    if (!p) return; // 'custom' — leave fields as-is
+    const set = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.value = v;
+    };
+    set('quickDockerMemory', p.m);
+    set('quickDockerCpus', p.c);
+    set('quickDockerGpus', p.g);
+  },
+
+  // Collect only the non-default docker overrides (empty fields fall back to defaults
+  // server-side; sent as undefined, never null, per the Zod .optional() gotcha).
+  _collectDockerQuickSettings() {
+    const val = (id) => (document.getElementById(id)?.value || '').trim();
+    const o = {};
+    const mem = val('quickDockerMemory');
+    if (mem) o.memory = mem;
+    const cpus = val('quickDockerCpus');
+    if (cpus) o.cpus = cpus;
+    const gpus = val('quickDockerGpus');
+    if (gpus && gpus.toLowerCase() !== 'none') o.gpus = gpus;
+    const net = document.getElementById('quickDockerNetwork')?.value;
+    if (net && net !== 'bridge') o.network = net;
+    const img = val('quickDockerImage');
+    if (img) o.image = img;
+    const mc = document.getElementById('quickDockerMountCreds');
+    if (mc && !mc.checked) o.mountCredentials = false;
+    return o;
   },
 
   async linkCase() {
@@ -2643,6 +2822,178 @@ Object.assign(CodemanApp.prototype, {
     this.caseDirectoryBrowserParentPath = null;
   },
 
+  async linkDockerCase() {
+    const name = document.getElementById('dockerCaseName').value.trim();
+    const hostWorkspacePath = document.getElementById('dockerWorkspacePath').value.trim();
+    const hostId = document.getElementById('dockerHostId').value.trim() || 'local';
+    const image = document.getElementById('dockerImage').value.trim() || 'codeman/agent:base';
+    const network = document.getElementById('dockerNetwork').value;
+    const memory = document.getElementById('dockerMemory').value.trim();
+    const cpus = document.getElementById('dockerCpus').value.trim();
+    const mountCredentials = document.getElementById('dockerMountCredentials').checked;
+    const resumeOnStart = document.getElementById('dockerResumeOnStart').checked;
+    const statusEl = document.getElementById('dockerLinkStatus');
+
+    if (!name || !hostWorkspacePath) {
+      this.showToast('Please enter a case name and workspace path', 'error');
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(name) || !/^[a-zA-Z0-9_-]+$/.test(hostId)) {
+      this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+      return;
+    }
+    if (!hostWorkspacePath.startsWith('/')) {
+      this.showToast('Workspace path must be absolute', 'error');
+      return;
+    }
+
+    try {
+      if (statusEl) statusEl.textContent = 'Checking docker daemon + base image...';
+      // omitted optionals sent as UNDEFINED (never null — Zod .optional() rejects null)
+      const resources = {};
+      if (memory) resources.memory = memory;
+      if (cpus) resources.cpus = cpus;
+      const hostPayload = {
+        id: hostId,
+        label: hostId,
+        image,
+        network,
+        mountCredentials,
+        resumeOnStart,
+        ...(Object.keys(resources).length ? { resources } : {}),
+      };
+      // PUT (update-or-create) so re-linking with the same host id refreshes its settings.
+      let hostRes = await fetch('/api/docker-hosts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hostPayload),
+      });
+      let hostData = await hostRes.json();
+      if (!hostData.success && hostData.errorCode === 'ALREADY_EXISTS') {
+        hostRes = await fetch(`/api/docker-hosts/${encodeURIComponent(hostId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hostPayload),
+        });
+        hostData = await hostRes.json();
+      }
+      if (!hostData.success) throw new Error(hostData.error || 'Failed to save docker host');
+
+      const caseRes = await fetch('/api/cases/docker-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, hostId, hostWorkspacePath }),
+      });
+      const caseData = await caseRes.json();
+      if (caseData.success) {
+        this.closeCreateCaseModal();
+        const caps = caseData.data?.capsEnforced === false ? ' (resource caps are advisory on this engine)' : '';
+        this.showToast(`Docker case "${name}" linked${caps}`, 'success');
+        await this.loadQuickStartCases(name);
+        await this.saveLastUsedCase(name);
+      } else {
+        if (statusEl) statusEl.textContent = caseData.error || 'Failed to link docker case';
+        this.showToast(caseData.error || 'Failed to link docker case', 'error');
+      }
+    } catch (err) {
+      console.error('Failed to link docker case:', err);
+      if (statusEl) statusEl.textContent = err.message;
+      this.showToast('Failed to link docker case: ' + err.message, 'error');
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Docker export / import UI
+  // ═══════════════════════════════════════════════════════════════
+
+  async refreshDockerExports() {
+    const listEl = document.getElementById('dockerExportsList');
+    if (!listEl) return;
+    try {
+      const res = await fetch('/api/docker-exports');
+      const data = await res.json();
+      const exports = data?.data?.exports || [];
+      if (exports.length === 0) {
+        listEl.innerHTML = '<span class="form-hint">No exports yet. Export a docker case from its tab.</span>';
+        return;
+      }
+      listEl.innerHTML = exports
+        .map(e => {
+          const mb = (e.sizeBytes / 1e6).toFixed(1);
+          // escapeHtml is the free function from constants.js (never a method on `this`)
+          const nm = escapeHtml(e.name);
+          return `<div class="case-manage-item" style="display:flex; align-items:center; gap:8px; justify-content:space-between;">
+            <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${nm}">${nm} <span class="form-hint">(${mb} MB)</span></span>
+            <span style="flex-shrink:0;">
+              <a class="btn-toolbar" href="/api/docker-exports/${encodeURIComponent(e.name)}" download>Download</a>
+              <button class="btn-toolbar" onclick="app.importDockerBundle('${nm.replace(/'/g, "\\'")}')">Import</button>
+              <button class="btn-toolbar" onclick="app.deleteDockerExport('${nm.replace(/'/g, "\\'")}')">Delete</button>
+            </span>
+          </div>`;
+        })
+        .join('');
+    } catch (err) {
+      listEl.innerHTML = `<span class="form-hint">Failed to load exports: ${err.message}</span>`;
+    }
+  },
+
+  async exportDockerCaseBundle(caseName, mode = 'full') {
+    try {
+      const res = await fetch(`/api/docker-cases/${encodeURIComponent(caseName)}/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(`Exporting "${caseName}" (${mode})... you'll be notified when the bundle is ready`, 'info');
+      } else {
+        this.showToast(data.error || 'Export failed', 'error');
+      }
+    } catch (err) {
+      this.showToast('Export failed: ' + err.message, 'error');
+    }
+  },
+
+  async importDockerBundle(bundle) {
+    const newCaseName = prompt('New case name for the imported bundle:', bundle.split('-')[0] + '-imported');
+    if (!newCaseName) return;
+    const destWorkspacePath = prompt('Absolute host directory to restore the workspace into:', '');
+    if (!destWorkspacePath) return;
+    try {
+      const res = await fetch('/api/docker-cases/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bundle, newCaseName, destWorkspacePath }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(`Imported as "${newCaseName}"`, 'success');
+        await this.loadQuickStartCases(newCaseName);
+      } else {
+        this.showToast(data.error || 'Import failed', 'error');
+      }
+    } catch (err) {
+      this.showToast('Import failed: ' + err.message, 'error');
+    }
+  },
+
+  async deleteDockerExport(filename) {
+    if (!confirm(`Delete export bundle "${filename}"?`)) return;
+    try {
+      const res = await fetch(`/api/docker-exports/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast('Export deleted', 'success');
+        this.refreshDockerExports();
+      } else {
+        this.showToast(data.error || 'Delete failed', 'error');
+      }
+    } catch (err) {
+      this.showToast('Delete failed: ' + err.message, 'error');
+    }
+  },
+
   // ═══════════════════════════════════════════════════════════════
   // COD-105 — Discover + attach existing remote tmux sessions
   // ═══════════════════════════════════════════════════════════════
@@ -2970,6 +3321,12 @@ Object.assign(CodemanApp.prototype, {
           <div class="case-manage-actions">
             <button class="case-manage-btn case-manage-btn-edit" onclick="app.editCase(${escapeHtml(JSON.stringify(c.name))})"
                     title="Edit case">&#x270E;</button>
+            ${
+              c.location === 'docker'
+                ? `<button class="case-manage-btn" onclick="app.exportDockerCaseBundle(${escapeHtml(JSON.stringify(c.name))}, 'full')"
+                    title="Export container (full image + workspace) to move to another machine">&#x1F4E6;</button>`
+                : ''
+            }
             <button class="case-manage-btn" onclick="app.moveCaseUp(${escapeHtml(JSON.stringify(c.name))})"
                     title="Move up" ${isFirst ? 'disabled' : ''}>&#x25B2;</button>
             <button class="case-manage-btn" onclick="app.moveCaseDown(${escapeHtml(JSON.stringify(c.name))})"
