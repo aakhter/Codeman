@@ -47,6 +47,10 @@
   <script>if(window.innerWidth<768||(('ontouchstart' in window||navigator.maxTouchPoints>0)&&window.innerWidth<1024))document.documentElement.classList.add('mobile-init');</script>
   <!-- Synchronous skin selection — runs before first paint to prevent theme flash -->
   <script>try{var s=localStorage.getItem('codeman:skin');if(s!=='og'&&s!=='daylight-green'&&s!=='daylight-blue')s='daylight-blue';document.documentElement.dataset.skin=s;window.__codemanSkin=s;}catch(e){document.documentElement.dataset.skin='daylight-blue';window.__codemanSkin='daylight-blue';}</script>
+  <!-- Apply the saved per-device language before first paint. The full translation
+       layer loads below; setting lang/dir here prevents an English accessibility
+       tree from flashing while the deferred scripts start. -->
+  <script>try{var m=window.innerWidth<768||(('ontouchstart' in window||navigator.maxTouchPoints>0)&&window.innerWidth<1024);var k=m?'codeman-app-settings-mobile':'codeman-app-settings';var l=JSON.parse(localStorage.getItem(k)||'{}').language;l=l==='zh-CN'?'zh-CN':'en';document.documentElement.lang=l;window.__codemanLanguage=l;}catch(e){document.documentElement.lang='en';window.__codemanLanguage='en';}</script>
   <!-- Inline critical CSS for instant skeleton paint (before styles.css loads) -->
   <style>
     .loading-skeleton{display:flex;flex-direction:column;height:100vh;height:100dvh;background:#11151c}
@@ -77,7 +81,9 @@
     <!-- Compact Header with Session Tabs -->
     <header class="header">
       <div class="header-brand">
-        <span class="logo" onclick="app.goHome()" title="Go to main page">Codeman</span>
+        <span class="logo" onclick="app.goHome()" title="Go to main page"
+          ><span class="logo-text">Codeman</span><span class="logo-compact" aria-hidden="true">C</span></span
+        >
       </div>
 
       <!-- Session Tabs -->
@@ -92,6 +98,10 @@
       <div class="solo-session-title" id="soloSessionTitle" style="display: none;" aria-live="polite"></div>
 
       <div class="header-right" id="headerRight">
+        <button class="btn-admin-panel btn-admin-panel--hidden" id="adminPanelBtn" onclick="window.codemanAdmin.openAdminPanel()" title="Admin Panel (multi-user administration)" aria-label="Open admin panel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Admin Panel</span>
+        </button>
         <button class="btn-icon-header btn-solo-redock" id="soloRedockBtn" style="display: none;" onclick="window.close()" title="Re-dock to dashboard (close window)" aria-label="Re-dock session to dashboard">&#x229E;</button>
         <button class="tunnel-indicator" id="tunnelIndicator" style="display: none;" onclick="app.toggleTunnelPanel()" title="Cloudflare Tunnel" aria-label="Tunnel status">
           <span class="tunnel-dot"></span>
@@ -132,6 +142,7 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           <span class="attachment-history-badge" id="attachmentHistoryBadge" style="display:none;">0</span>
         </button>
+        <button class="btn-icon-header btn-file-viewer" onclick="app.toggleFileBrowserButton()" title="File Viewer" aria-label="Open file viewer" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
         <button class="btn-icon-header btn-multimonitor btn-multimonitor--hidden" onclick="app.launchMultiMonitor()" title="Open Codeman across all displays" aria-label="Open Codeman across all displays"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="9" rx="1.5"/><rect x="11" y="9" width="11" height="8" rx="1.5"/></svg></button>
         <button class="btn-icon-header btn-ultracode-agents btn-ultracode-agents--hidden" onclick="app.toggleUltracodeAgentsPanel()" title="Ultracode / Workflow agents" aria-label="Open ultracode workflow agents"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.2 7.2 15.6 11M8.2 16.8 15.6 13"/></svg></button>
         <div class="header-plan-usage header-plan-usage--hidden" id="planUsageChip" title="Claude plan usage limits">—</div>
@@ -139,9 +150,9 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span class="notification-badge" id="notifBadge" style="display:none;">0</span>
         </button>
-        <button class="btn-icon-header btn-lifecycle-log" onclick="app.openLifecycleLog()" title="Session Lifecycle Log" aria-label="Open session lifecycle log"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></button>
+        <button class="btn-icon-header btn-lifecycle-log" style="display: none" onclick="app.openLifecycleLog()" title="Session Lifecycle Log" aria-label="Open session lifecycle log"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></button>
         <button class="btn-icon-header btn-settings" onclick="app.openAppSettings()" title="App Settings" aria-label="Open app settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-        <div class="header-tokens" id="headerTokens" title="Total tokens across all sessions">0 tokens</div>
+        <div class="header-tokens" id="headerTokens" style="display: none" title="Total tokens across all sessions">0 tokens</div>
       </div>
     </header>
 
@@ -1218,6 +1229,20 @@
           <!-- Display Tab -->
           <div class="modal-tab-content" id="settings-display">
             <div class="settings-grid">
+              <!-- Branding & Language Section -->
+              <div class="settings-section-header">Branding &amp; Language</div>
+              <div class="settings-item" title="Name shown in the browser UI and window title. Supports Unicode, including Chinese.">
+                <span class="settings-item-label">Display Name</span>
+                <input type="text" id="appSettingsDisplayName" class="settings-inline-input" maxlength="40" placeholder="Codeman" autocomplete="off">
+              </div>
+              <div class="settings-item" title="Language for this device. Dynamic status messages and dialogs use the same language.">
+                <span class="settings-item-label">Interface Language</span>
+                <select id="appSettingsLanguage" class="form-select settings-inline-select">
+                  <option value="en">English</option>
+                  <option value="zh-CN">简体中文</option>
+                </select>
+              </div>
+
               <!-- Appearance Section -->
               <div class="settings-section-header">Appearance</div>
               <div class="settings-item settings-item-skin" title="Visual theme for this device (not synced)">
@@ -1349,6 +1374,13 @@
                   <span class="slider"></span>
                 </label>
               </div>
+              <div class="settings-item" title="Show the file viewer button in header (opens the file browser panel for the active session)">
+                <span class="settings-item-label">File Viewer</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowFileViewerButton">
+                  <span class="slider"></span>
+                </label>
+              </div>
               <div class="settings-item" title="Show the attachments button in header (opens the attachment history drawer)">
                 <span class="settings-item-label">Attachments Button</span>
                 <label class="switch switch-sm">
@@ -1360,6 +1392,27 @@
                 <span class="settings-item-label">Multi-monitor Button</span>
                 <label class="switch switch-sm">
                   <input type="checkbox" id="appSettingsShowMultiMonitorButton">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="settings-item" title="Show the session manager button in the header (opens the session manager — sessions also stay reachable via the Ctrl+K palette)">
+                <span class="settings-item-label">Session Manager Button</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowSessionButton">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="settings-item" title="Show the away digest button in the header (opens the 'what happened while you were away' summary)">
+                <span class="settings-item-label">Away Digest Button</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowAwayDigestButton">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="settings-item" title="Show the Cron button in the footer toolbar (opens the cron jobs manager)">
+                <span class="settings-item-label">Cron Button</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowCronButton">
                   <span class="slider"></span>
                 </label>
               </div>
@@ -1508,10 +1561,11 @@
               <label>Startup Mode</label>
               <select id="appSettingsClaudeMode" class="form-select">
                 <option value="dangerously-skip-permissions">Skip Permissions (default)</option>
+                <option value="auto">Auto (classifier-guarded, low prompts)</option>
                 <option value="normal">Normal (with prompts)</option>
                 <option value="allowedTools">Allowed Tools Only</option>
               </select>
-              <span class="form-hint">How Claude CLI is started in screen sessions</span>
+              <span class="form-hint">How Claude CLI is started in screen sessions. Auto Mode runs without routine prompts behind a background safety classifier (needs Claude Code 2.1.207+ and Opus 4.6+/Sonnet 4.6+/Fable 5)</span>
             </div>
             <div class="form-row" id="allowedToolsRow" style="display: none;">
               <label>Allowed Tools</label>
@@ -2000,6 +2054,7 @@
           <button class="modal-tab-btn active" data-tab="case-create">Create New</button>
           <button class="modal-tab-btn" data-tab="case-link">Link Existing</button>
           <button class="modal-tab-btn" data-tab="case-remote">Remote</button>
+          <button class="modal-tab-btn" data-tab="case-docker">Docker</button>
           <button class="modal-tab-btn" data-tab="case-manage">Manage</button>
         </div>
         <div class="modal-body">
@@ -2014,6 +2069,53 @@
               <label>Description (optional)</label>
               <input type="text" id="newCaseDescription" placeholder="A brief description..." autocomplete="off">
             </div>
+            <div class="form-row docker-quick-row">
+              <label class="checkbox-row"><input type="checkbox" id="newCaseDocker"> 🐳 Run in an isolated Docker container</label>
+              <span class="form-hint">Runs this case in a hardened, isolated container. The base image is built automatically on first use. Docker/Podman must be installed.</span>
+            </div>
+            <details class="advanced-options docker-quick-settings" id="dockerQuickSettings">
+              <summary>Container settings (optional, sensible defaults)</summary>
+              <div class="advanced-options-content">
+                <div class="form-row">
+                  <label>Template</label>
+                  <select id="quickDockerTemplate" onchange="app.applyDockerTemplate()">
+                    <option value="small">Small — 2 GB RAM, 1 CPU</option>
+                    <option value="medium" selected>Medium — 4 GB RAM, 2 CPU (default)</option>
+                    <option value="large">Large — 8 GB RAM, 4 CPU</option>
+                    <option value="gpu">GPU — 8 GB RAM, 4 CPU, all GPUs</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  <span class="form-hint">Disk is elastic: storage grows automatically as data flows in (no fixed cap).</span>
+                </div>
+                <div class="form-row">
+                  <label>Memory</label>
+                  <input type="text" id="quickDockerMemory" placeholder="4g" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label>CPUs</label>
+                  <input type="text" id="quickDockerCpus" placeholder="2" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label>GPUs</label>
+                  <input type="text" id="quickDockerGpus" placeholder="none (e.g. all, or 1)" autocomplete="off" spellcheck="false">
+                  <span class="form-hint">Needs the NVIDIA container toolkit on the host.</span>
+                </div>
+                <div class="form-row">
+                  <label>Network</label>
+                  <select id="quickDockerNetwork">
+                    <option value="bridge">bridge (internet on)</option>
+                    <option value="none">none (fully isolated)</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label>Image</label>
+                  <input type="text" id="quickDockerImage" placeholder="codeman/agent:base" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label class="checkbox-row"><input type="checkbox" id="quickDockerMountCreds" checked> Mount host credentials (~/.claude etc.)</label>
+                </div>
+              </div>
+            </details>
           </div>
           <!-- Link Existing Tab -->
           <div class="modal-tab-content hidden" id="case-link">
@@ -2073,6 +2175,70 @@
                 <div id="remoteDiscoverResults" class="remote-discover-results"></div>
               </div>
             </details>
+            <!-- COD-105 — discover + attach existing remote tmux sessions this Codeman didn't create. -->
+            <details class="advanced-options" id="remoteDiscoverSection">
+              <summary>Discover existing sessions</summary>
+              <div class="advanced-options-content">
+                <span class="form-hint">Find <code>codeman-*</code> tmux sessions already running on this host (started by the remote's own Codeman or another instance) and attach to one. Attaching shares the session; closing the tab detaches it — it is never killed.</span>
+                <div class="form-row" style="margin-top: 8px;">
+                  <button type="button" class="btn-toolbar" id="remoteDiscoverBtn" onclick="app.discoverRemoteSessions()">Discover existing sessions</button>
+                </div>
+                <div id="remoteDiscoverResults" class="remote-discover-results"></div>
+              </div>
+            </details>
+          </div>
+          <!-- Docker Tab -->
+          <div class="modal-tab-content hidden" id="case-docker">
+            <div class="form-row">
+              <label>Case Name</label>
+              <input type="text" id="dockerCaseName" placeholder="sandbox" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">Runs inside an isolated container. Multiple sessions can share the same container.</span>
+            </div>
+            <div class="form-row">
+              <label>Workspace Path</label>
+              <input type="text" id="dockerWorkspacePath" placeholder="/home/user/projects/sandbox" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+              <span class="form-hint">Absolute HOST directory, bind-mounted into the container. Codeman scaffolds CLAUDE.md + hooks into it.</span>
+            </div>
+            <div class="form-row">
+              <label>Host ID</label>
+              <input type="text" id="dockerHostId" placeholder="local" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">A reusable docker host profile. Reuse the same ID across cases to share settings.</span>
+            </div>
+            <div class="form-row">
+              <label>Image</label>
+              <input type="text" id="dockerImage" placeholder="codeman/agent:base" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini + tmux.</span>
+            </div>
+            <div class="form-row">
+              <label>Network</label>
+              <select id="dockerNetwork">
+                <option value="bridge">bridge (internet on, default)</option>
+                <option value="none">none (fully isolated, no network)</option>
+                <option value="custom">custom bridge</option>
+              </select>
+            </div>
+            <details class="advanced-options">
+              <summary>Advanced container settings</summary>
+              <div class="advanced-options-content">
+                <div class="form-row">
+                  <label>Memory</label>
+                  <input type="text" id="dockerMemory" placeholder="4g" autocomplete="off" spellcheck="false">
+                  <span class="form-hint">Optional, e.g. 4g / 512m. Enforced as a hard OOM cap where the engine supports it.</span>
+                </div>
+                <div class="form-row">
+                  <label>CPUs</label>
+                  <input type="text" id="dockerCpus" placeholder="2" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-row">
+                  <label class="checkbox-row"><input type="checkbox" id="dockerMountCredentials" checked> Mount host credentials (~/.claude etc.)</label>
+                  <span class="form-hint">On: your existing login just works (creds stay on the host, never in exports). Off: sealed sandbox, log in inside the container.</span>
+                </div>
+                <div class="form-row">
+                  <label class="checkbox-row"><input type="checkbox" id="dockerResumeOnStart" checked> Resume last conversation on relaunch</label>
+                </div>
+              </div>
+            </details>
+            <span class="form-hint" id="dockerLinkStatus" style="margin-top: 8px; display: block;"></span>
           </div>
           <div class="case-directory-browser hidden" id="caseDirectoryBrowserPanel">
             <div class="case-directory-browser-header">
@@ -2090,6 +2256,13 @@
               <!-- Populated by JS -->
             </div>
             <span class="form-hint" style="margin-top: 8px; display: block;">Use arrows to reorder. Changes are saved automatically.</span>
+            <div id="dockerExportsSection" style="margin-top: 16px; border-top: 1px solid var(--border, #333); padding-top: 12px;">
+              <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <strong style="font-size: 13px;">Docker exports</strong>
+                <button class="btn-toolbar" onclick="app.refreshDockerExports()">Refresh</button>
+              </div>
+              <div class="case-manage-list" id="dockerExportsList"><span class="form-hint">No exports yet. Export a docker case from its tab.</span></div>
+            </div>
           </div>
         </div>
         <div class="form-actions">
@@ -2621,6 +2794,7 @@
   </svg>
 
   <script defer src="constants.js"></script>
+  <script defer src="i18n.js"></script>
   <script defer src="mobile-handlers.js"></script>
   <script defer src="voice-input.js"></script>
   <script defer src="notification-manager.js"></script>
@@ -2638,6 +2812,7 @@
   <script defer src="settings-ui.js"></script>
   <script defer src="panels-ui.js"></script>
   <script defer src="ultracode-panel.js"></script>
+  <script defer src="admin-ui.js"></script>
   <script defer src="session-ui.js"></script>
   <script defer src="ralph-wizard.js"></script>
   <script defer src="api-client.js"></script>
