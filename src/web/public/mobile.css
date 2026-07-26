@@ -693,6 +693,7 @@ html.mobile-init .file-browser-panel {
     height: 32px;
     margin-left: auto;
     opacity: 0.6;
+    pointer-events: auto;
   }
 
   /* Close button on active tab - large for easy tapping */
@@ -705,6 +706,7 @@ html.mobile-init .file-browser-panel {
     width: 20px;
     height: 18px;
     margin-left: -2px;
+    pointer-events: auto;
   }
 
   /* Clean dark toolbar - positioned near bottom */
@@ -2332,6 +2334,7 @@ html.mobile-init .file-browser-panel {
     padding: 0.15rem 0.25rem;
     align-items: center;
     justify-content: center;
+    pointer-events: auto;
   }
 
   /* Simplify button hover states */
