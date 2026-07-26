@@ -208,7 +208,7 @@ function toSkillEntry(e: InstallEntry, sources: import('../../skill-install-read
   let description = '';
   if (e.source) {
     const src = sources.find((s) => s.name === e.source);
-    if (e.pack && src) description = src.bundles[e.pack]?.description ?? '';
+    if (e.pack && src) description = src.bundles?.[e.pack]?.description ?? '';
     if (!description && src) description = src.description;
   }
   return {
