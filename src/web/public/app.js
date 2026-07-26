@@ -2087,12 +2087,96 @@ class CodemanApp {
   }
 
   /**
+   * Resolve an explicit response-viewer link to a safe workspace-relative preview path.
+   * The server remains the authoritative filesystem-containment boundary.
+   */
+  _resolveResponseViewerPreviewPath(rawHref, workingDir) {
+    if (!rawHref || String(rawHref).length > 3000) return null;
+
+    let candidate;
+    try {
+      candidate = decodeURIComponent(String(rawHref));
+    } catch {
+      return null;
+    }
+
+    if (
+      !candidate ||
+      candidate.length > 1000 ||
+      candidate.includes('\\') ||
+      candidate.includes('?') ||
+      candidate.includes('#') ||
+      /[\x00-\x1f\x7f]/.test(candidate) ||
+      /^[a-z][a-z0-9+.-]*:/i.test(candidate)
+    ) {
+      return null;
+    }
+
+    const previewExtensions = new Set([
+      'pdf',
+      'md',
+      'txt',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'docx',
+      'pptx',
+      'xlsx',
+      'json',
+      'yaml',
+      'yml',
+      'csv',
+      'xml',
+      'sh',
+      'py',
+      'ts',
+      'js',
+    ]);
+    const extension = candidate.slice(candidate.lastIndexOf('.') + 1).toLowerCase();
+    if (!previewExtensions.has(extension)) return null;
+
+    const normalizePath = (filePath, absolute) => {
+      if (absolute && filePath === '/') return '/';
+      const normalized = [];
+      for (const [index, part] of filePath.split('/').entries()) {
+        if (!part) {
+          if (absolute && index === 0) continue;
+          return null;
+        }
+        if (part === '.') continue;
+        if (part === '..') return null;
+        normalized.push(part);
+      }
+      if (!normalized.length) return null;
+      return `${absolute ? '/' : ''}${normalized.join('/')}`;
+    };
+
+    if (!candidate.startsWith('/')) return normalizePath(candidate, false);
+
+    const normalizedCandidate = normalizePath(candidate, true);
+    const rawWorkingDir = String(workingDir || '');
+    const normalizedWorkingDir = normalizePath(
+      rawWorkingDir === '/' ? rawWorkingDir : rawWorkingDir.replace(/\/+$/, ''),
+      true
+    );
+    if (!normalizedCandidate || !normalizedWorkingDir) return null;
+    const workspacePrefix = normalizedWorkingDir === '/' ? '/' : `${normalizedWorkingDir}/`;
+    return normalizedCandidate.startsWith(workspacePrefix)
+      ? normalizedCandidate.slice(workspacePrefix.length)
+      : null;
+  }
+
+  /**
    * Bind click handlers inside the response viewer body. Uses event delegation
    * so a single listener serves every diagram-toggle button, including those
    * added when the conversation is reloaded. Idempotent via a dataset flag.
    */
-  _bindResponseViewerInteractions(body) {
-    if (!body || body.dataset.rvBound === '1') return;
+  _bindResponseViewerInteractions(body, responseSessionId = null) {
+    if (!body) return;
+    if (responseSessionId) body.dataset.rvSessionId = responseSessionId;
+    if (body.dataset.rvBound === '1') return;
     body.dataset.rvBound = '1';
     body.addEventListener('click', async (ev) => {
       const messageCopyBtn = ev.target.closest('.rv-message-copy');
@@ -2125,6 +2209,22 @@ class CodemanApp {
           copyBtn.classList.remove('rv-copied', 'rv-copy-failed');
         }, 1500);
         return;
+      }
+
+      const link = ev.target.closest('a[href]');
+      const sessionId = body.dataset.rvSessionId || '';
+      if (link && sessionId) {
+        const session = this.sessions?.get?.(sessionId);
+        const previewPath = this._resolveResponseViewerPreviewPath(
+          link.getAttribute('href'),
+          session?.workingDir
+        );
+        if (previewPath) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.openFilePreview(previewPath, sessionId);
+          return;
+        }
       }
 
       const btn = ev.target.closest('.rv-wrap-toggle');
@@ -2331,7 +2431,7 @@ class CodemanApp {
     this.showToast(copied ? 'Copied response as Markdown' : 'Failed to copy response as Markdown', copied ? 'success' : 'error');
   }
 
-  _renderResponseViewerMessages(body, messages) {
+  _renderResponseViewerMessages(body, messages, responseSessionId = this.activeSessionId) {
     body.innerHTML = '';
     for (const msg of messages) {
       const kind = msg.kind || (msg.role === 'user' ? 'prompt' : 'response');
@@ -2362,7 +2462,7 @@ class CodemanApp {
 
       body.appendChild(div);
     }
-    this._bindResponseViewerInteractions(body);
+    this._bindResponseViewerInteractions(body, responseSessionId);
   }
 
   // COD-225: independent User / Tools / Responses visibility filters for the
@@ -2488,17 +2588,18 @@ class CodemanApp {
     }
 
     if (!this.activeSessionId) return;
+    const responseSessionId = this.activeSessionId;
     try {
-      const session = this.sessions?.get?.(this.activeSessionId);
+      const session = this.sessions?.get?.(responseSessionId);
       const mode = session?.mode || '';
       // Source 1: Transcript JSONL (best quality — clean structured text from Claude)
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response`);
+      const res = await fetch(`/api/sessions/${responseSessionId}/last-response`);
       const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
 
       // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
       if (!lastResponse && mode === 'claude') {
-        const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
+        const termRes = await fetch(`/api/sessions/${responseSessionId}/terminal`);
         const termData = (await termRes.json())?.data ?? {};
         if (termData.terminalBuffer) {
           lastResponse = this._cleanTerminalBuffer(termData.terminalBuffer);
@@ -2510,7 +2611,7 @@ class CodemanApp {
       const body = document.getElementById('responseViewerBody');
       if (lastResponse) {
         body.innerHTML = this._renderMarkdown(lastResponse);
-        this._bindResponseViewerInteractions(body);
+        this._bindResponseViewerInteractions(body, responseSessionId);
       } else {
         body.textContent =
           window.codemanT?.('No response yet — send a message in this session first.') ||
@@ -2538,10 +2639,11 @@ class CodemanApp {
 
   async loadFullContext() {
     if (!this.activeSessionId) return;
+    const responseSessionId = this.activeSessionId;
     const moreBtn = document.getElementById('responseViewerMore');
     if (moreBtn) moreBtn.textContent = '...';
     try {
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response?context=full`);
+      const res = await fetch(`/api/sessions/${responseSessionId}/last-response?context=full`);
       const data = (await res.json())?.data ?? {};
       const messages = data.messages || [];
       const body = document.getElementById('responseViewerBody');
@@ -2559,7 +2661,7 @@ class CodemanApp {
       });
       if (lastResponse) this._responseViewerMarkdown = lastResponse.text || '';
 
-      this._renderResponseViewerMessages(body, messages);
+      this._renderResponseViewerMessages(body, messages, responseSessionId);
       this._showResponseFilters();
 
       const hasStructuredKinds = messages.some((msg) => typeof msg.kind === 'string');
