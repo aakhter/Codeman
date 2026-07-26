@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.8.1
+
+### Patch Changes
+
+- Open supported in-workspace document links from Last Response and expanded transcripts in Codeman's existing file preview overlay. Preserve the originating session, correctly decode filenames containing spaces, and reject traversal, external, malformed, unsupported, or out-of-workspace targets.
+
 ## 1.3.6
 
 ### Patch Changes
@@ -249,6 +255,7 @@
   **Docs**: CLAUDE.md accuracy audit (18 verified fixes: security hook-bypass description, env-prefix allowlist, state-file inventory, watcher/function names, counts) + documentation for all new subsystems. README gains a user walkthrough (#141).
 
   All PRs went through adversarial multi-agent review; ~60 verified findings (including 12 blockers) were fixed on the contributors' branches before merge. Full test suite green: 3,400+ tests.
+
 ## 1.2.8
 
 ### Patch Changes
