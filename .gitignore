@@ -3,6 +3,9 @@
 skills-lock.json
 CLAUDE.local.md
 
+# Written by install.sh into end-user clones when setup finishes
+.install-complete
+
 # Dependencies
 node_modules/
 

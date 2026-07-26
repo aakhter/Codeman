@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.8.1
+
+### Patch Changes
+
+- Open supported in-workspace document links from Last Response and expanded transcripts in Codeman's existing file preview overlay. Preserve the originating session, correctly decode filenames containing spaces, and reject traversal, external, malformed, unsupported, or out-of-workspace targets.
+
 ## 1.3.6
 
 ### Patch Changes
@@ -7,6 +13,166 @@
 - Add XLSX attachment uploads with picker and drag-and-drop support, ZIP-signature validation, binary attachment registration, and Open/Download handling.
 
   Persist keyboard shortcut overrides across upgrades and upstream refreshes. Fix Files panel path handling when the working directory has a trailing slash, linkify unquoted absolute terminal paths containing spaces, improve multiline prompt and final-response extraction, and make Headroom configuration reconciliation idempotent and reversible.
+
+## 1.8.0
+
+### Minor Changes
+
+- Installer: choose your network binding, with LAN access as the new guided default.
+
+  The install script now asks at the end of setup how the dashboard should be reachable:
+  1. Any device on your network (0.0.0.0), the default. The installer prompts for a dashboard password (hidden input, confirmed twice); declining a password requires an explicit confirmation and the install ends with a prominent warning explaining the exposure.
+  2. This machine only (127.0.0.1), the safer option for tunnel/Tailscale setups.
+
+  The choice is wired into the generated systemd unit and launchd plist (values escaped for each format), the run-now launch path, and the printed URLs, which now include the detected LAN IP for instant phone access. Non-interactive installs keep the safe loopback default unless CODEMAN_HOST is preset, and the server binary's own default binding (127.0.0.1) is unchanged, so npm and manual installs behave exactly as before. New installer env presets: CODEMAN_HOST and CODEMAN_PASSWORD skip the prompts for automation.
+
+## 1.7.1
+
+### Patch Changes
+
+- Mobile and UI polish plus docs refresh.
+  - Mobile: the header brand collapses to a single "C" home button on phones (<430px), freeing header space for session tabs while keeping the same tap target. The compact letter lives in its own span so i18n custom branding keeps rewriting only the full wordmark.
+  - UI fix: the absolutely-centered toolbar voice button no longer overlaps the case picker's chevron and "+" button. Below ~1500px (or with long case names widening the left toolbar group) it now falls back into normal flex flow where overlap is impossible; wide viewports keep the centered layout.
+  - Docs: README gains a hero pitch block with deep links, npm version + GitHub stars badges, and a star CTA; CLAUDE.md core-files table synced (Infra docker modules, app.js line count); blog article images added under docs/images/blog/.
+
+## 1.7.0
+
+### Minor Changes
+
+- Community release (thanks @shenlvkang-collab for all four PRs) plus documentation fixes.
+  - fix(mobile): per-device settings now key off a stable handheld classification (`MobileDetection.isHandheldDevice()`: touch plus UA form-factor tokens, with User-Agent Client Hints fallback) instead of the instantaneous viewport width, so an Android foldable that unfolds past the desktop breakpoint keeps `codeman-app-settings-mobile` and opt-ins such as the Response Viewer and Extended Keyboard Bar. Responsive layout stays width-driven. Adds an OPPO Find N5 (unfolded) device profile and a fold/unfold/reload Playwright regression test (mobile suite now 136 devices). (#162)
+  - fix(paths): `SAFE_PATH_PATTERN` now accepts Unicode letters and numbers (`\p{L}\p{N}` with the `u` flag), so working directories like `/mnt/d/AI/中文项目` validate in Create Session, Quick Run, and Scheduled Run. All shell-metacharacter, traversal, and absolute-path protections are unchanged. (#163)
+  - fix(ui): newly created run sessions render their tab immediately instead of waiting for the `session:created` SSE event (idempotent upsert from the POST response, with a `GET /api/sessions/:id` fallback for quick-start modes), and the Run button holds an in-flight lock (min 500 ms) so a double click cannot create duplicate sessions. (#164)
+  - feat(ui): the synced custom display name and per-device English/Simplified Chinese UI language are described in their own entry (#165); on top of that PR, `renderIndexHtml` no longer recomputes `windowTitle` on solo-session renders, so a detached window cannot reset the push-notification `hostTitle` prefix to the default name.
+  - docs: corrected the `sse-events.ts` fileoverview breakdown (148 event constants, was stale at 120; per-category counts refreshed, including Cron, Docker, Remote auto-reconnect, and Multi-user) and the CLAUDE.md SSE registry count; READMEs synced with the 1.6.2 installer behavior.
+
+### Patch Changes
+
+- 8d9fc41: Add a synced custom display name and a per-device English/Simplified Chinese browser UI language picker under App Settings → Display.
+
+## 1.6.2
+
+### Patch Changes
+
+- Installer (install.sh) reliability and safety overhaul, prompted by a review of the Linux flow:
+  - Install-completion marker (`.install-complete`): a bare re-run only takes the quiet update path when a previous install actually finished. Previously, a first install that failed during npm install/build (or was interrupted) left `.git` behind, so the retry silently became an "update" and the user never got the launch menu, the `codeman`/`tmux-chooser` symlinks, the PATH entry, or the `sc` alias. The marker is refreshed by updates and cleared by uninstall when the app dir is kept; added to .gitignore for end-user clones.
+  - `update` no longer runs an unconditional `git reset --hard` over local changes: interactive runs are asked to stash (declining keeps everything and skips the update), headless runs auto-stash with a dated message (same policy as scripts/self-update.sh).
+  - Service setup is verified instead of asserted: after starting codeman-web, the installer polls `systemctl --user is-active` (up to 6s) and only then prints "Codeman is running now!"; failures print an honest warning plus status/journalctl hints. Uses `restart` instead of `start` so re-running the installer over an already-running service actually loads the new build. A missing user D-Bus session (e.g. bare `ssh host 'curl | bash'`) is detected up front with copy-paste recovery commands instead of dying mid-setup via `set -e`. macOS gets the equivalent `launchctl list` verification, and the update path verifies its service restart too. The Cloudflare tunnel-service offer is skipped when service setup failed.
+  - Headless consent guard: with no interactive terminal AND no explicit `CODEMAN_NONINTERACTIVE=1`, the installer now refuses (with instructions) to run sudo package installs (git/node/tmux) or third-party `curl | bash` AI CLI installers, instead of silently taking the default-yes prompts. Explicit `CODEMAN_NONINTERACTIVE=1` keeps the previous full-auto behavior for CI/automation.
+  - AI CLI gate now recognizes Codex and Gemini (search paths mirrored from the CLI resolvers), so a box with only Codex or Gemini installed is no longer forced to install Claude Code/OpenCode. The install menu gains a "Skip" option (with npm install hints for Codex/Gemini), and the final reminder lists all four CLIs.
+
+  Docs: CLAUDE.md documents `src/remote-reconnect.ts` (pure COD-108 auto-reconnect backoff/eligibility logic) in the Infra table and the remote-sessions pattern.
+
+## 1.6.1
+
+### Patch Changes
+
+- **Admin Panel for multi-user mode.** Admins in multi-user mode now get a prominent Admin Panel button at the top of the page (header, admin-only; the template ships it hidden and `admin-ui.js` reveals it after identity boot; hidden on phones per the mobile header policy, where user management stays reachable via App Settings > Users). It opens a full Admin Panel modal: a users table with role, enabled/disabled status, bypass-permissions grant, live sessions, active logins, case count, and last login; per-user actions for Promote/Demote, Enable/Disable, Grant/Revoke bypass, Reset password (copyable one-time password), Force logout, and Delete (with an optional "also delete their files" step); and a proper add-user form (role, optional password, bypass checkbox) replacing the old prompt() flow. Each user's cases open in a drawer listing their case folders (modified date, live-session badge) with per-folder delete. Two new admin endpoints back this: `GET /api/admin/users/:username/cases` and `DELETE /api/admin/users/:username/cases/:caseName`, guarded like `deleteUserSpace` (symlinks refused, realpath confined to the user's space, folders in use by a live session refused with 409, audit-logged). The panel and the App Settings Users tab live-refresh on the SSE `admin:usersChanged` event (now wired in app.js). New coverage in `test/admin-routes.test.ts` (list/delete, traversal + symlink refusal, non-admin 403) and `test/admin-ui.test.ts` (button reveal gating, panel render, case drawer); verified end to end against a live multi-user instance with curl and Playwright.
+
+  **Also in this release:** README/docs synced with 1.6.0 (remote SSH cases, session manager, permissions) and fixed installer prompts when run via `curl | bash`.
+
+  **Recap of the recent feature line, for readers catching up:**
+  - **Multi-user mode (shipped 1.5.0, opt-in `--multiuser` / `CODEMAN_MULTIUSER=1`).** Named users with scrypt-hashed passwords, per-user case spaces under `~/codeman-users/<name>/cases`, and full ownership scoping of sessions, cases, cron jobs, scheduled runs, search, file previews, and SSE/WS streams. Non-admin users default to Claude's classifier-guarded `--permission-mode auto`; shell mode, cron `launchCommand`, and skip-permissions bypass switches require the per-user `canBypassPermissions` grant (now toggleable from the Admin Panel). Admin API with one-time passwords, last-admin invariants, and an append-only audit log; self-service `/api/me` password change; `codeman users add|passwd|list|rm` CLI. Off by default is byte-identical to single-user. Note: multi-user separates workspaces for a trusted team; it is not a security boundary (all sessions share the host OS account), so pair it with Docker cases for real isolation.
+  - **Docker cases (shipped 1.4.0/1.4.1).** A case can run inside an isolated per-case container (any of the five CLI backends), with one-click "Run in Docker" quick-create, durable in-container tmux that survives Codeman restarts and resumes conversations after container stops, hardened container creation (cap-drop ALL, no-new-privileges, non-root, memory/pid limits, never privileged, never the docker socket), commit-safe seeded credentials, config-drift detection, GPU passthrough, and portable export/import bundles to move a whole case between machines.
+  - **1.6.0 highlights.** Remote SSH cases with durable remote tmux (survives SSH drops, auto-reconnect, shared multi-client attach, discover + attach with detach-not-kill); the Cmd+K session palette and unified Session Manager with pinning, cross-device tab order, and first/last prompt search; full-scrollback replay; and the multi-user permission downgrade now threading through to remote launch/attach.
+
+## 1.6.0
+
+### Minor Changes
+
+- Remote tmux durability, Session Manager polish, and an opt-in Cron button.
+
+  **Remote sessions: durability, discovery, and auto-reconnect** (PR #156 by @aakhter, COD-104 to COD-109)
+  - Durable remote launches survive an SSH drop: the agent runs inside `tmux -L codeman-remote new-session -A` on the remote host, and reconnecting lands back in the same session.
+  - Discover + attach: a "Discover existing sessions" action per remote host lists `codeman-*` tmux sessions on the host's canonical socket (started by the remote's own Codeman or another instance) and attaches to one. Attached (non-owned) sessions detach on tab close, never kill; a structural early-return in `killSession()` guarantees no remote `kill-session` can ever be issued for a session Codeman doesn't own (COD-105).
+  - Shared/collaborative sessions: per-session `window-size latest` so concurrent clients at different viewports don't clamp each other, plus a "shared - N clients" badge in discovery results (COD-106).
+  - Auto-reconnect watcher: a bounded-backoff (5s to 5m, ~6 attempts) watcher detects a dead remote pane and reattaches the still-running remote tmux session; intentional kills/detaches are guarded and never revived. Kill-switch setting `remoteAutoReconnect` (default on). SSE `remote:sessionDropped`/`sessionReconnected`/`reconnectExhausted`, with a manual Reconnect toast after exhaustion (COD-108).
+  - Owned durable sessions propagate `kill-session` to the remote on close (COD-109); the remote tmux prereq probe is skipped under the test runner (COD-104).
+  - All ssh command lines continue to flow through the single shell-safe `buildSshConnectionArgs()` (COD-107). New design doc: `docs/remote-sessions.md`.
+  - Maintainer additions: the discovery endpoint is admin-gated in multi-user mode, and the remote launch/attach chooser threads the multi-user permission downgrade (`claudeMode`/`allowedTools`) through to the remote agent.
+
+  **Session Manager: pinning, cross-device ordering, name/prompt retention** (PR #157 by @aakhter, COD-131/139/140/142/143/145)
+  - Session pinning: pin a session to the top of the Session Manager list (`POST /api/sessions/:id/pin`, `session:pinned` SSE, amber highlight + pin glyph). Pinned group orders most-recently-pinned first (COD-139).
+  - Pinned sessions survive kill: killing a pinned session demotes its record to a lightweight stopped entry instead of removing it, so it stays visible and resumable; cleanup skips pinned records (COD-142). The pin route also works on these persisted-only records, so a pinned-then-killed session can always be unpinned.
+  - Cross-device tab order: tab order syncs via server state (`PUT /api/session-order`, `session:orderChanged` SSE, persisted in `state.json`); the pushing device wins and server-only ids fall to the end, never dropped (COD-131).
+  - Resuming from the Session Manager keeps the session's original name instead of always synthesizing a fresh `w<N>-<dir>` one (COD-143).
+  - firstPrompt backfill for sessions whose Codeman id is not the transcript UUID (claudeSessionId join, then newest transcript in the same workingDir), and the most recent prompt is shown alongside the first and included in search (COD-140/145).
+
+  **Cron button now opt-in** (hidden by default)
+  - The Cron footer-toolbar button follows the same opt-in pattern as the Session Manager / Away Digest / File Viewer buttons: hidden by default, enable per device under App Settings -> Display -> Header Displays. Cron jobs themselves are unchanged.
+
+  Also: `docs/remote-sessions.md` synced with the shipped `-L codeman-remote` / `codeman-ssh-<id8>` naming.
+
+## 1.5.1
+
+### Patch Changes
+
+- Docker session-mode deep-review fixes — the work intended for the skipped **1.4.2**, now merged onto the 1.5.x line — plus a recap of the multi-user mode shipped in 1.5.0.
+
+  **Docker resume actually works now.** `DockerCase.lastClaudeSessionId` was read at quick-start but never written, so the documented resume-after-container-stop never fired. Claude-mode docker panes now pin a deterministic conversation id (`claudeDockerPaneCommand()`): a fresh launch runs `claude --session-id <id> || claude --resume <id>` (a duplicate `--session-id` exits 1 "already in use", so the fallback resumes after a container stop/reboot — verified CLI behavior), an explicit resume runs `--resume <rid> || --session-id <sid>` so a stale id never dead-panes. The id is persisted at launch and again on hook / last-response conversation-id adoption. Verified end-to-end across a `docker stop` + relaunch and a full container recreate.
+
+  **Config-drift detection + recreate (was documented but entirely missing).** The `codeman.confighash` label was stamped but never read, so docker-host config edits silently never applied. Quick-start now compares via `checkDockerConfigDrift()` and refuses a drifted launch with `CONFLICT`; the UI confirms and calls the new `POST /api/docker-cases/:name/recreate` (refused while the case has live sessions), then relaunches with the new config. New SSE event `docker:containerRecreated`.
+
+  **Model picker now applies to docker sessions.** `modelOverride` was absent from `QuickStartSchema`, so the App Settings Claude Model choice was silently inert for docker runs. It is now accepted and applied via `updateCaseModel` for local and docker quick-starts (still rejected for remote, where the settings file would land on the wrong machine).
+
+  **Import hardening.** `importDockerBundle` validates the untrusted cross-machine manifest before trusting any field (`validateImportManifest`: engine/image/containerWorkdir/network/caseName/schemaVersion — a hostile `engine` could previously select the probe binary); the outer bundle tar gets the same member-traversal guard as the inner workspace tar; the quarantine image tag derives from the schema-validated case name.
+
+  **Remote-daemon correctness.** All docker probes and the base-image auto-build now honor a host's `context`/`daemonHost` (`dockerEngineArgv`) instead of always probing the local daemon.
+
+  **Smaller fixes:** commas are rejected in docker workspace/workdir/destination paths (a comma corrupts the `--mount type=bind,src=…` CSV spec, which shell escaping cannot protect); a dead `this.escapeHtml` reference in the exports refresh is fixed; `docker:importComplete` / `docker:containerRecreated` get frontend SSE listeners so other open tabs refresh; the File Viewer header button is hidden on phone headers like its siblings.
+
+  **Docs.** CLAUDE.md + READMEs synced with the current feature set, including a full zh-CN README re-translation.
+
+  **Multi-user mode (recap — shipped in 1.5.0).** Opt-in named users (`--multiuser` / `CODEMAN_MULTIUSER=1`, off by default) with per-user case spaces and full ownership scoping of sessions, cases, cron jobs, scheduled runs, search, file previews, and real-time SSE/WS streams. Non-admin users default to Claude's classifier-guarded `--permission-mode auto`; raw shell mode, cron `launchCommand`, skip-permissions, and the Codex/Gemini bypass switches require an explicit per-user `canBypassPermissions` grant. Machine-level resources are admin-only. Admin API (`/api/admin/users*`) with one-time passwords, last-admin invariants, and an append-only audit log; self-service `/api/me` + password change; and a `codeman users add|passwd|list|rm` CLI. Off by default is byte-identical to single-user. Note: multi-user separates workspaces for a trusted team; it is not a security boundary between mutually-distrusting users (all sessions share the host OS account) — pair with Docker cases for real isolation.
+
+## 1.5.0
+
+### Minor Changes
+
+- 0ab2416: Opt-in multi-user mode (`--multiuser` / `CODEMAN_MULTIUSER=1`, off by default).
+
+  Named users with individually scrypt-hashed passwords in `~/.codeman/users.json`, per-user case spaces under `~/codeman-users/<name>/cases`, and ownership scoping of sessions (create/list/delete/mutate, incl. bulk delete), cases, cron jobs + run history, scheduled runs, search, file previews, session history, away digest, subagent/workflow monitors, and real-time SSE/WS streams (including the debounced session/task update path, clipboard, and push notifications). A non-admin's `workingDir` is realpath-confined to their own space at every spawn/link path (session create, quick-start, cron create/fire, scheduled runs, case link/docker-link, docker import). Non-admin users default to Claude's classifier-guarded `--permission-mode auto`; raw shell mode, cron `launchCommand`, skip-permissions, and the Codex/Gemini bypass switches require an explicit per-user `canBypassPermissions` grant (enforced at every spawn site incl. one-shots, plan generation, scheduled runs, and remote launches). Machine-level resources (remote/Docker hosts + host reads, mux sessions, orchestrator, tunnel, self-update, settings) are admin-only. Admin API (`/api/admin/users*`) with one-time passwords, last-admin invariants (validated before any teardown), and an append-only audit log; self-service `/api/me` + password change; a frontend admin Users tab + change-password modal; and `codeman users add|passwd|list|rm` CLI. Also adds a global `auto` Claude startup permission mode. When off, behavior is byte-identical to single-user.
+
+  Auth hardening: the login throttle verifies the password before consulting the per-account failure bucket (a correct password can never be locked out); the `mustChangePassword` lockbox covers the WebSocket terminal; the cookie fast-path re-validates identity against the store each request (so a CLI/admin delete/disable/demote takes effect promptly); a role/grant change revokes the target's sessions. (Known limitation: a bare CLI `codeman users passwd` reset — no delete — does not by itself revoke an already-active cookie until it expires; use `codeman users rm`, the admin API, or a restart to force-revoke.) Data-integrity hardening: the store distinguishes a missing users file from a corrupt/unreadable one (so a transient read error can't overwrite all accounts) and writes via a unique per-process temp file; the earlier fire-and-forget `touchLastLogin` corruption race is serialized.
+
+  Note: multi-user mode separates workspaces for a trusted team; it is not a security boundary between users (all sessions share the host OS account). Pair with Docker cases for real isolation.
+
+## 1.4.1
+
+### Patch Changes
+
+- **Docker session mode** hardening + fixes, plus a File Viewer header button.
+
+  **What Docker session mode is** (recap): a case can run inside an isolated, hardened Docker container instead of on the host, and any of the CLI backends (Claude, Codex, Gemini, OpenCode, or a plain shell) runs inside it. It is a location overlay on cases — not a new session mode — and the container analog of remote-SSH cases: a local tmux pane `docker exec`s into a durable in-container tmux, with exactly one long-lived container per case that multiple sessions share. The workspace, credentials, and conversation transcripts are bind-mounted so the agent is authenticated and resumable; containers are hardened by default (`--cap-drop ALL`, `--security-opt no-new-privileges`, non-root, pids/memory caps, `--init`, never `--privileged` or the docker socket) and export-safe. Start one with the one-click "Run in Docker" checkbox on Create Case, or the Docker tab for full control.
+
+  This release fixes the rough edges found running it for real:
+
+  Docker cases:
+  - **Seamless Claude auth in containers**: `~/.claude.json` is no longer bind-mounted as a single file (a mount point that broke Claude's atomic-rename config writes — forcing re-auth and, via failed in-place writes, corrupting the host `~/.claude.json`). It is now seeded as a writable, onboarding-complete copy, so a docker session boots straight to the prompt (no theme picker, login, or folder-trust prompt).
+  - **Claude-state isolation**: containers no longer bind-mount the whole `~/.claude` directory (which wrote backups/tasks/teams/settings back into the host). Only `~/.claude/projects` transcripts are shared (host watchers + `--resume`); credentials, settings, and stats-cache are seeded as writable copies; everything else stays container-local.
+  - **Codex/Gemini/gcloud/opencode isolation**: same treatment — codex shares `sessions/` + `history.jsonl` (response-viewer + resume) and seeds `auth.json`/`config.toml`; gemini/gcloud/opencode are whole seed-copies. Containers never write their credential state back into the host dirs.
+  - **Base image auto-builds on first use**: a missing `codeman/agent:base` no longer blocks case creation or launch; it builds locally on first use (concurrency-safe, with SSE progress toasts).
+  - **UTF-8 locale**: containers set `LANG`/`LC_ALL=C.UTF-8` so tmux renders Claude's box-drawing correctly (fixes `qqqq` line artifacts).
+  - **Create Case UI**: larger, collapsed-by-default "Run in Docker" settings with a shorter hint; dockerized cases show a short `(docker)` tag (or the custom host id) in the case menus.
+  - **Tab naming**: docker/remote (and codex/gemini/opencode) sessions now follow the `w<n>-<case>` convention instead of `codeman-<id>`.
+
+  Other:
+  - **File Viewer header button** (opt-in via App Settings, Header Displays): toggle the file browser panel from the header.
+  - Fixed a timezone-boundary flaky test in the away-digest route suite.
+
+## 1.4.0
+
+### Minor Changes
+
+- Add **Docker session mode**: a case can now run inside an isolated Docker container instead of on the host, with configurable network / resource / credential settings, multiple sessions sharing one per-case container, and one-click export to move a container (toolchain + workspace) to another machine.
+  - Docker is a location overlay on cases (not a new session mode), mirroring the remote-SSH feature: a local tmux pane runs `docker exec -it` into a durable in-container tmux server. The container is scoped to the case (`codeman-case-<name>`), so multiple sessions share it; killing one session never stops the shared container.
+  - New `/api/docker-hosts` CRUD, `/api/cases/docker-link`, and a `/api/quick-start` docker branch. Create Case gains a **Docker** tab. Base image is built locally via `scripts/build-agent-image.mjs` (node + claude/codex/gemini/opencode + tmux, secret-free, arbitrary-uid-writable HOME).
+  - Hardened by default: `--cap-drop ALL`, `--security-opt no-new-privileges`, non-root, `--pids-limit`, `--memory`==`--memory-swap`, `--init`; never `--privileged` or the docker socket. Convenient credential default bind-mounts host `~/.claude` etc. read-write (never captured by `docker commit`); a sealed profile is opt-in.
+  - Two-layer durability: reconnect after a Codeman restart reattaches the same live agent; a container stop/reboot resumes the conversation from the bind-mounted transcript via `--resume`.
+  - Export / import: full-image (`docker commit` + `save` + workspace tar + manifest) or workspace-only, to one portable `.codeman-container.tgz`; import validates checksums, guards path traversal, and re-tags the loaded image into a quarantined namespace. Instance-scoped boot reaper cleans orphaned containers. New `docker:*` SSE events. Docs in `docs/docker-cases.md`.
+  - Robustness: sets `CLAUDE_CODE_TMPDIR` in the container so claude launches regardless of workspace path. In-container hooks require the server to be reachable from the container (documented); on a loopback-only bind, idle detection falls back to output-based.
+
+  Also wire session, away-digest, and cron header-button visibility toggles in App Settings.
 
 ## 1.3.5
 
@@ -89,6 +255,7 @@
   **Docs**: CLAUDE.md accuracy audit (18 verified fixes: security hook-bypass description, env-prefix allowlist, state-file inventory, watcher/function names, counts) + documentation for all new subsystems. README gains a user walkthrough (#141).
 
   All PRs went through adversarial multi-agent review; ~60 verified findings (including 12 blockers) were fixed on the contributors' branches before merge. Full test suite green: 3,400+ tests.
+
 ## 1.2.8
 
 ### Patch Changes

@@ -883,6 +883,7 @@ class CodemanApp {
     this.applyHeaderVisibilitySettings();
     this.restorePlanUsageChip();
     this.applySkin();
+    this.applyLocalization();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
     // Remove mobile-init class now that JS has applied visibility settings.
@@ -941,6 +942,7 @@ class CodemanApp {
     this.loadAppSettingsFromServer(settingsPromise).then(() => {
       this.applyHeaderVisibilitySettings();
       this.applySkin();
+      this.applyLocalization();
       this.applyTabWrapSettings();
       this.applyMonitorVisibility();
       // ultracodeFloatingWindows syncs from the server (non-display key), but on a
@@ -1532,7 +1534,7 @@ class CodemanApp {
     if (titleEl) { titleEl.textContent = name; titleEl.style.display = ''; }
     const redock = document.getElementById('soloRedockBtn');
     if (redock) redock.style.display = '';
-    document.title = name + ' — Codeman';
+    document.title = name + ' — ' + (window.CodemanI18n?.displayName || 'Codeman');
     if (this.notificationManager) this.notificationManager.originalTitle = document.title;
     // Neutralize the dashboard-only brand click in a solo window.
     const logo = document.querySelector('.header-brand .logo');
@@ -1550,7 +1552,8 @@ class CodemanApp {
       + '<p>This session has ended or is no longer available.</p>'
       + '<button class="btn-primary" onclick="window.close()">Close window</button>';
     document.body.appendChild(el);
-    document.title = 'Session ended — Codeman';
+    document.title = (window.codemanT?.('Session ended') || 'Session ended')
+      + ' — ' + (window.CodemanI18n?.displayName || 'Codeman');
   }
 
   connectSSE() {
@@ -1662,6 +1665,73 @@ class CodemanApp {
     for (const event of [SSE_EVENTS.SESSION_CREATED, SSE_EVENTS.SESSION_UPDATED, SSE_EVENTS.SESSION_DELETED]) {
       addListener(event, () => this._onSessionListMaybeChanged());
     }
+
+    // Docker export/import: toast + refresh the Manage-tab exports list on completion.
+    addListener(SSE_EVENTS.DOCKER_EXPORT_COMPLETE, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Docker export ready: ${d.bundle} (${Math.round((d.sizeBytes || 0) / 1e6)} MB)`, 'success');
+        this.refreshDockerExports?.();
+      } catch (err) {
+        console.error('[SSE] docker export complete:', err);
+      }
+    });
+    addListener(SSE_EVENTS.DOCKER_EXPORT_FAILED, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Docker export failed: ${d.error || 'unknown error'}`, 'error');
+      } catch (err) {
+        console.error('[SSE] docker export failed:', err);
+      }
+    });
+    // Import + drift-recreate completions: refresh case lists in EVERY open tab
+    // (the initiating tab already refreshes via its own fetch response).
+    addListener(SSE_EVENTS.DOCKER_IMPORT_COMPLETE, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Docker bundle imported as case "${d.name}"`, 'success');
+        this.loadQuickStartCases?.();
+        this.refreshDockerExports?.();
+      } catch (err) {
+        console.error('[SSE] docker import complete:', err);
+      }
+    });
+    addListener(SSE_EVENTS.DOCKER_CONTAINER_RECREATED, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Container for "${d.name}" removed — next launch recreates it with the new config`, 'info');
+      } catch (err) {
+        console.error('[SSE] docker container recreated:', err);
+      }
+    });
+    // Multi-user admin: live-refresh whichever admin views (panel/Users tab) are open.
+    addListener(SSE_EVENTS.ADMIN_USERS_CHANGED, () => {
+      window.codemanAdmin?.onUsersChanged?.();
+    });
+    // Base image auto-build on first Docker case (build-on-first-use). A single
+    // multi-minute event; surface start/finish so the Run spinner is explained.
+    addListener(SSE_EVENTS.DOCKER_IMAGE_BUILD_STARTED, () => {
+      this.showToast('Building the Codeman agent image (first Docker case, a few minutes)...', 'info', {
+        duration: 8000,
+      });
+    });
+    addListener(SSE_EVENTS.DOCKER_IMAGE_BUILD_COMPLETE, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        if (d.error) this.showToast(`Agent image build failed: ${d.error}`, 'error');
+        else this.showToast('Agent image ready. Starting the container...', 'success');
+      } catch (err) {
+        console.error('[SSE] docker image build complete:', err);
+      }
+    });
+    addListener(SSE_EVENTS.DOCKER_IMAGE_BUILD_FAILED, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(`Agent image build failed: ${d.error || 'unknown error'}`, 'error');
+      } catch (err) {
+        console.error('[SSE] docker image build failed:', err);
+      }
+    });
 
     // COD-139: a session:pinned event updates the local live-session pin flag (so
     // a subsequent render is consistent) and re-sorts the open session manager /
@@ -2017,12 +2087,96 @@ class CodemanApp {
   }
 
   /**
+   * Resolve an explicit response-viewer link to a safe workspace-relative preview path.
+   * The server remains the authoritative filesystem-containment boundary.
+   */
+  _resolveResponseViewerPreviewPath(rawHref, workingDir) {
+    if (!rawHref || String(rawHref).length > 3000) return null;
+
+    let candidate;
+    try {
+      candidate = decodeURIComponent(String(rawHref));
+    } catch {
+      return null;
+    }
+
+    if (
+      !candidate ||
+      candidate.length > 1000 ||
+      candidate.includes('\\') ||
+      candidate.includes('?') ||
+      candidate.includes('#') ||
+      /[\x00-\x1f\x7f]/.test(candidate) ||
+      /^[a-z][a-z0-9+.-]*:/i.test(candidate)
+    ) {
+      return null;
+    }
+
+    const previewExtensions = new Set([
+      'pdf',
+      'md',
+      'txt',
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'docx',
+      'pptx',
+      'xlsx',
+      'json',
+      'yaml',
+      'yml',
+      'csv',
+      'xml',
+      'sh',
+      'py',
+      'ts',
+      'js',
+    ]);
+    const extension = candidate.slice(candidate.lastIndexOf('.') + 1).toLowerCase();
+    if (!previewExtensions.has(extension)) return null;
+
+    const normalizePath = (filePath, absolute) => {
+      if (absolute && filePath === '/') return '/';
+      const normalized = [];
+      for (const [index, part] of filePath.split('/').entries()) {
+        if (!part) {
+          if (absolute && index === 0) continue;
+          return null;
+        }
+        if (part === '.') continue;
+        if (part === '..') return null;
+        normalized.push(part);
+      }
+      if (!normalized.length) return null;
+      return `${absolute ? '/' : ''}${normalized.join('/')}`;
+    };
+
+    if (!candidate.startsWith('/')) return normalizePath(candidate, false);
+
+    const normalizedCandidate = normalizePath(candidate, true);
+    const rawWorkingDir = String(workingDir || '');
+    const normalizedWorkingDir = normalizePath(
+      rawWorkingDir === '/' ? rawWorkingDir : rawWorkingDir.replace(/\/+$/, ''),
+      true
+    );
+    if (!normalizedCandidate || !normalizedWorkingDir) return null;
+    const workspacePrefix = normalizedWorkingDir === '/' ? '/' : `${normalizedWorkingDir}/`;
+    return normalizedCandidate.startsWith(workspacePrefix)
+      ? normalizedCandidate.slice(workspacePrefix.length)
+      : null;
+  }
+
+  /**
    * Bind click handlers inside the response viewer body. Uses event delegation
    * so a single listener serves every diagram-toggle button, including those
    * added when the conversation is reloaded. Idempotent via a dataset flag.
    */
-  _bindResponseViewerInteractions(body) {
-    if (!body || body.dataset.rvBound === '1') return;
+  _bindResponseViewerInteractions(body, responseSessionId = null) {
+    if (!body) return;
+    if (responseSessionId) body.dataset.rvSessionId = responseSessionId;
+    if (body.dataset.rvBound === '1') return;
     body.dataset.rvBound = '1';
     body.addEventListener('click', async (ev) => {
       const messageCopyBtn = ev.target.closest('.rv-message-copy');
@@ -2055,6 +2209,22 @@ class CodemanApp {
           copyBtn.classList.remove('rv-copied', 'rv-copy-failed');
         }, 1500);
         return;
+      }
+
+      const link = ev.target.closest('a[href]');
+      const sessionId = body.dataset.rvSessionId || '';
+      if (link && sessionId) {
+        const session = this.sessions?.get?.(sessionId);
+        const previewPath = this._resolveResponseViewerPreviewPath(
+          link.getAttribute('href'),
+          session?.workingDir
+        );
+        if (previewPath) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.openFilePreview(previewPath, sessionId);
+          return;
+        }
       }
 
       const btn = ev.target.closest('.rv-wrap-toggle');
@@ -2261,7 +2431,7 @@ class CodemanApp {
     this.showToast(copied ? 'Copied response as Markdown' : 'Failed to copy response as Markdown', copied ? 'success' : 'error');
   }
 
-  _renderResponseViewerMessages(body, messages) {
+  _renderResponseViewerMessages(body, messages, responseSessionId = this.activeSessionId) {
     body.innerHTML = '';
     for (const msg of messages) {
       const kind = msg.kind || (msg.role === 'user' ? 'prompt' : 'response');
@@ -2292,7 +2462,7 @@ class CodemanApp {
 
       body.appendChild(div);
     }
-    this._bindResponseViewerInteractions(body);
+    this._bindResponseViewerInteractions(body, responseSessionId);
   }
 
   // COD-225: independent User / Tools / Responses visibility filters for the
@@ -2418,17 +2588,18 @@ class CodemanApp {
     }
 
     if (!this.activeSessionId) return;
+    const responseSessionId = this.activeSessionId;
     try {
-      const session = this.sessions?.get?.(this.activeSessionId);
+      const session = this.sessions?.get?.(responseSessionId);
       const mode = session?.mode || '';
       // Source 1: Transcript JSONL (best quality — clean structured text from Claude)
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response`);
+      const res = await fetch(`/api/sessions/${responseSessionId}/last-response`);
       const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
 
       // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
       if (!lastResponse && mode === 'claude') {
-        const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
+        const termRes = await fetch(`/api/sessions/${responseSessionId}/terminal`);
         const termData = (await termRes.json())?.data ?? {};
         if (termData.terminalBuffer) {
           lastResponse = this._cleanTerminalBuffer(termData.terminalBuffer);
@@ -2440,9 +2611,11 @@ class CodemanApp {
       const body = document.getElementById('responseViewerBody');
       if (lastResponse) {
         body.innerHTML = this._renderMarkdown(lastResponse);
-        this._bindResponseViewerInteractions(body);
+        this._bindResponseViewerInteractions(body, responseSessionId);
       } else {
-        body.textContent = 'No response yet — send a message in this session first.';
+        body.textContent =
+          window.codemanT?.('No response yet — send a message in this session first.') ||
+          'No response yet — send a message in this session first.';
       }
 
       // Reset state for fresh open
@@ -2466,10 +2639,11 @@ class CodemanApp {
 
   async loadFullContext() {
     if (!this.activeSessionId) return;
+    const responseSessionId = this.activeSessionId;
     const moreBtn = document.getElementById('responseViewerMore');
     if (moreBtn) moreBtn.textContent = '...';
     try {
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/last-response?context=full`);
+      const res = await fetch(`/api/sessions/${responseSessionId}/last-response?context=full`);
       const data = (await res.json())?.data ?? {};
       const messages = data.messages || [];
       const body = document.getElementById('responseViewerBody');
@@ -2487,7 +2661,7 @@ class CodemanApp {
       });
       if (lastResponse) this._responseViewerMarkdown = lastResponse.text || '';
 
-      this._renderResponseViewerMessages(body, messages);
+      this._renderResponseViewerMessages(body, messages, responseSessionId);
       this._showResponseFilters();
 
       const hasStructuredKinds = messages.some((msg) => typeof msg.kind === 'string');

@@ -335,6 +335,12 @@ const RemoteCommandOverridesSchema = z
 const NO_SHELL_INJECTION = /^[^\n\r\0`]*$/;
 const noCommandSubstitution = (s: string) => !s.includes('$(');
 
+// Docker fields are shell-escaped, then the whole launch command is embedded via
+// `JSON.stringify(...)` inside `bash -c "..."` (tmux-manager). That outer DOUBLE-quote
+// layer re-exposes `$(...)`, backticks, and `$VAR`, so they carry NO_SHELL_META
+// (rejects `$`/backtick that survive the outer quoting) as defense-in-depth.
+const NO_SHELL_META = /^[^\n\r\0`$]*$/;
+
 export const RemoteHostSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
   label: z.string().min(1).max(100),
@@ -420,6 +426,178 @@ export const BrowseDirectoryQuerySchema = z.object({
   path: z.string().max(2000).optional(),
 });
 
+// ========== Docker cases ==========
+//
+// Docker mode is a location overlay on cases (see docs/docker-cases-plan.md),
+// the analog of the remote-SSH schemas above. `image`, `hostWorkspacePath`,
+// `containerWorkdir`, and `container` all reach the outer `bash -c "..."` launch
+// layer, so they carry NO_SHELL_META (rejects `$`/backtick that survive the
+// double-quote layer) exactly like remotePath/identityFile. `--privileged` and
+// any docker-socket mount are structurally unrepresentable (never accepted).
+
+const DockerResourceLimitsSchema = z
+  .object({
+    memory: z
+      .string()
+      .regex(/^\d+[bkmg]?$/i, 'Memory must be like 512m / 4g')
+      .optional(),
+    cpus: z
+      .string()
+      .regex(/^\d+(\.\d+)?$/, 'CPUs must be a number')
+      .optional(),
+    pidsLimit: z.number().int().positive().max(100000).optional(),
+    nofile: z
+      .string()
+      .regex(/^\d+:\d+$/, 'nofile must be soft:hard')
+      .optional(),
+    shmSize: z
+      .string()
+      .regex(/^\d+[bkmg]?$/i, 'shm-size must be like 256m')
+      .optional(),
+  })
+  .strict();
+
+export const DockerHostSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid docker host id'),
+  label: z.string().min(1).max(100),
+  engine: z.enum(['docker', 'podman']).optional(),
+  image: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[a-zA-Z0-9][\w./:@-]*$/, 'Invalid image reference')
+    .regex(NO_SHELL_META, 'Invalid characters in image reference'),
+  daemonHost: z.string().max(512).regex(NO_SHELL_META, 'Invalid daemon host').optional(),
+  context: z
+    .string()
+    .max(128)
+    .regex(/^[a-zA-Z0-9._-]+$/, 'Invalid docker context')
+    .optional(),
+  network: z.enum(['bridge', 'none', 'custom']).optional(),
+  networkName: z
+    .string()
+    .max(128)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/, 'Invalid network name')
+    .optional(),
+  resources: DockerResourceLimitsSchema.optional(),
+  gpus: z
+    .string()
+    .max(128)
+    .regex(/^(all|\d+|device=[a-zA-Z0-9,:._-]+)$/, 'GPUs must be all / a count / device=...')
+    .optional(),
+  mountCredentials: z.boolean().optional(),
+  hooksEnabled: z.boolean().optional(),
+  resumeOnStart: z.boolean().optional(),
+  commands: RemoteCommandOverridesSchema, // same shell/claude/opencode/codex/gemini shape
+  extraCreateArgs: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(1024)
+        .regex(NO_SHELL_INJECTION, 'Invalid characters in create arg')
+        .refine(noCommandSubstitution, 'Invalid characters in create arg')
+    )
+    .max(32)
+    .optional(),
+  extraExecArgs: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(1024)
+        .regex(NO_SHELL_INJECTION, 'Invalid characters in exec arg')
+        .refine(noCommandSubstitution, 'Invalid characters in exec arg')
+    )
+    .max(32)
+    .optional(),
+});
+
+export const DockerCaseLinkSchema = z.object({
+  name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
+  hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid docker host id'),
+  // No commas: the path is embedded in a `--mount type=bind,src=<path>,dst=<path>`
+  // CSV spec, and docker's --mount parser splits fields on commas (shell escaping
+  // cannot protect it). Spaces are fine.
+  hostWorkspacePath: z
+    .string()
+    .min(1)
+    .max(2000)
+    .regex(/^\//, 'Workspace path must be absolute')
+    .regex(/^[^,]*$/, 'Workspace path must not contain commas (docker --mount is comma-delimited)')
+    .regex(NO_SHELL_META, 'Invalid characters in workspace path'),
+  containerWorkdir: z
+    .string()
+    .min(1)
+    .max(2000)
+    .regex(/^\//, 'Container workdir must be absolute')
+    .regex(/^[^,]*$/, 'Container workdir must not contain commas (docker --mount is comma-delimited)')
+    .regex(NO_SHELL_META, 'Invalid characters in container workdir')
+    .optional(),
+  container: z
+    .string()
+    .min(2)
+    .max(128)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/, 'Invalid container name')
+    .optional(),
+});
+
+export const DockerExportSchema = z.object({
+  mode: z.enum(['full', 'workspace']).optional(),
+});
+
+export const DockerImportSchema = z.object({
+  // A bare filename resolved WITHIN the exports dir (never an arbitrary path).
+  bundle: z
+    .string()
+    .min(1)
+    .max(300)
+    .regex(/^[a-zA-Z0-9._-]+\.tgz$/, 'Invalid bundle filename'),
+  newCaseName: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
+  destWorkspacePath: z
+    .string()
+    .min(1)
+    .max(2000)
+    .regex(/^\//, 'Destination path must be absolute')
+    .regex(/^[^,]*$/, 'Destination path must not contain commas (docker --mount is comma-delimited)')
+    .regex(NO_SHELL_META, 'Invalid characters in destination path'),
+});
+
+// One-click "Run in Docker" case creation. name/description behave like a normal
+// case; the docker fields are OPTIONAL overrides of the predefined defaults (the
+// checkbox alone, with no overrides, uses the shared `default` host).
+export const DockerQuickCreateSchema = z.object({
+  name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
+  description: z.string().max(1000).optional(),
+  image: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[a-zA-Z0-9][\w./:@-]*$/, 'Invalid image reference')
+    .regex(NO_SHELL_META, 'Invalid characters in image reference')
+    .optional(),
+  network: z.enum(['bridge', 'none', 'custom']).optional(),
+  networkName: z
+    .string()
+    .max(128)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/, 'Invalid network name')
+    .optional(),
+  memory: z
+    .string()
+    .regex(/^\d+[bkmg]?$/i, 'Memory must be like 512m / 4g')
+    .optional(),
+  cpus: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, 'CPUs must be a number')
+    .optional(),
+  gpus: z
+    .string()
+    .max(128)
+    .regex(/^(all|\d+|device=[a-zA-Z0-9,:._-]+)$/, 'GPUs must be all / a count / device=...')
+    .optional(),
+  mountCredentials: z.boolean().optional(),
+});
+
 // ========== Quick Start ==========
 
 /**
@@ -431,6 +609,14 @@ export const QuickStartSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.')
     .optional(),
+  /** Display name for the created session tab (e.g. w1-mycase). Cosmetic; the durable
+   *  mux/container names derive from the session id, not this. Defaults server-side. */
+  sessionName: z.string().max(128).optional(),
+  /** Model override written to <case>/.claude/settings.local.json (e.g. "opus[1m]").
+   *  Empty string clears. Applied for local AND docker cases (the docker workspace is
+   *  a real host dir, so the settings file crosses the bind mount); rejected for
+   *  remote cases (the file would be written on the WRONG machine). */
+  modelOverride: z.string().max(50).optional(),
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy']).optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
@@ -524,6 +710,22 @@ const NotificationEventSchema = z
 
 export const SettingsUpdateSchema = z
   .object({
+    // User-facing product branding. This changes browser/UI copy only; package,
+    // CLI, API, storage, and protocol identifiers remain Codeman.
+    displayName: z
+      .string()
+      .trim()
+      .min(1)
+      .max(40)
+      .refine(
+        (value) =>
+          Array.from(value).every((character) => {
+            const codePoint = character.codePointAt(0);
+            return codePoint !== undefined && codePoint > 31 && codePoint !== 127;
+          }),
+        'Display name must not contain control characters'
+      )
+      .optional(),
     // Paths
     defaultClaudeMdPath: z.string().max(500).optional(),
     defaultWorkingDir: z.string().max(500).optional(),
@@ -899,7 +1101,10 @@ export const CaseOrderSchema = z.object({
 
 /** PUT /api/session-order — global tab order (ordered sessionIds), COD-131 */
 export const SessionOrderUpdateSchema = z.object({
-  order: z.array(z.string()),
+  // Bounded defensively: ids are uuid-ish (<=100 chars) and the client pushes only
+  // its open-tab order (max sessions is 50) — 500 leaves ample headroom while
+  // keeping a hostile/buggy client from persisting megabytes into state.json.
+  order: z.array(z.string().max(100)).max(500),
 });
 
 /** POST /api/auth/revoke */

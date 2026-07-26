@@ -3,7 +3,7 @@
  * Provides directory listing, file content preview, raw file serving, and tail streaming.
  */
 
-import { FastifyInstance, type FastifyReply } from 'fastify';
+import { FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { join, extname, sep, basename as pathBasename, posix as pathPosix } from 'node:path';
 import { createReadStream, realpathSync } from 'node:fs';
 import type { ReadStream } from 'node:fs';
@@ -52,7 +52,7 @@ import {
   isDiffableDocExtension,
 } from '../../document-text-extract.js';
 import { wordDiff } from '../../utils/word-diff.js';
-import { findSessionOrFail, validateSessionFilePath } from '../route-helpers.js';
+import { canAccessOwned, findSessionOrFail, getAuthUser, validateSessionFilePath } from '../route-helpers.js';
 import { compileFileQuery } from '../../utils/file-query.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
@@ -304,13 +304,17 @@ function appendDownloadFlag(url: string): string {
 function getKnownSessionWorkingDir(
   ctx: SessionPort & ConfigPort,
   sessionId: string,
-  reply: FastifyReply
+  reply: FastifyReply,
+  req: FastifyRequest
 ): string | undefined {
+  // Multi-user: a non-admin may only reach their OWN session's files. A foreign
+  // (or missing) session is reported identically as 404 so existence isn't leaked.
+  const user = getAuthUser(req);
   const liveSession = ctx.sessions.get(sessionId);
-  if (liveSession) return liveSession.workingDir;
+  if (liveSession && canAccessOwned(user, liveSession.owner)) return liveSession.workingDir;
 
   const stored = ctx.store.getSession(sessionId) as StoredSessionWithPrivateAttachmentHistory | undefined;
-  if (stored) return stored.workingDir;
+  if (stored && canAccessOwned(user, (stored as { owner?: string }).owner)) return stored.workingDir;
 
   reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, `Session ${sessionId} not found`));
   return undefined;
@@ -318,10 +322,13 @@ function getKnownSessionWorkingDir(
 
 function getSessionAttachmentHistory(
   ctx: SessionPort & ConfigPort,
-  sessionId: string
+  sessionId: string,
+  req: FastifyRequest
 ): { workingDir: string; history: SessionAttachmentHistoryItem[] } | undefined {
+  const user = getAuthUser(req);
   const liveSession = ctx.sessions.get(sessionId);
   if (liveSession) {
+    if (!canAccessOwned(user, liveSession.owner)) return undefined;
     return {
       workingDir: liveSession.workingDir,
       history: liveSession.getAttachmentHistoryForPersist() ?? liveSession.attachmentHistory ?? [],
@@ -329,7 +336,7 @@ function getSessionAttachmentHistory(
   }
 
   const stored = ctx.store.getSession(sessionId) as StoredSessionWithPrivateAttachmentHistory | undefined;
-  if (!stored) return undefined;
+  if (!stored || !canAccessOwned(user, (stored as { owner?: string }).owner)) return undefined;
 
   return {
     workingDir: stored.workingDir,
@@ -477,7 +484,8 @@ function resolveDocumentTarget(
   ctx: SessionPort & ConfigPort,
   reply: FastifyReply,
   sessionId: string,
-  target: { attachmentId?: string; path?: string }
+  target: { attachmentId?: string; path?: string },
+  req: FastifyRequest
 ): DocumentTarget | undefined {
   if (target.attachmentId) {
     const record = attachmentRegistry.get(sessionId, target.attachmentId);
@@ -488,7 +496,7 @@ function resolveDocumentTarget(
     return { filePath: record.filePath, extension: record.extension };
   }
   if (target.path) {
-    const workingDir = getKnownSessionWorkingDir(ctx, sessionId, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, sessionId, reply, req);
     if (!workingDir) return undefined;
     const validated = validateSessionFilePath(workingDir, target.path);
     if (!validated) {
@@ -772,7 +780,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-content', async (req) => {
     const { id } = req.params as { id: string };
     const { path: filePath, lines, raw } = req.query as { path?: string; lines?: string; raw?: string };
-    const workingDir = getSessionAttachmentHistory(ctx, id)?.workingDir ?? findSessionOrFail(ctx, id).workingDir;
+    const workingDir = getSessionAttachmentHistory(ctx, id, req)?.workingDir ?? findSessionOrFail(ctx, id).workingDir;
 
     if (!filePath) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
@@ -1364,7 +1372,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
   app.get('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const sessionHistory = getSessionAttachmentHistory(ctx, id);
+    const sessionHistory = getSessionAttachmentHistory(ctx, id, req);
     if (!sessionHistory) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, `Session ${id} not found`));
       return;
@@ -1392,7 +1400,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // size/mtime as the underlying file is rewritten).
   app.get('/api/sessions/:id/attachments/:attachmentId', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
@@ -1433,7 +1441,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/attachments/:attachmentId/raw', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
     const { download } = req.query as { download?: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
@@ -1457,7 +1465,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // convert server-side; PDF/PNG/text redirect to the raw route.
   app.get('/api/sessions/:id/attachments/:attachmentId/preview', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
@@ -1477,7 +1485,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // Serve a first-page thumbnail of a registered attachment by id.
   app.get('/api/sessions/:id/attachments/:attachmentId/thumbnail', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
@@ -1491,7 +1499,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // diff two versions (word-level), and roll a document back to a prior version.
   app.get('/api/sessions/:id/documents/versions', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string });
+    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string }, req);
     if (!target) return;
     await captureDocumentVersion(id, target.filePath, target.extension);
     return { success: true, data: { versions: documentVersionStore.list(id, target.filePath) } };
@@ -1500,7 +1508,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/documents/diff', async (req, reply) => {
     const { id } = req.params as { id: string };
     const query = req.query as { attachmentId?: string; path?: string; from?: string; to?: string };
-    const target = resolveDocumentTarget(ctx, reply, id, query);
+    const target = resolveDocumentTarget(ctx, reply, id, query, req);
     if (!target) return;
     await captureDocumentVersion(id, target.filePath, target.extension);
     const versions = documentVersionStore.list(id, target.filePath);
@@ -1527,7 +1535,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.post('/api/sessions/:id/documents/rollback', async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = (req.body || {}) as { attachmentId?: string; path?: string; versionId?: string };
-    const target = resolveDocumentTarget(ctx, reply, id, body);
+    const target = resolveDocumentTarget(ctx, reply, id, body, req);
     if (!target) return;
     if (!body.versionId) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing versionId'));
@@ -1560,7 +1568,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // Selectable HTML rendering of a .docx for the annotatable preview view (COD-68).
   app.get('/api/sessions/:id/documents/html', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string });
+    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string }, req);
     if (!target) return;
     if (target.extension.toLowerCase().replace(/^\./, '') !== 'docx') {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'HTML view is only available for .docx'));
@@ -1594,7 +1602,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return;
     }
 
-    const target = resolveDocumentTarget(ctx, reply, id, query);
+    const target = resolveDocumentTarget(ctx, reply, id, query, req);
     if (!target) return;
 
     // Resolve symlinks before the sensitive-path guard so a symlink pointing at
@@ -1664,14 +1672,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       path?: string;
       annotations?: { passage?: string; note?: string }[];
     };
-    const target = resolveDocumentTarget(ctx, reply, id, body);
+    const target = resolveDocumentTarget(ctx, reply, id, body, req);
     if (!target) return;
     const annotations = Array.isArray(body.annotations) ? body.annotations.filter((a) => a && a.note) : [];
     if (annotations.length === 0) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No annotations provided'));
       return;
     }
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
     const docName = pathBasename(target.filePath);
     const reviewName = `codeman-review-${docName.replace(/[^a-zA-Z0-9._-]/g, '_')}.md`;
@@ -1697,7 +1705,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-raw', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath, download } = req.query as { path?: string; download?: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
 
     if (!filePath) {
@@ -1729,7 +1737,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-preview', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath } = req.query as { path?: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
 
     if (!filePath) {
@@ -1759,7 +1767,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-thumbnail', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath } = req.query as { path?: string };
-    const workingDir = getKnownSessionWorkingDir(ctx, id, reply);
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
 
     if (!filePath) {

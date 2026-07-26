@@ -40,6 +40,118 @@ beforeEach(() => {
 });
 
 describe('response viewer behavior', () => {
+  it('opens the exact spaced Falck DOCX link in the originating session preview', async () => {
+    const sessionId = '019f9b3b-6c0e-7f71-be98-3c7f2086c6de';
+    const workingDir = '/mnt/c/Users/aakhter/OneDrive - Cisco/01_Projects/Other_Strategic/Projects/Source/kb';
+    const relativePath =
+      'out/falck-mads-airdc-interview-review/deliverables/2026-07-17 Falck Mads Jung Johansen-AIRDC-reviewed.docx';
+    const absolutePath = `${workingDir}/${relativePath}`;
+    const encodedHref = absolutePath.replaceAll(' ', '%20');
+    app.activeSessionId = sessionId;
+    app.sessions.set(sessionId, { mode: 'codex', workingDir });
+    app.openFilePreview = vi.fn();
+    app._renderMarkdown = vi.fn(() => `<p>Updated the <a href="${encodedHref}">Falck reviewed transcript</a>.</p>`);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        json: async () => ({
+          data: {
+            text: `Updated the [Falck reviewed transcript](<${absolutePath}>).`,
+            hasContext: true,
+          },
+        }),
+      })) as unknown as typeof fetch
+    );
+
+    await app.toggleResponseViewer();
+
+    const link = document.querySelector<HTMLAnchorElement>('#responseViewerBody a');
+    expect(link).not.toBeNull();
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    link?.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(app.openFilePreview).toHaveBeenCalledWith(relativePath, sessionId);
+  });
+
+  it.each([
+    ['out/report.docx', 'out/report.docx'],
+    ['./out/report.md', 'out/report.md'],
+    ['/workspace/project/out/Report%20Final.pptx', 'out/Report Final.pptx'],
+    ['/workspace/project-sibling/out/report.docx', null],
+    ['../outside/report.docx', null],
+    ['out/%2e%2e/outside/report.docx', null],
+    ['https://example.com/report.docx', null],
+    ['mailto:owner@example.com', null],
+    ['#document-section', null],
+    ['out/report.exe', null],
+    ['out/report.docx?download=true', null],
+    ['out/report.docx%23section', null],
+    ['out/%E0%A4%A.docx', null],
+  ])('resolves response-viewer href %s to %s', (href, expected) => {
+    expect(app._resolveResponseViewerPreviewPath(href, '/workspace/project')).toBe(expected);
+  });
+
+  it('resolves an absolute document beneath a root workspace', () => {
+    expect(app._resolveResponseViewerPreviewPath('/report.docx', '/')).toBe('report.docx');
+  });
+
+  it('routes a transcript document link through the same preview interaction', () => {
+    const sessionId = 'transcript-session';
+    app.sessions.set(sessionId, { workingDir: '/workspace/project' });
+    app.openFilePreview = vi.fn();
+    app._renderMarkdown = vi.fn(() => '<p><a href="out/review.md">Review</a></p>');
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+
+    app._renderResponseViewerMessages(
+      body,
+      [{ kind: 'response', label: 'Response', text: '[Review](out/review.md)' }],
+      sessionId
+    );
+    body.querySelector('a')?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    expect(app.openFilePreview).toHaveBeenCalledWith('out/review.md', sessionId);
+  });
+
+  it('refreshes originating-session ownership when the reusable viewer body is rebound', () => {
+    app.sessions.set('first-session', { workingDir: '/workspace/first' });
+    app.sessions.set('second-session', { workingDir: '/workspace/second' });
+    app.openFilePreview = vi.fn();
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML = '<a href="/workspace/second/out/report.docx">Report</a>';
+
+    app._bindResponseViewerInteractions(body, 'first-session');
+    app._bindResponseViewerInteractions(body, 'second-session');
+    body.querySelector('a')?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    expect(app.openFilePreview).toHaveBeenCalledWith('out/report.docx', 'second-session');
+  });
+
+  it.each([
+    'https://example.com/report.docx',
+    '/workspace/project-sibling/report.docx',
+    '../outside/report.docx',
+    'out/report.exe',
+    '#document-section',
+    'out/%E0%A4%A.docx',
+  ])('does not route unsafe or unsupported response link %s to preview', (href) => {
+    const sessionId = 'external-link-session';
+    app.sessions.set(sessionId, { workingDir: '/workspace/project' });
+    app.openFilePreview = vi.fn();
+    const body = document.getElementById('responseViewerBody');
+    if (!body) throw new Error('missing response viewer body');
+    body.innerHTML = `<a href="${href}">Report</a>`;
+    app._bindResponseViewerInteractions(body, sessionId);
+
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    body.querySelector('a')?.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(false);
+    expect(app.openFilePreview).not.toHaveBeenCalled();
+  });
+
   it('does not wrap ordinary prose mentioning box-drawing separators into a code block', () => {
     const prepared = app._preprocessAsciiArt(
       [

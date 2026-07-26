@@ -5,7 +5,7 @@
 <h2 align="center">Mission control for AI coding agents</h2>
 
 <p align="center">
-  <em>Claude Code &bull; OpenCode &bull; Codex &bull; Terminal - One Dashboard &bull; Any Device</em>
+  <em>Claude Code &bull; OpenCode &bull; Codex &bull; Gemini &bull; Terminal - One Dashboard &bull; Any Device</em>
 </p>
 
 <p align="center">
@@ -13,7 +13,9 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-22%2B-22c55e?style=flat-square&logo=node.js&logoColor=white" alt="Node.js 22+"></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.9-3b82f6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5.9"></a>
   <a href="https://fastify.dev/"><img src="https://img.shields.io/badge/Fastify-5.x-1e3a5f?style=flat-square&logo=fastify&logoColor=white" alt="Fastify"></a>
-  <img src="https://img.shields.io/badge/Tests-1435%20total-22c55e?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-2861%20total-22c55e?style=flat-square" alt="Tests">
+  <a href="https://www.npmjs.com/package/aicodeman"><img src="https://img.shields.io/npm/v/aicodeman?style=flat-square&label=npm&color=22c55e" alt="npm version"></a>
+  <a href="https://github.com/Ark0N/Codeman/stargazers"><img src="https://img.shields.io/github/stars/Ark0N/Codeman?style=flat-square&color=eab308" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
@@ -21,7 +23,20 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/subagent-demo.gif" alt="Codeman — parallel subagent visualization" width="900">
+  <img src="docs/images/subagent-demo-20260724.gif" alt="Codeman — parallel subagent visualization" width="900">
+</p>
+
+**Codeman** is a self-hosted mission control for AI coding agents. It spawns Claude Code, OpenCode, Codex, or Gemini CLI inside persistent tmux sessions, streams the real terminal to any browser, and keeps agents productive after you walk away: it re-prompts on idle, resumes when a usage limit resets, runs scheduled jobs, and shows every background agent working in real time.
+
+- **One dashboard, four CLIs** - run [Claude Code, OpenCode, Codex, or Gemini](#more-features) per session (plus plain shell), locally, [in Docker](#isolated-docker-sessions), or [over SSH](#remote-ssh-sessions)
+- **Truly phone-friendly** - a [touch-optimized terminal](#mobile-optimized-web-ui) with instant local echo, QR login, swipe navigation, and push notifications
+- **Runs while you sleep** - [idle detection + respawn cycling](#respawn-controller) and auto-resume when a subscription limit resets, for 24+ hour unattended runs
+- **See your agents think** - [live floating windows](#live-agent-visualization) for every subagent and teammate, with real-time transcripts
+- **Nothing gets lost** - tmux persistence across restarts and network drops, exactly-once input delivery, full-scrollback replay
+- **Self-hosted and private** - loopback-only by default, MIT licensed, no telemetry, runs entirely on your machine
+
+<p align="center">
+  <img src="docs/images/codeman-tour-20260724.png" alt="Codeman dashboard tour: session tabs per case, one-click Run for new agents, live plan usage in the header" width="900">
 </p>
 
 ---
@@ -32,17 +47,33 @@
 curl -fsSL https://raw.githubusercontent.com/Ark0N/Codeman/master/install.sh | bash
 ```
 
-This installs Node.js and tmux if missing, clones Codeman to `~/.codeman/app`, and builds it.
+This installs Node.js and tmux if missing, clones Codeman to `~/.codeman/app`, and builds it. A few things worth knowing:
 
-You'll need at least one AI coding CLI installed — [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), or [Codex](https://developers.openai.com/codex/cli) (any combination works). After install:
+- **It asks first.** Every system change (package installs, AI CLI download) is prompted, and a menu at the end lets you choose: run Codeman in this terminal, install it as a background service (systemd/launchd, auto-start on boot), or don't start yet. Nothing runs in the background unless you pick it.
+- **Network or local-only, your choice.** The installer asks whether the dashboard should be reachable from other devices on your network (`0.0.0.0`, the default, with a strongly recommended password prompt) or from this machine only (`127.0.0.1`, safest). Skipping the password on a network bind requires an explicit confirmation and ends with a loud warning. A bare `codeman web` started by hand still defaults to loopback.
+- **Re-run to update.** The same one-liner updates a finished install in place: local changes in `~/.codeman/app` are stashed (never discarded), and a running service is restarted and verified. If a first install was interrupted, re-running resumes the full setup instead. `install.sh update` and `install.sh uninstall` also exist.
+- **CI / headless:** without a terminal attached, steps that would change your system abort with instructions instead of running silently. Set `CODEMAN_NONINTERACTIVE=1` to approve them for automation.
+
+You'll need at least one AI coding CLI installed — [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex/cli), or [Gemini CLI](https://github.com/google-gemini/gemini-cli) (any combination works). The installer detects whichever of the four is present; if none is found, it offers to install Claude Code or OpenCode, or you can skip and install one yourself later. After install:
 
 ```bash
 codeman web
-# Open http://localhost:3000 — press Ctrl+Enter to start your first session
+# Open http://localhost:3000 and start your first session
 ```
+
+**Sharing with a small team?** Start it in multi-user mode instead: each person gets their own login and workspace.
+
+```bash
+codeman users add alice --admin      # create the first admin account
+codeman web --multiuser              # named logins + per-user case spaces
+```
+
+Details in [Multi-User Mode](#multi-user-mode-opt-in) below.
 
 <details>
 <summary><strong>Run as a background service</strong></summary>
+
+The installer's final menu sets this up for you (option 2) and verifies the service actually comes up before claiming success. To configure it manually instead:
 
 **Linux (systemd):**
 
@@ -106,7 +137,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codeman.web.plist
 wsl bash -c "curl -fsSL https://raw.githubusercontent.com/Ark0N/Codeman/master/install.sh | bash"
 ```
 
-Codeman requires tmux, so Windows users need [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). If you don't have WSL yet: run `wsl --install` in an admin PowerShell, reboot, open Ubuntu, then install your preferred AI coding CLI inside WSL ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), or [Codex](https://developers.openai.com/codex/cli)). After installing, `http://localhost:3000` is accessible from your Windows browser.
+Codeman requires tmux, so Windows users need [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). If you don't have WSL yet: run `wsl --install` in an admin PowerShell, reboot, open Ubuntu, then install your preferred AI coding CLI inside WSL ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex/cli), or [Gemini CLI](https://github.com/google-gemini/gemini-cli)). After installing, `http://localhost:3000` is accessible from your Windows browser.
 
 </details>
 
@@ -142,7 +173,7 @@ Hit start — Codeman spawns the CLI via a real PTY and streams it to your brows
 
 ### 3. Read the dashboard
 
-- **Tabs (top)** — one per session. `Alt+1`-`9` to jump, `Ctrl+Tab` for next, drag to reorder.
+- **Tabs (top)** — one per session. `Alt+1`-`9` to jump, `Ctrl+Tab` for next, drag to reorder (tab order syncs across your devices).
 - **Terminal (center)** — a real `xterm.js` terminal; full TUIs render correctly. Type directly and press **Enter** to send. `Shift+Enter` inserts a newline.
 - **Side panels** — Respawn, Ralph, Orchestrator, Cron, Subagents, Settings (toggled from the toolbar).
 
@@ -155,13 +186,13 @@ Hit start — Codeman spawns the CLI via a real PTY and streams it to your brows
 
 ### 5. Make it autonomous
 
-| Mode             | Use it for                                                                                                                        | Where              |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| **Respawn**      | Long unattended runs — auto-restarts the CLI on idle/limit, with adaptive timing. Presets: `solo-work`, `overnight-autonomous`, … | Respawn tab        |
-| **Ralph / Todo** | A self-driving loop that tracks a todo list and keeps working until done.                                                         | Ralph tab          |
-| **Orchestrator** | Turn one goal into a phased plan and drive it to completion across agents.                                                        | Orchestrator panel |
-| **Cron**         | Saved, named jobs on a schedule (`once`/`interval`/`daily`/`weekly`) that spawn a session and send a prompt when due.             | ⏰ Cron button     |
-| **Auto-resume**  | Automatically continue after a subscription rate-limit resets.                                                                    | Respawn tab (top)  |
+| Mode             | Use it for                                                                                                                        | Where                                                               |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **Respawn**      | Long unattended runs — auto-restarts the CLI on idle/limit, with adaptive timing. Presets: `solo-work`, `overnight-autonomous`, … | Respawn tab                                                         |
+| **Ralph / Todo** | A self-driving loop that tracks a todo list and keeps working until done.                                                         | Ralph tab                                                           |
+| **Orchestrator** | Turn one goal into a phased plan and drive it to completion across agents.                                                        | Orchestrator panel                                                  |
+| **Cron**         | Saved, named jobs on a schedule (`once`/`interval`/`daily`/`weekly`) that spawn a session and send a prompt when due.             | ⏰ Cron button _(opt-in: App Settings → Display → Header Displays)_ |
+| **Auto-resume**  | Automatically continue after a subscription rate-limit resets.                                                                    | Respawn tab (top)                                                   |
 
 ### 6. Reach it from anywhere
 
@@ -171,7 +202,7 @@ Hit start — Codeman spawns the CLI via a real PTY and streams it to your brows
 
 ### 7. Operate & maintain
 
-- **App Settings** — model, effort, theme/skin, notifications, display toggles, per-CLI options.
+- **App Settings** — model, effort, permission startup mode, theme/skin, notifications, display toggles, per-CLI options, a synced custom display name, and per-device English/Simplified Chinese UI language.
 - **Self-update** — git-clone installs update in place from **Settings → Updates**.
 - **Deploy your own changes** — see [Development](#development).
 
@@ -243,7 +274,7 @@ codeman web --https
 Watch background agents work in real-time. Codeman monitors agent activity and displays each agent in a draggable floating window with animated Matrix-style connection lines back to the parent session.
 
 <p align="center">
-  <img src="docs/images/subagent-spawn.png" alt="Subagent Visualization" width="900">
+  <img src="docs/images/subagent-windows-20260724.png" alt="Subagent Visualization: three parallel Explore agents as floating windows with live tool-call feeds" width="900">
 </p>
 
 - **Floating terminal windows** — draggable, resizable panels for each agent with a live activity log showing every tool call, file read, and progress update as it happens
@@ -251,6 +282,14 @@ Watch background agents work in real-time. Codeman monitors agent activity and d
 - **Status & model badges** — green (active), yellow (idle), blue (completed) indicators with Haiku/Sonnet/Opus model color coding
 - **Auto-behavior** — windows auto-open on spawn, auto-minimize on completion, tab badge shows "AGENT" or "AGENTS (n)" count
 - **Nested agents** — supports 3-level hierarchies (lead session -> teammate agents -> sub-subagents)
+
+Multi-agent Workflow runs ("ultracode") get the same treatment: a floating run window tracks the whole workflow live, with phases, per-agent token counts, and the current tool of every agent:
+
+<p align="center">
+  <img src="docs/images/ultracode-window-20260724.png" alt="Ultracode workflow visualization: a live run window with per-agent tokens and phases" width="900">
+</p>
+
+**Agent Teams** — first-class support for Claude Code's native multi-agent teams (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). `TeamWatcher` polls `~/.claude/teams/`, matches teammates to their lead session, and surfaces them as live subagent windows with **team-aware idle detection** — so the Respawn Controller won't fire while teammates are still working. See [`docs/agent-teams/`](docs/agent-teams/).
 
 ---
 
@@ -290,6 +329,20 @@ WATCHING → IDLE DETECTED → SEND UPDATE → /clear → /init → CONTINUE →
 
 ---
 
+## Orchestrator Loop
+
+Beyond single-session respawn, the **Orchestrator** turns a high-level goal into a phased plan and drives it to completion across multiple agents — a state machine that runs `idle → planning → approval → executing → verifying → (replanning) → completed`.
+
+- **Plan, then execute** — generates a phased plan from your goal and pauses for approval before touching anything; reject with feedback to regenerate
+- **Per-phase verification gates** — each phase is verified before the next begins; on failure the orchestrator replans instead of barreling ahead
+- **Multi-agent execution** — fans phases out to team agents / a task queue, coordinating work too big for one session
+- **Crash-safe** — full state persists under the `orchestrator` key in `state.json`, so it survives restarts
+- **Driven from the UI or API** — the Orchestrator panel, or `POST /api/orchestrator/start` → `/approve` → `/status` (10 endpoints)
+
+> Distinct from Ralph (a single-session autonomous loop): the orchestrator coordinates multi-phase, multi-agent execution. Full design: [`docs/orchestrator-loop-architecture.md`](docs/orchestrator-loop-architecture.md).
+
+---
+
 ## Multi-Session Dashboard
 
 Run **20 parallel sessions** with full visibility — real-time xterm.js terminals at 60fps, per-session token and cost tracking, tab-based navigation, and one-click management.
@@ -301,6 +354,14 @@ Run **20 parallel sessions** with full visibility — real-time xterm.js termina
 ### Persistent Sessions
 
 Every session runs inside **tmux** — sessions survive server restarts, network drops, and machine sleep. Auto-recovery on startup with dual redundancy. Ghost session discovery finds orphaned tmux sessions. Managed sessions are environment-tagged so the agent won't kill its own session.
+
+### Session Manager & Command Palette
+
+`Ctrl/Cmd/Alt+K` opens a fuzzy session palette; **Browse all sessions** opens the Session Manager: one deduped list of everything Codeman knows about (live sessions, past sessions from state and lifecycle history, and Claude transcripts), each row showing its first and most recent prompt.
+
+- **Pinning**: pin a session to float it to the top of the list. Pinned sessions even survive kill (they demote to a lightweight stopped entry that stays visible and resumable).
+- **Name retention**: resuming a past session keeps its original name instead of minting a new one.
+- **Cross-device tab order**: drag-reordered tabs persist server-side, so your ordering follows you from desktop to phone.
 
 ### Hostname-Aware Window Title
 
@@ -349,14 +410,67 @@ PTY Output → 16ms Server Batch → DEC 2026 Wrap → SSE → Client rAF → xt
 ## More Features
 
 - **Self-update** — git-clone installs under systemd/launchd update in place from **App Settings → Updates**: it detects the latest release, auto-stashes a dirty tree, and streams build progress across the service restart (npm installs report as non-updatable)
-- **Multi-CLI** — run **Claude Code**, **OpenCode**, or **Codex** per session; env-var prefixes auto-gate (`CLAUDE_CODE_*` vs `OPENCODE_*` vs `CODEX_*`). See [`docs/opencode-integration.md`](docs/opencode-integration.md)
+- **Multi-CLI** — run **Claude Code**, **OpenCode**, **Codex**, or **Gemini** per session; env-var prefixes auto-gate (`CLAUDE_CODE_*` vs `OPENCODE_*` vs `CODEX_*` vs `GEMINI_*`/`GOOGLE_*`). See [`docs/opencode-integration.md`](docs/opencode-integration.md)
+- **Docker sessions** — run a case inside an isolated, hardened container. One checkbox on **Create New** spins up a container with sensible defaults and starts the agent inside it; multiple sessions share one per-case container; export a container + its workspace to a portable `.tar.gz` to move it to another machine. See [`docs/docker-cases.md`](docs/docker-cases.md)
+- **Remote SSH sessions** — point a case at another machine and run the agent there inside a durable remote tmux: survives SSH drops, auto-reconnects, and can discover + attach sessions already running on the host. See [`docs/remote-sessions.md`](docs/remote-sessions.md)
 - **Effort & Ultracode** — set a per-session default effort (`low`–`max`) or enable **ultracode** (dynamic multi-agent workflows). Soft defaults only — switchable anytime with `/effort` in-session. Extended-thinking budget is configurable too
 - **Voice input** — dictate prompts with Deepgram Nova-3 (Web Speech API fallback): toggle recording, auto-silence stop, live level meter (`Ctrl+Shift+V`)
 - **Image input** — paste or drag-and-drop images straight into a session
 - **Gesture control** _(opt-in)_ — a MediaPipe hand-tracking overlay to grab/drag session windows and pinch buttons, hands-free. Enable with `CODEMAN_GESTURE=1` + App Settings → Display
 - **Multi-monitor span** _(macOS)_ — one click opens a browser window maximized across all displays, so floating agent/gesture panels can cross the physical seam
+- **File Viewer button** _(opt-in)_ — a header button that toggles the built-in file browser panel with one tap; enable under App Settings → Display → Header Displays
 - **CJK / IME input** — full composition support for Chinese / Japanese / Korean
 - **OS notifications & hostname-aware titles** — desktop alerts and tab titles are prefixed `codeman:<host>` so multi-host setups stay unambiguous
+
+---
+
+## Isolated Docker Sessions
+
+Run a case inside its own hardened Docker container instead of directly on your host — for security isolation, reproducible toolchains, and one-click portability.
+
+- **One click** — on **New Case → Create New**, tick **🐳 Run in an isolated Docker container**. Codeman creates the case folder, spins up a container with default settings, and starts the agent inside it. No host/image/network fields to fill in.
+- **Resource templates** — expand the checkbox for a **Small / Medium / Large / GPU** preset (memory, CPUs, GPU), or set your own. **Disk is elastic** — storage grows as data flows in, no fixed cap.
+- **Shared per-case container** — many sessions can `docker exec` into the same container; killing one session never tears the container out from under the others.
+- **Hardened by default** — non-root, `--cap-drop ALL`, `no-new-privileges`, PID/memory caps, never `--privileged` or the docker socket; a **sealed** profile (no host credentials, network off) is one toggle away.
+- **Seamless auth, isolated credentials** — your host Claude / Codex / Gemini / OpenCode logins work inside the container out of the box: credentials are seeded (copied) in at launch and onboarding/trust prompts are pre-answered, so no login wizard appears. The container keeps its own copies and never writes back to your host credential stores; only conversation transcripts are shared, and exports never capture secrets.
+- **Move it to another machine** — export a container's whole environment (toolchain + workspace) to a portable `.tar.gz`, `docker load` it on the other side, and import it into a fresh case.
+- **Durable** — reconnect after a restart lands back in the same live agent; a container stop/reboot resumes the conversation from the bind-mounted transcript.
+
+Prerequisite: just Docker (or Podman). The agent base image builds itself automatically on first use, with progress streamed to the UI (or pre-build it with `node scripts/build-agent-image.mjs`). Full guide: [`docs/docker-cases.md`](docs/docker-cases.md).
+
+---
+
+## Remote SSH Sessions
+
+Point a case at another machine and run the agent **there**, over SSH, with the same dashboard, mobile UI, and autonomy features. Your laptop is just a window onto a session that lives on the remote host.
+
+- **Durable by design**: the agent runs inside a dedicated tmux session on the remote host, so a dropped SSH connection, network change, or laptop sleep never kills the run. Reconnecting lands back in the same live conversation.
+- **Auto-reconnect**: a bounded-backoff watcher notices a dead SSH pane and silently reattaches to the still-running remote session (kill-switch in settings; intentional kills are never revived).
+- **Discover & attach**: list the `codeman-*` sessions already running on a host (started by that machine's own Codeman, or by another operator) and attach to one. Attached sessions you don't own **detach on tab close, never kill**.
+- **Shared sessions**: several clients can attach the same remote session at different window sizes without clamping each other; discovery shows a "shared" badge with the client count.
+- **Injection-safe**: every ssh command line flows through a single shell-escaping builder, and host/path/identity fields are schema-guarded.
+
+Set it up under **New Case → Remote** (host, user, identity file, optional jump host). Full design: [`docs/remote-sessions.md`](docs/remote-sessions.md).
+
+---
+
+## Multi-User Mode (opt-in)
+
+Share one Codeman with a small trusted team, each person getting their own login and workspace. **Off by default** — without the flag, nothing changes.
+
+Enable with `codeman web --multiuser` (or `CODEMAN_MULTIUSER=1`). Create the first admin, then manage users from the CLI or the **Users** tab in App Settings:
+
+```bash
+codeman users add alice --admin      # prompts for a password (or --password-stdin)
+codeman users add bob                # a regular user
+codeman users list
+```
+
+- **Per-user spaces** — each user's cases live under `~/codeman-users/<name>/cases`; sessions, cases, search, and real-time events are scoped to their owner. Admins see everything.
+- **Individually revocable logins** — named users with scrypt-hashed passwords in `~/.codeman/users.json`; disable, reset (one-time password), or delete an account at any time. Admin actions are audited to `~/.codeman/admin-audit.jsonl`.
+- **Safer defaults for regular users** — non-admins run Claude in `--permission-mode auto` (Anthropic's classifier-guarded mode); raw shell sessions, cron `launchCommand`, and skip-permissions require an explicit per-user grant.
+
+> ⚠️ **This separates workspaces; it does not sandbox users from each other.** Every session runs as the same OS account, so a determined user's agent can still reach another user's files. For real isolation, pair users with **Docker cases** or run separate instances under separate OS accounts. See [`docs/multi-user-plan.md`](docs/multi-user-plan.md) and the multi-user section of [`docs/security-architecture.md`](docs/security-architecture.md).
 
 ---
 
@@ -483,13 +597,14 @@ When someone authenticates via QR, the desktop shows a notification toast with t
 
 ## Security
 
-Codeman launches sessions with `--dangerously-skip-permissions`, so the web UI is by design a remote-code-execution surface for whoever can reach it — the whole security model exists to control _who_ that is. Recent hardening (v0.9.0 + v0.9.5) closes the browser-driven attack paths that bite self-hosted dev tools. Full model: [`docs/security-architecture.md`](docs/security-architecture.md). **Found a vulnerability?** See [`SECURITY.md`](SECURITY.md) for private disclosure and the list of known limitations.
+By default Codeman launches sessions with `--dangerously-skip-permissions`, so the web UI is by design a remote-code-execution surface for whoever can reach it — the whole security model exists to control _who_ that is. (The startup permission mode is configurable; see below.) Recent hardening (v0.9.0 + v0.9.5) closes the browser-driven attack paths that bite self-hosted dev tools. Full model: [`docs/security-architecture.md`](docs/security-architecture.md). **Found a vulnerability?** See [`SECURITY.md`](SECURITY.md) for private disclosure and the list of known limitations.
 
 ### Network & access
 
-- **Loopback by default** — binds `127.0.0.1`, reachable only from the same machine, so the no-password default is safe out of the box. Binding a non-loopback host without `CODEMAN_PASSWORD` _starts but prints a loud warning_ with three concrete fixes (set a password, loopback + an authenticated tunnel, or explicitly acknowledge with `--allow-unauthenticated-network`)
+- **Loopback by default** — the server binary binds `127.0.0.1`, reachable only from the same machine, so the no-password default is safe out of the box (the guided installer asks about network access and configures the binding + password for you). Binding a non-loopback host without `CODEMAN_PASSWORD` _starts but prints a loud warning_ with three concrete fixes (set a password, loopback + an authenticated tunnel, or explicitly acknowledge with `--allow-unauthenticated-network`)
 - **Optional auth, real sessions** — HTTP Basic via `CODEMAN_USERNAME` (default `admin`) / `CODEMAN_PASSWORD`. Success issues an opaque 256-bit `codeman_session` cookie (`randomBytes(32)`) — validated server-side, not client-signed, so it can't be forged offline (24h TTL, auto-extend, device-context audit log)
 - **Per-IP rate limiting** — 10 failed attempts → `429` with `Retry-After` (15-min decay). A valid cookie or correct password recovers _immediately_ even while an attacker hammers the same IP — important because all tunnel traffic shares one loopback IP. QR auth has its own separate limiter
+- **Configurable permission mode** - `--dangerously-skip-permissions` is only the default. **App Settings → Claude CLI → Startup Mode** can switch new sessions to Anthropic's classifier-guarded `auto` mode (low-prompt, needs Claude Code 2.1.207+), `normal` prompting, or an explicit allowed-tools list. In multi-user mode, non-granted users are forced to `auto`, and shell sessions / skip-permissions require an explicit per-user grant
 
 ### Always-on browser hardening (v0.9.5)
 
@@ -503,7 +618,7 @@ These run for **every** request — before auth, even on the default no-password
 
 ### Input, files & headers
 
-- **Schema-validated inputs** — every API body is checked with Zod v4 schemas; a `CLAUDE_CODE_*` / `OPENCODE_*` / `CODEX_*` env-prefix allowlist gates which settings each CLI can receive
+- **Schema-validated inputs** — every API body is checked with Zod v4 schemas; a `CLAUDE_CODE_*` / `OPENCODE_*` / `CODEX_*` / `GEMINI_*` / `GOOGLE_*` env-prefix allowlist gates which settings each CLI can receive
 - **Path containment** — file routes `realpath` before boundary checks (no TOCTOU); `..`, absolute paths, and symlinks resolving outside the working dir are rejected. Caps: 10 MB text preview / 50 MB raw & download; `/api/download` blocklists sensitive paths (`.env`, `*credentials*`, `~/.ssh/`, `.aws/credentials`). SVG/HTML is served `octet-stream` + `nosniff` + attachment so it downloads rather than executes
 - **Security headers** — `Content-Security-Policy` (`default-src 'self'`, every exception enumerated), `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, HSTS over HTTPS, and CORS reflected **only** for `localhost` / `127.0.0.1` / `::1`
 
@@ -532,6 +647,8 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 
 ## Keyboard Shortcuts
 
+> Ctrl bindings also accept Cmd on macOS.
+
 | Shortcut                        | Action                                                        |
 | ------------------------------- | ------------------------------------------------------------- |
 | `Ctrl/Cmd+W`                    | Kill active session                                           |
@@ -540,24 +657,117 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 | `Alt/Option+[` / `Alt/Option+]` | Previous / next session                                       |
 | `Alt/Option+1`-`Alt/Option+9`   | Switch to tab N (physical keys, so macOS Option layouts work) |
 | `Ctrl+Shift+{` / `Ctrl+Shift+}` | Move active tab left / right                                  |
-| `Ctrl+?` / `Alt/Option+?`       | Show keyboard shortcuts                                       |
-| `Ctrl+L`                        | Clear terminal                                                |
+| `Ctrl/Cmd+L`                    | Clear terminal                                                |
+| `Ctrl+Shift+R`                  | Restore terminal size                                         |
 | `Ctrl+Shift+V`                  | Toggle voice input                                            |
-| `Ctrl/Cmd +/-`                  | Font size                                                     |
-| `Escape`                        | Close panels                                                  |
+| `Ctrl/Cmd +` / `-`              | Font size                                                     |
+| `Ctrl/Cmd+?`                    | Keyboard help                                                 |
+| `Shift+Enter`                   | Insert newline (sent to terminal)                             |
+| `Escape`                        | Close panels & modals                                         |
+
+---
+
+## Driving Codeman from an Agent — Programmatic Guide
+
+For AI agents and automation that control Codeman without a browser: an agent that spins up worker sessions, a CI bot, or **Claude Code running _inside_ a Codeman session orchestrating other sessions**. Everything the UI does is HTTP + a CLI, so an agent can do it too.
+
+### Detect that you're inside Codeman
+
+When a CLI runs in a Codeman-managed session, these environment variables are set — read them instead of hardcoding anything:
+
+| Variable                   | Meaning                                                                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `CODEMAN_MUX=1`            | You're in a managed tmux session. **Never** `tmux kill-session` / `pkill claude` / `pkill tmux` — you'll kill yourself or a sibling. |
+| `CODEMAN_API_URL`          | Base URL of the API (e.g. `https://127.0.0.1:3000`). Use it for every call below.                                                    |
+| `CODEMAN_SESSION_ID`       | _Your own_ session id. Use it to avoid acting on yourself.                                                                           |
+| `CODEMAN_HOOK_SECRET_FILE` | Path to the hook secret (required on `/api/hook-event` while a managed tunnel is up).                                                |
+
+### Rules of the road (read before you POST)
+
+1. **Single-line input only.** Programmatic input is sent as literal text **+ Enter** in one shot. Multi-line strings break the agent TUI (Ink) — send one line, or split into multiple calls.
+2. **Make input idempotent.** Include a stable `clientId` and a monotonic per-session `seq` on `POST …/input`. The server de-duplicates, so a retry after a dropped connection can't double-deliver a prompt.
+3. **Auth.** If `CODEMAN_PASSWORD` is set, send HTTP Basic auth (user `admin` or `CODEMAN_USERNAME`) or a `codeman_session` cookie. The default loopback install is passwordless. A missing `Origin` header is allowed, so plain `curl` works; cross-site browser origins are rejected (CSRF guard).
+4. **Response envelope.** Most endpoints return `{ "success": true, "data": … }` (errors: `{ "success": false, "error", "errorCode" }`). A few legacy GETs return bare bodies — **handle both** (`body.data ?? body`).
+5. **`/api/v1/*`** is a stable alias of `/api/*`.
+
+### Recipes
+
+```bash
+API="${CODEMAN_API_URL:-http://127.0.0.1:3000}"
+# (add  -u admin:"$CODEMAN_PASSWORD"  to each call if a password is set)
+
+# 1. See what's running
+curl -s "$API/api/sessions" | jq '.data // .'
+
+# 2. Spin up a worker session (a "case" = named working dir)
+curl -s -X POST "$API/api/quick-start" \
+  -H 'Content-Type: application/json' \
+  -d '{"caseName":"refactor-auth","mode":"claude","effort":"high"}' | jq
+
+# 3. Send a prompt into a session (exactly-once: clientId + seq)
+curl -s -X POST "$API/api/sessions/$SID/input" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"Run the test suite and summarize failures","useMux":true,"clientId":"agent-1","seq":1}'
+
+# 4. Read the terminal back
+curl -s "$API/api/sessions/$SID/output" | jq -r '.data // .'
+
+# 5. Stream live events (session output, agent activity, status)
+curl -sN "$API/api/events"          # Server-Sent Events
+
+# 6. Schedule recurring work (cron-style job)
+curl -s -X POST "$API/api/cron/jobs" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"nightly-deps","agentType":"claude","workingDir":"/home/me/proj",
+       "promptMode":"inline_text","promptText":"Update dependencies and open a PR",
+       "inputMode":"typed","scheduleType":"daily","dailyTime":"03:00",
+       "enabled":true,"concurrencyPolicy":"warn_only"}' | jq
+
+# 7. Inspect background sub-agents and their transcripts
+curl -s "$API/api/subagents" | jq '.data // .'
+curl -s "$API/api/subagents/$AID/transcript" | jq -r '.data // .'
+
+# 8. Whole-system snapshot (sessions, settings, respawn, stats)
+curl -s "$API/api/status" | jq
+```
+
+### Or use the bundled CLI
+
+The same operations are available as commands (`codeman <cmd>`, aliases in parentheses) — handy from a shell tool inside a session:
+
+```bash
+codeman session start -d /path/to/repo   # (s)  start a session
+codeman session list                     #      list sessions
+codeman session logs <id>                #      tail output
+codeman task add "fix the failing test"  # (t)  queue a task
+codeman ralph start --min-hours 8        # (r)  launch the autonomous loop
+codeman attach <path>                     #      attach a Claude hook context
+```
+
+### Hooks (events flowing _back_ to Codeman)
+
+Codeman registers Claude Code hooks that `POST /api/hook-event` (`permission_prompt`, `idle_prompt`, `stop`, `task_completed`, …) so the dashboard reacts in real time. This endpoint is auth-exempt on loopback but, under a managed tunnel, requires the `X-Codeman-Hook-Secret` header (read it from `$CODEMAN_HOOK_SECRET_FILE`). You normally don't call this by hand — Codeman wires it up — but it's how the autonomy layers "see" what the agent is doing.
+
+> Full endpoint list and request/response shapes follow.
 
 ---
 
 ## API
 
+REST over Fastify — **~190 handlers across 20 route modules**, plus an SSE stream and a WebSocket terminal channel. All responses use the `ApiResponse<T>` envelope (`{success, data}` / `{success, error, errorCode}`); `/api/v1/*` is a stable alias. A representative subset:
+
 ### Sessions
 
-| Method   | Endpoint                  | Description                 |
-| -------- | ------------------------- | --------------------------- |
-| `GET`    | `/api/sessions`           | List all                    |
-| `POST`   | `/api/quick-start`        | Create case + start session |
-| `DELETE` | `/api/sessions/:id`       | Delete session              |
-| `POST`   | `/api/sessions/:id/input` | Send input                  |
+| Method   | Endpoint                   | Description                                                                        |
+| -------- | -------------------------- | ---------------------------------------------------------------------------------- |
+| `GET`    | `/api/sessions`            | List all                                                                           |
+| `POST`   | `/api/quick-start`         | Create case + start session (`{caseName?, mode?, effort?, envOverrides?}`)         |
+| `POST`   | `/api/sessions/:id/input`  | Send input (`{input, useMux?, clientId?, seq?}` — `clientId`+`seq` = exactly-once) |
+| `GET`    | `/api/sessions/:id/output` | Read terminal output                                                               |
+| `GET`    | `/api/sessions/unified`    | Unified live + history list (Session Manager) — `?q=&limit=`                       |
+| `POST`   | `/api/sessions/:id/pin`    | Pin/unpin in the Session Manager (`{pinned}`)                                      |
+| `PUT`    | `/api/session-order`       | Sync tab order across devices (`{order: [ids]}`)                                   |
+| `DELETE` | `/api/sessions/:id`        | Delete session                                                                     |
 
 ### Respawn
 
@@ -573,6 +783,25 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 | ------ | -------------------------------- | ---------------------- |
 | `GET`  | `/api/sessions/:id/ralph-state`  | Get loop state + todos |
 | `POST` | `/api/sessions/:id/ralph-config` | Configure tracking     |
+
+### Orchestrator
+
+| Method | Endpoint                    | Description                     |
+| ------ | --------------------------- | ------------------------------- |
+| `POST` | `/api/orchestrator/start`   | Start orchestration from a goal |
+| `POST` | `/api/orchestrator/approve` | Approve the generated plan      |
+| `GET`  | `/api/orchestrator/status`  | Current phase + progress        |
+| `POST` | `/api/orchestrator/stop`    | Stop and clean up               |
+
+### Cron (scheduled jobs)
+
+| Method           | Endpoint                     | Description             |
+| ---------------- | ---------------------------- | ----------------------- |
+| `GET` / `POST`   | `/api/cron/jobs`             | List / create cron jobs |
+| `PUT` / `DELETE` | `/api/cron/jobs/:id`         | Update / delete a job   |
+| `PUT`            | `/api/cron/jobs/:id/enabled` | Enable / disable        |
+| `POST`           | `/api/cron/jobs/:id/run`     | Run now                 |
+| `GET`            | `/api/cron/jobs/:id/runs`    | Run history             |
 
 ### Subagents
 
@@ -590,6 +819,8 @@ Single-digit selection (1-9), color-coded status, token counts, auto-refresh. De
 | `GET`  | `/api/events`                   | SSE stream                                     |
 | `GET`  | `/api/status`                   | Full app state                                 |
 | `POST` | `/api/hook-event`               | Hook callbacks                                 |
+| `GET`  | `/api/system/update/check`      | Check for a new release                        |
+| `POST` | `/api/system/update`            | Self-update (git-clone installs)               |
 | `POST` | `/api/clipboard`                | Push text to all connected browsers (`{text}`) |
 | `GET`  | `/api/sessions/:id/run-summary` | Timeline + stats                               |
 
@@ -611,11 +842,13 @@ flowchart TB
             S1["Session (PTY)"]
             S2["Session (PTY)"]
             RC["Respawn Controller"]
+            ORC["Orchestrator Loop"]
         end
 
         subgraph Detection["Detection Layer"]
             RT["Ralph Tracker"]
             SW["Subagent Watcher<br/><small>~/.claude/projects/*/subagents</small>"]
+            TW["Team Watcher<br/><small>~/.claude/teams/*</small>"]
         end
 
         subgraph Persistence["Persistence Layer"]
@@ -624,7 +857,7 @@ flowchart TB
         end
 
         subgraph External["External"]
-            CLI["AI CLI<br/><small>Claude Code / OpenCode / Codex</small>"]
+            CLI["AI CLI<br/><small>Claude Code / OpenCode / Codex / Gemini</small>"]
             BG["Background Agents<br/><small>(Task tool)</small>"]
         end
     end
@@ -635,14 +868,17 @@ flowchart TB
     SM --> S1
     SM --> S2
     SM --> RC
+    SM --> ORC
     SM --> SS
     S1 --> RT
     S1 --> SCR
     S2 --> SCR
     RC --> SCR
+    ORC --> SCR
     SCR --> CLI
     SW --> BG
     SW --> SSE
+    TW --> SSE
 ```
 
 ---
@@ -653,7 +889,7 @@ flowchart TB
 npm install
 npx tsx src/index.ts web    # Dev mode
 npm run build               # Production build
-npm test                    # Run tests
+npm run test:ci             # Run tests (the CI suite; browser suites need extra setup)
 ```
 
 See [CLAUDE.md](./CLAUDE.md) for full documentation.
@@ -664,16 +900,16 @@ See [CLAUDE.md](./CLAUDE.md) for full documentation.
 
 The codebase went through a comprehensive 7-phase refactoring that eliminated god objects, centralized configuration, and established modular architecture:
 
-| Phase                    | What changed                                                                                                                       | Impact                                     |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| **Performance**          | Cached endpoints, SSE adaptive batching, buffer chunking                                                                           | Sub-16ms terminal latency                  |
-| **Route extraction**     | `server.ts` split into 13 domain route modules + auth middleware + port interfaces                                                 | **−60%** server.ts LOC (6,736 → 2,697)     |
-| **Domain splitting**     | `types.ts` → 14 domain files, `ralph-tracker` → 7 files, `respawn-controller` → 5 files, `session` → 6 files                       | No more god files                          |
-| **Frontend modules**     | `app.js` → 9 extracted modules (constants, mobile, voice, notifications, keyboard, CJK input, API, Ralph wizard, subagent windows) | **−24%** app.js LOC (15.2K → 11.5K)        |
-| **Config consolidation** | ~70 scattered magic numbers → 9 domain-focused config files                                                                        | Zero cross-file duplicates                 |
-| **Test infrastructure**  | Shared mock library, 12 route test files, consolidated MockSession                                                                 | Testable route handlers via `app.inject()` |
+| Phase                    | What changed                                                                                                 | Impact                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------ |
+| **Performance**          | Cached endpoints, SSE adaptive batching, buffer chunking                                                     | Sub-16ms terminal latency                  |
+| **Route extraction**     | `server.ts` split into 15 domain route modules + auth middleware + port interfaces                           | **−67%** server.ts LOC (6,736 → 2,254)     |
+| **Domain splitting**     | `types.ts` → 16 domain files, `ralph-tracker` → 7 files, `respawn-controller` → 5 files, `session` → 6 files | No more god files                          |
+| **Frontend modules**     | `app.js` → 18 extracted modules across infra, domain & feature layers                                        | app.js core down to **~3.4K LOC**          |
+| **Config consolidation** | ~70 scattered magic numbers → 10 domain-focused config files                                                 | Zero cross-file duplicates                 |
+| **Test infrastructure**  | Shared mock library, 12 route test files, consolidated MockSession                                           | Testable route handlers via `app.inject()` |
 
-Full details: [`docs/code-structure-findings.md`](docs/code-structure-findings.md)
+Full details: [`docs/archive/code-structure-findings.md`](docs/archive/code-structure-findings.md)
 
 ---
 
@@ -709,4 +945,9 @@ MIT — see [LICENSE](LICENSE)
 
 <p align="center">
   <strong>Track sessions. Visualize agents. Control respawn. Let it run while you sleep.</strong>
+</p>
+
+<p align="center">
+  If Codeman saves you time, <a href="https://github.com/Ark0N/Codeman/stargazers">a star</a> helps other people find it.<br>
+  Bug reports and feature ideas are welcome in <a href="https://github.com/Ark0N/Codeman/issues">Issues</a>.
 </p>

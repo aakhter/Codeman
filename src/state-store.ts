@@ -295,6 +295,9 @@ export class StateStore {
     if (this.state.sessionOrder) {
       parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
     }
+    if (this.state.sessionOrder) {
+      parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
+    }
 
     return `{${parts.join(',')}}`;
   }

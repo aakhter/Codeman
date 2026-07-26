@@ -147,6 +147,7 @@ describe('mergeUnifiedSessions', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].lastActivityAt).toBe(new Date('2026-01-01T00:00:00.000Z').getTime());
   });
+
   it('surfaces projectKey from a history input onto the merged item', () => {
     const merged = mergeUnifiedSessions({
       history: [
@@ -182,7 +183,10 @@ describe('mergeUnifiedSessions', () => {
     const live = merged.find((m) => m.sessionId === 'codeman-1');
     expect(live).toBeDefined();
     expect(live!.firstPrompt).toBe('fix the bug');
-    // The history row keyed by the conversation UUID folds into the live owner.
+    // The upstream unified-service alias map (COD-160/161) folds a history row keyed
+    // by the Claude conversation UUID into the owning live session (claudeSessionId
+    // join), so it does NOT surface as a separate item — the firstPrompt reaches the
+    // live row above rather than a duplicate uuid-A entry.
     const hist = merged.find((m) => m.sessionId === 'uuid-A');
     expect(hist).toBeUndefined();
   });
@@ -285,7 +289,9 @@ describe('mergeUnifiedSessions', () => {
     const live = merged.find((m) => m.sessionId === 'codeman-l1');
     expect(live).toBeDefined();
     expect(live!.lastPrompt).toBe('now ship it');
-    // The aliased history row does not surface as a duplicate.
+    // The upstream unified-service alias map (COD-160/161) folds the UUID-keyed
+    // history row into the owning live session, so lastPrompt reaches the live row
+    // above rather than surfacing as a separate uuid-LA entry.
     const hist = merged.find((m) => m.sessionId === 'uuid-LA');
     expect(hist).toBeUndefined();
   });
