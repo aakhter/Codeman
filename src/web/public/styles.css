@@ -527,22 +527,24 @@ body {
 
 .session-tab .tab-close {
   opacity: 0;
-  width: 0;
-  padding: 0;
+  width: 1.5rem;
+  padding: 0.15rem 0.35rem;
+  box-sizing: border-box;
+  flex-shrink: 0;
   font-size: 0.9rem;
   line-height: 1;
   color: var(--text-muted);
   overflow: hidden;
   cursor: default;
   border-radius: 3px;
-  /* Performance: use transform for GPU acceleration */
-  transition: opacity 0.05s ease-out, width 0.05s ease-out, padding 0.05s ease-out;
+  pointer-events: none;
+  transition: opacity 0.05s ease-out;
 }
 
-.session-tab:hover .tab-close {
+.session-tab:hover .tab-close,
+.session-tab .tab-close:focus-visible {
   opacity: 1;
-  width: auto;
-  padding: 0.15rem 0.35rem;
+  pointer-events: auto;
 }
 
 .session-tab .tab-close:hover {
@@ -1096,20 +1098,23 @@ body {
 /* Session tab gear icon */
 .session-tab .tab-gear {
   opacity: 0;
-  width: 0;
-  padding: 0;
+  width: 1.6rem;
+  padding: 0 0.3rem;
+  box-sizing: border-box;
+  flex-shrink: 0;
   font-size: 1rem;
   line-height: 1;
   color: var(--text-muted);
   cursor: pointer;
   overflow: hidden;
-  transition: opacity 0.15s, width 0.15s, padding 0.15s, transform 0.2s;
+  pointer-events: none;
+  transition: opacity 0.15s, transform 0.2s;
 }
 
-.session-tab:hover .tab-gear {
+.session-tab:hover .tab-gear,
+.session-tab .tab-gear:focus-visible {
   opacity: 1;
-  width: auto;
-  padding: 0 0.3rem;
+  pointer-events: auto;
 }
 
 .session-tab .tab-gear:hover {
@@ -1122,19 +1127,22 @@ body {
 /* Pop-out (detach) icon on each tab — mirrors .tab-gear reveal-on-hover. */
 .session-tab .tab-detach {
   opacity: 0;
-  width: 0;
-  padding: 0;
+  width: 1.6rem;
+  padding: 0 0.3rem;
+  box-sizing: border-box;
+  flex-shrink: 0;
   font-size: 0.95rem;
   line-height: 1;
   color: var(--text-muted);
   cursor: pointer;
   overflow: hidden;
-  transition: opacity 0.15s, width 0.15s, padding 0.15s;
+  pointer-events: none;
+  transition: opacity 0.15s;
 }
-.session-tab:hover .tab-detach {
+.session-tab:hover .tab-detach,
+.session-tab .tab-detach:focus-visible {
   opacity: 1;
-  width: auto;
-  padding: 0 0.3rem;
+  pointer-events: auto;
 }
 .session-tab .tab-detach:hover {
   color: var(--accent-hover);
@@ -1149,8 +1157,7 @@ body {
 .session-tab.detached .tab-detach {
   /* Keep the pop-out icon visible while detached as a re-focus affordance. */
   opacity: 1;
-  width: auto;
-  padding: 0 0.3rem;
+  pointer-events: auto;
   color: var(--accent-hover);
 }
 .session-tab .tab-detached-badge {
