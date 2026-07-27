@@ -43,9 +43,10 @@ project (`Ark0N/Codeman`) for reference only. Recent history uses Conventional C
 `fix(test): COD-25 stabilize mobile visual regression`, `feat: COD-18 add attachment history drawer`,
 `docs: COD-18 design session attachment history`. The Jira project key is `COD`; use `COD-###` in branch names, commit
 subjects, and PR titles for Jira-backed work. Never start implementation work on a bug or feature until a Jira issue exists
-for that work. Create and update issues only through Jira MCP, not GitHub Issues or Bitbucket Issues. For this repository,
-use the `mcp_servers.atlassian-aakhter` Jira MCP configuration. For multi-PR efforts, create one parent `COD` issue and
-focused sub-issues per feature/fix PR. Update
+for that work. Create and update issues through the local Jira CLI using `JIRA_PROFILE=work`, site
+`JIRA_SITE=https://aakhter.atlassian.net`, and project `COD` (for example, `JIRA_PROFILE=work JIRA_SITE=https://aakhter.atlassian.net jira create --project COD ...`);
+do not use Jira MCP, GitHub Issues, or Bitbucket Issues. For multi-PR efforts, create one
+parent `COD` issue and focused sub-issues per feature/fix PR. Update
 Jira with branch, PR, commit, and verification before marking work Done. PRs should summarize the problem and approach,
 link Jira/issues, and include screenshots for UI/mobile changes. Before review, run typecheck, lint, format check, lockfile
 check, and targeted tests.
