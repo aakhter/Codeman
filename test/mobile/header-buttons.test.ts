@@ -66,6 +66,83 @@ describe('Header button visibility (E2E)', () => {
     await assertHidden(page, '#headerRight');
   });
 
+  it('refits the active terminal after expanding header utilities on a 393px phone', async () => {
+    const { page } = await createDevicePage(REPRESENTATIVE_DEVICES['standard-phone'], BASE_URL);
+    let sessionId: string | undefined;
+
+    try {
+      sessionId = await page.evaluate(async () => {
+        const createResponse = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workingDir: '/tmp' }),
+        });
+        const createData = await createResponse.json();
+        if (!createData.success) throw new Error(`Failed to create shell session: ${createData.error}`);
+        return createData.data.session.id;
+      });
+
+      await page.evaluate(async (id) => {
+        const startResponse = await fetch(`/api/sessions/${id}/shell`, { method: 'POST' });
+        const startData = await startResponse.json();
+        if (!startData.success) throw new Error(`Failed to start shell session: ${startData.error}`);
+      }, sessionId);
+
+      const sessionTab = page.locator(`.session-tab[data-id="${sessionId}"]`);
+      await sessionTab.waitFor({ state: 'visible' });
+      await sessionTab.click();
+      await page.waitForFunction(
+        (id) => window.app?.activeSessionId === id && window.app?.fitAddon && window.app?.terminal,
+        sessionId
+      );
+
+      const before = await page.evaluate(() => {
+        const proposed = window.app.fitAddon.proposeDimensions();
+        return {
+          terminalRows: window.app.terminal.rows,
+          proposedRows: proposed?.rows,
+        };
+      });
+      expect(before.proposedRows).toBeDefined();
+      expect(before.terminalRows).toBe(before.proposedRows);
+
+      const toggleStartedAt = Date.now();
+      await page.locator('.mobile-header-utility-toggle').click();
+      expect(await page.locator('.mobile-header-utility-toggle').getAttribute('aria-expanded')).toBe('true');
+      const after = (await page
+        .waitForFunction(
+          ({ beforeRows, toggleStartedAt }) => {
+            const proposed = window.app?.fitAddon?.proposeDimensions();
+            const terminalRows = window.app?.terminal?.rows;
+            if (
+              Date.now() - toggleStartedAt < 350 ||
+              proposed === undefined ||
+              terminalRows !== proposed.rows ||
+              proposed.rows >= beforeRows
+            ) {
+              return null;
+            }
+            return { terminalRows, proposedRows: proposed.rows };
+          },
+          { beforeRows: before.terminalRows, toggleStartedAt },
+          { timeout: 2000 }
+        )
+        .then((result) => result.jsonValue())) as { terminalRows: number; proposedRows: number };
+
+      expect(after.proposedRows).toBeDefined();
+      expect(after.terminalRows).toBe(after.proposedRows);
+      expect(after.terminalRows).toBeLessThan(before.terminalRows);
+    } finally {
+      if (sessionId) {
+        const deleteData = await page.evaluate(async (id) => {
+          const response = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+          return response.json();
+        }, sessionId);
+        expect(deleteData.success).toBe(true);
+      }
+    }
+  }, 30000);
+
   it('keeps desktop header utilities visible without a collapse toggle', async () => {
     const { page } = await createDevicePage(REPRESENTATIVE_DEVICES['large-tablet'], BASE_URL);
     await page.waitForTimeout(WAIT.PAGE_SETTLE);
