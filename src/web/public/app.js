@@ -4624,6 +4624,7 @@ class CodemanApp {
     const expanded = header.classList.toggle('mobile-utilities-expanded');
     appShell.classList.toggle('mobile-header-utilities-expanded', expanded);
     toggle.setAttribute('aria-expanded', String(expanded));
+    window.dispatchEvent(new Event('resize'));
   }
 
   _fullRenderSessionTabs() {
