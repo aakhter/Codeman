@@ -1754,6 +1754,107 @@ and effort involved in moving workloads.
     });
   });
 
+  // ========== POST /api/sessions/:id/park (COD-124) ==========
+
+  describe('POST /api/sessions/:id/park', () => {
+    it('parks an active session', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/park`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(harness.ctx._session.park).toHaveBeenCalled();
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:parked', expect.anything());
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:updated', expect.anything());
+    });
+
+    it('returns error for unknown session', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/nonexistent/park',
+      });
+      expect(res.statusCode).toBe(404);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+    });
+
+    it('is idempotent when the session is already parked', async () => {
+      harness.ctx._session.status = 'parked';
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/park`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      // Already parked — park() should NOT be invoked again.
+      expect(harness.ctx._session.park).not.toHaveBeenCalled();
+    });
+  });
+
+  // ========== POST /api/sessions/:id/resume (COD-124) ==========
+
+  describe('POST /api/sessions/:id/resume', () => {
+    it('resumes a parked session', async () => {
+      harness.ctx._session.status = 'parked';
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/resume`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      // COD-118-style requirement: listener wiring must be re-attached before
+      // startInteractive() is called, since park() detaches listeners via PTY exit.
+      expect(harness.ctx.setupSessionListeners).toHaveBeenCalledWith(harness.ctx._session);
+      expect(harness.ctx._session.startInteractive).toHaveBeenCalled();
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:resumed', expect.anything());
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:updated', expect.anything());
+    });
+
+    it('returns error for unknown session', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/nonexistent/resume',
+      });
+      expect(res.statusCode).toBe(404);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+    });
+
+    it('rejects resume when the session is not parked', async () => {
+      // Default mock status is 'idle', not 'parked'.
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/resume`,
+      });
+      expect(res.statusCode).toBe(409);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe(ApiErrorCode.CONFLICT);
+      expect(harness.ctx._session.startInteractive).not.toHaveBeenCalled();
+    });
+
+    // Non-Claude CLIs (codex/opencode/gemini/shell) get a best-effort relaunch
+    // in the same workingDir with NO conversation restore — startInteractive()
+    // is still called (it's the same relaunch path), but no --resume semantics
+    // are claimed or asserted for these modes.
+    it('best-effort relaunches a parked non-claude-mode session (no conversation restore claimed)', async () => {
+      harness.ctx._session.status = 'parked';
+      harness.ctx._session.mode = 'codex';
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/resume`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(harness.ctx._session.startInteractive).toHaveBeenCalled();
+    });
+  });
+
   // ========== GET /api/sessions/:id/output ==========
 
   describe('GET /api/sessions/:id/output', () => {

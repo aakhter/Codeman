@@ -7,7 +7,7 @@
  * - SessionState — full session state (status, tokens, respawn, ralph, CLI metadata)
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
- * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error'
+ * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
  * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
@@ -31,8 +31,13 @@ import type { RespawnConfig } from './respawn.js';
 import type { SessionSource } from './sources.js';
 import type { AttachmentDetectedType } from './tools.js';
 
-/** Status of a Claude session */
-export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error';
+/**
+ * Status of a Claude session.
+ * - `'parked'` (COD-124): detached + CLI stopped, but the session record, workingDir,
+ *   and resumeSessionId are preserved for later resume — distinct from `'stopped'`,
+ *   which existing flows treat as terminal (deleted from SessionManager.sessions).
+ */
+export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error' | 'parked';
 
 /**
  * Claude CLI startup permission mode.

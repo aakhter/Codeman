@@ -6,7 +6,7 @@
  * and QR auth events. Written by `SessionLifecycleLog`, read for debugging.
  *
  * Key exports:
- * - LifecycleEventType — union of 11 event types (created, started, exit, qr_auth, etc.)
+ * - LifecycleEventType — union of 13 event types (created, started, exit, qr_auth, parked, resumed, etc.)
  * - LifecycleEntry — a single timestamped log entry with event, sessionId, and optional metadata
  *
  * No dependencies on other domain modules. LifecycleEntry.sessionId links
@@ -25,7 +25,9 @@ export type LifecycleEventType =
   | 'mux_died' // tmux session died (detected by reconciliation)
   | 'server_started' // Server started (marker for restart detection)
   | 'server_stopped' // Server shutting down
-  | 'qr_auth'; // Device authenticated via QR code scan
+  | 'qr_auth' // Device authenticated via QR code scan
+  | 'parked' // COD-124: session detached from mux + CLI stopped gracefully, preserved for resume
+  | 'resumed'; // COD-124: parked session relaunched (conversation restored for Claude mode only)
 
 /** A single entry in the session lifecycle audit log */
 export interface LifecycleEntry {

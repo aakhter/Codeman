@@ -11,7 +11,7 @@
  * @globals {function} getEventCoords - Unified mouse/touch coordinate extractor
  * @globals {function} escapeHtml - XSS-safe HTML escaping
  * @globals {object} CodemanTabOverflow - Tab overflow layout policy helper
- * @globals {object} SSE_EVENTS - Centralized SSE event type constants (120 event types; must match backend src/web/sse-events.ts)
+ * @globals {object} SSE_EVENTS - Centralized SSE event type constants (122 event types; must match backend src/web/sse-events.ts)
  * @globals {Array} BUILTIN_RESPAWN_PRESETS - Built-in respawn configuration presets
  *
  * @dependency None (first in load order)
@@ -381,6 +381,8 @@ const SSE_EVENTS = {
   SESSION_INTERACTIVE: 'session:interactive',
   SESSION_RUNNING: 'session:running',
   SESSION_STATUS_TELEMETRY: 'session:statusTelemetry',
+  SESSION_PARKED: 'session:parked',
+  SESSION_RESUMED: 'session:resumed',
 
   // Scheduled runs
   SCHEDULED_CREATED: 'scheduled:created',

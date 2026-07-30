@@ -3470,6 +3470,94 @@ export class Session extends EventEmitter {
     }
   }
 
+  /**
+   * COD-124 — park an idle session: detach the tmux session and gracefully
+   * stop the CLI (SIGTERM only, no forced SIGKILL escalation), while
+   * PRESERVING the state.json record, workingDir, and — for claude-mode
+   * sessions — the resumeSessionId needed to restore the conversation later
+   * via `--resume`. The session stays in `SessionManager.sessions` (unlike
+   * `stop()`, which is followed by deletion in every existing caller); it
+   * just shows up in the UI as `status: 'parked'`.
+   *
+   * Deliberately, unlike `stop()`, this does NOT set `_isStopped` and does
+   * NOT call `removeAllListeners()`: park/resume is designed for reusing
+   * this SAME `Session` object later via `startInteractive()` (a flow
+   * `stop()` never had to support — every existing `stop()` caller discards
+   * the object), and `_isStopped` is checked by several async CLI-version
+   * probes / buffer-flush guards that must still function after resume.
+   *
+   * Non-claude modes (codex/opencode/gemini/shell): resume-after-park is a
+   * best-effort relaunch in the same workingDir with NO conversation
+   * restore. `_resumeSessionId` is deliberately left untouched for these
+   * modes here, even though `appendResumeFlag()` in tmux-manager.ts can in
+   * principle carry a resume flag for gemini/codex too — COD-124 only
+   * commits to full resume semantics for claude-mode sessions.
+   *
+   * Remote-attached (owned:false) sessions: `TerminalMultiplexer.killSession()`
+   * already differentiates owned vs. non-owned sessions (COD-105) — a
+   * non-owned session is always DETACHED locally, never killed on the
+   * remote host. park() relies entirely on that existing guarantee; it does
+   * not special-case remote sessions itself.
+   *
+   * Idempotent: calling park() on an already-parked session is a no-op.
+   */
+  async park(): Promise<void> {
+    if (this._status === 'parked') {
+      return;
+    }
+
+    // Preserve the conversation-resume id for claude-mode sessions only.
+    if (this.mode === 'claude') {
+      this._resumeSessionId = this._claudeSessionId || this._resumeSessionId || this.id;
+    }
+
+    this._clearAllTimers();
+    this._desktopSizeClaims.clear();
+
+    if (this.rejectPromise && !this._promptResolved) {
+      this._promptResolved = true;
+      this.rejectPromise(new Error('Session parked'));
+    }
+    this.resolvePromise = null;
+    this.rejectPromise = null;
+
+    this.cleanupTrackerListeners();
+
+    if (this.ptyProcess) {
+      // Graceful SIGTERM only — a parked session is expected to be resumed,
+      // not torn down, so we don't escalate to SIGKILL the way stop() does.
+      try {
+        this.ptyProcess.kill();
+      } catch (err) {
+        console.warn('[Session] park: failed to send SIGTERM to PTY process (may already be dead):', err);
+      }
+      this.ptyProcess = null;
+    }
+
+    this._pid = null;
+    this._currentTaskId = null;
+    this._taskCache.clear();
+    this._childAgentIds = [];
+
+    // Detach the mux/tmux session. killSession() already implements the
+    // COD-105-safe owned/non-owned differentiation (kill vs. local-only
+    // detach for remote-attached sessions) — park() just delegates to it,
+    // same as stop() does for its own killMux=true path.
+    if (this._mux) {
+      try {
+        const detached = await this._mux.killSession(this.id);
+        if (detached) {
+          console.log('[Session] park: detached mux session for:', this.id);
+        }
+      } catch (err) {
+        console.error('[Session] park: failed to detach mux session:', err);
+      }
+    }
+    this._muxSession = null;
+
+    this._status = 'parked';
+  }
+
   assignTask(taskId: string): void {
     this._currentTaskId = taskId;
     this._status = 'busy';

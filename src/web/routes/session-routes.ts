@@ -904,6 +904,74 @@ export function registerSessionRoutes(
   });
 
   // ═══════════════════════════════════════════════════════════════
+  // Park / Resume (COD-124)
+  // ═══════════════════════════════════════════════════════════════
+
+  // ========== Park ==========
+  // Detaches the tmux session + stops the CLI gracefully (SIGTERM), preserving
+  // the session record (workingDir, resumeSessionId/transcript, mux metadata)
+  // for a later /resume. Remote-attached sessions (owned:false) are detached,
+  // never killed — enforced inside Session.park() (COD-105 invariant).
+
+  app.post('/api/sessions/:id/park', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+
+    // Idempotent: parking an already-parked session is a no-op success.
+    if (session.status === 'parked') {
+      return {};
+    }
+
+    try {
+      await session.park();
+      getLifecycleLog().log({
+        event: 'parked',
+        sessionId: id,
+        name: session.name,
+        mode: session.mode,
+      });
+      persistAndBroadcastSession(ctx, session);
+      ctx.broadcast(SseEvent.SessionParked, { id });
+      return {};
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ========== Resume ==========
+  // Claude-mode sessions resume the prior conversation via the preserved
+  // resumeSessionId (startInteractive() passes --resume). Non-Claude CLIs
+  // (codex/opencode/gemini/shell) are a best-effort relaunch in the same
+  // workingDir with NO conversation restore — those CLIs don't have an
+  // equivalent resume mechanism wired here.
+
+  app.post('/api/sessions/:id/resume', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+
+    if (session.status !== 'parked') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, 'Session is not parked');
+    }
+
+    try {
+      // Re-attach listener wiring detached by park()'s PTY exit (see /interactive).
+      await ctx.setupSessionListeners(session);
+      await session.startInteractive();
+      getLifecycleLog().log({
+        event: 'resumed',
+        sessionId: id,
+        name: session.name,
+        mode: session.mode,
+      });
+      persistAndBroadcastSession(ctx, session);
+      ctx.broadcast(SseEvent.SessionResumed, { id });
+      return {};
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════
   // Terminal I/O (input, resize, buffer)
   // ═══════════════════════════════════════════════════════════════
 
