@@ -1,8 +1,9 @@
 # Plan Usage Limits Display — Design & As-Built
 
-> **Status: SHIPPED — deployed to prod + pushed to master, not yet released (2026-06-14).** Opt-in via App Settings → Display → **Plan Usage Limits** (`showPlanUsageLimits`, default OFF). Commits `c82f6c8` (feature) → `4d9d93d` (end-to-end fixes) → `eae225b` (per-user reconcile) → `95fb5fc` (init-snapshot replay). Full suite green (2869), CI green. No changeset/version bump yet.
+> **Status: SHIPPED — deployed to prod + pushed to master, not yet released (2026-06-14).** App Settings → Display → **Plan Usage Limits** (`showPlanUsageLimits`). **Default changed in 1.9.3: desktop now defaults ON, handhelds stay OFF, resolved via `planUsageChipEnabled()`.** The per-device notes further down describing it as opt-in/synced record the original 2026-06-14 shape, not current behavior. Commits `c82f6c8` (feature) → `4d9d93d` (end-to-end fixes) → `eae225b` (per-user reconcile) → `95fb5fc` (init-snapshot replay). Full suite green (2869), CI green. No changeset/version bump yet.
 >
 > Two surfaces from one `statusLine` callback:
+>
 > - **Header chip** (top-right) — account-wide **plan limits**: `5h 35% · 7d 38%`, per-window green/yellow/red.
 > - **In-terminal statusline footer** — the **current session's** status: `Opus 4.8 (1M context)  in:562,411 out:1,188  ctx:56%`.
 >
@@ -10,13 +11,13 @@
 
 ## Problem
 
-Codeman had no proactive view of how much of the Claude subscription is left. It only learned about limits **reactively**: `usage-limit-patterns.ts` regex-scrapes ANSI-stripped terminal output for footer strings like `5-hour limit reached ∙ resets 8pm`, extracting only the **reset time**, and only *after* Claude has already stalled. There was no "73% of your 5-hour limit used" anywhere.
+Codeman had no proactive view of how much of the Claude subscription is left. It only learned about limits **reactively**: `usage-limit-patterns.ts` regex-scrapes ANSI-stripped terminal output for footer strings like `5-hour limit reached ∙ resets 8pm`, extracting only the **reset time**, and only _after_ Claude has already stalled. There was no "73% of your 5-hour limit used" anywhere.
 
 We wanted a live, always-visible gauge so the operator can see a wall coming and pace overnight/autonomous runs — without hijacking the in-terminal statusline, which should keep showing the current session's status.
 
 ## Data source: the statusline `rate_limits` JSON
 
-Claude Code (**v2.1.80+**; prod box runs **2.1.177**) pipes a JSON blob to a configured `statusLine.command` on stdin after each render. On Pro/Max subscriptions that blob includes `rate_limits`. **This is the only channel that exposes plan-limit data** (see rejected alternatives) — so the feature *must* set a statusLine command, which is why the footer is also reconstructed by it (below).
+Claude Code (**v2.1.80+**; prod box runs **2.1.177**) pipes a JSON blob to a configured `statusLine.command` on stdin after each render. On Pro/Max subscriptions that blob includes `rate_limits`. **This is the only channel that exposes plan-limit data** (see rejected alternatives) — so the feature _must_ set a statusLine command, which is why the footer is also reconstructed by it (below).
 
 ### Confirmed schema (real captured payload)
 
@@ -27,11 +28,11 @@ Claude Code (**v2.1.80+**; prod box runs **2.1.177**) pipes a JSON blob to a con
 }
 ```
 
-| Field | Type | Notes |
-|-------|------|-------|
-| `rate_limits.five_hour.used_percentage` | `number` 0–100 | Integer-valued in practice; treat as `number`, don't assume decimals. |
-| `rate_limits.five_hour.resets_at` | `number` | **Epoch SECONDS** (10 digits). `×1000` for a JS `Date`. |
-| `rate_limits.seven_day.{used_percentage,resets_at}` | same | |
+| Field                                               | Type           | Notes                                                                 |
+| --------------------------------------------------- | -------------- | --------------------------------------------------------------------- |
+| `rate_limits.five_hour.used_percentage`             | `number` 0–100 | Integer-valued in practice; treat as `number`, don't assume decimals. |
+| `rate_limits.five_hour.resets_at`                   | `number`       | **Epoch SECONDS** (10 digits). `×1000` for a JS `Date`.               |
+| `rate_limits.seven_day.{used_percentage,resets_at}` | same           |                                                                       |
 
 **Confirmed facts & gotchas:**
 
@@ -46,13 +47,13 @@ The same stdin object also carries `model.display_name`, `context_window.{used_p
 
 ### Alternatives considered & rejected
 
-| Source | Why not |
-|--------|---------|
-| OAuth endpoint `api.anthropic.com/api/oauth/usage` | Undocumented, aggressively rate-limited, needs the **encrypted** OAuth token. Only worth it for *dollar spend*. |
-| `/usage` slash command | Interactive-only, no programmatic output. |
-| On-disk `~/.claude/` files | No usage state persisted (only `daemon.status.json` = auto-updater supervisor). |
-| CLI flag (`claude usage` / `--check-usage`) | Does not exist. |
-| `StopFailure` hook | Carries only an `error_type` on *failure* — no live percentages. |
+| Source                                             | Why not                                                                                                         |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| OAuth endpoint `api.anthropic.com/api/oauth/usage` | Undocumented, aggressively rate-limited, needs the **encrypted** OAuth token. Only worth it for _dollar spend_. |
+| `/usage` slash command                             | Interactive-only, no programmatic output.                                                                       |
+| On-disk `~/.claude/` files                         | No usage state persisted (only `daemon.status.json` = auto-updater supervisor).                                 |
+| CLI flag (`claude usage` / `--check-usage`)        | Does not exist.                                                                                                 |
+| `StopFailure` hook                                 | Carries only an `error_type` on _failure_ — no live percentages.                                                |
 
 ## As-built architecture
 
@@ -88,7 +89,7 @@ curl -sk -X POST "$CODEMAN_API_URL/api/status-telemetry" \
   --data @- 2>/dev/null || echo codeman
 ```
 
-⚠️ **`curl -sk`, not `curl -s`.** Prod is loopback **HTTPS with a self-signed cert**; without `-k`, curl returns `000` and the statusline silently shows nothing. `-k` is safe (loopback only). *(The existing hook curls use `-s` without `-k` and have the same latent issue on HTTPS installs — a known, separate follow-up.)*
+⚠️ **`curl -sk`, not `curl -s`.** Prod is loopback **HTTPS with a self-signed cert**; without `-k`, curl returns `000` and the statusline silently shows nothing. `-k` is safe (loopback only). _(The existing hook curls use `-s` without `-k` and have the same latent issue on HTTPS installs — a known, separate follow-up.)_
 
 ### 2. Endpoint — `POST /api/status-telemetry` (`status-telemetry-routes.ts`)
 
@@ -100,6 +101,7 @@ Fixed path (sessionId in the **body**, not the URL) so the auth exemption is an 
 ### 3. SSE + frontend chip
 
 `session:statusTelemetry` registered in `sse-events.ts` + `constants.js`. `app.js`:
+
 - `_onSessionStatusTelemetry` → `updatePlanUsageChip(data)` + save to `localStorage['codeman:planUsage']`.
 - `updatePlanUsageChip` renders two `5h`/`7d` windows; **per-window color by usage** — green `<60%`, yellow `60–84%`, red `≥85%` (`pu-green/pu-yellow/pu-red`); bold labels/values; reset times in the tooltip. `resets_at*1000 → Date`.
 - Chip element ships hidden (`header-plan-usage--hidden`); `applyHeaderVisibilitySettings()` reveals it client-side when the setting is on (response-viewer pattern — **no `renderIndexHtml` strip**, which kept the "title-only" render contract intact).
@@ -110,22 +112,22 @@ Fixed path (sessionId in the **body**, not the URL) so the auth exemption is an 
 2. **Fresh load / reconnect:** server stores the latest in `plan-usage-latest.ts`; `getLightState()` includes it as `planUsage`; the per-connection **init snapshot** replays it; `handleInit` paints the chip immediately (authoritative over localStorage). Null until the first telemetry of the process.
 3. **Offline / cross-restart:** `restorePlanUsageChip()` reads `localStorage` on load (12h freshness guard).
 
-### 5. Injection lifecycle — works for *any* user, never self-destructs
+### 5. Injection lifecycle — works for _any_ user, never self-destructs
 
 The setting `showPlanUsageLimits` is **synced** (in `settings.json`, not a per-device `displayKey`).
 
-- **On toggle** (`PUT /api/settings`, `system-routes.ts`): reconcile the exporter across **all active Claude sessions' working dirs** — inject on enable, remove on disable. Server-side and authoritative, so existing sessions get the footer + feed the chip *immediately*, no new session needed, no dependency on a client's synced localStorage.
+- **On toggle** (`PUT /api/settings`, `system-routes.ts`): reconcile the exporter across **all active Claude sessions' working dirs** — inject on enable, remove on disable. Server-side and authoritative, so existing sessions get the footer + feed the chip _immediately_, no new session needed, no dependency on a client's synced localStorage.
 - **On session create** (`session-routes.ts`): **ADD-ONLY** — inject when `statusLineTelemetry` is true; **never remove**. Sessions in a repo share one `settings.local.json`, so a single create-with-false (e.g. a client whose synced setting hadn't loaded) must not yank the statusLine out from under other live sessions. Removal happens only via the explicit toggle.
 - `applyStatusLineConfig()` is **`isOurs`-guarded** (matches `/api/status-telemetry`), so a user's own hand-authored statusLine is never touched, and it **updates an out-of-date ours-command** so fixes (e.g. `-k`) propagate. **No `CASES_DIR` gate** — runs for linked cases / real repos (where sessions actually run), mirroring `updateCaseModel`.
 
 ## Codeman-specific considerations
 
 1. **Account-global limits.** The 5h/7d pools are shared across all sessions on the account → one shared header chip (freshest sample wins), not a per-tab bar.
-2. **The footer is owned, by necessity.** A statusLine command always replaces Claude's default footer. Since `rate_limits` *only* arrives via statusLine, we reconstruct a useful **session-status** footer (model · tokens · ctx %) from the same payload rather than showing the limits there.
+2. **The footer is owned, by necessity.** A statusLine command always replaces Claude's default footer. Since `rate_limits` _only_ arrives via statusLine, we reconstruct a useful **session-status** footer (model · tokens · ctx %) from the same payload rather than showing the limits there.
 3. **`isOurs`-guarded.** Never removes/overwrites a user's own statusLine on disable; only manages the Codeman exporter.
 4. **Security envelope unchanged.** The exporter runs arbitrary shell every render — same trust model as the hook curls (localhost + `$CODEMAN_HOOK_SECRET_FILE`); reuses the hook-secret gate.
 5. **Claude-only.** OpenCode/Codex emit no `rate_limits` JSON; injection is gated to `mode === 'claude'`.
-6. **Future — auto-resume synergy.** Live percentages would let `SessionAutoOps` pre-arm *before* the wall instead of reacting to the stall footer. Not built.
+6. **Future — auto-resume synergy.** Live percentages would let `SessionAutoOps` pre-arm _before_ the wall instead of reacting to the stall footer. Not built.
 
 ## Files shipped
 
@@ -154,7 +156,7 @@ The first "shipped" build passed every test and was broken in practice. End-to-e
 
 - **Schema stability.** `rate_limits` is officially shipped but undocumented in exact shape; the parser is tolerant (renders whatever windows exist, ignores unknown).
 - **Hook `curl -s` parity.** Hooks share the no-`-k` issue on HTTPS installs — worth fixing the hook curl too (separate change; covered by `cod54` tests).
-- **Disable cleanliness.** Disabling removes the statusLine from active sessions; a brand-new session created by a *stale* client could re-add it (chip still hidden, footer benign). Fully server-authoritative create-time injection (read the setting server-side instead of the payload flag) would close this — deferred.
+- **Disable cleanliness.** Disabling removes the statusLine from active sessions; a brand-new session created by a _stale_ client could re-add it (chip still hidden, footer benign). Fully server-authoritative create-time injection (read the setting server-side instead of the payload flag) would close this — deferred.
 
 ## Verification appendix — how the schema was captured (reproducible)
 

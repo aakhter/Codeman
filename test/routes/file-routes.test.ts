@@ -14,6 +14,7 @@ import { createRouteTestHarness, type RouteTestHarness } from './_route-test-uti
 import { createMockRouteContext } from '../mocks/index.js';
 import { registerFileRoutes } from '../../src/web/routes/file-routes.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
+import { ApiErrorCode } from '../../src/types.js';
 
 // Mock fs/promises for file operations
 vi.mock('node:fs/promises', () => ({
@@ -21,7 +22,7 @@ vi.mock('node:fs/promises', () => ({
     readdir: vi.fn(async () => []),
     readFile: vi.fn(async () => 'file content'),
     writeFile: vi.fn(async () => undefined),
-    stat: vi.fn(async () => ({ size: 100, isFile: () => true })),
+    stat: vi.fn(async () => ({ size: 100, isFile: () => true, isDirectory: () => true })),
     mkdir: vi.fn(async () => undefined),
     mkdtemp: vi.fn(async () => '/tmp/codeman-preview-test'),
     rename: vi.fn(async () => undefined),
@@ -96,8 +97,11 @@ describe('file-routes', () => {
         throw new Error('ENOENT');
       }
 
-      return { size: 100, isFile: () => true, mtimeMs: 12345 } as never;
+      return { size: 100, isFile: () => true, isDirectory: () => true, mtimeMs: 12345 } as never;
     });
+    mockedReadFile.mockImplementation(async (path) =>
+      String(path).endsWith('settings.json') ? ('{}' as never) : ('file content' as never)
+    );
     mockedMkdir.mockResolvedValue(undefined as never);
     mockedMkdtemp.mockResolvedValue('/tmp/codeman-preview-test' as never);
     mockedRename.mockResolvedValue(undefined as never);
@@ -111,6 +115,291 @@ describe('file-routes', () => {
 
   afterEach(async () => {
     await harness.app.close();
+  });
+
+  // ========== GET /api/filesystem/browse ==========
+
+  describe('GET /api/filesystem/browse', () => {
+    it('lists the active session folder lazily with directories first', async () => {
+      mockedReaddir.mockResolvedValueOnce([
+        {
+          name: 'notes.txt',
+          isDirectory: () => false,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        },
+        {
+          name: 'src',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as never);
+
+      const path = harness.ctx._session.workingDir;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/browse?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(path)}`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.path).toBe(path);
+      expect(body.data.roots[0]).toEqual({ label: 'Current Folder', path });
+      expect(
+        body.data.entries.map((entry: { name: string; type: string; previewKind?: string }) => [
+          entry.name,
+          entry.type,
+          entry.previewKind,
+        ])
+      ).toEqual([
+        ['src', 'directory', undefined],
+        ['notes.txt', 'file', 'text'],
+      ]);
+    });
+
+    it('rejects paths outside the configured roots', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/browse?path=${encodeURIComponent('/tmp/not-an-allowed-root')}`,
+      });
+
+      expect(res.statusCode).toBe(403);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
+    });
+
+    it('does not expose hidden entries or symlinks that escape the allowed roots', async () => {
+      const root = harness.ctx._session.workingDir;
+      mockedReaddir.mockResolvedValueOnce([
+        {
+          name: '.secret',
+          isDirectory: () => false,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        },
+        {
+          name: 'outside-link',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+      ] as never);
+      mockedRealpathSync.mockImplementation((path: string) =>
+        path === `${root}/outside-link` ? ('/etc/shadow' as never) : (path as never)
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/browse?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(root)}`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data.entries).toEqual([]);
+    });
+
+    it('returns 404 for an unknown session scope', async () => {
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: '/api/filesystem/browse?sessionId=missing-session',
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.NOT_FOUND });
+    });
+
+    it('rejects direct navigation into a hidden descendant', async () => {
+      const hidden = `${harness.ctx._session.workingDir}/.git`;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/browse?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(hidden)}`,
+      });
+
+      expect(res.statusCode).toBe(403);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
+    });
+  });
+
+  // ========== Multi-user scoping for the filesystem picker ==========
+  //
+  // The picker is a SECOND file-serving surface and does not inherit the
+  // attachment guard's ownership scoping, so both of its endpoints have to do
+  // it themselves. Two distinct holes are covered here:
+  //   1. `sessionId` was used without an owner check, so any user could pin
+  //      another user's workingDir as a browse root.
+  //   2. `Home` and `CASES_DIR` were unconditional roots, and per-user spaces
+  //      live INSIDE homedir(), so Home alone exposed every other user's files.
+  describe('filesystem picker multi-user scoping', () => {
+    const SPACES = '/tmp/codeman-test-user-spaces';
+    let prevMultiUser: string | undefined;
+    let prevSpaces: string | undefined;
+
+    beforeEach(() => {
+      prevMultiUser = process.env.CODEMAN_MULTIUSER;
+      prevSpaces = process.env.CODEMAN_USER_SPACES_DIR;
+      process.env.CODEMAN_MULTIUSER = '1';
+      process.env.CODEMAN_USER_SPACES_DIR = SPACES;
+    });
+
+    afterEach(() => {
+      if (prevMultiUser === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = prevMultiUser;
+      if (prevSpaces === undefined) delete process.env.CODEMAN_USER_SPACES_DIR;
+      else process.env.CODEMAN_USER_SPACES_DIR = prevSpaces;
+    });
+
+    const harnessAs = (role: 'admin' | 'user', username: string) =>
+      createRouteTestHarness(registerFileRoutes, { authUser: { username, role } });
+
+    it('404s a browse scoped to another user session instead of adopting its folder', async () => {
+      const scoped = await harnessAs('user', 'bob');
+      scoped.ctx._session.owner = 'alice';
+      try {
+        const res = await scoped.app.inject({
+          method: 'GET',
+          url: `/api/filesystem/browse?sessionId=${scoped.ctx._sessionId}`,
+        });
+
+        expect(res.statusCode).toBe(404);
+        expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.NOT_FOUND });
+        // The decisive part: alice's folder must not have leaked in as a root.
+        expect(res.body).not.toContain(scoped.ctx._session.workingDir);
+      } finally {
+        await scoped.app.close();
+      }
+    });
+
+    it('404s a preview scoped to another user session', async () => {
+      const scoped = await harnessAs('user', 'bob');
+      scoped.ctx._session.owner = 'alice';
+      try {
+        const res = await scoped.app.inject({
+          method: 'GET',
+          url: `/api/filesystem/preview?sessionId=${scoped.ctx._sessionId}&path=${encodeURIComponent(
+            `${scoped.ctx._session.workingDir}/notes.md`
+          )}`,
+        });
+
+        expect(res.statusCode).toBe(404);
+      } finally {
+        await scoped.app.close();
+      }
+    });
+
+    it('confines a regular user to their own space, never Home or the shared cases dir', async () => {
+      const scoped = await harnessAs('user', 'bob');
+      try {
+        mockedReaddir.mockResolvedValueOnce([] as never);
+        const res = await scoped.app.inject({ method: 'GET', url: '/api/filesystem/browse' });
+
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.roots).toEqual([{ label: 'My Space', path: `${SPACES}/bob` }]);
+        expect(body.data.path).toBe(`${SPACES}/bob`);
+      } finally {
+        await scoped.app.close();
+      }
+    });
+
+    it("refuses to browse another user's space by absolute path", async () => {
+      const scoped = await harnessAs('user', 'bob');
+      try {
+        const res = await scoped.app.inject({
+          method: 'GET',
+          url: `/api/filesystem/browse?path=${encodeURIComponent(`${SPACES}/alice/cases`)}`,
+        });
+
+        expect(res.statusCode).toBe(403);
+        expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
+      } finally {
+        await scoped.app.close();
+      }
+    });
+
+    it('keeps the host-wide roots for a multi-user admin', async () => {
+      const scoped = await harnessAs('admin', 'root');
+      try {
+        mockedReaddir.mockResolvedValueOnce([] as never);
+        const res = await scoped.app.inject({ method: 'GET', url: '/api/filesystem/browse' });
+
+        expect(res.statusCode).toBe(200);
+        const labels = JSON.parse(res.body).data.roots.map((root: { label: string }) => root.label);
+        expect(labels).toContain('Home');
+        expect(labels).not.toContain('My Space');
+      } finally {
+        await scoped.app.close();
+      }
+    });
+  });
+
+  // ========== GET /api/filesystem/preview ==========
+
+  describe('GET /api/filesystem/preview', () => {
+    it('serves Markdown as inert plain text inside the active session root', async () => {
+      const path = `${harness.ctx._session.workingDir}/notes.md`;
+      mockedReadFile.mockImplementation(async (candidate) =>
+        candidate === path ? ('# Safe heading\n<script>alert(1)</script>' as never) : ('{}' as never)
+      );
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/preview?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(path)}`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('text/plain');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.body).toContain('<script>alert(1)</script>');
+    });
+
+    it('rejects unsupported file types', async () => {
+      const path = `${harness.ctx._session.workingDir}/archive.exe`;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/preview?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(path)}`,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
+    });
+
+    it('rejects hidden files even when requested directly', async () => {
+      const path = `${harness.ctx._session.workingDir}/.env`;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/preview?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(path)}`,
+      });
+
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('rejects a preview symlink whose real path escapes every allowed root', async () => {
+      const path = `${harness.ctx._session.workingDir}/outside.png`;
+      mockedRealpathSync.mockImplementation((candidate: string) =>
+        candidate === path ? ('/etc/shadow' as never) : (candidate as never)
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/preview?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(path)}`,
+      });
+
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('caps text previews at 2MB', async () => {
+      const path = `${harness.ctx._session.workingDir}/large.txt`;
+      mockedStat.mockImplementation(async (candidate) =>
+        candidate === path
+          ? ({ size: 2 * 1024 * 1024 + 1, isFile: () => true, isDirectory: () => false } as never)
+          : ({ size: 100, isFile: () => true, isDirectory: () => true } as never)
+      );
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/filesystem/preview?sessionId=${harness.ctx._sessionId}&path=${encodeURIComponent(path)}`,
+      });
+
+      expect(res.statusCode).toBe(413);
+    });
   });
 
   // ========== GET /api/sessions/:id/files ==========
@@ -714,7 +1003,9 @@ describe('file-routes', () => {
 
       expect(rawRes.statusCode).toBe(200);
       expect(rawRes.headers['content-type']).toBe(mimeType);
-      expect(rawRes.headers['content-disposition']).toBe(`inline; filename="${fileName}"`);
+      expect(rawRes.headers['content-disposition']).toBe(
+        `inline; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+      );
     });
 
     it('classifies XLSX metadata as binary and redirects preview to raw bytes', async () => {
@@ -823,7 +1114,9 @@ describe('file-routes', () => {
 
       expect(rawRes.statusCode).toBe(200);
       expect(rawRes.headers['content-type']).toBe(mimeType);
-      expect(rawRes.headers['content-disposition']).toBe(`inline; filename="${fileName}"`);
+      expect(rawRes.headers['content-disposition']).toBe(
+        `inline; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+      );
     });
 
     it.each([['/mnt/c/notes/readme.md'], ['/mnt/c/notes/run.txt']])(
@@ -1266,7 +1559,10 @@ describe('file-routes', () => {
 
         expect(res.statusCode).toBe(200);
         expect(res.headers['content-type']).toBe(mediaType);
-        expect(res.headers['content-disposition']).toBe(`attachment; filename="${filePath.split('/').at(-1)}"`);
+        const downloadName = filePath.split('/').at(-1) as string;
+        expect(res.headers['content-disposition']).toBe(
+          `attachment; filename="${downloadName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`
+        );
         expect(res.rawPayload).toEqual(content);
         expect(mockedCreateReadStream).toHaveBeenCalledWith(`${harness.ctx._session.workingDir}/${filePath}`);
       }

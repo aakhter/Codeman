@@ -757,7 +757,7 @@ Object.assign(CodemanApp.prototype, {
             // is shared by sibling sessions, so create-with-false must not yank it
             // — see the comment in session-routes create). Disabling the setting
             // removes it via the App Settings toggle path (system-routes), not here.
-            statusLineTelemetry: globalSettings.showPlanUsageLimits === true,
+            statusLineTelemetry: this.planUsageChipEnabled(globalSettings),
             // COD-179: spawn the tmux window at this browser's real dims so the
             // TUI's first frames aren't painted at the 120x40 legacy default.
             ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
@@ -2434,6 +2434,25 @@ Object.assign(CodemanApp.prototype, {
       console.error('Failed to link case:', err);
       this.showToast('Failed to link case: ' + err.message, 'error');
     }
+  },
+
+  openLinkCasePathPicker() {
+    const pathInput = document.getElementById('linkCasePath');
+    PathPicker.open({
+      title: 'Select Existing Project Folder',
+      initialPath: pathInput.value.trim(),
+      directoriesOnly: true,
+      onSelect: (path) => {
+        pathInput.value = path;
+        const nameInput = document.getElementById('linkCaseName');
+        if (!nameInput.value.trim()) {
+          const folderName = path.split('/').filter(Boolean).pop() || '';
+          if (/^[\p{L}\p{N}_-]+$/u.test(folderName)) nameInput.value = folderName;
+        }
+        pathInput.focus();
+        pathInput.setSelectionRange(path.length, path.length);
+      },
+    });
   },
 
   async linkRemoteCase() {

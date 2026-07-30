@@ -40,10 +40,21 @@
     og: { background: '#0d0d0d', foreground: '#e0e0e0', cursor: '#e0e0e0', cursorAccent: '#0d0d0d', selection: 'rgba(255,255,255,0.3)', black: '#0d0d0d', red: '#ff6b6b', green: '#51cf66', yellow: '#ffd43b', blue: '#339af0', magenta: '#cc5de8', cyan: '#22b8cf', white: '#e0e0e0', brightBlack: '#495057', brightRed: '#ff8787', brightGreen: '#69db7c', brightYellow: '#ffe066', brightBlue: '#5c7cfa', brightMagenta: '#da77f2', brightCyan: '#66d9e8', brightWhite: '#ffffff' },
     'daylight-green': { background: '#161b23', foreground: '#dfe6ef', cursor: '#2fd3aa', cursorAccent: '#161b23', selection: 'rgba(47,211,170,0.22)', black: '#161b23', red: '#ff8585', green: '#34d8a0', yellow: '#f0c25a', blue: '#5cc6e8', magenta: '#c79af2', cyan: '#2bcbbb', white: '#dfe6ef', brightBlack: '#5b6675', brightRed: '#ffa0a0', brightGreen: '#5fe6b8', brightYellow: '#ffd884', brightBlue: '#82d4ee', brightMagenta: '#d6b3f7', brightCyan: '#5ee0d4', brightWhite: '#f3f6fa' },
     'daylight-blue': { background: '#161b23', foreground: '#dfe6ef', cursor: '#38b6f0', cursorAccent: '#161b23', selection: 'rgba(56,182,240,0.22)', black: '#161b23', red: '#ff8585', green: '#34d8a0', yellow: '#f0c25a', blue: '#5cc6e8', magenta: '#c79af2', cyan: '#2bcbbb', white: '#dfe6ef', brightBlack: '#5b6675', brightRed: '#ffa0a0', brightGreen: '#5fe6b8', brightYellow: '#ffd884', brightBlue: '#82d4ee', brightMagenta: '#d6b3f7', brightCyan: '#5ee0d4', brightWhite: '#f3f6fa' },
+    'paper-gray': { background: '#f6f8fa', foreground: '#1f2328', cursor: '#0969da', cursorAccent: '#ffffff', selection: 'rgba(9,105,218,0.2)', black: '#24292f', red: '#cf222e', green: '#1a7f37', yellow: '#9a6700', blue: '#0969da', magenta: '#8250df', cyan: '#1b7c83', white: '#59636e', brightBlack: '#6e7781', brightRed: '#a40e26', brightGreen: '#116329', brightYellow: '#7d4e00', brightBlue: '#0550ae', brightMagenta: '#6639ba', brightCyan: '#116b75', brightWhite: '#1f2328' },
+    'solarized-light': { background: '#fdf6e3', foreground: '#586e75', cursor: '#147ba3', cursorAccent: '#fdf6e3', selection: 'rgba(38,139,210,0.2)', black: '#eee8d5', red: '#dc322f', green: '#758600', yellow: '#9b7800', blue: '#147ba3', magenta: '#d33682', cyan: '#2a9189', white: '#073642', brightBlack: '#93a1a1', brightRed: '#cb4b16', brightGreen: '#657b83', brightYellow: '#586e75', brightBlue: '#268bd2', brightMagenta: '#6c71c4', brightCyan: '#2aa198', brightWhite: '#002b36' },
+    'catppuccin-latte': { background: '#eff1f5', foreground: '#4c4f69', cursor: '#1e66f5', cursorAccent: '#ffffff', selection: 'rgba(30,102,245,0.18)', black: '#5c5f77', red: '#d20f39', green: '#3b8f2b', yellow: '#a86605', blue: '#1e66f5', magenta: '#8839ef', cyan: '#177f86', white: '#6c6f85', brightBlack: '#7c7f93', brightRed: '#b50930', brightGreen: '#2f7622', brightYellow: '#8b5604', brightBlue: '#174fbf', brightMagenta: '#6f2bc5', brightCyan: '#116b71', brightWhite: '#4c4f69' },
+    'rose-pine-dawn': { background: '#faf4ed', foreground: '#575279', cursor: '#286983', cursorAccent: '#fffaf3', selection: 'rgba(40,105,131,0.2)', black: '#575279', red: '#b4637a', green: '#286983', yellow: '#96681f', blue: '#477f91', magenta: '#907aa9', cyan: '#3f7f8b', white: '#6e6a86', brightBlack: '#797593', brightRed: '#984d66', brightGreen: '#1f5266', brightYellow: '#7d5417', brightBlue: '#386b7c', brightMagenta: '#765f90', brightCyan: '#326b76', brightWhite: '#575279' },
   };
+  const CODEMAN_LIGHT_SKINS = new Set(['paper-gray', 'solarized-light', 'catppuccin-latte', 'rose-pine-dawn']);
+  function currentSkin() {
+    return (typeof document !== 'undefined' && document.documentElement.dataset.skin) || 'daylight-blue';
+  }
   function currentXtermTheme() {
-    const skin = (typeof document !== 'undefined' && document.documentElement.dataset.skin) || 'daylight-blue';
+    const skin = currentSkin();
     return CODEMAN_XTERM_THEMES[skin] || CODEMAN_XTERM_THEMES['daylight-blue'];
+  }
+  function currentSkinIsLight(skin = currentSkin()) {
+    return CODEMAN_LIGHT_SKINS.has(skin);
   }
 
   global.CodemanTerminalInput = {
@@ -54,6 +65,7 @@
   };
   global.CODEMAN_XTERM_THEMES = CODEMAN_XTERM_THEMES;
   global.codemanCurrentXtermTheme = currentXtermTheme;
+  global.codemanCurrentSkinIsLight = currentSkinIsLight;
 })(window);
 
 Object.assign(CodemanApp.prototype, {
@@ -263,6 +275,7 @@ Object.assign(CodemanApp.prototype, {
       lineHeight: 1.2,
       cursorBlink: false,
       cursorStyle: 'block',
+      minimumContrastRatio: window.codemanCurrentSkinIsLight() ? 4.5 : 1,
       scrollback: scrollback,
       allowTransparency: true,
       allowProposedApi: true,
@@ -1329,64 +1342,6 @@ Object.assign(CodemanApp.prototype, {
       return references;
     };
 
-    const readLogicalLine = (buffer, bufferLineNumber) => {
-      let startRow = bufferLineNumber - 1;
-      let line = buffer.getLine(startRow);
-      if (!line) return null;
-
-      while (startRow > 0 && line.isWrapped) {
-        startRow--;
-        line = buffer.getLine(startRow);
-        if (!line) return null;
-      }
-
-      let endRow = startRow;
-      while (buffer.getLine(endRow + 1)?.isWrapped) endRow++;
-
-      const rows = [];
-      const offsetPositions = [];
-      let lineText = '';
-      for (let row = startRow; row <= endRow; row++) {
-        const current = buffer.getLine(row);
-        if (!current) break;
-        const text = current.translateToString(row === endRow);
-        rows.push({ y: row + 1, startIndex: lineText.length, length: text.length });
-
-        // Detector offsets are JavaScript string offsets, while xterm link
-        // ranges use terminal cells. Build the bridge from the real buffer
-        // cells so wide CJK/emoji cells and combining sequences do not shift a
-        // later path's underline or touch hit target.
-        const rowPositions = [];
-        if (typeof current.getCell === 'function') {
-          for (let column = 0; column < self.terminal.cols; column++) {
-            const cell = current.getCell(column);
-            if (!cell || cell.getWidth() === 0) continue;
-            const chars = cell.getChars() || ' ';
-            for (let index = 0; index < chars.length; index++) {
-              rowPositions.push({ x: column + 1, y: row + 1 });
-            }
-          }
-        }
-        for (let index = 0; index < text.length; index++) {
-          offsetPositions.push(rowPositions[index] || { x: index + 1, y: row + 1 });
-        }
-        lineText += text;
-      }
-      return { lineText, rows, offsetPositions };
-    };
-
-    const positionForOffset = (logicalLine, offset) => {
-      if (logicalLine.offsetPositions[offset]) return logicalLine.offsetPositions[offset];
-      for (let index = 0; index < logicalLine.rows.length; index++) {
-        const row = logicalLine.rows[index];
-        const rowEnd = row.startIndex + row.length;
-        if (offset < rowEnd || index === logicalLine.rows.length - 1) {
-          return { x: Math.max(1, offset - row.startIndex + 1), y: row.y };
-        }
-      }
-      return { x: 1, y: logicalLine.rows[0]?.y || 1 };
-    };
-
     // Debug: Track if provider is being invoked
     let lastInvokedLine = -1;
 
@@ -1407,62 +1362,127 @@ Object.assign(CodemanApp.prototype, {
           return;
         }
 
-        const logicalLine = readLogicalLine(buffer, bufferLineNumber);
-        const lineText = logicalLine?.lineText || '';
+        // Stitch the LOGICAL line back together.
+        //
+        // xterm invokes this provider per visible ROW, and translateToString returns
+        // that row alone (the old comment here claimed otherwise). A URL or path
+        // longer than the terminal is wide therefore matched only as far as the row
+        // boundary, and the link opened a PREFIX of the real target. Walk out to both
+        // ends of the continuation, match against the joined text, and map offsets
+        // back to (x, y) so a link can span rows.
+        //
+        // Two different kinds of continuation, and handling only the first is not
+        // enough:
+        //   1. SOFT wrap: the emulator ran out of columns and flags the next row
+        //      `isWrapped`.
+        //   2. HARD wrap: the program did its own wrapping and emitted a real
+        //      newline, so nothing is flagged. Ink does this, which is why Claude
+        //      Code's own `/login` URL was cut at the window edge, and why the
+        //      clickable part grew when the window was widened.
+        // A row that fills the full width is treated as continuing into the next:
+        // that is the signal a hard wrap leaves behind, and a line that genuinely
+        // ended would stop short of the last column.
+        const cols = self.terminal.cols;
+        const rowAt = (r) => buffer.getLine(r - 1);
+        const continuesPrevious = (r) => {
+          if (r <= 1) return false;
+          if (rowAt(r)?.isWrapped) return true;
+          const prev = rowAt(r - 1);
+          return !!prev && prev.translateToString(true).length >= cols;
+        };
+
+        // Bounded so a screenful of full-width output (wide tables, box drawing)
+        // cannot make every hover stitch and re-scan the entire viewport.
+        const MAX_STITCHED_ROWS = 12;
+        let startRow = bufferLineNumber;
+        while (startRow > 1 && bufferLineNumber - startRow < MAX_STITCHED_ROWS && continuesPrevious(startRow)) {
+          startRow--;
+        }
+        let endRow = bufferLineNumber;
+        while (endRow < buffer.length && endRow - startRow < MAX_STITCHED_ROWS && continuesPrevious(endRow + 1)) {
+          endRow++;
+        }
+
+        const rowTexts = [];
+        for (let r = startRow; r <= endRow; r++) {
+          const row = rowAt(r);
+          if (!row) break;
+          // Only the final row may be trimmed. Continuation rows fill the width by
+          // definition, and trimming one would shift every later offset.
+          rowTexts.push(row.translateToString(r === endRow));
+        }
+        const lineText = rowTexts.join('');
+
+        /** Map an offset in the stitched text back to a 1-based terminal cell.
+         * Detector offsets are JavaScript string offsets, while xterm link
+         * ranges use terminal cells. Bridge them from the real buffer cells so
+         * wide CJK/emoji cells and combining sequences do not shift a later
+         * path's underline or touch hit target. */
+        const offsetPositions = [];
+        for (let i = 0; i < rowTexts.length; i++) {
+          const row = rowAt(startRow + i);
+          const text = rowTexts[i];
+          const rowPositions = [];
+          if (row && typeof row.getCell === 'function') {
+            for (let column = 0; column < cols; column++) {
+              const cell = row.getCell(column);
+              if (!cell || cell.getWidth() === 0) continue;
+              const chars = cell.getChars() || ' ';
+              for (let k = 0; k < chars.length; k++) rowPositions.push({ x: column + 1, y: startRow + i });
+            }
+          }
+          for (let k = 0; k < text.length; k++) {
+            offsetPositions.push(rowPositions[k] || { x: k + 1, y: startRow + i });
+          }
+        }
+        const coordAt = (index) => {
+          if (offsetPositions[index]) return offsetPositions[index];
+          // Past-the-end offset (an exclusive link end): one cell past the last.
+          const last = offsetPositions[offsetPositions.length - 1];
+          return last ? { x: last.x + 1, y: last.y } : { x: index + 1, y: startRow };
+        };
 
         if (!lineText || !lineText.includes('/')) {
           callback(undefined);
           return;
         }
 
-        // Byte occupancy + start slots keep overlap checks and ordered emission
-        // linear in logical-line length. Accepted links occupy disjoint spans,
-        // and each detector makes at most one additional pass over a span.
-        const occupied = new Uint8Array(lineText.length);
-        const linkSlots = new Array(lineText.length);
+        const links = [];
         const originatingSessionId = self.activeSessionId;
         const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
 
-        const addLink = ({ text, startIndex, endIndex, activate }) => {
-          if (!logicalLine || startIndex < 0 || endIndex <= startIndex || endIndex > lineText.length) return;
-          for (let index = startIndex; index < endIndex; index++) {
-            if (occupied[index]) return;
-          }
-          for (let index = startIndex; index < endIndex; index++) {
-            occupied[index] = 1;
-          }
-          linkSlots[startIndex] = {
-            text,
-            range: {
-              start: positionForOffset(logicalLine, startIndex),
-              // xterm link ranges are inclusive. endIndex is our scanner's
-              // exclusive offset, so map the final character, not the boundary.
-              end: positionForOffset(logicalLine, endIndex - 1),
-            },
+        // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
+        // they take priority over file-path patterns.
+        //
+        // A single `&` is PART of the URL: it separates query parameters, so excluding
+        // it truncated every real query string (`?post=1479&action=edit` linked only
+        // through `1479`, landing on the wrong page). `&&` is still a boundary, since
+        // that is the shell operator and never appears inside a URL. A lone trailing
+        // `&` is trimmed below with the other trailing punctuation.
+        const urlPattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&)\]\x00-\x1f]|&(?!&))+/g;
+
+        const addUrlLink = (url, matchIndex) => {
+          // Strip trailing punctuation that's likely not part of the URL
+          const cleaned = url.replace(/[.,;:!?)&]+$/, '');
+          const startCol = lineText.indexOf(cleaned, matchIndex);
+          if (startCol === -1) return;
+
+          const start = coordAt(startCol);
+          const end = coordAt(startCol + cleaned.length);
+          if (links.some((l) => l.range.start.x === start.x && l.range.start.y === start.y)) return;
+
+          links.push({
+            text: cleaned,
+            range: { start, end },
             decorations: { pointerCursor: true, underline: true },
-            activate,
+            activate(_event, text) {
+              self._openTerminalUrl(text);
+            },
             hover() {
               self._linkHovered = true;
             },
             leave() {
               self._linkHovered = false;
-            },
-          };
-        };
-
-        // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
-        // they take priority over file-path patterns.
-        const urlPattern = /(?:https?|webexteams):\/\/[^\s"'<>|;)\]\x00-\x1f]+/g;
-
-        const addUrlLink = (url, matchIndex) => {
-          // Strip trailing punctuation that's likely not part of the URL
-          const cleaned = url.replace(/[.,;:!?)]+$/, '');
-          addLink({
-            text: cleaned,
-            startIndex: matchIndex,
-            endIndex: matchIndex + cleaned.length,
-            activate(_event, text) {
-              self._openTerminalUrl(text);
             },
           });
         };
@@ -1476,21 +1496,47 @@ Object.assign(CodemanApp.prototype, {
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
         // Pattern 2: Legacy standalone absolute paths. In-workspace previewable
-        // paths are claimed by the document scanner first; this remains the
-        // live-log fallback for paths outside the session workspace.
+        // paths are claimed by the document scanner (findPreviewReferences) first;
+        // this remains the live-log fallback for paths outside the session workspace.
+        // Image/PDF extensions are included so pasted-attachment paths
+        // (`.claude-images/paste-*.png`) are clickable; they open the file preview
+        // rather than the log viewer (see addLogLink/PREVIEW_EXTS).
         const extPattern =
-          /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js))\b/g;
+          /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js|png|jpe?g|gif|webp|bmp|svg|pdf))\b/g;
 
         // Pattern 3: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
-        const addLogLink = (filePath, startIndex) => {
-          addLink({
+        /** Extensions that should open the image/document preview, not the log viewer. */
+        const PREVIEW_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'pdf']);
+
+        const addLogLink = (filePath, matchIndex) => {
+          const startCol = lineText.indexOf(filePath, matchIndex);
+          if (startCol === -1) return;
+
+          const start = coordAt(startCol);
+          const end = coordAt(startCol + filePath.length);
+          if (links.some((l) => l.range.start.x === start.x && l.range.start.y === start.y)) return;
+
+          links.push({
             text: filePath,
-            startIndex,
-            endIndex: startIndex + filePath.length,
+            range: { start, end },
+            decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
+              // Tailing a PNG in the log viewer shows binary noise; the file preview
+              // already renders images and PDFs inline.
+              const ext = (text.split('.').pop() || '').toLowerCase();
+              if (PREVIEW_EXTS.has(ext)) {
+                self.openFilePreview(text, originatingSessionId);
+                return;
+              }
               self.openLogViewerWindow(text, originatingSessionId);
+            },
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
             },
           });
         };
@@ -1505,22 +1551,32 @@ Object.assign(CodemanApp.prototype, {
 
         cmdPattern.lastIndex = 0;
         while ((match = cmdPattern.exec(lineText)) !== null) {
-          addLogLink(match[2], match.index + match[0].lastIndexOf(match[2]));
+          addLogLink(match[2], match.index);
         }
 
         bashPattern.lastIndex = 0;
         while ((match = bashPattern.exec(lineText)) !== null) {
-          addLogLink(match[1], match.index + match[0].lastIndexOf(match[1]));
+          addLogLink(match[1], match.index);
         }
 
         if (originatingSessionId) {
           for (const reference of findPreviewReferences(lineText, workingDir)) {
-            addLink({
+            const start = coordAt(reference.startIndex);
+            const end = coordAt(reference.endIndex - 1);
+            if (links.some((l) => l.range.start.x === start.x && l.range.start.y === start.y)) continue;
+
+            links.push({
               text: reference.text,
-              startIndex: reference.startIndex,
-              endIndex: reference.endIndex,
+              range: { start, end },
+              decorations: { pointerCursor: true, underline: true },
               activate() {
                 self.openFilePreview(reference.relativePath, originatingSessionId);
+              },
+              hover() {
+                self._linkHovered = true;
+              },
+              leave() {
+                self._linkHovered = false;
               },
             });
           }
@@ -1528,12 +1584,7 @@ Object.assign(CodemanApp.prototype, {
 
         extPattern.lastIndex = 0;
         while ((match = extPattern.exec(lineText)) !== null) {
-          addLogLink(match[1], match.index + match[0].indexOf(match[1]));
-        }
-
-        const links = [];
-        for (const link of linkSlots) {
-          if (link) links.push(link);
+          addLogLink(match[1], match.index);
         }
 
         if (links.length > 0) {
@@ -2912,6 +2963,50 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.clear();
   },
 
+  /** Insert editable text at the active prompt without pressing Enter. */
+  insertTerminalText(text) {
+    if (!this.activeSessionId || !text) return;
+    if (this._localEchoEnabled && this._localEchoOverlay) {
+      this._localEchoOverlay.appendText(text);
+    } else {
+      this.sendInput(text).catch(() => {});
+    }
+    this.terminal?.focus();
+  },
+
+  /**
+   * Clear only the current editable prompt. This is intentionally distinct
+   * from Ctrl+L (clear display) and the agent's destructive `/clear` command.
+   */
+  clearTerminalInput() {
+    if (!this.activeSessionId) return;
+
+    if (typeof CjkInput !== 'undefined') CjkInput.clear();
+    if (this._inputFlushTimeout) {
+      clearTimeout(this._inputFlushTimeout);
+      this._inputFlushTimeout = null;
+    }
+    this._pendingInput = '';
+
+    if (this._localEchoEnabled && this._localEchoOverlay) {
+      const flushed = this._localEchoOverlay.getFlushed?.() || { count: 0, text: '' };
+      this._localEchoOverlay.clear();
+      this._localEchoOverlay.suppressBufferDetection();
+      this._flushedOffsets?.delete(this.activeSessionId);
+      this._flushedTexts?.delete(this.activeSessionId);
+      if (flushed.count > 0) {
+        this.sendInput('\x7f'.repeat(flushed.count)).catch(() => {});
+      }
+    } else {
+      // In non-local-echo mode the TUI already owns the editable buffer. Ctrl+U
+      // is the conventional kill-line key supported by shells and agent TUIs.
+      this.sendInput('\x15').catch(() => {});
+    }
+
+    this.showToast?.('Input cleared', 'success');
+    this.terminal?.focus();
+  },
+
   /**
    * Ask xterm to repaint its current viewport from its in-memory buffer.
    * This is a local renderer nudge only: it does not send input to tmux/Codex.
@@ -3457,8 +3552,14 @@ Object.assign(CodemanApp.prototype, {
   // DOM and WebGL renderers) plus a belt-and-suspenders refresh().
   applyTerminalSkin(skin) {
     const theme = { ...(window.CODEMAN_XTERM_THEMES[skin] || window.CODEMAN_XTERM_THEMES['daylight-blue']) };
+    const minimumContrastRatio = window.codemanCurrentSkinIsLight(skin) ? 4.5 : 1;
     if (this.terminal) {
+      this.terminal.options.minimumContrastRatio = minimumContrastRatio;
       this.terminal.options.theme = theme;
+      // The zero-lag typing overlay caches the xterm foreground/background.
+      // Refresh it on live skin changes so typed text never keeps the prior
+      // theme's dark backing surface or foreground color.
+      this._localEchoOverlay?.refreshFont();
       try {
         this.terminal.refresh(0, this.terminal.rows - 1);
       } catch {}
@@ -3466,6 +3567,7 @@ Object.assign(CodemanApp.prototype, {
     if (this.teammateTerminals) {
       for (const [, entry] of this.teammateTerminals) {
         if (entry && entry.terminal) {
+          entry.terminal.options.minimumContrastRatio = minimumContrastRatio;
           entry.terminal.options.theme = { ...theme };
           try {
             entry.terminal.refresh(0, entry.terminal.rows - 1);

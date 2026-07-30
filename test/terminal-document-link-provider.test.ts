@@ -295,7 +295,13 @@ describe('COD-232 terminal document link provider', () => {
 
     const links = provide();
 
-    expect(links.map((link) => link.text)).toEqual(['/workspace/project/out/report.pdf']);
+    // In-workspace absolute paths are normalized to a workspace-relative
+    // preview path. Out-of-workspace paths under the well-known prefixes
+    // (/etc here) still link via the legacy standalone-path fallback since
+    // upstream's extPattern gained image/pdf extensions (pasted-attachment
+    // paths) — the backend's validateSessionFilePath guard rejects reads
+    // outside the workspace, so that link cannot expose foreign files.
+    expect(links.map((link) => link.text)).toEqual(['/workspace/project/out/report.pdf', '/etc/secret.pdf']);
     links[0].activate(null, links[0].text);
     expect(previewSpy).toHaveBeenCalledWith('out/report.pdf', 'origin-session');
   });
