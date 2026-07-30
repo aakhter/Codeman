@@ -1765,6 +1765,37 @@ class CodemanApp {
       }
       this._onSessionListMaybeChanged();
     });
+
+    // COD-124: session:parked / session:resumed carry only {id} — the new
+    // status lives locally, mirroring the session-park/resume-session flow
+    // in terminal-ui.js, so rows update live without a reload.
+    addListener(SSE_EVENTS.SESSION_PARKED, (e) => {
+      let data = null;
+      try {
+        data = JSON.parse(e.data);
+      } catch {
+        /* ignore malformed payload */
+      }
+      if (data && data.id) {
+        const live = this.sessions.get(data.id);
+        if (live) live.status = 'parked';
+      }
+      this._onSessionListMaybeChanged();
+    });
+
+    addListener(SSE_EVENTS.SESSION_RESUMED, (e) => {
+      let data = null;
+      try {
+        data = JSON.parse(e.data);
+      } catch {
+        /* ignore malformed payload */
+      }
+      if (data && data.id) {
+        const live = this.sessions.get(data.id);
+        if (live) live.status = 'active';
+      }
+      this._onSessionListMaybeChanged();
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════

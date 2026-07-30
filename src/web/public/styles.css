@@ -3196,6 +3196,22 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: var(--green);
 }
 
+/* COD-124: parked sessions are distinct from LIVE (running) and from a plain
+   closed history row (no active PTY, but automation was deliberately disarmed
+   rather than just ended) — a muted amber/yellow pill flags that state. */
+.history-item-badge-parked {
+  background: color-mix(in srgb, var(--yellow, #eab308) 20%, transparent);
+  color: var(--yellow, #eab308);
+}
+
+/* COD-124 (AC6): armed-automation marker on non-parked rows (small icon,
+   full detail in the title tooltip) — reuses the neutral badge shape. */
+.history-item-badge-armed {
+  background: color-mix(in srgb, var(--warning, #e6a817) 18%, transparent);
+  color: var(--warning, #e6a817);
+  padding-inline: 0.35rem;
+}
+
 /* COD-129: per-CLI mode-chip colors, matching the canonical .session-tab
    .tab-mode.* / .btn-run.mode-* palette so each CLI is visually distinct.
    Unknown/missing mode keeps the neutral .history-item-badge default. */
@@ -3225,6 +3241,16 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: var(--text-muted);
   white-space: nowrap;
   align-self: center;
+}
+
+/* COD-124: compact idle-duration suffix inside .history-item-meta; flagged
+   (subtle warn tint) once a session has been idle a while. */
+.history-item-idle {
+  color: inherit;
+}
+
+.history-item-idle-warn {
+  color: var(--warning, #e6a817);
 }
 
 .history-item-expand {

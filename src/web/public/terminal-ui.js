@@ -1812,6 +1812,28 @@ Object.assign(CodemanApp.prototype, {
       liveBadge.textContent = 'LIVE';
       badgeRow.appendChild(liveBadge);
     }
+    // COD-124: parked sessions are neither live nor a plain closed history
+    // entry — flag them distinctly so the row isn't mistaken for "running".
+    if (s.status === 'parked') {
+      const parkedBadge = document.createElement('span');
+      parkedBadge.className = 'history-item-badge history-item-badge-parked';
+      parkedBadge.textContent = 'PARKED';
+      parkedBadge.title = 'Parked — automation disarmed, resume to reactivate';
+      badgeRow.appendChild(parkedBadge);
+    } else {
+      // COD-124 (AC6): on non-parked rows, flag armed automation that a
+      // future Park would need to disarm — using only fields the serialized
+      // session state actually exposes (autoResumeEnabled/ralphEnabled from
+      // the live-session cache; no live signal exists yet for respawn).
+      const armed = this._armedObligationLabels(s);
+      if (armed.length > 0) {
+        const armedBadge = document.createElement('span');
+        armedBadge.className = 'history-item-badge history-item-badge-armed';
+        armedBadge.textContent = '⚡';
+        armedBadge.title = armed.join('; ');
+        badgeRow.appendChild(armedBadge);
+      }
+    }
 
     const subtitleSpan = document.createElement('span');
     subtitleSpan.className = 'history-item-subtitle';
@@ -1825,6 +1847,21 @@ Object.assign(CodemanApp.prototype, {
     const metaSpan = document.createElement('span');
     metaSpan.className = 'history-item-meta';
     metaSpan.textContent = timeStr;
+
+    // COD-124: compact idle duration ("12m", "3h 40m") reusing the timestamp
+    // already resolved above; flagged (subtle warn style) once idle a while.
+    if (!Number.isNaN(tsMs)) {
+      const idleMs = Date.now() - tsMs;
+      const idleLabel = this._formatIdleDuration(idleMs);
+      if (idleLabel) {
+        const idleSpan = document.createElement('span');
+        idleSpan.className = 'history-item-idle';
+        if (idleMs >= this._IDLE_WARN_THRESHOLD_MS) idleSpan.classList.add('history-item-idle-warn');
+        idleSpan.textContent = `· idle ${idleLabel}`;
+        idleSpan.title = 'Time since last activity';
+        metaSpan.appendChild(idleSpan);
+      }
+    }
 
     const expandBtn = document.createElement('button');
     expandBtn.className = 'history-item-expand';
@@ -1994,21 +2031,43 @@ Object.assign(CodemanApp.prototype, {
       menu.appendChild(btn);
     };
 
-    // Resume / Switch to session (always).
-    addItem(
-      isLiveOpen ? 'Switch to session' : 'Resume session',
-      () => {
-        if (isLiveOpen) {
-          this.selectSession(s.sessionId);
-        } else {
-          // Resume by the Claude conversation UUID when present (resumed sessions
-          // carry theirs separately from their Codeman id).
-          this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name);
+    // Resume / Switch to session (always) — skipped for parked rows, which
+    // get the dedicated "Resume from park" item below instead: a parked
+    // session has no live terminal to switch to, and must go through the
+    // park-aware resume endpoint rather than a plain relaunch (COD-124).
+    if (s.status !== 'parked') {
+      addItem(
+        isLiveOpen ? 'Switch to session' : 'Resume session',
+        () => {
+          if (isLiveOpen) {
+            this.selectSession(s.sessionId);
+          } else {
+            // Resume by the Claude conversation UUID when present (resumed sessions
+            // carry theirs separately from their Codeman id).
+            this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name);
+          }
+          this.closeSessionManager?.();
+          closeMenu();
         }
-        this.closeSessionManager?.();
+      );
+    }
+
+    // Park / Resume-from-park (COD-124).
+    if (s.status === 'parked') {
+      addItem(
+        'Resume from park',
+        async () => {
+          closeMenu();
+          await this._resumeSession(s);
+        },
+        { sublabel: this._resumeFidelityLabel(s) }
+      );
+    } else {
+      addItem('Park session', async () => {
         closeMenu();
-      }
-    );
+        await this._parkSession(s);
+      });
+    }
 
     // Pin / Unpin (COD-139) — floats the session to the top of the list.
     const isPinned = s.pinned === true;
@@ -2139,6 +2198,172 @@ Object.assign(CodemanApp.prototype, {
       console.error('[_setSessionPinned]', err);
       return false;
     }
+  },
+
+  /** COD-124: human-readable label per park obligation code (backend's stable order). */
+  _PARK_OBLIGATION_LABELS: {
+    respawn: 'Respawn cycling is armed',
+    autoResume: 'Auto-resume timer is armed',
+    ralph: 'Ralph loop is armed',
+  },
+
+  /**
+   * COD-124: human-readable label for a single park obligation code, falling
+   * back to the raw code for anything the frontend doesn't recognize yet.
+   * @param {string} obligation
+   * @returns {string}
+   */
+  _parkObligationLabel(obligation) {
+    return this._PARK_OBLIGATION_LABELS[obligation] || obligation;
+  },
+
+  /**
+   * COD-124 (AC6): armed-automation labels for a non-parked row, using only
+   * fields the serialized session state actually exposes. respawn is
+   * intentionally omitted — SessionState.respawnConfig is never populated by
+   * Session.toState(), so no live signal reaches the frontend for it.
+   * @param {object} s
+   * @returns {string[]}
+   */
+  _armedObligationLabels(s) {
+    const armed = [];
+    if (s?.autoResumeEnabled && s?.autoResumeAt) armed.push(this._parkObligationLabel('autoResume'));
+    if (s?.ralphEnabled) armed.push(this._parkObligationLabel('ralph'));
+    return armed;
+  },
+
+  /**
+   * COD-124: build the confirm() message shown when a park attempt is blocked
+   * by armed automation (409 response body's `obligations` array).
+   * @param {string[]} obligations
+   * @returns {string}
+   */
+  _buildParkConfirmMessage(obligations) {
+    const list = (obligations || []).map((ob) => `- ${this._parkObligationLabel(ob)}`).join('\n');
+    return `This session has active automation that will be disarmed:\n${list}\n\nPark anyway?`;
+  },
+
+  /**
+   * COD-124: park a session via POST /api/sessions/:id/park. On a 409 response
+   * carrying `obligations` (armed respawn/auto-resume/ralph automation), shows
+   * a confirm() dialog listing them in plain language and, on accept, re-calls
+   * with {force:true}. Updates the record's status in place and toasts the
+   * outcome; the session:parked SSE event keeps other views in sync.
+   * @param {object} s serialized session record (needs sessionId)
+   * @returns {Promise<boolean>}
+   */
+  async _parkSession(s) {
+    try {
+      let res = await this._apiPost(`/api/sessions/${encodeURIComponent(s.sessionId)}/park`, {});
+      if (res && res.status === 409) {
+        let body = null;
+        try {
+          body = await res.json();
+        } catch {
+          /* malformed 409 body — treat as no obligations to report */
+        }
+        const obligations = Array.isArray(body?.obligations) ? body.obligations : [];
+        if (obligations.length > 0) {
+          const proceed = window.confirm(this._buildParkConfirmMessage(obligations));
+          if (!proceed) return false;
+          res = await this._apiPost(`/api/sessions/${encodeURIComponent(s.sessionId)}/park`, { force: true });
+        }
+      }
+      const ok = !!res && res.ok;
+      if (ok) {
+        s.status = 'parked';
+        this.showToast('Session parked', 'success');
+        this._onSessionListMaybeChanged?.();
+      } else {
+        this.showToast('Park failed', 'error');
+      }
+      return ok;
+    } catch (err) {
+      console.error('[_parkSession]', err);
+      this.showToast('Park failed', 'error');
+      return false;
+    }
+  },
+
+  /**
+   * COD-124: resume-fidelity label — what resuming this session will actually
+   * restore, based on mode and whether a native resume id was captured at
+   * park time. Pure function of the session record (no I/O).
+   * @param {object} s
+   * @returns {string}
+   */
+  _resumeFidelityLabel(s) {
+    const mode = String(s?.mode || '').toLowerCase();
+    if (mode === 'claude') return 'Resumes the conversation';
+    if (mode === 'codex' && s?.nativeResumeId) return 'Resumes via Codex session id';
+    return 'Fresh relaunch — conversation not restored';
+  },
+
+  /**
+   * COD-124: whether resuming this session record would NOT restore the
+   * prior conversation (gates the extra confirm() before resuming).
+   * @param {object} s
+   * @returns {boolean}
+   */
+  _isNonRestorableResume(s) {
+    const mode = String(s?.mode || '').toLowerCase();
+    if (mode === 'claude') return false;
+    if (mode === 'codex' && s?.nativeResumeId) return false;
+    return true;
+  },
+
+  /**
+   * COD-124: resume a parked session via POST /api/sessions/:id/resume. When
+   * the resume would not restore the prior conversation (non-Claude mode, or
+   * Codex without a captured native resume id), confirms first.
+   * @param {object} s serialized session record (needs sessionId)
+   * @returns {Promise<boolean>}
+   */
+  async _resumeSession(s) {
+    if (this._isNonRestorableResume(s)) {
+      const proceed = window.confirm(
+        `${this._resumeFidelityLabel(s)}.\n\nThe prior conversation will not be restored — this starts a fresh session. Resume anyway?`
+      );
+      if (!proceed) return false;
+    }
+    try {
+      const res = await this._apiPost(`/api/sessions/${encodeURIComponent(s.sessionId)}/resume`, {});
+      const ok = !!res && res.ok;
+      if (ok) {
+        s.status = 'active';
+        this.showToast('Session resumed', 'success');
+        this._onSessionListMaybeChanged?.();
+      } else {
+        this.showToast('Resume failed', 'error');
+      }
+      return ok;
+    } catch (err) {
+      console.error('[_resumeSession]', err);
+      this.showToast('Resume failed', 'error');
+      return false;
+    }
+  },
+
+  /** COD-124: idle duration ≥ this gets a subtle warn style on the row. */
+  _IDLE_WARN_THRESHOLD_MS: 30 * 60 * 1000,
+
+  /**
+   * COD-124: compact idle-duration formatter, e.g. "12m", "3h 40m", "2d 5h".
+   * Pure function of an elapsed-ms value; returns '' for invalid/negative input.
+   * @param {number} ms
+   * @returns {string}
+   */
+  _formatIdleDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const totalMinutes = Math.floor(ms / 60000);
+    if (totalMinutes < 1) return '<1m';
+    if (totalMinutes < 60) return `${totalMinutes}m`;
+    const totalHours = Math.floor(totalMinutes / 60);
+    const remMinutes = totalMinutes % 60;
+    if (totalHours < 24) return remMinutes > 0 ? `${totalHours}h ${remMinutes}m` : `${totalHours}h`;
+    const days = Math.floor(totalHours / 24);
+    const remHours = totalHours % 24;
+    return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
   },
 
   /** Number of history items shown before "Show More" */
