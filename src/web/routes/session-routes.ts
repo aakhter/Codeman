@@ -1593,6 +1593,7 @@ export function registerSessionRoutes(
   ): Promise<{
     text: string;
     timestamp: string;
+    hasContext?: boolean;
     messages?: Array<{ role: string; text: string; timestamp?: string }>;
   }> {
     const empty = full ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
@@ -1679,8 +1680,17 @@ export function registerSessionRoutes(
       })
       .map(({ role, text, timestamp }) => ({ role, text, timestamp }));
 
-    return full
-      ? { text: lastText, timestamp: lastTimestamp, messages: thread }
+    // Brief callers (full=false) never build `thread`, so the capability flag
+    // can't be derived from it directly — but an assistant message is only
+    // ever pushed into `thread` when `full` is true AND its text is non-empty
+    // (see the `role === 'assistant'` branch above), so `lastText` truthy is
+    // exactly the condition under which a `?context=full` read would come back
+    // with expandable history. Cheap: no extra pass over the rollout needed.
+    if (full) {
+      return { text: lastText, timestamp: lastTimestamp, messages: thread };
+    }
+    return lastText
+      ? { text: lastText, timestamp: lastTimestamp, hasContext: true }
       : { text: lastText, timestamp: lastTimestamp };
   }
 
