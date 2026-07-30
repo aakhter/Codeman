@@ -5569,12 +5569,17 @@ class CodemanApp {
         // output produced while the user was away — preserving unconditionally
         // left tabs frozen on a mid-turn frame forever (COD-175).
         const canonicalUnchanged = data.terminalBuffer === cachedBuffer;
-        const preserveSnapshotScrollback =
-          restoredSnapshot &&
-          session?.mode === 'codex' &&
-          !clearedForBusy &&
-          !requestFullHistory &&
-          (canonicalUnchanged || sessionIsBusy);
+        // COD-92: byte-identical canonical buffer ⇒ keep the restored snapshot
+        // for ANY mode (skip the clear+rewrite flash); busy allowance stays
+        // codex-only. Predicate lives in terminal-ui.js (unit-tested).
+        const preserveSnapshotScrollback = this._shouldPreserveSnapshotScrollback({
+          restoredSnapshot,
+          clearedForBusy,
+          requestFullHistory,
+          canonicalUnchanged,
+          sessionIsBusy,
+          mode: session?.mode,
+        });
         const needsRewrite =
           clearedForBusy || (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
         if (needsRewrite) {

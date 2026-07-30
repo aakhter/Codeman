@@ -3013,6 +3013,38 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /**
+   * COD-92: after a terminal-snapshot restore, decide whether the fetched
+   * canonical buffer may be skipped instead of clearing + rewriting the
+   * terminal (the visible blank-then-repaint flash on tab switch).
+   *
+   * Preserve the restored snapshot ONLY while it is provably not stale:
+   * - the canonical buffer byte-matches the cached one (nothing new happened
+   *   since the snapshot was taken — any mode), or
+   * - the session is a busy codex session (its live output stream will
+   *   reconcile the viewport; codex's TUI frame can omit earlier output the
+   *   snapshot preserved).
+   * Never preserve when the terminal was already cleared (busy/mirror paint),
+   * on the first full-history load after page open, or when the buffer
+   * changed on an idle session — idle tabs unsubscribe from terminal output,
+   * so the fetched buffer is the only way they learn about missed output
+   * (COD-175).
+   *
+   * Pure predicate (unit-tested in test/snapshot-preserve-predicate.test.ts);
+   * app.js calls it at the terminal buffer fetch site.
+   */
+  _shouldPreserveSnapshotScrollback({
+    restoredSnapshot,
+    clearedForBusy,
+    requestFullHistory,
+    canonicalUnchanged,
+    sessionIsBusy,
+    mode,
+  }) {
+    if (!restoredSnapshot || clearedForBusy || requestFullHistory) return false;
+    return canonicalUnchanged || (mode === 'codex' && !!sessionIsBusy);
+  },
+
   scrollToLastNonEmptyLine() {
     if (!this.terminal?.buffer?.active) {
       this.terminal?.scrollToBottom?.();
