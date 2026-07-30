@@ -21,6 +21,14 @@ export class MockSession extends EventEmitter {
   pid: number | null = 12345;
   /** COD-124 — preserved conversation ref for claude-mode resume via --resume. */
   resumeSessionId?: string;
+  /** COD-124 unit 2, Gap B — native external-CLI (codex) rollout id captured at park time. */
+  nativeResumeId: string | null = null;
+  setNativeResumeId = vi.fn((id: string | null) => {
+    this.nativeResumeId = id;
+  });
+  /** COD-124 unit 2, Gap B — codex-mode config surface read by captureNativeResumeId(). */
+  codexConfig?: { resumeSessionId?: string };
+  codexLastSubmitAt?: number;
   isWorking: boolean = false;
   private _activeChildProcesses: { pid: number; command: string }[] = [];
   ralphTracker: null = null;
@@ -243,6 +251,7 @@ export class MockSession extends EventEmitter {
       pinned: this.pinned || undefined,
       pinnedAt: this.pinned ? (this.pinnedAt ?? undefined) : undefined,
       resumeSessionId: this.resumeSessionId,
+      nativeResumeId: this.nativeResumeId,
     };
   }
 

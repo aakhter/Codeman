@@ -515,6 +515,15 @@ export interface SessionState {
   agyConfig?: AgyConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
+  /**
+   * Native CLI session/rollout id captured at PARK time for external-CLI modes
+   * (COD-124 unit 2, Gap B). Codex: the rollout UUID discovered from the newest
+   * matching JSONL rollout file under `~/.codex/sessions/` — threaded back into
+   * `codexConfig.resumeSessionId` on resume so `codex resume <id>` restores the
+   * conversation. gemini/opencode/agy/shell: always null — no on-disk resume
+   * mechanism has been wired for those CLIs (best-effort relaunch only).
+   */
+  nativeResumeId?: string | null;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort?: EffortLevel;
   /** Sanitized per-session attachment history. */

@@ -294,6 +294,16 @@ export const ResizeSchema = z.object({
 });
 
 /**
+ * Schema for POST /api/sessions/:id/park (COD-124)
+ * `force: true` acknowledges and disarms any live automation (respawn/
+ * auto-resume/ralph) armed against the session; without it, a park request
+ * against a session with obligations returns 409 CONFLICT instead.
+ */
+export const ParkSessionSchema = z.object({
+  force: z.boolean().optional(),
+});
+
+/**
  * Schema for POST /api/status-telemetry
  * Claude Code statusline payload forwarded by the Codeman-managed statusLine
  * exporter (see hooks-config.generateStatusLineCommand). Validates only the

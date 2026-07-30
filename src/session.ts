@@ -494,6 +494,14 @@ export class Session extends EventEmitter {
   private _codexRawLogErrored = false;
   private _resumeSessionId: string | undefined;
 
+  // Native external-CLI session/rollout id captured at PARK time (COD-124 unit 2,
+  // Gap B). Codex only, for now: the rollout UUID discovered from the newest
+  // matching JSONL file under ~/.codex/sessions/, threaded back into
+  // _codexConfig.resumeSessionId on resume (see applyNativeResumeId()) so
+  // `codex resume <id>` restores the conversation. null for gemini/opencode/agy/
+  // shell — no on-disk resume mechanism is wired for those CLIs.
+  private _nativeResumeId: string | null = null;
+
   // Ephemeral env overrides (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Exported by tmux
   // at spawn, preserved across respawns via persisted state. Not written to .claude/settings.local.json.
   private _envOverrides: Record<string, string> | undefined;
@@ -581,6 +589,8 @@ export class Session extends EventEmitter {
       geminiConfig?: GeminiConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
       resumeSessionId?: string;
+      /** Native external-CLI session/rollout id captured at park time (COD-124 unit 2, Gap B) */
+      nativeResumeId?: string | null;
       /** Extra env vars exported to the CLI at spawn time (no disk persistence) */
       envOverrides?: Record<string, string>;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
@@ -620,6 +630,7 @@ export class Session extends EventEmitter {
     this.mode = config.mode || 'claude';
     this._name = config.name || '';
     this._resumeSessionId = config.resumeSessionId;
+    this._nativeResumeId = config.nativeResumeId ?? null;
     this._lastActivityAt = this.createdAt;
     this._terminalBufferMaxSize = config.terminalBufferConfig?.maxBytes ?? MAX_TERMINAL_BUFFER_SIZE;
     this._terminalBufferTrimSize = config.terminalBufferConfig?.trimBytes ?? TERMINAL_BUFFER_TRIM_SIZE;
@@ -977,6 +988,48 @@ export class Session extends EventEmitter {
   /** Codex CLI configuration for this session. */
   get codexConfig(): CodexConfig | undefined {
     return this._codexConfig;
+  }
+
+  /**
+   * Native external-CLI session/rollout id captured at park time (COD-124 unit 2,
+   * Gap B). Codex only for now — see {@link setNativeResumeId} and
+   * {@link applyNativeResumeIdForResume}.
+   */
+  get nativeResumeId(): string | null {
+    return this._nativeResumeId;
+  }
+
+  /**
+   * Record the native CLI session/rollout id discovered at park time. Called
+   * by the park route after locating the on-disk rollout file for codex
+   * sessions; left null for CLIs with no analogous on-disk resume mechanism
+   * (gemini/opencode/agy/shell).
+   */
+  setNativeResumeId(id: string | null): void {
+    this._nativeResumeId = id;
+  }
+
+  /**
+   * If a native resume id was captured at a previous park and the CLI mode
+   * supports resuming by id (currently: codex, via `codex resume <id>` — see
+   * buildCodexCommand() in tmux-manager.ts), merge it into the mode-specific
+   * launch config so the upcoming relaunch resumes the original conversation
+   * instead of starting fresh. A no-op for modes without a wired resume
+   * mechanism (gemini/opencode/agy) — those stay best-effort relaunch.
+   *
+   * Only fills in the id when the config doesn't already carry an explicit
+   * resumeSessionId, so an explicit caller-supplied resume target always wins.
+   */
+  private _applyNativeResumeIdForResume(): void {
+    if (!this._nativeResumeId) return;
+    if (this.mode === 'codex') {
+      this._codexConfig = {
+        ...this._codexConfig,
+        resumeSessionId: this._codexConfig?.resumeSessionId ?? this._nativeResumeId,
+      };
+    }
+    // gemini/opencode/agy: no on-disk resume mechanism wired yet — TODO if one
+    // is added, thread nativeResumeId into the relevant config here too.
   }
 
   /** Agy CLI configuration for this session. */
@@ -1466,6 +1519,7 @@ export class Session extends EventEmitter {
       agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
       resumeSessionId: this._resumeSessionId,
+      nativeResumeId: this._nativeResumeId,
       effort: this._effort,
       // COD-118: runtime-only — surfaced so the frontend can require explicit user
       // intent before restarting a crash-looped session. Deliberately NOT restored
@@ -1817,6 +1871,12 @@ export class Session extends EventEmitter {
         'Respawn blocked: interactive PTY exited non-zero too many times in a short window (circuit breaker tripped). Restart the session to clear it.'
       );
     }
+
+    // COD-124 unit 2, Gap B: if a native resume id was captured at a previous
+    // park, fold it into the mode-specific launch config (currently codex
+    // only) before building spawn options below, so the relaunch resumes the
+    // original conversation instead of starting fresh.
+    this._applyNativeResumeIdForResume();
 
     this._resetBuffers();
 

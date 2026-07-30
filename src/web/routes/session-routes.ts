@@ -40,6 +40,7 @@ import {
   QuickStartSchema,
   InteractiveStartSchema,
   SessionOrderUpdateSchema,
+  ParkSessionSchema,
 } from '../schemas.js';
 import { mergeSessionOrder } from '../../session-order.js';
 import {
@@ -82,7 +83,7 @@ import {
   type HistoryInput,
   type MuxStatInput,
 } from '../../services/unified-session-service.js';
-import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
+import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort, RespawnPort } from '../ports/index.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
   checkRemoteTmuxAvailable,
@@ -330,6 +331,58 @@ export function _resetPasteRateBuckets(): void {
  * (auto_edit) even when the request sent none. No-op in single-user mode / for a granted
  * owner (canUsernameRunPrivilegedCommands returns true when !isMultiUserMode()).
  */
+/**
+ * COD-124 unit 2, Gap A — computes which live automations are armed against
+ * a session and would not survive parking:
+ *  - 'respawn': a respawn controller is registered for this session at the
+ *    WebServer level (Session.park() has no visibility into it).
+ *  - 'autoResume': an auto-resume usage-limit timer is armed (autoResumeAt
+ *    non-null) — distinct from the user's autoResumeEnabled *preference*,
+ *    which park() must NOT clear (Session.park()/_clearAllTimers() already
+ *    cancels only the armed timer and preserves the preference).
+ *  - 'ralph': the session's Ralph tracker is enabled (Session.park() already
+ *    tears it down via cleanupTrackerListeners(), same as stop()).
+ * Order is stable (respawn, autoResume, ralph) so callers/tests can assert
+ * on it directly.
+ */
+function computeParkObligations(ctx: RespawnPort, session: Session, id: string): string[] {
+  const obligations: string[] = [];
+  if (ctx.respawnControllers.has(id)) {
+    obligations.push('respawn');
+  }
+  if (session.autoResumeAt !== null) {
+    obligations.push('autoResume');
+  }
+  if (session.ralphTracker?.enabled) {
+    obligations.push('ralph');
+  }
+  return obligations;
+}
+
+/**
+ * COD-124 unit 2, Gap A — disarms the WebServer-held respawn controller for
+ * a session about to be parked. Mirrors POST /respawn/stop's exact sequence
+ * (controller.stop() → drop from the map → clear+drop any timed-respawn
+ * timer → clear the persisted respawn config) so a parked session can never
+ * have a respawn cycle fire into its now-detached pane. No-op when no
+ * controller is armed.
+ */
+function disarmRespawnForPark(ctx: RespawnPort & InfraPort, id: string): void {
+  const controller = ctx.respawnControllers.get(id);
+  if (!controller) return;
+
+  controller.stop();
+  ctx.respawnControllers.delete(id);
+
+  const timerInfo = ctx.respawnTimers.get(id);
+  if (timerInfo) {
+    clearTimeout(timerInfo.timer);
+    ctx.respawnTimers.delete(id);
+  }
+
+  ctx.mux.clearRespawnConfig(id);
+}
+
 async function clampExternalCliBypassForOwner(
   owner: string | undefined,
   codexConfig: CodexConfig | undefined,
@@ -346,7 +399,7 @@ async function clampExternalCliBypassForOwner(
 
 export function registerSessionRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort
 ): void {
   // ═══════════════════════════════════════════════════════════════
   // Auth
@@ -912,6 +965,20 @@ export function registerSessionRoutes(
   // the session record (workingDir, resumeSessionId/transcript, mux metadata)
   // for a later /resume. Remote-attached sessions (owned:false) are detached,
   // never killed — enforced inside Session.park() (COD-105 invariant).
+  //
+  // Obligation interlock (COD-124 unit 2, Gap A): parking must neutralize any
+  // live automation armed against the session, or that automation will later
+  // fire into a dead/detached pane (respawn cycling a parked session, an
+  // auto-resume usage-limit timer sending Esc+continue nowhere, ...).
+  // auto-resume and Ralph teardown are already fully handled inside
+  // Session.park() (it calls the same _clearAllTimers()/
+  // cleanupTrackerListeners() that stop() does) — only the WebServer-held
+  // respawn controller map is outside Session's visibility, so this route
+  // disarms it explicitly, mirroring POST /respawn/stop's exact sequence.
+  //
+  // Callers that haven't acknowledged the obligations get a 409 CONFLICT
+  // listing them (`obligations`), so the UI can confirm before resending
+  // with `{force: true}`.
 
   app.post('/api/sessions/:id/park', async (req) => {
     const { id } = req.params as { id: string };
@@ -922,7 +989,30 @@ export function registerSessionRoutes(
       return {};
     }
 
+    const { force } = parseBody(ParkSessionSchema, req.body ?? {});
+    const obligations = computeParkObligations(ctx, session, id);
+    if (obligations.length > 0 && !force) {
+      const msg = `Session has active automation that will not survive parking: ${obligations.join(', ')}`;
+      // Structured throw (not a bare return) — installRouteErrorHandler renders
+      // {statusCode, body} at the right HTTP status in both the test harness
+      // and production (mirrors findSessionOrFail/parseBody in route-helpers.ts).
+      // A bare `return {success:false,...}` only gets its status code fixed up
+      // by the preSerialization hook, which is production-server-only.
+      throw Object.assign(new Error(msg), {
+        statusCode: 409,
+        body: { ...createErrorResponse(ApiErrorCode.CONFLICT, msg), obligations },
+      });
+    }
+
     try {
+      disarmRespawnForPark(ctx, id);
+      // COD-124 unit 2, Gap B: best-effort capture — a failure here must not
+      // block parking, so it's isolated from session.park()'s own try/catch.
+      try {
+        session.setNativeResumeId(await captureNativeResumeId(session));
+      } catch (err) {
+        console.warn(`[Server] park: failed to capture native resume id for ${id}:`, getErrorMessage(err));
+      }
       await session.park();
       getLifecycleLog().log({
         event: 'parked',
@@ -1609,6 +1699,34 @@ export function registerSessionRoutes(
     }
 
     return idMatch?.path ?? cwdFallback?.path ?? null;
+  }
+
+  // COD-124 unit 2, Gap B: capture the native external-CLI session/rollout id
+  // at park time so a later /resume can thread it back into the relaunch
+  // command. Only codex has a real on-disk rollout store PLUS a resume-by-id
+  // mechanism Codeman can drive (`codex resume <id>` — see buildCodexCommand()
+  // in tmux-manager.ts), so this reuses findActiveCodexFile() (the same
+  // rollout-discovery logic backing the eye-view codexLastResponse endpoint)
+  // rather than duplicating it, then extracts the rollout UUID from the
+  // filename. gemini and opencode have no analogous "resume this exact
+  // conversation by id" flow wired into their CLI builders today — this
+  // intentionally returns null for them (and for shell/agy) rather than
+  // inventing a resume flag that doesn't exist; those modes stay a
+  // best-effort relaunch in the same workingDir with no id to restore.
+  async function captureNativeResumeId(session: {
+    mode: string;
+    id: string;
+    workingDir: string;
+    codexLastSubmitAt?: number;
+    codexConfig?: { resumeSessionId?: string };
+  }): Promise<string | null> {
+    if (session.mode !== 'codex') return null;
+    const rolloutPath = await findActiveCodexFile(session);
+    if (!rolloutPath) return null;
+    const match = basename(rolloutPath).match(
+      /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
+    );
+    return match ? match[1] : null;
   }
 
   // session_meta is written once when codex creates the rollout and never
