@@ -155,7 +155,9 @@ function parseSftpLongListing(stdout: string, relativeDir: string): RemoteWorksp
   for (const line of stdout.split('\n')) {
     // OpenSSH emits: mode links owner group size month day time-or-year name
     const match =
-      /^([d-])[rwxStTs-]+\+?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(.+)$/.exec(line);
+      /^([d-])[rwxStTs-]+\+?\s+(?:\d+|\?)\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(.+)$/.exec(
+        line
+      );
     if (!match) continue;
     const [, kind, size, name] = match;
     // A newline-containing name cannot be safely represented in SFTP batch input.

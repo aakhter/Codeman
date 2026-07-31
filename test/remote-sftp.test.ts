@@ -136,6 +136,14 @@ describe('listRemoteWorkspaceDirectory', () => {
     expect(Buffer.concat(stdin).toString('utf8')).toBe('ls -l "/home/ann/proj/folder with spaces"\n');
   });
 
+  it('parses a macOS long listing with an unknown link count', async () => {
+    mockSftp({ stdout: '-rw-r--r--    ? ann      staff          12 Jul 30 20:11 AGENTS.md\n' });
+
+    await expect(listRemoteWorkspaceDirectory(REMOTE)).resolves.toEqual([
+      { name: 'AGENTS.md', path: 'AGENTS.md', type: 'file', size: 12 },
+    ]);
+  });
+
   it('returns an empty listing when SFTP has no stdout', async () => {
     mockSftp();
     await expect(listRemoteWorkspaceDirectory(REMOTE)).resolves.toEqual([]);
