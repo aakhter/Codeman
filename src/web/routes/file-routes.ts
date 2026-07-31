@@ -587,6 +587,16 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // one directory at a time via the saved SSH/SFTP connection; the client
     // expands these lazy nodes on demand.
     if (session.remote) {
+      if (q?.trim()) {
+        return reply
+          .code(400)
+          .send(
+            createErrorResponse(
+              ApiErrorCode.INVALID_INPUT,
+              'Remote file search is limited to folders already loaded in the File Viewer'
+            )
+          );
+      }
       const relativePath = requestedPath ?? '';
       try {
         remoteWorkspacePath(session.remote, relativePath);
@@ -595,24 +605,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       }
       try {
         const entries = await listRemoteWorkspaceDirectory(session.remote, relativePath);
-        if (q) {
-          const match = compileFileQuery(q);
-          const matches = match ? entries.filter((entry) => match(entry.name, entry.path)) : entries;
-          return {
-            success: true,
-            data: {
-              root: session.remote.remotePath,
-              matches,
-              totalFiles: entries.filter((entry) => entry.type === 'file').length,
-              totalDirectories: entries.filter((entry) => entry.type === 'directory').length,
-              truncated: false,
-              matchCount: matches.length,
-              query: q.trim(),
-              mode: 'search' as const,
-              lazy: true,
-            },
-          };
-        }
         const tree = entries.map((entry) => ({
           ...entry,
           ...(entry.type === 'directory'
@@ -952,12 +944,24 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         // Return metadata for media/binary files (no text body). COD-58: docx/pptx
         // expose a server-converted PDF previewUrl + a thumbnailUrl so the document
         // preview overlay can render them inline rather than dumping raw bytes.
-        const officePreviewUrl = `/api/sessions/${id}/file-preview?path=${encodeURIComponent(filePath)}`;
         const type =
           mediaType ??
-          (ext === 'pdf' ? 'pdf' : ext === 'docx' ? 'document' : ext === 'pptx' ? 'presentation' : 'binary');
-        const previewUrl = ext === 'docx' || ext === 'pptx' ? officePreviewUrl : fileRawUrl;
-        const thumbnailUrl = isSupportedAttachmentExtension(ext) ? buildFileThumbnailRoute(id, filePath) : undefined;
+          (ext === 'pdf'
+            ? 'pdf'
+            : !remote && ext === 'docx'
+              ? 'document'
+              : !remote && ext === 'pptx'
+                ? 'presentation'
+                : 'binary');
+        // DOCX/PPTX conversion and thumbnails read server-local paths. Remote
+        // workspaces therefore expose those files as safe raw downloads instead
+        // of handing the browser an endpoint that cannot access the SSH host.
+        const previewUrl =
+          !remote && (ext === 'docx' || ext === 'pptx')
+            ? `/api/sessions/${id}/file-preview?path=${encodeURIComponent(filePath)}`
+            : fileRawUrl;
+        const thumbnailUrl =
+          !remote && isSupportedAttachmentExtension(ext) ? buildFileThumbnailRoute(id, filePath) : undefined;
         return {
           success: true,
           data: {

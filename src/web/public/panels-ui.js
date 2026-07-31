@@ -3513,6 +3513,7 @@ Object.assign(CodemanApp.prototype, {
       // terminal tab can change independently while this panel remains open.
       this.fileBrowserSessionId = sessionId;
       this.fileBrowserData = result.data;
+      this.fileBrowserLoadedDirs = new Set();
       this.renderFileBrowserTree();
 
       // Update status
@@ -3673,13 +3674,60 @@ Object.assign(CodemanApp.prototype, {
     return false;
   },
 
-  toggleFileBrowserFolder(path) {
+  async toggleFileBrowserFolder(path) {
     if (this.fileBrowserExpandedDirs.has(path)) {
       this.fileBrowserExpandedDirs.delete(path);
-    } else {
-      this.fileBrowserExpandedDirs.add(path);
+      this.renderFileBrowserTree();
+      return;
     }
-    this.renderFileBrowserTree();
+
+    this.fileBrowserExpandedDirs.add(path);
+    const treeData = this.fileBrowserData;
+    if (!treeData?.lazy || this.fileBrowserLoadedDirs?.has(path)) {
+      this.renderFileBrowserTree();
+      return;
+    }
+
+    // Remote trees are intentionally one directory deep. Capture both ownership
+    // and generation before the request so an old expansion can never graft its
+    // children onto a newly selected session's tree.
+    const sessionId = this.fileBrowserSessionId;
+    const generation = this.fileBrowserLoadGeneration;
+    const includeHidden = this.fileBrowserShowHidden === true;
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/files?path=${encodeURIComponent(path)}&showHidden=${includeHidden}`
+      );
+      if (!res.ok) throw new Error('Failed to load folder');
+      const result = await res.json();
+      if (!result.success) throw new Error(result.error || 'Failed to load folder');
+      if (
+        generation !== this.fileBrowserLoadGeneration ||
+        sessionId !== this.fileBrowserSessionId ||
+        treeData !== this.fileBrowserData
+      ) {
+        return;
+      }
+
+      const findDirectory = (nodes) => {
+        for (const node of nodes || []) {
+          if (node.path === path && node.type === 'directory') return node;
+          const match = findDirectory(node.children);
+          if (match) return match;
+        }
+        return null;
+      };
+      const directory = findDirectory(treeData.tree);
+      if (!directory) return;
+      directory.children = result.data.tree || [];
+      (this.fileBrowserLoadedDirs ||= new Set()).add(path);
+      this.renderFileBrowserTree();
+    } catch (err) {
+      if (generation !== this.fileBrowserLoadGeneration || sessionId !== this.fileBrowserSessionId) return;
+      this.fileBrowserExpandedDirs.delete(path);
+      this.renderFileBrowserTree();
+      this.showToast?.(`Failed to load folder: ${err && err.message ? err.message : err}`, 'error');
+    }
   },
 
   // COD-236: server-side search. The filter box now hits the files endpoint with
@@ -3718,6 +3766,17 @@ Object.assign(CodemanApp.prototype, {
     const treeEl = this.$('fileBrowserTree');
     const statusEl = this.$('fileBrowserStatus');
     if (!treeEl) return;
+
+    // Remote SFTP listings are lazy by design. Searching the current directory
+    // would look complete while silently omitting nested matches, so filtering is
+    // explicitly limited to the folders that have already been expanded.
+    if (this.fileBrowserData?.lazy) {
+      this.fileBrowserSearchMode = false;
+      this.fileBrowserMatches = null;
+      this.renderFileBrowserTree();
+      if (statusEl) statusEl.textContent = `Filtering loaded folders for '${q}'`;
+      return;
+    }
 
     // Generation guard: a slow response must not clobber a newer query.
     const loadGeneration = ++this.fileBrowserLoadGeneration;
@@ -3858,6 +3917,7 @@ Object.assign(CodemanApp.prototype, {
         this._fileBrowserSearchTimer = null;
       }
       this.fileBrowserExpandedDirs.clear();
+      this.fileBrowserLoadedDirs?.clear();
       this.fileBrowserFilter = '';
       this.fileBrowserSearchMode = false;
       this.fileBrowserMatches = null;

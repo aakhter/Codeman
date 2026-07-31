@@ -109,22 +109,17 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
     expect(listRemoteWorkspaceDirectory).not.toHaveBeenCalled();
   });
 
-  it('keeps remote search requests on SFTP instead of scanning the local working directory', async () => {
+  it('rejects remote server-side search rather than omitting nested matches', async () => {
     const readdir = vi.spyOn(fs, 'readdir');
-    listRemoteWorkspaceDirectory.mockResolvedValue([{ name: 'match.ts', path: 'match.ts', type: 'file', size: 7 }]);
 
     const res = await harness.app.inject({
       method: 'GET',
       url: `/api/sessions/${harness.ctx._sessionId}/files?q=match`,
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data).toMatchObject({
-      mode: 'search',
-      lazy: true,
-      matches: [{ name: 'match.ts', path: 'match.ts', type: 'file', size: 7 }],
-    });
-    expect(listRemoteWorkspaceDirectory).toHaveBeenCalledWith(REMOTE, '');
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toContain('limited to folders already loaded');
+    expect(listRemoteWorkspaceDirectory).not.toHaveBeenCalled();
     expect(readdir).not.toHaveBeenCalled();
     readdir.mockRestore();
   });
@@ -169,6 +164,25 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
     expect(res.json().data).toMatchObject({ type: 'binary', size: 11 * 1024 * 1024, extension: 'zip' });
     expect(getRemoteWorkspaceFileInfo).toHaveBeenCalledWith(REMOTE, 'archive.zip');
     expect(readRemoteWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps remote Office files on the raw-download path', async () => {
+    getRemoteWorkspaceFileInfo.mockResolvedValue({ size: 1024, mtimeMs: 1 });
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=proposal.docx`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({
+      type: 'binary',
+      url: expect.stringContaining('file-raw'),
+      previewUrl: expect.stringContaining('file-raw'),
+    });
+    expect(res.json().data.thumbnailUrl).toBeUndefined();
+    expect(res.body).not.toContain('file-preview');
+    expect(res.body).not.toContain('file-thumbnail');
   });
 
   it('streams a staged remote download and removes it after the response closes', async () => {
