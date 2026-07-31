@@ -1,6 +1,34 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import vm from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
+
+// COD-92 extracted the preserve-or-rewrite decision into a pure, mode-agnostic
+// predicate (`_shouldPreserveSnapshotScrollback`, terminal-ui.js). Load it
+// through the same vm harness as test/snapshot-preserve-predicate.test.ts so
+// tests here can assert behaviour directly instead of pinning source
+// substrings specific to one CLI mode.
+function loadPreservePredicate() {
+  const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+  const context = vm.createContext({
+    console: { ...console, debug: vi.fn(), log: vi.fn() },
+    CodemanApp: class CodemanApp {},
+    setInterval: vi.fn(),
+    clearInterval: vi.fn(),
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: vi.fn(),
+    document: { addEventListener: vi.fn(), getElementById: vi.fn(), documentElement: { dataset: {} } },
+    window: {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      document: { documentElement: { dataset: {} } },
+    },
+  });
+  vm.runInContext(`${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
+  const proto = (context as unknown as { __proto: Record<string, (...args: never[]) => unknown> }).__proto;
+  return (opts: Record<string, unknown>) => proto._shouldPreserveSnapshotScrollback.call(proto, opts);
+}
 
 describe('Codex tab resize behavior', () => {
   it('selectSession does not skip resize because another tab had the same dimensions', () => {
@@ -143,7 +171,30 @@ describe('Codex tab resize behavior', () => {
     expect(needsRewrite).toBeGreaterThan(busyClear);
     expect(replayBlock).toContain('clearedForBusy');
     expect(replayBlock).toContain('preserveSnapshotScrollback');
-    expect(replayBlock).toContain("session?.mode === 'codex'");
+    // needsRewrite is unconditionally forced by clearedForBusy — mode-agnostic
+    // since COD-92 removed the codex-only carve-out from this guard.
+    expect(replayBlock).toContain('clearedForBusy || (!preserveSnapshotScrollback');
+
+    // Behavioural: clearedForBusy alone must defeat preservation, even with
+    // every other input set to favour preserving the snapshot (restored
+    // snapshot, byte-identical canonical buffer, busy session) — and for
+    // every mode, not just codex. Asserted on the predicate itself rather
+    // than on a re-implementation of the call site, so the check actually
+    // fails if clearedForBusy is dropped from the guard.
+    const preserve = loadPreservePredicate();
+    for (const mode of ['claude', 'codex', 'opencode', 'gemini', 'agy']) {
+      expect(
+        preserve({
+          restoredSnapshot: true,
+          clearedForBusy: true,
+          requestFullHistory: false,
+          canonicalUnchanged: true,
+          sessionIsBusy: true,
+          mode,
+        }),
+        mode
+      ).toBe(false);
+    }
   });
 
   it('nudges xterm to repaint after session restore and browser refocus', () => {
