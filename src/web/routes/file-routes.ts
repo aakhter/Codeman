@@ -80,6 +80,13 @@ import { isSensitivePath } from '../sensitive-path.js';
 import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
 import { SseEvent } from '../sse-events.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
+import {
+  downloadRemoteWorkspaceFile,
+  getRemoteWorkspaceFileInfo,
+  listRemoteWorkspaceDirectory,
+  readRemoteWorkspaceFile,
+  remoteWorkspacePath,
+} from '../../remote-sftp.js';
 import { dataPath } from '../../config/instance.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
 import { FilesystemBrowseQuerySchema, FilesystemPreviewQuerySchema } from '../schemas.js';
@@ -125,7 +132,7 @@ function buildContentDisposition(disposition: 'inline' | 'attachment', fileName:
   return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-function sendRawStream(reply: FastifyReply, content: ReadStream): void {
+function sendRawStream(reply: FastifyReply, content: ReadStream, onClose?: () => void): void {
   const headers = reply.getHeaders();
   reply.hijack();
 
@@ -135,7 +142,14 @@ function sendRawStream(reply: FastifyReply, content: ReadStream): void {
     }
   }
 
+  let closed = false;
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    onClose?.();
+  };
   content.on('error', (err) => {
+    finish();
     if (reply.raw.headersSent) {
       reply.raw.destroy(err);
       return;
@@ -144,6 +158,7 @@ function sendRawStream(reply: FastifyReply, content: ReadStream): void {
     reply.raw.statusCode = 500;
     reply.raw.end('Failed to read file');
   });
+  content.once('close', finish);
   content.pipe(reply.raw);
 }
 
@@ -153,7 +168,8 @@ async function serveRawFile(
   fileName: string,
   extension: string,
   download?: boolean,
-  maxSizeBytes?: number
+  maxSizeBytes?: number,
+  onClose?: () => void
 ): Promise<void> {
   const stat = await fs.stat(resolvedPath);
   // Optional cap: the by-id attachment raw route bounds its response (an
@@ -179,7 +195,7 @@ async function serveRawFile(
     reply.header('Content-Disposition', buildContentDisposition('attachment', fileName));
     reply.header('Content-Length', stat.size);
     reply.header('X-Content-Type-Options', 'nosniff');
-    sendRawStream(reply, content);
+    sendRawStream(reply, content, onClose);
     return;
   }
 
@@ -187,7 +203,7 @@ async function serveRawFile(
   reply.header('Content-Disposition', buildContentDisposition('inline', fileName));
   reply.header('Content-Length', stat.size);
   reply.header('X-Content-Type-Options', 'nosniff');
-  sendRawStream(reply, content);
+  sendRawStream(reply, content, onClose);
 }
 
 async function serveConvertedPreview(
@@ -918,10 +934,67 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     await serveRawFile(reply, resolvedPath, fileName, extension);
   });
 
-  app.get('/api/sessions/:id/files', async (req) => {
+  // File tree listing (tree mode) + server-side search (search mode, COD-236).
+  // Remote workspaces are listed lazily via the saved SFTP connection.
+  app.get('/api/sessions/:id/files', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { depth, showHidden, q } = req.query as { depth?: string; showHidden?: string; q?: string };
-    const session = findSessionOrFail(ctx, id);
+    const {
+      depth,
+      showHidden,
+      q,
+      path: requestedPath,
+    } = req.query as {
+      depth?: string;
+      showHidden?: string;
+      q?: string;
+      path?: string;
+    };
+    const session = findSessionOrFail(ctx, id, req);
+
+    // Remote workspaces cannot be walked through this server's filesystem. List
+    // one directory at a time via the saved SSH/SFTP connection; the client
+    // expands these lazy nodes on demand.
+    if (session.remote) {
+      if (q?.trim()) {
+        return reply
+          .code(400)
+          .send(
+            createErrorResponse(
+              ApiErrorCode.INVALID_INPUT,
+              'Remote file search is limited to folders already loaded in the File Viewer'
+            )
+          );
+      }
+      const relativePath = requestedPath ?? '';
+      try {
+        remoteWorkspacePath(session.remote, relativePath);
+      } catch (err) {
+        return reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err)));
+      }
+      try {
+        const entries = await listRemoteWorkspaceDirectory(session.remote, relativePath);
+        const tree = entries.map((entry) => ({
+          ...entry,
+          ...(entry.type === 'directory'
+            ? { children: [] }
+            : { extension: entry.name.includes('.') ? entry.name.split('.').pop()?.toLowerCase() : undefined }),
+        }));
+        return {
+          success: true,
+          data: {
+            root: session.remote.remotePath,
+            tree,
+            totalFiles: entries.filter((entry) => entry.type === 'file').length,
+            totalDirectories: entries.filter((entry) => entry.type === 'directory').length,
+            truncated: false,
+            mode: 'tree' as const,
+            lazy: true,
+          },
+        };
+      } catch (err) {
+        throw Object.assign(new Error(`Failed to list remote files: ${getErrorMessage(err)}`), { statusCode: 500 });
+      }
+    }
 
     const maxDepth = Math.min(parseInt(depth || '5', 10), 10);
     const includeHidden = showHidden === 'true';
@@ -1146,21 +1219,37 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-content', async (req) => {
     const { id } = req.params as { id: string };
     const { path: filePath, lines, raw } = req.query as { path?: string; lines?: string; raw?: string };
+    const liveSession = ctx.sessions.get(id);
+    const remote = liveSession?.remote;
+    // Keep stored/local attachment-history previews on their existing path. A
+    // remote workspace must be live so its saved connection configuration is
+    // available, and findSessionOrFail preserves ownership checks.
+    if (remote) findSessionOrFail(ctx, id, req);
     const workingDir = getSessionAttachmentHistory(ctx, id, req)?.workingDir ?? findSessionOrFail(ctx, id).workingDir;
 
     if (!filePath) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
     }
 
-    // Validate path is within working directory (security: resolve symlinks to prevent traversal)
-    const validated = validateSessionFilePath(workingDir, filePath);
-    if (!validated) {
-      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+    let resolvedPath: string | undefined;
+    if (remote) {
+      try {
+        remoteWorkspacePath(remote, filePath);
+      } catch {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+      }
+    } else {
+      // Validate path is within working directory (security: resolve symlinks to prevent traversal)
+      const validated = validateSessionFilePath(workingDir, filePath);
+      if (!validated) {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+      }
+      resolvedPath = validated.resolvedPath;
     }
-    const { resolvedPath } = validated;
 
     try {
-      const stat = await fs.stat(resolvedPath);
+      const remoteInfo = remote ? await getRemoteWorkspaceFileInfo(remote, filePath) : null;
+      const stat = remoteInfo ?? (await fs.stat(resolvedPath!));
 
       // Classify by extension. Known media types render with a dedicated player;
       // other known-binary types are flagged so the client offers a download
@@ -1223,12 +1312,24 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         // Return metadata for media/binary files (no text body). COD-58: docx/pptx
         // expose a server-converted PDF previewUrl + a thumbnailUrl so the document
         // preview overlay can render them inline rather than dumping raw bytes.
-        const officePreviewUrl = `/api/sessions/${id}/file-preview?path=${encodeURIComponent(filePath)}`;
         const type =
           mediaType ??
-          (ext === 'pdf' ? 'pdf' : ext === 'docx' ? 'document' : ext === 'pptx' ? 'presentation' : 'binary');
-        const previewUrl = ext === 'docx' || ext === 'pptx' ? officePreviewUrl : fileRawUrl;
-        const thumbnailUrl = isSupportedAttachmentExtension(ext) ? buildFileThumbnailRoute(id, filePath) : undefined;
+          (ext === 'pdf'
+            ? 'pdf'
+            : !remote && ext === 'docx'
+              ? 'document'
+              : !remote && ext === 'pptx'
+                ? 'presentation'
+                : 'binary');
+        // DOCX/PPTX conversion and thumbnails read server-local paths. Remote
+        // workspaces therefore expose those files as safe raw downloads instead
+        // of handing the browser an endpoint that cannot access the SSH host.
+        const previewUrl =
+          !remote && (ext === 'docx' || ext === 'pptx')
+            ? `/api/sessions/${id}/file-preview?path=${encodeURIComponent(filePath)}`
+            : fileRawUrl;
+        const thumbnailUrl =
+          !remote && isSupportedAttachmentExtension(ext) ? buildFileThumbnailRoute(id, filePath) : undefined;
         return {
           success: true,
           data: {
@@ -1258,7 +1359,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       // is actually binary would otherwise be dumped to the viewer as UTF-8
       // mojibake; a NUL byte in the first 8KB is a reliable binary signal that
       // (unlike a static extension list) catches arbitrary binary formats.
-      const fileBuffer = await fs.readFile(resolvedPath);
+      const remoteBuffer = remote ? await readRemoteWorkspaceFile(remote, filePath, MAX_TEXT_FILE_SIZE) : null;
+      const fileBuffer = remoteBuffer ?? (await fs.readFile(resolvedPath!));
       const buf = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(String(fileBuffer));
       const sniffLength = Math.min(buf.length, 8192);
       let looksBinary = false;
@@ -2071,6 +2173,47 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/file-raw', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath, download } = req.query as { path?: string; download?: string };
+    const liveSession = ctx.sessions.get(id);
+    if (liveSession?.remote) {
+      // Uses the live session deliberately: remote connection details are not
+      // persisted in the detached-session record. This call enforces the same
+      // ownership rule as every other live-session file operation.
+      const session = findSessionOrFail(ctx, id, req);
+      if (!filePath) {
+        reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
+        return;
+      }
+      try {
+        remoteWorkspacePath(session.remote!, filePath);
+      } catch {
+        reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
+        return;
+      }
+      try {
+        const staged = await downloadRemoteWorkspaceFile(session.remote!, filePath);
+        const ext = filePath.split('.').pop()?.toLowerCase() || '';
+        const rawBasename = filePath.split('/').pop() || 'download';
+        let cleaned = false;
+        const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
+          void staged.cleanup();
+        };
+        try {
+          await serveRawFile(reply, staged.path, rawBasename, ext, download === 'true', undefined, cleanup);
+        } catch (err) {
+          cleanup();
+          throw err;
+        }
+      } catch (err) {
+        reply
+          .code(500)
+          .send(
+            createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read remote file: ${getErrorMessage(err)}`)
+          );
+      }
+      return;
+    }
     const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
 

@@ -639,6 +639,7 @@ class CodemanApp {
     this.fileBrowserSessionId = null;
     this.fileBrowserLoadGeneration = 0;
     this.fileBrowserExpandedDirs = new Set();
+    this.fileBrowserLoadedDirs = new Set();
     this.fileBrowserFilter = '';
     this.fileBrowserAllExpanded = false;
     this.fileBrowserDragListeners = null;

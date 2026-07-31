@@ -225,6 +225,14 @@ Frontend touchpoints: the remote-host management UI is in `session-ui.js` /
 session-create flow, or via the per-host **"Discover existing sessions"** button →
 **Attach** action (creates an `owned: false` session).
 
+### File Viewer (COD-252)
+
+The File Viewer lists remote workspaces and downloads remote files through the
+system OpenSSH `sftp` client. It reuses the saved host's identity, port, jump
+host, SOCKS proxy, and extra SSH options; no separate SFTP configuration is
+required. Directories load as they are expanded. Bounded text previews use the
+same SSH connection contract so a growing remote file cannot exhaust local disk.
+
 ## Security notes
 
 - **`identityFile` is a path only — never key bytes.** Codeman stores the path and

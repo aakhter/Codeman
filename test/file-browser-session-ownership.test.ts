@@ -14,6 +14,7 @@ type TreeNode = {
   type: 'file' | 'directory';
   extension?: string;
   size?: number;
+  children?: TreeNode[];
 };
 
 type BrowserData = {
@@ -21,6 +22,7 @@ type BrowserData = {
   totalFiles: number;
   totalDirectories: number;
   truncated: boolean;
+  lazy?: boolean;
 };
 
 type FakeTreeItem = {
@@ -42,6 +44,7 @@ type Host = {
   fileBrowserFilter: string;
   fileBrowserAllExpanded: boolean;
   fileBrowserExpandedDirs: Set<string>;
+  fileBrowserShowHidden?: boolean;
   renderFileBrowserTree: () => void;
   loadFileBrowser: (sessionId: string) => Promise<void>;
   refreshFileBrowser: () => void;
@@ -328,6 +331,76 @@ describe('COD-231 file-browser session ownership', () => {
     expect(host.fileBrowserFilter).toBe('');
     expect(host.fileBrowserAllExpanded).toBe(false);
     expect(searchInput.value).toBe('');
+  });
+
+  it('lazy-loads an expanded remote directory into the displayed tree', async () => {
+    const children: TreeNode[] = [{ name: 'index.ts', path: 'src/index.ts', type: 'file' }];
+    const fetchImpl = vi.fn(async () =>
+      successfulResponse({ tree: children, totalFiles: 1, totalDirectories: 0, truncated: false, lazy: true })
+    );
+    const proto = loadPanelsUiPrototype(fetchImpl);
+    const host = {
+      $: vi.fn(() => null),
+      activeSessionId: 'new-active-session',
+      fileBrowserSessionId: 'tree-owner-session',
+      fileBrowserLoadGeneration: 7,
+      fileBrowserData: {
+        tree: [{ name: 'src', path: 'src', type: 'directory', children: [] }],
+        totalFiles: 0,
+        totalDirectories: 1,
+        truncated: false,
+        lazy: true,
+      },
+      fileBrowserFilter: '',
+      fileBrowserExpandedDirs: new Set<string>(),
+      fileBrowserShowHidden: false,
+      renderFileBrowserTree: vi.fn(),
+    } as unknown as Host;
+    host.toggleFileBrowserFolder = proto.toggleFileBrowserFolder as Host['toggleFileBrowserFolder'];
+
+    await host.toggleFileBrowserFolder('src');
+
+    expect(fetchImpl).toHaveBeenCalledWith('/api/sessions/tree-owner-session/files?path=src&showHidden=false');
+    expect(host.fileBrowserData?.tree[0].children).toEqual(children);
+    expect(host.renderFileBrowserTree).toHaveBeenCalledOnce();
+  });
+
+  it('drops a lazy directory response after a new tree load starts', async () => {
+    const request = deferred<FetchResponse>();
+    const proto = loadPanelsUiPrototype(vi.fn(() => request.promise));
+    const host = {
+      $: vi.fn(() => null),
+      activeSessionId: 'new-active-session',
+      fileBrowserSessionId: 'tree-owner-session',
+      fileBrowserLoadGeneration: 7,
+      fileBrowserData: {
+        tree: [{ name: 'src', path: 'src', type: 'directory', children: [] }],
+        totalFiles: 0,
+        totalDirectories: 1,
+        truncated: false,
+        lazy: true,
+      },
+      fileBrowserFilter: '',
+      fileBrowserExpandedDirs: new Set<string>(),
+      renderFileBrowserTree: vi.fn(),
+    } as unknown as Host;
+    host.toggleFileBrowserFolder = proto.toggleFileBrowserFolder as Host['toggleFileBrowserFolder'];
+
+    const expand = host.toggleFileBrowserFolder('src');
+    host.fileBrowserLoadGeneration++;
+    request.resolve(
+      successfulResponse({
+        tree: [{ name: 'stale.ts', path: 'src/stale.ts', type: 'file' }],
+        totalFiles: 1,
+        totalDirectories: 0,
+        truncated: false,
+        lazy: true,
+      })
+    );
+    await expand;
+
+    expect(host.fileBrowserData?.tree[0].children).toEqual([]);
+    expect(host.renderFileBrowserTree).not.toHaveBeenCalled();
   });
 
   it('initializes the file-browser owner and load generation with the other browser state', () => {
