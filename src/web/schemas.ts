@@ -397,10 +397,17 @@ export const RemoteHostSchema = z.object({
   commands: RemoteCommandOverridesSchema,
 });
 
+const remoteWorkspacePathSchema = z
+  .string()
+  .min(1)
+  .max(2000)
+  .regex(/^\//, 'Remote path must be absolute')
+  .refine((path) => !/[\0\r\n]/.test(path), 'Remote path must not contain NUL, CR, or LF');
+
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
   hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
-  remotePath: z.string().min(1).max(2000).regex(/^\//, 'Remote path must be absolute'),
+  remotePath: remoteWorkspacePathSchema,
   commands: RemoteCommandOverridesSchema.optional(),
 });
 
@@ -415,7 +422,7 @@ export const UpdateCaseSchema = z
       .string()
       .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id')
       .optional(),
-    remotePath: z.string().min(1).max(2000).regex(/^\//, 'Remote path must be absolute').optional(),
+    remotePath: remoteWorkspacePathSchema.optional(),
     commands: RemoteCommandOverridesSchema.optional(),
   })
   .refine((value) => value.name || value.path || value.hostId || value.remotePath || value.commands, {
