@@ -137,7 +137,9 @@ describe('listRemoteWorkspaceDirectory', () => {
   });
 
   it('parses a macOS long listing with an unknown link count', async () => {
-    mockSftp({ stdout: '-rw-r--r--    ? ann      staff          12 Jul 30 20:11 AGENTS.md\n' });
+    mockSftp({
+      stdout: '-rw-r--r--    ? ann      staff          12 Jul 30 20:11 /home/ann/proj/AGENTS.md\n',
+    });
 
     await expect(listRemoteWorkspaceDirectory(REMOTE)).resolves.toEqual([
       { name: 'AGENTS.md', path: 'AGENTS.md', type: 'file', size: 12 },

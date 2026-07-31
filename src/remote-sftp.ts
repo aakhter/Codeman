@@ -159,7 +159,10 @@ function parseSftpLongListing(stdout: string, relativeDir: string): RemoteWorksp
         line
       );
     if (!match) continue;
-    const [, kind, size, name] = match;
+    const [, kind, size, listedName] = match;
+    // macOS includes the absolute child path when `ls` receives an absolute
+    // directory. A filename cannot contain `/`, so keep only the final entry.
+    const name = pathPosix.basename(listedName);
     // A newline-containing name cannot be safely represented in SFTP batch input.
     if (!name || /[\0\r\n]/.test(name) || name === '.' || name === '..') continue;
     entries.push({
