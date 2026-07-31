@@ -144,6 +144,20 @@ export async function downloadRemoteWorkspaceFile(
   return { path: localPath, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
+async function remoteWorkspaceFileSize(
+  remote: SessionRemote,
+  relativePath: string,
+  options: RemoteSftpOptions
+): Promise<number> {
+  const remotePath = remoteWorkspacePath(remote, relativePath);
+  const stdout = await runSftpBatch(remote, `ls -ln ${quoteSftpPath(remotePath)}\n`, options);
+  const entries = parseSftpLongListing(stdout, '');
+  if (entries.length !== 1 || entries[0].type !== 'file' || entries[0].size === undefined) {
+    throw new Error('Could not determine remote file size before reading');
+  }
+  return entries[0].size;
+}
+
 /** Read a remote workspace file, rejecting it before returning if it exceeds `maxBytes`. */
 export async function readRemoteWorkspaceFile(
   remote: SessionRemote,
@@ -151,8 +165,12 @@ export async function readRemoteWorkspaceFile(
   maxBytes: number,
   options: RemoteSftpOptions = {}
 ): Promise<Buffer> {
+  const remoteSize = await remoteWorkspaceFileSize(remote, relativePath, options);
+  if (remoteSize > maxBytes) throw new Error(`Remote file exceeds the ${maxBytes}-byte read limit`);
   const staged = await downloadRemoteWorkspaceFile(remote, relativePath, options);
   try {
+    // The preflight prevents an oversized transfer; retain this guard against a
+    // concurrent remote file replacement between metadata lookup and download.
     const info = await stat(staged.path);
     if (info.size > maxBytes) throw new Error(`Remote file exceeds the ${maxBytes}-byte read limit`);
     return await readFile(staged.path);
