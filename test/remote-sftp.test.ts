@@ -12,6 +12,7 @@ import {
   buildSftpConnectionArgv,
   downloadRemoteWorkspaceFile,
   listRemoteWorkspaceDirectory,
+  MAX_SFTP_BATCH_STDOUT_BYTES,
   readRemoteWorkspaceFile,
   remoteWorkspacePath,
 } from '../src/remote-sftp.js';
@@ -152,6 +153,14 @@ describe('listRemoteWorkspaceDirectory', () => {
   it('times out and terminates a stalled SFTP process', async () => {
     const { kill } = mockSftp({ neverClose: true });
     await expect(listRemoteWorkspaceDirectory(REMOTE, '', { timeoutMs: 10 })).rejects.toThrow('timed out');
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('terminates and rejects an SFTP listing whose stdout exceeds the hard byte cap', async () => {
+    const { kill } = mockSftp({ stdout: 'x'.repeat(MAX_SFTP_BATCH_STDOUT_BYTES + 1) });
+
+    await expect(listRemoteWorkspaceDirectory(REMOTE)).rejects.toThrow('stdout exceeded');
+
     expect(kill).toHaveBeenCalledWith('SIGTERM');
   });
 });

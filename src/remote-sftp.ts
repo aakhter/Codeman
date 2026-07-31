@@ -14,6 +14,8 @@ import { buildSshConnectionArgv, remoteSshTarget, shellescape } from './remote-h
 import type { SessionRemote } from './types/session.js';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** Bounds an `sftp ls` response to roughly 5,000 long-list entries. */
+export const MAX_SFTP_BATCH_STDOUT_BYTES = 5 * 1024 * 1024;
 
 export interface RemoteSftpOptions {
   timeoutMs?: number;
@@ -70,6 +72,7 @@ async function runSftpBatch(remote: SessionRemote, batch: string, options: Remot
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const stdout: Buffer[] = [];
+    let stdoutBytes = 0;
     const stderr: Buffer[] = [];
     let settled = false;
     const finish = (fn: () => void) => {
@@ -85,7 +88,18 @@ async function runSftpBatch(remote: SessionRemote, batch: string, options: Remot
       });
     }, timeoutMs);
 
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_SFTP_BATCH_STDOUT_BYTES) {
+        finish(() => {
+          child.kill('SIGTERM');
+          reject(new Error(`Remote SFTP stdout exceeded the ${MAX_SFTP_BATCH_STDOUT_BYTES}-byte limit`));
+        });
+        return;
+      }
+      stdout.push(Buffer.from(chunk));
+    });
     child.stderr.on('data', (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
     child.on('error', (error) => finish(() => reject(error)));
     child.on('close', (code) => {
