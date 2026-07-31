@@ -60,6 +60,7 @@ import { SseEvent } from '../sse-events.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 import {
   downloadRemoteWorkspaceFile,
+  getRemoteWorkspaceFileInfo,
   listRemoteWorkspaceDirectory,
   readRemoteWorkspaceFile,
   remoteWorkspacePath,
@@ -585,7 +586,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // Remote workspaces cannot be walked through this server's filesystem. List
     // one directory at a time via the saved SSH/SFTP connection; the client
     // expands these lazy nodes on demand.
-    if (session.remote && !q) {
+    if (session.remote) {
       const relativePath = requestedPath ?? '';
       try {
         remoteWorkspacePath(session.remote, relativePath);
@@ -594,6 +595,24 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       }
       try {
         const entries = await listRemoteWorkspaceDirectory(session.remote, relativePath);
+        if (q) {
+          const match = compileFileQuery(q);
+          const matches = match ? entries.filter((entry) => match(entry.name, entry.path)) : entries;
+          return {
+            success: true,
+            data: {
+              root: session.remote.remotePath,
+              matches,
+              totalFiles: entries.filter((entry) => entry.type === 'file').length,
+              totalDirectories: entries.filter((entry) => entry.type === 'directory').length,
+              truncated: false,
+              matchCount: matches.length,
+              query: q.trim(),
+              mode: 'search' as const,
+              lazy: true,
+            },
+          };
+        }
         const tree = entries.map((entry) => ({
           ...entry,
           ...(entry.type === 'directory'
@@ -869,9 +888,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
 
     try {
-      const remoteBuffer = remote ? await readRemoteWorkspaceFile(remote, filePath, 10 * 1024 * 1024) : null;
-      const stat =
-        remoteBuffer !== null ? { size: remoteBuffer.length, mtimeMs: undefined } : await fs.stat(resolvedPath!);
+      const remoteInfo = remote ? await getRemoteWorkspaceFileInfo(remote, filePath) : null;
+      const stat = remoteInfo ?? (await fs.stat(resolvedPath!));
 
       // Classify by extension. Known media types render with a dedicated player;
       // other known-binary types are flagged so the client offers a download
@@ -969,6 +987,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       // is actually binary would otherwise be dumped to the viewer as UTF-8
       // mojibake; a NUL byte in the first 8KB is a reliable binary signal that
       // (unlike a static extension list) catches arbitrary binary formats.
+      const remoteBuffer = remote ? await readRemoteWorkspaceFile(remote, filePath, MAX_TEXT_FILE_SIZE) : null;
       const fileBuffer = remoteBuffer ?? (await fs.readFile(resolvedPath!));
       const buf = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(String(fileBuffer));
       const sniffLength = Math.min(buf.length, 8192);

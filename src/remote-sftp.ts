@@ -35,6 +35,12 @@ export interface StagedRemoteWorkspaceFile {
   cleanup: () => Promise<void>;
 }
 
+/** Minimal metadata needed to classify a remote File Viewer response safely. */
+export interface RemoteWorkspaceFileInfo {
+  size: number;
+  mtimeMs?: number;
+}
+
 /** Buffer process diagnostics up to a fixed limit without retaining overflow. */
 function createCappedStderrCollector(maxBytes = MAX_REMOTE_STDERR_BYTES): {
   append: (chunk: Buffer) => boolean;
@@ -172,6 +178,19 @@ export async function listRemoteWorkspaceDirectory(
   const remotePath = remoteWorkspacePath(remote, relativePath);
   const stdout = await runSftpBatch(remote, `ls -l ${quoteSftpPath(remotePath)}\n`, options);
   return parseSftpLongListing(stdout, relativePath);
+}
+
+/** Read a file's SFTP long-list metadata without downloading its contents. */
+export async function getRemoteWorkspaceFileInfo(
+  remote: SessionRemote,
+  relativePath: string,
+  options: RemoteSftpOptions = {}
+): Promise<RemoteWorkspaceFileInfo> {
+  const remotePath = remoteWorkspacePath(remote, relativePath);
+  const stdout = await runSftpBatch(remote, `ls -l ${quoteSftpPath(remotePath)}\n`, options);
+  const entry = parseSftpLongListing(stdout, '').find((candidate) => candidate.type === 'file');
+  if (!entry || entry.size === undefined) throw new Error('Remote file metadata was not returned by SFTP');
+  return { size: entry.size };
 }
 
 /** Download a workspace-relative remote file into a private staging directory. */

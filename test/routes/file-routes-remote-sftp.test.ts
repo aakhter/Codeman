@@ -8,19 +8,26 @@ import { createRouteTestHarness, type RouteTestHarness } from './_route-test-uti
 import { registerFileRoutes } from '../../src/web/routes/file-routes.js';
 import type { SessionRemote } from '../../src/types/session.js';
 
-const { listRemoteWorkspaceDirectory, readRemoteWorkspaceFile, downloadRemoteWorkspaceFile, remoteWorkspacePath } =
-  vi.hoisted(() => ({
-    listRemoteWorkspaceDirectory: vi.fn(),
-    readRemoteWorkspaceFile: vi.fn(),
-    downloadRemoteWorkspaceFile: vi.fn(),
-    remoteWorkspacePath: vi.fn((remote: SessionRemote, relativePath = '') => {
-      if (relativePath.startsWith('/') || relativePath.split('/').includes('..')) throw new Error('workspace-relative');
-      return relativePath ? `${remote.remotePath}/${relativePath}` : remote.remotePath;
-    }),
-  }));
+const {
+  listRemoteWorkspaceDirectory,
+  getRemoteWorkspaceFileInfo,
+  readRemoteWorkspaceFile,
+  downloadRemoteWorkspaceFile,
+  remoteWorkspacePath,
+} = vi.hoisted(() => ({
+  listRemoteWorkspaceDirectory: vi.fn(),
+  getRemoteWorkspaceFileInfo: vi.fn(),
+  readRemoteWorkspaceFile: vi.fn(),
+  downloadRemoteWorkspaceFile: vi.fn(),
+  remoteWorkspacePath: vi.fn((remote: SessionRemote, relativePath = '') => {
+    if (relativePath.startsWith('/') || relativePath.split('/').includes('..')) throw new Error('workspace-relative');
+    return relativePath ? `${remote.remotePath}/${relativePath}` : remote.remotePath;
+  }),
+}));
 
 vi.mock('../../src/remote-sftp.js', () => ({
   listRemoteWorkspaceDirectory,
+  getRemoteWorkspaceFileInfo,
   readRemoteWorkspaceFile,
   downloadRemoteWorkspaceFile,
   remoteWorkspacePath,
@@ -102,7 +109,28 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
     expect(listRemoteWorkspaceDirectory).not.toHaveBeenCalled();
   });
 
+  it('keeps remote search requests on SFTP instead of scanning the local working directory', async () => {
+    const readdir = vi.spyOn(fs, 'readdir');
+    listRemoteWorkspaceDirectory.mockResolvedValue([{ name: 'match.ts', path: 'match.ts', type: 'file', size: 7 }]);
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/files?q=match`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({
+      mode: 'search',
+      lazy: true,
+      matches: [{ name: 'match.ts', path: 'match.ts', type: 'file', size: 7 }],
+    });
+    expect(listRemoteWorkspaceDirectory).toHaveBeenCalledWith(REMOTE, '');
+    expect(readdir).not.toHaveBeenCalled();
+    readdir.mockRestore();
+  });
+
   it('uses bounded remote content reads and preserves text and binary responses', async () => {
+    getRemoteWorkspaceFileInfo.mockResolvedValueOnce({ size: 14 }).mockResolvedValueOnce({ size: 3 });
     readRemoteWorkspaceFile
       .mockResolvedValueOnce(Buffer.from('one\ntwo\nthree\n'))
       .mockResolvedValueOnce(Buffer.from([1, 0, 2]));
@@ -127,6 +155,20 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
     expect(binary.statusCode).toBe(200);
     expect(binary.json().data).toMatchObject({ type: 'binary', size: 3, url: expect.stringContaining('file-raw') });
     expect(readRemoteWorkspaceFile).toHaveBeenNthCalledWith(1, REMOTE, 'notes.txt', 10 * 1024 * 1024);
+  });
+
+  it('returns known remote binary metadata from SFTP info without reading a >10MB body', async () => {
+    getRemoteWorkspaceFileInfo.mockResolvedValue({ size: 11 * 1024 * 1024 });
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=archive.zip`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ type: 'binary', size: 11 * 1024 * 1024, extension: 'zip' });
+    expect(getRemoteWorkspaceFileInfo).toHaveBeenCalledWith(REMOTE, 'archive.zip');
+    expect(readRemoteWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('streams a staged remote download and removes it after the response closes', async () => {

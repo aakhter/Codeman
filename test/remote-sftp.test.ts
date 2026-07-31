@@ -11,6 +11,7 @@ vi.mock('node:child_process', async (orig) => {
 import {
   buildSftpConnectionArgv,
   downloadRemoteWorkspaceFile,
+  getRemoteWorkspaceFileInfo,
   listRemoteWorkspaceDirectory,
   MAX_SFTP_BATCH_STDOUT_BYTES,
   MAX_REMOTE_STDERR_BYTES,
@@ -171,6 +172,17 @@ describe('listRemoteWorkspaceDirectory', () => {
     await expect(listRemoteWorkspaceDirectory(REMOTE)).rejects.toThrow('stderr exceeded');
 
     expect(kill).toHaveBeenCalledWith('SIGTERM');
+  });
+});
+
+describe('getRemoteWorkspaceFileInfo', () => {
+  beforeEach(() => spawn.mockReset());
+
+  it('reads only SFTP long-list metadata for a workspace-relative file', async () => {
+    const { stdin } = mockSftp({ stdout: '-rw-r--r--    1 ann      staff    11534336 Jan  2 12:34 archive.zip\n' });
+
+    await expect(getRemoteWorkspaceFileInfo(REMOTE, 'archive.zip')).resolves.toEqual({ size: 11534336 });
+    expect(Buffer.concat(stdin).toString('utf8')).toBe('ls -l "/home/ann/proj/archive.zip"\n');
   });
 });
 
