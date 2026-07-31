@@ -16,6 +16,8 @@ import type { SessionRemote } from './types/session.js';
 const DEFAULT_TIMEOUT_MS = 15_000;
 /** Bounds an `sftp ls` response to roughly 5,000 long-list entries. */
 export const MAX_SFTP_BATCH_STDOUT_BYTES = 5 * 1024 * 1024;
+/** Retains a bounded diagnostic while refusing a peer that floods stderr. */
+export const MAX_REMOTE_STDERR_BYTES = 1024 * 1024;
 
 export interface RemoteSftpOptions {
   timeoutMs?: number;
@@ -31,6 +33,26 @@ export interface RemoteWorkspaceEntry {
 export interface StagedRemoteWorkspaceFile {
   path: string;
   cleanup: () => Promise<void>;
+}
+
+/** Buffer process diagnostics up to a fixed limit without retaining overflow. */
+function createCappedStderrCollector(maxBytes = MAX_REMOTE_STDERR_BYTES): {
+  append: (chunk: Buffer) => boolean;
+  text: () => string;
+} {
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  return {
+    append(chunk) {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) return false;
+      chunks.push(Buffer.from(chunk));
+      return true;
+    },
+    text() {
+      return Buffer.concat(chunks).toString('utf8').trim();
+    },
+  };
 }
 
 /** Build SFTP arguments from the canonical SSH connection arguments. */
@@ -73,7 +95,7 @@ async function runSftpBatch(remote: SessionRemote, batch: string, options: Remot
     });
     const stdout: Buffer[] = [];
     let stdoutBytes = 0;
-    const stderr: Buffer[] = [];
+    const stderr = createCappedStderrCollector();
     let settled = false;
     const finish = (fn: () => void) => {
       if (settled) return;
@@ -100,14 +122,22 @@ async function runSftpBatch(remote: SessionRemote, batch: string, options: Remot
       }
       stdout.push(Buffer.from(chunk));
     });
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      if (!stderr.append(chunk)) {
+        finish(() => {
+          child.kill('SIGTERM');
+          reject(new Error(`Remote SFTP stderr exceeded the ${MAX_REMOTE_STDERR_BYTES}-byte diagnostic limit`));
+        });
+      }
+    });
     child.on('error', (error) => finish(() => reject(error)));
     child.on('close', (code) => {
       if (code === 0) {
         finish(() => resolve(Buffer.concat(stdout).toString('utf8')));
         return;
       }
-      const message = Buffer.concat(stderr).toString('utf8').trim();
+      const message = stderr.text();
       finish(() => reject(new Error(message || `Remote SFTP operation failed with exit code ${code ?? 'unknown'}`)));
     });
     child.stdin.end(batch);
@@ -190,7 +220,7 @@ export async function readRemoteWorkspaceFile(
   return new Promise<Buffer>((resolve, reject) => {
     const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
+    const stderr = createCappedStderrCollector();
     let total = 0;
     let settled = false;
     const finish = (fn: () => void) => {
@@ -218,14 +248,22 @@ export async function readRemoteWorkspaceFile(
       }
       stdout.push(Buffer.from(chunk));
     });
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      if (!stderr.append(chunk)) {
+        finish(() => {
+          child.kill('SIGTERM');
+          reject(new Error(`Remote file read stderr exceeded the ${MAX_REMOTE_STDERR_BYTES}-byte diagnostic limit`));
+        });
+      }
+    });
     child.on('error', (error) => finish(() => reject(error)));
     child.on('close', (code) => {
       if (code === 0) {
         finish(() => resolve(Buffer.concat(stdout)));
         return;
       }
-      const message = Buffer.concat(stderr).toString('utf8').trim();
+      const message = stderr.text();
       finish(() => reject(new Error(message || `Remote file read failed with exit code ${code ?? 'unknown'}`)));
     });
   });

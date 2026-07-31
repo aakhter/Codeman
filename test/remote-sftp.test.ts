@@ -13,6 +13,7 @@ import {
   downloadRemoteWorkspaceFile,
   listRemoteWorkspaceDirectory,
   MAX_SFTP_BATCH_STDOUT_BYTES,
+  MAX_REMOTE_STDERR_BYTES,
   readRemoteWorkspaceFile,
   remoteWorkspacePath,
 } from '../src/remote-sftp.js';
@@ -163,6 +164,14 @@ describe('listRemoteWorkspaceDirectory', () => {
 
     expect(kill).toHaveBeenCalledWith('SIGTERM');
   });
+
+  it('terminates and rejects an SFTP operation whose stderr exceeds the diagnostic cap', async () => {
+    const { kill } = mockSftp({ stderr: 'x'.repeat(MAX_REMOTE_STDERR_BYTES + 1) });
+
+    await expect(listRemoteWorkspaceDirectory(REMOTE)).rejects.toThrow('stderr exceeded');
+
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+  });
 });
 
 function mockSftpRead(bytes: Buffer): { batches: string[]; localPaths: string[] } {
@@ -227,6 +236,34 @@ function mockBoundedSshRead(bytes: Buffer): void {
   });
 }
 
+function mockSshStderr(stderr: Buffer): { kill: ReturnType<typeof vi.fn> } {
+  const kill = vi.fn();
+  spawn.mockImplementation(() => {
+    const child = new PassThrough() as unknown as {
+      stdin: Writable;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      on: (event: string, cb: (...args: unknown[]) => void) => unknown;
+      emit: (event: string, ...args: unknown[]) => boolean;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdin = new Writable({
+      write(_chunk, _encoding, cb) {
+        cb();
+      },
+    });
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = kill;
+    queueMicrotask(() => {
+      child.stderr.emit('data', stderr);
+      child.emit('close', 1);
+    });
+    return child;
+  });
+  return { kill };
+}
+
 describe('readRemoteWorkspaceFile', () => {
   beforeEach(() => spawn.mockReset());
 
@@ -264,5 +301,13 @@ describe('readRemoteWorkspaceFile', () => {
       expect.arrayContaining(['BatchMode=yes', 'ann@10.0.0.9', expect.stringContaining('head -c 101')]),
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
+  });
+
+  it('terminates and rejects an SSH text read whose stderr exceeds the diagnostic cap', async () => {
+    const { kill } = mockSshStderr(Buffer.alloc(MAX_REMOTE_STDERR_BYTES + 1, 'x'));
+
+    await expect(readRemoteWorkspaceFile(REMOTE, 'unreadable.txt', 100)).rejects.toThrow('stderr exceeded');
+
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
   });
 });
