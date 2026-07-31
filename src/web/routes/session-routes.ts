@@ -68,7 +68,7 @@ import {
   updateCaseModel,
   stripCaseEnvKeys,
   applyStatusLineConfig,
-  refreshStaleHookSecret,
+  refreshStaleCodemanHooks,
 } from '../../hooks-config.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { imageWatcher } from '../../image-watcher.js';
@@ -154,6 +154,24 @@ const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
 const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g;
 
 const REMOTE_PASTE_IMAGE_SSH_TIMEOUT_MS = 15_000;
+
+// Native external-CLI resume-id capture (COD-124 unit 2 Gap B; widened to
+// opencode/gemini/agy by COD-251). Each pattern mirrors the validation the
+// matching CLI builder in tmux-manager.ts applies before putting the id on a
+// command line — captured ids are re-validated here as defense in depth.
+const OPENCODE_SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const GEMINI_SESSION_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
+const AGY_CONVERSATION_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
+
+/** opencode's sqlite store root. Overridable via XDG_DATA_HOME for tests (mirrors codex's CODEX_HOME). */
+function opencodeDataHome(): string {
+  return process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+}
+
+/** gemini/agy's config root. Overridable via GEMINI_HOME for tests (mirrors codex's CODEX_HOME). */
+function geminiHome(): string {
+  return process.env.GEMINI_HOME || join(homedir(), '.gemini');
+}
 
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
@@ -557,7 +575,7 @@ export function registerSessionRoutes(
     // unconditional hook-secret gate keeps accepting its hook events. No-op for fresh
     // cases (writeHooksConfig already wrote the secret) and for non-Codeman/absent hooks.
     if ((body.mode ?? 'claude') === 'claude') {
-      await refreshStaleHookSecret(workingDir).catch(() => {});
+      await refreshStaleCodemanHooks(workingDir).catch(() => {});
     }
 
     // Check OpenCode availability if requested
@@ -1701,18 +1719,112 @@ export function registerSessionRoutes(
     return idMatch?.path ?? cwdFallback?.path ?? null;
   }
 
-  // COD-124 unit 2, Gap B: capture the native external-CLI session/rollout id
-  // at park time so a later /resume can thread it back into the relaunch
-  // command. Only codex has a real on-disk rollout store PLUS a resume-by-id
-  // mechanism Codeman can drive (`codex resume <id>` — see buildCodexCommand()
-  // in tmux-manager.ts), so this reuses findActiveCodexFile() (the same
-  // rollout-discovery logic backing the eye-view codexLastResponse endpoint)
-  // rather than duplicating it, then extracts the rollout UUID from the
-  // filename. gemini and opencode have no analogous "resume this exact
-  // conversation by id" flow wired into their CLI builders today — this
-  // intentionally returns null for them (and for shell/agy) rather than
-  // inventing a resume flag that doesn't exist; those modes stay a
-  // best-effort relaunch in the same workingDir with no id to restore.
+  // opencode stores sessions in a sqlite db keyed by absolute working
+  // directory. node:sqlite (DatabaseSync) is unflagged on Node 24+ but needs
+  // --experimental-sqlite on Node 22 (what CI runs), so the import is dynamic
+  // and wrapped so a missing/unflagged module degrades to null rather than
+  // throwing.
+  async function findOpencodeSessionId(workingDir: string): Promise<string | null> {
+    let sqliteModule: typeof import('node:sqlite');
+    try {
+      sqliteModule = await import('node:sqlite');
+    } catch {
+      return null;
+    }
+    const dbPath = join(opencodeDataHome(), 'opencode', 'opencode.db');
+    if (!existsSync(dbPath)) return null;
+    let db: InstanceType<typeof sqliteModule.DatabaseSync> | undefined;
+    try {
+      db = new sqliteModule.DatabaseSync(dbPath, { readOnly: true });
+      const row = db
+        .prepare('SELECT id FROM session WHERE directory = ? ORDER BY time_updated DESC LIMIT 1;')
+        .get(workingDir) as { id?: unknown } | undefined;
+      const id = row && typeof row.id === 'string' ? row.id : null;
+      return id && OPENCODE_SESSION_ID_PATTERN.test(id) ? id : null;
+    } catch {
+      return null;
+    } finally {
+      try {
+        db?.close();
+      } catch {
+        // ignore close errors — best-effort cleanup only
+      }
+    }
+  }
+
+  // gemini maps an absolute working directory to a project "slug" via
+  // ~/.gemini/projects.json, then keeps that project's chat transcripts under
+  // ~/.gemini/tmp/<slug>/chats/session-*.jsonl. The newest transcript's first
+  // line is a JSON object carrying the session id.
+  async function findGeminiSessionId(workingDir: string): Promise<string | null> {
+    try {
+      const projectsRaw = await fs.readFile(join(geminiHome(), 'projects.json'), 'utf8');
+      const projects = JSON.parse(projectsRaw) as { projects?: Record<string, string> };
+      const slug = projects.projects?.[workingDir];
+      if (!slug) return null;
+
+      const chatsDir = join(geminiHome(), 'tmp', slug, 'chats');
+      const entries = await fs.readdir(chatsDir, { withFileTypes: true }).catch(() => []);
+      const files: Array<{ path: string; mtimeMs: number }> = [];
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.startsWith('session-') || !entry.name.endsWith('.jsonl')) continue;
+        const fullPath = join(chatsDir, entry.name);
+        const st = await fs.stat(fullPath).catch(() => null);
+        if (st) files.push({ path: fullPath, mtimeMs: st.mtimeMs });
+      }
+      if (files.length === 0) return null;
+      files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+      const firstLine = (await fs.readFile(files[0].path, 'utf8')).split('\n')[0]?.trim();
+      if (!firstLine) return null;
+      const parsed = JSON.parse(firstLine) as { sessionId?: unknown };
+      const id = typeof parsed.sessionId === 'string' ? parsed.sessionId : null;
+      return id && GEMINI_SESSION_ID_PATTERN.test(id) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // agy ("antigravity") keeps a separate tree from gemini proper — do not
+  // reuse gemini's projects/chats layout. history.jsonl is NDJSON; the last
+  // entry whose workspace matches ours and that carries a conversationId wins.
+  // A literal 'latest' means "resume the most recent conversation" (--continue
+  // in buildAgyCommand()), so it is never returned as a captured id.
+  async function findAgySessionId(workingDir: string): Promise<string | null> {
+    try {
+      const raw = await fs.readFile(join(geminiHome(), 'antigravity-cli', 'history.jsonl'), 'utf8');
+      let match: string | null = null;
+      for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let entry: { workspace?: unknown; conversationId?: unknown };
+        try {
+          entry = JSON.parse(trimmed);
+        } catch {
+          continue; // skip malformed lines
+        }
+        if (entry.workspace === workingDir && typeof entry.conversationId === 'string' && entry.conversationId) {
+          match = entry.conversationId;
+        }
+      }
+      return match && match !== 'latest' && AGY_CONVERSATION_ID_PATTERN.test(match) ? match : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // COD-124 unit 2, Gap B (widened to opencode/gemini/agy by COD-251): capture
+  // the native external-CLI session/conversation id at park time so a later
+  // /resume can thread it back into the relaunch command. codex reuses
+  // findActiveCodexFile() (the same rollout-discovery logic backing the
+  // eye-view codexLastResponse endpoint) and extracts the rollout UUID from
+  // the filename; opencode/gemini/agy each read that CLI's own on-disk store
+  // (see findOpencodeSessionId/findGeminiSessionId/findAgySessionId above).
+  // claude/shell have no analogous "resume this exact conversation by id"
+  // flow wired into their CLI builders — this intentionally returns null for
+  // them rather than inventing a resume flag that doesn't exist; those modes
+  // stay a best-effort relaunch in the same workingDir with no id to restore.
+  // Must never throw: capture is opportunistic and must never block park().
   async function captureNativeResumeId(session: {
     mode: string;
     id: string;
@@ -1720,13 +1832,22 @@ export function registerSessionRoutes(
     codexLastSubmitAt?: number;
     codexConfig?: { resumeSessionId?: string };
   }): Promise<string | null> {
-    if (session.mode !== 'codex') return null;
-    const rolloutPath = await findActiveCodexFile(session);
-    if (!rolloutPath) return null;
-    const match = basename(rolloutPath).match(
-      /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
-    );
-    return match ? match[1] : null;
+    try {
+      if (session.mode === 'codex') {
+        const rolloutPath = await findActiveCodexFile(session);
+        if (!rolloutPath) return null;
+        const match = basename(rolloutPath).match(
+          /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
+        );
+        return match ? match[1] : null;
+      }
+      if (session.mode === 'opencode') return await findOpencodeSessionId(session.workingDir);
+      if (session.mode === 'gemini') return await findGeminiSessionId(session.workingDir);
+      if (session.mode === 'agy') return await findAgySessionId(session.workingDir);
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   // session_meta is written once when codex creates the rollout and never
@@ -2586,7 +2707,7 @@ export function registerSessionRoutes(
       // now-unconditional hook-secret gate keeps accepting its hook events. No-op when
       // the hooks aren't ours or already carry the secret. Skipped for remote cases —
       // resolvedCasePath is a REMOTE path that doesn't exist on the local filesystem.
-      await refreshStaleHookSecret(resolvedCasePath).catch(() => {});
+      await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
     }
 
     // Docker cases: the workspace is a REAL host dir bind-mounted into the container.
@@ -2602,7 +2723,7 @@ export function registerSessionRoutes(
         if (!existsSync(join(resolvedCasePath, '.claude', 'settings.local.json'))) {
           await writeHooksConfig(resolvedCasePath);
         } else {
-          await refreshStaleHookSecret(resolvedCasePath).catch(() => {});
+          await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
         }
       } catch {
         /* non-fatal — the session still runs, hooks may be degraded */

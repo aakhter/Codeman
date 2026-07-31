@@ -246,6 +246,13 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
 const DEFAULT_PTY_COLS = 120;
 const DEFAULT_PTY_ROWS = 40;
 const TMUX_DISPLAY_TIMEOUT_MS = 2000;
+const IS_TEST_MODE = !!process.env.VITEST;
+/**
+ * Echo transport for the test-mode PTY attach. Raw mode disables the tty line
+ * discipline, so each input byte flows back exactly once and immediately; without
+ * it, tty echo doubles every line and canonical buffering holds bytes until Enter.
+ */
+const TEST_PTY_SCRIPT = 'if (process.stdin.isTTY) process.stdin.setRawMode(true); process.stdin.pipe(process.stdout);';
 /** Delay before the in-container Claude CLI version probe (lets the container start). */
 const DOCKER_CLI_VERSION_PROBE_DELAY_MS = 3000;
 
@@ -495,11 +502,14 @@ export class Session extends EventEmitter {
   private _resumeSessionId: string | undefined;
 
   // Native external-CLI session/rollout id captured at PARK time (COD-124 unit 2,
-  // Gap B). Codex only, for now: the rollout UUID discovered from the newest
-  // matching JSONL file under ~/.codex/sessions/, threaded back into
-  // _codexConfig.resumeSessionId on resume (see applyNativeResumeId()) so
-  // `codex resume <id>` restores the conversation. null for gemini/opencode/agy/
-  // shell — no on-disk resume mechanism is wired for those CLIs.
+  // Gap B; widened to opencode/gemini/agy by COD-251). The CLI-native session/
+  // conversation id discovered from that CLI's own on-disk store at park time
+  // (codex: rollout UUID under ~/.codex/sessions/; opencode: session row in its
+  // sqlite db; gemini: session id from its projects/chats JSONL trees; agy:
+  // conversation id from its history.jsonl), threaded back into the matching
+  // mode-specific config field on resume (see _applyNativeResumeIdForResume())
+  // so relaunching resumes the same conversation. null for claude/shell — no
+  // on-disk resume-by-id mechanism is wired for those.
   private _nativeResumeId: string | null = null;
 
   // Ephemeral env overrides (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Exported by tmux
@@ -990,20 +1000,30 @@ export class Session extends EventEmitter {
     return this._codexConfig;
   }
 
+  /** OpenCode CLI configuration for this session. */
+  get openCodeConfig(): OpenCodeConfig | undefined {
+    return this._openCodeConfig;
+  }
+
+  /** Gemini CLI configuration for this session. */
+  get geminiConfig(): GeminiConfig | undefined {
+    return this._geminiConfig;
+  }
+
   /**
-   * Native external-CLI session/rollout id captured at park time (COD-124 unit 2,
-   * Gap B). Codex only for now — see {@link setNativeResumeId} and
-   * {@link applyNativeResumeIdForResume}.
+   * Native external-CLI session/conversation id captured at park time
+   * (COD-124 unit 2, Gap B; widened to opencode/gemini/agy by COD-251) — see
+   * {@link setNativeResumeId} and {@link _applyNativeResumeIdForResume}.
    */
   get nativeResumeId(): string | null {
     return this._nativeResumeId;
   }
 
   /**
-   * Record the native CLI session/rollout id discovered at park time. Called
-   * by the park route after locating the on-disk rollout file for codex
-   * sessions; left null for CLIs with no analogous on-disk resume mechanism
-   * (gemini/opencode/agy/shell).
+   * Record the native CLI session/conversation id discovered at park time.
+   * Called by the park route after locating the on-disk session record for
+   * codex/opencode/gemini/agy sessions; left null for CLIs with no analogous
+   * on-disk resume mechanism (claude/shell).
    */
   setNativeResumeId(id: string | null): void {
     this._nativeResumeId = id;
@@ -1011,14 +1031,15 @@ export class Session extends EventEmitter {
 
   /**
    * If a native resume id was captured at a previous park and the CLI mode
-   * supports resuming by id (currently: codex, via `codex resume <id>` — see
-   * buildCodexCommand() in tmux-manager.ts), merge it into the mode-specific
-   * launch config so the upcoming relaunch resumes the original conversation
-   * instead of starting fresh. A no-op for modes without a wired resume
-   * mechanism (gemini/opencode/agy) — those stay best-effort relaunch.
+   * supports resuming by id (codex via `codex resume <id>`, opencode via
+   * `--session <id>`, gemini via `--resume <id>`, agy via `--conversation
+   * <id>` — see the matching builders in tmux-manager.ts), merge it into the
+   * mode-specific launch config so the upcoming relaunch resumes the original
+   * conversation instead of starting fresh. A no-op for modes without a wired
+   * resume mechanism (claude/shell).
    *
    * Only fills in the id when the config doesn't already carry an explicit
-   * resumeSessionId, so an explicit caller-supplied resume target always wins.
+   * resume target, so an explicit caller-supplied resume id always wins.
    */
   private _applyNativeResumeIdForResume(): void {
     if (!this._nativeResumeId) return;
@@ -1027,9 +1048,23 @@ export class Session extends EventEmitter {
         ...this._codexConfig,
         resumeSessionId: this._codexConfig?.resumeSessionId ?? this._nativeResumeId,
       };
+    } else if (this.mode === 'opencode') {
+      this._openCodeConfig = {
+        ...this._openCodeConfig,
+        continueSession: this._openCodeConfig?.continueSession ?? this._nativeResumeId,
+      };
+    } else if (this.mode === 'gemini') {
+      this._geminiConfig = {
+        ...this._geminiConfig,
+        resumeSession: this._geminiConfig?.resumeSession ?? this._nativeResumeId,
+      };
+    } else if (this.mode === 'agy') {
+      this._agyConfig = {
+        ...this._agyConfig,
+        resumeSession: this._agyConfig?.resumeSession ?? this._nativeResumeId,
+      };
     }
-    // gemini/opencode/agy: no on-disk resume mechanism wired yet — TODO if one
-    // is added, thread nativeResumeId into the relevant config here too.
+    // claude/shell: no on-disk resume mechanism — nativeResumeId stays inert.
   }
 
   /** Agy CLI configuration for this session. */
@@ -1664,16 +1699,23 @@ export class Session extends EventEmitter {
       // No extra sleep — createSession() already waits for tmux readiness
     }
 
-    // Attach to the mux session via PTY
-    // Prevent tmux from letting the newest browser attach dictate global window
-    // size; accepted Codeman resize events update it explicitly below.
-    mux.setManualWindowSize?.(this._muxSession!.muxName);
+    // Integration tests need a live input/output transport without attaching to
+    // the host's tmux server or agent CLI. Production still uses the real mux.
+    if (!IS_TEST_MODE) {
+      // Prevent tmux from letting the newest browser attach dictate global window
+      // size; accepted Codeman resize events update it explicitly below.
+      mux.setManualWindowSize?.(this._muxSession!.muxName);
+    }
     // Query existing tmux window size so re-attach matches (avoids flicker from 120x40 default).
     // MUST go through the dedicated socket (mux.muxSocket); a bare `tmux display` hits the
     // default server, always fails for our socketed sessions, and silently falls back to 120x40.
-    const { cols: ptyCols, rows: ptyRows } = queryTmuxWindowSize(this._muxSession!.muxName, mux.muxSocket);
+    const { cols: ptyCols, rows: ptyRows } = IS_TEST_MODE
+      ? { cols: DEFAULT_PTY_COLS, rows: DEFAULT_PTY_ROWS }
+      : queryTmuxWindowSize(this._muxSession!.muxName, mux.muxSocket);
+    const attachCommand = IS_TEST_MODE ? process.execPath : mux.getAttachCommand();
+    const attachArgs = IS_TEST_MODE ? ['-e', TEST_PTY_SCRIPT] : mux.getAttachArgs(this._muxSession!.muxName);
     try {
-      this.ptyProcess = pty.spawn(mux.getAttachCommand(), mux.getAttachArgs(this._muxSession!.muxName), {
+      this.ptyProcess = pty.spawn(attachCommand, attachArgs, {
         name: 'xterm-256color',
         cols: ptyCols,
         rows: ptyRows,
@@ -3341,7 +3383,7 @@ export class Session extends EventEmitter {
     if (this.ptyProcess && (dimsChanged || options.force)) {
       this._ptyCols = cols;
       this._ptyRows = rows;
-      if (this._mux && this._muxSession) {
+      if (!IS_TEST_MODE && this._mux && this._muxSession) {
         this._mux.resizeWindow?.(this._muxSession.muxName, cols, rows);
       }
       try {

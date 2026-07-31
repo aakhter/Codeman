@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -98,7 +98,7 @@ describe('remote-hosts domain', () => {
       );
 
       expect(cmd).toContain('ssh -o BatchMode=yes -o ConnectTimeout=10 -p 2222');
-      expect(cmd).toContain("-i '/home/");
+      expect(cmd).toContain(`-i '${homedir()}/.ssh/remote key'`);
       expect(cmd).toContain('ubuntu@10.0.0.42');
       expect(cmd).toContain('find ');
       expect(cmd).toContain('-mindepth 1 -maxdepth 1 -type d -print');
@@ -123,7 +123,7 @@ describe('remote-hosts domain', () => {
       });
 
       expect(cmd).toContain('ssh -o BatchMode=yes -o ConnectTimeout=10 -p 2222');
-      expect(cmd).toContain("-i '/home/");
+      expect(cmd).toContain(`-i '${homedir()}/.ssh/remote key'`);
       expect(cmd).toContain('ubuntu@10.0.0.42');
       expect(cmd).toContain('printf codeman-ssh-ok');
     });

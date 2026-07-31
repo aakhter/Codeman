@@ -1,11 +1,41 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import vm from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
 
 // Structural tests for the xterm snapshot/replay slice (COD-81). app.js has no
 // bundler and is hard to drive through a real DOM, so — following the repo's
 // existing pattern for app.js — these assert the source structure that makes
 // the snapshot first-paint correct rather than executing it.
+//
+// COD-92 extracted the actual preserve-or-rewrite decision into a pure
+// predicate (`_shouldPreserveSnapshotScrollback`, terminal-ui.js) that is
+// mode-agnostic. Where a test below is really about THAT decision, it loads
+// the predicate through this same vm harness used by
+// test/snapshot-preserve-predicate.test.ts and asserts behaviour directly,
+// rather than pinning source substrings that are specific to one CLI mode.
+function loadPreservePredicate() {
+  const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+  const context = vm.createContext({
+    console: { ...console, debug: vi.fn(), log: vi.fn() },
+    CodemanApp: class CodemanApp {},
+    setInterval: vi.fn(),
+    clearInterval: vi.fn(),
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: vi.fn(),
+    document: { addEventListener: vi.fn(), getElementById: vi.fn(), documentElement: { dataset: {} } },
+    window: {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      document: { documentElement: { dataset: {} } },
+    },
+  });
+  vm.runInContext(`${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
+  const proto = (context as unknown as { __proto: Record<string, (...args: never[]) => unknown> }).__proto;
+  return (opts: Record<string, unknown>) => proto._shouldPreserveSnapshotScrollback.call(proto, opts);
+}
+
 describe('xterm snapshot/replay (codex tab-switch)', () => {
   const appSource = () => readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
 
@@ -87,8 +117,25 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
 
     expect(fullHistoryDecision).toBeGreaterThan(selectStart);
     expect(preserveDecision).toBeGreaterThan(fullHistoryDecision);
-    expect(block).toContain('!requestFullHistory');
+    // The call site forwards requestFullHistory into the extracted predicate
+    // (COD-92) rather than inlining a `!requestFullHistory` guard itself.
+    expect(block).toContain('requestFullHistory,');
     expect(block).toContain('preserveSnapshotScrollback');
+
+    // Behavioural: a full-history replay must win even for a busy codex
+    // session whose canonical buffer byte-matches the cache — every other
+    // condition that would otherwise preserve the restored snapshot.
+    const preserve = loadPreservePredicate();
+    expect(
+      preserve({
+        restoredSnapshot: true,
+        clearedForBusy: false,
+        requestFullHistory: true,
+        canonicalUnchanged: true,
+        sessionIsBusy: true,
+        mode: 'codex',
+      })
+    ).toBe(false);
   });
 
   it('never preserves a stale snapshot over changed canonical output (COD-175)', () => {
@@ -170,7 +217,30 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     expect(needsRewrite).toBeGreaterThan(busyClear);
     expect(replayBlock).toContain('clearedForBusy');
     expect(replayBlock).toContain('preserveSnapshotScrollback');
-    expect(replayBlock).toContain("session?.mode === 'codex'");
+    // needsRewrite is unconditionally forced by clearedForBusy — mode-agnostic
+    // since COD-92 removed the codex-only carve-out from this guard.
+    expect(replayBlock).toContain('clearedForBusy || (!preserveSnapshotScrollback');
+
+    // Behavioural: clearedForBusy alone must defeat preservation, even with
+    // every other input set to favour preserving the snapshot (restored
+    // snapshot, byte-identical canonical buffer, busy session) — and for
+    // every mode, not just codex. Asserted on the predicate itself rather
+    // than on a re-implementation of the call site, so the check actually
+    // fails if clearedForBusy is dropped from the guard.
+    const preserve = loadPreservePredicate();
+    for (const mode of ['claude', 'codex', 'opencode', 'gemini', 'agy']) {
+      expect(
+        preserve({
+          restoredSnapshot: true,
+          clearedForBusy: true,
+          requestFullHistory: false,
+          canonicalUnchanged: true,
+          sessionIsBusy: true,
+          mode,
+        }),
+        mode
+      ).toBe(false);
+    }
   });
 
   it('loads the SerializeAddon and keeps a per-session snapshot map', () => {
