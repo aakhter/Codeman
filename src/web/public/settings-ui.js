@@ -327,10 +327,11 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsUltracodeFloatingWindows').checked =
       settings.ultracodeFloatingWindows ?? defaults.ultracodeFloatingWindows ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
-    document.getElementById('appSettingsShowPlanUsageLimits').checked = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
-    document.getElementById('appSettingsShowAwayDigest').checked = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
+    document.getElementById('appSettingsShowPlanUsageLimits').checked = this.planUsageChipEnabled(settings);
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
-    // Session Manager + Away Digest buttons default OFF; Cron button defaults ON.
+    // Session Manager, Away Digest and Cron buttons all default OFF (opt-in under
+    // Display → Header Displays; the Cron button also ships with btn-cron--hidden
+    // in the template, so an unchecked box and a hidden button stay consistent).
     document.getElementById('appSettingsShowSessionButton').checked = settings.showSessionButton ?? defaults.showSessionButton ?? false;
     document.getElementById('appSettingsShowAwayDigestButton').checked = settings.showAwayDigestButton ?? defaults.showAwayDigestButton ?? false;
     document.getElementById('appSettingsShowCronButton').checked = settings.showCronButton ?? defaults.showCronButton ?? false;
@@ -2041,7 +2042,9 @@ Object.assign(CodemanApp.prototype, {
         headroomProxyUrl: 'http://192.168.55.175:8787',
         headroomRouteClaude: true,
         headroomRouteCodex: true,
-        // Plan usage limits header chip (upstream)
+        // Plan usage limits header chip: desktop defaults this ON (see
+        // planUsageChipEnabled); handhelds keep it OFF so the phone header stays
+        // minimal and the mobile-header-buttons policy guard keeps passing.
         showPlanUsageLimits: false,
         showAttachmentsButton: false,
         liveMirrorEnabled: true, // COD-187 live mirror for codex/gemini terminals
@@ -2195,6 +2198,8 @@ Object.assign(CodemanApp.prototype, {
     const skin = settings.skin ?? defaults.skin ?? 'daylight-blue';
     document.documentElement.setAttribute('data-skin', skin);
     window.__codemanSkin = skin;
+    const themeColor = getComputedStyle(document.documentElement).getPropertyValue('--bg-dark').trim();
+    if (themeColor) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', themeColor);
     try {
       localStorage.setItem('codeman:skin', skin);
     } catch (_e) {
@@ -2214,6 +2219,18 @@ Object.assign(CodemanApp.prototype, {
     if (result && this.notificationManager) {
       this.notificationManager.originalTitle = document.title;
     }
+  },
+
+  // Resolved per-device state of the plan-usage chip. Desktop defaults ON,
+  // handhelds default OFF (the mobile block in getDefaultSettings() sets false,
+  // and the mobile-header-buttons-policy guard depends on that staying false).
+  // Single source of truth for THREE call sites that must never disagree: the
+  // App Settings checkbox, the chip's visibility, and the statusLineTelemetry
+  // flag sent on session create. A chip shown without telemetry renders "—"
+  // forever, which is exactly the drift this helper prevents.
+  planUsageChipEnabled(settings = null) {
+    const s = settings ?? this.loadAppSettingsFromStorage();
+    return s.showPlanUsageLimits ?? this.getDefaultSettings().showPlanUsageLimits ?? true;
   },
 
   applyHeaderVisibilitySettings() {
@@ -2294,11 +2311,13 @@ Object.assign(CodemanApp.prototype, {
       ultracodeBtn.classList.toggle('btn-ultracode-agents--hidden', !showUltracodeAgents);
     }
 
-    // Plan-usage chip — hidden by default (App Settings → Display → "Plan Usage
-    // Limits"). Server renders the initial state on reload; this handles a live
-    // toggle from a settings save. Marker class (base is display:inline-flex
-    // !important), matching the response-viewer/multimonitor pattern.
-    const showPlanUsageLimits = settings.showPlanUsageLimits ?? defaults.showPlanUsageLimits ?? false;
+    // Plan-usage chip — shown by default on desktop, OFF on handhelds (App
+    // Settings → Display → "Plan Usage Limits"). The template always ships it
+    // hidden because display is per-device and the server cannot know a
+    // localStorage value, so THIS is what reveals it on every load as well as
+    // on a live toggle. Marker class (base is display:inline-flex !important),
+    // matching the response-viewer/multimonitor pattern.
+    const showPlanUsageLimits = this.planUsageChipEnabled(settings);
     const planUsageChip = document.getElementById('planUsageChip');
     if (planUsageChip) {
       planUsageChip.classList.toggle('header-plan-usage--hidden', !showPlanUsageLimits);
@@ -2561,9 +2580,10 @@ Object.assign(CodemanApp.prototype, {
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
         ]);
-        // The plan-usage chip is a PER-DEVICE display setting (default OFF): desktop
-        // can show it while mobile stays hidden. It used to sync, so an older
-        // server.json may still carry `true` — drop it so the server value is NEVER
+        // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
+        // handheld default OFF): desktop can show it while mobile stays hidden. It
+        // used to sync, so an older server.json may still carry a value — drop it
+        // so the server value is NEVER
         // seeded into a device that didn't explicitly enable it (collection is handled
         // separately via the statusLineTelemetry action, not this display flag).
         delete appSettings.showPlanUsageLimits;

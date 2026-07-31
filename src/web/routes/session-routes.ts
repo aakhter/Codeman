@@ -40,6 +40,7 @@ import {
   QuickStartSchema,
   InteractiveStartSchema,
   SessionOrderUpdateSchema,
+  ParkSessionSchema,
 } from '../schemas.js';
 import { mergeSessionOrder } from '../../session-order.js';
 import {
@@ -82,7 +83,7 @@ import {
   type HistoryInput,
   type MuxStatInput,
 } from '../../services/unified-session-service.js';
-import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
+import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort, RespawnPort } from '../ports/index.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
   checkRemoteTmuxAvailable,
@@ -330,6 +331,58 @@ export function _resetPasteRateBuckets(): void {
  * (auto_edit) even when the request sent none. No-op in single-user mode / for a granted
  * owner (canUsernameRunPrivilegedCommands returns true when !isMultiUserMode()).
  */
+/**
+ * COD-124 unit 2, Gap A — computes which live automations are armed against
+ * a session and would not survive parking:
+ *  - 'respawn': a respawn controller is registered for this session at the
+ *    WebServer level (Session.park() has no visibility into it).
+ *  - 'autoResume': an auto-resume usage-limit timer is armed (autoResumeAt
+ *    non-null) — distinct from the user's autoResumeEnabled *preference*,
+ *    which park() must NOT clear (Session.park()/_clearAllTimers() already
+ *    cancels only the armed timer and preserves the preference).
+ *  - 'ralph': the session's Ralph tracker is enabled (Session.park() already
+ *    tears it down via cleanupTrackerListeners(), same as stop()).
+ * Order is stable (respawn, autoResume, ralph) so callers/tests can assert
+ * on it directly.
+ */
+function computeParkObligations(ctx: RespawnPort, session: Session, id: string): string[] {
+  const obligations: string[] = [];
+  if (ctx.respawnControllers.has(id)) {
+    obligations.push('respawn');
+  }
+  if (session.autoResumeAt !== null) {
+    obligations.push('autoResume');
+  }
+  if (session.ralphTracker?.enabled) {
+    obligations.push('ralph');
+  }
+  return obligations;
+}
+
+/**
+ * COD-124 unit 2, Gap A — disarms the WebServer-held respawn controller for
+ * a session about to be parked. Mirrors POST /respawn/stop's exact sequence
+ * (controller.stop() → drop from the map → clear+drop any timed-respawn
+ * timer → clear the persisted respawn config) so a parked session can never
+ * have a respawn cycle fire into its now-detached pane. No-op when no
+ * controller is armed.
+ */
+function disarmRespawnForPark(ctx: RespawnPort & InfraPort, id: string): void {
+  const controller = ctx.respawnControllers.get(id);
+  if (!controller) return;
+
+  controller.stop();
+  ctx.respawnControllers.delete(id);
+
+  const timerInfo = ctx.respawnTimers.get(id);
+  if (timerInfo) {
+    clearTimeout(timerInfo.timer);
+    ctx.respawnTimers.delete(id);
+  }
+
+  ctx.mux.clearRespawnConfig(id);
+}
+
 async function clampExternalCliBypassForOwner(
   owner: string | undefined,
   codexConfig: CodexConfig | undefined,
@@ -346,7 +399,7 @@ async function clampExternalCliBypassForOwner(
 
 export function registerSessionRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort
 ): void {
   // ═══════════════════════════════════════════════════════════════
   // Auth
@@ -904,6 +957,111 @@ export function registerSessionRoutes(
   });
 
   // ═══════════════════════════════════════════════════════════════
+  // Park / Resume (COD-124)
+  // ═══════════════════════════════════════════════════════════════
+
+  // ========== Park ==========
+  // Detaches the tmux session + stops the CLI gracefully (SIGTERM), preserving
+  // the session record (workingDir, resumeSessionId/transcript, mux metadata)
+  // for a later /resume. Remote-attached sessions (owned:false) are detached,
+  // never killed — enforced inside Session.park() (COD-105 invariant).
+  //
+  // Obligation interlock (COD-124 unit 2, Gap A): parking must neutralize any
+  // live automation armed against the session, or that automation will later
+  // fire into a dead/detached pane (respawn cycling a parked session, an
+  // auto-resume usage-limit timer sending Esc+continue nowhere, ...).
+  // auto-resume and Ralph teardown are already fully handled inside
+  // Session.park() (it calls the same _clearAllTimers()/
+  // cleanupTrackerListeners() that stop() does) — only the WebServer-held
+  // respawn controller map is outside Session's visibility, so this route
+  // disarms it explicitly, mirroring POST /respawn/stop's exact sequence.
+  //
+  // Callers that haven't acknowledged the obligations get a 409 CONFLICT
+  // listing them (`obligations`), so the UI can confirm before resending
+  // with `{force: true}`.
+
+  app.post('/api/sessions/:id/park', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+
+    // Idempotent: parking an already-parked session is a no-op success.
+    if (session.status === 'parked') {
+      return {};
+    }
+
+    const { force } = parseBody(ParkSessionSchema, req.body ?? {});
+    const obligations = computeParkObligations(ctx, session, id);
+    if (obligations.length > 0 && !force) {
+      const msg = `Session has active automation that will not survive parking: ${obligations.join(', ')}`;
+      // Structured throw (not a bare return) — installRouteErrorHandler renders
+      // {statusCode, body} at the right HTTP status in both the test harness
+      // and production (mirrors findSessionOrFail/parseBody in route-helpers.ts).
+      // A bare `return {success:false,...}` only gets its status code fixed up
+      // by the preSerialization hook, which is production-server-only.
+      throw Object.assign(new Error(msg), {
+        statusCode: 409,
+        body: { ...createErrorResponse(ApiErrorCode.CONFLICT, msg), obligations },
+      });
+    }
+
+    try {
+      disarmRespawnForPark(ctx, id);
+      // COD-124 unit 2, Gap B: best-effort capture — a failure here must not
+      // block parking, so it's isolated from session.park()'s own try/catch.
+      try {
+        session.setNativeResumeId(await captureNativeResumeId(session));
+      } catch (err) {
+        console.warn(`[Server] park: failed to capture native resume id for ${id}:`, getErrorMessage(err));
+      }
+      await session.park();
+      getLifecycleLog().log({
+        event: 'parked',
+        sessionId: id,
+        name: session.name,
+        mode: session.mode,
+      });
+      persistAndBroadcastSession(ctx, session);
+      ctx.broadcast(SseEvent.SessionParked, { id });
+      return {};
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ========== Resume ==========
+  // Claude-mode sessions resume the prior conversation via the preserved
+  // resumeSessionId (startInteractive() passes --resume). Non-Claude CLIs
+  // (codex/opencode/gemini/shell) are a best-effort relaunch in the same
+  // workingDir with NO conversation restore — those CLIs don't have an
+  // equivalent resume mechanism wired here.
+
+  app.post('/api/sessions/:id/resume', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+
+    if (session.status !== 'parked') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, 'Session is not parked');
+    }
+
+    try {
+      // Re-attach listener wiring detached by park()'s PTY exit (see /interactive).
+      await ctx.setupSessionListeners(session);
+      await session.startInteractive();
+      getLifecycleLog().log({
+        event: 'resumed',
+        sessionId: id,
+        name: session.name,
+        mode: session.mode,
+      });
+      persistAndBroadcastSession(ctx, session);
+      ctx.broadcast(SseEvent.SessionResumed, { id });
+      return {};
+    } catch (err) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════
   // Terminal I/O (input, resize, buffer)
   // ═══════════════════════════════════════════════════════════════
 
@@ -1107,6 +1265,180 @@ export function registerSessionRoutes(
     return liveMuxBuffer && liveMuxBuffer.length > 0 ? liveMuxBuffer : session.terminalBuffer;
   }
 
+  interface ClaudeResponseMessage {
+    role: 'user' | 'assistant';
+    text: string;
+    timestamp?: string;
+  }
+
+  interface ClaudeTranscriptEntry {
+    type?: string;
+    timestamp?: string;
+    isMeta?: boolean;
+    isSidechain?: boolean;
+    isCompactSummary?: boolean;
+    message?: { content?: unknown };
+  }
+
+  function extractClaudeText(content: unknown, separator: string): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+      .filter(
+        (block): block is { type: string; text: string } =>
+          !!block &&
+          typeof block === 'object' &&
+          (block as { type?: string }).type === 'text' &&
+          typeof (block as { text?: string }).text === 'string'
+      )
+      .map((block) => block.text)
+      .join(separator);
+  }
+
+  function isClaudeSyntheticUserMessage(entry: ClaudeTranscriptEntry, text: string): boolean {
+    if (entry.isMeta || entry.isCompactSummary) return true;
+    return /^(?:<local-command|<command-name>|<task-notification>|<system-reminder>|<teammate-message\b|Another Claude session sent a message:|Base directory for this skill:)/i.test(
+      text
+    );
+  }
+
+  /**
+   * Claude writes one logical turn as many JSONL rows: text, thinking and tool
+   * blocks share message ids, while tool results are represented as user rows.
+   * Build viewer cards from real user boundaries instead of treating every row
+   * as a separate chat message.
+   */
+  function parseClaudeResponseTranscript(
+    content: string,
+    full: boolean
+  ): { text: string; timestamp: string; messages?: ClaudeResponseMessage[] } {
+    let lastText = '';
+    let lastTimestamp = '';
+    const messages: ClaudeResponseMessage[] = [];
+    let currentUserFragments = new Set<string>();
+    let currentAssistantFragments = new Set<string>();
+
+    for (const line of content.split('\n')) {
+      if (!line) continue;
+      let entry: ClaudeTranscriptEntry;
+      try {
+        entry = JSON.parse(line) as ClaudeTranscriptEntry;
+      } catch {
+        continue;
+      }
+      // Sidechains belong to agents/forks, not the main conversation. Meta user
+      // rows include repeated image dimensions and other UI-generated context.
+      if (entry.isSidechain) continue;
+
+      if (entry.type === 'user') {
+        const text = extractClaudeText(entry.message?.content, '\n').trim();
+        // A tool_result block has no text block and naturally drops out here.
+        if (!text || isClaudeSyntheticUserMessage(entry, text)) continue;
+        if (!full) continue;
+
+        const previous = messages.at(-1);
+        if (previous?.role === 'user') {
+          // Claude can replay the initial user row while restoring a transcript.
+          // Only collapse duplicates within the same unanswered user turn; the
+          // same prompt after an assistant response remains a legitimate turn.
+          if (currentUserFragments.has(text)) continue;
+          previous.text += `\n\n${text}`;
+          currentUserFragments.add(text);
+        } else {
+          messages.push({ role: 'user', text, timestamp: entry.timestamp });
+          currentUserFragments = new Set([text]);
+        }
+        currentAssistantFragments.clear();
+        continue;
+      }
+
+      if (entry.type !== 'assistant') continue;
+      const text = extractClaudeText(entry.message?.content, '\n\n').trim();
+      if (!text) continue;
+      lastText = text;
+      lastTimestamp = entry.timestamp || '';
+      if (!full) continue;
+
+      const previous = messages.at(-1);
+      if (previous?.role === 'assistant') {
+        // Replayed snapshots sometimes repeat an identical text block. Distinct
+        // progress/final blocks are kept, but remain inside one Claude card.
+        if (currentAssistantFragments.has(text)) continue;
+        previous.text += `\n\n${text}`;
+        previous.timestamp = entry.timestamp || previous.timestamp;
+        currentAssistantFragments.add(text);
+      } else {
+        messages.push({ role: 'assistant', text, timestamp: entry.timestamp });
+        currentAssistantFragments = new Set([text]);
+      }
+      currentUserFragments.clear();
+    }
+
+    return full ? { text: lastText, timestamp: lastTimestamp, messages } : { text: lastText, timestamp: lastTimestamp };
+  }
+
+  /** Locate a top-level Claude transcript, including recovered tmux sessions. */
+  async function findClaudeTranscript(
+    projectsDir: string,
+    conversationId: string,
+    codemanSessionId: string
+  ): Promise<{ sessionId: string; path: string } | null> {
+    let projectDirs: import('node:fs').Dirent[];
+    try {
+      projectDirs = await fs.readdir(projectsDir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+
+    const safeIds = [...new Set([conversationId, codemanSessionId])].filter((value) => /^[a-zA-Z0-9._-]+$/.test(value));
+    for (const candidateId of safeIds) {
+      for (const projectDir of projectDirs) {
+        if (!projectDir.isDirectory()) continue;
+        const jsonlPath = join(projectsDir, projectDir.name, `${candidateId}.jsonl`);
+        try {
+          const stat = await fs.stat(jsonlPath);
+          if (stat.isFile()) return { sessionId: candidateId, path: jsonlPath };
+        } catch {
+          /* continue */
+        }
+      }
+    }
+
+    // If mux-sessions.json was lost or stale, reconcileSessions() historically
+    // recovered `codeman-40568a29` as `restored-40568a29` and used the server cwd.
+    // The tmux name still carries the first eight UUID characters, which safely
+    // reconnects the viewer when exactly one matching top-level transcript exists.
+    const restoredMatch = /^restored-([a-f0-9]{8,})$/i.exec(codemanSessionId);
+    if (!restoredMatch) return null;
+    const fragment = restoredMatch[1].toLowerCase();
+    const candidates: Array<{ sessionId: string; path: string; mtimeMs: number }> = [];
+    const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+
+    for (const projectDir of projectDirs) {
+      if (!projectDir.isDirectory()) continue;
+      const dirPath = join(projectsDir, projectDir.name);
+      let files: import('node:fs').Dirent[];
+      try {
+        files = await fs.readdir(dirPath, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
+        const candidateId = file.name.slice(0, -'.jsonl'.length);
+        if (!candidateId.toLowerCase().startsWith(fragment) || !uuidPattern.test(candidateId)) continue;
+        const path = join(dirPath, file.name);
+        const stat = await fs.stat(path).catch(() => null);
+        if (stat) candidates.push({ sessionId: candidateId, path, mtimeMs: stat.mtimeMs });
+      }
+    }
+
+    const candidateIds = new Set(candidates.map((candidate) => candidate.sessionId));
+    if (candidateIds.size !== 1) return null;
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0] ?? null;
+  }
+
   app.get('/api/sessions/:id/last-response', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
@@ -1165,106 +1497,29 @@ export function registerSessionRoutes(
       }
     }
 
-    // The Claude conversation ID (used as JSONL filename)
     const claudeSessionId = session.claudeSessionId || session.id;
-    let transcriptText = '';
-    let transcriptTimestamp = '';
+    const transcript = await findClaudeTranscript(projectsDir, claudeSessionId, session.id);
+    if (!transcript) {
+      return query.context === 'full' ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
+    }
+
+    if (transcript.sessionId !== session.claudeSessionId && transcript.sessionId !== session.id) {
+      session.adoptClaudeSessionId(transcript.sessionId);
+      if (session.docker) {
+        void persistDockerCaseClaudeSessionId(
+          CODEMAN_CONFIG_DIR,
+          session.docker.containerName,
+          transcript.sessionId
+        ).catch(() => {});
+      }
+    }
 
     try {
-      const projectDirs = await fs.readdir(projectsDir);
-      for (const projDir of projectDirs) {
-        const jsonlPath = join(projectsDir, projDir, `${claudeSessionId}.jsonl`);
-        try {
-          const content = await fs.readFile(jsonlPath, 'utf8');
-          const lines = content.trim().split('\n');
-
-          // Search from end for last assistant message with text
-          for (let i = lines.length - 1; i >= 0; i--) {
-            try {
-              const entry = JSON.parse(lines[i]);
-              if (entry.type === 'assistant' && entry.message?.content) {
-                const blocks = Array.isArray(entry.message.content)
-                  ? entry.message.content
-                  : [{ type: 'text', text: String(entry.message.content) }];
-                const textBlocks = blocks
-                  .filter((b: { type: string; text?: string }) => b.type === 'text' && b.text)
-                  .map((b: { type: string; text?: string }) => b.text);
-                if (textBlocks.length > 0) {
-                  transcriptText = textBlocks.join('\n\n');
-                  transcriptTimestamp = entry.timestamp || '';
-                  break;
-                }
-              }
-            } catch {
-              // Skip unparseable lines
-            }
-          }
-          if (transcriptText) break; // Found it, stop scanning directories
-        } catch {
-          // File doesn't exist in this project dir, continue
-        }
-      }
+      const content = await fs.readFile(transcript.path, 'utf8');
+      return parseClaudeResponseTranscript(content, query.context === 'full');
     } catch {
-      // projects dir doesn't exist
+      return query.context === 'full' ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
     }
-
-    // If ?context=full, return all user+assistant messages for conversation view
-    if (query.context === 'full' && transcriptText) {
-      const allMessages: Array<{ role: string; text: string; timestamp?: string }> = [];
-      try {
-        const projectDirs = await fs.readdir(projectsDir);
-        for (const projDir of projectDirs) {
-          const jsonlPath = join(projectsDir, projDir, `${claudeSessionId}.jsonl`);
-          try {
-            const content = await fs.readFile(jsonlPath, 'utf8');
-            const lines = content.trim().split('\n');
-            for (const line of lines) {
-              try {
-                const entry = JSON.parse(line);
-                if (entry.type === 'user' && entry.message?.content) {
-                  const text =
-                    typeof entry.message.content === 'string'
-                      ? entry.message.content
-                      : (entry.message.content as Array<{ type: string; text?: string }>)
-                          .filter((b) => b.type === 'text' && b.text)
-                          .map((b) => b.text)
-                          .join('\n');
-                  // Skip system/command messages
-                  if (text && !text.startsWith('<local-command') && !text.startsWith('<command-name>')) {
-                    allMessages.push({ role: 'user', text, timestamp: entry.timestamp });
-                  }
-                } else if (entry.type === 'assistant' && entry.message?.content) {
-                  const blocks = Array.isArray(entry.message.content)
-                    ? entry.message.content
-                    : [{ type: 'text', text: String(entry.message.content) }];
-                  const text = blocks
-                    .filter((b: { type: string; text?: string }) => b.type === 'text' && b.text)
-                    .map((b: { type: string; text?: string }) => b.text)
-                    .join('\n\n');
-                  if (text) {
-                    allMessages.push({ role: 'assistant', text, timestamp: entry.timestamp });
-                  }
-                }
-              } catch {
-                /* skip */
-              }
-            }
-            if (allMessages.length > 0) break;
-          } catch {
-            /* continue */
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-      return { text: transcriptText, timestamp: transcriptTimestamp, hasContext: true, messages: allMessages };
-    }
-
-    return {
-      text: transcriptText,
-      timestamp: transcriptTimestamp,
-      hasContext: Boolean(transcriptText),
-    };
   });
 
   function isCodexInjectedContext(text: string): boolean {
@@ -1446,6 +1701,34 @@ export function registerSessionRoutes(
     return idMatch?.path ?? cwdFallback?.path ?? null;
   }
 
+  // COD-124 unit 2, Gap B: capture the native external-CLI session/rollout id
+  // at park time so a later /resume can thread it back into the relaunch
+  // command. Only codex has a real on-disk rollout store PLUS a resume-by-id
+  // mechanism Codeman can drive (`codex resume <id>` — see buildCodexCommand()
+  // in tmux-manager.ts), so this reuses findActiveCodexFile() (the same
+  // rollout-discovery logic backing the eye-view codexLastResponse endpoint)
+  // rather than duplicating it, then extracts the rollout UUID from the
+  // filename. gemini and opencode have no analogous "resume this exact
+  // conversation by id" flow wired into their CLI builders today — this
+  // intentionally returns null for them (and for shell/agy) rather than
+  // inventing a resume flag that doesn't exist; those modes stay a
+  // best-effort relaunch in the same workingDir with no id to restore.
+  async function captureNativeResumeId(session: {
+    mode: string;
+    id: string;
+    workingDir: string;
+    codexLastSubmitAt?: number;
+    codexConfig?: { resumeSessionId?: string };
+  }): Promise<string | null> {
+    if (session.mode !== 'codex') return null;
+    const rolloutPath = await findActiveCodexFile(session);
+    if (!rolloutPath) return null;
+    const match = basename(rolloutPath).match(
+      /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
+    );
+    return match ? match[1] : null;
+  }
+
   // session_meta is written once when codex creates the rollout and never
   // rewritten (verified: resume appends without touching it), so the parsed
   // identity of a given path can be cached forever. This turns the per-request
@@ -1496,6 +1779,7 @@ export function registerSessionRoutes(
   ): Promise<{
     text: string;
     timestamp: string;
+    hasContext?: boolean;
     messages?: Array<{ role: string; text: string; timestamp?: string }>;
   }> {
     const empty = full ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
@@ -1582,8 +1866,17 @@ export function registerSessionRoutes(
       })
       .map(({ role, text, timestamp }) => ({ role, text, timestamp }));
 
-    return full
-      ? { text: lastText, timestamp: lastTimestamp, messages: thread }
+    // Brief callers (full=false) never build `thread`, so the capability flag
+    // can't be derived from it directly — but an assistant message is only
+    // ever pushed into `thread` when `full` is true AND its text is non-empty
+    // (see the `role === 'assistant'` branch above), so `lastText` truthy is
+    // exactly the condition under which a `?context=full` read would come back
+    // with expandable history. Cheap: no extra pass over the rollout needed.
+    if (full) {
+      return { text: lastText, timestamp: lastTimestamp, messages: thread };
+    }
+    return lastText
+      ? { text: lastText, timestamp: lastTimestamp, hasContext: true }
       : { text: lastText, timestamp: lastTimestamp };
   }
 

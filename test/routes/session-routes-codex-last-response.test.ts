@@ -320,7 +320,7 @@ describe('GET /api/sessions/:id/last-response (codex)', () => {
 
   // ── Envelope shape + Claude-mode regression guard ────────────────────────
 
-  it('returns the {success:true,data:{text,timestamp}} envelope; messages only with ?context=full', async () => {
+  it('returns the {success:true,data:{text,timestamp,hasContext}} envelope; messages only with ?context=full', async () => {
     writeRollout(
       `rollout-2026-07-01T00-00-00-${UUID_A}.jsonl`,
       [sessionMeta(workdir, `codeman_${session.id}`), assistantMsg('the answer', '2026-07-01T01:02:03Z')],
@@ -331,7 +331,7 @@ describe('GET /api/sessions/:id/last-response (codex)', () => {
     expect(brief.res.statusCode).toBe(200);
     expect(brief.body).toEqual({
       success: true,
-      data: { text: 'the answer', timestamp: '2026-07-01T01:02:03Z' },
+      data: { text: 'the answer', timestamp: '2026-07-01T01:02:03Z', hasContext: true },
     });
 
     const full = await getLastResponse(session.id, true);
@@ -346,6 +346,49 @@ describe('GET /api/sessions/:id/last-response (codex)', () => {
 
     const full = await getLastResponse(session.id, true);
     expect(full.body.data.messages).toEqual([]);
+  });
+
+  // ── COD-249: brief hasContext capability flag ────────────────────────────
+
+  it('reports hasContext:true on the brief response for a structured rollout with a multi-turn thread', async () => {
+    writeRollout(
+      `rollout-2026-07-01T00-00-00-${UUID_A}.jsonl`,
+      [
+        sessionMeta(workdir, `codeman_${session.id}`),
+        eventUserMsg('first question'),
+        assistantMsg('first answer', '2026-07-01T00:00:01Z'),
+        eventUserMsg('second question'),
+        assistantMsg('second answer', '2026-07-01T00:00:02Z'),
+      ],
+      BASE_MTIME
+    );
+
+    const { body } = await getLastResponse(session.id);
+    expect(body.data).toEqual({
+      text: 'second answer',
+      timestamp: '2026-07-01T00:00:02Z',
+      hasContext: true,
+    });
+
+    // The flag mirrors what ?context=full actually returns: expandable history.
+    const full = await getLastResponse(session.id, true);
+    expect(full.body.data.messages.length).toBeGreaterThan(1);
+  });
+
+  it('omits hasContext on the brief response when the rollout has no assistant text yet', async () => {
+    // A rollout that exists on disk but hasn't produced an assistant response
+    // has no expandable history to show — the brief reader falls through to
+    // the terminal-parser fallback (untouched here, no live tmux buffer in
+    // tests), so text stays empty and hasContext must not be set to true.
+    writeRollout(
+      `rollout-2026-07-01T00-00-00-${UUID_A}.jsonl`,
+      [sessionMeta(workdir, `codeman_${session.id}`)],
+      BASE_MTIME
+    );
+
+    const { body } = await getLastResponse(session.id);
+    expect(body.data.text).toBe('');
+    expect(body.data.hasContext).toBeFalsy();
   });
 
   it('leaves Claude-mode sessions on the ~/.claude/projects reader (regression guard)', async () => {

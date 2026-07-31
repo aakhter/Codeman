@@ -76,9 +76,13 @@ export class SessionManager extends EventEmitter {
   private loadFromStore(): void {
     const storedSessions = this.store.getSessions();
     // Note: We don't restore actual processes, just the state
-    // Dead sessions are marked as stopped
+    // Dead sessions are marked as stopped. COD-124: 'parked' sessions are
+    // exempt — they intentionally have no live process (that's the point of
+    // parking) but must survive a reboot as 'parked' so their preserved
+    // resumeSessionId/workingDir can still be resumed later. Force-resetting
+    // them to 'stopped' here would silently discard that resumability.
     for (const [id, state] of Object.entries(storedSessions)) {
-      if (state.status !== 'stopped') {
+      if (state.status !== 'stopped' && state.status !== 'parked') {
         state.status = 'stopped';
         state.pid = null;
         this.store.setSession(id, state);
@@ -194,6 +198,28 @@ export class SessionManager extends EventEmitter {
 
     await session.stop();
     this.sessions.delete(id);
+    this.updateSessionState(session);
+  }
+
+  /**
+   * Parks a session by ID (COD-124).
+   *
+   * Unlike {@link stopSession}, this does NOT remove the session from the
+   * manager's in-memory map — a parked session is still "known" to the
+   * manager, just without a live process backing it. The preserved
+   * `resumeSessionId`/`workingDir`/mux metadata (see `Session.park()`) is
+   * persisted so the session can be resumed later. No-op if the session
+   * doesn't exist in memory (nothing live to park).
+   *
+   * @param id - Session ID to park
+   */
+  async parkSession(id: string): Promise<void> {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return;
+    }
+
+    await session.park();
     this.updateSessionState(session);
   }
 

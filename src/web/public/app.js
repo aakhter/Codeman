@@ -345,6 +345,9 @@ const _SSE_HANDLER_MAP = [
 
   // Session order (global tab order sync, COD-131)
   [SSE_EVENTS.SESSION_ORDER_CHANGED, '_onSessionOrderChanged'],
+
+  // Web tabs (dashboard URLs)
+  [SSE_EVENTS.WEBVIEW_CHANGED, '_onWebviewChanged'],
 ];
 
 
@@ -911,6 +914,7 @@ class CodemanApp {
     const settingsPromise = fetch('/api/settings').then(r => r.ok ? r.json() : null).then(env => env?.data ?? null).catch(() => null);
     this.loadQuickStartCases(null, settingsPromise);
     this._initRunMode();
+    this.initWebviews?.();
     this.setupEventListeners();
     // Mobile: ensure button taps register even when keyboard is visible.
     // On mobile, tapping a button while the soft keyboard is up causes the
@@ -1230,9 +1234,18 @@ class CodemanApp {
         const digitMatch = code.match(/^Digit([1-9])$/);
         if (digitMatch) {
           const idx = parseInt(digitMatch[1], 10) - 1;
+          // Sessions occupy 1..N and web tabs continue from N+1, matching the
+          // numbers actually painted on the tabs.
           if (idx < this.sessionOrder.length) {
             e.preventDefault();
             this.selectSession(this.sessionOrder[idx]);
+          } else {
+            const webIdx = idx - this.sessionOrder.length;
+            const webId = (this.webviewOrder || [])[webIdx];
+            if (webId) {
+              e.preventDefault();
+              this.openWebview(webId);
+            }
           }
           return;
         }
@@ -1750,6 +1763,37 @@ class CodemanApp {
           live.pinned = data.pinned === true;
           live.pinnedAt = data.pinned ? data.pinnedAt : undefined;
         }
+      }
+      this._onSessionListMaybeChanged();
+    });
+
+    // COD-124: session:parked / session:resumed carry only {id} — the new
+    // status lives locally, mirroring the session-park/resume-session flow
+    // in terminal-ui.js, so rows update live without a reload.
+    addListener(SSE_EVENTS.SESSION_PARKED, (e) => {
+      let data = null;
+      try {
+        data = JSON.parse(e.data);
+      } catch {
+        /* ignore malformed payload */
+      }
+      if (data && data.id) {
+        const live = this.sessions.get(data.id);
+        if (live) live.status = 'parked';
+      }
+      this._onSessionListMaybeChanged();
+    });
+
+    addListener(SSE_EVENTS.SESSION_RESUMED, (e) => {
+      let data = null;
+      try {
+        data = JSON.parse(e.data);
+      } catch {
+        /* ignore malformed payload */
+      }
+      if (data && data.id) {
+        const live = this.sessions.get(data.id);
+        if (live) live.status = 'active';
       }
       this._onSessionListMaybeChanged();
     });
@@ -4408,9 +4452,21 @@ class CodemanApp {
     const existingIds = new Set([...existingTabs].map(t => t.dataset.id));
     const currentIds = new Set(this.sessions.keys());
 
-    // Check if we can do incremental update (same session IDs)
+    // Web tabs live in the same strip but are not in this.sessions, so they need
+    // their own change check. Without it, the session-only comparison below is
+    // vacuously "unchanged" whenever session count is stable — most visibly with
+    // ZERO sessions (0 === 0), where opening a dashboard would never draw its tab.
+    const existingWebIds = [...container.querySelectorAll('.session-tab[data-webview-id]')].map(
+      t => t.dataset.webviewId
+    );
+    const wantedWebIds = (this.webviewOrder || []).filter(id => this.webviews?.has(id));
+    const webTabsUnchanged =
+      existingWebIds.length === wantedWebIds.length && existingWebIds.every((id, i) => id === wantedWebIds[i]);
+
+    // Check if we can do incremental update (same session IDs and same web tabs)
     const canIncremental = existingIds.size === currentIds.size &&
-      [...existingIds].every(id => currentIds.has(id));
+      [...existingIds].every(id => currentIds.has(id)) &&
+      webTabsUnchanged;
 
     if (canIncremental) {
       // Incremental update - only modify changed properties
@@ -4418,7 +4474,12 @@ class CodemanApp {
         const tab = container.querySelector(`.session-tab[data-id="${id}"]`);
         if (!tab) continue;
 
-        const isActive = id === this.activeSessionId;
+        // A web tab owns the active state while one is open. activeSessionId stays
+        // set (the terminal keeps streaming underneath, and switching back is
+        // instant): only the highlight moves. Without this the debounced render
+        // re-marks the session tab active moments after a web tab was selected,
+        // leaving two tabs lit at once.
+        const isActive = id === this.activeSessionId && !this.activeWebviewId;
         const status = session.status || 'idle';
         const name = this.getSessionName(session);
         const taskStats = session.taskStats || { running: 0, total: 0 };
@@ -4650,7 +4711,9 @@ class CodemanApp {
       const session = this.sessions.get(id);
       if (!session) continue; // Skip if session was removed
 
-      const isActive = id === this.activeSessionId;
+      // See the note in the incremental path: a web tab owns the active highlight
+      // while one is open, even though activeSessionId stays set.
+      const isActive = id === this.activeSessionId && !this.activeWebviewId;
       const status = session.status || 'idle';
       const name = this.getSessionName(session);
       const mode = session.mode || 'claude';
@@ -4696,6 +4759,11 @@ class CodemanApp {
         </div>`);
       _tabIdx++;
     }
+
+    // Web tabs (dashboard URLs) render after the session tabs, continuing the
+    // Alt+N numbering. They carry data-webview-id instead of data-id, so every
+    // session-tab code path above (drag-and-drop, alerts, badges) skips them.
+    parts.push(this.renderWebviewTabs ? this.renderWebviewTabs(_tabIdx) : '');
 
     container.innerHTML = parts.join('');
 
@@ -5243,6 +5311,9 @@ class CodemanApp {
       return; // newer tab switch won
     }
 
+    // A session tab takes the stage back from any active web tab.
+    this._hideWebviewLayer?.();
+
     this._cleanupPreviousSession(sessionId);
     // COD-187: scrollback ownership — mirror tabs run at 0 (pure screen
     // mirror; nothing accumulates), everything else gets the user's value
@@ -5499,12 +5570,17 @@ class CodemanApp {
         // output produced while the user was away — preserving unconditionally
         // left tabs frozen on a mid-turn frame forever (COD-175).
         const canonicalUnchanged = data.terminalBuffer === cachedBuffer;
-        const preserveSnapshotScrollback =
-          restoredSnapshot &&
-          session?.mode === 'codex' &&
-          !clearedForBusy &&
-          !requestFullHistory &&
-          (canonicalUnchanged || sessionIsBusy);
+        // COD-92: byte-identical canonical buffer ⇒ keep the restored snapshot
+        // for ANY mode (skip the clear+rewrite flash); busy allowance stays
+        // codex-only. Predicate lives in terminal-ui.js (unit-tested).
+        const preserveSnapshotScrollback = this._shouldPreserveSnapshotScrollback({
+          restoredSnapshot,
+          clearedForBusy,
+          requestFullHistory,
+          canonicalUnchanged,
+          sessionIsBusy,
+          mode: session?.mode,
+        });
         const needsRewrite =
           clearedForBusy || (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
         if (needsRewrite) {

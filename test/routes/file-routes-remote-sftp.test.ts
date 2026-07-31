@@ -198,7 +198,7 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toBe('remote bytes');
-    expect(res.headers['content-disposition']).toBe('attachment; filename="report.txt"');
+    expect(res.headers['content-disposition']).toBe('attachment; filename="report.txt"; filename*=UTF-8\'\'report.txt');
     expect(downloadRemoteWorkspaceFile).toHaveBeenCalledWith(REMOTE, 'report.txt');
     await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(1));
   });

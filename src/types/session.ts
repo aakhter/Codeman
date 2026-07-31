@@ -7,7 +7,7 @@
  * - SessionState — full session state (status, tokens, respawn, ralph, CLI metadata)
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
- * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error'
+ * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
  * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
@@ -31,8 +31,13 @@ import type { RespawnConfig } from './respawn.js';
 import type { SessionSource } from './sources.js';
 import type { AttachmentDetectedType } from './tools.js';
 
-/** Status of a Claude session */
-export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error';
+/**
+ * Status of a Claude session.
+ * - `'parked'` (COD-124): detached + CLI stopped, but the session record, workingDir,
+ *   and resumeSessionId are preserved for later resume — distinct from `'stopped'`,
+ *   which existing flows treat as terminal (deleted from SessionManager.sessions).
+ */
+export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error' | 'parked';
 
 /**
  * Claude CLI startup permission mode.
@@ -510,6 +515,15 @@ export interface SessionState {
   agyConfig?: AgyConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
+  /**
+   * Native CLI session/rollout id captured at PARK time for external-CLI modes
+   * (COD-124 unit 2, Gap B). Codex: the rollout UUID discovered from the newest
+   * matching JSONL rollout file under `~/.codex/sessions/` — threaded back into
+   * `codexConfig.resumeSessionId` on resume so `codex resume <id>` restores the
+   * conversation. gemini/opencode/agy/shell: always null — no on-disk resume
+   * mechanism has been wired for those CLIs (best-effort relaunch only).
+   */
+  nativeResumeId?: string | null;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort?: EffortLevel;
   /** Sanitized per-session attachment history. */

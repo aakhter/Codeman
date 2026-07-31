@@ -5,9 +5,9 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * 148 event constants organized by category:
+ * 151 event constants organized by category:
  * - **Core** (1): init
- * - **Session lifecycle** (23): created, updated, deleted, terminal, idle, working, ...
+ * - **Session lifecycle** (25): created, updated, deleted, terminal, idle, working, parked, resumed, ...
  * - **Session: Ralph** (6): ralphLoopUpdate, todoUpdate, completionDetected, ...
  * - **Session: Bash tools** (3): bashToolStart, bashToolEnd, bashToolsUpdate
  * - **Session: Plan** (4): planTaskUpdate, planCheckpoint, planRollback, planTaskAdded
@@ -30,6 +30,7 @@
  * - **Cases** (4): created, linked, deleted, order-changed
  * - **Docker cases** (8): exportComplete/Failed, importComplete, imageBuild*, containerRecreated
  * - **Multi-user** (3): admin:usersChanged, auth:passwordChangeRequired, session:orderChanged
+ * - **Web tabs** (1): webview:changed
  *
  * Naming convention: `domain:action` (e.g., `session:created`, `respawn:stateChanged`)
  *
@@ -102,6 +103,10 @@ export const SessionInteractive = 'session:interactive' as const;
 export const SessionRunning = 'session:running' as const;
 /** Claude plan-usage telemetry (5-hour + weekly limits) parsed from the statusline. */
 export const SessionStatusTelemetry = 'session:statusTelemetry' as const;
+/** Session parked (COD-124): detached from mux + CLI stopped gracefully, state preserved for resume. */
+export const SessionParked = 'session:parked' as const;
+/** Parked session resumed (COD-124): relaunched — conversation restored for Claude mode, best-effort otherwise. */
+export const SessionResumed = 'session:resumed' as const;
 
 // ─── Session: Ralph ──────────────────────────────────────────────────────────
 
@@ -417,6 +422,11 @@ export const AuthPasswordChangeRequired = 'auth:passwordChangeRequired' as const
 /** Global session tab order changed (synced across devices). COD-131. */
 export const SessionOrderChanged = 'session:orderChanged' as const;
 
+/** A saved web tab (dashboard URL) was created, updated or deleted.
+ *  Payload: `{ action: 'created' | 'updated' | 'deleted', id }`. The client
+ *  re-fetches the list rather than patching from the payload. */
+export const WebviewChanged = 'webview:changed' as const;
+
 // ─── Namespace Re-export ─────────────────────────────────────────────────────
 
 /**
@@ -453,6 +463,8 @@ export const SseEvent = {
   SessionInteractive,
   SessionRunning,
   SessionStatusTelemetry,
+  SessionParked,
+  SessionResumed,
 
   // Session: Ralph
   SessionRalphLoopUpdate,
@@ -621,4 +633,7 @@ export const SseEvent = {
 
   // Session order (global tab order sync)
   SessionOrderChanged,
+
+  // Web tabs (dashboard URLs)
+  WebviewChanged,
 } as const;

@@ -82,7 +82,9 @@ describe('run mode UI', () => {
     await app.loadAppSettingsFromServer(Promise.resolve({ runMode: 'shell' }));
 
     expect(app.runMode).toBe('shell');
-    expect(runBtnLabel.textContent).toBe('Run');
+    // Upstream labels shell mode distinctly ('Run SH') since v1.9.x; the guard
+    // here is that the mode survives the sync, not the specific label text.
+    expect(runBtnLabel.textContent).toBe('Run SH');
   });
 });
 

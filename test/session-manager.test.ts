@@ -50,6 +50,8 @@ vi.mock('../src/session.js', () => {
     workingDir: string;
     _started = false;
     _stopped = false;
+    _parked = false;
+    resumeSessionId: string | undefined = undefined;
 
     constructor(options: { workingDir: string }) {
       super();
@@ -68,12 +70,17 @@ vi.mock('../src/session.js', () => {
       this.emit('exit');
     }
 
+    async park() {
+      this._parked = true;
+    }
+
     toState() {
       return {
         id: this.id,
         workingDir: this.workingDir,
-        status: this._stopped ? 'stopped' : this._started ? 'running' : 'pending',
-        pid: this._started && !this._stopped ? 12345 : null,
+        status: this._parked ? 'parked' : this._stopped ? 'stopped' : this._started ? 'running' : 'pending',
+        pid: this._parked || this._stopped ? null : this._started ? 12345 : null,
+        resumeSessionId: this.resumeSessionId,
       };
     }
 
@@ -236,6 +243,74 @@ describe('SessionManager', () => {
           status: 'stopped',
           pid: null,
         })
+      );
+    });
+  });
+
+  // COD-124: park() detaches + preserves state, unlike stopSession() which
+  // removes the session from the manager's in-memory map entirely.
+  describe('parkSession', () => {
+    it('should call session.park() and keep the session in the manager (not deleted)', async () => {
+      const session = await manager.createSession('/tmp/test');
+
+      await manager.parkSession(session.id);
+
+      expect((session as any)._parked).toBe(true);
+      expect(manager.hasSession(session.id)).toBe(true);
+      expect(manager.getSession(session.id)).toBe(session);
+    });
+
+    it('should persist the parked status to the store', async () => {
+      const session = await manager.createSession('/tmp/test');
+
+      await manager.parkSession(session.id);
+
+      expect(mockState.store.setSession).toHaveBeenCalledWith(
+        session.id,
+        expect.objectContaining({ status: 'parked', pid: null })
+      );
+    });
+
+    it('should handle non-existent session gracefully', async () => {
+      await expect(manager.parkSession('non-existent')).resolves.not.toThrow();
+    });
+  });
+
+  // COD-124: on reboot, parked sessions must survive as 'parked' (they carry a
+  // resumeSessionId a user can resume from later) rather than being force-reset
+  // to 'stopped' the way every other non-stopped status is.
+  describe('loadFromStore (parked exemption)', () => {
+    it('should NOT reset a parked session to stopped on boot', () => {
+      mockState.store.state.sessions['parked-session'] = {
+        id: 'parked-session',
+        status: 'parked',
+        pid: null,
+        resumeSessionId: 'claude-conv-xyz',
+      };
+      vi.clearAllMocks();
+
+      new SessionManager();
+
+      expect(mockState.store.setSession).not.toHaveBeenCalledWith(
+        'parked-session',
+        expect.objectContaining({ status: 'stopped' })
+      );
+      expect(mockState.store.state.sessions['parked-session'].status).toBe('parked');
+    });
+
+    it('should still reset other non-stopped statuses to stopped on boot', () => {
+      mockState.store.state.sessions['running-session'] = {
+        id: 'running-session',
+        status: 'running',
+        pid: 12345,
+      };
+      vi.clearAllMocks();
+
+      new SessionManager();
+
+      expect(mockState.store.setSession).toHaveBeenCalledWith(
+        'running-session',
+        expect.objectContaining({ status: 'stopped', pid: null })
       );
     });
   });

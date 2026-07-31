@@ -884,8 +884,25 @@ Object.assign(CodemanApp.prototype, {
           sizeBytes: s.sizeBytes ?? 0,
           lastModified: new Date(s.lastActivityAt ?? s.createdAt ?? Date.now()).toISOString(),
           firstPrompt: s.firstPrompt || s.name || '',
+          // COD-124: status/mode drive the Parked badge, idle-duration flag,
+          // and the Park/Resume menu items in _buildHistoryItem/_openSessionRowMenu.
+          status: s.status,
+          mode: s.mode,
+          name: s.name,
+          claudeSessionId: s.claudeSessionId,
+          pinned: s.pinned,
+          pinnedAt: s.pinnedAt,
         };
         const isLive = !!this.sessions?.has?.(s.sessionId);
+        if (isLive) {
+          // Enrich from the richer live-session cache — these fields aren't
+          // part of UnifiedSessionItem (COD-124: resume-fidelity + obligation markers).
+          const live = this.sessions.get(s.sessionId);
+          record.nativeResumeId = live?.nativeResumeId;
+          record.autoResumeAt = live?.autoResumeAt;
+          record.autoResumeEnabled = live?.autoResumeEnabled;
+          record.ralphEnabled = live?.ralphEnabled;
+        }
         const item = this._buildHistoryItem(record, this.cases, {
           showViewAll: false,
           onActivate: () => {
@@ -2745,6 +2762,7 @@ Object.assign(CodemanApp.prototype, {
 
       const terminal = new Terminal({
         theme: { ...window.codemanCurrentXtermTheme() },
+        minimumContrastRatio: window.codemanCurrentSkinIsLight() ? 4.5 : 1,
         fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "SF Mono", Monaco, monospace',
         fontSize: 12,
         lineHeight: 1.2,

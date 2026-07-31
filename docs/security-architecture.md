@@ -40,14 +40,14 @@ an explicit, guided opt‑in.
 **The security boundary is the network bind plus authentication — not the code Codeman
 runs.** Because sessions launch with `--dangerously-skip-permissions`, the web UI is by
 design a remote‑code‑execution surface for whoever is allowed to reach it. Everything
-below exists to control *who* that is.
+below exists to control _who_ that is.
 
-| Actor | Reaches the UI when… | Is granted |
-|-------|----------------------|------------|
-| Same‑machine user | Always (default loopback bind) | Full session control — the intended local‑use case. |
-| Authenticated remote client | Tunnel/LAN reachability **and** a valid password or session cookie | Full session control. |
-| Unauthenticated remote client | Only if you bind a non‑loopback host with no password | Full session control — the exact case every default and warning works to prevent. |
-| Clients behind a loopback‑connecting tunnel | A reverse tunnel terminates on `127.0.0.1` | Inherit `req.ip = 127.0.0.1`, so they hit the localhost‑only exemptions (§3) unless a password is set. |
+| Actor                                       | Reaches the UI when…                                               | Is granted                                                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Same‑machine user                           | Always (default loopback bind)                                     | Full session control — the intended local‑use case.                                                    |
+| Authenticated remote client                 | Tunnel/LAN reachability **and** a valid password or session cookie | Full session control.                                                                                  |
+| Unauthenticated remote client               | Only if you bind a non‑loopback host with no password              | Full session control — the exact case every default and warning works to prevent.                      |
+| Clients behind a loopback‑connecting tunnel | A reverse tunnel terminates on `127.0.0.1`                         | Inherit `req.ip = 127.0.0.1`, so they hit the localhost‑only exemptions (§3) unless a password is set. |
 
 **Explicitly out of scope.** Codeman is access control for the operator console, not a
 sandbox for the code that console runs. It does **not** defend against: a compromised
@@ -59,11 +59,11 @@ deliberately open, or the breadth of filesystem a session's `workingDir` is poin
 
 ## 1. Network binding model
 
-| Setting | Default | Source |
-|---------|---------|--------|
-| Bind host | `127.0.0.1` (loopback) | `--host` / `CODEMAN_HOST` → `WebServer` ctor |
-| Port | `3000` | `--port` / `CODEMAN_PORT` |
-| TLS | off (`--https` to enable) | `--https` |
+| Setting   | Default                   | Source                                       |
+| --------- | ------------------------- | -------------------------------------------- |
+| Bind host | `127.0.0.1` (loopback)    | `--host` / `CODEMAN_HOST` → `WebServer` ctor |
+| Port      | `3000`                    | `--port` / `CODEMAN_PORT`                    |
+| TLS       | off (`--https` to enable) | `--https`                                    |
 
 ### Bind host classification
 
@@ -86,15 +86,15 @@ non‑loopback (you'll get a warning, not a silent wide‑open bind) — use
 
 At `WebServer.start()`:
 
-| Bind host | `CODEMAN_PASSWORD` | Behavior |
-|-----------|--------------------|----------|
-| loopback (default) | unset | **Start.** Safe — reachable only from this machine. |
-| loopback | set | **Start.** Auth required even locally. |
-| non‑loopback | set | **Start.** Auth protects the open bind. |
-| non‑loopback | unset | **Start + LOUD warning** listing how to secure it. |
-| non‑loopback | unset, `--allow-unauthenticated-network` | **Start + terse acknowledged note.** |
+| Bind host          | `CODEMAN_PASSWORD`                       | Behavior                                            |
+| ------------------ | ---------------------------------------- | --------------------------------------------------- |
+| loopback (default) | unset                                    | **Start.** Safe — reachable only from this machine. |
+| loopback           | set                                      | **Start.** Auth required even locally.              |
+| non‑loopback       | set                                      | **Start.** Auth protects the open bind.             |
+| non‑loopback       | unset                                    | **Start + LOUD warning** listing how to secure it.  |
+| non‑loopback       | unset, `--allow-unauthenticated-network` | **Start + terse acknowledged note.**                |
 
-> History: an earlier iteration (unreleased COD‑29) *refused to start* on a
+> History: an earlier iteration (unreleased COD‑29) _refused to start_ on a
 > non‑loopback bind without a password. That surprised setups that "just worked"
 > before, so **0.9.0 changed it to start‑and‑warn**. Loopback is still the safe
 > default; the warning (with three concrete fixes) replaces the hard failure.
@@ -297,11 +297,11 @@ escapes the session working directory (`..`, absolute paths, and symlinks that
 resolve outside). The realpath‑before‑check ordering closes the validation‑time
 TOCTOU window.
 
-| Route | Cap | Notes |
-|-------|-----|-------|
-| `file-content` | 10 MB | text preview |
-| `file-raw` | 50 MB | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses** |
-| `POST /api/download` | 50 MB | forced `attachment`; sensitive‑path blocklist |
+| Route                | Cap   | Notes                                                                   |
+| -------------------- | ----- | ----------------------------------------------------------------------- |
+| `file-content`       | 10 MB | text preview                                                            |
+| `file-raw`           | 50 MB | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses** |
+| `POST /api/download` | 50 MB | forced `attachment`; sensitive‑path blocklist                           |
 
 ### SVG / content‑type XSS
 
@@ -311,7 +311,7 @@ serves `.svg` as `application/octet-stream` + `Content-Disposition: attachment` 
 `nosniff`. The control here is the **`octet-stream` + `attachment` + `nosniff`
 combination**, which forces a download instead of a render — not the CSP: the
 policy's `script-src` allows `'unsafe-inline'` (§9), so a same‑origin HTML
-document *would* be able to run inline scripts if the browser ever rendered it.
+document _would_ be able to run inline scripts if the browser ever rendered it.
 By the same combination, other text types (`.html`, `.xml`, …) that fall through
 to `octet-stream` are downloaded, not executed. Trusted QR/welcome SVGs are
 injected from API JSON (`innerHTML`), not via `file-raw`, so they are unaffected.
@@ -395,7 +395,7 @@ transient mount blip at launch poisons tmux's long‑lived cwd and crashes
 - **Fail‑safe cwd:** the command is `cd "<dir>" && <cmd>` — if `cd` fails the CLI
   does **not** run in `/tmp`; the pane dies with a visible error instead.
 - **No injection:** `workingDir` passes `isValidWorkingDir` (absolute, rejects
-  `;&|$\`(){}<>'"` and newlines and `..`) and `isValidPath`, and is double‑quoted
+  `;&|$\`(){}<>'"`and newlines and`..`) and `isValidPath`, and is double‑quoted
   in the pane command. Paths with spaces work; metacharacters are rejected before
   reaching the shell.
 - It does not change which tmux socket is targeted, so instance isolation (§8) is
@@ -500,33 +500,43 @@ Full feature guide: [`docker-cases.md`](docker-cases.md).
 
 ---
 
+## 10b. Web tabs (dashboard proxy)
+
+A saved dashboard URL renders as a tab, served through Codeman's own origin at `/webview/<capability>/`. User guide: [`web-tabs.md`](web-tabs.md). Three properties carry the security weight:
+
+- **The proxy is exempt from cookie auth and the Origin/CSRF guard, and that is deliberate.** The iframe is sandboxed without `allow-same-origin`, so it is opaque‑origin: its requests are cross‑site, meaning the `SameSite=lax` session cookie is never attached and its writes and WS upgrades arrive with `Origin: null`. The credential is instead a 192‑bit capability in the path, minted only by an authenticated `POST /api/webviews/:id/open`, held in memory (a restart invalidates every one), rolling TTL, bound to the minting user, and granting nothing but "relay bytes to this one saved URL". ⚠️ **The Host allowlist is NOT bypassed**, so DNS‑rebinding protection is unaffected. A second `Referer`‑keyed form exists for root‑absolute assets and is the only exemption decided by a request‑supplied header, so it is fenced to safe methods on non‑`/api`, non‑`/ws`, non‑`/q` paths. Edges pinned by `test/webview-auth-exemption.test.ts`.
+- **Sandboxed by default; `allow-same-origin` is an explicit per‑dashboard opt‑in.** A proxied page is same‑origin with Codeman, so without the sandbox its JavaScript could read the Codeman document and call the agent‑spawning API. ⚠️ In BOTH modes the `Authorization` header and the `codeman_session` cookie are stripped before the upstream request, because a trusted (same‑origin) frame makes the browser attach Codeman's own Basic‑auth credentials to every proxied request; forwarding them would hand `CODEMAN_PASSWORD` to the dashboard.
+- **Not an open relay, and not a privilege boundary.** `resolveUpstreamUrl()` refuses anything leaving the saved origin, and cross‑origin redirects are handed back unchanged rather than followed. The proxy does reach whatever the SERVER can reach, which is not an escalation for someone who already commands `--dangerously-skip-permissions` agents, but in multi‑user mode it means a non‑admin's dashboard is fetched from the server's network position. Saved URLs are validated to plain http(s) with no embedded credentials, and there is deliberately **no magic‑link path**: terminal output can never create a webview (the mistake the attachment scanner had to be walled off from).
+
+---
+
 ## 11. Quick reference
 
-| Env / flag | Effect |
-|------------|--------|
-| `CODEMAN_PASSWORD` (+ `CODEMAN_USERNAME`) | Enable HTTP Basic auth |
-| `--host` / `CODEMAN_HOST` | Bind host (default `127.0.0.1`) |
-| `CODEMAN_ALLOWED_HOSTS` | Extra `Host`/`Origin` allowlist entries for reverse proxies (comma‑separated; exact host, or leading‑dot `.suffix` for subdomains) — see §3 |
-| `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledge an unauthenticated non‑loopback bind (downgrades the warning) |
-| `--https` | Enable TLS (adds HSTS) |
-| `CODEMAN_INSTANCE` | Scope tmux socket + data dir for isolation |
-| `CODEMAN_GESTURE=1` | Make the gesture overlay available (widens CSP) |
-| `CODEMAN_DOCKER_BRIDGE_HOOKS=1` | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
-| `CODEMAN_DOCKER_BRIDGE_HOST` | Override the bridge gateway IP the hooks listener binds (default: auto‑detect) |
+| Env / flag                                                                  | Effect                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODEMAN_PASSWORD` (+ `CODEMAN_USERNAME`)                                   | Enable HTTP Basic auth                                                                                                                                           |
+| `--host` / `CODEMAN_HOST`                                                   | Bind host (default `127.0.0.1`)                                                                                                                                  |
+| `CODEMAN_ALLOWED_HOSTS`                                                     | Extra `Host`/`Origin` allowlist entries for reverse proxies (comma‑separated; exact host, or leading‑dot `.suffix` for subdomains) — see §3                      |
+| `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledge an unauthenticated non‑loopback bind (downgrades the warning)                                                                                        |
+| `--https`                                                                   | Enable TLS (adds HSTS)                                                                                                                                           |
+| `CODEMAN_INSTANCE`                                                          | Scope tmux socket + data dir for isolation                                                                                                                       |
+| `CODEMAN_GESTURE=1`                                                         | Make the gesture overlay available (widens CSP)                                                                                                                  |
+| `CODEMAN_DOCKER_BRIDGE_HOOKS=1`                                             | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
+| `CODEMAN_DOCKER_BRIDGE_HOST`                                                | Override the bridge gateway IP the hooks listener binds (default: auto‑detect)                                                                                   |
 
 **Audit log:** session lifecycle and server start are recorded in
 `~/.codeman/session-lifecycle.jsonl`.
 
 ### Key source files
 
-| Concern | File |
-|---------|------|
-| Bind‑host classification, env‑flag parsing, Host/Origin allowlist (`buildHostPolicy` / `isAllowedRequestHost` / `isAllowedRequestOrigin`) | `src/web/network-auth-policy.ts` |
-| Start‑and‑warn policy | `src/web/server.ts` (`WebServer.start()`) |
-| Auth pipeline, rate limiting, security headers, CORS, Host/Origin guard (`registerHostGuard`) | `src/web/middleware/auth.ts` |
-| File‑path containment (realpath‑before‑check) | `src/web/route-helpers.ts` (`validateSessionFilePath`) |
-| File routes, caps, SVG handling, download blocklist | `src/web/routes/file-routes.ts` |
-| Instance/socket/data‑dir scoping | `src/config/instance.ts` |
+| Concern                                                                                                                                   | File                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Bind‑host classification, env‑flag parsing, Host/Origin allowlist (`buildHostPolicy` / `isAllowedRequestHost` / `isAllowedRequestOrigin`) | `src/web/network-auth-policy.ts`                       |
+| Start‑and‑warn policy                                                                                                                     | `src/web/server.ts` (`WebServer.start()`)              |
+| Auth pipeline, rate limiting, security headers, CORS, Host/Origin guard (`registerHostGuard`)                                             | `src/web/middleware/auth.ts`                           |
+| File‑path containment (realpath‑before‑check)                                                                                             | `src/web/route-helpers.ts` (`validateSessionFilePath`) |
+| File routes, caps, SVG handling, download blocklist                                                                                       | `src/web/routes/file-routes.ts`                        |
+| Instance/socket/data‑dir scoping                                                                                                          | `src/config/instance.ts`                               |
 
 ---
 

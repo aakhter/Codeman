@@ -17,8 +17,18 @@ export class MockSession extends EventEmitter {
   workingDir: string = '/tmp/test-workdir';
   /** COD-241 — set by remote-session route tests; production reads `session.remote`. */
   remote?: SessionRemote;
-  status: 'idle' | 'working' = 'idle';
-  pid: number = 12345;
+  status: 'idle' | 'working' | 'parked' = 'idle';
+  pid: number | null = 12345;
+  /** COD-124 — preserved conversation ref for claude-mode resume via --resume. */
+  resumeSessionId?: string;
+  /** COD-124 unit 2, Gap B — native external-CLI (codex) rollout id captured at park time. */
+  nativeResumeId: string | null = null;
+  setNativeResumeId = vi.fn((id: string | null) => {
+    this.nativeResumeId = id;
+  });
+  /** COD-124 unit 2, Gap B — codex-mode config surface read by captureNativeResumeId(). */
+  codexConfig?: { resumeSessionId?: string };
+  codexLastSubmitAt?: number;
   isWorking: boolean = false;
   private _activeChildProcesses: { pid: number; command: string }[] = [];
   ralphTracker: null = null;
@@ -240,8 +250,18 @@ export class MockSession extends EventEmitter {
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
       pinned: this.pinned || undefined,
       pinnedAt: this.pinned ? (this.pinnedAt ?? undefined) : undefined,
+      resumeSessionId: this.resumeSessionId,
+      nativeResumeId: this.nativeResumeId,
     };
   }
+
+  /** COD-124 — stub for park(): detach + preserve for resume. Mirrors the
+   *  observable effects of production Session.park() (status → 'parked',
+   *  pid cleared) without touching any real tmux/PTY. */
+  park = vi.fn(async () => {
+    this.status = 'parked';
+    this.pid = null;
+  });
 
   get attachmentHistory(): SessionAttachmentHistoryItem[] {
     return sanitizeAttachmentHistory(this._attachmentHistory);
