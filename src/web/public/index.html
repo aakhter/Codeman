@@ -1752,7 +1752,8 @@
                 </div>
                 <label>Proxy URL</label>
                 <input type="text" id="appSettingsHeadroomUrl" placeholder="http://192.168.55.175:8787">
-                <div id="appSettingsHeadroomSavings" style="margin-top:8px;margin-bottom:4px;">&#x2014;</div>
+                <div class="form-hint" style="margin-top:8px;">Proxy-wide · all proxy clients</div>
+                <div id="appSettingsHeadroomSavings" style="margin-top:4px;margin-bottom:4px;">&#x2014;</div>
               </div>
               <div class="form-row form-row-switch">
                 <label>Route Claude</label>
@@ -1768,10 +1769,12 @@
                   <input type="checkbox" id="appSettingsHeadroomCodex">
                   <span class="slider"></span>
                 </label>
-                <span class="form-hint" style="margin-top:0;margin-left:4px;">(applies now)</span>
+                <span class="form-hint" style="margin-top:0;margin-left:4px;">(shared config reconciles now)</span>
               </div>
+              <div class="form-hint" style="margin-top:8px;">Managed-session launch / respawn snapshots</div>
               <div id="appSettingsHeadroomSessions" style="margin-top:6px;font-size:0.75rem;display:flex;flex-direction:column;gap:3px;"></div>
-              <span class="form-hint">Changes apply to new sessions. Codex toggle takes effect immediately; respawn a session to re-route it.</span>
+              <span class="form-hint">Proxy activity is not attributable to these managed-session snapshots; it includes other proxy clients and historical traffic.</span>
+              <span class="form-hint">The shared Codex config is reconciled immediately, but a running session's routing snapshot changes on its next respawn.</span>
             </div>
           </div>
           <!-- Codex CLI Tab -->

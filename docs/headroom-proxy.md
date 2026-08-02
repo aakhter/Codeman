@@ -30,7 +30,15 @@ API rather than failing.
 ## Status / stats
 
 Status and stats surface via system routes plus a frontend **stats hero**
-(savings %, cache, best %).
+(savings %, cache, best %). Those counters are explicitly **proxy-wide** —
+they include all proxy clients and historical proxy traffic, not just Codeman
+sessions. When supplied by Headroom, the panel also renders the bounded
+`agent_usage.agents` attribution and the `requests.by_provider` breakdown.
+
+Each managed Claude/Codex row is instead a launch/respawn routing snapshot with
+its recorded time. It does not attribute proxy requests to that session. A
+settings update reconciles the shared Codex config immediately; an already
+running session's snapshot changes only after it respawns.
 
 ## Key files
 

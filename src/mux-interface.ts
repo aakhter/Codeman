@@ -60,6 +60,8 @@ export interface MuxSession {
   ralphEnabled?: boolean;
   /** COD-102: whether this session was routed through Headroom at spawn (claude/codex); undefined for other modes. */
   headroomRouted?: boolean;
+  /** COD-254: when the Headroom routing state above was captured at launch or respawn. */
+  headroomRoutedAt?: number;
 }
 
 /**

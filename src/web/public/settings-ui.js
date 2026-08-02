@@ -1974,6 +1974,19 @@ Object.assign(CodemanApp.prototype, {
       } else {
         const st = s.stats;
         const pct = Math.max(0, Math.min(100, Number(st.compressedPct) || 0));
+        const renderBuckets = (buckets) =>
+          Object.entries(buckets || {})
+            .map(([name, count]) => `${String(name).replace(/[<&]/g, '')}: ${Number(count).toLocaleString()}`)
+            .join(' · ');
+        const agents = (st.attribution?.agents || [])
+          .map((agent) => {
+            const label = String(agent.label || agent.agent || 'Unknown').replace(/[<&]/g, '');
+            const requests = Number(agent.requests) || 0;
+            const saved = Number(agent.tokensSaved) || 0;
+            return `${label}: ${requests.toLocaleString()} requests · ${saved.toLocaleString()} tokens saved`;
+          })
+          .join('<br>');
+        const providers = renderBuckets(st.attribution?.providers);
         savings.innerHTML =
           '<div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;">' +
           '<span style="font-size:1.9rem;font-weight:700;color:#4ade80;line-height:1;">' +
@@ -1984,7 +1997,13 @@ Object.assign(CodemanApp.prototype, {
           '<div style="position:relative;height:14px;border-radius:7px;background:rgba(148,163,184,0.18);overflow:hidden;">' +
           '<div style="position:absolute;left:0;top:0;bottom:0;width:' + pct + '%;background:#4ade80;"></div></div>' +
           '<div style="font-size:0.72rem;color:var(--text-secondary);margin-top:6px;">Cost saved $' +
-          st.costSavedUsd + ' (' + st.savingsPct + '%) \u00b7 cache $' + st.cacheSavedUsd + ' \u00b7 best ' + st.bestPct + '%</div>';
+          st.costSavedUsd + ' (' + st.savingsPct + '%) \u00b7 cache $' + st.cacheSavedUsd + ' \u00b7 best ' + st.bestPct + '%</div>' +
+          (agents || providers
+            ? '<div style="font-size:0.72rem;color:var(--text-secondary);margin-top:8px;"><strong>Agent usage</strong>' +
+              (agents ? '<br>' + agents : '') +
+              (providers ? '<br><strong>Providers</strong> · ' + providers : '') +
+              '</div>'
+            : '');
       }
       sessions.innerHTML = (s.routedSessions || [])
         .map((x) => {
@@ -1994,7 +2013,14 @@ Object.assign(CodemanApp.prototype, {
           const state = x.routed === null ? 'n/a' : x.routed ? 'routed' : 'direct';
           const stateColor = state === 'routed' ? '#4ade80' : state === 'direct' ? '#fbbf24' : 'var(--text-secondary)';
           const stateWeight = state === 'routed' ? '600' : '400';
-          return `<div style="display:flex;gap:10px;align-items:baseline;padding:2px 0;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${name}</span><span style="width:60px;flex-shrink:0;font-weight:600;color:${modeColor};">${mode}</span><span style="width:54px;flex-shrink:0;font-weight:${stateWeight};color:${stateColor};">${state}</span></div>`;
+          const hasTimestamp = x.routedAt !== null && x.routedAt !== undefined;
+          const timestamp = Number(x.routedAt);
+          const recordedAt = hasTimestamp && Number.isFinite(timestamp)
+            ? new Date(timestamp).toLocaleString()
+            : x.routed === null
+              ? 'not applicable'
+              : 'recorded before timestamps';
+          return `<div style="display:flex;gap:10px;align-items:baseline;padding:2px 0;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${name}</span><span style="width:60px;flex-shrink:0;font-weight:600;color:${modeColor};">${mode}</span><span style="width:54px;flex-shrink:0;font-weight:${stateWeight};color:${stateColor};">${state}</span><span style="flex-shrink:0;color:var(--text-secondary);">snapshot ${recordedAt}</span></div>`;
         })
         .join('');
     } catch {

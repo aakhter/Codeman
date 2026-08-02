@@ -2078,6 +2078,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         attached: false,
         name,
         headroomRouted,
+        headroomRoutedAt: headroomRouted === undefined ? undefined : Date.now(),
       };
 
       this.sessions.set(sessionId, session);
@@ -2181,15 +2182,20 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Resolve CLI binary directory based on mode
     const { pathExport } = this.buildPathExport(mode);
 
-    const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
-    if (session) {
-      session.headroomRouted =
-        mode === 'claude'
-          ? headroomClaudeUrl !== undefined
-          : mode === 'codex'
-            ? await resolveHeadroomRouted('codex')
-            : undefined;
+    // COD-254: Codex routing lives in the shared config.toml patch. Reconcile it
+    // before calculating this respawn's snapshot or launching its replacement,
+    // so the persisted/UI state matches the process that actually starts.
+    if (mode === 'codex') {
+      await reconcileCodexHeadroomPatch();
     }
+
+    const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
+    const headroomRouted =
+      mode === 'claude'
+        ? headroomClaudeUrl !== undefined
+        : mode === 'codex'
+          ? await resolveHeadroomRouted('codex')
+          : undefined;
     const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
       ' && '
     );
@@ -2259,6 +2265,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       }
       const verifiedPid = (await this.getPanePid(muxName)) ?? pid;
       session.pid = verifiedPid;
+      session.headroomRouted = headroomRouted;
+      session.headroomRoutedAt = headroomRouted === undefined ? undefined : Date.now();
+      this.saveSessions();
       return verifiedPid;
     } catch (err) {
       console.error('[TmuxManager] Failed to respawn pane:', err);

@@ -18,6 +18,33 @@ const STATS = {
     },
     cost: { total_saved_usd: 0.19, savings_pct: 12, breakdown: { cache_savings_usd: 0.18 } },
   },
+  agent_usage: {
+    agents: [
+      {
+        agent: 'claude-code',
+        label: 'Claude Code',
+        source: 'client',
+        requests: 101,
+        tokens_saved: 15000,
+        savings_percent: 75,
+        providers: { anthropic: 101 },
+      },
+      {
+        agent: 'codex',
+        label: 'Codex',
+        source: 'client',
+        requests: 17,
+        tokens_saved: 1629,
+        savings_percent: 70,
+        providers: { openai: 17 },
+      },
+    ],
+  },
+  requests: {
+    by_provider: { anthropic: 101, openai: 17 },
+    by_model: { 'claude-sonnet-4': 101, 'gpt-5-codex': 17 },
+    by_stack: { proxy: 118 },
+  },
 };
 
 function mockFetch(map: Record<string, { ok: boolean; json?: unknown }>) {
@@ -46,6 +73,75 @@ describe('fetchHeadroomStatus', () => {
       savingsPct: 12,
       cacheSavedUsd: 0.18,
       bestPct: 100,
+      attribution: {
+        providers: { anthropic: 101, openai: 17 },
+        models: { 'claude-sonnet-4': 101, 'gpt-5-codex': 17 },
+        stacks: { proxy: 118 },
+        agents: [
+          {
+            agent: 'claude-code',
+            label: 'Claude Code',
+            source: 'client',
+            requests: 101,
+            tokensSaved: 15000,
+            savingsPct: 75,
+            providers: { anthropic: 101 },
+          },
+          {
+            agent: 'codex',
+            label: 'Codex',
+            source: 'client',
+            requests: 17,
+            tokensSaved: 1629,
+            savingsPct: 70,
+            providers: { openai: 17 },
+          },
+        ],
+      },
+    });
+  });
+
+  it('preserves a Claude-only proxy breakdown without inventing Codex activity', async () => {
+    const claudeOnly = {
+      ...STATS,
+      agent_usage: {
+        agents: [
+          {
+            agent: 'claude-code',
+            label: 'Claude Code',
+            source: 'client',
+            requests: 118,
+            tokens_saved: 16629,
+            savings_percent: 74.4,
+            providers: { anthropic: 118 },
+          },
+        ],
+      },
+      requests: { by_provider: { anthropic: 118 }, by_model: { 'claude-sonnet-4': 118 }, by_stack: { proxy: 118 } },
+    };
+    vi.stubGlobal(
+      'fetch',
+      mockFetch({ '/readyz': { ok: true, json: READYZ }, '/stats': { ok: true, json: claudeOnly } })
+    );
+    const { fetchHeadroomStatus } = await import('../../src/config/headroom-status.js');
+
+    const s = await fetchHeadroomStatus('http://h:8787');
+
+    expect(s.stats?.attribution).toEqual({
+      providers: { anthropic: 118 },
+      models: { 'claude-sonnet-4': 118 },
+      stacks: { proxy: 118 },
+      agents: [
+        {
+          agent: 'claude-code',
+          label: 'Claude Code',
+          source: 'client',
+          requests: 118,
+          tokensSaved: 16629,
+          savingsPct: 74.4,
+          providers: { anthropic: 118 },
+        },
+      ],
     });
   });
 

@@ -428,6 +428,7 @@ export function registerSystemRoutes(
       name: s.name,
       mode: s.mode,
       routed: s.headroomRouted ?? null,
+      routedAt: s.headroomRoutedAt ?? null,
     }));
     return {
       enabled: cfg.proxyUrl !== '',

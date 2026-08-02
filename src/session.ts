@@ -1162,6 +1162,11 @@ export class Session extends EventEmitter {
     return this._muxSession?.headroomRouted;
   }
 
+  /** COD-254: when the Headroom launch/respawn routing snapshot was recorded. */
+  get headroomRoutedAt(): number | undefined {
+    return this._muxSession?.headroomRoutedAt;
+  }
+
   set name(value: string) {
     this._name = value;
   }

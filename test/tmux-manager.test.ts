@@ -890,6 +890,54 @@ describe('TmuxManager (unit)', () => {
       }
     });
 
+    it('reconciles Codex Headroom config before capturing its successful respawn routing snapshot', async () => {
+      const originalVitest = process.env.VITEST;
+      vi.resetModules();
+      delete process.env.VITEST;
+      const routing = await import('../src/config/headroom-routing.js');
+      let reconciled = false;
+      const reconcile = vi.spyOn(routing, 'reconcileCodexHeadroomPatch').mockImplementation(async () => {
+        reconciled = true;
+      });
+      vi.spyOn(routing, 'resolveHeadroomClaudeBaseUrl').mockResolvedValue(undefined);
+      vi.spyOn(routing, 'resolveHeadroomRouted').mockImplementation(async () => reconciled);
+      const { TmuxManager: NonTestTmuxManager } = await import('../src/tmux-manager.js');
+      if (originalVitest === undefined) {
+        delete process.env.VITEST;
+      } else {
+        process.env.VITEST = originalVitest;
+      }
+
+      const nonTestManager = new NonTestTmuxManager();
+      nonTestManager.registerSession({
+        sessionId: 'codex-respawn-1',
+        muxName: 'codeman-c0d25401',
+        pid: 1000,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'codex',
+        attached: false,
+        headroomRouted: false,
+      });
+
+      try {
+        const pid = await nonTestManager.respawnPane({
+          sessionId: 'codex-respawn-1',
+          workingDir: '/tmp',
+          mode: 'codex',
+        });
+
+        expect(pid).toBe(4242);
+        expect(reconcile).toHaveBeenCalledOnce();
+        expect(nonTestManager.getSession('codex-respawn-1')).toMatchObject({ headroomRouted: true });
+        expect(reconcile.mock.invocationCallOrder[0]).toBeLessThan(
+          vi.mocked(routing.resolveHeadroomRouted).mock.invocationCallOrder[0]
+        );
+      } finally {
+        nonTestManager.destroy();
+      }
+    });
+
     it('treats a remote respawn as failed when ssh exits during the connect window', async () => {
       vi.useFakeTimers();
       const NonTestTmuxManager = await importWithTmuxCommandsEnabled();

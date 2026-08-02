@@ -153,6 +153,57 @@ describe('system-routes', () => {
     });
   });
 
+  // ========== GET /api/headroom/status ==========
+
+  describe('GET /api/headroom/status', () => {
+    it('keeps proxy-wide Claude activity separate from a direct Codex launch snapshot', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => {
+          if (url.endsWith('/readyz')) return { ok: true, json: async () => ({ version: '0.25.0' }) } as Response;
+          return {
+            ok: true,
+            json: async () => ({
+              summary: { api_requests: 8, compression: {}, cost: {} },
+              agent_usage: {
+                agents: [
+                  {
+                    agent: 'claude-code',
+                    label: 'Claude Code',
+                    source: 'client',
+                    requests: 8,
+                    tokens_saved: 99,
+                    savings_percent: 50,
+                    providers: { anthropic: 8 },
+                  },
+                ],
+              },
+              requests: { by_provider: { anthropic: 8 }, by_model: {}, by_stack: { proxy: 8 } },
+            }),
+          } as Response;
+        })
+      );
+      const session = harness.ctx._session as typeof harness.ctx._session & {
+        headroomRouted?: boolean;
+        headroomRoutedAt?: number;
+      };
+      session.mode = 'codex';
+      session.headroomRouted = false;
+      session.headroomRoutedAt = 1_722_470_400_000;
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/headroom/status' });
+      const body = JSON.parse(res.body);
+
+      expect(res.statusCode).toBe(200);
+      expect(body.stats.attribution.agents).toEqual([
+        expect.objectContaining({ agent: 'claude-code', label: 'Claude Code', requests: 8 }),
+      ]);
+      expect(body.routedSessions).toEqual([
+        expect.objectContaining({ mode: 'codex', routed: false, routedAt: 1_722_470_400_000 }),
+      ]);
+    });
+  });
+
   // ========== GET /api/config ==========
 
   describe('GET /api/config', () => {

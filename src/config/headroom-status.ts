@@ -14,6 +14,26 @@ export interface HeadroomStats {
   savingsPct: number;
   cacheSavedUsd: number;
   bestPct: number;
+  /** Proxy-provided request attribution. These are proxy-wide, not per-Codeman-session counters. */
+  attribution?: HeadroomAttribution;
+}
+
+export interface HeadroomAgentUsage {
+  agent: string;
+  label: string;
+  source: string;
+  requests: number;
+  tokensSaved: number;
+  savingsPct: number;
+  providers: Record<string, number>;
+}
+
+/** Bounded subset of Headroom's top-level `agent_usage` and `requests` fields. */
+export interface HeadroomAttribution {
+  agents: HeadroomAgentUsage[];
+  providers: Record<string, number>;
+  models: Record<string, number>;
+  stacks: Record<string, number>;
 }
 
 export interface HeadroomStatus {
@@ -37,8 +57,48 @@ async function getJson(url: string): Promise<unknown> {
   }
 }
 
+function numericBuckets(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, raw]) => {
+      const count = Number(raw);
+      return Number.isFinite(count) ? [[key, count]] : [];
+    })
+  );
+}
+
+function parseAttribution(body: Record<string, unknown>): HeadroomAttribution | undefined {
+  const requests = (body.requests ?? {}) as Record<string, unknown>;
+  const agentUsage = (body.agent_usage ?? {}) as Record<string, unknown>;
+  const agents = Array.isArray(agentUsage.agents)
+    ? agentUsage.agents.flatMap((raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+        const item = raw as Record<string, unknown>;
+        if (typeof item.agent !== 'string' || !item.agent) return [];
+        return [
+          {
+            agent: item.agent,
+            label: typeof item.label === 'string' && item.label ? item.label : item.agent,
+            source: typeof item.source === 'string' && item.source ? item.source : 'unknown',
+            requests: Number(item.requests ?? 0),
+            tokensSaved: Number(item.tokens_saved ?? 0),
+            savingsPct: Number(item.savings_percent ?? 0),
+            providers: numericBuckets(item.providers),
+          },
+        ];
+      })
+    : [];
+  const providers = numericBuckets(requests.by_provider);
+  const models = numericBuckets(requests.by_model);
+  const stacks = numericBuckets(requests.by_stack);
+  return agents.length || Object.keys(providers).length || Object.keys(models).length || Object.keys(stacks).length
+    ? { agents, providers, models, stacks }
+    : undefined;
+}
+
 function parseStats(body: unknown): HeadroomStats | null {
-  const s = (body as { summary?: Record<string, unknown> } | null)?.summary;
+  const payload = body as Record<string, unknown> | null;
+  const s = payload?.summary as Record<string, unknown> | undefined;
   if (!s) return null;
   const c = (s.compression ?? {}) as Record<string, number>;
   const cost = (s.cost ?? {}) as Record<string, unknown>;
@@ -52,6 +112,7 @@ function parseStats(body: unknown): HeadroomStats | null {
     savingsPct: Number((cost.savings_pct as number) ?? 0),
     cacheSavedUsd: Number(bd.cache_savings_usd ?? 0),
     bestPct: Number(c.best_compression_pct ?? 0),
+    attribution: parseAttribution(payload ?? {}),
   };
 }
 
