@@ -147,6 +147,25 @@ describe('COD-76 attachment "Clear all" control', () => {
     }
   });
 
+  it('keeps the single visible control first while attachment cards stay newest-first', () => {
+    document.body.innerHTML = '';
+    const host = makeHost(methods);
+
+    addCard(host, 'a');
+    addCard(host, 'b');
+    addCard(host, 'c');
+
+    const stack = host.attachmentCardStack!;
+    const controls = stack.querySelectorAll('.attachment-clear-all:not([hidden])');
+    expect(controls).toHaveLength(1);
+    expect(stack.firstElementChild).toBe(controls[0]);
+    expect(Array.from(stack.querySelectorAll('.attachment-card')).map((card) => card.dataset.attachmentId)).toEqual([
+      'c',
+      'b',
+      'a',
+    ]);
+  });
+
   it('closeAllAttachmentCards() empties the map and tears down the stack container (no leaked nodes)', () => {
     document.body.innerHTML = '';
     const host = makeHost(methods);

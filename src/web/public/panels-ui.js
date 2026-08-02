@@ -5492,8 +5492,8 @@ Object.assign(CodemanApp.prototype, {
       control.textContent = 'Clear all';
       control.title = 'Dismiss all attachment cards';
       control.addEventListener('click', () => this.closeAllAttachmentCards());
-      stack.prepend(control);
     }
+    stack.prepend(control);
     control.hidden = false;
   },
 
@@ -6558,8 +6558,8 @@ Object.assign(CodemanApp.prototype, {
       control.textContent = 'Clear all';
       control.title = 'Dismiss all attachment cards';
       control.addEventListener('click', () => this.closeAllAttachmentCards());
-      stack.prepend(control);
     }
+    stack.prepend(control);
     control.hidden = false;
   },
 
