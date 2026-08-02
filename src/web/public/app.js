@@ -944,7 +944,8 @@ class CodemanApp {
     // Setup online/offline detection
     this.setupOnlineDetection();
     // Load server-stored settings (async, re-applies visibility after load)
-    this.loadAppSettingsFromServer(settingsPromise).then(() => {
+    this._settingsSyncPromise = this.loadAppSettingsFromServer(settingsPromise).catch(() => {});
+    this._settingsSyncPromise.then(() => {
       this.applyHeaderVisibilitySettings();
       this.applySkin();
       this.applyLocalization();

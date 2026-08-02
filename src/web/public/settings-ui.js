@@ -294,7 +294,11 @@ Object.assign(CodemanApp.prototype, {
   // App Settings Modal
   // ═══════════════════════════════════════════════════════════════
 
-  openAppSettings() {
+  async openAppSettings() {
+    // The startup sync makes settings.json authoritative across browser/PWA
+    // clients. Do not let an immediately opened modal re-save stale localStorage
+    // before that sync has populated the local mirror.
+    await this._settingsSyncPromise;
     // Load current settings
     const settings = this.loadAppSettingsFromStorage();
     document.getElementById('appSettingsDisplayName').value = settings.displayName || 'Codeman';
