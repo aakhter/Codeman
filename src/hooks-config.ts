@@ -440,23 +440,24 @@ export async function writeHooksConfig(casePath: string): Promise<void> {
  * X-Codeman-Hook-Secret header was added (COD-54, 2026-06-10) keep hook curls in their
  * settings.local.json that POST to /api/hook-event WITHOUT the secret — which, once the
  * gate requires it unconditionally (COD-91), silently 401 on a password-protected install.
- * Older Codeman blocks also lack the background Bash async-rewake hook. Refresh either
- * stale shape on launch so existing cases gain both current behaviors.
+ * Older Codeman blocks may also lack the background Bash async-rewake hook or the
+ * SessionStart identity hook. Refresh any stale shape on launch so existing cases
+ * gain all current behaviors.
  *
  * Deliberately surgical: regenerates ONLY when settings.local.json already contains
  * Codeman's own hook curls (they target `/api/hook-event`) and they are stale. No-op
  * when the file/hooks are absent (we never impose hooks on a user who removed them) or
  * when the hooks aren't ours, so it is cheap enough to call on every Claude spawn.
  */
-export async function refreshStaleCodemanHooks(casePath: string): Promise<void> {
+export async function refreshStaleCodemanHooks(casePath: string): Promise<boolean> {
   const settingsPath = join(casePath, '.claude', 'settings.local.json');
-  if (!existsSync(settingsPath)) return;
-  await withSettingsLock(settingsPath, async () => {
+  if (!existsSync(settingsPath)) return false;
+  return withSettingsLock(settingsPath, async () => {
     let existing: Record<string, unknown>;
     try {
       existing = JSON.parse(await readFile(settingsPath, 'utf-8'));
     } catch {
-      return; // malformed — leave it untouched (case-create owns the happy path)
+      return false; // malformed — leave it untouched (case-create owns the happy path)
     }
     const hooksJson = JSON.stringify(existing.hooks ?? null);
     const isOurs = hooksJson.includes('/api/hook-event');
@@ -464,13 +465,16 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<void> 
     // absence on our own hooks means they predate COD-54 and need regenerating.
     const hasSecret = hooksJson.includes('X-Codeman-Hook-Secret');
     const hasBackgroundWake = hooksJson.includes(BACKGROUND_WAKE_MARKER);
-    if (!isOurs || (hasSecret && hasBackgroundWake)) return;
+    const hasSessionStart = hooksJson.includes('session_start');
+    if (!isOurs) return false;
+    if (hasSecret && hasBackgroundWake && hasSessionStart) return true;
     const generated = generateHooksConfig();
     const merged = {
       ...existing,
       hooks: mergeCodemanHooks(existing.hooks, generated.hooks),
     };
     await writeFile(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+    return true;
   });
 }
 

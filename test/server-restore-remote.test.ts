@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRestoredSessionName, resolveRestoredSessionRemote } from '../src/web/server.js';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  refreshRestoredClaudeHookCapability,
+  resolveRestoredSessionName,
+  resolveRestoredSessionRemote,
+} from '../src/web/server.js';
+import { generateHooksConfig } from '../src/hooks-config.js';
 import type { SessionRemote } from '../src/types.js';
 
 describe('server mux restore remote metadata', () => {
@@ -23,6 +31,27 @@ describe('server mux restore remote metadata', () => {
     };
 
     expect(resolveRestoredSessionRemote(savedRemote, muxRemote)).toEqual(savedRemote);
+  });
+
+  it('fails closed for restored remote Claude fresh-thread identity hooks', async () => {
+    await expect(refreshRestoredClaudeHookCapability('claude', '/remote/project', muxRemote)).resolves.toBe(false);
+  });
+
+  it('does not fence non-Claude restored sessions', async () => {
+    await expect(refreshRestoredClaudeHookCapability('codex', '/remote/project', muxRemote)).resolves.toBe(true);
+  });
+
+  it('migrates a local restored Claude case before enabling fresh-thread identity', async () => {
+    const workingDir = await mkdtemp(join(tmpdir(), 'codeman-restored-claude-hooks-'));
+    const claudeDir = join(workingDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.local.json');
+    await mkdir(claudeDir, { recursive: true });
+    const hooks = generateHooksConfig().hooks;
+    delete hooks.SessionStart;
+    await writeFile(settingsPath, JSON.stringify({ hooks }, null, 2));
+
+    await expect(refreshRestoredClaudeHookCapability('claude', workingDir, undefined)).resolves.toBe(true);
+    expect(await readFile(settingsPath, 'utf8')).toContain('session_start');
   });
 });
 

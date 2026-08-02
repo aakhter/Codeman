@@ -198,6 +198,8 @@ interface AutoOpsCallbacks {
   getCheckpointObservation?: () => CheckpointObservation | Promise<CheckpointObservation>;
   /** Immutable configured backend. Checkpoint capability is never inferred from terminal text. */
   getCheckpointBackendMode?: () => string;
+  /** Optional fail-closed backend/mode capability reason. */
+  getCheckpointCapabilityReason?: (mode: CheckpointMode) => string | undefined;
   /** Check if Claude is currently working */
   isWorking: () => boolean;
   /** Check if the session has been stopped */
@@ -620,6 +622,8 @@ export class SessionAutoOps extends EventEmitter {
     if (backend !== undefined && backend !== 'codex' && backend !== 'claude') {
       return { triggered: false, reason: 'unsupported-backend' };
     }
+    const capabilityReason = this.callbacks.getCheckpointCapabilityReason?.(mode);
+    if (capabilityReason) return { triggered: false, reason: capabilityReason };
 
     this._checkpointActive = true;
     const runId = randomUUID();

@@ -398,6 +398,7 @@ export class Session extends EventEmitter {
   private _lastActivityAt: number;
   private _claudeSessionId: string | null = null;
   private _claudeSessionIdentityAdopted = false;
+  private readonly _claudeSessionStartHookReady: boolean;
   private _totalCost: number = 0;
   private _messages: ClaudeMessage[] = [];
   private _lineBuffer: string = '';
@@ -614,6 +615,8 @@ export class Session extends EventEmitter {
       truecolorEnabled?: boolean;
       /** Enable Agent Checkpoint for this newly created session (COD-257 app default). */
       checkpointEnabled?: boolean;
+      /** Restored Claude session can receive authoritative SessionStart identity changes. */
+      claudeSessionStartHookReady?: boolean;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Restored per-session reference sources (COD-65). */
@@ -658,6 +661,7 @@ export class Session extends EventEmitter {
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
     this._claudeSessionIdentityAdopted = Boolean(config.resumeSessionId);
+    this._claudeSessionStartHookReady = config.claudeSessionStartHookReady ?? true;
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;
@@ -772,6 +776,10 @@ export class Session extends EventEmitter {
       writeCheckpointCommand: (cmd) => this.writeCheckpointViaMux(cmd),
       getCheckpointObservation: () => this.getCheckpointAutomationObservation(),
       getCheckpointBackendMode: () => this.mode,
+      getCheckpointCapabilityReason: (mode) =>
+        this.mode === 'claude' && mode !== 'compact' && !this._claudeSessionStartHookReady
+          ? 'session-start-hook-unavailable'
+          : undefined,
       isWorking: () => this._isWorking,
       isStopped: () => this._isStopped,
       getTotalTokens: () => this._totalInputTokens + this._totalOutputTokens,

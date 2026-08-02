@@ -487,6 +487,8 @@ program
         'no checkpoint modes are allowed for this session — enable compact and/or clear in Session Options',
       busy: 'a checkpoint or compact/clear is already running',
       stopped: 'session is stopped',
+      'session-start-hook-unavailable':
+        'fresh-thread checkpoint unavailable: this restored Claude session lacks a verified managed SessionStart hook — use compact or respawn after migrating hooks',
     };
     const msg = reasonMessage[result.reason ?? ''] ?? `checkpoint refused${result.reason ? `: ${result.reason}` : ''}`;
     console.error(chalk.red(`✗ ${msg}`));

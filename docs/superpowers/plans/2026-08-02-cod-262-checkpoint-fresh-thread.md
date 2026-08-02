@@ -101,3 +101,8 @@ build`.
 The disposable installed-Claude/Codex smoke in step 5 was not run in this implementation environment: policy does not
 authorize launching live external model sessions. Deterministic Session, hook-route, rollout-fixture, and built-CLI
 integration coverage is the in-repository substitute; the real-CLI smoke remains an explicit authorized-environment gate.
+
+Existing local and bind-mounted Claude sessions are migrated during server recovery. This is safe for an attached running
+CLI because Claude Code's documented settings file watcher automatically reloads direct hook edits without a restart.
+Restored remote sessions cannot have their project settings verified from the Codeman host, so fresh-thread (`clear`/`new`)
+checkpoint requests fail closed with `session-start-hook-unavailable`; `compact` remains available.

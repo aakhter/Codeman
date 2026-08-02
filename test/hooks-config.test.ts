@@ -206,11 +206,26 @@ describe('writeHooksConfig', () => {
     delete oldHooks.PostToolUse;
     writeFileSync(settingsPath, JSON.stringify({ hooks: oldHooks }, null, 2));
 
-    await refreshStaleCodemanHooks(testDir);
+    await expect(refreshStaleCodemanHooks(testDir)).resolves.toBe(true);
 
     const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
     expect(parsed.hooks.PostToolUse).toHaveLength(1);
     expect(JSON.stringify(parsed.hooks.PostToolUse)).toContain('CODEMAN_BACKGROUND_REWAKE_V');
+  });
+
+  it('should upgrade otherwise-current Codeman hooks that predate SessionStart identity adoption', async () => {
+    const claudeDir = join(testDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.local.json');
+    mkdirSync(claudeDir, { recursive: true });
+    const legacyHooks = generateHooksConfig().hooks;
+    delete legacyHooks.SessionStart;
+    writeFileSync(settingsPath, JSON.stringify({ hooks: legacyHooks }, null, 2));
+
+    await expect(refreshStaleCodemanHooks(testDir)).resolves.toBe(true);
+
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(parsed.hooks.SessionStart).toHaveLength(1);
+    expect(JSON.stringify(parsed.hooks.SessionStart)).toContain('session_start');
   });
 
   it('should replace an older rewake script version without duplicating it', async () => {

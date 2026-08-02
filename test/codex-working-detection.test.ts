@@ -286,6 +286,23 @@ describe('checkpoint prompt observations', () => {
     await session.stop();
   });
 
+  it('fails restored Claude fresh-thread checkpoints when SessionStart hook capability is unavailable', async () => {
+    const session = new Session({
+      workingDir: '/remote/project',
+      mode: 'claude',
+      claudeSessionStartHookReady: false,
+    });
+    session.setCheckpoint(true, ['new']);
+    expect(session.requestCheckpoint({ mode: 'new' })).toEqual({
+      triggered: false,
+      reason: 'session-start-hook-unavailable',
+    });
+    session.setCheckpoint(true, ['compact']);
+    expect(session.requestCheckpoint({ mode: 'compact' })).toEqual({ triggered: true, runId: expect.any(String) });
+    session.cancelCheckpoint('test-cleanup');
+    await session.stop();
+  });
+
   it('serializes the durable terminal checkpoint record', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     const internals = session as unknown as {

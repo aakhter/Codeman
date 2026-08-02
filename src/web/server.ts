@@ -43,12 +43,14 @@ import { hostname as getHostname } from 'node:os';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
 import { normalizeSettingsObject } from '../config/settings.js';
 import { getHookSecret } from '../config/hook-secret.js';
+import { refreshStaleCodemanHooks } from '../hooks-config.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
 import type {
   ClaudeMode,
   SessionAttachmentHistoryItem,
+  SessionMode,
   SessionRemote,
   SessionState,
   WorkflowRunInfo,
@@ -134,6 +136,17 @@ export function resolveRestoredSessionName(
   if (savedStateName) return savedStateName;
   if (muxSessionName && muxSessionName !== muxName) return muxSessionName;
   return '';
+}
+
+/** Heal or conservatively fence authoritative Claude identity hooks on mux restore. */
+export async function refreshRestoredClaudeHookCapability(
+  mode: SessionMode,
+  workingDir: string,
+  remote: SessionRemote | undefined
+): Promise<boolean> {
+  if (mode !== 'claude') return true;
+  if (remote) return false;
+  return refreshStaleCodemanHooks(workingDir).catch(() => false);
 }
 import {
   getErrorMessage,
@@ -2545,6 +2558,16 @@ export class WebServer extends EventEmitter {
             // re-resolve the permission mode with the RECOVERED owner or a reboot
             // would silently un-downgrade a non-granted user's restored session.
             const recoveredOwner = muxSession.owner ?? savedState?.owner;
+            const recoveredRemote = resolveRestoredSessionRemote(savedState?.remote, muxSession.remote);
+            // Claude watches project settings and reloads hook edits in a running
+            // session. Heal local/bind-mounted restored cases before exposing
+            // fresh-thread checkpoint capability. Remote settings are not locally
+            // verifiable, so those restored sessions fail closed for clear/new.
+            const claudeSessionStartHookReady = await refreshRestoredClaudeHookCapability(
+              muxSession.mode,
+              muxSession.workingDir,
+              recoveredRemote
+            );
             const recoveryClaudeModeConfig = await this.getClaudeModeConfig();
             const recoveryClaudeMode = {
               claudeMode: await resolveClaudeModeForUsername(recoveryClaudeModeConfig.claudeMode, recoveredOwner),
@@ -2563,7 +2586,7 @@ export class WebServer extends EventEmitter {
             const session = new Session({
               id: muxSession.sessionId, // Preserve the original session ID
               workingDir: muxSession.workingDir,
-              remote: resolveRestoredSessionRemote(savedState?.remote, muxSession.remote),
+              remote: recoveredRemote,
               mode: muxSession.mode,
               name: sessionName,
               mux: this.mux,
@@ -2579,6 +2602,7 @@ export class WebServer extends EventEmitter {
               attachmentHistory: savedAttachmentHistory,
               checkpointState: savedState?.checkpoint,
               checkpointRuns: savedState?.checkpointRuns,
+              claudeSessionStartHookReady,
               // Docker metadata round-trips on recovery (mux-sessions.json carries
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
