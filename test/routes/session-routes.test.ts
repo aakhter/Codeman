@@ -2019,7 +2019,7 @@ and effort involved in moving workloads.
       });
     });
 
-    it('enables a new local Claude session only after current hooks are verified', async () => {
+    it('enables a new local Claude session only after current hooks and authoritative SessionStart identity', async () => {
       const workingDir = await mkdtemp(join(tmpdir(), 'codeman-route-current-hooks-'));
       await writeHooksConfig(workingDir);
       const res = await harness.app.inject({
@@ -2031,6 +2031,11 @@ and effort involved in moving workloads.
       expect(res.statusCode).toBe(200);
       const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
       created.setCheckpoint(true, ['new']);
+      expect(created.requestCheckpoint({ mode: 'new' })).toEqual({
+        triggered: false,
+        reason: 'baseline-identity-unavailable',
+      });
+      created.adoptClaudeSessionStartId('route-authoritative-session-id');
       expect(created.requestCheckpoint({ mode: 'new' })).toEqual({ triggered: true, runId: expect.any(String) });
       created.cancelCheckpoint('test-cleanup');
     });
