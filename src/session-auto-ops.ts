@@ -505,6 +505,11 @@ export class SessionAutoOps extends EventEmitter {
     return this._checkpointActive;
   }
 
+  /** Exact active run identity used to fence async delivery preparation. */
+  get activeCheckpointRunId(): string | undefined {
+    return this._checkpointActive ? this._checkpointRunId : undefined;
+  }
+
   /** Durable last-known checkpoint state. Terminal records remain queryable. */
   get checkpointState(): CheckpointState | undefined {
     return this._checkpointState ? { ...this._checkpointState } : undefined;

@@ -427,6 +427,7 @@ export class Session extends EventEmitter {
   private _checkpointCodexFreshBaselineId: string | undefined;
   private _checkpointCodexFreshBaselineIds: string[] = [];
   private _checkpointCodexFreshTransitionArmed = false;
+  private _findRecentOwnedCodexConversationIds = findRecentOwnedCodexConversationIds;
   /** Armed only while a delivered `/clear` may reset+return between polls. */
   private _checkpointAwaitingInstantClear = false;
   private _checkpointInstantClearBaseline: string | null = null;
@@ -3372,6 +3373,7 @@ export class Session extends EventEmitter {
    * unchanged; checkpoint orchestration receives the exact failed stage.
    */
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
+    const checkpointRunId = this._autoOps.activeCheckpointRunId;
     const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
     const isClear = checkpointCommand === '/clear';
     const isCodexFreshThread = this.mode === 'codex' && (isClear || checkpointCommand === '/new');
@@ -3381,21 +3383,27 @@ export class Session extends EventEmitter {
       this._checkpointDirectPtySawClear = false;
     }
     if (isCodexFreshThread) {
-      this._checkpointCodexFreshBaselineId = this._checkpointCodexConversationId;
-      this._checkpointCodexFreshTransitionArmed = true;
+      const baselineId = this._checkpointCodexConversationId;
       const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
-      this._checkpointCodexFreshBaselineIds = await findRecentOwnedCodexConversationIds({
+      const baselineIds = await this._findRecentOwnedCodexConversationIds({
         codexHome,
         sessionId: this.id,
       });
       if (
-        this._checkpointCodexFreshBaselineId &&
-        !this._checkpointCodexFreshBaselineIds.includes(this._checkpointCodexFreshBaselineId)
+        this._isStopped ||
+        (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)
       ) {
-        this._checkpointCodexFreshBaselineIds.push(this._checkpointCodexFreshBaselineId);
+        return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
       }
+      this._checkpointCodexFreshBaselineId = baselineId;
+      this._checkpointCodexFreshBaselineIds =
+        baselineId && !baselineIds.includes(baselineId) ? [...baselineIds, baselineId] : baselineIds;
+      this._checkpointCodexFreshTransitionArmed = true;
     } else {
       this._trackCodexSubmit(data);
+    }
+    if (this._isStopped || (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)) {
+      return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
     }
     if (this._mux && this._muxSession) {
       const result = await this._mux.sendCheckpointCommand(this.id, data);

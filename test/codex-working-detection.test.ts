@@ -160,6 +160,69 @@ describe('checkpoint prompt observations', () => {
     await session.stop();
   });
 
+  it('fences a cancelled checkpoint while Codex owned-ID snapshot preparation is pending', async () => {
+    vi.useFakeTimers();
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    let resolveFirstSnapshot!: (ids: string[]) => void;
+    let resolveSecondSnapshot!: (ids: string[]) => void;
+    const firstSnapshotPending = new Promise<string[]>((resolve) => {
+      resolveFirstSnapshot = resolve;
+    });
+    const secondSnapshotPending = new Promise<string[]>((resolve) => {
+      resolveSecondSnapshot = resolve;
+    });
+    const sendCheckpointCommand = vi.fn(async () => ({ ok: true as const, attempt: 1 }));
+    const internals = session as unknown as {
+      _findRecentOwnedCodexConversationIds: ReturnType<typeof vi.fn>;
+      getCheckpointAutomationObservation: () => Promise<{
+        ready: boolean;
+        working: boolean;
+        revision: number;
+        conversationId: string;
+      }>;
+      _mux: { captureActivePaneBuffer: () => string; sendCheckpointCommand: typeof sendCheckpointCommand };
+      _muxSession: { muxName: string };
+    };
+    internals._findRecentOwnedCodexConversationIds = vi
+      .fn()
+      .mockImplementationOnce(() => firstSnapshotPending)
+      .mockImplementationOnce(() => secondSnapshotPending);
+    internals.getCheckpointAutomationObservation = async () => ({
+      ready: true,
+      working: false,
+      revision: 1,
+      conversationId: 'baseline-conversation',
+    });
+    internals._mux = { captureActivePaneBuffer: () => '› prompt', sendCheckpointCommand };
+    internals._muxSession = { muxName: 'codeman-race' };
+    session.setCheckpoint(true, ['new']);
+
+    const request = session.requestCheckpoint({ mode: 'new' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(internals._findRecentOwnedCodexConversationIds).toHaveBeenCalledOnce();
+    session.cancelCheckpoint('manual-takeover');
+    const newer = session.requestCheckpoint({ mode: 'new' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(internals._findRecentOwnedCodexConversationIds).toHaveBeenCalledTimes(2);
+
+    resolveFirstSnapshot([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendCheckpointCommand).not.toHaveBeenCalled();
+    expect(session.checkpointStates[request.runId!]).toMatchObject({
+      runId: request.runId,
+      status: 'cancelled',
+      reason: 'manual-takeover',
+    });
+
+    resolveSecondSnapshot([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendCheckpointCommand).toHaveBeenCalledTimes(1);
+    expect(sendCheckpointCommand).toHaveBeenCalledWith(session.id, '/new\r');
+    expect(session.checkpointState).toMatchObject({ runId: newer.runId, status: 'running' });
+    await session.stop();
+    vi.useRealTimers();
+  });
+
   it('does not advance clear generation when Codex appends a command rejection to the prior frame', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     let frame = 'previous conversation output\n› prompt\n  gpt-5.5 medium · /tmp';
