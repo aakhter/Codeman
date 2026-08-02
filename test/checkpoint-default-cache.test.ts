@@ -34,4 +34,14 @@ describe('COD-257 checkpoint default cache', () => {
     expect(await getCheckpointDefaultEnabled()).toBe(true);
     expect(readFile).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['null', '[]', '"not a settings object"'])('treats persisted %s as the enabled fallback', async (raw) => {
+    vi.spyOn(fs, 'readFile').mockResolvedValue(raw as never);
+    server = new WebServer(0, false, true);
+    const getCheckpointDefaultEnabled = (
+      server as unknown as { getCheckpointDefaultEnabled(): Promise<boolean> }
+    ).getCheckpointDefaultEnabled.bind(server);
+
+    await expect(getCheckpointDefaultEnabled()).resolves.toBe(true);
+  });
 });

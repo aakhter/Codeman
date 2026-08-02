@@ -41,6 +41,7 @@ import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { hostname as getHostname } from 'node:os';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
+import { normalizeSettingsObject } from '../config/settings.js';
 import { getHookSecret } from '../config/hook-secret.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
@@ -1574,7 +1575,7 @@ export class WebServer extends EventEmitter {
     const settingsPath = dataPath('settings.json');
     try {
       const content = await fs.readFile(settingsPath, 'utf-8');
-      const data = JSON.parse(content) as Record<string, unknown>;
+      const data = normalizeSettingsObject(JSON.parse(content));
       this._settingsCache = { data, ts: now };
       return data;
     } catch {

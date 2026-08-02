@@ -464,6 +464,18 @@ describe('system-routes', () => {
       expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: false });
     });
 
+    it.each(['null', '[]', '"not a settings object"'])(
+      'returns the safe default for malformed persisted %s',
+      async (raw) => {
+        mockedReadFile.mockResolvedValue(raw as never);
+
+        const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
+
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: true });
+      }
+    );
+
     // COD-242: a reloaded client (after a deploy/upgrade) must get its persisted
     // shortcut overrides back from the server so custom shortcuts are not reset.
     it('returns persisted shortcutOverrides so a reloaded client restores them', async () => {

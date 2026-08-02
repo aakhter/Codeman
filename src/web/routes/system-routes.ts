@@ -13,6 +13,7 @@ import { totalmem, freemem, loadavg, cpus } from 'node:os';
 import { execSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { dataPath } from '../../config/instance.js';
+import { normalizeSettingsObject } from '../../config/settings.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage, type NiceConfig } from '../../types.js';
 import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
@@ -655,7 +656,7 @@ export function registerSystemRoutes(
 
   // ========== Settings ===
   app.get('/api/settings', async () => {
-    const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'settings', {});
+    const settings = normalizeSettingsObject(await readJsonConfig<unknown>(SETTINGS_PATH, 'settings', {}));
     // COD-257: clients always receive the effective server default. localStorage
     // mirrors this value but never becomes the authority across rebuilds/upgrades.
     return { ...settings, checkpointDefaultEnabled: settings.checkpointDefaultEnabled !== false };

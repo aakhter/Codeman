@@ -37,4 +37,16 @@ describe('OrchestratorPlanner checkpoint default', () => {
       checkpointEnabled: false,
     });
   });
+
+  it.each(['null', '[]', '"not a settings object"'])('falls back to enabled for persisted %s', async (raw) => {
+    planOrchestratorCtor.mockClear();
+    vi.mocked(readFile).mockResolvedValueOnce(raw as never);
+    const planner = new OrchestratorPlanner({} as never, '/tmp', DEFAULT_ORCHESTRATOR_CONFIG);
+
+    await planner.generatePlan('Implement checkpoint defaults');
+
+    expect(planOrchestratorCtor).toHaveBeenLastCalledWith(expect.anything(), '/tmp', undefined, expect.anything(), {
+      checkpointEnabled: true,
+    });
+  });
 });

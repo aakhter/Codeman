@@ -26,6 +26,7 @@ import { readFile } from 'node:fs/promises';
 import { PlanOrchestrator, type DetailedPlanResult, type ProgressCallback } from './plan-orchestrator.js';
 import type { TerminalMultiplexer } from './mux-interface.js';
 import { dataPath } from './config/instance.js';
+import { normalizeSettingsObject } from './config/settings.js';
 import type {
   PlanItem,
   TddPhase,
@@ -81,7 +82,7 @@ export class OrchestratorPlanner {
   /** COD-257: OrchestratorLoop planner agents honor the persistent global default. */
   private async getCheckpointDefaultEnabled(): Promise<boolean> {
     try {
-      const settings = JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')) as Record<string, unknown>;
+      const settings = normalizeSettingsObject(JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')));
       return settings.checkpointDefaultEnabled !== false;
     } catch {
       return true;

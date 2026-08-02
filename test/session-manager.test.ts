@@ -159,6 +159,17 @@ describe('SessionManager', () => {
       expect(session.checkpointEnabled).toBe(false);
     });
 
+    it.each(['null', '[]', '"not a settings object"'])(
+      'falls back to enabled for malformed persisted %s',
+      async (raw) => {
+        mockedReadFile.mockResolvedValueOnce(raw as never);
+
+        const session = await manager.createSession('/tmp/test');
+
+        expect(session.checkpointEnabled).toBe(true);
+      }
+    );
+
     it('should create and start a new session', async () => {
       const session = await manager.createSession('/tmp/test');
 

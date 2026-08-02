@@ -28,6 +28,7 @@ import { Session } from './session.js';
 import { getStore } from './state-store.js';
 import { SessionState } from './types.js';
 import { dataPath } from './config/instance.js';
+import { normalizeSettingsObject } from './config/settings.js';
 
 /**
  * Events emitted by SessionManager
@@ -78,7 +79,7 @@ export class SessionManager extends EventEmitter {
   /** COD-257: CLI-created sessions use the same settings.json authority as web sessions. */
   private async getCheckpointDefaultEnabled(): Promise<boolean> {
     try {
-      const settings = JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')) as Record<string, unknown>;
+      const settings = normalizeSettingsObject(JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')));
       return settings.checkpointDefaultEnabled !== false;
     } catch {
       return true;
