@@ -111,3 +111,6 @@ New Claude sessions also default to fresh-thread capability off. Every productio
 explicit local hook verification/migration; remote or arbitrary hookless projects remain fenced. The external CLI wait uses
 a 240-second total deadline, covering the server's 30-second readiness plus 180-second operation lifecycle with margin,
 while a missing or evicted run still fails after 20 short polls.
+
+Readiness is structural, not substring-based: `SessionStart` must contain an unrestricted command handler that posts the
+exact `session_start` event to `/api/hook-event` with the managed hook-secret header. Migration re-verifies persisted output.

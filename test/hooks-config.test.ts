@@ -229,6 +229,58 @@ describe('writeHooksConfig', () => {
     expect(JSON.stringify(parsed.hooks.SessionStart)).toContain('session_start');
   });
 
+  it('does not accept unrelated user session_start text when the managed SessionStart entry is absent', async () => {
+    const claudeDir = join(testDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.local.json');
+    mkdirSync(claudeDir, { recursive: true });
+    const hooks = generateHooksConfig().hooks;
+    delete hooks.SessionStart;
+    hooks.UserPromptSubmit = [{ hooks: [{ type: 'command', command: 'echo user-session_start-note' }] }];
+    writeFileSync(settingsPath, JSON.stringify({ hooks }, null, 2));
+
+    await expect(refreshStaleCodemanHooks(testDir)).resolves.toBe(true);
+
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(parsed.hooks.SessionStart).toHaveLength(1);
+    expect(parsed.hooks.UserPromptSubmit).toEqual(hooks.UserPromptSubmit);
+  });
+
+  it('replaces a restricted managed-looking SessionStart entry before reporting ready', async () => {
+    const claudeDir = join(testDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.local.json');
+    mkdirSync(claudeDir, { recursive: true });
+    const hooks = generateHooksConfig().hooks;
+    hooks.SessionStart = [{ ...(hooks.SessionStart[0] as object), matcher: 'resume' }];
+    writeFileSync(settingsPath, JSON.stringify({ hooks }, null, 2));
+
+    await expect(refreshStaleCodemanHooks(testDir)).resolves.toBe(true);
+
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    const managed = parsed.hooks.SessionStart.find((entry: { hooks?: Array<{ command?: string }> }) =>
+      entry.hooks?.some((handler) => handler.command?.includes('/api/hook-event'))
+    );
+    expect(managed?.matcher).toBeUndefined();
+    expect(managed?.hooks[0]).toMatchObject({ type: 'command' });
+    expect(managed?.hooks[0].command).toContain('"event":"session_start"');
+  });
+
+  it('keeps a structurally valid managed SessionStart entry idempotent and preserves user siblings', async () => {
+    const claudeDir = join(testDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.local.json');
+    mkdirSync(claudeDir, { recursive: true });
+    const hooks = generateHooksConfig().hooks;
+    hooks.SessionStart.push({
+      matcher: 'resume',
+      hooks: [{ type: 'command', command: './user-session-start.sh' }],
+    });
+    const before = JSON.stringify({ hooks }, null, 2) + '\n';
+    writeFileSync(settingsPath, before);
+
+    await expect(refreshStaleCodemanHooks(testDir)).resolves.toBe(true);
+
+    expect(readFileSync(settingsPath, 'utf-8')).toBe(before);
+  });
+
   it('verifies Claude fresh-thread hook capability for absent, current, migrated, and remote cases', async () => {
     const absent = join(testDir, 'absent');
     mkdirSync(absent, { recursive: true });

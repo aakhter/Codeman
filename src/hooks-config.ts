@@ -245,6 +245,30 @@ function isCodemanHookHandler(value: unknown): boolean {
   }
 }
 
+/** Structurally prove the unrestricted managed SessionStart identity hook exists. */
+function hasManagedSessionStartHook(hooksValue: unknown): boolean {
+  if (!hooksValue || typeof hooksValue !== 'object' || Array.isArray(hooksValue)) return false;
+  const entries = (hooksValue as Record<string, unknown>).SessionStart;
+  if (!Array.isArray(entries)) return false;
+  return entries.some((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const record = entry as Record<string, unknown>;
+    const matcher = record.matcher;
+    if (matcher !== undefined && matcher !== '' && matcher !== '*') return false;
+    if (!Array.isArray(record.hooks)) return false;
+    return record.hooks.some((handler) => {
+      if (!handler || typeof handler !== 'object' || Array.isArray(handler)) return false;
+      const candidate = handler as Record<string, unknown>;
+      if (candidate.type !== 'command' || typeof candidate.command !== 'string') return false;
+      return (
+        candidate.command.includes(`printf '{"event":"session_start","sessionId":`) &&
+        candidate.command.includes(`curl -s -X POST "$CODEMAN_API_URL/api/hook-event"`) &&
+        candidate.command.includes(`-H "X-Codeman-Hook-Secret:`)
+      );
+    });
+  });
+}
+
 /**
  * Replace only Codeman-owned command handlers while preserving user events,
  * matcher entries, and sibling handlers in mixed entries.
@@ -465,7 +489,7 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
     // absence on our own hooks means they predate COD-54 and need regenerating.
     const hasSecret = hooksJson.includes('X-Codeman-Hook-Secret');
     const hasBackgroundWake = hooksJson.includes(BACKGROUND_WAKE_MARKER);
-    const hasSessionStart = hooksJson.includes('session_start');
+    const hasSessionStart = hasManagedSessionStartHook(existing.hooks);
     if (!isOurs) return false;
     if (hasSecret && hasBackgroundWake && hasSessionStart) return true;
     const generated = generateHooksConfig();
@@ -474,7 +498,12 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
       hooks: mergeCodemanHooks(existing.hooks, generated.hooks),
     };
     await writeFile(settingsPath, JSON.stringify(merged, null, 2) + '\n');
-    return true;
+    try {
+      const persisted = JSON.parse(await readFile(settingsPath, 'utf-8')) as Record<string, unknown>;
+      return hasManagedSessionStartHook(persisted.hooks);
+    } catch {
+      return false;
+    }
   });
 }
 
