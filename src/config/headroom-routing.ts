@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import type { SessionMode } from '../types/session.js';
 import { dataPath } from './instance.js';
+import { normalizeSettingsObject } from './settings.js';
 
 const DEFAULT_PROXY_URL = 'http://192.168.55.175:8787';
 const HEALTH_TTL_MS = 30_000;
@@ -27,7 +28,7 @@ export interface HeadroomConfig {
 
 function readSettings(): Record<string, unknown> {
   try {
-    return JSON.parse(readFileSync(dataPath('settings.json'), 'utf8')) as Record<string, unknown>;
+    return normalizeSettingsObject(JSON.parse(readFileSync(dataPath('settings.json'), 'utf8')));
   } catch {
     return {};
   }

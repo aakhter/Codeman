@@ -18,6 +18,14 @@ function withSettings(obj: Record<string, unknown> | null): string {
   return dir;
 }
 
+function withRawSettings(raw: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'hr-settings-'));
+  dataDirs.push(dir);
+  writeFileSync(join(dir, 'settings.json'), raw);
+  process.env.CODEMAN_DATA_DIR = dir;
+  return dir;
+}
+
 const origDataDir = process.env.CODEMAN_DATA_DIR;
 
 afterEach(async () => {
@@ -68,6 +76,16 @@ describe('getHeadroomConfig (settings-based)', () => {
     vi.resetModules();
     writeFileSync(join(dir, 'settings.json'), '{ not json');
     ({ getHeadroomConfig } = await import('../../src/config/headroom-routing.js'));
+    expect(getHeadroomConfig()).toEqual({
+      proxyUrl: 'http://192.168.55.175:8787',
+      routeClaude: true,
+      routeCodex: true,
+    });
+  });
+
+  it.each(['null', '[]', '"not a settings object"'])('falls back to defaults for persisted %s', async (raw) => {
+    withRawSettings(raw);
+    const { getHeadroomConfig } = await import('../../src/config/headroom-routing.js');
     expect(getHeadroomConfig()).toEqual({
       proxyUrl: 'http://192.168.55.175:8787',
       routeClaude: true,
