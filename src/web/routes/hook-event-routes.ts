@@ -59,13 +59,14 @@ export function registerHookEventRoutes(
       }
     }
 
-    // Sync Claude's current conversation id. SessionStart is the authoritative
-    // startup/resume/fresh-thread signal; other hooks retain compatibility for
-    // existing transitions that also carry session_id.
-    if (data && typeof data.session_id === 'string' && data.session_id) {
+    // SessionStart is the authoritative startup/resume/fresh-thread identity
+    // signal. Other hooks must not promote a legacy placeholder to an adopted
+    // identity before a genuine SessionStart arrives.
+    if (event === 'session_start' && data && typeof data.session_id === 'string' && data.session_id) {
       const session = ctx.sessions.get(sessionId);
       const prevClaudeSessionId = session?.claudeSessionId;
-      session?.adoptClaudeSessionId(data.session_id);
+      session?.adoptClaudeSessionStartId(data.session_id);
+      if (session) ctx.persistSessionState(session);
       // Docker sessions: keep the case's resume seed following the LIVE
       // conversation (post-/clear id switches), so a container stop/reboot
       // relaunch resumes the right transcript.

@@ -20,6 +20,7 @@ describe('built checkpoint CLI', () => {
   let responseForRequest:
     | ((method: string | undefined) => { status: number; body: string; contentType?: string })
     | undefined;
+  let trickleNextGet = false;
   const children = new Set<ReturnType<typeof spawn>>();
 
   beforeAll(async () => {
@@ -28,6 +29,13 @@ describe('built checkpoint CLI', () => {
     const candidate = createServer((req, res) => {
       req.resume();
       req.on('end', () => {
+        if (trickleNextGet && req.method === 'GET') {
+          trickleNextGet = false;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          const interval = setInterval(() => res.write(' '), 250);
+          res.once('close', () => clearInterval(interval));
+          return;
+        }
         const selected = responseForRequest?.(req.method) ?? response;
         res.writeHead(selected.status, { 'Content-Type': selected.contentType ?? 'application/json' });
         res.end(selected.body);
@@ -192,5 +200,57 @@ describe('built checkpoint CLI', () => {
     responseForRequest = undefined;
     expect(result.code).toBe(0);
     expect(result.stdout).toMatch(/wait-run-262 completed/i);
+  });
+
+  it('enforces an absolute timeout on a trickling status GET and retries within the lifecycle bound', async () => {
+    trickleNextGet = true;
+    responseForRequest = (method) =>
+      method === 'GET'
+        ? {
+            status: 200,
+            body: JSON.stringify({
+              success: true,
+              data: { checkpointRuns: { 'stall-run-262': { runId: 'stall-run-262', status: 'completed' } } },
+            }),
+          }
+        : {
+            status: 200,
+            body: JSON.stringify({
+              success: true,
+              data: { checkpoint: { triggered: true, runId: 'stall-run-262' } },
+            }),
+          };
+    const result = await runCheckpoint(['--wait']);
+    responseForRequest = undefined;
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/stall-run-262 completed/i);
+  });
+
+  it('retries transient status errors and completes the exact run', async () => {
+    let getCount = 0;
+    responseForRequest = (method) => {
+      if (method !== 'GET') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            success: true,
+            data: { checkpoint: { triggered: true, runId: 'retry-run-262' } },
+          }),
+        };
+      }
+      getCount += 1;
+      if (getCount < 3) return { status: 503, body: JSON.stringify({ error: 'transient' }) };
+      return {
+        status: 200,
+        body: JSON.stringify({
+          success: true,
+          data: { checkpointRuns: { 'retry-run-262': { runId: 'retry-run-262', status: 'completed' } } },
+        }),
+      };
+    };
+    const result = await runCheckpoint(['--wait']);
+    responseForRequest = undefined;
+    expect(result.code).toBe(0);
+    expect(getCount).toBe(3);
   });
 });

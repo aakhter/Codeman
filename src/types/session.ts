@@ -367,6 +367,10 @@ export interface SessionConfig {
   checkpointState?: SessionCheckpointState;
   /** Bounded run-keyed history restored safely after restart. */
   checkpointRuns?: Record<string, SessionCheckpointState>;
+  /** Last authoritative Claude conversation identity observed from SessionStart. */
+  claudeSessionId?: string;
+  /** Whether claudeSessionId was established by an authoritative source. */
+  claudeSessionIdentityAdopted?: boolean;
 }
 
 /**
@@ -465,6 +469,10 @@ export interface SessionState {
   /** Durable most-recent checkpoint lifecycle record, including terminal outcomes. */
   checkpoint?: SessionCheckpointState;
   checkpointRuns?: Record<string, SessionCheckpointState>;
+  /** Last authoritative Claude conversation identity observed from SessionStart. */
+  claudeSessionId?: string;
+  /** Whether claudeSessionId was established by an authoritative source. */
+  claudeSessionIdentityAdopted?: boolean;
   /** Auto-resume on usage limit enabled */
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */

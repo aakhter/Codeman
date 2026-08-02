@@ -1,6 +1,11 @@
 /** @fileoverview Defensive checkpoint CLI response interpretation (COD-240). */
 import { describe, expect, it } from 'vitest';
-import { evaluateCheckpointWait, interpretCheckpointResponse } from '../src/cli.js';
+import {
+  checkpointWaitRequestTimeoutMs,
+  evaluateCheckpointWait,
+  interpretCheckpointResponse,
+  shouldRetryCheckpointWaitRequest,
+} from '../src/cli.js';
 
 describe('interpretCheckpointResponse', () => {
   it.each([
@@ -59,5 +64,19 @@ describe('evaluateCheckpointWait', () => {
       kind: 'failed',
       reason: expect.stringContaining('timed out'),
     });
+  });
+});
+
+describe('checkpoint wait transport policy', () => {
+  it('caps each GET by the remaining lifecycle deadline', () => {
+    expect(checkpointWaitRequestTimeoutMs(1_000, 1_000)).toBe(5_000);
+    expect(checkpointWaitRequestTimeoutMs(1_000, 239_000)).toBe(2_000);
+    expect(checkpointWaitRequestTimeoutMs(1_000, 241_000)).toBe(0);
+  });
+
+  it('retries only a bounded number of transient transport failures', () => {
+    expect(shouldRetryCheckpointWaitRequest(0, 1, 1_000)).toBe(true);
+    expect(shouldRetryCheckpointWaitRequest(0, 5, 1_000)).toBe(false);
+    expect(shouldRetryCheckpointWaitRequest(0, 1, 240_001)).toBe(false);
   });
 });

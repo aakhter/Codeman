@@ -29,6 +29,8 @@ const program = new Command();
 
 const CHECKPOINT_WAIT_TIMEOUT_MS = 240_000;
 const CHECKPOINT_WAIT_MAX_MISSING_POLLS = 20;
+const CHECKPOINT_WAIT_REQUEST_TIMEOUT_MS = 5_000;
+const CHECKPOINT_WAIT_MAX_TRANSIENT_FAILURES = 5;
 
 type CheckpointWaitDecision =
   | { kind: 'waiting'; missing: boolean }
@@ -66,6 +68,22 @@ export function evaluateCheckpointWait(
     return { kind: 'failed', reason: `checkpoint run ${runId} timed out` };
   }
   return { kind: 'waiting', missing: false };
+}
+
+/** Bound each wait GET by both a short transport timeout and the lifecycle deadline. */
+export function checkpointWaitRequestTimeoutMs(startedAt: number, now = Date.now()): number {
+  return Math.max(0, Math.min(CHECKPOINT_WAIT_REQUEST_TIMEOUT_MS, startedAt + CHECKPOINT_WAIT_TIMEOUT_MS - now));
+}
+
+/** Retry transient wait transport failures, but never indefinitely. */
+export function shouldRetryCheckpointWaitRequest(
+  startedAt: number,
+  consecutiveFailures: number,
+  now = Date.now()
+): boolean {
+  return (
+    checkpointWaitRequestTimeoutMs(startedAt, now) > 0 && consecutiveFailures < CHECKPOINT_WAIT_MAX_TRANSIENT_FAILURES
+  );
 }
 
 program.name('codeman').description('Claude Code session manager with autonomous Ralph Loop').version(pkg.version);
@@ -461,8 +479,30 @@ program
       if (options.wait) {
         const startedAt = Date.now();
         let missingPolls = 0;
+        let consecutiveRequestFailures = 0;
         for (;;) {
-          const state = await fetchServerJson(apiUrl, `/api/sessions/${encodeURIComponent(sessionId)}`);
+          const requestTimeoutMs = checkpointWaitRequestTimeoutMs(startedAt);
+          if (requestTimeoutMs <= 0) {
+            console.error(chalk.red(`✗ checkpoint run ${result.runId} timed out`));
+            process.exit(1);
+          }
+          let state: unknown;
+          try {
+            state = await fetchServerJson(apiUrl, `/api/sessions/${encodeURIComponent(sessionId)}`, {
+              timeoutMs: requestTimeoutMs,
+            });
+            consecutiveRequestFailures = 0;
+          } catch (err) {
+            consecutiveRequestFailures += 1;
+            if (!shouldRetryCheckpointWaitRequest(startedAt, consecutiveRequestFailures)) {
+              console.error(chalk.red(`✗ checkpoint run ${result.runId} status unavailable: ${getErrorMessage(err)}`));
+              process.exit(1);
+            }
+            await new Promise((resolve) =>
+              setTimeout(resolve, Math.min(500, checkpointWaitRequestTimeoutMs(startedAt)))
+            );
+            continue;
+          }
           const decision = evaluateCheckpointWait(state, result.runId, startedAt, Date.now(), missingPolls);
           if (decision.kind === 'completed') {
             console.log(chalk.green(`✓ checkpoint run ${result.runId} completed`));
@@ -489,6 +529,10 @@ program
       stopped: 'session is stopped',
       'session-start-hook-unavailable':
         'fresh-thread checkpoint unavailable: this restored Claude session lacks a verified managed SessionStart hook — use compact or respawn after migrating hooks',
+      'baseline-identity-unavailable':
+        'fresh-thread checkpoint unavailable: no authoritative Claude conversation identity has been observed — use compact or wait for SessionStart',
+      'remote-identity-unavailable':
+        'fresh-thread checkpoint unavailable: remote Codex rollout identity cannot be verified locally — use compact',
     };
     const msg = reasonMessage[result.reason ?? ''] ?? `checkpoint refused${result.reason ? `: ${result.reason}` : ''}`;
     console.error(chalk.red(`✗ ${msg}`));
@@ -514,7 +558,7 @@ export function unwrapEnvelope(body: unknown): unknown {
  * Resolves the unwrapped `{ success, data }` envelope (or the parsed body when
  * there is no envelope), or rejects on connection / non-2xx / invalid-JSON.
  */
-async function fetchServerJson(apiUrl: string, path: string): Promise<unknown> {
+async function fetchServerJson(apiUrl: string, path: string, options?: { timeoutMs?: number }): Promise<unknown> {
   const envFile = readCodemanEnv();
   const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
   const password = process.env.CODEMAN_PASSWORD || envFile.CODEMAN_PASSWORD;
@@ -555,6 +599,15 @@ async function fetchServerJson(apiUrl: string, path: string): Promise<unknown> {
       }
     );
     req.on('error', (err) => reject(err));
+    if (options?.timeoutMs !== undefined) {
+      const absoluteDeadline = setTimeout(() => {
+        req.destroy(new Error(`request timed out after ${options.timeoutMs}ms`));
+      }, options.timeoutMs);
+      req.once('close', () => clearTimeout(absoluteDeadline));
+      req.setTimeout(options.timeoutMs, () => {
+        req.destroy(new Error(`request timed out after ${options.timeoutMs}ms`));
+      });
+    }
     req.end();
   });
 }

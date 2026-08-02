@@ -60,7 +60,7 @@ function generateHookCommand(event: HookEventType): string {
   return (
     `HOOK_DATA=$(cat 2>/dev/null || echo '{}'); ` +
     `printf '{"event":"${event}","sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$HOOK_DATA" | ` +
-    `curl -s -X POST "$CODEMAN_API_URL/api/hook-event" ` +
+    `curl -s -o /dev/null -X POST "$CODEMAN_API_URL/api/hook-event" ` +
     `-H 'Content-Type: application/json' ` +
     `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
     `--data @- ` +

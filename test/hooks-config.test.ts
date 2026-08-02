@@ -45,6 +45,7 @@ describe('generateHooksConfig', () => {
     expect(hooks).toHaveLength(1);
     expect(hooks[0].matcher).toBeUndefined();
     expect(hooks[0].hooks[0].command).toContain('session_start');
+    expect(hooks[0].hooks[0].command).toContain('-o /dev/null');
   });
 
   it('should configure a self-contained Bash background-task rewake hook', () => {

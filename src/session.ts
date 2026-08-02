@@ -96,7 +96,12 @@ import {
   type CheckpointState,
   type CheckpointMode,
 } from './session-auto-ops.js';
-import { findActiveCodexConversation } from './checkpoint-conversation-identity.js';
+import {
+  findActiveCodexConversation,
+  findAuthoritativeCodexConversation,
+  findRecentOwnedCodexConversationIds,
+  invalidateCodexConversationInventory,
+} from './checkpoint-conversation-identity.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
@@ -397,8 +402,9 @@ export class Session extends EventEmitter {
   private _errorBuffer: string = '';
   private _lastActivityAt: number;
   private _claudeSessionId: string | null = null;
+  private _claudeAuthoritativeSessionId: string | null = null;
   private _claudeSessionIdentityAdopted = false;
-  private readonly _claudeSessionStartHookReady: boolean;
+  private _claudeSessionStartHookReady: boolean;
   private _totalCost: number = 0;
   private _messages: ClaudeMessage[] = [];
   private _lineBuffer: string = '';
@@ -417,6 +423,10 @@ export class Session extends EventEmitter {
   private _checkpointWasReady = false;
   private _checkpointLastObservation: CheckpointObservation = { ready: false, working: false, revision: 0 };
   private _checkpointReadyFingerprint: string | null = null;
+  private _checkpointCodexConversationId: string | undefined;
+  private _checkpointCodexFreshBaselineId: string | undefined;
+  private _checkpointCodexFreshBaselineIds: string[] = [];
+  private _checkpointCodexFreshTransitionArmed = false;
   /** Armed only while a delivered `/clear` may reset+return between polls. */
   private _checkpointAwaitingInstantClear = false;
   private _checkpointInstantClearBaseline: string | null = null;
@@ -617,6 +627,10 @@ export class Session extends EventEmitter {
       checkpointEnabled?: boolean;
       /** Restored Claude session can receive authoritative SessionStart identity changes. */
       claudeSessionStartHookReady?: boolean;
+      /** Last authoritative Claude conversation identity persisted across recovery. */
+      claudeSessionId?: string;
+      /** Whether the persisted Claude identity was authoritatively adopted. */
+      claudeSessionIdentityAdopted?: boolean;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Restored per-session reference sources (COD-65). */
@@ -659,8 +673,9 @@ export class Session extends EventEmitter {
     this._initialDims = config.initialDims;
     this._terminalBuffer = new BufferAccumulator(this._terminalBufferMaxSize, this._terminalBufferTrimSize);
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
-    this._claudeSessionId = config.resumeSessionId || this.id;
-    this._claudeSessionIdentityAdopted = Boolean(config.resumeSessionId);
+    this._claudeSessionId = config.claudeSessionId ?? config.resumeSessionId ?? this.id;
+    this._claudeAuthoritativeSessionId = config.claudeSessionId ?? config.resumeSessionId ?? null;
+    this._claudeSessionIdentityAdopted = config.claudeSessionIdentityAdopted ?? Boolean(config.resumeSessionId);
     this._claudeSessionStartHookReady = config.claudeSessionStartHookReady ?? this.mode !== 'claude';
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
@@ -776,10 +791,17 @@ export class Session extends EventEmitter {
       writeCheckpointCommand: (cmd) => this.writeCheckpointViaMux(cmd),
       getCheckpointObservation: () => this.getCheckpointAutomationObservation(),
       getCheckpointBackendMode: () => this.mode,
-      getCheckpointCapabilityReason: (mode) =>
-        this.mode === 'claude' && mode !== 'compact' && !this._claudeSessionStartHookReady
-          ? 'session-start-hook-unavailable'
-          : undefined,
+      getCheckpointCapabilityReason: (mode) => {
+        if (mode === 'compact') return undefined;
+        if (this.mode === 'codex' && this._remote) return 'remote-identity-unavailable';
+        if (this.mode === 'claude' && !this._claudeSessionStartHookReady) {
+          return 'session-start-hook-unavailable';
+        }
+        if (this.mode === 'claude' && !this._claudeSessionIdentityAdopted) {
+          return 'baseline-identity-unavailable';
+        }
+        return undefined;
+      },
       isWorking: () => this._isWorking,
       isStopped: () => this._isStopped,
       getTotalTokens: () => this._totalInputTokens + this._totalOutputTokens,
@@ -799,6 +821,9 @@ export class Session extends EventEmitter {
         this._checkpointAwaitingInstantClear = false;
         this._checkpointInstantClearBaseline = null;
         this._checkpointDirectPtySawClear = false;
+        this._checkpointCodexFreshBaselineId = undefined;
+        this._checkpointCodexFreshBaselineIds = [];
+        this._checkpointCodexFreshTransitionArmed = false;
       }
       this.emit('checkpointProgress', data);
     });
@@ -863,15 +888,25 @@ export class Session extends EventEmitter {
     this._owner = username;
   }
 
-  // Adopt a Claude conversation ID observed from an external source (e.g. hook
-  // payload). In interactive PTY mode Claude CLI emits no JSON to stdout, so
-  // `_handleJsonMessage` never sees `session_id`; hooks are the only signal
-  // that conveys a post-/clear conversation switch.
+  // Update Claude's best-effort viewer identity. This does not establish the
+  // authoritative checkpoint baseline; only SessionStart may do that.
   adoptClaudeSessionId(newId: string): void {
     if (!newId) return;
-    this._claudeSessionIdentityAdopted = true;
     if (newId === this._claudeSessionId) return;
     this._claudeSessionId = newId;
+  }
+
+  /** Adopt the authoritative identity delivered by Claude's SessionStart hook. */
+  adoptClaudeSessionStartId(newId: string): void {
+    if (!newId) return;
+    this._claudeSessionStartHookReady = true;
+    this._claudeSessionIdentityAdopted = true;
+    this._claudeAuthoritativeSessionId = newId;
+    this.adoptClaudeSessionId(newId);
+  }
+
+  private _seedClaudeViewerIdentityAfterMuxAttach(isRestored: boolean): void {
+    if (!isRestored) this._claudeSessionId = this._resumeSessionId || this.id;
   }
 
   /** The tmux session name, if the session is running inside a mux */
@@ -1266,23 +1301,38 @@ export class Session extends EventEmitter {
     if (this.mode === 'claude') {
       return {
         ...terminal,
-        conversationId: this._claudeSessionIdentityAdopted ? (this._claudeSessionId ?? undefined) : undefined,
+        conversationId: this._claudeSessionIdentityAdopted
+          ? (this._claudeAuthoritativeSessionId ?? undefined)
+          : undefined,
       };
     }
     if (this.mode === 'codex') {
       const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
-      const conversationId = (
-        await findActiveCodexConversation({
-          codexHome,
-          sessionId: this.id,
-          workingDir: this.workingDir,
-          resumeSessionId: this._codexConfig?.resumeSessionId,
-          lastSubmitAt: this._codexLastSubmitAt,
-          competingSubmitAts: [...Session.codexSubmitTimes.entries()]
-            .filter(([sessionId]) => sessionId !== this.id)
-            .map(([, submittedAt]) => submittedAt),
-        })
-      )?.id;
+      const conversationId = this._checkpointCodexFreshTransitionArmed
+        ? (
+            await findAuthoritativeCodexConversation({
+              codexHome,
+              sessionId: this.id,
+              baselineId: this._checkpointCodexFreshBaselineId,
+              baselineIds: this._checkpointCodexFreshBaselineIds,
+            })
+          )?.id
+        : (
+            await findActiveCodexConversation({
+              codexHome,
+              sessionId: this.id,
+              workingDir: this.workingDir,
+              resumeSessionId: this._codexConfig?.resumeSessionId,
+              lastSubmitAt: this._codexLastSubmitAt,
+              competingSubmitAts: [...Session.codexSubmitTimes.entries()]
+                .filter(([sessionId]) => sessionId !== this.id)
+                .map(([, submittedAt]) => submittedAt),
+            })
+          )?.id;
+      if (conversationId) {
+        this._checkpointCodexConversationId = conversationId;
+        if (this._checkpointCodexFreshTransitionArmed) invalidateCodexConversationInventory(codexHome);
+      }
       return { ...terminal, conversationId };
     }
     return terminal;
@@ -1594,6 +1644,10 @@ export class Session extends EventEmitter {
       checkpointModes: this._autoOps.checkpointModes,
       checkpoint: this._autoOps.checkpointState,
       checkpointRuns: this._autoOps.checkpointStates,
+      claudeSessionId: this._claudeSessionIdentityAdopted
+        ? (this._claudeAuthoritativeSessionId ?? undefined)
+        : undefined,
+      claudeSessionIdentityAdopted: this._claudeSessionIdentityAdopted,
       autoResumeEnabled: this._autoOps.autoResumeEnabled,
       autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
       imageWatcherEnabled: this._imageWatcherEnabled,
@@ -2072,8 +2126,9 @@ export class Session extends EventEmitter {
           spawnErrLabel: 'mux attachment',
         });
 
-        // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
-        this._claudeSessionId = this._resumeSessionId || this.id;
+        // A restored mux retains the persisted viewer + authoritative identity.
+        // Only a newly spawned pane needs its viewer seed initialized here.
+        this._seedClaudeViewerIdentityAfterMuxAttach(isRestored);
 
         // For NEW mux sessions: wait for readiness then clean buffer
         // For RESTORED mux sessions: don't do anything - client will fetch buffer on tab switch
@@ -2910,7 +2965,6 @@ export class Session extends EventEmitter {
       if (msgSessionId && msgSessionId !== this._claudeSessionId) {
         this._claudeSessionId = msgSessionId;
       }
-      if (msgSessionId) this._claudeSessionIdentityAdopted = true;
 
       // Process message for task tracking
       this._taskTracker.processMessage(msg);
@@ -3320,12 +3374,29 @@ export class Session extends EventEmitter {
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
     const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
     const isClear = checkpointCommand === '/clear';
+    const isCodexFreshThread = this.mode === 'codex' && (isClear || checkpointCommand === '/new');
     if (isClear) {
       this._checkpointAwaitingInstantClear = true;
       this._checkpointInstantClearBaseline = this._checkpointReadyFingerprint;
       this._checkpointDirectPtySawClear = false;
     }
-    this._trackCodexSubmit(data);
+    if (isCodexFreshThread) {
+      this._checkpointCodexFreshBaselineId = this._checkpointCodexConversationId;
+      this._checkpointCodexFreshTransitionArmed = true;
+      const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
+      this._checkpointCodexFreshBaselineIds = await findRecentOwnedCodexConversationIds({
+        codexHome,
+        sessionId: this.id,
+      });
+      if (
+        this._checkpointCodexFreshBaselineId &&
+        !this._checkpointCodexFreshBaselineIds.includes(this._checkpointCodexFreshBaselineId)
+      ) {
+        this._checkpointCodexFreshBaselineIds.push(this._checkpointCodexFreshBaselineId);
+      }
+    } else {
+      this._trackCodexSubmit(data);
+    }
     if (this._mux && this._muxSession) {
       const result = await this._mux.sendCheckpointCommand(this.id, data);
       if (isClear && !result.ok) {

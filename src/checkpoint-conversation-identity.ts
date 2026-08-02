@@ -27,7 +27,77 @@ interface CodexRolloutFile {
 }
 
 const rolloutMetaCache = new LRUMap<string, Pick<CodexRolloutFile, 'cwd' | 'originator'>>({ maxSize: 4096 });
-const historyPinCache = new LRUMap<string, { submitAt: number; id: string }>({ maxSize: 1024 });
+const historyPinCache = new LRUMap<
+  string,
+  { submitAt: number; id: string; historyMtimeMs: number; historySize: number }
+>({ maxSize: 1024 });
+const ROLLOUT_INVENTORY_TTL_MS = 10_000;
+const rolloutInventoryCache = new Map<string, { expiresAt: number; files: CodexRolloutFile[] }>();
+const missingHistoryRolloutCache = new LRUMap<string, number>({ maxSize: 1024 });
+let rolloutTreeWalkCount = 0;
+let authoritativeDirectoryScanCount = 0;
+
+/** Invalidate best-effort viewer inventory when history or authoritative proof changes. */
+export function invalidateCodexConversationInventory(codexHome: string): void {
+  rolloutInventoryCache.delete(codexHome);
+}
+
+/** Test-only observability for proving repeated polling does not rescan unchanged trees. */
+export function resetCodexConversationIdentityDebugStats(): void {
+  rolloutTreeWalkCount = 0;
+  authoritativeDirectoryScanCount = 0;
+  rolloutInventoryCache.clear();
+  missingHistoryRolloutCache.clear();
+}
+
+export function getCodexConversationIdentityDebugStats(): {
+  rolloutTreeWalkCount: number;
+  authoritativeDirectoryScanCount: number;
+} {
+  return { rolloutTreeWalkCount, authoritativeDirectoryScanCount };
+}
+
+async function listRecentCodexRollouts(codexHome: string, now = new Date()): Promise<CodexRolloutFile[]> {
+  authoritativeDirectoryScanCount += 1;
+  const sessionsDir = join(codexHome, 'sessions');
+  const directories = new Set<string>([sessionsDir]);
+  for (let daysAgo = 0; daysAgo <= 1; daysAgo += 1) {
+    const date = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+    directories.add(
+      join(
+        sessionsDir,
+        String(date.getFullYear()),
+        String(date.getMonth() + 1).padStart(2, '0'),
+        String(date.getDate()).padStart(2, '0')
+      )
+    );
+    directories.add(
+      join(
+        sessionsDir,
+        String(date.getUTCFullYear()),
+        String(date.getUTCMonth() + 1).padStart(2, '0'),
+        String(date.getUTCDate()).padStart(2, '0')
+      )
+    );
+  }
+  const files: CodexRolloutFile[] = [];
+  for (const dir of directories) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+      const path = join(dir, entry.name);
+      const info = await stat(path).catch(() => undefined);
+      if (!info) continue;
+      files.push({
+        path,
+        mtimeMs: info.mtimeMs,
+        id: basename(path).match(UUID_AT_END)?.[1],
+        ...(await readCodexRolloutMeta(path)),
+      });
+    }
+  }
+  return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
 
 async function readCodexRolloutMeta(path: string): Promise<Pick<CodexRolloutFile, 'cwd' | 'originator'>> {
   const cached = rolloutMetaCache.get(path);
@@ -61,6 +131,9 @@ async function readCodexRolloutMeta(path: string): Promise<Pick<CodexRolloutFile
 }
 
 async function listCodexRollouts(codexHome: string): Promise<CodexRolloutFile[]> {
+  const cached = rolloutInventoryCache.get(codexHome);
+  if (cached && cached.expiresAt > Date.now()) return cached.files;
+  rolloutTreeWalkCount += 1;
   const files: CodexRolloutFile[] = [];
   const walk = async (dir: string): Promise<void> => {
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -81,17 +154,28 @@ async function listCodexRollouts(codexHome: string): Promise<CodexRolloutFile[]>
     }
   };
   await walk(join(codexHome, 'sessions'));
-  return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const sorted = files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  rolloutInventoryCache.set(codexHome, { expiresAt: Date.now() + ROLLOUT_INVENTORY_TTL_MS, files: sorted });
+  return sorted;
 }
 
 async function resolveCodexThreadFromHistory(options: CodexConversationIdentityOptions): Promise<string | undefined> {
   if (!options.lastSubmitAt) return undefined;
   const cacheKey = `${options.codexHome}\0${options.sessionId}`;
-  const cached = historyPinCache.get(cacheKey);
-  if (cached?.submitAt === options.lastSubmitAt) return cached.id;
   const historyPath = join(options.codexHome, 'history.jsonl');
   const info = await stat(historyPath).catch(() => undefined);
   if (!info?.size) return undefined;
+  const cached = historyPinCache.get(cacheKey);
+  if (
+    cached?.submitAt === options.lastSubmitAt &&
+    cached.historyMtimeMs === info.mtimeMs &&
+    cached.historySize === info.size
+  ) {
+    return cached.id;
+  }
+  if (cached && (cached.historyMtimeMs !== info.mtimeMs || cached.historySize !== info.size)) {
+    invalidateCodexConversationInventory(options.codexHome);
+  }
   const handle = await open(historyPath, 'r').catch(() => undefined);
   if (!handle) return undefined;
   let history = '';
@@ -118,7 +202,14 @@ async function resolveCodexThreadFromHistory(options: CodexConversationIdentityO
       // The first tail row or final row may be incomplete.
     }
   }
-  if (best) historyPinCache.set(cacheKey, { submitAt: options.lastSubmitAt, id: best.id });
+  if (best) {
+    historyPinCache.set(cacheKey, {
+      submitAt: options.lastSubmitAt,
+      id: best.id,
+      historyMtimeMs: info.mtimeMs,
+      historySize: info.size,
+    });
+  }
   return best?.id;
 }
 
@@ -126,9 +217,20 @@ async function resolveCodexThreadFromHistory(options: CodexConversationIdentityO
 export async function findActiveCodexConversation(
   options: CodexConversationIdentityOptions
 ): Promise<ActiveCodexConversation | undefined> {
-  const files = await listCodexRollouts(options.codexHome);
   const historyId = await resolveCodexThreadFromHistory(options);
-  const historyFile = historyId ? files.find((file) => file.id === historyId) : undefined;
+  let files = await listCodexRollouts(options.codexHome);
+  let historyFile = historyId ? files.find((file) => file.id === historyId) : undefined;
+  const missingHistoryKey = historyId ? `${options.codexHome}\0${historyId}` : undefined;
+  const missingUntil = missingHistoryKey ? missingHistoryRolloutCache.get(missingHistoryKey) : undefined;
+  if (historyId && !historyFile && (!missingUntil || missingUntil <= Date.now())) {
+    invalidateCodexConversationInventory(options.codexHome);
+    files = await listCodexRollouts(options.codexHome);
+    historyFile = files.find((file) => file.id === historyId);
+    if (!historyFile && missingHistoryKey) {
+      missingHistoryRolloutCache.set(missingHistoryKey, Date.now() + ROLLOUT_INVENTORY_TTL_MS);
+    }
+  }
+  if (historyFile && missingHistoryKey) missingHistoryRolloutCache.delete(missingHistoryKey);
   if (historyFile?.id) return { id: historyFile.id, path: historyFile.path };
 
   const originator = `codeman_${options.sessionId}`;
@@ -143,6 +245,34 @@ export async function findActiveCodexConversation(
       )
     : undefined;
   return legacy?.id ? { id: legacy.id, path: legacy.path } : undefined;
+}
+
+/**
+ * Resolve fresh-thread checkpoint proof only from a new rollout carrying this
+ * managed pane's originator marker. Viewer history, resume IDs and cwd matches
+ * are intentionally excluded because they are not post-transition proof.
+ */
+export async function findAuthoritativeCodexConversation(
+  options: CodexConversationIdentityOptions & { baselineId?: string; baselineIds?: string[] }
+): Promise<ActiveCodexConversation | undefined> {
+  if (!options.baselineId) return undefined;
+  const files = await listRecentCodexRollouts(options.codexHome);
+  const originator = `codeman_${options.sessionId}`;
+  const baselineIds = new Set([options.baselineId, ...(options.baselineIds ?? [])]);
+  // The pre-command owned-ID snapshot is stronger than timestamp ordering:
+  // filesystems may assign equal mtimes to distinct rollout creations.
+  const owned = files.find((file) => file.id && !baselineIds.has(file.id) && file.originator === originator);
+  return owned?.id ? { id: owned.id, path: owned.path } : undefined;
+}
+
+/** Snapshot recent rollout IDs owned by this managed pane before a thread transition. */
+export async function findRecentOwnedCodexConversationIds(
+  options: Pick<CodexConversationIdentityOptions, 'codexHome' | 'sessionId'>
+): Promise<string[]> {
+  const originator = `codeman_${options.sessionId}`;
+  return (await listRecentCodexRollouts(options.codexHome))
+    .filter((file): file is CodexRolloutFile & { id: string } => Boolean(file.id) && file.originator === originator)
+    .map((file) => file.id);
 }
 
 /**

@@ -150,6 +150,16 @@ describe('checkpoint prompt observations', () => {
     await session.stop();
   });
 
+  it('does not treat checkpoint clear/new commands as viewer history submissions', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    expect(session.codexLastSubmitAt).toBe(0);
+    await session.writeCheckpointViaMux('/clear\r');
+    expect(session.codexLastSubmitAt).toBe(0);
+    await session.writeCheckpointViaMux('/new\r');
+    expect(session.codexLastSubmitAt).toBe(0);
+    await session.stop();
+  });
+
   it('does not advance clear generation when Codex appends a command rejection to the prior frame', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     let frame = 'previous conversation output\n› prompt\n  gpt-5.5 medium · /tmp';
@@ -237,7 +247,7 @@ describe('checkpoint prompt observations', () => {
       ).getCheckpointAutomationObservation();
 
     await expect(observe()).resolves.toMatchObject({ conversationId: undefined });
-    session.adoptClaudeSessionId('claude-session-start-id');
+    session.adoptClaudeSessionStartId('claude-session-start-id');
     await expect(observe()).resolves.toMatchObject({ conversationId: 'claude-session-start-id' });
     await session.stop();
   });
@@ -265,13 +275,13 @@ describe('checkpoint prompt observations', () => {
       },
     };
     internals._muxSession = { muxName: 'codeman-abc12345' };
-    session.adoptClaudeSessionId('claude-before-new');
+    session.adoptClaudeSessionStartId('claude-before-new');
     session.setCheckpoint(true, ['new']);
 
     expect(session.requestCheckpoint({ mode: 'new' })).toEqual({ triggered: true, runId: expect.any(String) });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(sent).toEqual(['/new\r']);
-    session.adoptClaudeSessionId('claude-after-new');
+    session.adoptClaudeSessionStartId('claude-after-new');
     await vi.advanceTimersByTimeAsync(1_000);
     expect(sent).toEqual(['/new\r', 'continue\r']);
     expect(sent).not.toContain('/clear\r');
@@ -315,6 +325,83 @@ describe('checkpoint prompt observations', () => {
       reason: 'session-start-hook-unavailable',
     });
     await session.stop();
+  });
+
+  it('rejects remote Codex fresh-thread modes while leaving compact available', async () => {
+    const session = new Session({
+      workingDir: '/remote/project',
+      mode: 'codex',
+      remote: { hostId: 'r1', label: 'r1', host: 'host', username: 'user', remotePath: '/remote/project' },
+    });
+    session.setCheckpoint(true, ['new', 'compact']);
+    expect(session.requestCheckpoint({ mode: 'new' })).toEqual({
+      triggered: false,
+      reason: 'remote-identity-unavailable',
+    });
+    expect(session.requestCheckpoint({ mode: 'compact' })).toEqual({ triggered: true, runId: expect.any(String) });
+    session.cancelCheckpoint('test-cleanup');
+    await session.stop();
+  });
+
+  it('restores only an explicitly adopted Claude identity and becomes ready after SessionStart adoption', async () => {
+    const legacy = new Session({
+      workingDir: '/tmp',
+      mode: 'claude',
+      claudeSessionStartHookReady: true,
+      claudeSessionId: 'placeholder-id',
+      claudeSessionIdentityAdopted: false,
+    });
+    legacy.setCheckpoint(true, ['new']);
+    expect(legacy.requestCheckpoint({ mode: 'new' })).toMatchObject({ triggered: false });
+    legacy.adoptClaudeSessionStartId('authoritative-id');
+    expect(legacy.toState()).toMatchObject({
+      claudeSessionId: 'authoritative-id',
+      claudeSessionIdentityAdopted: true,
+    });
+    expect(legacy.requestCheckpoint({ mode: 'new' })).toEqual({ triggered: true, runId: expect.any(String) });
+    legacy.cancelCheckpoint('test-cleanup');
+    await legacy.stop();
+  });
+
+  it('round-trips an authoritative Claude identity across restart recovery', async () => {
+    const original = new Session({
+      workingDir: '/tmp',
+      mode: 'claude',
+      claudeSessionStartHookReady: true,
+    });
+    original.adoptClaudeSessionStartId('persisted-authoritative-id');
+    original.adoptClaudeSessionId('viewer-only-id');
+    const saved = original.toState();
+    expect(saved.claudeSessionId).toBe('persisted-authoritative-id');
+    await expect(
+      (
+        original as unknown as {
+          getCheckpointAutomationObservation(): Promise<{ conversationId?: string }>;
+        }
+      ).getCheckpointAutomationObservation()
+    ).resolves.toMatchObject({ conversationId: 'persisted-authoritative-id' });
+    const restored = new Session({
+      id: saved.id,
+      workingDir: saved.workingDir,
+      mode: 'claude',
+      claudeSessionStartHookReady: true,
+      claudeSessionId: saved.claudeSessionId,
+      claudeSessionIdentityAdopted: saved.claudeSessionIdentityAdopted,
+    });
+    (
+      restored as unknown as {
+        _seedClaudeViewerIdentityAfterMuxAttach(isRestored: boolean): void;
+      }
+    )._seedClaudeViewerIdentityAfterMuxAttach(true);
+    expect(restored.toState().claudeSessionId).toBe('persisted-authoritative-id');
+    restored.setCheckpoint(true, ['new']);
+    expect(restored.requestCheckpoint({ mode: 'new' })).toEqual({
+      triggered: true,
+      runId: expect.any(String),
+    });
+    restored.cancelCheckpoint('test-cleanup');
+    await original.stop();
+    await restored.stop();
   });
 
   it('serializes the durable terminal checkpoint record', async () => {
