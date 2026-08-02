@@ -780,6 +780,15 @@ export class WebServer extends EventEmitter {
         .type('text/html; charset=utf-8')
         .send(await this.renderIndexHtml(id));
     });
+    // The manifest's installation label must identify this Codeman server, not
+    // whichever browser-local state happened to request it. Register this before
+    // the static plugin so it remains server-rendered and revalidated.
+    this.app.get('/manifest.json', async (_req, reply) => {
+      return reply
+        .header('Cache-Control', 'no-cache, must-revalidate')
+        .type('application/manifest+json; charset=utf-8')
+        .send(await this.renderPwaManifest());
+    });
     // Service worker must never be cached — browsers check for SW updates on navigation
     this.app.get('/sw.js', async (_req, reply) => {
       return reply
@@ -1269,13 +1278,10 @@ export class WebServer extends EventEmitter {
     // Detached-session windows intentionally skip App Settings during server
     // rendering (their client bootstrap loads the synced name moments later).
     const persistedSettings: Record<string, unknown> = soloSessionId ? {} : await this.readSettings(true);
-    const configuredDisplayName =
-      typeof persistedSettings.displayName === 'string' ? persistedSettings.displayName.trim() : '';
-    const displayName = configuredDisplayName || 'Codeman';
     // Solo renders read no settings; recomputing here would reset the shared
     // push-notification prefix (hostTitle) to the default name.
     if (!soloSessionId) {
-      this.windowTitle = `${displayName === 'Codeman' ? 'codeman' : displayName}:${this.titleHostname}`;
+      this.windowTitle = this.serverTitle(persistedSettings);
     }
     // Read the template fresh each render so a rebuilt index.html (e.g. after a
     // deploy) is picked up without a restart; cacheBustAssets handles the ?v= on
@@ -1337,6 +1343,39 @@ export class WebServer extends EventEmitter {
       }
     }
     return html;
+  }
+
+  /** Render Android/PWA installation metadata using the same persisted identity
+   * as the normal server-rendered title. JSON serialization is the escaping
+   * boundary; escaping HTML-significant and JS-line-separator characters keeps
+   * the response safe even if it is inspected or embedded by another client. */
+  private async renderPwaManifest(): Promise<string> {
+    const persistedSettings = await this.readSettings(true);
+    const name = this.serverTitle(persistedSettings);
+    const manifest = {
+      name,
+      short_name: name,
+      description: 'Claude Code session manager',
+      start_url: '/',
+      display: 'standalone',
+      orientation: 'any',
+      background_color: '#0a0a0a',
+      theme_color: '#0a0a0a',
+      icons: [
+        { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+        { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+      ],
+    };
+    return JSON.stringify(manifest).replace(/[<>\u2028\u2029]/g, (char) => {
+      return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+    });
+  }
+
+  /** Canonical, server-authoritative identity for browser and installed-PWA titles. */
+  private serverTitle(settings: Record<string, unknown>): string {
+    const configuredDisplayName = typeof settings.displayName === 'string' ? settings.displayName.trim() : '';
+    const displayName = configuredDisplayName || 'Codeman';
+    return `${displayName === 'Codeman' ? 'codeman' : displayName}:${this.titleHostname}`;
   }
 
   /** mtime memo for asset cache-busting (keyed by absolute path). A full index
