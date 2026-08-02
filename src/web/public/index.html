@@ -429,6 +429,11 @@
       <div class="file-preview-window">
         <div class="file-preview-header">
           <span class="file-preview-title" id="filePreviewTitle">file.ts</span>
+          <div class="file-preview-navigation" id="filePreviewNavigation" hidden>
+            <button type="button" class="btn-icon-sm" id="filePreviewPrevious" onclick="app.navigateFilePreviewAttachment(-1)" title="Previous attachment" aria-label="Previous attachment" disabled>&larr;</button>
+            <span class="file-preview-position" id="filePreviewPosition" aria-live="polite"></span>
+            <button type="button" class="btn-icon-sm" id="filePreviewNext" onclick="app.navigateFilePreviewAttachment(1)" title="Next attachment" aria-label="Next attachment" disabled>&rarr;</button>
+          </div>
           <div class="file-preview-actions">
             <button class="btn-icon-sm" onclick="app.copyFilePreviewContent()" title="Copy content">&#x2398;</button>
             <button class="btn-icon-sm" onclick="app.closeFilePreview()" title="Close">&times;</button>

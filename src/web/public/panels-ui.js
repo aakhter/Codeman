@@ -4035,6 +4035,12 @@ Object.assign(CodemanApp.prototype, {
       : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
     const previewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
     this.filePreviewState = previewState;
+    this._hideFilePreviewNavigation();
+    // Navigation is deliberately independent from the document metadata request:
+    // attachment history is the authoritative ordered list, and a slow document
+    // conversion must not delay it. The loader checks this exact state identity
+    // before it ever reveals controls.
+    void this._loadFilePreviewNavigation(previewState);
     this._annotations = [];
     this._closeAnnotationTray();
 
@@ -4053,6 +4059,80 @@ Object.assign(CodemanApp.prototype, {
       console.error('Failed to preview file:', err);
       bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
     }
+  },
+
+  _hideFilePreviewNavigation() {
+    const navigation = this.$('filePreviewNavigation');
+    const previous = this.$('filePreviewPrevious');
+    const next = this.$('filePreviewNext');
+    const position = this.$('filePreviewPosition');
+    if (navigation) navigation.hidden = true;
+    if (previous) previous.disabled = true;
+    if (next) next.disabled = true;
+    if (position) position.textContent = '';
+  },
+
+  async _loadFilePreviewNavigation(previewState) {
+    this._hideFilePreviewNavigation();
+    try {
+      const res = await fetch(`/api/sessions/${previewState.sessionId}/attachments`);
+      if (!res.ok) throw new Error('Failed to load attachments');
+      const result = await res.json();
+      if (this.filePreviewState !== previewState) return;
+      if (!result?.success || !Array.isArray(result.data?.items)) {
+        this._hideFilePreviewNavigation();
+        return;
+      }
+
+      // Keep the server's endpoint order; it is the attachment-history order.
+      // External attachments do not have a workspace-relative path, but their
+      // filename remains a valid title when reopening through their attachment ID.
+      const items = result.data.items.filter(
+        (item) =>
+          item &&
+          !item.missing &&
+          (typeof item.relativePath === 'string' || (typeof item.fileName === 'string' && item.fileName))
+      );
+      if (items.length < 2) {
+        this._hideFilePreviewNavigation();
+        return;
+      }
+
+      let index = -1;
+      if (previewState.attachmentId) {
+        index = items.findIndex((item) => item.attachmentId === previewState.attachmentId);
+      }
+      if (index === -1) {
+        index = items.findIndex((item) => item.relativePath === previewState.filePath);
+      }
+      if (this.filePreviewState !== previewState) return;
+      if (index === -1) {
+        this._hideFilePreviewNavigation();
+        return;
+      }
+
+      previewState.navigationItems = items;
+      previewState.navigationIndex = index;
+      const navigation = this.$('filePreviewNavigation');
+      const previous = this.$('filePreviewPrevious');
+      const next = this.$('filePreviewNext');
+      const position = this.$('filePreviewPosition');
+      if (this.filePreviewState !== previewState) return;
+      if (position) position.textContent = `${index + 1} of ${items.length}`;
+      if (previous) previous.disabled = index === 0;
+      if (next) next.disabled = index === items.length - 1;
+      if (navigation) navigation.hidden = false;
+    } catch {
+      if (this.filePreviewState === previewState) this._hideFilePreviewNavigation();
+    }
+  },
+
+  navigateFilePreviewAttachment(direction) {
+    const state = this.filePreviewState;
+    if (!state || (direction !== -1 && direction !== 1) || !state.navigationItems) return;
+    const item = state.navigationItems[state.navigationIndex + direction];
+    if (!item) return;
+    this.openFilePreview(item.relativePath || item.fileName, state.sessionId, item.attachmentId || null);
   },
 
   async _fetchFilePreviewMetadata(metadataUrl) {
@@ -5311,6 +5391,7 @@ Object.assign(CodemanApp.prototype, {
 
   closeFilePreview() {
     this._stopFilePreviewPolling();
+    this._hideFilePreviewNavigation();
     this._teardownOutlineScrollSpy();
     this._closeAnnotationPopover();
     this._closeAnnotationTray();

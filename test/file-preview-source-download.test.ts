@@ -260,6 +260,8 @@ describe('COD-238 Files-panel source download', () => {
       _restorePreviewSize: vi.fn(),
       _closeAnnotationTray: vi.fn(),
       _stopFilePreviewPolling: proto._stopFilePreviewPolling,
+      _hideFilePreviewNavigation: proto._hideFilePreviewNavigation,
+      _loadFilePreviewNavigation: proto._loadFilePreviewNavigation,
       _startFilePreviewPolling: startFilePreviewPolling,
       _fetchFilePreviewMetadata: vi.fn((url: string) =>
         url.includes('first-session') ? firstMetadata.promise : secondMetadata.promise

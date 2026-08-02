@@ -9972,6 +9972,25 @@ kbd {
   white-space: nowrap;
 }
 
+.file-preview-navigation {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.file-preview-navigation[hidden] {
+  display: none;
+}
+
+.file-preview-position {
+  min-width: 3.5rem;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .file-preview-actions {
   display: flex;
   gap: 0.25rem;
