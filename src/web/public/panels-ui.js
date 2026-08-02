@@ -4101,8 +4101,7 @@ Object.assign(CodemanApp.prototype, {
       let index = -1;
       if (previewState.attachmentId) {
         index = items.findIndex((item) => item.attachmentId === previewState.attachmentId);
-      }
-      if (index === -1) {
+      } else {
         index = items.findIndex((item) => item.relativePath === previewState.filePath);
       }
       if (this.filePreviewState !== previewState) return;

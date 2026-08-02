@@ -167,7 +167,7 @@ describe('COD-259 attachment preview navigation', () => {
     expect(host.openFilePreview).toHaveBeenNthCalledWith(2, 'third.pdf', 'session-2', 'third-id');
   });
 
-  it('falls back to an exact relative path only when no attachment ID matches', async () => {
+  it('falls back to an exact relative path when the preview has no attachment ID', async () => {
     const fetch = vi.fn(async () =>
       response({
         success: true,
@@ -182,13 +182,37 @@ describe('COD-259 attachment preview navigation', () => {
     );
     const proto = loadPanelsUiPrototype(fetch);
     const elements = navigationElements();
-    const state = { sessionId: 'session-3', filePath: 'match.pdf', attachmentId: 'not-in-list' };
+    const state = { sessionId: 'session-3', filePath: 'match.pdf', attachmentId: null };
     const host = hostFor(proto, elements, state);
 
     await proto._loadFilePreviewNavigation.call(host, state);
 
     expect(elements.navigation.hidden).toBe(false);
     expect(elements.position.textContent).toBe('2 of 3');
+  });
+
+  it('hides navigation when a supplied attachment ID is absent from the list, even if its path matches', async () => {
+    const fetch = vi.fn(async () =>
+      response({
+        success: true,
+        data: {
+          items: [
+            { relativePath: 'first.pdf', attachmentId: 'first' },
+            { relativePath: 'match.pdf', attachmentId: 'different-id' },
+            { relativePath: 'last.pdf', attachmentId: 'last' },
+          ],
+        },
+      })
+    );
+    const proto = loadPanelsUiPrototype(fetch);
+    const elements = navigationElements();
+    const state = { sessionId: 'session-3', filePath: 'match.pdf', attachmentId: 'missing-id' };
+    const host = hostFor(proto, elements, state);
+
+    await proto._loadFilePreviewNavigation.call(host, state);
+
+    expect(elements.navigation.hidden).toBe(true);
+    expect(elements.position.textContent).toBe('');
   });
 
   it.each([
