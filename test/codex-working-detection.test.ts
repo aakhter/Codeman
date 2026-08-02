@@ -290,6 +290,8 @@ describe('checkpoint prompt observations', () => {
     });
     expect(completed.toState().checkpoint).toEqual({
       active: false,
+      runId: 'legacy-200',
+      status: 'completed',
       mode: 'compact',
       phase: 'done',
       updatedAt: 200,

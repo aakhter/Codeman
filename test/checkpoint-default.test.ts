@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { Session } from '../src/session.js';
-import { SettingsUpdateSchema } from '../src/web/schemas.js';
+import { CheckpointSchema, SettingsUpdateSchema } from '../src/web/schemas.js';
 
 describe('COD-257 checkpoint default', () => {
   it('initializes a new session from an explicit checkpoint default without changing allowed modes', () => {
@@ -17,14 +17,28 @@ describe('COD-257 checkpoint default', () => {
 
     expect(enabled.checkpointEnabled).toBe(true);
     expect(disabled.checkpointEnabled).toBe(false);
-    expect(enabled.checkpointModes).toEqual(['compact', 'clear']);
-    expect(disabled.checkpointModes).toEqual(['compact', 'clear']);
+    expect(enabled.checkpointModes).toEqual(['compact', 'clear', 'new']);
+    expect(disabled.checkpointModes).toEqual(['compact', 'clear', 'new']);
   });
 
   it('accepts only a boolean checkpoint default in settings updates', () => {
     expect(SettingsUpdateSchema.safeParse({ checkpointDefaultEnabled: true }).success).toBe(true);
     expect(SettingsUpdateSchema.safeParse({ checkpointDefaultEnabled: false }).success).toBe(true);
     expect(SettingsUpdateSchema.safeParse({ checkpointDefaultEnabled: 'true' }).success).toBe(false);
+  });
+
+  it('accepts new in the checkpoint configuration schema', () => {
+    expect(CheckpointSchema.safeParse({ enabled: true, modes: ['compact', 'clear', 'new'] }).success).toBe(true);
+  });
+
+  it('renders clear and screen-preserving new without checkpoint /init claims', () => {
+    const html = readFileSync(new URL('../src/web/public/index.html', import.meta.url), 'utf8');
+    const checkpointStart = html.indexOf('id="modalCheckpointEnabled"');
+    const checkpointEnd = html.indexOf('File Watching', checkpointStart);
+    const checkpointUi = html.slice(checkpointStart, checkpointEnd);
+    expect(checkpointUi).toContain('modalCheckpointModeNew');
+    expect(checkpointUi).toContain('preserving the display');
+    expect(checkpointUi).not.toContain('/init');
   });
 
   it('uses a server resolver with an upgrade-safe enabled default for every web session creator', () => {

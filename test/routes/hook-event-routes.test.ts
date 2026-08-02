@@ -79,6 +79,27 @@ describe('hook-event-routes', () => {
   // ========== POST /api/hook-event ==========
 
   describe('POST /api/hook-event', () => {
+    it('returns the checkpoint run id for a new-mode request', async () => {
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+        checkpointEnabled: boolean;
+        requestCheckpoint: ReturnType<typeof vi.fn>;
+      };
+      session.checkpointEnabled = true;
+      session.requestCheckpoint = vi.fn(() => ({ triggered: true, runId: 'route-run-262' }));
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: {
+          event: 'checkpoint',
+          sessionId: harness.ctx._sessionId,
+          data: { mode: 'new', continuePrompt: 'continue safely' },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data.checkpoint).toEqual({ triggered: true, runId: 'route-run-262' });
+      expect(session.requestCheckpoint).toHaveBeenCalledWith({ mode: 'new', continuePrompt: 'continue safely' });
+    });
+
     it('accepts a valid hook event and broadcasts it', async () => {
       const res = await harness.app.inject({
         method: 'POST',

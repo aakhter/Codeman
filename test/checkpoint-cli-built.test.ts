@@ -17,6 +17,9 @@ describe('built checkpoint CLI', () => {
   let server: Server | undefined;
   let apiUrl = '';
   let response: { status: number; body: string; contentType?: string };
+  let responseForRequest:
+    | ((method: string | undefined) => { status: number; body: string; contentType?: string })
+    | undefined;
   const children = new Set<ReturnType<typeof spawn>>();
 
   beforeAll(async () => {
@@ -25,8 +28,9 @@ describe('built checkpoint CLI', () => {
     const candidate = createServer((req, res) => {
       req.resume();
       req.on('end', () => {
-        res.writeHead(response.status, { 'Content-Type': response.contentType ?? 'application/json' });
-        res.end(response.body);
+        const selected = responseForRequest?.(req.method) ?? response;
+        res.writeHead(selected.status, { 'Content-Type': selected.contentType ?? 'application/json' });
+        res.end(selected.body);
       });
     });
     server = candidate;
@@ -75,14 +79,17 @@ describe('built checkpoint CLI', () => {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
   });
 
-  function runCheckpoint(): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  function runCheckpoint(
+    extraArgs: string[] = [],
+    envOverrides: Record<string, string> = {}
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const child = spawn(
         process.execPath,
-        ['dist/index.js', 'checkpoint', '--session', 'built-cli-test', '--url', apiUrl],
+        ['dist/index.js', 'checkpoint', '--session', 'built-cli-test', '--url', apiUrl, ...extraArgs],
         {
           cwd: process.cwd(),
-          env: { ...process.env, CODEMAN_HOOK_SECRET_FILE: '' },
+          env: { ...process.env, CODEMAN_HOOK_SECRET_FILE: '', ...envOverrides },
           stdio: ['ignore', 'pipe', 'pipe'],
         }
       );
@@ -142,12 +149,48 @@ describe('built checkpoint CLI', () => {
   it('reports request acceptance without claiming completion', async () => {
     response = {
       status: 200,
-      body: JSON.stringify({ success: true, data: { checkpoint: { triggered: true } } }),
+      body: JSON.stringify({ success: true, data: { checkpoint: { triggered: true, runId: 'built-run-262' } } }),
     };
     const result = await runCheckpoint();
     expect(result.code).toBe(0);
     expect(result.stdout).toMatch(/checkpoint compact requested/i);
+    expect(result.stdout).toMatch(/built-run-262/);
     expect(result.stdout).not.toMatch(/\bdone\b/i);
     expect(result.stderr).toBe('');
+  });
+
+  it('refuses self-targeted --wait before making a request', async () => {
+    const result = await runCheckpoint(['--wait'], { CODEMAN_SESSION_ID: 'built-cli-test' });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/must yield first/i);
+  });
+
+  it('waits externally for the matching run id', async () => {
+    responseForRequest = (method) =>
+      method === 'GET'
+        ? {
+            status: 200,
+            body: JSON.stringify({
+              success: true,
+              data: {
+                checkpoint: { runId: 'newer-run', status: 'running' },
+                checkpointRuns: {
+                  'wait-run-262': { runId: 'wait-run-262', status: 'completed' },
+                  'newer-run': { runId: 'newer-run', status: 'running' },
+                },
+              },
+            }),
+          }
+        : {
+            status: 200,
+            body: JSON.stringify({
+              success: true,
+              data: { checkpoint: { triggered: true, runId: 'wait-run-262' } },
+            }),
+          };
+    const result = await runCheckpoint(['--wait']);
+    responseForRequest = undefined;
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/wait-run-262 completed/i);
   });
 });

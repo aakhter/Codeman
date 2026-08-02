@@ -22,10 +22,17 @@ describe('interpretCheckpointResponse', () => {
     ).toEqual({ ok: true, triggered: false, reason: 'busy' });
   });
 
-  it('accepts only a well-formed requested response', () => {
-    expect(interpretCheckpointResponse({ success: true, data: { checkpoint: { triggered: true } } })).toEqual({
+  it('accepts only a well-formed requested response with its stable run id', () => {
+    expect(
+      interpretCheckpointResponse({ success: true, data: { checkpoint: { triggered: true, runId: 'run-262' } } })
+    ).toEqual({
       ok: true,
       triggered: true,
+      runId: 'run-262',
+    });
+    expect(interpretCheckpointResponse({ success: true, data: { checkpoint: { triggered: true } } })).toEqual({
+      ok: false,
+      error: expect.stringContaining('run ID'),
     });
   });
 });

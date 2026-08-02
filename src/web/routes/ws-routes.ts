@@ -181,6 +181,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             const seq = Number.isInteger(msg.seq) ? (msg.seq as number) : null;
             const apply = cid && seq !== null ? session.shouldApplyInput(cid, seq) : true;
             if (apply) {
+              session.cancelCheckpoint('manual-takeover');
               // Typed input from a claim-holding desktop keeps the claim "hot"
               // and re-asserts the desktop layout after a mobile override.
               if (holdsDesktopClaim) session.noteDesktopActivity();

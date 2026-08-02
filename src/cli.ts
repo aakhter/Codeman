@@ -355,19 +355,30 @@ program
 program
   .command('checkpoint')
   .alias('compact')
-  .description('Signal Codeman to checkpoint at a clean boundary, then continue (both compact and clear available)')
-  .option('-m, --mode <mode>', 'Checkpoint mode: compact (default) or clear', 'compact')
+  .description('Signal Codeman to checkpoint at a clean boundary, then continue')
+  .option('-m, --mode <mode>', 'Checkpoint mode: compact (default), clear, or new', 'compact')
   .option('-c, --continue <prompt>', 'Prompt to send after the op completes (default: continue)')
   .option('-s, --session <id>', 'Codeman session ID (defaults to CODEMAN_SESSION_ID)')
   .option('--status', 'Report the session checkpoint config (read-only — does NOT fire a checkpoint)')
+  .option('--wait', 'Wait for this run to finish (external observers only)')
   .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
   .action(async (options) => {
-    const mode = options.mode === 'clear' ? 'clear' : 'compact';
+    const mode = String(options.mode);
     const sessionId = options.session || process.env.CODEMAN_SESSION_ID;
     const apiUrl = options.url || process.env.CODEMAN_API_URL || 'https://127.0.0.1:3000';
 
     if (!sessionId) {
       console.error(chalk.red('✗ checkpoint requires a session id (--session or CODEMAN_SESSION_ID)'));
+      process.exit(1);
+    }
+    if (!['compact', 'clear', 'new'].includes(mode)) {
+      console.error(chalk.red(`✗ unsupported checkpoint mode '${mode}' (use compact, clear, or new)`));
+      process.exit(1);
+    }
+    if (options.wait && sessionId === process.env.CODEMAN_SESSION_ID) {
+      console.error(
+        chalk.red('✗ checkpoint --wait cannot target CODEMAN_SESSION_ID; the target agent must yield first')
+      );
       process.exit(1);
     }
 
@@ -405,7 +416,33 @@ program
     }
 
     if (result.triggered) {
-      console.log(chalk.green(`✓ checkpoint ${mode} requested`));
+      console.log(chalk.green(`✓ checkpoint ${mode} requested (run ${result.runId})`));
+      if (options.wait) {
+        for (;;) {
+          const state = (await fetchServerJson(apiUrl, `/api/sessions/${encodeURIComponent(sessionId)}`)) as {
+            checkpoint?: { runId?: string; status?: string; reason?: string };
+            checkpointRuns?: Record<string, { runId?: string; status?: string; reason?: string }>;
+          };
+          const checkpoint = state?.checkpointRuns?.[result.runId] ?? state?.checkpoint;
+          if (checkpoint?.runId !== result.runId) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
+          if (checkpoint.status === 'completed') {
+            console.log(chalk.green(`✓ checkpoint run ${result.runId} completed`));
+            return;
+          }
+          if (checkpoint.status === 'failed' || checkpoint.status === 'cancelled') {
+            console.error(
+              chalk.red(
+                `✗ checkpoint run ${result.runId} ${checkpoint.status}: ${checkpoint.reason || 'unknown reason'}`
+              )
+            );
+            process.exit(1);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
       return;
     }
 
@@ -592,7 +629,7 @@ export function formatSessionRows(sessions: SessionRow[]): string {
 const CHECKPOINT_DEFAULT_CONTINUE = 'continue';
 
 export type CheckpointResponseInterpretation =
-  | { ok: true; triggered: true }
+  | { ok: true; triggered: true; runId: string }
   | { ok: true; triggered: false; reason: string }
   | { ok: false; error: string };
 
@@ -620,8 +657,11 @@ export function interpretCheckpointResponse(body: unknown): CheckpointResponseIn
   if (!checkpoint || typeof checkpoint !== 'object') {
     return { ok: false, error: 'malformed success response from checkpoint API' };
   }
-  const result = checkpoint as { triggered?: unknown; reason?: unknown };
-  if (result.triggered === true) return { ok: true, triggered: true };
+  const result = checkpoint as { triggered?: unknown; reason?: unknown; runId?: unknown };
+  if (result.triggered === true && typeof result.runId === 'string' && result.runId) {
+    return { ok: true, triggered: true, runId: result.runId };
+  }
+  if (result.triggered === true) return { ok: false, error: 'checkpoint API omitted the run ID' };
   if (result.triggered === false && typeof result.reason === 'string' && result.reason) {
     return { ok: true, triggered: false, reason: result.reason };
   }
@@ -641,26 +681,39 @@ export function interpretCheckpointResponse(body: unknown): CheckpointResponseIn
 export function formatCheckpointStatus(state: unknown): string {
   const s = (state ?? {}) as {
     checkpointEnabled?: boolean;
-    checkpointMode?: 'compact' | 'clear';
-    checkpointModes?: Array<'compact' | 'clear'>;
+    checkpointMode?: 'compact' | 'clear' | 'new';
+    checkpointModes?: Array<'compact' | 'clear' | 'new'>;
+    checkpoint?: { runId?: string; status?: string; phase?: string };
   };
   const enabled = s.checkpointEnabled === true;
-  // Normalize to the stable display order (compact, clear). Fall back to the
+  // Normalize to the stable display order. Fall back to the
   // legacy single `checkpointMode` when the modes array is absent.
   const modes = Array.isArray(s.checkpointModes)
-    ? (['compact', 'clear'] as const).filter((m) => s.checkpointModes!.includes(m))
-    : s.checkpointMode === 'compact' || s.checkpointMode === 'clear'
+    ? (['compact', 'clear', 'new'] as const).filter((m) => s.checkpointModes!.includes(m))
+    : s.checkpointMode === 'compact' || s.checkpointMode === 'clear' || s.checkpointMode === 'new'
       ? [s.checkpointMode]
       : [];
   // A bare `checkpoint` (no -m) runs compact when allowed, else clear (mirrors
   // the server's `checkpointMode` getter); `n/a` when no mode is allowed.
-  const bare = modes.includes('compact') ? 'compact' : modes.includes('clear') ? 'clear' : 'n/a';
+  const bare = modes.includes('compact')
+    ? 'compact'
+    : modes.includes('clear')
+      ? 'clear'
+      : modes.includes('new')
+        ? 'new'
+        : 'n/a';
   return [
     'AGENT CHECKPOINT status:',
     `  enabled:           ${enabled ? 'yes' : 'no'}`,
     `  allowed modes:     ${modes.length ? modes.join(', ') : 'none'}`,
     `  bare checkpoint:   ${bare}`,
     `  default continue:  ${CHECKPOINT_DEFAULT_CONTINUE}`,
+    ...(s.checkpoint?.runId
+      ? [
+          `  run id:            ${s.checkpoint.runId}`,
+          `  run status:        ${s.checkpoint.status || s.checkpoint.phase || 'unknown'}`,
+        ]
+      : []),
   ].join('\n');
 }
 

@@ -19,6 +19,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import type { CommandDeliveryResult, CommandDeliveryStage } from './mux-interface.js';
 
@@ -114,7 +115,7 @@ const RESUME_ESC_DELAY_MS = 600;
 const RESUME_PROMPT = 'continue';
 
 // ============================================================================
-// Checkpoint (agent-initiated compact-or-clear, then continue) constants
+// Checkpoint (agent-initiated compact, clear, or new, then continue) constants
 // ============================================================================
 
 /** Poll interval while driving a checkpoint sequence (prompt/working transitions) */
@@ -154,10 +155,12 @@ export interface CheckpointObservation {
   working: boolean;
   /** Semantic prompt generation; advances only after leaving and returning to ready. */
   revision: number;
+  /** Authoritative backend conversation identity, when one is safely known. */
+  conversationId?: string;
 }
 
-export type CheckpointMode = 'compact' | 'clear';
-export type CheckpointStep = 'compact' | 'clear' | 'init' | 'continue';
+export type CheckpointMode = 'compact' | 'clear' | 'new';
+export type CheckpointStep = CheckpointMode | 'init' | 'continue';
 export type CheckpointPhase =
   | 'requested'
   | 'waiting-ready'
@@ -170,6 +173,7 @@ export type CheckpointPhase =
   | 'aborted';
 
 export interface CheckpointProgress {
+  runId: string;
   mode: CheckpointMode;
   phase: CheckpointPhase;
   step?: CheckpointStep;
@@ -181,6 +185,8 @@ export interface CheckpointProgress {
 
 export interface CheckpointState extends CheckpointProgress {
   active: boolean;
+  status: 'requested' | 'running' | 'completed' | 'cancelled' | 'failed';
+  lastObservation?: CheckpointObservation;
 }
 
 interface AutoOpsCallbacks {
@@ -189,7 +195,9 @@ interface AutoOpsCallbacks {
   /** Deliver a checkpoint command with stage-aware acknowledgement. */
   writeCheckpointCommand?: (command: string) => Promise<CommandDeliveryResult>;
   /** Return positive prompt/working evidence for checkpoint sequencing. */
-  getCheckpointObservation?: () => CheckpointObservation;
+  getCheckpointObservation?: () => CheckpointObservation | Promise<CheckpointObservation>;
+  /** Immutable configured backend. Checkpoint capability is never inferred from terminal text. */
+  getCheckpointBackendMode?: () => string;
   /** Check if Claude is currently working */
   isWorking: () => boolean;
   /** Check if the session has been stopped */
@@ -235,18 +243,19 @@ export class SessionAutoOps extends EventEmitter {
   private _limitPaused: boolean = false;
   private _resumeAttempts: number = 0;
 
-  // Checkpoint (agent-initiated compact-or-clear, then continue) state
+  // Checkpoint (agent-initiated compact, clear, or new, then continue) state
   private _checkpointEnabled: boolean = false;
   /**
    * Modes the agent is allowed to invoke at signal time. Both are allowed by
    * default; the operator may forbid one (e.g. allow compact, forbid the more
    * destructive clear). compact is the fallback when the agent passes no -m.
    */
-  private _checkpointModes: Set<'compact' | 'clear'> = new Set(['compact', 'clear']);
+  private _checkpointModes: Set<CheckpointMode> = new Set(['compact', 'clear', 'new']);
   private _checkpointActive: boolean = false;
   private _checkpointTimer: NodeJS.Timeout | null = null;
-  private _checkpointRunId = 0;
+  private _checkpointRunId: string | undefined;
   private _checkpointState: CheckpointState | undefined;
+  private readonly _checkpointStates = new Map<string, CheckpointState>();
 
   private readonly callbacks: AutoOpsCallbacks;
 
@@ -464,24 +473,30 @@ export class SessionAutoOps extends EventEmitter {
   }
 
   // ============================================================================
-  // Checkpoint (agent-initiated compact-or-clear, then continue)
+  // Checkpoint (agent-initiated compact, clear, or new, then continue)
   // ============================================================================
 
   get checkpointEnabled(): boolean {
     return this._checkpointEnabled;
   }
 
-  /** Allowed checkpoint modes, in stable order (compact, clear). */
-  get checkpointModes(): Array<'compact' | 'clear'> {
-    return (['compact', 'clear'] as const).filter((m) => this._checkpointModes.has(m));
+  /** Allowed checkpoint modes, in stable order. */
+  get checkpointModes(): CheckpointMode[] {
+    return (['compact', 'clear', 'new'] as const).filter((m) => this._checkpointModes.has(m));
   }
 
   /**
    * The mode a bare checkpoint (no -m) runs: compact when allowed, else clear.
    * Retained for backward-compatible persisted state (legacy `checkpointMode`).
    */
-  get checkpointMode(): 'compact' | 'clear' {
-    return this._checkpointModes.has('compact') ? 'compact' : this._checkpointModes.has('clear') ? 'clear' : 'compact';
+  get checkpointMode(): CheckpointMode {
+    return this._checkpointModes.has('compact')
+      ? 'compact'
+      : this._checkpointModes.has('clear')
+        ? 'clear'
+        : this._checkpointModes.has('new')
+          ? 'new'
+          : 'compact';
   }
 
   get isCheckpointActive(): boolean {
@@ -493,12 +508,17 @@ export class SessionAutoOps extends EventEmitter {
     return this._checkpointState ? { ...this._checkpointState } : undefined;
   }
 
+  /** Bounded run-keyed history so external waiters cannot follow a newer run by mistake. */
+  get checkpointStates(): Record<string, CheckpointState> {
+    return Object.fromEntries([...this._checkpointStates].map(([runId, state]) => [runId, { ...state }]));
+  }
+
   /**
    * Enable/disable agent-initiated checkpoints; optionally set which modes the
    * agent may invoke. Pass `[]` to allow nothing (checkpoint becomes a no-op
    * until a mode is re-enabled). Omit `modes` to leave the allowed set unchanged.
    */
-  setCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
+  setCheckpoint(enabled: boolean, modes?: CheckpointMode[]): void {
     this._checkpointEnabled = enabled;
     if (modes !== undefined) {
       this._checkpointModes = new Set(modes);
@@ -512,7 +532,7 @@ export class SessionAutoOps extends EventEmitter {
    * legacy session with no saved `checkpointModes` keeps the default (both
    * allowed), matching pre-COD-112 behavior where any requested mode ran.
    */
-  restoreCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
+  restoreCheckpoint(enabled: boolean, modes?: CheckpointMode[]): void {
     this._checkpointEnabled = enabled;
     if (modes !== undefined) {
       this._checkpointModes = new Set(modes);
@@ -520,27 +540,41 @@ export class SessionAutoOps extends EventEmitter {
   }
 
   /** Restore only the last-known status; never resume an in-flight sequence. */
-  restoreCheckpointState(state?: CheckpointState): void {
+  restoreCheckpointState(
+    state?: Omit<CheckpointState, 'runId' | 'status'> & Partial<Pick<CheckpointState, 'runId' | 'status'>>
+  ): void {
     if (!state) return;
+    const runId = state.runId || `legacy-${state.updatedAt}`;
+    const status = state.active
+      ? 'cancelled'
+      : state.phase === 'done'
+        ? 'completed'
+        : state.phase === 'failed'
+          ? 'failed'
+          : 'cancelled';
     this._checkpointState = state.active
       ? {
           ...state,
+          runId,
+          status,
           active: false,
           phase: 'aborted',
           reason: 'restarted',
           updatedAt: Date.now(),
         }
-      : { ...state, active: false };
+      : { ...state, runId, status: state.status ?? status, active: false };
     this._checkpointActive = false;
+    this._rememberCheckpointState(this._checkpointState);
   }
 
   /**
-   * Agent signal at a clean boundary: run the checkpoint op (compact or
-   * clear→init) and, ONLY after it completes, send a continue prompt. Returns
+   * Agent signal at a clean boundary: run the selected checkpoint op and,
+   * ONLY after it completes, send a continue prompt. Returns
    * whether the sequence was triggered (and if not, why).
    */
-  requestCheckpoint(opts?: { mode?: 'compact' | 'clear'; continuePrompt?: string }): {
+  requestCheckpoint(opts?: { mode?: CheckpointMode; continuePrompt?: string }): {
     triggered: boolean;
+    runId?: string;
     reason?: string;
   } {
     if (!this._checkpointEnabled) return { triggered: false, reason: 'not-enabled' };
@@ -552,7 +586,7 @@ export class SessionAutoOps extends EventEmitter {
     // Resolve the mode, gated by the operator's allowed set. An explicit -m that
     // the operator forbade is refused; with no -m, compact is the default (then
     // clear) — so a bare checkpoint always runs an allowed mode if one exists.
-    let mode: 'compact' | 'clear';
+    let mode: CheckpointMode;
     if (opts?.mode !== undefined) {
       if (!this._checkpointModes.has(opts.mode)) {
         return { triggered: false, reason: 'mode-not-allowed' };
@@ -562,25 +596,35 @@ export class SessionAutoOps extends EventEmitter {
       mode = 'compact';
     } else if (this._checkpointModes.has('clear')) {
       mode = 'clear';
+    } else if (this._checkpointModes.has('new')) {
+      mode = 'new';
     } else {
       return { triggered: false, reason: 'no-mode-allowed' };
     }
 
-    this._checkpointActive = true;
-    const runId = ++this._checkpointRunId;
-    const continueText = opts?.continuePrompt?.trim() || RESUME_PROMPT;
-    const steps: Array<{ command: string; step: Exclude<CheckpointStep, 'continue'> }> =
-      mode === 'clear'
-        ? [
-            { command: '/clear\r', step: 'clear' },
-            { command: '/init\r', step: 'init' },
-          ]
-        : [{ command: '/compact\r', step: 'compact' }];
+    const backend = this.callbacks.getCheckpointBackendMode?.();
+    if (backend !== undefined && backend !== 'codex' && backend !== 'claude') {
+      return { triggered: false, reason: 'unsupported-backend' };
+    }
 
-    this.emit('checkpointStart', { mode });
-    this._transition(mode, 'requested');
-    void this._runCheckpoint(runId, steps, continueText, mode);
-    return { triggered: true };
+    this._checkpointActive = true;
+    const runId = randomUUID();
+    this._checkpointRunId = runId;
+    const continueText = opts?.continuePrompt?.trim() || RESUME_PROMPT;
+
+    this.emit('checkpointStart', { mode, runId });
+    this._transition(runId, mode, 'requested');
+    void this._runCheckpoint(runId, continueText, mode);
+    return { triggered: true, runId };
+  }
+
+  /** Cancel pending automated checkpoint writes at a user-input boundary. */
+  cancelCheckpoint(reason = 'manual-takeover'): void {
+    if (!this._checkpointActive || !this._checkpointState || !this._checkpointRunId) return;
+    this._finishCheckpoint(this._checkpointRunId, this._checkpointState.mode, 'aborted', {
+      step: this._checkpointState.step,
+      reason,
+    });
   }
 
   /**
@@ -588,69 +632,76 @@ export class SessionAutoOps extends EventEmitter {
    * command, wait for the op to start (working) then finish (idle), and only
    * then move on. After the last step, send the continue prompt.
    */
-  private async _runCheckpoint(
-    runId: number,
-    steps: Array<{ command: string; step: Exclude<CheckpointStep, 'continue'> }>,
-    continueText: string,
-    mode: CheckpointMode
-  ): Promise<void> {
+  private async _runCheckpoint(runId: string, continueText: string, mode: CheckpointMode): Promise<void> {
     try {
-      for (const { command, step } of steps) {
-        this._transition(mode, 'waiting-ready', { step });
-        const ready = await this._waitForObservation(
+      const step = mode;
+      this._transition(runId, mode, 'waiting-ready', { step });
+      const baselineResult = await this._waitForObservation(
+        runId,
+        (observation) => observation.ready && (mode === 'compact' || Boolean(observation.conversationId)),
+        CHECKPOINT_READY_TIMEOUT_MS
+      );
+      if (
+        !this._handleWaitResult(
+          baselineResult,
           runId,
-          (observation) => observation.ready,
-          CHECKPOINT_READY_TIMEOUT_MS
-        );
-        if (!this._handleWaitResult(ready, runId, mode, step, 'readiness-timeout')) return;
-        const baseline = ready.observation;
+          mode,
+          step,
+          mode === 'compact' ? 'readiness-timeout' : 'baseline-identity-unavailable'
+        )
+      )
+        return;
+      const baseline = baselineResult.observation;
 
-        const delivery = await this._deliverCheckpointCommand(command);
-        if (!this._ensureActive(runId, mode, step)) return;
-        if (!delivery.ok) {
-          this._finishCheckpoint(mode, 'failed', {
-            step,
-            reason: 'delivery-failed',
-            stage: delivery.stage,
-            attempt: delivery.attempt ?? 1,
-          });
-          return;
-        }
-        this._transition(mode, 'command-submitted', { step, attempt: delivery.attempt ?? 1 });
+      if (!this._ensureActive(runId, mode, step)) return;
+      const delivery = await this._deliverCheckpointCommand(`/${mode}\r`);
+      if (!this._ensureActive(runId, mode, step)) return;
+      if (!delivery.ok) {
+        this._finishCheckpoint(runId, mode, 'failed', {
+          step,
+          reason: 'delivery-failed',
+          stage: delivery.stage,
+          attempt: delivery.attempt ?? 1,
+        });
+        return;
+      }
+      this._transition(runId, mode, 'command-submitted', { step, attempt: delivery.attempt ?? 1 });
 
+      if (mode === 'compact') {
         const accepted = await this._waitForObservation(
           runId,
-          (observation) =>
-            observation.working ||
-            !observation.ready ||
-            (step === 'clear' && observation.ready && observation.revision > baseline.revision),
+          (observation) => observation.working || !observation.ready,
           CHECKPOINT_OP_START_TIMEOUT_MS
         );
         if (!this._handleWaitResult(accepted, runId, mode, step, 'operation-not-accepted')) return;
-        this._transition(mode, 'operation-started', { step });
-
-        // `/clear` can reset and repaint a genuinely fresh prompt entirely
-        // between polls. A semantic prompt generation is positive completion
-        // evidence for this one instantaneous operation; compact/init remain
-        // strict and must be sampled away/working before returning ready.
-        if (step === 'clear' && accepted.observation.ready && accepted.observation.revision > baseline.revision) {
-          this._transition(mode, 'operation-complete', { step });
-          continue;
-        }
-
+        this._transition(runId, mode, 'operation-started', { step });
         const completed = await this._waitForObservation(
           runId,
           (observation) => observation.ready && observation.revision > baseline.revision,
           CHECKPOINT_OP_MAX_MS
         );
         if (!this._handleWaitResult(completed, runId, mode, step, 'operation-timeout')) return;
-        this._transition(mode, 'operation-complete', { step });
+      } else {
+        // Fresh-thread commands are asynchronous. A terminal repaint or prompt
+        // revision in the old conversation is never acceptance evidence.
+        const completed = await this._waitForObservation(
+          runId,
+          (observation) =>
+            Boolean(observation.conversationId) &&
+            observation.conversationId !== baseline.conversationId &&
+            observation.ready,
+          CHECKPOINT_OP_MAX_MS
+        );
+        if (!this._handleWaitResult(completed, runId, mode, step, 'fresh-thread-timeout')) return;
+        this._transition(runId, mode, 'operation-started', { step });
       }
+      this._transition(runId, mode, 'operation-complete', { step });
 
+      if (!this._ensureActive(runId, mode, 'continue')) return;
       const continuation = await this._deliverCheckpointCommand(`${continueText}\r`);
       if (!this._ensureActive(runId, mode, 'continue')) return;
       if (!continuation.ok) {
-        this._finishCheckpoint(mode, 'failed', {
+        this._finishCheckpoint(runId, mode, 'failed', {
           step: 'continue',
           reason: 'continuation-delivery-failed',
           stage: continuation.stage,
@@ -658,7 +709,7 @@ export class SessionAutoOps extends EventEmitter {
         });
         return;
       }
-      this._transition(mode, 'continue-submitted', {
+      this._transition(runId, mode, 'continue-submitted', {
         step: 'continue',
         attempt: continuation.attempt ?? 1,
       });
@@ -671,19 +722,19 @@ export class SessionAutoOps extends EventEmitter {
       if (!this._handleWaitResult(started, runId, mode, 'continue', 'continuation-not-started')) return;
       if (!this._ensureActive(runId, mode, 'continue')) return;
 
-      this._finishCheckpoint(mode, 'done');
-      this.emit('checkpointDone', { mode });
+      this._finishCheckpoint(runId, mode, 'done');
+      this.emit('checkpointDone', { mode, runId });
     } catch (err) {
       if (this._checkpointActive && runId === this._checkpointRunId) {
-        this._finishCheckpoint(mode, 'failed', {
+        this._finishCheckpoint(runId, mode, 'failed', {
           reason: `unexpected-error: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
     }
   }
 
-  private _checkpointObservation(): CheckpointObservation {
-    if (this.callbacks.getCheckpointObservation) return this.callbacks.getCheckpointObservation();
+  private async _checkpointObservation(): Promise<CheckpointObservation> {
+    if (this.callbacks.getCheckpointObservation) return await this.callbacks.getCheckpointObservation();
     // Explicit compatibility fallback for callers not yet supplying the probe.
     const working = this.callbacks.isWorking();
     return { ready: !working, working, revision: 0 };
@@ -696,7 +747,7 @@ export class SessionAutoOps extends EventEmitter {
   }
 
   private _waitForObservation(
-    runId: number,
+    runId: string,
     predicate: (observation: CheckpointObservation) => boolean,
     timeoutMs: number
   ): Promise<
@@ -706,7 +757,7 @@ export class SessionAutoOps extends EventEmitter {
   > {
     const startedAt = Date.now();
     return new Promise((resolve) => {
-      const poll = (): void => {
+      const poll = async (): Promise<void> => {
         this._checkpointTimer = null;
         if (runId !== this._checkpointRunId || !this._checkpointActive) {
           resolve({ kind: 'aborted', reason: 'cancelled' });
@@ -716,7 +767,15 @@ export class SessionAutoOps extends EventEmitter {
           resolve({ kind: 'aborted', reason: 'stopped' });
           return;
         }
-        const observation = this._checkpointObservation();
+        const observation = await this._checkpointObservation();
+        if (runId !== this._checkpointRunId || !this._checkpointActive) {
+          resolve({ kind: 'aborted', reason: 'cancelled' });
+          return;
+        }
+        if (this._checkpointState) {
+          this._checkpointState.lastObservation = observation;
+          this._rememberCheckpointState(this._checkpointState);
+        }
         if (predicate(observation)) {
           resolve({ kind: 'matched', observation });
           return;
@@ -725,9 +784,9 @@ export class SessionAutoOps extends EventEmitter {
           resolve({ kind: 'timeout' });
           return;
         }
-        this._checkpointTimer = setTimeout(poll, CHECKPOINT_POLL_MS);
+        this._checkpointTimer = setTimeout(() => void poll(), CHECKPOINT_POLL_MS);
       };
-      poll();
+      void poll();
     });
   }
 
@@ -736,44 +795,71 @@ export class SessionAutoOps extends EventEmitter {
       | { kind: 'matched'; observation: CheckpointObservation }
       | { kind: 'timeout' }
       | { kind: 'aborted'; reason: 'stopped' | 'cancelled' },
-    runId: number,
+    runId: string,
     mode: CheckpointMode,
     step: CheckpointStep,
     timeoutReason: string
   ): result is { kind: 'matched'; observation: CheckpointObservation } {
     if (result.kind === 'matched') return this._ensureActive(runId, mode, step);
     if (result.kind === 'timeout') {
-      this._finishCheckpoint(mode, 'failed', { step, reason: timeoutReason });
+      this._finishCheckpoint(runId, mode, 'failed', { step, reason: timeoutReason });
     } else if (result.reason === 'stopped' && runId === this._checkpointRunId && this._checkpointActive) {
-      this._finishCheckpoint(mode, 'aborted', { step, reason: 'stopped' });
+      this._finishCheckpoint(runId, mode, 'aborted', { step, reason: 'stopped' });
     }
     return false;
   }
 
-  private _ensureActive(runId: number, mode: CheckpointMode, step: CheckpointStep): boolean {
+  private _ensureActive(runId: string, mode: CheckpointMode, step: CheckpointStep): boolean {
     if (runId !== this._checkpointRunId || !this._checkpointActive) return false;
     if (this.callbacks.isStopped()) {
-      this._finishCheckpoint(mode, 'aborted', { step, reason: 'stopped' });
+      this._finishCheckpoint(runId, mode, 'aborted', { step, reason: 'stopped' });
       return false;
     }
     return true;
   }
 
   private _transition(
+    runId: string,
     mode: CheckpointMode,
     phase: CheckpointPhase,
     details: Omit<Partial<CheckpointProgress>, 'mode' | 'phase' | 'updatedAt'> = {}
   ): void {
     const updatedAt = Date.now();
-    const progress: CheckpointProgress = { mode, phase, ...details, updatedAt };
-    this._checkpointState = { active: phase !== 'done' && phase !== 'failed' && phase !== 'aborted', ...progress };
+    const progress: CheckpointProgress = { runId, mode, phase, ...details, updatedAt };
+    const status =
+      phase === 'requested'
+        ? 'requested'
+        : phase === 'done'
+          ? 'completed'
+          : phase === 'failed'
+            ? 'failed'
+            : phase === 'aborted'
+              ? 'cancelled'
+              : 'running';
+    this._checkpointState = {
+      active: phase !== 'done' && phase !== 'failed' && phase !== 'aborted',
+      status,
+      lastObservation: this._checkpointState?.lastObservation,
+      ...progress,
+    };
+    this._rememberCheckpointState(this._checkpointState);
     this.emit('checkpointProgress', progress);
     console.log(
       `[SessionAutoOps ${this.callbacks.getSessionId()}] checkpoint ${phase}${details.step ? ` step=${details.step}` : ''}${details.reason ? ` reason=${details.reason}` : ''}`
     );
   }
 
+  private _rememberCheckpointState(state: CheckpointState): void {
+    this._checkpointStates.set(state.runId, { ...state });
+    while (this._checkpointStates.size > 20) {
+      const oldest = this._checkpointStates.keys().next().value;
+      if (oldest === undefined) break;
+      this._checkpointStates.delete(oldest);
+    }
+  }
+
   private _finishCheckpoint(
+    runId: string,
     mode: CheckpointMode,
     phase: Extract<CheckpointPhase, 'done' | 'failed' | 'aborted'>,
     details: Omit<Partial<CheckpointProgress>, 'mode' | 'phase' | 'updatedAt'> = {}
@@ -783,7 +869,7 @@ export class SessionAutoOps extends EventEmitter {
       this._checkpointTimer = null;
     }
     this._checkpointActive = false;
-    this._transition(mode, phase, details);
+    this._transition(runId, mode, phase, details);
   }
 
   // ============================================================================
@@ -902,7 +988,7 @@ export class SessionAutoOps extends EventEmitter {
     this._isClearing = false;
 
     if (this._checkpointActive && this._checkpointState) {
-      this._finishCheckpoint(this._checkpointState.mode, 'aborted', {
+      this._finishCheckpoint(this._checkpointState.runId, this._checkpointState.mode, 'aborted', {
         step: this._checkpointState.step,
         reason: 'destroyed',
       });
@@ -910,7 +996,7 @@ export class SessionAutoOps extends EventEmitter {
       clearTimeout(this._checkpointTimer);
       this._checkpointTimer = null;
     }
-    this._checkpointRunId++;
+    this._checkpointRunId = undefined;
 
     this._cancelAutoResume('stopped');
   }

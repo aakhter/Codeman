@@ -34,6 +34,7 @@ export class MockSession extends EventEmitter {
   ralphTracker: null = null;
   writeBuffer: string[] = [];
   terminalBuffer: string = '';
+  cancelCheckpoint = vi.fn();
 
   private _muxName: string | null = null;
 

@@ -202,6 +202,7 @@ describe('ws-routes', () => {
         // Give the message handler time to process
         await vi.waitFor(() => {
           expect(session.writeBuffer).toContain('ls -la\r');
+          expect(session.cancelCheckpoint).toHaveBeenCalledWith('manual-takeover');
         });
       } finally {
         ws.close();

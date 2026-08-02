@@ -1045,9 +1045,9 @@ export const PinSessionSchema = z.object({
 export const CheckpointSchema = z.object({
   enabled: z.boolean(),
   /** Allowed modes the agent may invoke. Omit to leave unchanged. */
-  modes: z.array(z.enum(['compact', 'clear'])).optional(),
+  modes: z.array(z.enum(['compact', 'clear', 'new'])).optional(),
   /** Deprecated single-mode form; treated as `modes: [mode]` when `modes` absent. */
-  mode: z.enum(['compact', 'clear']).optional(),
+  mode: z.enum(['compact', 'clear', 'new']).optional(),
 });
 
 /** POST /api/sessions/:id/image-watcher */

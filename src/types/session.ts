@@ -50,10 +50,13 @@ export type ClaudeMode = 'dangerously-skip-permissions' | 'auto' | 'normal' | 'a
 
 /** Session mode: which CLI backend a session runs */
 export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'agy';
+export type SessionCheckpointMode = 'compact' | 'clear' | 'new';
 
 export interface SessionCheckpointState {
   active: boolean;
-  mode: 'compact' | 'clear';
+  runId?: string;
+  status?: 'requested' | 'running' | 'completed' | 'cancelled' | 'failed';
+  mode: SessionCheckpointMode;
   phase:
     | 'requested'
     | 'waiting-ready'
@@ -64,7 +67,7 @@ export interface SessionCheckpointState {
     | 'done'
     | 'failed'
     | 'aborted';
-  step?: 'compact' | 'clear' | 'init' | 'continue';
+  step?: SessionCheckpointMode | 'init' | 'continue';
   attempt?: number;
   stage?: 'text' | 'enter';
   reason?: string;
@@ -450,15 +453,16 @@ export interface SessionState {
    * runs. Superseded by `checkpointModes`; emitted as the compact-preferred
    * default of the allowed set.
    */
-  checkpointMode?: 'compact' | 'clear';
+  checkpointMode?: SessionCheckpointMode;
   /**
    * Modes the agent is allowed to invoke at checkpoint signal time. Default is
-   * both; the operator may forbid one. A bare checkpoint (no -m) runs compact
-   * when allowed, else clear.
+   * all three; the operator may forbid any. A bare checkpoint (no -m) runs
+   * compact when allowed, then clear, then new.
    */
-  checkpointModes?: Array<'compact' | 'clear'>;
+  checkpointModes?: SessionCheckpointMode[];
   /** Durable most-recent checkpoint lifecycle record, including terminal outcomes. */
   checkpoint?: SessionCheckpointState;
+  checkpointRuns?: Record<string, SessionCheckpointState>;
   /** Auto-resume on usage limit enabled */
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */

@@ -1302,19 +1302,22 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('modalAutoClearEnabled').checked = session.autoClearEnabled ?? false;
     document.getElementById('modalAutoClearThreshold').value = session.autoClearThreshold ?? 140000;
 
-    // Populate agent checkpoint (compact-or-clear, then continue). Both modes
+    // Populate agent checkpoint. All modes
     // are allowed by default; an explicit empty set means the operator unticked
     // everything (kept faithfully). Legacy sessions with no `checkpointModes`
-    // fall back to both, matching the backend's migration.
+    // fall back to all three, matching the backend's migration.
     const cpEnabled = session.checkpointEnabled ?? false;
-    const cpModes = Array.isArray(session.checkpointModes) ? session.checkpointModes : ['compact', 'clear'];
+    const cpModes = Array.isArray(session.checkpointModes) ? session.checkpointModes : ['compact', 'clear', 'new'];
     document.getElementById('modalCheckpointEnabled').checked = cpEnabled;
     const cpCompact = document.getElementById('modalCheckpointModeCompact');
     const cpClear = document.getElementById('modalCheckpointModeClear');
+    const cpNew = document.getElementById('modalCheckpointModeNew');
     cpCompact.checked = cpModes.includes('compact');
     cpClear.checked = cpModes.includes('clear');
+    cpNew.checked = cpModes.includes('new');
     cpCompact.disabled = !cpEnabled;
     cpClear.disabled = !cpEnabled;
+    cpNew.disabled = !cpEnabled;
 
     // Populate auto-resume on usage limit (token pause control)
     document.getElementById('modalAutoResumeEnabled').checked = session.autoResumeEnabled ?? false;
@@ -1445,16 +1448,19 @@ Object.assign(CodemanApp.prototype, {
     const enabled = document.getElementById('modalCheckpointEnabled').checked;
     const compactEl = document.getElementById('modalCheckpointModeCompact');
     const clearEl = document.getElementById('modalCheckpointModeClear');
-    let modes = [...(compactEl.checked ? ['compact'] : []), ...(clearEl.checked ? ['clear'] : [])];
-    // Can't enable with zero modes — fall back to both so the agent has something to run.
+    const newEl = document.getElementById('modalCheckpointModeNew');
+    let modes = [...(compactEl.checked ? ['compact'] : []), ...(clearEl.checked ? ['clear'] : []), ...(newEl.checked ? ['new'] : [])];
+    // Can't enable with zero modes — fall back to all so the agent has something to run.
     if (enabled && modes.length === 0) {
       compactEl.checked = true;
       clearEl.checked = true;
-      modes = ['compact', 'clear'];
+      newEl.checked = true;
+      modes = ['compact', 'clear', 'new'];
     }
     // Mode ticks only apply while Agent Checkpoint is enabled.
     compactEl.disabled = !enabled;
     clearEl.disabled = !enabled;
+    newEl.disabled = !enabled;
     try {
       await this._apiPost(`/api/sessions/${this.editingSessionId}/checkpoint`, { enabled, modes });
       const session = this.sessions.get(this.editingSessionId);

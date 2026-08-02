@@ -600,6 +600,9 @@ and effort involved in moving workloads.
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
+      expect(harness.ctx.sessions.get(harness.ctx._sessionId)?.cancelCheckpoint).toHaveBeenCalledWith(
+        'manual-takeover'
+      );
     });
 
     it('returns error for unknown session', async () => {

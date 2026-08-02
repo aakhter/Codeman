@@ -22,14 +22,14 @@ export function registerHookEventRoutes(
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Session not found');
     }
 
-    // Agent-initiated checkpoint: run compact-or-clear, then continue once the
+    // Agent-initiated checkpoint: run compact, clear, or new, then continue once the
     // op completes. Per-session opt-in (default OFF). The CLI reads the returned
     // result to learn whether it actually triggered.
     if (event === 'checkpoint') {
       const session = ctx.sessions.get(sessionId);
       const result = session?.checkpointEnabled
         ? session.requestCheckpoint({
-            mode: data?.mode as 'compact' | 'clear' | undefined,
+            mode: data?.mode as 'compact' | 'clear' | 'new' | undefined,
             continuePrompt: typeof data?.continuePrompt === 'string' ? data.continuePrompt : undefined,
           })
         : { triggered: false, reason: 'not-enabled' };

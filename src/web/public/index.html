@@ -1153,8 +1153,9 @@
               <span class="checkpoint-modes" role="group" aria-label="Allowed checkpoint modes">
                 <label class="checkbox-inline"><input type="checkbox" id="modalCheckpointModeCompact" onchange="app.autoSaveCheckpoint()"><span>compact</span></label>
                 <label class="checkbox-inline"><input type="checkbox" id="modalCheckpointModeClear" onchange="app.autoSaveCheckpoint()"><span>clear</span></label>
+                <label class="checkbox-inline"><input type="checkbox" id="modalCheckpointModeNew" onchange="app.autoSaveCheckpoint()"><span>new</span></label>
               </span>
-              <span class="form-hint">When enabled, the agent checkpoints at a clean boundary. <strong>Tick the modes it may run</strong> — both are acceptable by default; the agent picks per call with <code id="checkpointCliHint">aicodeman checkpoint -m compact|clear</code> (compact runs /compact; clear runs /clear + /init; then it continues). A bare <code>checkpoint</code> uses compact when allowed. Default OFF.<span id="checkpointCliPathWarning" class="cli-path-warning" hidden> ⚠ Codeman CLI not found on PATH — add <code>~/.local/bin</code> to your PATH to use this.</span></span>
+              <span class="form-hint">When enabled, the agent checkpoints at a clean boundary. <strong>Tick the modes it may run</strong> — compact keeps the current conversation; clear starts a fresh conversation and clears the display; new starts a fresh conversation while preserving the display. Choose with <code id="checkpointCliHint">aicodeman checkpoint -m compact|clear|new</code>. A bare <code>checkpoint</code> uses compact when allowed. Default OFF.<span id="checkpointCliPathWarning" class="cli-path-warning" hidden> ⚠ Codeman CLI not found on PATH — add <code>~/.local/bin</code> to your PATH to use this.</span></span>
             </div>
 
             <div class="form-section-header">File Watching</div>

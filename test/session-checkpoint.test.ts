@@ -26,6 +26,8 @@ describe('SessionAutoOps confirmed checkpoint', () => {
   let stopped: boolean;
   let tokens: number;
   let revision: number;
+  let conversationId: string | undefined;
+  let backendMode: string;
   let wasReady: boolean;
   let deliveryResult: CommandDeliveryResult;
   let progress: CheckpointProgress[];
@@ -36,7 +38,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     const ready = promptVisible && !working;
     if (ready && !wasReady) revision++;
     wasReady = ready;
-    return { ready, working, revision };
+    return { ready, working, revision, conversationId };
   }
 
   function sentCommands(): string[] {
@@ -67,6 +69,8 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     stopped = false;
     tokens = 0;
     revision = 0;
+    conversationId = 'conversation-1';
+    backendMode = 'codex';
     wasReady = false;
     deliveryResult = { ok: true };
     progress = [];
@@ -76,6 +80,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
       writeCommand,
       writeCheckpointCommand,
       getCheckpointObservation: observation,
+      getCheckpointBackendMode: () => backendMode,
       isWorking: () => working,
       isStopped: () => stopped,
       getTotalTokens: () => tokens,
@@ -104,7 +109,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
   it('does not inject on false idle without a positive prompt', async () => {
     promptVisible = false;
     ops.setCheckpoint(true, ['compact']);
-    expect(ops.requestCheckpoint()).toEqual({ triggered: true });
+    expect(ops.requestCheckpoint()).toEqual({ triggered: true, runId: expect.any(String) });
 
     await tick(POLL_MS * 6);
 
@@ -240,7 +245,10 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     const done = vi.fn();
     ops.on('checkpointDone', done);
     ops.setCheckpoint(true, ['compact']);
-    expect(ops.requestCheckpoint({ continuePrompt: '$jira-autoloop' })).toEqual({ triggered: true });
+    expect(ops.requestCheckpoint({ continuePrompt: '$jira-autoloop' })).toEqual({
+      triggered: true,
+      runId: expect.any(String),
+    });
     await tick(POLL_MS * 2);
     await acceptAndCompleteOperation();
 
@@ -248,7 +256,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     expect(done).not.toHaveBeenCalled();
     await finishContinuation();
 
-    expect(done).toHaveBeenCalledWith({ mode: 'compact' });
+    expect(done).toHaveBeenCalledWith({ mode: 'compact', runId: expect.any(String) });
     expect(progress.map((event) => event.phase)).toEqual([
       'requested',
       'waiting-ready',
@@ -261,38 +269,128 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     expect(ops.checkpointState).toMatchObject({ active: false, phase: 'done', mode: 'compact' });
   });
 
-  it('runs clear as /clear then /init, with a confirmed cycle for each step', async () => {
+  it('runs clear as the sole transition command and waits for a changed conversation identity', async () => {
     ops.setCheckpoint(true, ['clear']);
     ops.requestCheckpoint();
     await tick(POLL_MS * 2);
     expect(sentCommands()).toEqual(['/clear\r']);
-    await acceptAndCompleteOperation();
-    expect(sentCommands()).toEqual(['/clear\r', '/init\r']);
-    await acceptAndCompleteOperation();
-    expect(sentCommands()).toEqual(['/clear\r', '/init\r', 'continue\r']);
+    revision++;
+    await tick(OP_START_TIMEOUT_MS + POLL_MS);
+    expect(sentCommands()).toEqual(['/clear\r']);
+
+    conversationId = 'conversation-2';
+    await tick(POLL_MS * 2);
+    expect(sentCommands()).toEqual(['/clear\r', 'continue\r']);
     await finishContinuation();
 
     expect(ops.checkpointState).toMatchObject({ active: false, phase: 'done', mode: 'clear' });
-    expect(progress.filter((event) => event.phase === 'operation-complete').map((event) => event.step)).toEqual([
-      'clear',
-      'init',
-    ]);
+    expect(sentCommands()).not.toContain('/init\r');
   });
 
-  it('accepts an instantaneous /clear only from a genuinely fresh ready-prompt generation', async () => {
-    ops.setCheckpoint(true, ['clear']);
-    ops.requestCheckpoint();
-    await tick(POLL_MS);
-    expect(sentCommands()).toEqual(['/clear\r']);
+  it.each(['clear', 'new'] as const)(
+    'supports Codex %s after a transition delayed beyond eight seconds',
+    async (mode) => {
+      ops.setCheckpoint(true, [mode]);
+      const request = ops.requestCheckpoint({ mode });
+      expect(request).toEqual({ triggered: true, runId: expect.any(String) });
+      await tick(POLL_MS * 2);
+      expect(sentCommands()).toEqual([`/${mode}\r`]);
 
-    // /clear reset and returned to ready entirely between driver polls.
-    revision++;
+      await tick(OP_START_TIMEOUT_MS + POLL_MS * 4);
+      expect(ops.checkpointState).toMatchObject({ active: true, runId: request.runId });
+      expect(sentCommands()).toEqual([`/${mode}\r`]);
+
+      conversationId = 'conversation-2';
+      await tick(POLL_MS * 2);
+      expect(sentCommands()).toEqual([`/${mode}\r`, 'continue\r']);
+    }
+  );
+
+  it.each(['clear', 'new'] as const)('supports Claude %s with adopted conversation identity', async (mode) => {
+    backendMode = 'claude';
+    ops.setCheckpoint(true, [mode]);
+    ops.requestCheckpoint({ mode });
     await tick(POLL_MS * 2);
+    conversationId = 'claude-conversation-2';
+    await tick(POLL_MS * 2);
+    expect(sentCommands()).toEqual([`/${mode}\r`, 'continue\r']);
+  });
 
-    expect(sentCommands()).toEqual(['/clear\r', '/init\r']);
-    expect(progress.filter((event) => event.step === 'clear').map((event) => event.phase)).toContain(
-      'operation-complete'
-    );
+  it('fails unsupported backends before any write', async () => {
+    backendMode = 'shell';
+    ops.setCheckpoint(true, ['new']);
+    expect(ops.requestCheckpoint({ mode: 'new' })).toEqual({
+      triggered: false,
+      reason: 'unsupported-backend',
+    });
+    await tick(POLL_MS * 2);
+    expect(sentCommands()).toEqual([]);
+  });
+
+  it('fails closed before a fresh-thread command when baseline identity is unavailable', async () => {
+    conversationId = undefined;
+    ops.setCheckpoint(true, ['clear']);
+    const request = ops.requestCheckpoint({ mode: 'clear' });
+    expect(request).toEqual({ triggered: true, runId: expect.any(String) });
+    await tick(READY_TIMEOUT_MS + POLL_MS);
+    expect(sentCommands()).toEqual([]);
+    expect(ops.checkpointState).toMatchObject({ phase: 'failed', reason: 'baseline-identity-unavailable' });
+  });
+
+  it('cancels for manual takeover and suppresses continuation after the identity changes', async () => {
+    ops.setCheckpoint(true, ['new']);
+    const request = ops.requestCheckpoint({ mode: 'new' });
+    await tick(POLL_MS * 2);
+    ops.cancelCheckpoint('manual-takeover');
+    conversationId = 'conversation-2';
+    await tick(POLL_MS * 4);
+    expect(sentCommands()).toEqual(['/new\r']);
+    expect(ops.checkpointState).toMatchObject({
+      runId: request.runId,
+      active: false,
+      phase: 'aborted',
+      reason: 'manual-takeover',
+    });
+  });
+
+  it('fences manual takeover immediately before continuation delivery', async () => {
+    ops.setCheckpoint(true, ['clear']);
+    ops.requestCheckpoint({ mode: 'clear' });
+    await tick(POLL_MS * 2);
+    conversationId = 'conversation-2';
+    observationHook = () => {
+      observationHook = undefined;
+      ops.cancelCheckpoint('manual-takeover');
+    };
+    await tick(POLL_MS * 2);
+    expect(sentCommands()).toEqual(['/clear\r']);
+    expect(ops.checkpointState).toMatchObject({ status: 'cancelled', reason: 'manual-takeover' });
+  });
+
+  it('delivers the fresh-thread continuation exactly once across repeated ready observations', async () => {
+    ops.setCheckpoint(true, ['new']);
+    ops.requestCheckpoint({ mode: 'new' });
+    await tick(POLL_MS * 2);
+    conversationId = 'conversation-2';
+    await tick(POLL_MS * 8);
+    expect(sentCommands().filter((command) => command === 'continue\r')).toHaveLength(1);
+  });
+
+  it('lets a newer run proceed while the cancelled run remains fenced', async () => {
+    ops.setCheckpoint(true, ['new']);
+    const first = ops.requestCheckpoint({ mode: 'new' });
+    await tick(POLL_MS * 2);
+    ops.cancelCheckpoint('manual-takeover');
+    conversationId = 'conversation-2';
+    const second = ops.requestCheckpoint({ mode: 'new' });
+    expect(second).toEqual({ triggered: true, runId: expect.any(String) });
+    expect(second.runId).not.toBe(first.runId);
+    await tick(POLL_MS * 2);
+    conversationId = 'conversation-3';
+    await tick(POLL_MS * 3);
+    expect(sentCommands()).toEqual(['/new\r', '/new\r', 'continue\r']);
+    expect(ops.checkpointStates[first.runId!]).toMatchObject({ status: 'cancelled' });
+    expect(ops.checkpointStates[second.runId!]).toMatchObject({ status: 'running' });
   });
 
   it('does not let a fresh ready generation bypass strict compact acceptance', async () => {
@@ -315,6 +413,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
       else stopped = true;
       await Promise.resolve();
       await Promise.resolve();
+      await tick(0);
 
       expect(sentCommands()).toEqual([]);
       expect(progress.at(-1)).toMatchObject({ phase: 'aborted' });
@@ -426,6 +525,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
       writeCommand,
       writeCheckpointCommand,
       getCheckpointObservation: observation,
+      getCheckpointBackendMode: () => backendMode,
       isWorking: () => working,
       isStopped: () => stopped,
       getTotalTokens: () => 0,
@@ -436,6 +536,20 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     await tick(POLL_MS);
     expect(sentCommands()).toEqual(['/compact\r', '/clear\r']);
     clearOnly.destroy();
+
+    const newOnly = new SessionAutoOps({
+      writeCommand,
+      writeCheckpointCommand,
+      getCheckpointObservation: observation,
+      getCheckpointBackendMode: () => backendMode,
+      isWorking: () => working,
+      isStopped: () => stopped,
+      getTotalTokens: () => 0,
+      getSessionId: () => 'new-only',
+    });
+    newOnly.setCheckpoint(true, ['new']);
+    expect(newOnly.checkpointMode).toBe('new');
+    newOnly.destroy();
   });
 
   it('runs compact then clear in one session without changing checkpoint settings', async () => {
@@ -447,7 +561,7 @@ describe('SessionAutoOps confirmed checkpoint', () => {
     expect(ops.checkpointState?.phase).toBe('done');
 
     working = false;
-    expect(ops.requestCheckpoint({ mode: 'clear' })).toEqual({ triggered: true });
+    expect(ops.requestCheckpoint({ mode: 'clear' })).toEqual({ triggered: true, runId: expect.any(String) });
     await tick(POLL_MS);
     expect(sentCommands()).toContain('/compact\r');
     expect(sentCommands()).toContain('/clear\r');

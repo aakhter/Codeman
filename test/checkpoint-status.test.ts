@@ -23,10 +23,10 @@ describe('formatCheckpointStatus', () => {
     const out = formatCheckpointStatus({
       checkpointEnabled: true,
       checkpointMode: 'compact',
-      checkpointModes: ['compact', 'clear'],
+      checkpointModes: ['compact', 'clear', 'new'],
     });
     expect(out).toMatch(/enabled:\s+yes/);
-    expect(out).toMatch(/allowed modes:\s+compact, clear/);
+    expect(out).toMatch(/allowed modes:\s+compact, clear, new/);
     // A bare `checkpoint` (no -m) runs compact when allowed.
     expect(out).toMatch(/bare checkpoint:\s+compact/);
     expect(out).toMatch(/default continue:\s+continue/);
@@ -35,11 +35,13 @@ describe('formatCheckpointStatus', () => {
   it('reports disabled when the toggle is off', () => {
     const out = formatCheckpointStatus({
       checkpointEnabled: false,
-      checkpointModes: ['compact', 'clear'],
+      checkpointModes: ['compact', 'clear', 'new'],
+      checkpoint: { runId: 'run-262', status: 'running', phase: 'waiting-ready' },
     });
     expect(out).toMatch(/enabled:\s+no/);
     // Allowed modes are still reported (config persists while disabled).
-    expect(out).toMatch(/allowed modes:\s+compact, clear/);
+    expect(out).toMatch(/allowed modes:\s+compact, clear, new/);
+    expect(out).toMatch(/run id:\s+run-262/);
   });
 
   it('falls back to clear for bare checkpoint when only clear is allowed', () => {
@@ -59,13 +61,18 @@ describe('formatCheckpointStatus', () => {
     expect(out).toMatch(/bare checkpoint:\s+compact/);
   });
 
+  it('runs new for a bare checkpoint when it is the only allowed mode', () => {
+    const out = formatCheckpointStatus({ checkpointEnabled: true, checkpointModes: ['new'] });
+    expect(out).toMatch(/bare checkpoint:\s+new/);
+  });
+
   it('normalizes mode order regardless of input ordering', () => {
     const out = formatCheckpointStatus({
       checkpointEnabled: true,
-      checkpointModes: ['clear', 'compact'],
+      checkpointModes: ['new', 'clear', 'compact'],
     });
-    // Stable display order is always compact, clear.
-    expect(out).toMatch(/allowed modes:\s+compact, clear/);
+    // Stable display order is always compact, clear, new.
+    expect(out).toMatch(/allowed modes:\s+compact, clear, new/);
   });
 
   it('falls back to the legacy checkpointMode when checkpointModes is absent', () => {

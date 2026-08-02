@@ -104,6 +104,7 @@ import {
   isExternalCliTranscriptMode,
   parseExternalCliTranscript,
 } from '../response-viewer-transcript.js';
+import { findCodexConversationFile } from '../../checkpoint-conversation-identity.js';
 import {
   checkDockerAvailable,
   checkDockerConfigDrift,
@@ -1106,6 +1107,7 @@ export function registerSessionRoutes(
     if (typeof clientId === 'string' && typeof seq === 'number' && !session.shouldApplyInput(clientId, seq)) {
       return {};
     }
+    session.cancelCheckpoint('manual-takeover');
 
     // Write input to PTY. Direct write is synchronous; writeViaMux
     // (tmux send-keys) is fire-and-forget to avoid blocking the HTTP response.
@@ -1150,6 +1152,7 @@ export function registerSessionRoutes(
     }
 
     const session = findSessionOrFail(ctx, id, req);
+    session.cancelCheckpoint('manual-takeover');
     const muxName = session.muxName;
     if (!muxName) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No tmux session');
@@ -1686,39 +1689,35 @@ export function registerSessionRoutes(
       if (hit) return hit.path;
     }
 
-    const rawResumeId = session.codexConfig?.resumeSessionId;
-    const resumeId =
-      rawResumeId && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(rawResumeId)
-        ? rawResumeId
-        : undefined;
-    const idMatch = resumeId ? files.find((f) => basename(f.path).endsWith(`-${resumeId}.jsonl`)) : undefined;
+    const boundPath = await findCodexConversationFile({
+      codexHome,
+      sessionId: session.id,
+      resumeSessionId: session.codexConfig?.resumeSessionId,
+    });
+    if (boundPath) return boundPath;
 
     // Scan newest-first for our originator; anything strictly older than the
     // id match can never beat it, so the head reads stop there (mtime ties are
     // still scanned — a /new rollout may land in the same clock tick). The
     // 128 KiB head budget covers the session_meta line, which embeds full
     // base_instructions (observed max ~22 KiB on codex 0.144).
-    const originator = `codeman_${session.id}`;
     const wantCwd = session.workingDir.toLowerCase();
     const headBuf = Buffer.alloc(131072);
     let cwdFallback: { path: string; mtimeMs: number } | undefined;
     for (const f of files) {
-      if (idMatch && f.mtimeMs < idMatch.mtimeMs) break;
       const meta = await readCodexRolloutMetaCached(f.path, headBuf);
       if (!meta) continue;
-      if (meta.originator === originator) return f.path; // newest-first → first hit wins
       if (
         !cwdFallback &&
-        !idMatch &&
         meta.cwd?.toLowerCase() === wantCwd &&
         // A rollout stamped by another codeman pane belongs to that pane.
-        !(meta.originator?.startsWith('codeman_') && meta.originator !== originator)
+        !meta.originator?.startsWith('codeman_')
       ) {
         cwdFallback = f;
       }
     }
 
-    return idMatch?.path ?? cwdFallback?.path ?? null;
+    return cwdFallback?.path ?? null;
   }
 
   // opencode stores sessions in a sqlite db keyed by absolute working

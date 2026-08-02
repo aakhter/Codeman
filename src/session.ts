@@ -47,6 +47,7 @@ import {
   isEffortLevel,
   type ClaudeMode,
   type SessionMode,
+  type SessionCheckpointMode,
   type OpenCodeConfig,
   type CodexConfig,
   type AgyConfig,
@@ -93,7 +94,9 @@ import {
   type CheckpointObservation,
   type CheckpointProgress,
   type CheckpointState,
+  type CheckpointMode,
 } from './session-auto-ops.js';
+import { findClaudeConversationId, findCodexConversationId } from './checkpoint-conversation-identity.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
@@ -361,6 +364,7 @@ export interface ClaudeMessage {
  * @fires Session#autoCompact - Token threshold reached, compacting context
  */
 export class Session extends EventEmitter {
+  private static readonly checkpointTransitionTimes = new Map<string, number>();
   readonly id: string;
   readonly workingDir: string;
   readonly createdAt: number;
@@ -393,6 +397,7 @@ export class Session extends EventEmitter {
   private _errorBuffer: string = '';
   private _lastActivityAt: number;
   private _claudeSessionId: string | null = null;
+  private _claudeSessionIdentityAdopted = false;
   private _totalCost: number = 0;
   private _messages: ClaudeMessage[] = [];
   private _lineBuffer: string = '';
@@ -652,6 +657,7 @@ export class Session extends EventEmitter {
     this._terminalBuffer = new BufferAccumulator(this._terminalBufferMaxSize, this._terminalBufferTrimSize);
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
+    this._claudeSessionIdentityAdopted = Boolean(config.resumeSessionId);
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;
@@ -764,7 +770,8 @@ export class Session extends EventEmitter {
     this._autoOps = new SessionAutoOps({
       writeCommand: (cmd) => this.writeViaMux(cmd),
       writeCheckpointCommand: (cmd) => this.writeCheckpointViaMux(cmd),
-      getCheckpointObservation: () => this.getCheckpointObservation(),
+      getCheckpointObservation: () => this.getCheckpointAutomationObservation(),
+      getCheckpointBackendMode: () => this.mode,
       isWorking: () => this._isWorking,
       isStopped: () => this._isStopped,
       getTotalTokens: () => this._totalInputTokens + this._totalOutputTokens,
@@ -852,7 +859,9 @@ export class Session extends EventEmitter {
   // `_handleJsonMessage` never sees `session_id`; hooks are the only signal
   // that conveys a post-/clear conversation switch.
   adoptClaudeSessionId(newId: string): void {
-    if (!newId || newId === this._claudeSessionId) return;
+    if (!newId) return;
+    this._claudeSessionIdentityAdopted = true;
+    if (newId === this._claudeSessionId) return;
     this._claudeSessionId = newId;
   }
 
@@ -1201,12 +1210,12 @@ export class Session extends EventEmitter {
   }
 
   /** The mode a bare checkpoint runs (compact-preferred); legacy compat field. */
-  get checkpointMode(): 'compact' | 'clear' {
+  get checkpointMode(): SessionCheckpointMode {
     return this._autoOps.checkpointMode;
   }
 
   /** Modes the agent is allowed to invoke at checkpoint signal time. */
-  get checkpointModes(): Array<'compact' | 'clear'> {
+  get checkpointModes(): SessionCheckpointMode[] {
     return this._autoOps.checkpointModes;
   }
 
@@ -1215,22 +1224,67 @@ export class Session extends EventEmitter {
     return this._autoOps.checkpointState;
   }
 
+  get checkpointStates(): Record<string, CheckpointState> {
+    return this._autoOps.checkpointStates;
+  }
+
   /** Enable/disable agent-initiated checkpoints; optionally set allowed modes. */
-  setCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
+  setCheckpoint(enabled: boolean, modes?: SessionCheckpointMode[]): void {
     this._autoOps.setCheckpoint(enabled, modes);
   }
 
   /** Restore persisted checkpoint enable/allowed-modes after a Codeman restart. */
-  restoreCheckpoint(enabled: boolean, modes?: Array<'compact' | 'clear'>): void {
+  restoreCheckpoint(enabled: boolean, modes?: SessionCheckpointMode[]): void {
     this._autoOps.restoreCheckpoint(enabled, modes);
   }
 
   /** Agent signal: run the checkpoint op, then continue once it completes. */
-  requestCheckpoint(opts?: { mode?: 'compact' | 'clear'; continuePrompt?: string }): {
+  requestCheckpoint(opts?: { mode?: CheckpointMode; continuePrompt?: string }): {
     triggered: boolean;
+    runId?: string;
     reason?: string;
   } {
     return this._autoOps.requestCheckpoint(opts);
+  }
+
+  /** Cancel checkpoint automation before accepting user-originated terminal input. */
+  cancelCheckpoint(reason = 'manual-takeover'): void {
+    this._autoOps.cancelCheckpoint(reason);
+  }
+
+  private async getCheckpointAutomationObservation(): Promise<CheckpointObservation> {
+    const terminal = this.getCheckpointObservation();
+    if (this.mode === 'claude') {
+      const baselineId = this._claudeSessionIdentityAdopted ? this._claudeSessionId : null;
+      const transitionAt = Session.checkpointTransitionTimes.get(this.id);
+      if (baselineId && transitionAt) {
+        const claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || '/tmp', '.claude');
+        const conversationId = await findClaudeConversationId({
+          claudeHome,
+          workingDir: this.workingDir,
+          baselineId,
+          transitionAt,
+          competingTransitionAts: [...Session.checkpointTransitionTimes.entries()]
+            .filter(([sessionId]) => sessionId !== this.id)
+            .map(([, time]) => time),
+        });
+        if (conversationId) this.adoptClaudeSessionId(conversationId);
+      }
+      return {
+        ...terminal,
+        conversationId: this._claudeSessionIdentityAdopted ? (this._claudeSessionId ?? undefined) : undefined,
+      };
+    }
+    if (this.mode === 'codex') {
+      const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
+      const conversationId = await findCodexConversationId({
+        codexHome,
+        sessionId: this.id,
+        resumeSessionId: this._codexConfig?.resumeSessionId,
+      });
+      return { ...terminal, conversationId };
+    }
+    return terminal;
   }
 
   /**
@@ -1538,6 +1592,7 @@ export class Session extends EventEmitter {
       checkpointMode: this._autoOps.checkpointMode,
       checkpointModes: this._autoOps.checkpointModes,
       checkpoint: this._autoOps.checkpointState,
+      checkpointRuns: this._autoOps.checkpointStates,
       autoResumeEnabled: this._autoOps.autoResumeEnabled,
       autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
       imageWatcherEnabled: this._imageWatcherEnabled,
@@ -2854,6 +2909,7 @@ export class Session extends EventEmitter {
       if (msgSessionId && msgSessionId !== this._claudeSessionId) {
         this._claudeSessionId = msgSessionId;
       }
+      if (msgSessionId) this._claudeSessionIdentityAdopted = true;
 
       // Process message for task tracking
       this._taskTracker.processMessage(msg);
@@ -3239,7 +3295,7 @@ export class Session extends EventEmitter {
    * @example
    * ```typescript
    * session.writeViaMux('/clear\r');  // Send /clear command
-   * session.writeViaMux('/init\r');   // Send /init command
+   * session.writeViaMux('/new\r');    // Send /new command
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
@@ -3260,7 +3316,11 @@ export class Session extends EventEmitter {
    * unchanged; checkpoint orchestration receives the exact failed stage.
    */
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
-    const isClear = data.replace(/[\r\n]/g, '').trim() === '/clear';
+    const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
+    const isClear = checkpointCommand === '/clear';
+    if (checkpointCommand === '/clear' || checkpointCommand === '/new') {
+      Session.checkpointTransitionTimes.set(this.id, Date.now());
+    }
     if (isClear) {
       this._checkpointAwaitingInstantClear = true;
       this._checkpointInstantClearBaseline = this._checkpointReadyFingerprint;
