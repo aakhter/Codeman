@@ -19,6 +19,8 @@ export interface ConfigPort {
   getTerminalHistoryConfig(): Promise<TerminalHistoryConfig>;
   /** COD-75: whether new Claude/non-codex sessions opt into COLORTERM=truecolor (settings.json, default off). */
   getTruecolorEnabled(): Promise<boolean>;
+  /** COD-257: whether newly created sessions enable Agent Checkpoint (settings.json, default on). */
+  getCheckpointDefaultEnabled(): Promise<boolean>;
   getDefaultClaudeMdPath(): Promise<string | undefined>;
   getLightState(identity?: { username: string; role: 'admin' | 'user' }): unknown;
   getLightSessionsState(): unknown[];

@@ -439,12 +439,12 @@ describe('system-routes', () => {
   // ========== GET /api/settings ==========
 
   describe('GET /api/settings', () => {
-    it('returns empty object when settings file does not exist', async () => {
+    it('returns the upgrade-safe checkpoint default when settings file does not exist', async () => {
       mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual({});
+      expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: true });
     });
 
     it('returns parsed settings when file exists', async () => {
@@ -453,7 +453,15 @@ describe('system-routes', () => {
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual(settings);
+      expect(JSON.parse(res.body)).toEqual({ ...settings, checkpointDefaultEnabled: true });
+    });
+
+    it('preserves an explicitly disabled checkpoint default', async () => {
+      mockedReadFile.mockResolvedValue(JSON.stringify({ checkpointDefaultEnabled: false }) as never);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: false });
     });
 
     // COD-242: a reloaded client (after a deploy/upgrade) must get its persisted

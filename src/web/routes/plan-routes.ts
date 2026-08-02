@@ -145,6 +145,7 @@ NOW: Generate the implementation plan for the task above. Think step by step.`;
       claudeMode: planClaudeMode,
       allowedTools: planClaudeModeConfig.allowedTools,
       owner: planOwner,
+      checkpointEnabled: await ctx.getCheckpointDefaultEnabled(),
     });
 
     // Use configured model for plan generation, falling back to opus
@@ -272,6 +273,7 @@ NOW: Generate the implementation plan for the task above. Think step by step.`;
       claudeMode: detailedClaudeMode,
       owner: detailedOwner,
       allowedTools: detailedClaudeModeConfig.allowedTools,
+      checkpointEnabled: await ctx.getCheckpointDefaultEnabled(),
     });
 
     // Store orchestrator for potential cancellation via API (not on disconnect)

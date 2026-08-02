@@ -344,6 +344,7 @@ export function registerRalphRoutes(
       envOverrides,
       effort,
       owner: rlOwner,
+      checkpointEnabled: await ctx.getCheckpointDefaultEnabled(),
     });
 
     // Configure Ralph tracker

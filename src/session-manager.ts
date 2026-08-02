@@ -23,9 +23,11 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
 import { Session } from './session.js';
 import { getStore } from './state-store.js';
 import { SessionState } from './types.js';
+import { dataPath } from './config/instance.js';
 
 /**
  * Events emitted by SessionManager
@@ -71,6 +73,16 @@ export class SessionManager extends EventEmitter {
   constructor() {
     super();
     this.loadFromStore();
+  }
+
+  /** COD-257: CLI-created sessions use the same settings.json authority as web sessions. */
+  private async getCheckpointDefaultEnabled(): Promise<boolean> {
+    try {
+      const settings = JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')) as Record<string, unknown>;
+      return settings.checkpointDefaultEnabled !== false;
+    } catch {
+      return true;
+    }
   }
 
   private loadFromStore(): void {
@@ -120,7 +132,7 @@ export class SessionManager extends EventEmitter {
         throw new Error(`Maximum concurrent sessions (${config.maxConcurrentSessions}) reached`);
       }
 
-      const session = new Session({ workingDir });
+      const session = new Session({ workingDir, checkpointEnabled: await this.getCheckpointDefaultEnabled() });
 
       // Set up event forwarding with stored handlers for cleanup
       const handlers: SessionHandlers = {

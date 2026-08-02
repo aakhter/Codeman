@@ -369,6 +369,7 @@ export class CronService {
       const globalNice = await this.deps.getGlobalNiceConfig();
       const modelConfig = await this.deps.getModelConfig();
       const claudeModeConfig = await this.deps.getClaudeModeConfig();
+      const checkpointEnabled = await this.deps.getCheckpointDefaultEnabled();
       const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, job.owner);
       const model = mode !== 'shell' ? modelConfig?.defaultModel || undefined : undefined;
       // Section 6.3: cron carries no per-CLI config, so buildGeminiCommand(undefined)
@@ -390,6 +391,7 @@ export class CronService {
         allowedTools: claudeModeConfig.allowedTools,
         geminiConfig,
         owner: job.owner,
+        checkpointEnabled,
       });
       this.deps.addSession(session);
       this.store.incrementSessionsCreated();

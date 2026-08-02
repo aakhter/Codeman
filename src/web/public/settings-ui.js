@@ -383,6 +383,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsClaudeModel').value = settings.claudeModel ?? '';
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
+    document.getElementById('appSettingsCheckpointDefault').checked =
+      settings.checkpointDefaultEnabled ?? defaults.checkpointDefaultEnabled ?? true;
     document.getElementById('appSettingsRemoteAutoReconnect').checked = settings.remoteAutoReconnect ?? true;
     document.getElementById('appSettingsThinkingEffort').value = settings.thinkingEffort ?? '';
     document.getElementById('appSettingsHeadroomUrl').value = settings.headroomProxyUrl ?? 'http://192.168.55.175:8787';
@@ -1638,6 +1640,7 @@ Object.assign(CodemanApp.prototype, {
       claudeModel: document.getElementById('appSettingsClaudeModel').value,
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
       truecolorEnabled: document.getElementById('appSettingsTruecolor').checked,
+      checkpointDefaultEnabled: document.getElementById('appSettingsCheckpointDefault').checked,
       remoteAutoReconnect: document.getElementById('appSettingsRemoteAutoReconnect').checked,
       thinkingEffort: document.getElementById('appSettingsThinkingEffort').value,
       headroomProxyUrl: document.getElementById('appSettingsHeadroomUrl').value.trim(),
@@ -2039,6 +2042,7 @@ Object.assign(CodemanApp.prototype, {
       tmuxHistoryLimit: 100000,
       terminalBufferMaxBytes: 32 * 1024 * 1024,
       terminalBufferTrimBytes: 24 * 1024 * 1024,
+      checkpointDefaultEnabled: true,
     };
     const isHandheld =
       MobileDetection.isHandheldDevice?.() ?? MobileDetection.getDeviceType() === 'mobile';

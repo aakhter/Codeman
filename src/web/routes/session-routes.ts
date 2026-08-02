@@ -675,6 +675,7 @@ export function registerSessionRoutes(
     );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
+    const checkpointEnabled = await ctx.getCheckpointDefaultEnabled();
     const session = new Session({
       workingDir,
       mode,
@@ -693,6 +694,7 @@ export function registerSessionRoutes(
       envOverrides: body.envOverrides,
       effort: body.effort,
       truecolorEnabled,
+      checkpointEnabled,
       remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
@@ -2435,11 +2437,13 @@ export function registerSessionRoutes(
     // session's claudeMode, so resolve it for the owner (bypass -> auto for non-granted).
     const runClaudeModeConfig = await ctx.getClaudeModeConfig();
     const runClaudeMode = await resolveClaudeModeForUsername(runClaudeModeConfig.claudeMode, runOwner);
+    const runCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
     const session = new Session({
       workingDir: dir,
       envOverrides: runEnvOverrides,
       claudeMode: runClaudeMode,
       allowedTools: runClaudeModeConfig.allowedTools,
+      checkpointEnabled: runCheckpointEnabled,
       owner: runOwner,
     });
     ctx.addSession(session);
@@ -2777,6 +2781,7 @@ export function registerSessionRoutes(
     );
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
+    const qsCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
     const session = new Session({
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
@@ -2795,6 +2800,7 @@ export function registerSessionRoutes(
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
+      checkpointEnabled: qsCheckpointEnabled,
       remote,
       docker,
       resumeSessionId: dockerResumeId,

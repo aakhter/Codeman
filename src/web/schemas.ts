@@ -818,6 +818,8 @@ export const SettingsUpdateSchema = z
     opusContext1mEnabled: z.boolean().optional(),
     // Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75); default off
     truecolorEnabled: z.boolean().optional(),
+    // Enable Agent Checkpoint for newly created sessions (COD-257); default on when absent.
+    checkpointDefaultEnabled: z.boolean().optional(),
     // Headroom proxy routing (COD-102). empty string for headroomProxyUrl = kill-switch (off).
     headroomProxyUrl: z.string().max(300).optional(),
     headroomRouteClaude: z.boolean().optional(),

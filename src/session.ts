@@ -607,6 +607,8 @@ export class Session extends EventEmitter {
       effort?: EffortLevel;
       /** Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75 app setting; default off). */
       truecolorEnabled?: boolean;
+      /** Enable Agent Checkpoint for this newly created session (COD-257 app default). */
+      checkpointEnabled?: boolean;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Restored per-session reference sources (COD-65). */
@@ -788,6 +790,9 @@ export class Session extends EventEmitter {
     this._autoOps.on('limitPauseScheduled', (data) => this.emit('limitPauseScheduled', data));
     this._autoOps.on('limitResume', (data) => this.emit('limitResume', data));
     this._autoOps.on('limitResumeCancelled', (data) => this.emit('limitResumeCancelled', data));
+    if (typeof config.checkpointEnabled === 'boolean') {
+      this._autoOps.setCheckpoint(config.checkpointEnabled);
+    }
     this._autoOps.restoreCheckpointState(config.checkpointState);
   }
 

@@ -649,6 +649,7 @@ export class WebServer extends EventEmitter {
       getClaudeModeConfig: this.getClaudeModeConfig.bind(this),
       getTerminalHistoryConfig: this.getTerminalHistoryConfig.bind(this),
       getTruecolorEnabled: this.getTruecolorEnabled.bind(this),
+      getCheckpointDefaultEnabled: this.getCheckpointDefaultEnabled.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
       getLightSessionsState: this.getLightSessionsState.bind(this),
@@ -1623,6 +1624,12 @@ export class WebServer extends EventEmitter {
     return settings.truecolorEnabled === true;
   }
 
+  // COD-257: new sessions opt into Agent Checkpoint unless settings.json explicitly disables it.
+  private async getCheckpointDefaultEnabled(): Promise<boolean> {
+    const settings = await this.readSettings();
+    return settings.checkpointDefaultEnabled !== false;
+  }
+
   // Helper to get model configuration from settings
   private async getModelConfig(): Promise<{
     defaultModel?: string;
@@ -1699,6 +1706,7 @@ export class WebServer extends EventEmitter {
 
       let session: Session | null = null;
       try {
+        const checkpointEnabled = await this.getCheckpointDefaultEnabled();
         // Create a session for this iteration.
         if (isMultiUserMode()) {
           // §6.3: resolve the permission mode with the RUN OWNER (a non-granted user
@@ -1710,11 +1718,12 @@ export class WebServer extends EventEmitter {
             owner: run.owner,
             claudeMode: await resolveClaudeModeForUsername(scheduledClaudeCfg.claudeMode, run.owner),
             allowedTools: scheduledClaudeCfg.allowedTools,
+            checkpointEnabled,
           });
         } else {
-          // Single-user: build EXACTLY as master (bare workingDir → Session's default
-          // mode) so the flag-off path stays byte-identical.
-          session = new Session({ workingDir: run.workingDir });
+          // Single-user: preserve the legacy mode selection while seeding the
+          // server-authoritative Agent Checkpoint default.
+          session = new Session({ workingDir: run.workingDir, checkpointEnabled });
         }
         this.sessions.set(session.id, session);
         this.store.incrementSessionsCreated();

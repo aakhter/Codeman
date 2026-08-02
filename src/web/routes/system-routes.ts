@@ -655,7 +655,10 @@ export function registerSystemRoutes(
 
   // ========== Settings ===
   app.get('/api/settings', async () => {
-    return readJsonConfig(SETTINGS_PATH, 'settings', {});
+    const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'settings', {});
+    // COD-257: clients always receive the effective server default. localStorage
+    // mirrors this value but never becomes the authority across rebuilds/upgrades.
+    return { ...settings, checkpointDefaultEnabled: settings.checkpointDefaultEnabled !== false };
   });
 
   app.put('/api/settings', async (req) => {

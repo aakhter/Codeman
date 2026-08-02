@@ -136,13 +136,14 @@ export class PlanOrchestrator {
   private claudeMode?: ClaudeMode;
   private owner?: string;
   private allowedTools?: string;
+  private checkpointEnabled?: boolean;
 
   constructor(
     mux: TerminalMultiplexer,
     workingDir: string = process.cwd(),
     outputDir?: string,
     modelConfig?: { defaultModel?: string; agentTypeOverrides?: Record<string, string> },
-    security?: { claudeMode?: ClaudeMode; owner?: string; allowedTools?: string }
+    security?: { claudeMode?: ClaudeMode; owner?: string; allowedTools?: string; checkpointEnabled?: boolean }
   ) {
     this.mux = mux;
     this.workingDir = workingDir;
@@ -152,6 +153,7 @@ export class PlanOrchestrator {
     this.claudeMode = security?.claudeMode;
     this.owner = security?.owner;
     this.allowedTools = security?.allowedTools;
+    this.checkpointEnabled = security?.checkpointEnabled;
   }
 
   private saveAgentOutput(agentType: string, prompt: string, result: unknown, durationMs: number): void {
@@ -440,6 +442,7 @@ export class PlanOrchestrator {
       claudeMode: this.claudeMode,
       allowedTools: this.allowedTools,
       owner: this.owner,
+      checkpointEnabled: this.checkpointEnabled,
     });
 
     this.runningSessions.add(session);
@@ -600,6 +603,7 @@ export class PlanOrchestrator {
       claudeMode: this.claudeMode,
       allowedTools: this.allowedTools,
       owner: this.owner,
+      checkpointEnabled: this.checkpointEnabled,
     });
 
     this.runningSessions.add(session);

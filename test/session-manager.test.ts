@@ -7,6 +7,13 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
+
+vi.mock('node:fs/promises', () => ({
+  readFile: vi.fn(async () => '{}'),
+}));
+
+const mockedReadFile = vi.mocked(readFile);
 
 // Mock state that can be accessed by both mocks and tests
 const mockState = vi.hoisted(() => ({
@@ -51,12 +58,14 @@ vi.mock('../src/session.js', () => {
     _started = false;
     _stopped = false;
     _parked = false;
+    checkpointEnabled: boolean | undefined;
     resumeSessionId: string | undefined = undefined;
 
-    constructor(options: { workingDir: string }) {
+    constructor(options: { workingDir: string; checkpointEnabled?: boolean }) {
       super();
       this.id = `session-${Math.random().toString(36).substr(2, 9)}`;
       this.workingDir = options.workingDir;
+      this.checkpointEnabled = options.checkpointEnabled;
       mockState.sessions.set(this.id, this);
     }
 
@@ -142,6 +151,14 @@ describe('SessionManager', () => {
   });
 
   describe('createSession', () => {
+    it('seeds CLI-created sessions from settings.json', async () => {
+      mockedReadFile.mockResolvedValueOnce(JSON.stringify({ checkpointDefaultEnabled: false }) as never);
+
+      const session = await manager.createSession('/tmp/test');
+
+      expect(session.checkpointEnabled).toBe(false);
+    });
+
     it('should create and start a new session', async () => {
       const session = await manager.createSession('/tmp/test');
 
