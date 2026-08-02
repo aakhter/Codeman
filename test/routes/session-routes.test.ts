@@ -1995,6 +1995,22 @@ and effort involved in moving workloads.
   // ========== POST /api/sessions (with resumeSessionId) ==========
 
   describe('POST /api/sessions with resumeSessionId', () => {
+    it('seeds a standard new session from the server checkpoint default', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+      harness.ctx.getCheckpointDefaultEnabled.mockResolvedValueOnce(true);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'shell' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const created = harness.ctx.addSession.mock.calls.at(-1)?.[0];
+      expect(created?.checkpointEnabled).toBe(true);
+    });
+
     it('creates session from a remote case without local stat validation', async () => {
       remoteStore.hosts = [
         {
@@ -2079,6 +2095,7 @@ and effort involved in moving workloads.
           },
         ];
         remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+        harness.ctx.getCheckpointDefaultEnabled.mockResolvedValueOnce(false);
 
         const res = await harness.app.inject({
           method: 'POST',
@@ -2091,6 +2108,7 @@ and effort involved in moving workloads.
         expect(body.success).toBe(true);
         expect(body.data.casePath).toBe('/home/ubuntu/work');
         const session = [...harness.ctx.sessions.values()].find((item) => item.id === body.data.sessionId);
+        expect(session?.checkpointEnabled).toBe(false);
         expect(session?.toState()).toMatchObject({
           workingDir: '/home/ubuntu/work',
           remote: expect.objectContaining({

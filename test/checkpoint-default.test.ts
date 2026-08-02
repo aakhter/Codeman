@@ -51,11 +51,11 @@ describe('COD-257 checkpoint default', () => {
   });
 
   it('keeps restored sessions on their saved checkpoint value rather than the app default', () => {
-    const server = readFileSync(new URL('../src/web/server.ts', import.meta.url), 'utf8');
+    const restored = new Session({ workingDir: '/tmp', checkpointEnabled: true });
+    restored.restoreCheckpoint(false, ['clear']);
 
-    expect(server).toContain(
-      'session.restoreCheckpoint(savedState.checkpointEnabled ?? false, savedState.checkpointModes)'
-    );
+    expect(restored.checkpointEnabled).toBe(false);
+    expect(restored.checkpointModes).toEqual(['clear']);
   });
 
   it('round-trips an upgrade-safe Automation switch through server-synchronized settings', () => {

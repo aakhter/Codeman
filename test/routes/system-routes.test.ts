@@ -479,6 +479,25 @@ describe('system-routes', () => {
   // ========== PUT /api/settings ==========
 
   describe('PUT /api/settings', () => {
+    it('persists and returns checkpointDefaultEnabled across a settings round-trip', async () => {
+      mockedReadFile.mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+      const put = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/settings',
+        payload: { checkpointDefaultEnabled: false },
+      });
+
+      expect(put.statusCode).toBe(200);
+      const written = mockedWriteFile.mock.calls.at(-1)?.[1] as string;
+      expect(JSON.parse(written).checkpointDefaultEnabled).toBe(false);
+      mockedReadFile.mockResolvedValueOnce(written as never);
+
+      const get = await harness.app.inject({ method: 'GET', url: '/api/settings' });
+      expect(get.statusCode).toBe(200);
+      expect(JSON.parse(get.body).checkpointDefaultEnabled).toBe(false);
+    });
+
     it('saves valid settings', async () => {
       mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 

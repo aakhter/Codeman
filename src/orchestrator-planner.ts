@@ -22,8 +22,10 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { readFile } from 'node:fs/promises';
 import { PlanOrchestrator, type DetailedPlanResult, type ProgressCallback } from './plan-orchestrator.js';
 import type { TerminalMultiplexer } from './mux-interface.js';
+import { dataPath } from './config/instance.js';
 import type {
   PlanItem,
   TddPhase,
@@ -76,6 +78,16 @@ export class OrchestratorPlanner {
     this.config = config;
   }
 
+  /** COD-257: OrchestratorLoop planner agents honor the persistent global default. */
+  private async getCheckpointDefaultEnabled(): Promise<boolean> {
+    try {
+      const settings = JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')) as Record<string, unknown>;
+      return settings.checkpointDefaultEnabled !== false;
+    } catch {
+      return true;
+    }
+  }
+
   /**
    * Generate a phased plan from a user goal.
    *
@@ -85,9 +97,13 @@ export class OrchestratorPlanner {
     const startTime = Date.now();
 
     // Create a PlanOrchestrator for this plan generation
-    this.orchestrator = new PlanOrchestrator(this.mux, this.workingDir, undefined, {
-      defaultModel: this.config.plannerModel,
-    });
+    this.orchestrator = new PlanOrchestrator(
+      this.mux,
+      this.workingDir,
+      undefined,
+      { defaultModel: this.config.plannerModel },
+      { checkpointEnabled: await this.getCheckpointDefaultEnabled() }
+    );
 
     try {
       onProgress?.('planning', 'Generating detailed plan...');

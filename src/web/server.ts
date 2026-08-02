@@ -1626,7 +1626,9 @@ export class WebServer extends EventEmitter {
 
   // COD-257: new sessions opt into Agent Checkpoint unless settings.json explicitly disables it.
   private async getCheckpointDefaultEnabled(): Promise<boolean> {
-    const settings = await this.readSettings();
+    // This value is saved immediately before a user may create a session, so it
+    // must not inherit the general two-second burst cache used by other reads.
+    const settings = await this.readSettings(true);
     return settings.checkpointDefaultEnabled !== false;
   }
 
