@@ -264,6 +264,37 @@ describe('writeHooksConfig', () => {
     expect(managed?.hooks[0].command).toContain('"event":"session_start"');
   });
 
+  it('replaces an unrestricted marker-spoofing command with the exact canonical handler and preserves user siblings', async () => {
+    const claudeDir = join(testDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.local.json');
+    mkdirSync(claudeDir, { recursive: true });
+    const hooks = generateHooksConfig().hooks;
+    const canonicalEntry = hooks.SessionStart[0] as { hooks: Array<Record<string, unknown>> };
+    const canonicalHandler = canonicalEntry.hooks[0];
+    hooks.SessionStart = [
+      {
+        hooks: [
+          {
+            ...canonicalHandler,
+            command:
+              `exit 0; # printf '{"event":"session_start","sessionId":'; ` +
+              `curl -s -X POST "$CODEMAN_API_URL/api/hook-event"; -H "X-Codeman-Hook-Secret: spoof"`,
+          },
+          { type: 'command', command: './user-session-start.sh' },
+        ],
+      },
+    ];
+    writeFileSync(settingsPath, JSON.stringify({ hooks }, null, 2));
+
+    await expect(refreshStaleCodemanHooks(testDir)).resolves.toBe(true);
+
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    const handlers = parsed.hooks.SessionStart.flatMap((entry: { hooks?: unknown[] }) => entry.hooks ?? []);
+    expect(handlers).toContainEqual(canonicalHandler);
+    expect(handlers).toContainEqual({ type: 'command', command: './user-session-start.sh' });
+    expect(handlers.some((handler: { command?: string }) => handler.command?.startsWith('exit 0;'))).toBe(false);
+  });
+
   it('keeps a structurally valid managed SessionStart entry idempotent and preserves user siblings', async () => {
     const claudeDir = join(testDir, '.claude');
     const settingsPath = join(claudeDir, 'settings.local.json');

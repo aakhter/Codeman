@@ -112,5 +112,6 @@ explicit local hook verification/migration; remote or arbitrary hookless project
 a 240-second total deadline, covering the server's 30-second readiness plus 180-second operation lifecycle with margin,
 while a missing or evicted run still fails after 20 short polls.
 
-Readiness is structural, not substring-based: `SessionStart` must contain an unrestricted command handler that posts the
-exact `session_start` event to `/api/hook-event` with the managed hook-secret header. Migration re-verifies persisted output.
+Readiness is structural, not substring-based: `SessionStart` must contain an unrestricted handler deeply equal to the
+canonical generated command, timeout, and fields. Marker text in comments or no-op commands cannot qualify. Migration
+re-verifies persisted output.

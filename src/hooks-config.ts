@@ -27,6 +27,7 @@
 import { existsSync } from 'node:fs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import type { HookEventType } from './types.js';
 import { HOOK_TIMEOUT_SECONDS } from './config/auth-config.js';
@@ -54,6 +55,26 @@ const BACKGROUND_WAKE_MARKER_PREFIX = 'CODEMAN_BACKGROUND_REWAKE_V';
  */
 const BACKGROUND_WAKE_MARKER = `${BACKGROUND_WAKE_MARKER_PREFIX}2`;
 const BACKGROUND_WAKE_TIMEOUT_SECONDS = 6 * 60 * 60;
+
+function generateHookCommand(event: HookEventType): string {
+  return (
+    `HOOK_DATA=$(cat 2>/dev/null || echo '{}'); ` +
+    `printf '{"event":"${event}","sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$HOOK_DATA" | ` +
+    `curl -s -X POST "$CODEMAN_API_URL/api/hook-event" ` +
+    `-H 'Content-Type: application/json' ` +
+    `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
+    `--data @- ` +
+    `2>/dev/null || true`
+  );
+}
+
+function generateSessionStartHookEntry(): {
+  hooks: Array<{ type: 'command'; command: string; timeout: number }>;
+} {
+  return {
+    hooks: [{ type: 'command', command: generateHookCommand('session_start'), timeout: HOOK_TIMEOUT_SECONDS }],
+  };
+}
 
 /**
  * Inline Node helper for Claude Code's `asyncRewake` hook.
@@ -170,14 +191,7 @@ export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
   // never lands in this config and rotation needs no respawn. If the var/file is
   // missing the header is empty — the middleware then allows the request only on
   // the plain loopback bypass (tunnel down), same as pre-secret behavior.
-  const curlCmd = (event: HookEventType) =>
-    `HOOK_DATA=$(cat 2>/dev/null || echo '{}'); ` +
-    `printf '{"event":"${event}","sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$HOOK_DATA" | ` +
-    `curl -s -X POST "$CODEMAN_API_URL/api/hook-event" ` +
-    `-H 'Content-Type: application/json' ` +
-    `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
-    `--data @- ` +
-    `2>/dev/null || true`;
+  const curlCmd = generateHookCommand;
 
   return {
     hooks: {
@@ -202,11 +216,7 @@ export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
       ],
       // No matcher: Claude emits SessionStart for startup/resume and conversation
       // transitions including /clear, /compact, and supported /new behavior.
-      SessionStart: [
-        {
-          hooks: [{ type: 'command', command: curlCmd('session_start'), timeout: HOOK_TIMEOUT_SECONDS }],
-        },
-      ],
+      SessionStart: [generateSessionStartHookEntry()],
       TeammateIdle: [
         {
           hooks: [{ type: 'command', command: curlCmd('teammate_idle'), timeout: HOOK_TIMEOUT_SECONDS }],
@@ -250,6 +260,7 @@ function hasManagedSessionStartHook(hooksValue: unknown): boolean {
   if (!hooksValue || typeof hooksValue !== 'object' || Array.isArray(hooksValue)) return false;
   const entries = (hooksValue as Record<string, unknown>).SessionStart;
   if (!Array.isArray(entries)) return false;
+  const expectedHandler = generateSessionStartHookEntry().hooks[0];
   return entries.some((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
     const record = entry as Record<string, unknown>;
@@ -258,13 +269,7 @@ function hasManagedSessionStartHook(hooksValue: unknown): boolean {
     if (!Array.isArray(record.hooks)) return false;
     return record.hooks.some((handler) => {
       if (!handler || typeof handler !== 'object' || Array.isArray(handler)) return false;
-      const candidate = handler as Record<string, unknown>;
-      if (candidate.type !== 'command' || typeof candidate.command !== 'string') return false;
-      return (
-        candidate.command.includes(`printf '{"event":"session_start","sessionId":`) &&
-        candidate.command.includes(`curl -s -X POST "$CODEMAN_API_URL/api/hook-event"`) &&
-        candidate.command.includes(`-H "X-Codeman-Hook-Secret:`)
-      );
+      return isDeepStrictEqual(handler, expectedHandler);
     });
   });
 }
