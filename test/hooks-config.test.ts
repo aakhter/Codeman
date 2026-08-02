@@ -14,6 +14,7 @@ import {
   generateBackgroundWakeScript,
   generateHooksConfig,
   refreshStaleCodemanHooks,
+  verifyClaudeSessionStartHookCapability,
   writeHooksConfig,
 } from '../src/hooks-config.js';
 
@@ -226,6 +227,27 @@ describe('writeHooksConfig', () => {
     const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
     expect(parsed.hooks.SessionStart).toHaveLength(1);
     expect(JSON.stringify(parsed.hooks.SessionStart)).toContain('session_start');
+  });
+
+  it('verifies Claude fresh-thread hook capability for absent, current, migrated, and remote cases', async () => {
+    const absent = join(testDir, 'absent');
+    mkdirSync(absent, { recursive: true });
+    await expect(verifyClaudeSessionStartHookCapability('claude', absent, false)).resolves.toBe(false);
+
+    const current = join(testDir, 'current');
+    await writeHooksConfig(current);
+    await expect(verifyClaudeSessionStartHookCapability('claude', current, false)).resolves.toBe(true);
+
+    const migrated = join(testDir, 'migrated');
+    const migratedClaudeDir = join(migrated, '.claude');
+    mkdirSync(migratedClaudeDir, { recursive: true });
+    const legacyHooks = generateHooksConfig().hooks;
+    delete legacyHooks.SessionStart;
+    writeFileSync(join(migratedClaudeDir, 'settings.local.json'), JSON.stringify({ hooks: legacyHooks }, null, 2));
+    await expect(verifyClaudeSessionStartHookCapability('claude', migrated, false)).resolves.toBe(true);
+
+    await expect(verifyClaudeSessionStartHookCapability('claude', current, true)).resolves.toBe(false);
+    await expect(verifyClaudeSessionStartHookCapability('codex', absent, true)).resolves.toBe(true);
   });
 
   it('should replace an older rewake script version without duplicating it', async () => {

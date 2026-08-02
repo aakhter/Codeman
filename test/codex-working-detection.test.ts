@@ -244,7 +244,11 @@ describe('checkpoint prompt observations', () => {
 
   it('runs a Claude new handoff with only /new and preserves it through hook adoption', async () => {
     vi.useFakeTimers();
-    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'claude',
+      claudeSessionStartHookReady: true,
+    });
     const sent: string[] = [];
     const internals = session as unknown as {
       _mux: {
@@ -300,6 +304,16 @@ describe('checkpoint prompt observations', () => {
     session.setCheckpoint(true, ['compact']);
     expect(session.requestCheckpoint({ mode: 'compact' })).toEqual({ triggered: true, runId: expect.any(String) });
     session.cancelCheckpoint('test-cleanup');
+    await session.stop();
+  });
+
+  it('defaults new Claude sessions to fail-closed fresh-thread capability unless explicitly proven', async () => {
+    const session = new Session({ workingDir: '/arbitrary/project', mode: 'claude' });
+    session.setCheckpoint(true, ['clear']);
+    expect(session.requestCheckpoint({ mode: 'clear' })).toEqual({
+      triggered: false,
+      reason: 'session-start-hook-unavailable',
+    });
     await session.stop();
   });
 

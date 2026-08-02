@@ -29,6 +29,7 @@ import type { SessionPort, EventPort, ConfigPort, InfraPort } from '../web/ports
 import type { CronJob, CronJobRun, CronJobRunStatus, TriggerType } from '../types/cron.js';
 import type { GeminiConfig } from '../types/session.js';
 import type { CronJobInput } from './cron-input.js';
+import { verifyClaudeSessionStartHookCapability } from '../hooks-config.js';
 
 /** The subset of the route context the cron depends on. */
 export type CronDeps = SessionPort & EventPort & ConfigPort & InfraPort;
@@ -370,6 +371,7 @@ export class CronService {
       const modelConfig = await this.deps.getModelConfig();
       const claudeModeConfig = await this.deps.getClaudeModeConfig();
       const checkpointEnabled = await this.deps.getCheckpointDefaultEnabled();
+      const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability(mode, job.workingDir, false);
       const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, job.owner);
       const model = mode !== 'shell' ? modelConfig?.defaultModel || undefined : undefined;
       // Section 6.3: cron carries no per-CLI config, so buildGeminiCommand(undefined)
@@ -392,6 +394,7 @@ export class CronService {
         geminiConfig,
         owner: job.owner,
         checkpointEnabled,
+        claudeSessionStartHookReady,
       });
       this.deps.addSession(session);
       this.store.incrementSessionsCreated();

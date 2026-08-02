@@ -27,7 +27,7 @@ const pkg = require('../package.json') as { version: string };
 
 const program = new Command();
 
-const CHECKPOINT_WAIT_TIMEOUT_MS = 120_000;
+const CHECKPOINT_WAIT_TIMEOUT_MS = 240_000;
 const CHECKPOINT_WAIT_MAX_MISSING_POLLS = 20;
 
 type CheckpointWaitDecision =

@@ -15,6 +15,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyMultipart from '@fastify/multipart';
@@ -22,6 +25,7 @@ import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { Session } from '../../src/session.js';
+import { writeHooksConfig } from '../../src/hooks-config.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
@@ -1998,6 +2002,57 @@ and effort involved in moving workloads.
   // ========== POST /api/sessions (with resumeSessionId) ==========
 
   describe('POST /api/sessions with resumeSessionId', () => {
+    it('fails closed for a new arbitrary local Claude session without verified hooks', async () => {
+      const workingDir = await mkdtemp(join(tmpdir(), 'codeman-route-no-hooks-'));
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { workingDir, mode: 'claude' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+      created.setCheckpoint(true, ['new']);
+      expect(created.requestCheckpoint({ mode: 'new' })).toEqual({
+        triggered: false,
+        reason: 'session-start-hook-unavailable',
+      });
+    });
+
+    it('enables a new local Claude session only after current hooks are verified', async () => {
+      const workingDir = await mkdtemp(join(tmpdir(), 'codeman-route-current-hooks-'));
+      await writeHooksConfig(workingDir);
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { workingDir, mode: 'claude' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+      created.setCheckpoint(true, ['new']);
+      expect(created.requestCheckpoint({ mode: 'new' })).toEqual({ triggered: true, runId: expect.any(String) });
+      created.cancelCheckpoint('test-cleanup');
+    });
+
+    it('fails closed for a new remote Claude session', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'claude' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+      created.setCheckpoint(true, ['clear']);
+      expect(created.requestCheckpoint({ mode: 'clear' })).toEqual({
+        triggered: false,
+        reason: 'session-start-hook-unavailable',
+      });
+    });
+
     it('seeds a standard new session from the server checkpoint default', async () => {
       remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
       remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];

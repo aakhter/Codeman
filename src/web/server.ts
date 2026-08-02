@@ -43,7 +43,7 @@ import { hostname as getHostname } from 'node:os';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
 import { normalizeSettingsObject } from '../config/settings.js';
 import { getHookSecret } from '../config/hook-secret.js';
-import { refreshStaleCodemanHooks } from '../hooks-config.js';
+import { verifyClaudeSessionStartHookCapability } from '../hooks-config.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
@@ -144,9 +144,7 @@ export async function refreshRestoredClaudeHookCapability(
   workingDir: string,
   remote: SessionRemote | undefined
 ): Promise<boolean> {
-  if (mode !== 'claude') return true;
-  if (remote) return false;
-  return refreshStaleCodemanHooks(workingDir).catch(() => false);
+  return verifyClaudeSessionStartHookCapability(mode, workingDir, Boolean(remote));
 }
 import {
   getErrorMessage,
@@ -1762,6 +1760,11 @@ export class WebServer extends EventEmitter {
       let session: Session | null = null;
       try {
         const checkpointEnabled = await this.getCheckpointDefaultEnabled();
+        const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability(
+          'claude',
+          run.workingDir,
+          false
+        );
         // Create a session for this iteration.
         if (isMultiUserMode()) {
           // §6.3: resolve the permission mode with the RUN OWNER (a non-granted user
@@ -1774,11 +1777,12 @@ export class WebServer extends EventEmitter {
             claudeMode: await resolveClaudeModeForUsername(scheduledClaudeCfg.claudeMode, run.owner),
             allowedTools: scheduledClaudeCfg.allowedTools,
             checkpointEnabled,
+            claudeSessionStartHookReady,
           });
         } else {
           // Single-user: preserve the legacy mode selection while seeding the
           // server-authoritative Agent Checkpoint default.
-          session = new Session({ workingDir: run.workingDir, checkpointEnabled });
+          session = new Session({ workingDir: run.workingDir, checkpointEnabled, claudeSessionStartHookReady });
         }
         this.sessions.set(session.id, session);
         this.store.incrementSessionsCreated();

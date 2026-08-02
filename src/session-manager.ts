@@ -29,6 +29,7 @@ import { getStore } from './state-store.js';
 import { SessionState } from './types.js';
 import { dataPath } from './config/instance.js';
 import { normalizeSettingsObject } from './config/settings.js';
+import { verifyClaudeSessionStartHookCapability } from './hooks-config.js';
 
 /**
  * Events emitted by SessionManager
@@ -133,7 +134,11 @@ export class SessionManager extends EventEmitter {
         throw new Error(`Maximum concurrent sessions (${config.maxConcurrentSessions}) reached`);
       }
 
-      const session = new Session({ workingDir, checkpointEnabled: await this.getCheckpointDefaultEnabled() });
+      const session = new Session({
+        workingDir,
+        checkpointEnabled: await this.getCheckpointDefaultEnabled(),
+        claudeSessionStartHookReady: await verifyClaudeSessionStartHookCapability('claude', workingDir, false),
+      });
 
       // Set up event forwarding with stored handlers for cleanup
       const handlers: SessionHandlers = {

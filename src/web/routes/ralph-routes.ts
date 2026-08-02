@@ -24,7 +24,7 @@ import {
   parseBody,
 } from '../route-helpers.js';
 import { resolveClaudeModeForUsername } from '../../user-store.js';
-import { writeHooksConfig, stripCaseEnvKeys } from '../../hooks-config.js';
+import { writeHooksConfig, stripCaseEnvKeys, verifyClaudeSessionStartHookCapability } from '../../hooks-config.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { buildRalphLoopPrompt } from '../../prompts/index.js';
 import { getLifecycleLog } from '../../session-lifecycle-log.js';
@@ -332,6 +332,7 @@ export function registerRalphRoutes(
     const rlModelConfig = await ctx.getModelConfig();
     const rlClaudeModeConfig = await ctx.getClaudeModeConfig();
     const rlClaudeMode = await resolveClaudeModeForUsername(rlClaudeModeConfig.claudeMode, rlOwner);
+    const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability('claude', casePath, false);
     const session = new Session({
       workingDir: casePath,
       mux: ctx.mux,
@@ -345,6 +346,7 @@ export function registerRalphRoutes(
       effort,
       owner: rlOwner,
       checkpointEnabled: await ctx.getCheckpointDefaultEnabled(),
+      claudeSessionStartHookReady,
     });
 
     // Configure Ralph tracker

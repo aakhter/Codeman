@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RESEARCH_AGENT_PROMPT, PLANNER_PROMPT } from './prompts/index.js';
 import { getErrorMessage, type PlanItem, type ClaudeMode } from './types.js';
+import { verifyClaudeSessionStartHookCapability } from './hooks-config.js';
 
 // Re-export for backward compatibility
 export type { PlanItem };
@@ -431,6 +432,7 @@ export class PlanOrchestrator {
       detail: 'Researching...',
     });
 
+    const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability('claude', this.workingDir, false);
     const session = new Session({
       workingDir: this.workingDir,
       mux: this.mux,
@@ -443,6 +445,7 @@ export class PlanOrchestrator {
       allowedTools: this.allowedTools,
       owner: this.owner,
       checkpointEnabled: this.checkpointEnabled,
+      claudeSessionStartHookReady,
     });
 
     this.runningSessions.add(session);
@@ -594,6 +597,7 @@ export class PlanOrchestrator {
       detail: 'Generating plan...',
     });
 
+    const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability('claude', this.workingDir, false);
     const session = new Session({
       workingDir: this.workingDir,
       mux: this.mux,
@@ -604,6 +608,7 @@ export class PlanOrchestrator {
       allowedTools: this.allowedTools,
       owner: this.owner,
       checkpointEnabled: this.checkpointEnabled,
+      claudeSessionStartHookReady,
     });
 
     this.runningSessions.add(session);

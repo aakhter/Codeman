@@ -106,3 +106,8 @@ Existing local and bind-mounted Claude sessions are migrated during server recov
 CLI because Claude Code's documented settings file watcher automatically reloads direct hook edits without a restart.
 Restored remote sessions cannot have their project settings verified from the Codeman host, so fresh-thread (`clear`/`new`)
 checkpoint requests fail closed with `session-start-hook-unavailable`; `compact` remains available.
+
+New Claude sessions also default to fresh-thread capability off. Every production constructor receives the result of an
+explicit local hook verification/migration; remote or arbitrary hookless projects remain fenced. The external CLI wait uses
+a 240-second total deadline, covering the server's 30-second readiness plus 180-second operation lifecycle with margin,
+while a missing or evicted run still fails after 20 short polls.

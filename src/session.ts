@@ -661,7 +661,7 @@ export class Session extends EventEmitter {
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
     this._claudeSessionIdentityAdopted = Boolean(config.resumeSessionId);
-    this._claudeSessionStartHookReady = config.claudeSessionStartHookReady ?? true;
+    this._claudeSessionStartHookReady = config.claudeSessionStartHookReady ?? this.mode !== 'claude';
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;

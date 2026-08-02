@@ -478,6 +478,17 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
   });
 }
 
+/** Verify authoritative fresh-thread identity support without imposing hooks on arbitrary projects. */
+export async function verifyClaudeSessionStartHookCapability(
+  mode: string,
+  casePath: string,
+  remote: boolean
+): Promise<boolean> {
+  if (mode !== 'claude') return true;
+  if (remote) return false;
+  return refreshStaleCodemanHooks(casePath).catch(() => false);
+}
+
 /** Unique marker identifying Codeman's own statusLine command (vs a user's). */
 const STATUSLINE_MARKER = '/api/status-telemetry';
 

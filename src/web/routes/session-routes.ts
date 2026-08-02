@@ -69,6 +69,7 @@ import {
   stripCaseEnvKeys,
   applyStatusLineConfig,
   refreshStaleCodemanHooks,
+  verifyClaudeSessionStartHookCapability,
 } from '../../hooks-config.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { imageWatcher } from '../../image-watcher.js';
@@ -472,6 +473,7 @@ export function registerSessionRoutes(
     const body = parseBody(CreateSessionSchema, req.body);
     let workingDir = body.workingDir || process.cwd();
     let remote = undefined;
+    const mode = body.mode || 'claude';
 
     // COD-105 — attach to a discovered (non-owned) remote tmux session. The
     // remote session is already running, so we skip the tmux-prereq probe and
@@ -574,9 +576,7 @@ export function registerSessionRoutes(
     // COD-91 self-heal: refresh a pre-secret hooks block in an existing case so the now
     // unconditional hook-secret gate keeps accepting its hook events. No-op for fresh
     // cases (writeHooksConfig already wrote the secret) and for non-Codeman/absent hooks.
-    if ((body.mode ?? 'claude') === 'claude') {
-      await refreshStaleCodemanHooks(workingDir).catch(() => {});
-    }
+    const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability(mode, workingDir, Boolean(remote));
 
     // Check OpenCode availability if requested
     if (body.mode === 'opencode') {
@@ -651,7 +651,6 @@ export function registerSessionRoutes(
 
     const globalNice = await ctx.getGlobalNiceConfig();
     const modelConfig = await ctx.getModelConfig();
-    const mode = body.mode || 'claude';
     const model =
       mode === 'opencode'
         ? body.openCodeConfig?.model
@@ -695,6 +694,7 @@ export function registerSessionRoutes(
       effort: body.effort,
       truecolorEnabled,
       checkpointEnabled,
+      claudeSessionStartHookReady,
       remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
@@ -2280,12 +2280,14 @@ export function registerSessionRoutes(
     const runClaudeModeConfig = await ctx.getClaudeModeConfig();
     const runClaudeMode = await resolveClaudeModeForUsername(runClaudeModeConfig.claudeMode, runOwner);
     const runCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
+    const runClaudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability('claude', dir, false);
     const session = new Session({
       workingDir: dir,
       envOverrides: runEnvOverrides,
       claudeMode: runClaudeMode,
       allowedTools: runClaudeModeConfig.allowedTools,
       checkpointEnabled: runCheckpointEnabled,
+      claudeSessionStartHookReady: runClaudeSessionStartHookReady,
       owner: runOwner,
     });
     ctx.addSession(session);
@@ -2624,6 +2626,11 @@ export function registerSessionRoutes(
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
     const qsCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
+    const qsClaudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability(
+      mode,
+      resolvedCasePath,
+      Boolean(remote)
+    );
     const session = new Session({
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
@@ -2643,6 +2650,7 @@ export function registerSessionRoutes(
       effort,
       truecolorEnabled: qsTruecolorEnabled,
       checkpointEnabled: qsCheckpointEnabled,
+      claudeSessionStartHookReady: qsClaudeSessionStartHookReady,
       remote,
       docker,
       resumeSessionId: dockerResumeId,
