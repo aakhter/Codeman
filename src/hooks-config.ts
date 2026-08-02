@@ -200,6 +200,13 @@ export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
           hooks: [{ type: 'command', command: curlCmd('stop'), timeout: HOOK_TIMEOUT_SECONDS }],
         },
       ],
+      // No matcher: Claude emits SessionStart for startup/resume and conversation
+      // transitions including /clear, /compact, and supported /new behavior.
+      SessionStart: [
+        {
+          hooks: [{ type: 'command', command: curlCmd('session_start'), timeout: HOOK_TIMEOUT_SECONDS }],
+        },
+      ],
       TeammateIdle: [
         {
           hooks: [{ type: 'command', command: curlCmd('teammate_idle'), timeout: HOOK_TIMEOUT_SECONDS }],

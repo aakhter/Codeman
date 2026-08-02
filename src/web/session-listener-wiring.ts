@@ -47,7 +47,7 @@ export interface SessionListenerRefs {
   taskFailed: (task: BackgroundTask, error: string) => void;
   autoClear: (data: { tokens: number; threshold: number }) => void;
   autoCompact: (data: { tokens: number; threshold: number; prompt?: string }) => void;
-  checkpointStart: (data: { mode: 'compact' | 'clear' }) => void;
+  checkpointStart: (data: { mode: 'compact' | 'clear' | 'new'; runId?: string }) => void;
   checkpointProgress: (data: CheckpointProgress) => void;
   limitPauseScheduled: (data: { resetAt: number; resumeAt: number; matched: string }) => void;
   limitResume: (data: { attempt: number }) => void;
@@ -266,7 +266,7 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
     },
 
     /** Legacy additive compatibility event; progress owns status persistence. */
-    checkpointStart: (data: { mode: 'compact' | 'clear' }) => {
+    checkpointStart: (data: { mode: 'compact' | 'clear' | 'new'; runId?: string }) => {
       deps.broadcast(SseEvent.SessionCheckpoint, { sessionId: session.id, phase: 'start', ...data });
     },
 

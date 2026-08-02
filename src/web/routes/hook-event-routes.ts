@@ -59,9 +59,9 @@ export function registerHookEventRoutes(
       }
     }
 
-    // Sync Claude's current conversation id. Interactive PTY mode never emits
-    // `session_id` on stdout, so hooks are the only reliable way to learn that
-    // the user ran `/clear` (which spins up a new conversation jsonl).
+    // Sync Claude's current conversation id. SessionStart is the authoritative
+    // startup/resume/fresh-thread signal; other hooks retain compatibility for
+    // existing transitions that also carry session_id.
     if (data && typeof data.session_id === 'string' && data.session_id) {
       const session = ctx.sessions.get(sessionId);
       const prevClaudeSessionId = session?.claudeSessionId;

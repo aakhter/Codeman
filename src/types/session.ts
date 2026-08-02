@@ -67,7 +67,7 @@ export interface SessionCheckpointState {
     | 'done'
     | 'failed'
     | 'aborted';
-  step?: SessionCheckpointMode | 'init' | 'continue';
+  step?: SessionCheckpointMode | 'continue';
   attempt?: number;
   stage?: 'text' | 'enter';
   reason?: string;
@@ -365,6 +365,8 @@ export interface SessionConfig {
   createdAt: number;
   /** Restored last-known checkpoint status; active work is safely aborted. */
   checkpointState?: SessionCheckpointState;
+  /** Bounded run-keyed history restored safely after restart. */
+  checkpointRuns?: Record<string, SessionCheckpointState>;
 }
 
 /**

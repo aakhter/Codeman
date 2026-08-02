@@ -2578,6 +2578,7 @@ export class WebServer extends EventEmitter {
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
               checkpointState: savedState?.checkpoint,
+              checkpointRuns: savedState?.checkpointRuns,
               // Docker metadata round-trips on recovery (mux-sessions.json carries
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.

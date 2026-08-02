@@ -53,8 +53,8 @@ Codex and Claude; fence manual takeover and late writes; expose run-keyed status
 
 1. Extract Codex active-rollout identity discovery from the response-viewer route into a shared read-only helper and use it
    from both the viewer and checkpoint observation.
-2. Use Claude's live adopted hook session ID when it is authoritative; add a safe transcript/history discovery path for the
-   post-`/clear` or post-`/new` interval before the next ordinary hook.
+2. Install an unrestricted managed Claude `SessionStart` hook and adopt its `session_id` as the authoritative generation
+   signal for startup, resume, `/clear`, `/compact`, and `/new`; do not infer identity from transcript cwd/mtime.
 3. Bind every lookup to the managed Codeman session (originator/resume/workspace rules) so another pane's newer transcript or
    rollout cannot satisfy the transition.
 4. Fail closed when the adapter cannot establish a stable baseline or new generation.
@@ -95,3 +95,9 @@ build`.
 6. Commit with COD-262 subjects, fast-forward onto the latest verified `local`, re-run the merged-result gate, push only
    Bitbucket `origin/local`, add Jira worklog/comments/structured commit link, and transition COD-262 to Done with
    deploy-pending evidence.
+
+### Verification constraint
+
+The disposable installed-Claude/Codex smoke in step 5 was not run in this implementation environment: policy does not
+authorize launching live external model sessions. Deterministic Session, hook-route, rollout-fixture, and built-CLI
+integration coverage is the in-repository substitute; the real-CLI smoke remains an explicit authorized-environment gate.

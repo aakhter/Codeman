@@ -39,6 +39,9 @@ describe('COD-257 checkpoint default', () => {
     expect(checkpointUi).toContain('modalCheckpointModeNew');
     expect(checkpointUi).toContain('preserving the display');
     expect(checkpointUi).not.toContain('/init');
+    expect(readFileSync(new URL('../src/session-auto-ops.ts', import.meta.url), 'utf8')).not.toMatch(
+      /CheckpointStep[^\n]*init/
+    );
   });
 
   it('uses a server resolver with an upgrade-safe enabled default for every web session creator', () => {

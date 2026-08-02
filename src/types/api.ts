@@ -109,6 +109,7 @@ export type HookEventType =
   | 'stop'
   | 'teammate_idle'
   | 'task_completed'
+  | 'session_start'
   | 'checkpoint';
 
 // ========== API Response Types ==========

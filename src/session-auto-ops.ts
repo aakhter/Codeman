@@ -160,7 +160,7 @@ export interface CheckpointObservation {
 }
 
 export type CheckpointMode = 'compact' | 'clear' | 'new';
-export type CheckpointStep = CheckpointMode | 'init' | 'continue';
+export type CheckpointStep = CheckpointMode | 'continue';
 export type CheckpointPhase =
   | 'requested'
   | 'waiting-ready'
@@ -246,9 +246,9 @@ export class SessionAutoOps extends EventEmitter {
   // Checkpoint (agent-initiated compact, clear, or new, then continue) state
   private _checkpointEnabled: boolean = false;
   /**
-   * Modes the agent is allowed to invoke at signal time. Both are allowed by
-   * default; the operator may forbid one (e.g. allow compact, forbid the more
-   * destructive clear). compact is the fallback when the agent passes no -m.
+   * Modes the agent is allowed to invoke at signal time. All are allowed by
+   * default; the operator may forbid any (e.g. allow compact, forbid the more
+   * destructive clear/new). compact is the fallback when the agent passes no -m.
    */
   private _checkpointModes: Set<CheckpointMode> = new Set(['compact', 'clear', 'new']);
   private _checkpointActive: boolean = false;
@@ -544,6 +544,22 @@ export class SessionAutoOps extends EventEmitter {
     state?: Omit<CheckpointState, 'runId' | 'status'> & Partial<Pick<CheckpointState, 'runId' | 'status'>>
   ): void {
     if (!state) return;
+    this._checkpointState = this._normalizeRestoredCheckpointState(state);
+    this._checkpointActive = false;
+    this._rememberCheckpointState(this._checkpointState);
+  }
+
+  /** Restore bounded history without resuming or replaying any run. */
+  restoreCheckpointStates(states?: Record<string, CheckpointState>): void {
+    if (!states) return;
+    for (const state of Object.values(states).slice(-20)) {
+      this._rememberCheckpointState(this._normalizeRestoredCheckpointState(state));
+    }
+  }
+
+  private _normalizeRestoredCheckpointState(
+    state: Omit<CheckpointState, 'runId' | 'status'> & Partial<Pick<CheckpointState, 'runId' | 'status'>>
+  ): CheckpointState {
     const runId = state.runId || `legacy-${state.updatedAt}`;
     const status = state.active
       ? 'cancelled'
@@ -552,7 +568,7 @@ export class SessionAutoOps extends EventEmitter {
         : state.phase === 'failed'
           ? 'failed'
           : 'cancelled';
-    this._checkpointState = state.active
+    return state.active
       ? {
           ...state,
           runId,
@@ -563,8 +579,6 @@ export class SessionAutoOps extends EventEmitter {
           updatedAt: Date.now(),
         }
       : { ...state, runId, status: state.status ?? status, active: false };
-    this._checkpointActive = false;
-    this._rememberCheckpointState(this._checkpointState);
   }
 
   /**

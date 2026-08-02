@@ -35,6 +35,17 @@ describe('generateHooksConfig', () => {
     expect(config.hooks.Stop).toHaveLength(1);
   });
 
+  it('installs an unrestricted SessionStart hook for startup, resume, clear, compact, and new transitions', () => {
+    const config = generateHooksConfig();
+    const hooks = config.hooks.SessionStart as Array<{
+      matcher?: string;
+      hooks: Array<{ command: string }>;
+    }>;
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0].matcher).toBeUndefined();
+    expect(hooks[0].hooks[0].command).toContain('session_start');
+  });
+
   it('should configure a self-contained Bash background-task rewake hook', () => {
     const config = generateHooksConfig();
     const postToolHooks = config.hooks.PostToolUse as Array<{

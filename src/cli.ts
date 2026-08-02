@@ -27,6 +27,47 @@ const pkg = require('../package.json') as { version: string };
 
 const program = new Command();
 
+const CHECKPOINT_WAIT_TIMEOUT_MS = 120_000;
+const CHECKPOINT_WAIT_MAX_MISSING_POLLS = 20;
+
+type CheckpointWaitDecision =
+  | { kind: 'waiting'; missing: boolean }
+  | { kind: 'completed' }
+  | { kind: 'failed'; reason: string };
+
+/** Pure checkpoint wait policy shared by the CLI loop and regression tests. */
+export function evaluateCheckpointWait(
+  state: unknown,
+  runId: string,
+  startedAt: number,
+  now = Date.now(),
+  missingPolls = 0
+): CheckpointWaitDecision {
+  const value = state as {
+    checkpoint?: { runId?: string; status?: string; reason?: string };
+    checkpointRuns?: Record<string, { runId?: string; status?: string; reason?: string }>;
+  };
+  const checkpoint =
+    value?.checkpointRuns?.[runId] ?? (value?.checkpoint?.runId === runId ? value.checkpoint : undefined);
+  if (!checkpoint) {
+    if (now - startedAt >= CHECKPOINT_WAIT_TIMEOUT_MS || missingPolls >= CHECKPOINT_WAIT_MAX_MISSING_POLLS) {
+      return { kind: 'failed', reason: `checkpoint run ${runId} is missing or was evicted` };
+    }
+    return { kind: 'waiting', missing: true };
+  }
+  if (checkpoint.status === 'completed') return { kind: 'completed' };
+  if (checkpoint.status === 'failed' || checkpoint.status === 'cancelled') {
+    return {
+      kind: 'failed',
+      reason: `checkpoint run ${runId} ${checkpoint.status}: ${checkpoint.reason || 'unknown reason'}`,
+    };
+  }
+  if (now - startedAt >= CHECKPOINT_WAIT_TIMEOUT_MS) {
+    return { kind: 'failed', reason: `checkpoint run ${runId} timed out` };
+  }
+  return { kind: 'waiting', missing: false };
+}
+
 program.name('codeman').description('Claude Code session manager with autonomous Ralph Loop').version(pkg.version);
 
 function makeAttachmentMagicLink(filePath: string): string {
@@ -418,28 +459,20 @@ program
     if (result.triggered) {
       console.log(chalk.green(`✓ checkpoint ${mode} requested (run ${result.runId})`));
       if (options.wait) {
+        const startedAt = Date.now();
+        let missingPolls = 0;
         for (;;) {
-          const state = (await fetchServerJson(apiUrl, `/api/sessions/${encodeURIComponent(sessionId)}`)) as {
-            checkpoint?: { runId?: string; status?: string; reason?: string };
-            checkpointRuns?: Record<string, { runId?: string; status?: string; reason?: string }>;
-          };
-          const checkpoint = state?.checkpointRuns?.[result.runId] ?? state?.checkpoint;
-          if (checkpoint?.runId !== result.runId) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            continue;
-          }
-          if (checkpoint.status === 'completed') {
+          const state = await fetchServerJson(apiUrl, `/api/sessions/${encodeURIComponent(sessionId)}`);
+          const decision = evaluateCheckpointWait(state, result.runId, startedAt, Date.now(), missingPolls);
+          if (decision.kind === 'completed') {
             console.log(chalk.green(`✓ checkpoint run ${result.runId} completed`));
             return;
           }
-          if (checkpoint.status === 'failed' || checkpoint.status === 'cancelled') {
-            console.error(
-              chalk.red(
-                `✗ checkpoint run ${result.runId} ${checkpoint.status}: ${checkpoint.reason || 'unknown reason'}`
-              )
-            );
+          if (decision.kind === 'failed') {
+            console.error(chalk.red(`✗ ${decision.reason}`));
             process.exit(1);
           }
+          missingPolls = decision.missing ? missingPolls + 1 : 0;
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }

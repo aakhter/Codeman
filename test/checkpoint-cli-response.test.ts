@@ -1,6 +1,6 @@
 /** @fileoverview Defensive checkpoint CLI response interpretation (COD-240). */
 import { describe, expect, it } from 'vitest';
-import { interpretCheckpointResponse } from '../src/cli.js';
+import { evaluateCheckpointWait, interpretCheckpointResponse } from '../src/cli.js';
 
 describe('interpretCheckpointResponse', () => {
   it.each([
@@ -33,6 +33,15 @@ describe('interpretCheckpointResponse', () => {
     expect(interpretCheckpointResponse({ success: true, data: { checkpoint: { triggered: true } } })).toEqual({
       ok: false,
       error: expect.stringContaining('run ID'),
+    });
+  });
+});
+
+describe('evaluateCheckpointWait', () => {
+  it('fails a bounded wait when the requested run remains missing or was evicted', () => {
+    expect(evaluateCheckpointWait({}, 'missing-run', 0, 120_001, 20)).toEqual({
+      kind: 'failed',
+      reason: expect.stringContaining('missing'),
     });
   });
 });

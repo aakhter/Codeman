@@ -71,12 +71,13 @@ describe('session listener wiring', () => {
     } as unknown as Parameters<typeof createSessionListeners>[1];
     const refs = createSessionListeners(session, deps);
 
-    refs.checkpointStart({ mode: 'compact' });
+    refs.checkpointStart({ mode: 'new', runId: 'new-run' });
 
     expect(broadcast).toHaveBeenCalledWith(SseEvent.SessionCheckpoint, {
       sessionId: 'wiring-checkpoint-start-test',
       phase: 'start',
-      mode: 'compact',
+      mode: 'new',
+      runId: 'new-run',
     });
     expect(persistSessionState).not.toHaveBeenCalled();
   });

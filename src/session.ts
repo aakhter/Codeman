@@ -96,7 +96,7 @@ import {
   type CheckpointState,
   type CheckpointMode,
 } from './session-auto-ops.js';
-import { findClaudeConversationId, findCodexConversationId } from './checkpoint-conversation-identity.js';
+import { findActiveCodexConversation } from './checkpoint-conversation-identity.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
@@ -364,7 +364,7 @@ export interface ClaudeMessage {
  * @fires Session#autoCompact - Token threshold reached, compacting context
  */
 export class Session extends EventEmitter {
-  private static readonly checkpointTransitionTimes = new Map<string, number>();
+  private static readonly codexSubmitTimes = new Map<string, number>();
   readonly id: string;
   readonly workingDir: string;
   readonly createdAt: number;
@@ -800,6 +800,7 @@ export class Session extends EventEmitter {
     if (typeof config.checkpointEnabled === 'boolean') {
       this._autoOps.setCheckpoint(config.checkpointEnabled);
     }
+    this._autoOps.restoreCheckpointStates(config.checkpointRuns as Record<string, CheckpointState> | undefined);
     this._autoOps.restoreCheckpointState(config.checkpointState);
   }
 
@@ -1255,21 +1256,6 @@ export class Session extends EventEmitter {
   private async getCheckpointAutomationObservation(): Promise<CheckpointObservation> {
     const terminal = this.getCheckpointObservation();
     if (this.mode === 'claude') {
-      const baselineId = this._claudeSessionIdentityAdopted ? this._claudeSessionId : null;
-      const transitionAt = Session.checkpointTransitionTimes.get(this.id);
-      if (baselineId && transitionAt) {
-        const claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || '/tmp', '.claude');
-        const conversationId = await findClaudeConversationId({
-          claudeHome,
-          workingDir: this.workingDir,
-          baselineId,
-          transitionAt,
-          competingTransitionAts: [...Session.checkpointTransitionTimes.entries()]
-            .filter(([sessionId]) => sessionId !== this.id)
-            .map(([, time]) => time),
-        });
-        if (conversationId) this.adoptClaudeSessionId(conversationId);
-      }
       return {
         ...terminal,
         conversationId: this._claudeSessionIdentityAdopted ? (this._claudeSessionId ?? undefined) : undefined,
@@ -1277,11 +1263,18 @@ export class Session extends EventEmitter {
     }
     if (this.mode === 'codex') {
       const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
-      const conversationId = await findCodexConversationId({
-        codexHome,
-        sessionId: this.id,
-        resumeSessionId: this._codexConfig?.resumeSessionId,
-      });
+      const conversationId = (
+        await findActiveCodexConversation({
+          codexHome,
+          sessionId: this.id,
+          workingDir: this.workingDir,
+          resumeSessionId: this._codexConfig?.resumeSessionId,
+          lastSubmitAt: this._codexLastSubmitAt,
+          competingSubmitAts: [...Session.codexSubmitTimes.entries()]
+            .filter(([sessionId]) => sessionId !== this.id)
+            .map(([, submittedAt]) => submittedAt),
+        })
+      )?.id;
       return { ...terminal, conversationId };
     }
     return terminal;
@@ -3243,6 +3236,7 @@ export class Session extends EventEmitter {
   private _trackCodexSubmit(data: string): void {
     if (this.mode === 'codex' && (data.includes('\r') || data.includes('\n'))) {
       this._codexLastSubmitAt = Date.now();
+      Session.codexSubmitTimes.set(this.id, this._codexLastSubmitAt);
     }
   }
 
@@ -3318,9 +3312,6 @@ export class Session extends EventEmitter {
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
     const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
     const isClear = checkpointCommand === '/clear';
-    if (checkpointCommand === '/clear' || checkpointCommand === '/new') {
-      Session.checkpointTransitionTimes.set(this.id, Date.now());
-    }
     if (isClear) {
       this._checkpointAwaitingInstantClear = true;
       this._checkpointInstantClearBaseline = this._checkpointReadyFingerprint;
@@ -3556,6 +3547,7 @@ export class Session extends EventEmitter {
   async stop(killMux: boolean = true): Promise<void> {
     // Set stopped flag first to prevent new timers from being created
     this._isStopped = true;
+    Session.codexSubmitTimes.delete(this.id);
 
     this._clearAllTimers();
 

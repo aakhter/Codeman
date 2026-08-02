@@ -226,6 +226,66 @@ describe('checkpoint prompt observations', () => {
     await shell.stop();
   });
 
+  it('uses only hook-adopted Claude identity for generation observation', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    installFrame(session, () => '❯ prompt');
+    const observe = () =>
+      (
+        session as unknown as {
+          getCheckpointAutomationObservation(): Promise<{ conversationId?: string }>;
+        }
+      ).getCheckpointAutomationObservation();
+
+    await expect(observe()).resolves.toMatchObject({ conversationId: undefined });
+    session.adoptClaudeSessionId('claude-session-start-id');
+    await expect(observe()).resolves.toMatchObject({ conversationId: 'claude-session-start-id' });
+    await session.stop();
+  });
+
+  it('runs a Claude new handoff with only /new and preserves it through hook adoption', async () => {
+    vi.useFakeTimers();
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const sent: string[] = [];
+    const internals = session as unknown as {
+      _mux: {
+        captureActivePaneBuffer: () => string;
+        sendCheckpointCommand: (_muxName: string, command: string) => Promise<{ ok: true; attempt: number }>;
+      };
+      _muxSession: { muxName: string };
+    };
+    internals._mux = {
+      captureActivePaneBuffer: () => '❯ prompt',
+      sendCheckpointCommand: async (_muxName, command) => {
+        sent.push(command);
+        return { ok: true, attempt: 1 };
+      },
+    };
+    internals._muxSession = { muxName: 'codeman-abc12345' };
+    session.adoptClaudeSessionId('claude-before-new');
+    session.setCheckpoint(true, ['new']);
+
+    expect(session.requestCheckpoint({ mode: 'new' })).toEqual({ triggered: true, runId: expect.any(String) });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sent).toEqual(['/new\r']);
+    session.adoptClaudeSessionId('claude-after-new');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sent).toEqual(['/new\r', 'continue\r']);
+    expect(sent).not.toContain('/clear\r');
+
+    await session.stop();
+    vi.useRealTimers();
+  });
+
+  it('rejects checkpoint orchestration for an unsupported Session backend', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    session.setCheckpoint(true, ['new']);
+    expect(session.requestCheckpoint({ mode: 'new' })).toEqual({
+      triggered: false,
+      reason: 'unsupported-backend',
+    });
+    await session.stop();
+  });
+
   it('serializes the durable terminal checkpoint record', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     const internals = session as unknown as {
@@ -297,6 +357,47 @@ describe('checkpoint prompt observations', () => {
       updatedAt: 200,
     });
     await completed.stop();
+  });
+
+  it('restores bounded run-keyed history and cancels every active run as restarted without prompt data', async () => {
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      checkpointState: {
+        active: true,
+        runId: 'active-run',
+        status: 'running',
+        mode: 'new',
+        phase: 'waiting-ready',
+        step: 'new',
+        updatedAt: 10,
+      },
+      checkpointRuns: {
+        'done-run': {
+          active: false,
+          runId: 'done-run',
+          status: 'completed',
+          mode: 'compact',
+          phase: 'done',
+          updatedAt: 5,
+        },
+        'active-run': {
+          active: true,
+          runId: 'active-run',
+          status: 'running',
+          mode: 'new',
+          phase: 'waiting-ready',
+          step: 'new',
+          updatedAt: 10,
+        },
+      },
+    });
+    expect(session.toState().checkpointRuns).toMatchObject({
+      'done-run': { status: 'completed' },
+      'active-run': { active: false, status: 'cancelled', reason: 'restarted' },
+    });
+    expect(JSON.stringify(session.toState().checkpointRuns)).not.toContain('continuePrompt');
+    await session.stop();
   });
 });
 

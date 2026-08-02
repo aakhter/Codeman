@@ -692,6 +692,7 @@ export const HookEventSchema = z.object({
     'stop',
     'teammate_idle',
     'task_completed',
+    'session_start',
     'checkpoint',
   ]),
   sessionId: z.string().min(1),

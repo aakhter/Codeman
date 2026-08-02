@@ -79,6 +79,29 @@ describe('hook-event-routes', () => {
   // ========== POST /api/hook-event ==========
 
   describe('POST /api/hook-event', () => {
+    it('adopts authoritative Claude identity from managed SessionStart without restricting source', async () => {
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+        adoptClaudeSessionId: ReturnType<typeof vi.fn>;
+      };
+      session.adoptClaudeSessionId = vi.fn();
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: {
+          event: 'session_start',
+          sessionId: harness.ctx._sessionId,
+          data: {
+            source: 'new',
+            session_id: 'claude-new-262',
+            transcript_path: '/tmp/claude-new-262.jsonl',
+            cwd: '/tmp/test-workdir',
+          },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(session.adoptClaudeSessionId).toHaveBeenCalledWith('claude-new-262');
+    });
+
     it('returns the checkpoint run id for a new-mode request', async () => {
       const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
         checkpointEnabled: boolean;
