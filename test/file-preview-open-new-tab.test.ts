@@ -161,14 +161,33 @@ describe('COD-260 file preview open in new tab', () => {
     ).toBe('/api/sessions/session-2/file-raw?path=notes%2Ffinal%20draft.md');
   });
 
+  it('falls through unsafe metadata candidates in priority order', () => {
+    const { proto } = loadPanelsUiPrototype();
+
+    expect(
+      proto._resolveFilePreviewExternalUrl.call(
+        {},
+        { previewUrl: 'https://evil.test/rendered.pdf', url: '/safe-raw.pdf?rev=2' },
+        { sessionId: 'session-1', filePath: 'report.pdf', attachmentId: null }
+      )
+    ).toBe('/safe-raw.pdf?rev=2');
+    expect(
+      proto._resolveFilePreviewExternalUrl.call(
+        {},
+        { previewUrl: 'javascript:alert(1)', url: 'http://[' },
+        { sessionId: 'session-1', filePath: 'report.pdf', attachmentId: null }
+      )
+    ).toBe('/api/sessions/session-1/file-raw?path=report.pdf');
+  });
+
   it.each([
     ['cross-origin', 'https://evil.test/steal'],
     ['malformed', 'http://['],
     ['javascript', 'javascript:alert(1)'],
     ['non-http', 'ftp://codeman.test/report.pdf'],
-  ])('rejects %s metadata URLs instead of falling through to raw', (_label, previewUrl) => {
+  ])('rejects %s metadata URLs when no safe fallback exists', (_label, previewUrl) => {
     const { proto } = loadPanelsUiPrototype();
-    const state = { sessionId: 'session-1', filePath: 'report.pdf', attachmentId: null };
+    const state = { sessionId: null, filePath: null, attachmentId: null };
 
     expect(proto._resolveFilePreviewExternalUrl.call({}, { previewUrl }, state)).toBeNull();
   });

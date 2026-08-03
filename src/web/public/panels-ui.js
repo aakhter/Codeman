@@ -4072,34 +4072,39 @@ Object.assign(CodemanApp.prototype, {
 
   /**
    * Resolve metadata URLs or the identity-derived raw route into a safe,
-   * same-origin browser address. An explicitly unsafe metadata URL is rejected
-   * instead of being hidden by a raw-route fallback.
+   * same-origin browser address. Unsafe candidates are skipped so the next
+   * lower-priority representation can still be used.
    */
   _resolveFilePreviewExternalUrl(data, previewState) {
     if (!previewState) return null;
 
-    let candidate;
-    if (typeof data?.previewUrl === 'string' && data.previewUrl) {
-      candidate = data.previewUrl;
-    } else if (typeof data?.url === 'string' && data.url) {
-      candidate = data.url;
-    } else if (previewState.attachmentId) {
-      candidate = `/api/sessions/${encodeURIComponent(previewState.sessionId)}/attachments/${encodeURIComponent(previewState.attachmentId)}/raw`;
+    const candidates = [];
+    if (typeof data?.previewUrl === 'string' && data.previewUrl) candidates.push(data.previewUrl);
+    if (typeof data?.url === 'string' && data.url) candidates.push(data.url);
+    if (previewState.sessionId && previewState.attachmentId) {
+      candidates.push(
+        `/api/sessions/${encodeURIComponent(previewState.sessionId)}/attachments/${encodeURIComponent(previewState.attachmentId)}/raw`
+      );
     } else if (previewState.sessionId && previewState.filePath) {
-      candidate = `/api/sessions/${encodeURIComponent(previewState.sessionId)}/file-raw?path=${encodeURIComponent(previewState.filePath)}`;
-    } else {
-      return null;
+      candidates.push(
+        `/api/sessions/${encodeURIComponent(previewState.sessionId)}/file-raw?path=${encodeURIComponent(previewState.filePath)}`
+      );
     }
 
-    try {
-      const resolved = new URL(candidate, window.location.href);
-      if ((resolved.protocol !== 'http:' && resolved.protocol !== 'https:') || resolved.origin !== window.location.origin) {
-        return null;
+    for (const candidate of candidates) {
+      try {
+        const resolved = new URL(candidate, window.location.href);
+        if (
+          (resolved.protocol === 'http:' || resolved.protocol === 'https:') &&
+          resolved.origin === window.location.origin
+        ) {
+          return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+        }
+      } catch {
+        // Try the next lower-priority candidate.
       }
-      return `${resolved.pathname}${resolved.search}${resolved.hash}`;
-    } catch {
-      return null;
     }
+    return null;
   },
 
   /** Publish an external URL only while this exact preview still owns the overlay. */
