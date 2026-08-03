@@ -4022,6 +4022,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Stop any previous live-refresh poller before switching documents.
     this._stopFilePreviewPolling();
+    this._resetFilePreviewExternalAction?.();
 
     // Show overlay with loading state
     overlay.classList.add('visible');
@@ -4049,6 +4050,7 @@ Object.assign(CodemanApp.prototype, {
       // A newer open/close owns the overlay now. Never let this stale response
       // overwrite its body or start a poller for the wrong document.
       if (this.filePreviewState !== previewState) return;
+      this._setFilePreviewExternalUrl?.(previewState, data);
       previewState.signature = this._filePreviewSignature(data);
       const rendered = await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, previewState);
       if (!rendered || this.filePreviewState !== previewState) return;
@@ -4058,6 +4060,70 @@ Object.assign(CodemanApp.prototype, {
       if (this.filePreviewState !== previewState) return;
       console.error('Failed to preview file:', err);
       bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  /** Clear any approved external URL and keep the header action inert. */
+  _resetFilePreviewExternalAction() {
+    if (this.filePreviewState) delete this.filePreviewState.externalPreviewUrl;
+    const button = this.$('filePreviewOpenNewTab');
+    if (button) button.disabled = true;
+  },
+
+  /**
+   * Resolve metadata URLs or the identity-derived raw route into a safe,
+   * same-origin browser address. An explicitly unsafe metadata URL is rejected
+   * instead of being hidden by a raw-route fallback.
+   */
+  _resolveFilePreviewExternalUrl(data, previewState) {
+    if (!previewState) return null;
+
+    let candidate;
+    if (typeof data?.previewUrl === 'string' && data.previewUrl) {
+      candidate = data.previewUrl;
+    } else if (typeof data?.url === 'string' && data.url) {
+      candidate = data.url;
+    } else if (previewState.attachmentId) {
+      candidate = `/api/sessions/${encodeURIComponent(previewState.sessionId)}/attachments/${encodeURIComponent(previewState.attachmentId)}/raw`;
+    } else if (previewState.sessionId && previewState.filePath) {
+      candidate = `/api/sessions/${encodeURIComponent(previewState.sessionId)}/file-raw?path=${encodeURIComponent(previewState.filePath)}`;
+    } else {
+      return null;
+    }
+
+    try {
+      const resolved = new URL(candidate, window.location.href);
+      if ((resolved.protocol !== 'http:' && resolved.protocol !== 'https:') || resolved.origin !== window.location.origin) {
+        return null;
+      }
+      return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+    } catch {
+      return null;
+    }
+  },
+
+  /** Publish an external URL only while this exact preview still owns the overlay. */
+  _setFilePreviewExternalUrl(previewState, data) {
+    if (this.filePreviewState !== previewState) return;
+    const url = this._resolveFilePreviewExternalUrl(data, previewState);
+    if (this.filePreviewState !== previewState) return;
+    if (url) previewState.externalPreviewUrl = url;
+    else delete previewState.externalPreviewUrl;
+    const button = this.$('filePreviewOpenNewTab');
+    if (button) button.disabled = !url;
+  },
+
+  /** Open only the URL approved for the current preview state. */
+  openFilePreviewInNewTab() {
+    const url = this.filePreviewState?.externalPreviewUrl;
+    if (!url) return;
+    const opened = window.open(url, '_blank', 'noopener');
+    if (opened) {
+      try {
+        opened.opener = null;
+      } catch {
+        // Cross-window hardening is best-effort; noopener remains authoritative.
+      }
     }
   },
 
@@ -4539,6 +4605,7 @@ Object.assign(CodemanApp.prototype, {
     try {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
       if (this.filePreviewState !== st) return;
+      this._setFilePreviewExternalUrl?.(st, data);
       const sig = this._filePreviewSignature(data);
       if (sig === st.signature) return; // unchanged
       st.signature = sig;
@@ -5390,6 +5457,7 @@ Object.assign(CodemanApp.prototype, {
 
   closeFilePreview() {
     this._stopFilePreviewPolling();
+    this._resetFilePreviewExternalAction?.();
     this._hideFilePreviewNavigation();
     this._teardownOutlineScrollSpy();
     this._closeAnnotationPopover();
