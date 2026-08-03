@@ -1,6 +1,6 @@
 /**
  * @fileoverview COD-238 deterministic browser regression for the Files-panel
- * Office source-download control. This evaluates panels-ui.js in a minimal page
+ * shared viewer source-download control. This evaluates panels-ui.js in a minimal page
  * rather than starting Codeman, so it exercises real browser fetch/blob/download
  * behavior without depending on session bootstrap or a live tmux server.
  */
@@ -45,6 +45,7 @@ describe('COD-238 Files-panel source download in a real browser', () => {
     await page.setContent(`
       <base href="https://codeman.test/">
       <main id="spa-shell">terminal remains here</main>
+      <button type="button" id="filePreviewDownloadOriginal" onclick="app.downloadFilePreviewOriginal()" disabled>Download</button>
       <section id="filePreviewBody"></section>
       <footer id="filePreviewFooter"></footer>
     `);
@@ -78,6 +79,7 @@ describe('COD-238 Files-panel source download in a real browser', () => {
         app.filePreviewContent = '';
         app.$ = (id) => document.getElementById(id);
         app.formatFileSize = () => '31 KB';
+        app._setFilePreviewOriginalDownloadAction(app.filePreviewState);
         await app._renderFilePreviewBody(
           {
             type: 'document',
@@ -102,7 +104,7 @@ describe('COD-238 Files-panel source download in a real browser', () => {
     const framedUrl = new URL(frameSrc!, 'https://codeman.test');
     expect(framedUrl.pathname).toBe(`/api/sessions/${SESSION_ID}/file-preview`);
     expect(framedUrl.hash).toBe('#toolbar=0');
-    await expect.poll(() => page.locator('.document-source-download-btn').textContent()).toBe('Download DOCX');
+    await expect.poll(() => page.locator('#filePreviewDownloadOriginal').isEnabled()).toBe(true);
     await expect.poll(() => page.locator('.document-export-btn').textContent()).toBe('Export PDF');
 
     const pageUrlBefore = page.url();
@@ -110,7 +112,7 @@ describe('COD-238 Files-panel source download in a real browser', () => {
       new URL(request.url()).pathname.endsWith(`/api/sessions/${SESSION_ID}/file-raw`)
     );
     const downloadPromise = page.waitForEvent('download');
-    await page.locator('.document-source-download-btn').click();
+    await page.locator('#filePreviewDownloadOriginal').click();
     const [request, download] = await Promise.all([requestPromise, downloadPromise]);
 
     const sourceUrl = new URL(request.url());

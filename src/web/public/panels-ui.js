@@ -4023,6 +4023,7 @@ Object.assign(CodemanApp.prototype, {
     // Stop any previous live-refresh poller before switching documents.
     this._stopFilePreviewPolling();
     this._resetFilePreviewExternalAction?.();
+    this._resetFilePreviewOriginalDownloadAction?.();
 
     // Show overlay with loading state
     overlay.classList.add('visible');
@@ -4034,8 +4035,9 @@ Object.assign(CodemanApp.prototype, {
     const metadataUrl = attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
       : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
-    const previewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf' };
+    const previewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf', mtimeMs: null };
     this.filePreviewState = previewState;
+    this._setFilePreviewOriginalDownloadAction?.(previewState);
     this._hideFilePreviewNavigation();
     // Navigation is deliberately independent from the document metadata request:
     // attachment history is the authoritative ordered list, and a slow document
@@ -4052,6 +4054,7 @@ Object.assign(CodemanApp.prototype, {
       if (this.filePreviewState !== previewState) return;
       this._setFilePreviewExternalUrl?.(previewState, data);
       previewState.signature = this._filePreviewSignature(data);
+      previewState.mtimeMs = data.mtimeMs ?? null;
       const rendered = await this._renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, previewState);
       if (!rendered || this.filePreviewState !== previewState) return;
       // Auto-refresh the open preview as the agent rewrites the file (COD-58).
@@ -4068,6 +4071,74 @@ Object.assign(CodemanApp.prototype, {
     if (this.filePreviewState) delete this.filePreviewState.externalPreviewUrl;
     const button = this.$('filePreviewOpenNewTab');
     if (button) button.disabled = true;
+  },
+
+  /** Reset the identity-only original-source action before replacing or closing a preview. */
+  _resetFilePreviewOriginalDownloadAction() {
+    const button = this.$('filePreviewDownloadOriginal');
+    if (button) button.disabled = true;
+  },
+
+  /** Enable original-source download synchronously from the current preview identity. */
+  _setFilePreviewOriginalDownloadAction(previewState) {
+    const button = this.$('filePreviewDownloadOriginal');
+    if (!button) return;
+    button.disabled = !this._filePreviewOriginalDownloadUrl(previewState);
+  },
+
+  /** Build the raw original route solely from the preview identity, never render metadata. */
+  _filePreviewOriginalDownloadUrl(previewState) {
+    if (!previewState?.sessionId) return null;
+    let url;
+    if (previewState.attachmentId) {
+      url = `/api/sessions/${encodeURIComponent(previewState.sessionId)}/attachments/${encodeURIComponent(previewState.attachmentId)}/raw`;
+    } else if (previewState.filePath) {
+      url = `/api/sessions/${encodeURIComponent(previewState.sessionId)}/file-raw?path=${encodeURIComponent(previewState.filePath)}`;
+    } else {
+      return null;
+    }
+    const separator = url.includes('?') ? '&' : '?';
+    const cacheBust = previewState.mtimeMs != null ? `&_t=${encodeURIComponent(String(previewState.mtimeMs))}` : '';
+    return `${url}${separator}download=true${cacheBust}`;
+  },
+
+  /** Fetch and save the original file; successful browser downloads intentionally remain toast-free. */
+  async downloadFilePreviewOriginal(expectedState = null) {
+    const st = this.filePreviewState;
+    if (!st || (expectedState && expectedState !== st)) return;
+    const url = this._filePreviewOriginalDownloadUrl(st);
+    if (!url) return;
+    try {
+      const res = await fetch(url);
+      if (this.filePreviewState !== st) return;
+      if (!res.ok) {
+        let message = 'Failed to download original file';
+        try {
+          const body = await res.json();
+          if (typeof body?.error === 'string') message = body.error;
+        } catch {
+          // Use the generic error when the response does not contain an envelope.
+        }
+        this.showToast?.(message, 'error');
+        return;
+      }
+      const blob = await res.blob();
+      if (this.filePreviewState !== st) return;
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = String(st.filePath || 'download').split('/').pop() || 'download';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      if (this.filePreviewState === st) {
+        console.error('Failed to download preview source:', err);
+        this.showToast?.('Failed to download original file', 'error');
+      }
+    }
   },
 
   /**
@@ -4328,10 +4399,9 @@ Object.assign(CodemanApp.prototype, {
       const st = this.filePreviewState;
       const sourceExtension = String(data.extension || '')
         .toLowerCase();
-      const isWorkspaceOfficePreview =
-        !attachmentId &&
-        ((data.type === 'document' && sourceExtension === 'docx') ||
-          (data.type === 'presentation' && sourceExtension === 'pptx'));
+      const isOfficePreview =
+        (data.type === 'document' && sourceExtension === 'docx') ||
+        (data.type === 'presentation' && sourceExtension === 'pptx');
       // .docx supports a view switcher: rendered PDF (default), selectable HTML, and Changes (COD-68).
       const isDocx = data.type === 'document' && !!attachmentId;
       const view = isDocx ? st?.docxView || 'pdf' : 'pdf';
@@ -4355,7 +4425,7 @@ Object.assign(CodemanApp.prototype, {
         // Suppress the embedded PDF toolbar so its download icon cannot present
         // that conversion as the primary download; the footer below provides an
         // explicit guarded source download and a separately-labelled PDF export.
-        const iframeFragment = isWorkspaceOfficePreview ? '#toolbar=0' : '';
+        const iframeFragment = isOfficePreview ? '#toolbar=0' : '';
         if (data.type === 'pdf') {
           // Raw PDF: no server-side conversion, so embed it directly.
           bodyEl.innerHTML = `<iframe class="document-preview-frame" src="${bustedPreviewUrl}${iframeFragment}" title="${escapeHtml(filePath)}"></iframe>`;
@@ -4394,13 +4464,10 @@ Object.assign(CodemanApp.prototype, {
       // One-click PDF export of the open document (COD-61). docx/pptx reuse the
       // LibreOffice preview-PDF cache server-side; raw PDFs are already PDFs but
       // the control downloads them consistently via the export endpoint.
-      const sourceDownload = isWorkspaceOfficePreview
-        ? ` <button class="btn-icon-sm document-source-download-btn" onclick="app.downloadFilePreviewSource()" title="Download the original ${sourceExtension.toUpperCase()} file">Download ${sourceExtension.toUpperCase()}</button>`
-        : '';
       const exportPdf = this._renderExportPdfControl();
       footerEl.innerHTML = `${escapeHtml(
         `${this.formatFileSize(data.size)} \u2022 ${label}`
-      )}${switcher}${comment}${sourceDownload}${exportPdf}`;
+      )}${switcher}${comment}${exportPdf}`;
     } else if (data.type === 'markdown' || data.type === 'text') {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
@@ -4598,6 +4665,7 @@ Object.assign(CodemanApp.prototype, {
     if (!keepState) {
       this._teardownOfficePreviewResources(this.filePreviewState);
       this.filePreviewState = null;
+      this._resetFilePreviewOriginalDownloadAction?.();
     }
   },
 
@@ -4611,6 +4679,7 @@ Object.assign(CodemanApp.prototype, {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
       if (this.filePreviewState !== st) return;
       this._setFilePreviewExternalUrl?.(st, data);
+      st.mtimeMs = data.mtimeMs ?? null;
       const sig = this._filePreviewSignature(data);
       if (sig === st.signature) return; // unchanged
       st.signature = sig;
@@ -4664,16 +4733,6 @@ Object.assign(CodemanApp.prototype, {
     // resolves the extension from the attachment record and 400s if unsupported.
     if (st.filePath && !exportable.includes(ext)) return '';
     return ` <button class="btn-icon-sm document-export-btn" onclick="app.exportDocumentPdf()" title="Download a PDF of this document">Export PDF</button>`;
-  },
-
-  /** Download the original workspace Office source shown by the Files panel. */
-  downloadFilePreviewSource() {
-    const st = this.filePreviewState;
-    if (!st?.sessionId || !st.filePath || st.attachmentId) {
-      this.showToast?.('No source file to download', 'error');
-      return;
-    }
-    this.downloadWorkspaceFile(st.sessionId, st.filePath);
   },
 
   /** Download a PDF of the open document via the export endpoint (COD-61). */
@@ -4802,6 +4861,7 @@ Object.assign(CodemanApp.prototype, {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
       if (this.filePreviewState !== st) return;
       st.signature = this._filePreviewSignature(data);
+      st.mtimeMs = data.mtimeMs ?? null;
       await this._renderFilePreviewBody(
         data,
         {
@@ -4852,6 +4912,7 @@ Object.assign(CodemanApp.prototype, {
       const data = await this._fetchFilePreviewMetadata(st.metadataUrl);
       if (this.filePreviewState !== st) return;
       st.signature = this._filePreviewSignature(data);
+      st.mtimeMs = data.mtimeMs ?? null;
       await this._renderFilePreviewBody(
         data,
         {

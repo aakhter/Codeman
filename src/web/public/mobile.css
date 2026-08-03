@@ -20,6 +20,30 @@ html.mobile-init .file-browser-panel {
   display: none !important;
 }
 
+@media (max-width: 430px) {
+  .file-preview-header {
+    gap: 0.25rem;
+  }
+
+  .file-preview-title {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .file-preview-navigation,
+  .file-preview-actions {
+    flex-shrink: 0;
+  }
+
+  #filePreviewDownloadOriginal .file-preview-download-label {
+    display: none;
+  }
+
+  #filePreviewDownloadOriginal .file-preview-download-icon {
+    display: inline;
+  }
+}
+
 /* ============================================================================
    iOS Zoom Prevention (all mobile/tablet sizes)
    iOS Safari ignores user-scalable=no since iOS 10.

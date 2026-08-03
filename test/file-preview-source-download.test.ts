@@ -176,7 +176,10 @@ describe('COD-238 Files-panel source download', () => {
     expect(iframeSrc(body.innerHTML)).toContain('files-b');
     expect(iframeSrc(body.innerHTML)).toContain(encodeURIComponent(filesPath));
     expect(body.innerHTML).not.toContain('document-preview-diff');
-    expect(footer.innerHTML).toContain('Download DOCX');
+    expect(footer.innerHTML).not.toContain('document-source-download-btn');
+    expect(proto._filePreviewOriginalDownloadUrl.call(host, filesState)).toBe(
+      `/api/sessions/files-b/file-raw?path=${encodeURIComponent(filesPath)}&download=true`
+    );
   });
 
   it.each(['success', 'error'] as const)(
@@ -232,7 +235,7 @@ describe('COD-238 Files-panel source download', () => {
     }
   );
 
-  it('keeps the displayed preview and source button on the latest out-of-order open', async () => {
+  it('keeps the displayed preview and source identity on the latest out-of-order open', async () => {
     const proto = loadPanelsUiPrototype({ fetch: vi.fn(async () => okPreviewProbe()) });
     const firstPath = 'deliverables/First Draft.docx';
     const secondPath = 'deliverables/Approved Final.docx';
@@ -242,13 +245,11 @@ describe('COD-238 Files-panel source download', () => {
     const footer = previewElement();
     const title = previewElement();
     const overlay = { classList: { add: vi.fn() } };
-    const downloadWorkspaceFile = vi.fn();
     const startFilePreviewPolling = vi.fn();
     const host = {
       filePreviewState: null as Record<string, unknown> | null,
       filePreviewContent: '',
       _annotations: [],
-      downloadWorkspaceFile,
       formatFileSize: vi.fn(() => '31 KB'),
       $: vi.fn((id: string) => {
         if (id === 'filePreviewOverlay') return overlay;
@@ -312,19 +313,20 @@ describe('COD-238 Files-panel source download', () => {
     expect(startFilePreviewPolling).toHaveBeenCalledOnce();
     expect(host.filePreviewState).toMatchObject({ sessionId: 'second-session', filePath: secondPath });
 
-    proto.downloadFilePreviewSource.call(host);
-    expect(downloadWorkspaceFile).toHaveBeenCalledWith('second-session', secondPath);
+    expect(proto._filePreviewOriginalDownloadUrl.call(host, host.filePreviewState)).toBe(
+      `/api/sessions/second-session/file-raw?path=${encodeURIComponent(secondPath)}&download=true&_t=2`
+    );
   });
 
   it.each([
-    ['document', 'docx', 'deliverables/Market Story Final.docx', 'Download DOCX'],
-    ['presentation', 'pptx', 'deliverables/Executive Brief Final.pptx', 'Download PPTX'],
+    ['document', 'docx', 'deliverables/Market Story Final.docx'],
+    ['presentation', 'pptx', 'deliverables/Executive Brief Final.pptx'],
   ])(
     'makes the original %s source primary while the converted PDF remains the preview',
-    async (type, extension, filePath, sourceLabel) => {
+    async (type, extension, filePath) => {
       const proto = loadPanelsUiPrototype({ fetch: vi.fn(async () => okPreviewProbe()) });
       const state = { sessionId: 'tree-owner-session', filePath, attachmentId: null, docxView: 'pdf' };
-      const { body, footer, downloadWorkspaceFile, host } = renderHost(proto, state);
+      const { body, footer, host } = renderHost(proto, state);
 
       await proto._renderFilePreviewBody.call(
         host,
@@ -346,13 +348,11 @@ describe('COD-238 Files-panel source download', () => {
       expect(previewUrl.pathname).toBe('/api/sessions/tree-owner-session/file-preview');
       expect(previewUrl.searchParams.get('path')).toBe(filePath);
       expect(previewUrl.hash).toBe('#toolbar=0');
-      expect(footer.innerHTML).toContain(`class="btn-icon-sm document-source-download-btn"`);
-      expect(footer.innerHTML).toContain(sourceLabel);
+      expect(footer.innerHTML).not.toContain('document-source-download-btn');
       expect(footer.innerHTML).toContain('Export PDF');
-
-      expect(proto.downloadFilePreviewSource).toBeTypeOf('function');
-      proto.downloadFilePreviewSource.call(host);
-      expect(downloadWorkspaceFile).toHaveBeenCalledWith('tree-owner-session', filePath);
+      expect(proto._filePreviewOriginalDownloadUrl.call(host, state)).toBe(
+        `/api/sessions/tree-owner-session/file-raw?path=${encodeURIComponent(filePath)}&download=true`
+      );
     }
   );
 
@@ -378,7 +378,7 @@ describe('COD-238 Files-panel source download', () => {
     expect(footer.innerHTML).not.toContain('document-source-download-btn');
   });
 
-  it('does not alter the existing attachment-card DOCX viewer behavior', async () => {
+  it('suppresses the converted-PDF toolbar for attachment DOCX previews', async () => {
     const proto = loadPanelsUiPrototype({ fetch: vi.fn(async () => okPreviewProbe()) });
     const filePath = 'Published Brief.docx';
     const state = { sessionId: 'attachment-owner', filePath, attachmentId: 'att_123', docxView: 'pdf' };
@@ -397,11 +397,11 @@ describe('COD-238 Files-panel source download', () => {
       { sessionId: 'attachment-owner', filePath, attachmentId: 'att_123' }
     );
     // COD-239: rendering is now async (readiness probe first); wait for it. The
-    // attachment preview keeps its same-origin URL with no workspace fragment.
+    // attachment preview also suppresses the converted-PDF toolbar.
     await (state as { previewRenderPromise?: Promise<void> }).previewRenderPromise;
 
     expect(iframeSrc(body.innerHTML)).toContain('/attachments/att_123/preview');
-    expect(new URL(iframeSrc(body.innerHTML), 'https://codeman.test').hash).toBe('');
+    expect(new URL(iframeSrc(body.innerHTML), 'https://codeman.test').hash).toBe('#toolbar=0');
     expect(footer.innerHTML).not.toContain('document-source-download-btn');
     expect(footer.innerHTML).toContain('document-view-switch');
   });
