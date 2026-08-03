@@ -1411,7 +1411,7 @@ export function resolveDockerLaunchOptions(
  * These are inherited by panes but not visible in ps output or tmux history.
  */
 async function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY'];
+  const sensitiveVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY'];
   for (const key of sensitiveVars) {
     const val = process.env[key];
     if (val) {
