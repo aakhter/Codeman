@@ -24,6 +24,32 @@ import {
 import { attachmentRegistry, registerExternalAttachment } from '../src/attachment-registry.js';
 import type { SessionRemote } from '../src/types/session.js';
 
+const MAX_GENERATED_ARTIFACT_BYTES = 50 * 1024 * 1024;
+
+function mockRemoteInspection(
+  filePath: string,
+  size: number,
+  options: { workspace?: string; homes?: string[] } = {}
+): void {
+  const lines = [
+    `FILE\t${filePath}`,
+    `SIZE\t${size}`,
+    ...(options.workspace ? [`WORKSPACE\t${options.workspace}`] : []),
+    ...(options.homes ?? []).map((home) => `HOME\t${home}`),
+  ];
+  execFile.mockImplementationOnce((...args: unknown[]) => {
+    const callback = args.at(-1);
+    if (typeof callback === 'function') callback(null, { stdout: `${lines.join('\n')}\n`, stderr: '' });
+  });
+}
+
+function mockRemoteFetch(stdout: Buffer): void {
+  execFile.mockImplementationOnce((...args: unknown[]) => {
+    const callback = args.at(-1);
+    if (typeof callback === 'function') callback(null, { stdout, stderr: Buffer.alloc(0) });
+  });
+}
+
 describe('generated artifact attachments', () => {
   afterEach(() => {
     execFile.mockClear();
@@ -199,6 +225,144 @@ describe('generated artifact attachments', () => {
       expect(attachmentRegistry.get(sessionId, first.attachmentId)?.filePath).toBe(filePath);
     });
 
+    it('rejects a local generated artifact larger than 50 MiB before registration', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-local-large-')));
+      const filePath = join(workspaceDir, 'oversize.png');
+      await fs.writeFile(filePath, '');
+      await fs.truncate(filePath, MAX_GENERATED_ARTIFACT_BYTES + 1);
+
+      await expect(
+        registerGeneratedArtifactAttachment({ sessionId, filePath, sessionWorkingDir: workspaceDir })
+      ).rejects.toMatchObject({ statusCode: 413 });
+      expect(attachmentRegistry.findByFilePath(sessionId, filePath)).toBeUndefined();
+    });
+
+    it('rejects lexical remote paths outside approved roots with a typed 403 before SSH', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-lexical-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: '/Users/aamer/private/mockup.png',
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({ message: 'Access to this file is blocked', statusCode: 403 });
+      expect(execFile).not.toHaveBeenCalled();
+    });
+
+    it.each(['\0', '\r', '\n'])('rejects remote paths containing %j before SSH', async (control) => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-control-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: `/Users/aamer/projects/app/mock${control}up.png`,
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(execFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a remote workspace symlink whose canonical target escapes the approved roots before byte fetch', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-escape-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      const requestedPath = '/Users/aamer/projects/app/output/mockup.png';
+      const escapedPath = '/Users/aamer/private/mockup.png';
+      mockRemoteInspection(escapedPath, 12, {
+        workspace: remote.remotePath,
+        homes: ['/Users/aamer'],
+      });
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: requestedPath,
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({
+        message: 'Access to this file is blocked',
+        statusCode: 403,
+      });
+      expect(execFile).toHaveBeenCalledTimes(1);
+      expect(execFile.mock.calls[0]?.[2]).toMatchObject({ encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 });
+      expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
+    });
+
+    it('rejects a remote artifact reported over 50 MiB before byte fetch', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-large-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      const remotePath = '/Users/aamer/projects/app/output/oversize.png';
+      mockRemoteInspection(remotePath, MAX_GENERATED_ARTIFACT_BYTES + 1, { workspace: remote.remotePath });
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: remotePath,
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({ statusCode: 413 });
+      expect(execFile).toHaveBeenCalledTimes(1);
+      expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
+    });
+
+    it('rejects remote byte growth beyond 50 MiB before writing the cache', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-growth-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      const remotePath = '/Users/aamer/projects/app/output/growing.png';
+      const cachePath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, remotePath);
+      generatedCacheDir = dirname(cachePath);
+      mockRemoteInspection(remotePath, MAX_GENERATED_ARTIFACT_BYTES, { workspace: remote.remotePath });
+      mockRemoteFetch(Buffer.alloc(MAX_GENERATED_ARTIFACT_BYTES + 1));
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: remotePath,
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({ statusCode: 413 });
+      await expect(fs.stat(cachePath)).rejects.toThrow();
+      const fetchCall = execFile.mock.calls.find((call) => String(call[1]).includes('cat --'));
+      expect(fetchCall?.[2]).toMatchObject({ maxBuffer: MAX_GENERATED_ARTIFACT_BYTES + 1 });
+    });
+
     it('revalidates a locally registered artifact after it is deleted', async () => {
       workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-deleted-')));
       const filePath = join(workspaceDir, 'mockup.png');
@@ -220,7 +384,7 @@ describe('generated artifact attachments', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
     });
 
-    it('reuses a registered remote generated-artifact cache file without SSH', async () => {
+    it('reuses a registered remote generated-artifact cache file after fresh inspection without byte fetch', async () => {
       workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-dedupe-')));
       const remote: SessionRemote = {
         hostId: 'mac-mini',
@@ -236,6 +400,7 @@ describe('generated artifact attachments', () => {
       await fs.writeFile(cachePath, 'png-bytes');
 
       const first = await registerExternalAttachment(sessionId, cachePath, { sessionWorkingDir: workspaceDir });
+      mockRemoteInspection(remotePath, 9, { homes: ['/Users/aamer'] });
       const second = await registerGeneratedArtifactAttachment({
         sessionId,
         filePath: remotePath,
@@ -244,10 +409,11 @@ describe('generated artifact attachments', () => {
       });
 
       expect(second.attachmentId).toBe(first.attachmentId);
-      expect(execFile).not.toHaveBeenCalled();
+      expect(execFile).toHaveBeenCalledTimes(1);
+      expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
     });
 
-    it('reuses a remote cache registration through a symlinked data directory without SSH', async () => {
+    it('reuses a remote cache registration through a symlinked data directory after inspection without fetch', async () => {
       workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-symlink-')));
       generatedDataDir = await fs.mkdtemp(join(tmpdir(), 'codeman-genart-data-'));
       generatedDataDirLink = `${generatedDataDir}-link`;
@@ -269,6 +435,7 @@ describe('generated artifact attachments', () => {
       await fs.writeFile(cachePath, 'png-bytes');
 
       const first = await registerExternalAttachment(sessionId, cachePath, { sessionWorkingDir: workspaceDir });
+      mockRemoteInspection(remotePath, 9, { homes: ['/Users/aamer'] });
       const second = await registerGeneratedArtifactAttachment({
         sessionId,
         filePath: remotePath,
@@ -277,7 +444,8 @@ describe('generated artifact attachments', () => {
       });
 
       expect(second.attachmentId).toBe(first.attachmentId);
-      expect(execFile).not.toHaveBeenCalled();
+      expect(execFile).toHaveBeenCalledTimes(1);
+      expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
     });
   });
 });
