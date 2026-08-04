@@ -197,6 +197,31 @@ describe('COD-232 terminal document link provider', () => {
     expect(fileUriSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['an embedded prefix', 'notfile:///tmp/report.pdf'],
+    ['a colon-prefixed scheme', 'not:file:///tmp/report.pdf'],
+    ['a relative file form', 'file:relative/tmp/report.pdf'],
+    ['a network authority', 'file://server/tmp/report.pdf'],
+    ['an over-limit URI token', `file:///${'a'.repeat(2001)}/tmp/report.pdf`],
+  ])('does not let %s fall through to the legacy /tmp path detector', (_label, output) => {
+    const { provide, fileUriSpy, logSpy } = makeHarness(output);
+
+    expect(provide()).toEqual([]);
+    expect(fileUriSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it('preserves an ordinary standalone /tmp path that is not part of a file-scheme token', () => {
+    const path = '/tmp/report.pdf';
+    const { provide, previewSpy, originalSessionId } = makeHarness(`Inspect ${path}`);
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(link.text).toBe(path);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
   it('joins a wrapped file URI into one cross-row link', () => {
     const first = 'Saved file:///workspace/project/out/generated-';
     const second = 'mockup%20one.webp';

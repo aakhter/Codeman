@@ -1488,44 +1488,54 @@ Object.assign(CodemanApp.prototype, {
           'txt',
         ]);
         const isFileUriDelimiter = (char) => !char || /[\s"'<>|;&\x00-\x1f]/.test(char);
-        const findFileUris = () => {
+        const scanFileUriTokens = () => {
           const candidates = [];
-          let searchIndex = 0;
-          while (searchIndex < lineText.length) {
-            const startIndex = lineText.indexOf(FILE_URI_PREFIX, searchIndex);
-            if (startIndex === -1) break;
-            if (startIndex > 0 && /[A-Za-z0-9_.-]/.test(lineText[startIndex - 1])) {
-              searchIndex = startIndex + FILE_URI_PREFIX.length;
-              continue;
-            }
-            let endIndex = startIndex + FILE_URI_PREFIX.length;
-            const limit = Math.min(lineText.length, startIndex + MAX_FILE_URI_LENGTH + 1);
-            while (endIndex < limit && !isFileUriDelimiter(lineText[endIndex])) endIndex++;
-            if (endIndex === limit && endIndex < lineText.length && !isFileUriDelimiter(lineText[endIndex])) {
-              while (endIndex < lineText.length && !isFileUriDelimiter(lineText[endIndex])) endIndex++;
-              searchIndex = endIndex;
+          const rejected = [];
+          let tokenStart = 0;
+          while (tokenStart < lineText.length) {
+            while (tokenStart < lineText.length && isFileUriDelimiter(lineText[tokenStart])) tokenStart++;
+            if (tokenStart >= lineText.length) break;
+            let tokenEnd = tokenStart;
+            while (tokenEnd < lineText.length && !isFileUriDelimiter(lineText[tokenEnd])) tokenEnd++;
+
+            const token = lineText.slice(tokenStart, tokenEnd);
+            const schemeOffset = token.toLowerCase().indexOf('file:');
+            if (schemeOffset === -1) {
+              tokenStart = tokenEnd;
               continue;
             }
 
-            let cleanedEnd = endIndex;
+            const startIndex = tokenStart + schemeOffset;
+            let cleanedEnd = tokenEnd;
             while (cleanedEnd > startIndex && /[.,;:!?)\]}]/.test(lineText[cleanedEnd - 1])) cleanedEnd--;
             const uri = lineText.slice(startIndex, cleanedEnd);
             const pathname = uri.split(/[?#]/, 1)[0];
             const dotIndex = pathname.lastIndexOf('.');
             const extension = dotIndex === -1 ? '' : pathname.slice(dotIndex + 1).toLowerCase();
+            const startsAtBoundary = startIndex === tokenStart || /[([{]/.test(lineText[startIndex - 1]);
             if (
+              startsAtBoundary &&
+              uri.slice(0, FILE_URI_PREFIX.length).toLowerCase() === FILE_URI_PREFIX &&
+              uri.length <= MAX_FILE_URI_LENGTH &&
               uri.length > FILE_URI_PREFIX.length &&
               uri[FILE_URI_PREFIX.length] !== '/' &&
               fileUriExtensions.has(extension)
             ) {
               candidates.push({ uri, startIndex, endIndex: cleanedEnd });
+            } else {
+              // Own the whole malformed file-scheme token so legacy URL/path
+              // detectors cannot turn a suffix such as /tmp/report.pdf into a
+              // misleading, partially clickable target.
+              rejected.push({ startIndex: tokenStart, endIndex: tokenEnd });
             }
-            searchIndex = Math.max(endIndex, startIndex + FILE_URI_PREFIX.length);
+            tokenStart = tokenEnd;
           }
-          return candidates;
+          return { candidates, rejected };
         };
 
-        for (const candidate of findFileUris()) {
+        const fileUriTokens = scanFileUriTokens();
+        for (const rejected of fileUriTokens.rejected) reserveLink(rejected.startIndex, rejected.endIndex);
+        for (const candidate of fileUriTokens.candidates) {
           if (overlapsLink(candidate.startIndex, candidate.endIndex)) continue;
           const start = coordAt(candidate.startIndex);
           const end = coordAt(candidate.endIndex - 1);
