@@ -1,7 +1,20 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+const { execFile } = vi.hoisted(() => ({
+  execFile: vi.fn((...args: unknown[]) => {
+    const callback = args[args.length - 1];
+    if (typeof callback === 'function') callback(new Error('unexpected SSH invocation'));
+  }),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:child_process')>();
+  return { ...original, execFile };
+});
+
 import {
   buildRemoteGeneratedArtifactCachePath,
   buildRemoteGeneratedArtifactFetchArgs,
@@ -12,6 +25,10 @@ import { attachmentRegistry, registerExternalAttachment } from '../src/attachmen
 import type { SessionRemote } from '../src/types/session.js';
 
 describe('generated artifact attachments', () => {
+  afterEach(() => {
+    execFile.mockClear();
+  });
+
   it('allows workspace artifacts and known Codex generated image directories', () => {
     const home = homedir();
     expect(isAllowedGeneratedArtifactPath('/repo/out/mockup.png', '/repo')).toBe(true);
@@ -167,6 +184,27 @@ describe('generated artifact attachments', () => {
       expect(attachmentRegistry.get(sessionId, first.attachmentId)?.filePath).toBe(filePath);
     });
 
+    it('revalidates a locally registered artifact after it is deleted', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-deleted-')));
+      const filePath = join(workspaceDir, 'mockup.png');
+      await fs.writeFile(filePath, 'png-bytes');
+
+      await registerGeneratedArtifactAttachment({
+        sessionId,
+        filePath,
+        sessionWorkingDir: workspaceDir,
+      });
+      await fs.rm(filePath);
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath,
+          sessionWorkingDir: workspaceDir,
+        })
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+
     it('reuses a registered remote generated-artifact cache file without SSH', async () => {
       workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-dedupe-')));
       const remote: SessionRemote = {
@@ -191,6 +229,7 @@ describe('generated artifact attachments', () => {
       });
 
       expect(second.attachmentId).toBe(first.attachmentId);
+      expect(execFile).not.toHaveBeenCalled();
     });
   });
 });

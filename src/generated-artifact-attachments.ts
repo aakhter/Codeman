@@ -74,8 +74,6 @@ export async function registerGeneratedArtifactAttachment(
     // Keep the configured workspace path when it cannot be resolved.
   }
   const forceWorkspaceConfinement = !isAllowedGeneratedArtifactPath(resolvedPath, resolvedWorkingDir);
-  const existing = registeredArtifact(options.sessionId, resolvedPath);
-  if (existing) return existing;
   return registerExternalAttachment(options.sessionId, options.filePath, {
     sessionWorkingDir: options.sessionWorkingDir,
     forceWorkspaceConfinement,
