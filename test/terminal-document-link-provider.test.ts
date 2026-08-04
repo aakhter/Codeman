@@ -361,6 +361,20 @@ describe('COD-232 terminal document link provider', () => {
     expect(previewSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps an ordinary URL link when its query contains a file URI value', () => {
+    const url = 'https://example.com/?next=file:///tmp/report.pdf';
+    const { provide, openSpy, fileUriSpy, logSpy, previewSpy } = makeHarness(`Continue at ${url}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([url]);
+    links[0].activate(null, links[0].text);
+    expect(openSpy).toHaveBeenCalledWith(url, '_blank', 'noopener,noreferrer');
+    expect(fileUriSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
   it('preserves live-log routing while routing a document reference to preview', () => {
     const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(
       'tail -f /var/log/app.log then inspect out/report.pdf'
