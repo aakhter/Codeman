@@ -17,7 +17,12 @@ import { basename, join, posix as posixPath } from 'node:path';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import { dataPath } from './config/instance.js';
-import { registerExternalAttachment, type AttachmentRegistrationResult } from './attachment-registry.js';
+import {
+  attachmentRecordToEvent,
+  attachmentRegistry,
+  registerExternalAttachment,
+  type AttachmentRegistrationResult,
+} from './attachment-registry.js';
 import { buildSshConnectionArgv, remoteSshTarget, shellescape } from './remote-hosts.js';
 import type { SessionRemote } from './types/session.js';
 
@@ -49,7 +54,10 @@ export async function registerGeneratedArtifactAttachment(
     if (!isAllowedRemoteGeneratedArtifactPath(options.filePath, options.remote)) {
       throw new Error('Generated artifact path is outside allowed remote locations');
     }
-    const localPath = await materializeRemoteGeneratedArtifact(options.sessionId, options.remote, options.filePath);
+    const localPath = buildRemoteGeneratedArtifactCachePath(options.sessionId, options.remote, options.filePath);
+    const existing = registeredArtifact(options.sessionId, localPath);
+    if (existing) return existing;
+    await materializeRemoteGeneratedArtifact(options.sessionId, options.remote, options.filePath);
     return registerExternalAttachment(options.sessionId, localPath, { sessionWorkingDir: options.sessionWorkingDir });
   }
 
@@ -66,10 +74,17 @@ export async function registerGeneratedArtifactAttachment(
     // Keep the configured workspace path when it cannot be resolved.
   }
   const forceWorkspaceConfinement = !isAllowedGeneratedArtifactPath(resolvedPath, resolvedWorkingDir);
+  const existing = registeredArtifact(options.sessionId, resolvedPath);
+  if (existing) return existing;
   return registerExternalAttachment(options.sessionId, options.filePath, {
     sessionWorkingDir: options.sessionWorkingDir,
     forceWorkspaceConfinement,
   });
+}
+
+function registeredArtifact(sessionId: string, localPath: string): AttachmentRegistrationResult | undefined {
+  const existing = attachmentRegistry.findByFilePath(sessionId, localPath);
+  return existing ? attachmentRecordToEvent(existing) : undefined;
 }
 
 export function isAllowedGeneratedArtifactPath(

@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   buildRemoteGeneratedArtifactCachePath,
   buildRemoteGeneratedArtifactFetchArgs,
   isAllowedGeneratedArtifactPath,
   registerGeneratedArtifactAttachment,
 } from '../src/generated-artifact-attachments.js';
-import { attachmentRegistry } from '../src/attachment-registry.js';
+import { attachmentRegistry, registerExternalAttachment } from '../src/attachment-registry.js';
 import type { SessionRemote } from '../src/types/session.js';
 
 describe('generated artifact attachments', () => {
@@ -105,6 +105,7 @@ describe('generated artifact attachments', () => {
   describe('symlink resolution', () => {
     let workspaceDir: string | undefined;
     let outsideDir: string | undefined;
+    let generatedCacheDir: string | undefined;
     const sessionId = 'generated-artifact-symlink-test';
 
     afterEach(async () => {
@@ -112,8 +113,10 @@ describe('generated artifact attachments', () => {
       for (const dir of [workspaceDir, outsideDir]) {
         if (dir) await fs.rm(dir, { recursive: true, force: true });
       }
+      if (generatedCacheDir) await fs.rm(generatedCacheDir, { recursive: true, force: true });
       workspaceDir = undefined;
       outsideDir = undefined;
+      generatedCacheDir = undefined;
     });
 
     it('rejects a workspace symlink to an outside file', async () => {
@@ -142,6 +145,52 @@ describe('generated artifact attachments', () => {
 
       expect(event.fileName).toBe('mockup.png');
       expect(event.attachmentType).toBe('image');
+    });
+
+    it('reuses an existing registration for the same resolved local artifact', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-dedupe-')));
+      const filePath = join(workspaceDir, 'mockup.png');
+      await fs.writeFile(filePath, 'png-bytes');
+
+      const first = await registerGeneratedArtifactAttachment({
+        sessionId,
+        filePath,
+        sessionWorkingDir: workspaceDir,
+      });
+      const second = await registerGeneratedArtifactAttachment({
+        sessionId,
+        filePath,
+        sessionWorkingDir: workspaceDir,
+      });
+
+      expect(second.attachmentId).toBe(first.attachmentId);
+      expect(attachmentRegistry.get(sessionId, first.attachmentId)?.filePath).toBe(filePath);
+    });
+
+    it('reuses a registered remote generated-artifact cache file without SSH', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-dedupe-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      const remotePath = '/Users/aamer/.codex-personal/generated_images/mockup.png';
+      const cachePath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, remotePath);
+      generatedCacheDir = dirname(cachePath);
+      await fs.mkdir(generatedCacheDir, { recursive: true });
+      await fs.writeFile(cachePath, 'png-bytes');
+
+      const first = await registerExternalAttachment(sessionId, cachePath, { sessionWorkingDir: workspaceDir });
+      const second = await registerGeneratedArtifactAttachment({
+        sessionId,
+        filePath: remotePath,
+        sessionWorkingDir: workspaceDir,
+        remote,
+      });
+
+      expect(second.attachmentId).toBe(first.attachmentId);
     });
   });
 });
