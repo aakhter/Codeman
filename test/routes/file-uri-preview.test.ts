@@ -3,20 +3,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fs from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
 const { execFile } = vi.hoisted(() => ({ execFile: vi.fn() }));
+const previewFixture = vi.hoisted(() => ({ path: '' }));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:child_process')>();
   return { ...original, execFile };
 });
 
+vi.mock('../../src/document-preview-cache.js', () => ({
+  getOfficePreviewPdfPath: vi.fn(async () => previewFixture.path),
+  getPreviewPdfDownloadName: vi.fn((name: string) => `${name.replace(/\.[^.]+$/, '')}.pdf`),
+}));
+
+vi.mock('../../src/document-thumbnailer.js', () => ({
+  generateFirstPageThumbnail: vi.fn(async () => ({ content: Buffer.from('thumbnail'), contentType: 'image/png' })),
+}));
+
 import { attachmentRegistry } from '../../src/attachment-registry.js';
 import { buildRemoteGeneratedArtifactCachePath } from '../../src/generated-artifact-attachments.js';
 import { registerFileRoutes } from '../../src/web/routes/file-routes.js';
+import { getOfficePreviewPdfPath } from '../../src/document-preview-cache.js';
+import { generateFirstPageThumbnail } from '../../src/document-thumbnailer.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { SseEvent } from '../../src/web/sse-events.js';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
@@ -145,6 +157,172 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     );
     expect(ctx.persistSessionState).toHaveBeenCalledWith(ctx._session);
     expect(ctx.broadcast).toHaveBeenCalledWith(SseEvent.AttachmentDetected, body.data);
+  });
+
+  it.each([
+    ['metadata', 'txt', ''],
+    ['raw', 'txt', '/raw'],
+    ['preview', 'docx', '/preview'],
+    ['thumbnail', 'pdf', '/thumbnail'],
+  ])(
+    'rejects a generated artifact swapped outside its boundary on the %s route',
+    async (endpoint, extension, suffix) => {
+      const acceptedPath = join(workspaceDir, `accepted.${extension}`);
+      const outsidePath = join(outsideDir, `outside.${extension}`);
+      await fs.writeFile(acceptedPath, 'accepted');
+      await fs.writeFile(outsidePath, 'outside-secret');
+      previewFixture.path = join(testRoot, 'preview.pdf');
+      await fs.writeFile(previewFixture.path, '%PDF-1.4\n%%EOF\n');
+
+      const registration = await postUri(pathToFileURL(acceptedPath).href);
+      expect(registration.statusCode).toBe(200);
+      const attachmentId = registration.json().data.attachmentId;
+
+      await fs.rm(acceptedPath);
+      await fs.symlink(outsidePath, acceptedPath);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/sessions/${ctx._sessionId}/attachments/${attachmentId}${suffix}`,
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.body).not.toContain(acceptedPath);
+      expect(response.body).not.toContain(outsidePath);
+      if (endpoint === 'preview') expect(getOfficePreviewPdfPath).not.toHaveBeenCalled();
+      if (endpoint === 'thumbnail') expect(generateFirstPageThumbnail).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['metadata', 'png', ''],
+    ['raw', 'png', '/raw'],
+    ['preview', 'docx', '/preview'],
+    ['thumbnail', 'pdf', '/thumbnail'],
+  ])('rejects a generated artifact that grows beyond 50 MiB on the %s route', async (endpoint, extension, suffix) => {
+    const filePath = join(workspaceDir, `growing.${extension}`);
+    await fs.writeFile(filePath, 'small');
+    const registration = await postUri(pathToFileURL(filePath).href);
+    const attachmentId = registration.json().data.attachmentId;
+    await fs.truncate(filePath, MAX_GENERATED_ARTIFACT_BYTES + 1);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${ctx._sessionId}/attachments/${attachmentId}${suffix}`,
+    });
+
+    expect(response.statusCode).toBe(413);
+    if (endpoint === 'preview') expect(getOfficePreviewPdfPath).not.toHaveBeenCalled();
+    if (endpoint === 'thumbnail') expect(generateFirstPageThumbnail).not.toHaveBeenCalled();
+  });
+
+  it('rejects a generated artifact replaced by a directory after registration', async () => {
+    const filePath = join(workspaceDir, 'replaced.txt');
+    await fs.writeFile(filePath, 'file');
+    const registration = await postUri(pathToFileURL(filePath).href);
+    const attachmentId = registration.json().data.attachmentId;
+    await fs.rm(filePath);
+    await fs.mkdir(filePath);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${ctx._sessionId}/attachments/${attachmentId}/raw`,
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it('rejects a generated-provenance record with an unsupported canonical extension', async () => {
+    const filePath = join(workspaceDir, 'payload.bin');
+    await fs.writeFile(filePath, 'binary');
+    attachmentRegistry.register({
+      attachmentId: 'att_generated_unsupported',
+      sessionId: ctx._sessionId,
+      filePath,
+      fileName: 'payload.bin',
+      extension: 'bin',
+      attachmentType: 'binary',
+      size: 6,
+      mtimeMs: 1,
+      timestamp: 1,
+      source: 'external',
+      generatedArtifactBoundary: workspaceDir,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${ctx._sessionId}/attachments/att_generated_unsupported/raw`,
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it('preserves private generated provenance when the same file is explicitly re-registered', async () => {
+    const filePath = join(workspaceDir, 'reused.png');
+    await fs.writeFile(filePath, 'image');
+    const generatedResponse = await postUri(pathToFileURL(filePath).href);
+    expect(generatedResponse.statusCode).toBe(200);
+
+    const explicitResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${ctx._sessionId}/attachments`,
+      payload: { path: filePath },
+    });
+
+    expect(explicitResponse.statusCode).toBe(200);
+    expect(ctx._session.upsertAttachmentHistory).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        externalPath: filePath,
+        generatedArtifactBoundary: workspaceDir,
+      })
+    );
+    expect(explicitResponse.body).not.toContain('generatedArtifactBoundary');
+    expect(explicitResponse.body).not.toContain(workspaceDir);
+  });
+
+  it('rejects a document read after a generated artifact is swapped outside its boundary', async () => {
+    const acceptedPath = join(workspaceDir, 'document-read.txt');
+    const outsidePath = join(outsideDir, 'document-read.txt');
+    await fs.writeFile(acceptedPath, 'accepted');
+    await fs.writeFile(outsidePath, 'outside-secret');
+    const registration = await postUri(pathToFileURL(acceptedPath).href);
+    const attachmentId = registration.json().data.attachmentId;
+    await fs.rm(acceptedPath);
+    await fs.symlink(outsidePath, acceptedPath);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${ctx._sessionId}/documents/versions?attachmentId=${attachmentId}`,
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.body).not.toContain(acceptedPath);
+    expect(response.body).not.toContain(outsidePath);
+  });
+
+  it('rejects rollback after a generated artifact swap without writing the outside target', async () => {
+    const acceptedPath = join(workspaceDir, 'document-rollback.txt');
+    const outsidePath = join(outsideDir, 'document-rollback.txt');
+    await fs.writeFile(acceptedPath, 'accepted-version');
+    await fs.writeFile(outsidePath, 'outside-unchanged');
+    const registration = await postUri(pathToFileURL(acceptedPath).href);
+    const attachmentId = registration.json().data.attachmentId;
+    const versionsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${ctx._sessionId}/documents/versions?attachmentId=${attachmentId}`,
+    });
+    const versionId = versionsResponse.json().data.versions[0].id;
+    await fs.rm(acceptedPath);
+    await fs.symlink(outsidePath, acceptedPath);
+
+    const rollbackResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${ctx._sessionId}/documents/rollback`,
+      payload: { attachmentId, versionId },
+    });
+
+    expect(rollbackResponse.statusCode).toBe(403);
+    await expect(fs.readFile(outsidePath, 'utf8')).resolves.toBe('outside-unchanged');
   });
 
   it('rejects a missing URI', async () => {
@@ -404,5 +582,13 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     expect(response.body).not.toContain(remotePath);
     expect(response.body).not.toContain(remote.remotePath);
     expect(response.body).not.toContain(process.env.CODEMAN_DATA_DIR!);
+
+    const cachePath = buildRemoteGeneratedArtifactCachePath(ctx._sessionId, remote, remotePath);
+    expect(attachmentRegistry.get(ctx._sessionId, body.data.attachmentId)?.generatedArtifactBoundary).toBe(
+      await fs.realpath(dirname(cachePath))
+    );
+    const rawResponse = await app.inject({ method: 'GET', url: body.data.rawUrl });
+    expect(rawResponse.statusCode).toBe(200);
+    expect(rawResponse.rawPayload).toEqual(Buffer.alloc(18));
   });
 });

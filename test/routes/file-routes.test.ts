@@ -890,6 +890,40 @@ describe('file-routes', () => {
       expect(JSON.stringify(body.data)).not.toContain('/mnt/c/decks/missing.pdf');
     });
 
+    it('restores generated provenance privately and rejects a history path swapped outside its boundary', async () => {
+      const externalPath = '/tmp/test-workdir/output/mockup.png';
+      const boundary = '/tmp/test-workdir';
+      const swappedPath = '/srv/public/mockup.png';
+      mockedRealpathSync.mockImplementation((path: string) => {
+        if (path === externalPath) return swappedPath as never;
+        return path as never;
+      });
+      harness.ctx._session.upsertAttachmentHistory({
+        id: 'external:generated:mockup.png',
+        sessionId: harness.ctx._sessionId,
+        fileName: 'mockup.png',
+        extension: 'png',
+        attachmentType: 'image',
+        size: 100,
+        mtimeMs: 1,
+        timestamp: 100,
+        source: 'external',
+        externalPath,
+        generatedArtifactBoundary: boundary,
+      });
+
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.items[0]).toMatchObject({ fileName: 'mockup.png', missing: true });
+      expect(JSON.stringify(response.json().data)).not.toContain('generatedArtifactBoundary');
+      expect(JSON.stringify(response.json().data)).not.toContain(boundary);
+      expect(JSON.stringify(response.json().data)).not.toContain(swappedPath);
+    });
+
     it('lists stopped session workspace attachment history from stored state', async () => {
       harness.ctx.sessions.clear();
       const historyItem = buildDetectedAttachmentHistoryItem({

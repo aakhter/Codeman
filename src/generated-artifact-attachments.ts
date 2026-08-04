@@ -19,6 +19,7 @@ import fs from 'node:fs/promises';
 import { dataPath } from './config/instance.js';
 import {
   AttachmentRegistrationError,
+  MAX_GENERATED_ARTIFACT_BYTES,
   attachmentRecordToEvent,
   attachmentRegistry,
   isSupportedAttachmentExtension,
@@ -31,7 +32,6 @@ import { isSensitivePath } from './web/sensitive-path.js';
 
 const execFileAsync = promisify(execFile);
 
-const MAX_GENERATED_ARTIFACT_BYTES = 50 * 1024 * 1024;
 const REMOTE_OPERATION_TIMEOUT_MS = 30_000;
 const REMOTE_OPERATION_HEADER_MAX_BYTES = 16 * 1024;
 const REMOTE_SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
@@ -168,9 +168,11 @@ export async function registerGeneratedArtifactAttachment(
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
     }
     assertGeneratedArtifactSize(inspection.size);
-    if (existing) return existing;
-    await materializeRemoteGeneratedArtifact(localPath, inspection.data);
-    return registerExternalAttachment(options.sessionId, localPath, { sessionWorkingDir: options.sessionWorkingDir });
+    if (!existing) await materializeRemoteGeneratedArtifact(localPath, inspection.data);
+    return registerExternalAttachment(options.sessionId, localPath, {
+      sessionWorkingDir: options.sessionWorkingDir,
+      generatedArtifactBoundary: resolvedPathOrOriginal(posixPath.dirname(localPath)),
+    });
   }
 
   let resolvedPath = options.filePath;
@@ -185,17 +187,13 @@ export async function registerGeneratedArtifactAttachment(
   } catch {
     // Keep the configured workspace path when it cannot be resolved.
   }
-  const forceWorkspaceConfinement = !isAllowedGeneratedArtifactPath(resolvedPath, resolvedWorkingDir);
-  try {
-    const stat = await fs.stat(resolvedPath);
-    assertGeneratedArtifactSize(stat.size);
-  } catch (err) {
-    if (err instanceof AttachmentRegistrationError) throw err;
-    // Let registerExternalAttachment preserve its existing missing/not-a-file errors.
+  const generatedArtifactBoundary = findGeneratedArtifactBoundary(resolvedPath, resolvedWorkingDir);
+  if (!generatedArtifactBoundary) {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
-  return registerExternalAttachment(options.sessionId, options.filePath, {
+  return registerExternalAttachment(options.sessionId, resolvedPath, {
     sessionWorkingDir: options.sessionWorkingDir,
-    forceWorkspaceConfinement,
+    generatedArtifactBoundary,
   });
 }
 
@@ -217,9 +215,33 @@ export function isAllowedGeneratedArtifactPath(
   workingDir: string,
   homeDir: string = homedir()
 ): boolean {
+  return findGeneratedArtifactBoundary(filePath, workingDir, homeDir) !== undefined;
+}
+
+function findGeneratedArtifactBoundary(
+  filePath: string,
+  workingDir: string,
+  homeDir: string = homedir()
+): string | undefined {
   const normalizedPath = posixPath.normalize(filePath);
-  if (isPathInside(normalizedPath, workingDir)) return true;
-  return isAllowedGeneratedArtifactHomePath(normalizedPath, homeDir);
+  const normalizedWorkingDir = posixPath.normalize(workingDir);
+  if (isPathInside(normalizedPath, normalizedWorkingDir)) return normalizedWorkingDir;
+
+  for (const dir of CODEX_GENERATED_DIRS) {
+    const root = posixPath.join(homeDir, dir);
+    if (isPathInside(normalizedPath, root)) return root;
+  }
+
+  const worktreeRoot = posixPath.join(homeDir, '.config/superpowers/worktrees');
+  if (!isPathInside(normalizedPath, worktreeRoot)) return undefined;
+  const pathInWorktrees = normalizedPath.slice(ensureTrailingSlash(posixPath.normalize(worktreeRoot)).length);
+  for (const marker of SUPERPOWERS_ARTIFACT_DIR_MARKERS) {
+    const markerIndex = pathInWorktrees.indexOf(marker);
+    if (markerIndex >= 0) {
+      return posixPath.join(worktreeRoot, pathInWorktrees.slice(0, markerIndex + marker.length - 1));
+    }
+  }
+  return undefined;
 }
 
 function isAllowedGeneratedArtifactHomePath(normalizedPath: string, homeDir: string): boolean {

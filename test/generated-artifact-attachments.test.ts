@@ -364,6 +364,9 @@ describe('generated artifact attachments', () => {
 
       expect(event.fileName).toBe('mockup.png');
       expect(event.attachmentType).toBe('image');
+      expect(attachmentRegistry.get(sessionId, event.attachmentId)?.generatedArtifactBoundary).toBe(workspaceDir);
+      expect(JSON.stringify(event)).not.toContain('generatedArtifactBoundary');
+      expect(JSON.stringify(event)).not.toContain(workspaceDir);
     });
 
     it('reuses an existing registration for the same resolved local artifact', async () => {
@@ -672,6 +675,11 @@ describe('generated artifact attachments', () => {
       });
 
       expect(event.fileName).toBe('mockup.png');
+      expect(attachmentRegistry.get(sessionId, event.attachmentId)?.generatedArtifactBoundary).toBe(
+        await fs.realpath(dirname(cachePath))
+      );
+      expect(JSON.stringify(event)).not.toContain('generatedArtifactBoundary');
+      expect(JSON.stringify(event)).not.toContain(dirname(cachePath));
       expect(execFile).toHaveBeenCalledTimes(1);
       expect(execFile.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(['aamer@192.168.1.20']));
       expect(String(execFile.mock.calls[0]?.[1]?.at(-1))).toContain('PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c');

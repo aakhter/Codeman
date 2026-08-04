@@ -40,6 +40,7 @@ import {
   buildFileThumbnailRoute,
   getAttachmentType,
   isSupportedAttachmentExtension,
+  resolveGeneratedArtifactReadPath,
   registerExternalAttachment,
   type AttachmentRecord,
 } from '../../attachment-registry.js';
@@ -328,10 +329,26 @@ async function resolveServableAttachmentPath(
   let pathToCheck = record.filePath;
   let resolved = false;
   try {
-    pathToCheck = realpathSync(record.filePath);
-    resolved = true;
-  } catch {
-    // Fall back to the stored (already realpath-resolved at registration) path.
+    const generatedPath = await resolveGeneratedArtifactReadPath(record);
+    if (generatedPath) {
+      pathToCheck = generatedPath;
+      resolved = true;
+    }
+  } catch (err) {
+    if (err instanceof AttachmentRegistrationError) {
+      reply.code(err.statusCode).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message));
+      return null;
+    }
+    throw err;
+  }
+
+  if (!resolved) {
+    try {
+      pathToCheck = realpathSync(record.filePath);
+      resolved = true;
+    } catch {
+      // Fall back to the stored (already realpath-resolved at registration) path.
+    }
   }
 
   const guard = await loadAttachmentGuardConfig();
@@ -357,7 +374,7 @@ type StoredSessionWithPrivateAttachmentHistory = SessionState & {
   __attachmentHistory?: SessionAttachmentHistoryItem[];
 };
 
-type AttachmentHistoryRouteItem = Omit<SessionAttachmentHistoryItem, 'externalPath'> & {
+type AttachmentHistoryRouteItem = Omit<SessionAttachmentHistoryItem, 'externalPath' | 'generatedArtifactBoundary'> & {
   missing: boolean;
   rawUrl?: string;
   url?: string;
@@ -646,7 +663,10 @@ async function buildExternalAttachmentRouteItem(
   }
 
   try {
-    const event = await registerExternalAttachment(sessionId, item.externalPath, { sessionWorkingDir });
+    const event = await registerExternalAttachment(sessionId, item.externalPath, {
+      sessionWorkingDir,
+      generatedArtifactBoundary: item.generatedArtifactBoundary,
+    });
     // COD-241 unit 3: expose a workspace-relative path for Codeman-uploaded
     // copies (those inside .codeman-attachments/). The frontend gates its
     // "Remove" affordance on `relativePath` starting with `.codeman-attachments/`
@@ -719,20 +739,24 @@ interface DocumentTarget {
  * Resolve a document request (by attachmentId or workspace-relative path) to an
  * absolute file path + extension, or send an error response and return undefined.
  */
-function resolveDocumentTarget(
+async function resolveDocumentTarget(
   ctx: SessionPort & ConfigPort,
   reply: FastifyReply,
   sessionId: string,
   target: { attachmentId?: string; path?: string },
   req: FastifyRequest
-): DocumentTarget | undefined {
+): Promise<DocumentTarget | undefined> {
   if (target.attachmentId) {
     const record = attachmentRegistry.get(sessionId, target.attachmentId);
     if (!record) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Attachment not found'));
       return undefined;
     }
-    return { filePath: record.filePath, extension: record.extension };
+    const workingDir = getKnownSessionWorkingDir(ctx, sessionId, reply, req);
+    if (!workingDir) return undefined;
+    const servePath = await resolveServableAttachmentPath(reply, record, workingDir);
+    if (!servePath) return undefined;
+    return { filePath: servePath, extension: record.extension };
   }
   if (target.path) {
     const workingDir = getKnownSessionWorkingDir(ctx, sessionId, reply, req);
@@ -1473,6 +1497,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           size: record.size,
           mtimeMs: record.mtimeMs,
           timestamp: record.timestamp,
+          generatedArtifactBoundary: record.generatedArtifactBoundary,
         })
       );
       ctx.persistSessionState(session);
@@ -1523,6 +1548,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
             size: record.size,
             mtimeMs: record.mtimeMs,
             timestamp: event.timestamp,
+            generatedArtifactBoundary: record.generatedArtifactBoundary,
           })
         );
         ctx.persistSessionState(session);
@@ -1726,6 +1752,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
               size: record.size,
               mtimeMs: record.mtimeMs,
               timestamp: event.timestamp,
+              generatedArtifactBoundary: record.generatedArtifactBoundary,
             })
           );
           ctx.persistSessionState(session);
@@ -1826,6 +1853,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
             size: record.size,
             mtimeMs: record.mtimeMs,
             timestamp: event.timestamp,
+            generatedArtifactBoundary: record.generatedArtifactBoundary,
           })
         );
         ctx.persistSessionState(session);
@@ -1955,21 +1983,22 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
     if (!record) return;
-    if (!(await resolveServableAttachmentPath(reply, record, workingDir))) return;
+    const servePath = await resolveServableAttachmentPath(reply, record, workingDir);
+    if (!servePath) return;
     const event = attachmentRecordToEvent(record);
     // Re-stat so the live preview poller sees current size/mtime as the agent
     // rewrites the underlying file (COD-58). Fall back to the cached record on error.
     let size = record.size;
     let mtimeMs = record.mtimeMs;
     try {
-      const stat = await fs.stat(record.filePath);
+      const stat = await fs.stat(servePath);
       size = stat.size;
       mtimeMs = stat.mtimeMs ?? mtimeMs;
     } catch {
       // File temporarily unavailable mid-write — keep cached values.
     }
     // Snapshot revision history off the live-preview poll (COD-59).
-    await captureDocumentVersion(id, record.filePath, record.extension);
+    await captureDocumentVersion(id, servePath, record.extension);
     return {
       success: true,
       data: {
@@ -2050,7 +2079,13 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // diff two versions (word-level), and roll a document back to a prior version.
   app.get('/api/sessions/:id/documents/versions', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string }, req);
+    const target = await resolveDocumentTarget(
+      ctx,
+      reply,
+      id,
+      req.query as { attachmentId?: string; path?: string },
+      req
+    );
     if (!target) return;
     await captureDocumentVersion(id, target.filePath, target.extension);
     return { success: true, data: { versions: documentVersionStore.list(id, target.filePath) } };
@@ -2059,7 +2094,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/documents/diff', async (req, reply) => {
     const { id } = req.params as { id: string };
     const query = req.query as { attachmentId?: string; path?: string; from?: string; to?: string };
-    const target = resolveDocumentTarget(ctx, reply, id, query, req);
+    const target = await resolveDocumentTarget(ctx, reply, id, query, req);
     if (!target) return;
     await captureDocumentVersion(id, target.filePath, target.extension);
     const versions = documentVersionStore.list(id, target.filePath);
@@ -2086,7 +2121,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.post('/api/sessions/:id/documents/rollback', async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = (req.body || {}) as { attachmentId?: string; path?: string; versionId?: string };
-    const target = resolveDocumentTarget(ctx, reply, id, body, req);
+    const target = await resolveDocumentTarget(ctx, reply, id, body, req);
     if (!target) return;
     if (!body.versionId) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing versionId'));
@@ -2119,7 +2154,13 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // Selectable HTML rendering of a .docx for the annotatable preview view (COD-68).
   app.get('/api/sessions/:id/documents/html', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const target = resolveDocumentTarget(ctx, reply, id, req.query as { attachmentId?: string; path?: string }, req);
+    const target = await resolveDocumentTarget(
+      ctx,
+      reply,
+      id,
+      req.query as { attachmentId?: string; path?: string },
+      req
+    );
     if (!target) return;
     if (target.extension.toLowerCase().replace(/^\./, '') !== 'docx') {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'HTML view is only available for .docx'));
@@ -2153,7 +2194,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return;
     }
 
-    const target = resolveDocumentTarget(ctx, reply, id, query, req);
+    const target = await resolveDocumentTarget(ctx, reply, id, query, req);
     if (!target) return;
 
     // Resolve symlinks before the sensitive-path guard so a symlink pointing at
@@ -2223,7 +2264,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       path?: string;
       annotations?: { passage?: string; note?: string }[];
     };
-    const target = resolveDocumentTarget(ctx, reply, id, body, req);
+    const target = await resolveDocumentTarget(ctx, reply, id, body, req);
     if (!target) return;
     const annotations = Array.isArray(body.annotations) ? body.annotations.filter((a) => a && a.note) : [];
     if (annotations.length === 0) {

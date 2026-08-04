@@ -410,6 +410,8 @@ export interface SessionAttachmentHistoryItem {
   relativePath?: string;
   /** Server-private absolute path for explicitly published external files */
   externalPath?: string;
+  /** Server-private canonical root for generated-artifact read-time confinement. */
+  generatedArtifactBoundary?: string;
 }
 
 /**

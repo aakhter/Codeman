@@ -1556,6 +1556,7 @@ export class WebServer extends EventEmitter {
           size: record.size,
           mtimeMs: record.mtimeMs,
           timestamp: event.timestamp,
+          generatedArtifactBoundary: record.generatedArtifactBoundary,
         })
       );
       this.persistSessionState(session);

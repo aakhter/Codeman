@@ -14,6 +14,7 @@ export interface ExternalAttachmentHistoryInput {
   size: number;
   mtimeMs?: number;
   timestamp?: number;
+  generatedArtifactBoundary?: string;
 }
 
 export function normalizeAttachmentExtension(extensionOrPath: string): string {
@@ -35,7 +36,7 @@ function safeExternalHistoryId(item: SessionAttachmentHistoryItem): string {
 }
 
 export function sanitizeAttachmentHistoryItem(item: SessionAttachmentHistoryItem): SessionAttachmentHistoryItem {
-  const { externalPath: _externalPath, ...safe } = item;
+  const { externalPath: _externalPath, generatedArtifactBoundary: _generatedArtifactBoundary, ...safe } = item;
   return {
     ...safe,
     id: item.source === 'external' ? safeExternalHistoryId(item) : item.id,
@@ -88,5 +89,6 @@ export function buildExternalAttachmentHistoryItem(
     timestamp: input.timestamp ?? Date.now(),
     source: 'external',
     externalPath: input.externalPath,
+    ...(input.generatedArtifactBoundary ? { generatedArtifactBoundary: input.generatedArtifactBoundary } : {}),
   };
 }
