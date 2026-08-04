@@ -1499,18 +1499,15 @@ Object.assign(CodemanApp.prototype, {
             while (tokenEnd < lineText.length && !isFileUriDelimiter(lineText[tokenEnd])) tokenEnd++;
 
             const token = lineText.slice(tokenStart, tokenEnd);
-            const ordinaryUrlOffset = token.search(/(?:https?|webexteams):\/\//);
-            if (
-              ordinaryUrlOffset === 0 ||
-              (ordinaryUrlOffset > 0 && /[([{]/.test(token[ordinaryUrlOffset - 1]))
-            ) {
-              // The ordinary URL provider owns this whole URL (including any
-              // file: query value) and reserves it before legacy path matching.
+            const schemeOffset = token.toLowerCase().indexOf('file:');
+            if (schemeOffset === -1) {
               tokenStart = tokenEnd;
               continue;
             }
-            const schemeOffset = token.toLowerCase().indexOf('file:');
-            if (schemeOffset === -1) {
+            const ordinaryUrlOffset = token.search(/(?:https?|webexteams):\/\//);
+            if (ordinaryUrlOffset !== -1 && ordinaryUrlOffset < schemeOffset) {
+              // The ordinary URL provider owns this whole URL (including any
+              // file: query value) and reserves it before legacy path matching.
               tokenStart = tokenEnd;
               continue;
             }
