@@ -71,19 +71,22 @@ file=$(resolve_path "$1") || exit 66
 [ -f "$file" ] || exit 66
 size=$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || exit 66
 case "$size" in ''|*[!0-9]*) exit 66 ;; esac
-printf 'FILE\t%s\nSIZE\t%s\n' "$file" "$size"
+printf 'FILE\\000%s\\000SIZE\\000%s\\000' "$file" "$size"
 
 workspace=$(resolve_path "$2" 2>/dev/null) || workspace=
 if [ -n "$workspace" ] && [ -d "$workspace" ]; then
-  printf 'WORKSPACE\t%s\n' "$workspace"
+  printf 'WORKSPACE\\000%s\\000' "$workspace"
 fi
 
-for root in "$3" "$4"; do
-  home=$(resolve_path "$root" 2>/dev/null) || home=
-  if [ -n "$home" ] && [ -d "$home" ]; then
-    printf 'HOME\t%s\n' "$home"
-  fi
-done
+home0=$(resolve_path "$3" 2>/dev/null) || home0=
+if [ -n "$home0" ] && [ -d "$home0" ]; then
+  printf 'HOME0\\000%s\\000' "$home0"
+fi
+
+home1=$(resolve_path "$4" 2>/dev/null) || home1=
+if [ -n "$home1" ] && [ -d "$home1" ]; then
+  printf 'HOME1\\000%s\\000' "$home1"
+fi
 `.trim();
 
 export interface GeneratedArtifactRegistrationOptions {
@@ -99,6 +102,8 @@ export async function registerGeneratedArtifactAttachment(
   if (options.remote) {
     if (
       hasUnsafeRemotePathCharacters(options.filePath) ||
+      hasControlCharacters(options.remote.remotePath) ||
+      !posixPath.isAbsolute(options.remote.remotePath) ||
       !isAllowedRemoteGeneratedArtifactPath(options.filePath, options.remote)
     ) {
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
@@ -199,35 +204,49 @@ async function inspectRemoteGeneratedArtifact(
 ): Promise<RemoteGeneratedArtifactInspection> {
   const args = buildRemoteGeneratedArtifactInspectionArgs(remote, remotePath);
   const { stdout } = (await execFileAsync('ssh', args, {
-    encoding: 'utf8',
+    encoding: 'buffer',
     timeout: REMOTE_INSPECTION_TIMEOUT_MS,
     maxBuffer: REMOTE_INSPECTION_MAX_BUFFER_BYTES,
-  })) as { stdout: string };
+  })) as { stdout: Buffer };
   return parseRemoteGeneratedArtifactInspection(stdout);
 }
 
-function parseRemoteGeneratedArtifactInspection(stdout: string): RemoteGeneratedArtifactInspection {
+function parseRemoteGeneratedArtifactInspection(stdout: Buffer): RemoteGeneratedArtifactInspection {
+  if (stdout.length === 0 || stdout.at(-1) !== 0) {
+    throw new Error('Invalid remote artifact inspection response');
+  }
+  const fields = stdout.toString('utf8').split('\0');
+  fields.pop();
+  if (fields.length === 0 || fields.length % 2 !== 0) {
+    throw new Error('Invalid remote artifact inspection response');
+  }
+
   let filePath: string | undefined;
   let size: number | undefined;
   let workspace: string | undefined;
   const homes: string[] = [];
+  const seenKinds = new Set<string>();
 
-  for (const line of stdout.split('\n')) {
-    if (!line) continue;
-    const separator = line.indexOf('\t');
-    if (separator < 1) throw new Error('Invalid remote artifact inspection response');
-    const kind = line.slice(0, separator);
-    const value = line.slice(separator + 1);
-    if (kind === 'FILE' && filePath === undefined) filePath = value;
-    else if (kind === 'SIZE' && size === undefined && /^\d+$/.test(value)) size = Number(value);
-    else if (kind === 'WORKSPACE' && workspace === undefined) workspace = value;
-    else if (kind === 'HOME') homes.push(value);
+  for (let index = 0; index < fields.length; index += 2) {
+    const kind = fields[index];
+    const value = fields[index + 1];
+    if (!kind || value === undefined || seenKinds.has(kind)) {
+      throw new Error('Invalid remote artifact inspection response');
+    }
+    seenKinds.add(kind);
+    if (kind === 'FILE') filePath = value;
+    else if (kind === 'SIZE' && /^\d+$/.test(value)) size = Number(value);
+    else if (kind === 'WORKSPACE') workspace = value;
+    else if (kind === 'HOME0' || kind === 'HOME1') homes.push(value);
     else throw new Error('Invalid remote artifact inspection response');
+  }
+
+  if (filePath === undefined || size === undefined) {
+    throw new Error('Invalid remote artifact inspection response');
   }
 
   if (
     !filePath ||
-    size === undefined ||
     !Number.isSafeInteger(size) ||
     hasControlCharacters(filePath) ||
     !posixPath.isAbsolute(filePath) ||

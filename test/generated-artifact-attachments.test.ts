@@ -31,15 +31,23 @@ function mockRemoteInspection(
   size: number,
   options: { workspace?: string; homes?: string[] } = {}
 ): void {
-  const lines = [
-    `FILE\t${filePath}`,
-    `SIZE\t${size}`,
-    ...(options.workspace ? [`WORKSPACE\t${options.workspace}`] : []),
-    ...(options.homes ?? []).map((home) => `HOME\t${home}`),
+  const fields = [
+    'FILE',
+    filePath,
+    'SIZE',
+    String(size),
+    ...(options.workspace ? ['WORKSPACE', options.workspace] : []),
+    ...(options.homes ?? []).flatMap((home, index) => [`HOME${index}`, home]),
   ];
+  mockRemoteInspectionFields(fields);
+}
+
+function mockRemoteInspectionFields(fields: string[]): void {
   execFile.mockImplementationOnce((...args: unknown[]) => {
     const callback = args.at(-1);
-    if (typeof callback === 'function') callback(null, { stdout: `${lines.join('\n')}\n`, stderr: '' });
+    if (typeof callback === 'function') {
+      callback(null, { stdout: Buffer.from(`${fields.join('\0')}\0`), stderr: Buffer.alloc(0) });
+    }
   });
 }
 
@@ -307,7 +315,92 @@ describe('generated artifact attachments', () => {
         statusCode: 403,
       });
       expect(execFile).toHaveBeenCalledTimes(1);
-      expect(execFile.mock.calls[0]?.[2]).toMatchObject({ encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 });
+      expect(execFile.mock.calls[0]?.[2]).toMatchObject({ encoding: 'buffer', timeout: 10_000, maxBuffer: 16 * 1024 });
+      expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
+    });
+
+    it('rejects a canonical remote path containing LF with a typed 403 before fetch or cache registration', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-lf-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      const requestedPath = '/Users/aamer/projects/app/output/mockup.png';
+      const canonicalPath = '/Users/aamer/projects/app/output/mock\nup.png';
+      const cachePath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, requestedPath);
+      mockRemoteInspection(canonicalPath, 12, { workspace: remote.remotePath });
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: requestedPath,
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({ message: 'Access to this file is blocked', statusCode: 403 });
+      expect(execFile).toHaveBeenCalledTimes(1);
+      expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
+      expect(attachmentRegistry.findByFilePath(sessionId, cachePath)).toBeUndefined();
+    });
+
+    it('rejects control characters in the configured remote workspace before SSH', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-root-control-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app/poison\n/..',
+      };
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: '/Users/aamer/projects/app/output/mockup.png',
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toMatchObject({ message: 'Access to this file is blocked', statusCode: 403 });
+      expect(execFile).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['odd field count', ['FILE', '/Users/aamer/projects/app/output/mockup.png', 'SIZE']],
+      ['missing required field', ['FILE', '/Users/aamer/projects/app/output/mockup.png']],
+      [
+        'duplicate field',
+        [
+          'FILE',
+          '/Users/aamer/projects/app/output/mockup.png',
+          'SIZE',
+          '12',
+          'FILE',
+          '/Users/aamer/projects/app/output/mockup.png',
+        ],
+      ],
+    ])('rejects malformed NUL-delimited inspection output with %s', async (_case, fields) => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-malformed-')));
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      mockRemoteInspectionFields(fields);
+
+      await expect(
+        registerGeneratedArtifactAttachment({
+          sessionId,
+          filePath: '/Users/aamer/projects/app/output/mockup.png',
+          sessionWorkingDir: workspaceDir,
+          remote,
+        })
+      ).rejects.toThrow('Invalid remote artifact inspection response');
+      expect(execFile).toHaveBeenCalledTimes(1);
       expect(execFile.mock.calls.some((call) => String(call[1]).includes('cat --'))).toBe(false);
     });
 

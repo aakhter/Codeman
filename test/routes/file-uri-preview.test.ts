@@ -32,17 +32,19 @@ function mockRemoteSsh(options: {
   fetchBytes?: Buffer;
 }): void {
   execFile.mockImplementation((...args: unknown[]) => {
-    const execOptions = args.at(-2) as { encoding?: string };
+    const sshArgs = args[1] as string[];
     const callback = args.at(-1);
     if (typeof callback !== 'function') return {};
-    if (execOptions.encoding === 'utf8') {
-      const lines = [
-        `FILE\t${options.filePath}`,
-        `SIZE\t${options.size}`,
-        ...(options.workspace ? [`WORKSPACE\t${options.workspace}`] : []),
-        ...(options.homes ?? []).map((home) => `HOME\t${home}`),
+    if (!String(sshArgs.at(-1)).includes('cat --')) {
+      const fields = [
+        'FILE',
+        options.filePath,
+        'SIZE',
+        String(options.size),
+        ...(options.workspace ? ['WORKSPACE', options.workspace] : []),
+        ...(options.homes ?? []).flatMap((home, index) => [`HOME${index}`, home]),
       ];
-      callback(null, { stdout: `${lines.join('\n')}\n`, stderr: '' });
+      callback(null, { stdout: Buffer.from(`${fields.join('\0')}\0`), stderr: Buffer.alloc(0) });
     } else {
       callback(null, { stdout: options.fetchBytes ?? Buffer.from('remote-image-bytes'), stderr: Buffer.alloc(0) });
     }
