@@ -122,6 +122,22 @@ describe('file-routes attachment path guard (COD-53)', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('rejects generated registration when the canonical boundary itself has moved', async () => {
+    mockedRealpathSync.mockImplementation((path: string) => {
+      if (path === '/tmp/test-workdir/output/mockup.png') return '/srv/public/output/mockup.png' as never;
+      if (path === '/tmp/test-workdir') return '/srv/public' as never;
+      return path as never;
+    });
+
+    await expect(
+      registerExternalAttachment('test-session-boundary-swap', '/tmp/test-workdir/output/mockup.png', {
+        sessionWorkingDir: '/tmp/test-workdir',
+        generatedArtifactBoundary: '/tmp/test-workdir',
+      })
+    ).rejects.toMatchObject({ message: 'Access to this file is blocked', statusCode: 403 });
+    attachmentRegistry.clearSession('test-session-boundary-swap');
+  });
+
   // ===== BLOCK (defense-in-depth): raw serving rejects a sensitive record =====
 
   it('refuses to serve raw bytes for a record whose path is sensitive', async () => {

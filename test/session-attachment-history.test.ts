@@ -114,6 +114,26 @@ describe('session attachment history', () => {
     expect(persistedHistory?.[0].externalPath).toBe('/mnt/c/private/board-update.pdf');
   });
 
+  it('persists generated-artifact provenance privately without exposing its boundary', () => {
+    const session = new Session({ workingDir: '/tmp/workspace' });
+    session.upsertAttachmentHistory(
+      buildExternalAttachmentHistoryItem({
+        sessionId: session.id,
+        externalPath: '/tmp/workspace/output/mockup.png',
+        fileName: 'mockup.png',
+        extension: 'png',
+        size: 100,
+        timestamp: 100,
+        generatedArtifactBoundary: '/tmp/workspace',
+      })
+    );
+
+    const persistedHistory = session.getAttachmentHistoryForPersist();
+    expect(persistedHistory?.[0].generatedArtifactBoundary).toBe('/tmp/workspace');
+    expect(JSON.stringify(session.toState().attachmentHistory)).not.toContain('generatedArtifactBoundary');
+    expect(JSON.stringify(session.toState().attachmentHistory)).not.toContain('/tmp/workspace');
+  });
+
   it('attaches remote mux sessions from a local cwd', () => {
     expect(
       resolveMuxAttachCwd('/Users/remote/project', {

@@ -86,6 +86,7 @@ function makeHarness(
   let provider: { provideLinks: (line: number, callback: (links?: Link[]) => void) => void } | undefined;
   const originalSessionId = options.sessionId ?? 'origin-session';
   const previewSpy = vi.fn();
+  const fileUriSpy = vi.fn();
   const logSpy = vi.fn();
   const app = {
     terminal: {
@@ -114,6 +115,7 @@ function makeHarness(
     activeSessionId: originalSessionId,
     sessions: new Map([[originalSessionId, { workingDir: options.workingDir ?? '/workspace/project' }]]),
     openFilePreview: previewSpy,
+    openFileUriPreview: fileUriSpy,
     openLogViewerWindow: logSpy,
     _openTerminalUrl: proto._openTerminalUrl,
     _terminalCellFromClientPoint: proto._terminalCellFromClientPoint,
@@ -130,10 +132,130 @@ function makeHarness(
     return links ?? [];
   }
 
-  return { app, provide, previewSpy, logSpy, openSpy, originalSessionId };
+  return { app, provide, previewSpy, fileUriSpy, logSpy, openSpy, originalSessionId };
 }
 
 describe('COD-232 terminal document link provider', () => {
+  it('links a strict generated-image file URI before ordinary URL and path candidates', () => {
+    const uri = 'file:///Users/saqeb/.codex-personal/generated_images/mockup.png';
+    const { provide, fileUriSpy, openSpy, previewSpy, originalSessionId } = makeHarness(`Saved to: ${uri}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([uri]);
+    links[0].activate(null, links[0].text);
+    expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('preserves percent encoding while trimming sentence punctuation from a file URI', () => {
+    const uri = 'file:///workspace/project/out/mockup%20one.pdf';
+    const { provide, fileUriSpy, originalSessionId } = makeHarness(`Preview (${uri}).`);
+
+    const [link] = provide();
+
+    expect(link.text).toBe(uri);
+    link.activate(null, link.text);
+    expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
+  });
+
+  it.each([
+    ['sentence punctuation', '.'],
+    ['the following blank cell', ' '],
+  ])('ends a single-row file URI on its final character before %s', (_label, suffix) => {
+    const uri = 'file:///workspace/project/out/report.pdf';
+    const { provide } = makeHarness(`${uri}${suffix}`);
+
+    const [link] = provide();
+
+    expect(link.range.end).toEqual({ x: uri.length, y: 1 });
+  });
+
+  it('does not activate a file URI when a touch lands on following punctuation', () => {
+    const uri = 'file:///workspace/project/out/report.pdf';
+    const { app, fileUriSpy } = makeHarness(`${uri}.`);
+
+    expect(app._activateTerminalLinkAtPoint.call(app, (uri.length - 0.5) * 10, 10)).toBe(true);
+    expect(app._activateTerminalLinkAtPoint.call(app, (uri.length + 0.5) * 10, 10)).toBe(false);
+    expect(fileUriSpy).toHaveBeenCalledOnce();
+  });
+
+  it('does not link unsupported file URI extensions', () => {
+    const { provide, fileUriSpy } = makeHarness('Saved to: file:///workspace/project/out/archive.zip');
+
+    expect(provide()).toEqual([]);
+    expect(fileUriSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not link network authorities, relative forms, or a file prefix embedded in another token', () => {
+    const { provide, fileUriSpy } = makeHarness(
+      'file://server/share/report.pdf file:relative/report.pdf notfile:///workspace/out/report.pdf'
+    );
+
+    expect(provide()).toEqual([]);
+    expect(fileUriSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an embedded prefix', 'notfile:///tmp/report.pdf'],
+    ['a colon-prefixed scheme', 'not:file:///tmp/report.pdf'],
+    ['a relative file form', 'file:relative/tmp/report.pdf'],
+    ['a network authority', 'file://server/tmp/report.pdf'],
+    ['an over-limit URI token', `file:///${'a'.repeat(2001)}/tmp/report.pdf`],
+  ])('does not let %s fall through to the legacy /tmp path detector', (_label, output) => {
+    const { provide, fileUriSpy, logSpy } = makeHarness(output);
+
+    expect(provide()).toEqual([]);
+    expect(fileUriSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it('preserves an ordinary standalone /tmp path that is not part of a file-scheme token', () => {
+    const path = '/tmp/report.pdf';
+    const { provide, previewSpy, originalSessionId } = makeHarness(`Inspect ${path}`);
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(link.text).toBe(path);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
+  it('joins a wrapped file URI into one cross-row link', () => {
+    const first = 'Saved file:///workspace/project/out/generated-';
+    const second = 'mockup%20one.webp';
+    const uri = 'file:///workspace/project/out/generated-mockup%20one.webp';
+    const { provide } = makeHarness([{ text: first }, { text: second, isWrapped: true }], { cols: first.length });
+
+    const [link] = provide(2);
+
+    expect(link.text).toBe(uri);
+    expect(link.range.start.y).toBe(1);
+    expect(link.range.end.y).toBe(2);
+  });
+
+  it('ends a wrapped file URI on its final cell instead of the following punctuation cell', () => {
+    const first = 'file:///workspace/project/out/generated-';
+    const second = 'report.pdf.';
+    const { provide } = makeHarness([{ text: first }, { text: second, isWrapped: true }], { cols: first.length });
+
+    const [link] = provide(2);
+
+    expect(link.range.end).toEqual({ x: second.length - 1, y: 2 });
+  });
+
+  it('captures the originating session for a file URI when links are provided', () => {
+    const uri = 'file:///workspace/project/out/report.docx';
+    const { app, provide, fileUriSpy, originalSessionId } = makeHarness(uri);
+    const [link] = provide();
+
+    app.activeSessionId = 'different-active-session';
+    link.activate(null, link.text);
+
+    expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
+  });
+
   it('links the roadmap DOCX reference and opens the shared preview', () => {
     const path = 'out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
     const { provide, previewSpy, originalSessionId } = makeHarness(`Created ${path}`);
@@ -236,6 +358,48 @@ describe('COD-232 terminal document link provider', () => {
     expect(links.map((link) => link.text)).toEqual(['https://example.com/out/report.pdf']);
     links[0].activate(null, links[0].text);
     expect(openSpy).toHaveBeenCalledWith('https://example.com/out/report.pdf', '_blank', 'noopener,noreferrer');
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps an ordinary URL link when its query contains a file URI value', () => {
+    const url = 'https://example.com/?next=file:///tmp/report.pdf';
+    const { provide, openSpy, fileUriSpy, logSpy, previewSpy } = makeHarness(`Continue at ${url}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([url]);
+    links[0].activate(null, links[0].text);
+    expect(openSpy).toHaveBeenCalledWith(url, '_blank', 'noopener,noreferrer');
+    expect(fileUriSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps an assigned ordinary URL link when its query contains a file URI value', () => {
+    const url = 'https://example.com/?next=file:///tmp/report.pdf';
+    const { provide, openSpy, fileUriSpy, logSpy, previewSpy } = makeHarness(`url=${url}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([url]);
+    links[0].activate(null, links[0].text);
+    expect(openSpy).toHaveBeenCalledWith(url, '_blank', 'noopener,noreferrer');
+    expect(fileUriSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps one assigned ordinary URL link when a later query parameter contains a file URI value', () => {
+    const url = 'https://example.com/?x=1&next=file:///tmp/report.pdf';
+    const { provide, openSpy, fileUriSpy, logSpy, previewSpy } = makeHarness(`url=${url}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([url]);
+    links[0].activate(null, links[0].text);
+    expect(openSpy).toHaveBeenCalledWith(url, '_blank', 'noopener,noreferrer');
+    expect(fileUriSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
     expect(previewSpy).not.toHaveBeenCalled();
   });
 

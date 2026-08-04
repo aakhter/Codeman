@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import { basename, extname, isAbsolute } from 'node:path';
+import { basename, extname, isAbsolute, relative, sep } from 'node:path';
 import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from './config/attachment-guard.js';
 import { validateSessionFilePath } from './web/route-helpers.js';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
@@ -28,6 +28,8 @@ const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
   'txt',
 ]);
 
+export const MAX_GENERATED_ARTIFACT_BYTES = 50 * 1024 * 1024;
+
 export type AttachmentSource = 'detected' | 'external' | 'upload';
 
 export interface AttachmentRecord {
@@ -41,6 +43,8 @@ export interface AttachmentRecord {
   mtimeMs: number;
   timestamp: number;
   source: AttachmentSource;
+  /** Server-private canonical root for generated-artifact read-time confinement. */
+  generatedArtifactBoundary?: string;
 }
 
 export interface AttachmentRegistrationResult extends AttachmentDetectedEvent {
@@ -192,6 +196,66 @@ export interface RegisterExternalAttachmentOptions {
    * is distinguishable from a passively-detected or externally-referenced one.
    */
   source?: AttachmentSource;
+  /** Canonical root that must continue to contain this generated artifact. */
+  generatedArtifactBoundary?: string;
+}
+
+function isPathInsideBoundary(filePath: string, boundary: string): boolean {
+  const pathFromBoundary = relative(boundary, filePath);
+  return (
+    pathFromBoundary === '' ||
+    (pathFromBoundary !== '..' && !pathFromBoundary.startsWith(`..${sep}`) && !isAbsolute(pathFromBoundary))
+  );
+}
+
+function resolveGeneratedArtifactBoundary(resolvedPath: string, requestedBoundary: string): string {
+  let boundary: string;
+  try {
+    boundary = realpathSync(requestedBoundary);
+  } catch {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
+  if (boundary !== requestedBoundary || !isPathInsideBoundary(resolvedPath, boundary)) {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
+  return boundary;
+}
+
+/** Revalidate server-private generated-artifact provenance before every by-id read. */
+export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord): Promise<string | undefined> {
+  if (!record.generatedArtifactBoundary) return undefined;
+
+  let resolvedPath: string;
+  let resolvedBoundary: string;
+  try {
+    resolvedPath = realpathSync(record.filePath);
+    resolvedBoundary = realpathSync(record.generatedArtifactBoundary);
+  } catch {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
+
+  if (
+    resolvedPath !== record.filePath ||
+    resolvedBoundary !== record.generatedArtifactBoundary ||
+    !isPathInsideBoundary(resolvedPath, resolvedBoundary) ||
+    !isSupportedAttachmentExtension(extname(resolvedPath))
+  ) {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(resolvedPath);
+  } catch {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
+  if ((typeof stat.isFile === 'function' && !stat.isFile()) || stat.size > MAX_GENERATED_ARTIFACT_BYTES) {
+    throw new AttachmentRegistrationError(
+      stat.size > MAX_GENERATED_ARTIFACT_BYTES ? 'Attachment file is too large' : 'Access to this file is blocked',
+      stat.size > MAX_GENERATED_ARTIFACT_BYTES ? 413 : 403
+    );
+  }
+  return resolvedPath;
 }
 
 export async function registerExternalAttachment(
@@ -209,6 +273,10 @@ export async function registerExternalAttachment(
   } catch {
     throw new AttachmentRegistrationError('Attachment file not found', 404);
   }
+
+  const generatedArtifactBoundary = options.generatedArtifactBoundary
+    ? resolveGeneratedArtifactBoundary(resolvedPath, options.generatedArtifactBoundary)
+    : undefined;
 
   // COD-53: enforce the active attachment-guard policy on the symlink-resolved
   // path before doing anything else.
@@ -243,9 +311,20 @@ export async function registerExternalAttachment(
   if (typeof stat.isFile === 'function' && !stat.isFile()) {
     throw new AttachmentRegistrationError('Attachment path is not a file');
   }
+  if (generatedArtifactBoundary && stat.size > MAX_GENERATED_ARTIFACT_BYTES) {
+    throw new AttachmentRegistrationError('Attachment file is too large', 413);
+  }
 
   const existing = attachmentRegistry.findByFilePath(sessionId, resolvedPath);
   if (existing) {
+    if (
+      existing.generatedArtifactBoundary &&
+      generatedArtifactBoundary &&
+      existing.generatedArtifactBoundary !== generatedArtifactBoundary
+    ) {
+      throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+    }
+    if (generatedArtifactBoundary) existing.generatedArtifactBoundary = generatedArtifactBoundary;
     existing.size = stat.size;
     existing.mtimeMs = stat.mtimeMs ?? 0;
     existing.timestamp = Date.now();
@@ -263,6 +342,7 @@ export async function registerExternalAttachment(
     mtimeMs: stat.mtimeMs ?? 0,
     timestamp: Date.now(),
     source: options.source ?? 'external',
+    ...(generatedArtifactBoundary ? { generatedArtifactBoundary } : {}),
   };
   attachmentRegistry.register(record);
   return attachmentRecordToEvent(record);
