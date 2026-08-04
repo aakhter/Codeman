@@ -55,7 +55,7 @@ export async function registerGeneratedArtifactAttachment(
       throw new Error('Generated artifact path is outside allowed remote locations');
     }
     const localPath = buildRemoteGeneratedArtifactCachePath(options.sessionId, options.remote, options.filePath);
-    const existing = registeredArtifact(options.sessionId, localPath);
+    const existing = registeredArtifact(options.sessionId, resolvedPathOrOriginal(localPath));
     if (existing) return existing;
     await materializeRemoteGeneratedArtifact(options.sessionId, options.remote, options.filePath);
     return registerExternalAttachment(options.sessionId, localPath, { sessionWorkingDir: options.sessionWorkingDir });
@@ -83,6 +83,14 @@ export async function registerGeneratedArtifactAttachment(
 function registeredArtifact(sessionId: string, localPath: string): AttachmentRegistrationResult | undefined {
   const existing = attachmentRegistry.findByFilePath(sessionId, localPath);
   return existing ? attachmentRecordToEvent(existing) : undefined;
+}
+
+function resolvedPathOrOriginal(filePath: string): string {
+  try {
+    return realpathSync(filePath);
+  } catch {
+    return filePath;
+  }
 }
 
 export function isAllowedGeneratedArtifactPath(

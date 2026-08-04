@@ -123,6 +123,10 @@ describe('generated artifact attachments', () => {
     let workspaceDir: string | undefined;
     let outsideDir: string | undefined;
     let generatedCacheDir: string | undefined;
+    let generatedDataDir: string | undefined;
+    let generatedDataDirLink: string | undefined;
+    let originalDataDir: string | undefined;
+    let dataDirOverridden = false;
     const sessionId = 'generated-artifact-symlink-test';
 
     afterEach(async () => {
@@ -131,9 +135,20 @@ describe('generated artifact attachments', () => {
         if (dir) await fs.rm(dir, { recursive: true, force: true });
       }
       if (generatedCacheDir) await fs.rm(generatedCacheDir, { recursive: true, force: true });
+      if (dataDirOverridden) {
+        if (originalDataDir === undefined) delete process.env.CODEMAN_DATA_DIR;
+        else process.env.CODEMAN_DATA_DIR = originalDataDir;
+      }
+      for (const dir of [generatedDataDirLink, generatedDataDir]) {
+        if (dir) await fs.rm(dir, { recursive: true, force: true });
+      }
       workspaceDir = undefined;
       outsideDir = undefined;
       generatedCacheDir = undefined;
+      generatedDataDir = undefined;
+      generatedDataDirLink = undefined;
+      originalDataDir = undefined;
+      dataDirOverridden = false;
     });
 
     it('rejects a workspace symlink to an outside file', async () => {
@@ -218,6 +233,39 @@ describe('generated artifact attachments', () => {
       const cachePath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, remotePath);
       generatedCacheDir = dirname(cachePath);
       await fs.mkdir(generatedCacheDir, { recursive: true });
+      await fs.writeFile(cachePath, 'png-bytes');
+
+      const first = await registerExternalAttachment(sessionId, cachePath, { sessionWorkingDir: workspaceDir });
+      const second = await registerGeneratedArtifactAttachment({
+        sessionId,
+        filePath: remotePath,
+        sessionWorkingDir: workspaceDir,
+        remote,
+      });
+
+      expect(second.attachmentId).toBe(first.attachmentId);
+      expect(execFile).not.toHaveBeenCalled();
+    });
+
+    it('reuses a remote cache registration through a symlinked data directory without SSH', async () => {
+      workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-remote-symlink-')));
+      generatedDataDir = await fs.mkdtemp(join(tmpdir(), 'codeman-genart-data-'));
+      generatedDataDirLink = `${generatedDataDir}-link`;
+      await fs.symlink(generatedDataDir, generatedDataDirLink);
+      originalDataDir = process.env.CODEMAN_DATA_DIR;
+      process.env.CODEMAN_DATA_DIR = generatedDataDirLink;
+      dataDirOverridden = true;
+
+      const remote: SessionRemote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.1.20',
+        username: 'aamer',
+        remotePath: '/Users/aamer/projects/app',
+      };
+      const remotePath = '/Users/aamer/.codex-personal/generated_images/mockup.png';
+      const cachePath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, remotePath);
+      await fs.mkdir(dirname(cachePath), { recursive: true });
       await fs.writeFile(cachePath, 'png-bytes');
 
       const first = await registerExternalAttachment(sessionId, cachePath, { sessionWorkingDir: workspaceDir });
