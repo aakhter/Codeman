@@ -241,7 +241,11 @@ function parseRemoteGeneratedArtifactInspection(stdout: string): RemoteGenerated
 }
 
 function hasControlCharacters(value: string): boolean {
-  return /[\x00-\x1f\x7f]/.test(value);
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function isAllowedCanonicalRemoteGeneratedArtifactPath(inspection: RemoteGeneratedArtifactInspection): boolean {
