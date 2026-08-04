@@ -1468,6 +1468,17 @@ Object.assign(CodemanApp.prototype, {
         const originatingSessionId = self.activeSessionId;
         const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
 
+        // Pre-scan with the exact ordinary-URL grammar used for link creation.
+        // File-token rejection consults these same ranges so query separators
+        // such as `&next=file:///...` cannot make the two detectors disagree.
+        const urlPattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&)\]\x00-\x1f]|&(?!&))+/g;
+        const ordinaryUrlReferences = [];
+        let urlMatch;
+        while ((urlMatch = urlPattern.exec(lineText)) !== null) {
+          const url = urlMatch[0].replace(/[.,;:!?)&]+$/, '');
+          ordinaryUrlReferences.push({ url, startIndex: urlMatch.index, endIndex: urlMatch.index + url.length });
+        }
+
         // Pattern 0: strict local file URIs. Scan before ordinary URLs and paths,
         // retaining the encoded URI for the authenticated resolver to decode. The
         // scan and candidate length are bounded so hostile terminal output cannot
@@ -1491,6 +1502,7 @@ Object.assign(CodemanApp.prototype, {
         const scanFileUriTokens = () => {
           const candidates = [];
           const rejected = [];
+          let ordinaryUrlIndex = 0;
           let tokenStart = 0;
           while (tokenStart < lineText.length) {
             while (tokenStart < lineText.length && isFileUriDelimiter(lineText[tokenStart])) tokenStart++;
@@ -1504,15 +1516,21 @@ Object.assign(CodemanApp.prototype, {
               tokenStart = tokenEnd;
               continue;
             }
-            const ordinaryUrlOffset = token.search(/(?:https?|webexteams):\/\//);
-            if (ordinaryUrlOffset !== -1 && ordinaryUrlOffset < schemeOffset) {
-              // The ordinary URL provider owns this whole URL (including any
-              // file: query value) and reserves it before legacy path matching.
+            const startIndex = tokenStart + schemeOffset;
+            while (
+              ordinaryUrlIndex < ordinaryUrlReferences.length &&
+              ordinaryUrlReferences[ordinaryUrlIndex].endIndex <= startIndex
+            ) {
+              ordinaryUrlIndex++;
+            }
+            const ordinaryUrl = ordinaryUrlReferences[ordinaryUrlIndex];
+            if (ordinaryUrl && startIndex >= ordinaryUrl.startIndex && startIndex < ordinaryUrl.endIndex) {
+              // The ordinary URL provider owns this file: query value and will
+              // reserve the full URL before legacy path matching.
               tokenStart = tokenEnd;
               continue;
             }
 
-            const startIndex = tokenStart + schemeOffset;
             let cleanedEnd = tokenEnd;
             while (cleanedEnd > startIndex && /[.,;:!?)\]}]/.test(lineText[cleanedEnd - 1])) cleanedEnd--;
             const uri = lineText.slice(startIndex, cleanedEnd);
@@ -1571,22 +1589,15 @@ Object.assign(CodemanApp.prototype, {
         // through `1479`, landing on the wrong page). `&&` is still a boundary, since
         // that is the shell operator and never appears inside a URL. A lone trailing
         // `&` is trimmed below with the other trailing punctuation.
-        const urlPattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&)\]\x00-\x1f]|&(?!&))+/g;
+        const addUrlLink = (reference) => {
+          if (overlapsLink(reference.startIndex, reference.endIndex)) return;
 
-        const addUrlLink = (url, matchIndex) => {
-          // Strip trailing punctuation that's likely not part of the URL
-          const cleaned = url.replace(/[.,;:!?)&]+$/, '');
-          const startCol = lineText.indexOf(cleaned, matchIndex);
-          if (startCol === -1) return;
-          const endCol = startCol + cleaned.length;
-          if (overlapsLink(startCol, endCol)) return;
-
-          const start = coordAt(startCol);
-          const end = coordAt(endCol);
-          reserveLink(startCol, endCol);
+          const start = coordAt(reference.startIndex);
+          const end = coordAt(reference.endIndex);
+          reserveLink(reference.startIndex, reference.endIndex);
 
           links.push({
-            text: cleaned,
+            text: reference.url,
             range: { start, end },
             decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
@@ -1660,10 +1671,7 @@ Object.assign(CodemanApp.prototype, {
         // Match all patterns — URLs first so they take priority
         let match;
 
-        urlPattern.lastIndex = 0;
-        while ((match = urlPattern.exec(lineText)) !== null) {
-          addUrlLink(match[0], match.index);
-        }
+        for (const reference of ordinaryUrlReferences) addUrlLink(reference);
 
         cmdPattern.lastIndex = 0;
         while ((match = cmdPattern.exec(lineText)) !== null) {
