@@ -4,7 +4,7 @@
 
 **Goal:** Make supported `file://` URIs in Codex terminal output open the referenced local or remote generated artifact in Codeman's in-app preview.
 
-**Architecture:** Extend the existing xterm link provider with a file-URI link kind. Resolve clicks through a Codex-only session route that decodes the URI and delegates to the existing generated-artifact registration boundary, returning only sanitized attachment metadata. Reuse registry records by canonical local/cache path so the proactive `Saved to:` scanner and a click converge on one attachment.
+**Architecture:** Extend the existing xterm link provider with a file-URI link kind. Resolve clicks through a Codex-only session route that decodes the URI and delegates to the existing generated-artifact registration boundary, returning only sanitized attachment metadata. Reuse registry records by canonical local/cache path so the proactive `Saved to:` scanner and a click converge on one attachment. A remote cache hit skips byte retransmission only after a fresh canonical, descriptor-backed inspection; first-time inspection and bounded transfer share one framed remote operation and retain the 50 MiB limit.
 
 **Tech Stack:** TypeScript ESM, Fastify `app.inject()`, browser JavaScript mixins, xterm.js link providers, Vitest, OpenSSH-backed generated-artifact materialization.
 
@@ -50,7 +50,7 @@ Expected: FAIL because the second registration currently mints a different attac
 
 - [ ] **Step 3: Implement canonical-path reuse**
 
-Import `attachmentRecordToEvent` and `attachmentRegistry`. Before `registerExternalAttachment()`, resolve the final server-local path and return the existing event when `findByFilePath()` succeeds. For remote sessions, compute `buildRemoteGeneratedArtifactCachePath()` and check it before invoking SSH.
+Import `attachmentRecordToEvent` and `attachmentRegistry`. Before `registerExternalAttachment()`, resolve the final server-local path and return the existing event when `findByFilePath()` succeeds. For remote sessions, compute `buildRemoteGeneratedArtifactCachePath()` and check it for a candidate existing record, then perform a fresh canonical security inspection before reuse. A cache hit omits the byte payload but does not omit the remote inspection.
 
 ```ts
 function registeredArtifact(sessionId: string, localPath: string): AttachmentRegistrationResult | undefined {
@@ -61,8 +61,10 @@ function registeredArtifact(sessionId: string, localPath: string): AttachmentReg
 if (options.remote) {
   const localPath = buildRemoteGeneratedArtifactCachePath(options.sessionId, options.remote, options.filePath);
   const existing = registeredArtifact(options.sessionId, localPath);
+  const inspection = await inspectRemoteGeneratedArtifact(options, { includeBytes: !existing });
+  // canonical validation + 50 MiB admission check
   if (existing) return existing;
-  // existing validation + materialization + registration
+  // materialize the bytes returned by the same descriptor-backed operation, then register
 }
 
 const existing = registeredArtifact(options.sessionId, resolvedPath);
@@ -71,7 +73,7 @@ if (existing) return existing;
 
 - [ ] **Step 4: Add and verify the remote-cache deduplication case**
 
-Create the deterministic cache file, register it once with `registerExternalAttachment()`, call `registerGeneratedArtifactAttachment()` with a remote descriptor, and assert the existing ID returns without an SSH error. Clean the generated cache directory in `afterEach`.
+Create the deterministic cache file, register it once with `registerExternalAttachment()`, call `registerGeneratedArtifactAttachment()` with a mocked canonical remote inspection, and assert the existing ID returns after inspection without a file-byte payload. Clean the generated cache directory in `afterEach`.
 
 Run: `npm test -- test/generated-artifact-attachments.test.ts`
 

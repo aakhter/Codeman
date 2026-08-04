@@ -31,7 +31,7 @@ Terminal output is prompt-influenceable, and clicking a link must not turn it in
 - The endpoint is session-scoped and available only for Codex-mode sessions, matching the existing generated-artifact listener boundary.
 - Local paths remain limited to the session workspace, home-anchored `.codex`/`.codex-personal` generated image or artifact directories, and the existing allowed Superpowers output locations.
 - Remote paths remain limited to the remote workspace or the matching remote user's home-anchored generated-artifact directories.
-- Existing realpath checks, symlink-escape rejection, sensitive-path guards, supported-extension allowlist, size cap, SSH argv construction, timeout, and output cap remain authoritative.
+- Existing realpath checks, symlink-escape rejection, sensitive-path guards, supported-extension allowlist, 50 MiB admission limit, SSH argv construction, timeout, and output cap remain authoritative.
 - The browser receives only attachment IDs, filenames, types, sizes, and attachment routes. Server or SSH command diagnostics are not returned to the UI.
 - A rejected link is non-destructive and does not fall back to browser `file://` navigation or an unconfined workspace route.
 
@@ -39,9 +39,9 @@ Terminal output is prompt-influenceable, and clicking a link must not turn it in
 
 Codex already scans `Saved to: file://...` output and asynchronously registers the generated artifact so it can display an attachment card. A user may click the terminal URI before or after that registration completes.
 
-`registerGeneratedArtifactAttachment()` will reuse an existing per-session registry record when its final local path is already registered. For a local file, the comparison uses the realpath-resolved target. For a remote file, the deterministic generated-artifact cache path is computed first and checked before another SSH fetch. The existing attachment event is reconstructed from the registry record and returned.
+`registerGeneratedArtifactAttachment()` will reuse an existing per-session registry record when its final local path is already registered. For a local file, the comparison uses the realpath-resolved target. For a remote file, the deterministic generated-artifact cache path locates a possible existing record, but reuse still requires a fresh canonical, descriptor-backed security inspection on the remote host. An accepted cached record avoids retransmitting the file bytes; the existing attachment event is reconstructed from the registry record and returned.
 
-If no record exists, registration follows the current local or remote path and produces one. Concurrent first-time requests are allowed to resolve independently; the registry and session attachment-history upsert retain bounded state, and both results remain subject to the same validation. No client-side filename matching is used.
+If no record exists, registration follows the current local or remote path and produces one. Remote inspection metadata and any required file bytes use one framed operation bound to the same opened descriptor, and the 50 MiB admission limit bounds materialization. Concurrent first-time requests are allowed to resolve independently; the registry and session attachment-history upsert retain bounded state, and both results remain subject to the same validation. No client-side filename matching is used.
 
 ## Terminal link behavior
 
