@@ -21,18 +21,20 @@ import {
   AttachmentRegistrationError,
   attachmentRecordToEvent,
   attachmentRegistry,
+  isSupportedAttachmentExtension,
   registerExternalAttachment,
   type AttachmentRegistrationResult,
 } from './attachment-registry.js';
 import { buildSshConnectionArgv, remoteSshTarget, shellescape } from './remote-hosts.js';
 import type { SessionRemote } from './types/session.js';
+import { isSensitivePath } from './web/sensitive-path.js';
 
 const execFileAsync = promisify(execFile);
 
 const MAX_GENERATED_ARTIFACT_BYTES = 50 * 1024 * 1024;
-const REMOTE_FETCH_TIMEOUT_MS = 30_000;
-const REMOTE_INSPECTION_TIMEOUT_MS = 10_000;
-const REMOTE_INSPECTION_MAX_BUFFER_BYTES = 16 * 1024;
+const REMOTE_OPERATION_TIMEOUT_MS = 30_000;
+const REMOTE_OPERATION_HEADER_MAX_BYTES = 16 * 1024;
+const REMOTE_SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
 const CODEX_GENERATED_DIRS = [
   '.codex-personal/generated_images',
@@ -43,19 +45,22 @@ const CODEX_GENERATED_DIRS = [
 
 const SUPERPOWERS_ARTIFACT_DIR_MARKERS = ['/output/', '/docs/mockups/'];
 
-const REMOTE_INSPECTION_SCRIPT = `
+export const _REMOTE_GENERATED_ARTIFACT_SCRIPT_FOR_TEST = `
+PATH=${REMOTE_SYSTEM_PATH}
+export PATH
+
 resolve_path() {
   candidate=$1
   hops=0
   while :; do
     hops=$((hops + 1))
     [ "$hops" -le 40 ] || return 1
-    dir=$(dirname "$candidate") || return 1
-    base=$(basename "$candidate") || return 1
+    dir=$(/usr/bin/dirname "$candidate") || return 1
+    base=$(/usr/bin/basename "$candidate") || return 1
     resolved_dir=$(CDPATH= cd -P "$dir" 2>/dev/null && pwd -P) || return 1
     candidate=$resolved_dir/$base
     if [ -L "$candidate" ]; then
-      target=$(readlink "$candidate") || return 1
+      target=$(/usr/bin/readlink "$candidate") || return 1
       case "$target" in
         /*) candidate=$target ;;
         *) candidate=$resolved_dir/$target ;;
@@ -67,11 +72,35 @@ resolve_path() {
   done
 }
 
-file=$(resolve_path "$1") || exit 66
-[ -f "$file" ] || exit 66
-size=$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || exit 66
+requested=$1
+file=$(resolve_path "$requested") || exit 66
+[ -f "$file" ] && [ ! -L "$file" ] || exit 66
+exec 3< "$file" || exit 66
+
+confirmed_file=$(resolve_path "$requested") || exit 73
+[ "$confirmed_file" = "$file" ] || exit 73
+[ -f "$confirmed_file" ] && [ ! -L "$confirmed_file" ] || exit 73
+
+platform=$(/usr/bin/uname -s) || exit 69
+case "$platform" in
+  Linux)
+    fd_path=/proc/$$/fd/3
+    path_meta=$(/usr/bin/stat -L -c '%d:%i:%s' "$confirmed_file") || exit 73
+    fd_meta=$(/usr/bin/stat -L -c '%d:%i:%s' "$fd_path") || exit 73
+    ;;
+  Darwin)
+    fd_path=/dev/fd/3
+    path_meta=$(/usr/bin/stat -L -f '%d:%i:%z' "$confirmed_file") || exit 73
+    fd_meta=$(/usr/bin/stat -L -f '%d:%i:%z' "$fd_path") || exit 73
+    ;;
+  *) exit 69 ;;
+esac
+
+[ -f "$fd_path" ] || exit 73
+[ "\${path_meta%:*}" = "\${fd_meta%:*}" ] || exit 73
+size=\${fd_meta##*:}
 case "$size" in ''|*[!0-9]*) exit 66 ;; esac
-printf 'FILE\\000%s\\000SIZE\\000%s\\000' "$file" "$size"
+printf 'FILE\\000%s\\000SIZE\\000%s\\000' "$confirmed_file" "$size"
 
 workspace=$(resolve_path "$2" 2>/dev/null) || workspace=
 if [ -n "$workspace" ] && [ -d "$workspace" ]; then
@@ -86,6 +115,26 @@ fi
 home1=$(resolve_path "$4" 2>/dev/null) || home1=
 if [ -n "$home1" ] && [ -d "$home1" ]; then
   printf 'HOME1\\000%s\\000' "$home1"
+fi
+
+max_bytes=$6
+case "$max_bytes" in ''|*[!0-9]*) exit 64 ;; esac
+stream_data=0
+case "$5" in
+  stream)
+    if [ "$size" -le "$max_bytes" ]; then
+      data_size=$size
+      stream_data=1
+    else
+      data_size=0
+    fi
+    ;;
+  inspect) data_size=0 ;;
+  *) exit 64 ;;
+esac
+printf 'DATA_SIZE\\000%s\\000DATA\\000' "$data_size"
+if [ "$stream_data" -eq 1 ]; then
+  /bin/cat <&3 || exit 74
 fi
 `.trim();
 
@@ -108,15 +157,19 @@ export async function registerGeneratedArtifactAttachment(
     ) {
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
     }
-    const inspection = await inspectRemoteGeneratedArtifact(options.remote, options.filePath);
-    if (!isAllowedCanonicalRemoteGeneratedArtifactPath(inspection)) {
+    const localPath = buildRemoteGeneratedArtifactCachePath(options.sessionId, options.remote, options.filePath);
+    const existing = registeredArtifact(options.sessionId, resolvedPathOrOriginal(localPath));
+    const inspection = await runRemoteGeneratedArtifactOperation(options.remote, options.filePath, !existing);
+    if (
+      !isAllowedCanonicalRemoteGeneratedArtifactPath(inspection) ||
+      !isSupportedAttachmentExtension(posixPath.extname(inspection.filePath)) ||
+      isSensitiveRemoteGeneratedArtifactPath(inspection)
+    ) {
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
     }
     assertGeneratedArtifactSize(inspection.size);
-    const localPath = buildRemoteGeneratedArtifactCachePath(options.sessionId, options.remote, options.filePath);
-    const existing = registeredArtifact(options.sessionId, resolvedPathOrOriginal(localPath));
     if (existing) return existing;
-    await materializeRemoteGeneratedArtifact(options.sessionId, options.remote, options.filePath, inspection.filePath);
+    await materializeRemoteGeneratedArtifact(localPath, inspection.data);
     return registerExternalAttachment(options.sessionId, localPath, { sessionWorkingDir: options.sessionWorkingDir });
   }
 
@@ -192,56 +245,84 @@ interface RemoteGeneratedArtifactInspection {
   size: number;
   workspace?: string;
   homes: string[];
+  data: Buffer;
 }
 
 function hasUnsafeRemotePathCharacters(filePath: string): boolean {
   return /[\0\r\n]/.test(filePath) || !posixPath.isAbsolute(filePath);
 }
 
-async function inspectRemoteGeneratedArtifact(
+async function runRemoteGeneratedArtifactOperation(
   remote: SessionRemote,
-  remotePath: string
+  remotePath: string,
+  streamBytes: boolean
 ): Promise<RemoteGeneratedArtifactInspection> {
-  const args = buildRemoteGeneratedArtifactInspectionArgs(remote, remotePath);
-  const { stdout } = (await execFileAsync('ssh', args, {
-    encoding: 'buffer',
-    timeout: REMOTE_INSPECTION_TIMEOUT_MS,
-    maxBuffer: REMOTE_INSPECTION_MAX_BUFFER_BYTES,
-  })) as { stdout: Buffer };
-  return parseRemoteGeneratedArtifactInspection(stdout);
+  const args = buildRemoteGeneratedArtifactInspectionArgs(remote, remotePath, streamBytes);
+  let stdout: Buffer;
+  try {
+    ({ stdout } = (await execFileAsync('ssh', args, {
+      encoding: 'buffer',
+      timeout: REMOTE_OPERATION_TIMEOUT_MS,
+      maxBuffer: streamBytes
+        ? MAX_GENERATED_ARTIFACT_BYTES + REMOTE_OPERATION_HEADER_MAX_BYTES + 1
+        : REMOTE_OPERATION_HEADER_MAX_BYTES,
+    })) as { stdout: Buffer });
+  } catch (err) {
+    throwRemoteGeneratedArtifactProcessError(err);
+  }
+  return parseRemoteGeneratedArtifactInspection(stdout, streamBytes);
 }
 
-function parseRemoteGeneratedArtifactInspection(stdout: Buffer): RemoteGeneratedArtifactInspection {
-  if (stdout.length === 0 || stdout.at(-1) !== 0) {
-    throw new Error('Invalid remote artifact inspection response');
-  }
-  const fields = stdout.toString('utf8').split('\0');
-  fields.pop();
-  if (fields.length === 0 || fields.length % 2 !== 0) {
-    throw new Error('Invalid remote artifact inspection response');
-  }
-
+function parseRemoteGeneratedArtifactInspection(
+  stdout: Buffer,
+  streamBytes: boolean
+): RemoteGeneratedArtifactInspection {
   let filePath: string | undefined;
   let size: number | undefined;
+  let dataSize: number | undefined;
   let workspace: string | undefined;
   const homes: string[] = [];
   const seenKinds = new Set<string>();
+  let data: Buffer | undefined;
+  let offset = 0;
 
-  for (let index = 0; index < fields.length; index += 2) {
-    const kind = fields[index];
-    const value = fields[index + 1];
-    if (!kind || value === undefined || seenKinds.has(kind)) {
+  const readField = (): string => {
+    const end = stdout.indexOf(0, offset);
+    if (end < 0) throw new Error('Invalid remote artifact inspection response');
+    const value = stdout.subarray(offset, end).toString('utf8');
+    offset = end + 1;
+    return value;
+  };
+
+  while (offset < stdout.length) {
+    const kind = readField();
+    if (!kind || seenKinds.has(kind)) {
       throw new Error('Invalid remote artifact inspection response');
     }
     seenKinds.add(kind);
+    if (kind === 'DATA') {
+      data = stdout.subarray(offset);
+      offset = stdout.length;
+      break;
+    }
+    const value = readField();
     if (kind === 'FILE') filePath = value;
     else if (kind === 'SIZE' && /^\d+$/.test(value)) size = Number(value);
+    else if (kind === 'DATA_SIZE' && /^\d+$/.test(value)) dataSize = Number(value);
     else if (kind === 'WORKSPACE') workspace = value;
     else if (kind === 'HOME0' || kind === 'HOME1') homes.push(value);
     else throw new Error('Invalid remote artifact inspection response');
   }
 
-  if (filePath === undefined || size === undefined) {
+  if (
+    filePath === undefined ||
+    size === undefined ||
+    dataSize === undefined ||
+    data === undefined ||
+    !Number.isSafeInteger(dataSize) ||
+    data.length !== dataSize ||
+    dataSize !== (streamBytes && size <= MAX_GENERATED_ARTIFACT_BYTES ? size : 0)
+  ) {
     throw new Error('Invalid remote artifact inspection response');
   }
 
@@ -256,7 +337,21 @@ function parseRemoteGeneratedArtifactInspection(stdout: Buffer): RemoteGenerated
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
 
-  return { filePath, size, workspace, homes };
+  return { filePath, size, workspace, homes, data };
+}
+
+export function _parseRemoteGeneratedArtifactOutputForTest(
+  stdout: Buffer,
+  streamBytes: boolean
+): RemoteGeneratedArtifactInspection {
+  return parseRemoteGeneratedArtifactInspection(stdout, streamBytes);
+}
+
+function throwRemoteGeneratedArtifactProcessError(err: unknown): never {
+  if ((err as { code?: unknown }).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+    throw new AttachmentRegistrationError('Attachment file is too large', 413);
+  }
+  throw err;
 }
 
 function hasControlCharacters(value: string): boolean {
@@ -270,6 +365,11 @@ function hasControlCharacters(value: string): boolean {
 function isAllowedCanonicalRemoteGeneratedArtifactPath(inspection: RemoteGeneratedArtifactInspection): boolean {
   if (inspection.workspace && isPathInside(inspection.filePath, inspection.workspace)) return true;
   return inspection.homes.some((home) => isAllowedGeneratedArtifactHomePath(inspection.filePath, home));
+}
+
+function isSensitiveRemoteGeneratedArtifactPath(inspection: RemoteGeneratedArtifactInspection): boolean {
+  if (isSensitivePath(inspection.filePath)) return true;
+  return inspection.homes.some((home) => isPathInside(inspection.filePath, posixPath.join(home, '.ssh')));
 }
 
 function assertGeneratedArtifactSize(size: number): void {
@@ -288,46 +388,29 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`;
 }
 
-async function materializeRemoteGeneratedArtifact(
-  sessionId: string,
-  remote: SessionRemote,
-  cacheKeyPath: string,
-  canonicalRemotePath: string
-): Promise<string> {
-  const localPath = buildRemoteGeneratedArtifactCachePath(sessionId, remote, cacheKeyPath);
+async function materializeRemoteGeneratedArtifact(localPath: string, data: Buffer): Promise<string> {
   await mkdir(posixPath.dirname(localPath), { recursive: true });
-
-  const args = buildRemoteGeneratedArtifactFetchArgs(remote, canonicalRemotePath);
-  let stdout: Buffer;
-  try {
-    ({ stdout } = (await execFileAsync('ssh', args, {
-      encoding: 'buffer',
-      timeout: REMOTE_FETCH_TIMEOUT_MS,
-      maxBuffer: MAX_GENERATED_ARTIFACT_BYTES + 1,
-    })) as { stdout: Buffer });
-  } catch (err) {
-    if ((err as { code?: unknown }).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-      throw new AttachmentRegistrationError('Attachment file is too large', 413);
-    }
-    throw err;
-  }
-
-  assertGeneratedArtifactSize(stdout.length);
-
-  await fs.writeFile(localPath, stdout);
+  await fs.writeFile(localPath, data);
   return localPath;
 }
 
-export function buildRemoteGeneratedArtifactInspectionArgs(remote: SessionRemote, remotePath: string): string[] {
+export function buildRemoteGeneratedArtifactInspectionArgs(
+  remote: SessionRemote,
+  remotePath: string,
+  streamBytes = false
+): string[] {
   const candidateHomes =
     remote.username === 'root' ? ['/root', '/root'] : [`/home/${remote.username}`, `/Users/${remote.username}`];
   const command = [
-    'sh -c',
-    shellescape(REMOTE_INSPECTION_SCRIPT),
-    'sh',
+    `PATH=${REMOTE_SYSTEM_PATH}`,
+    '/bin/sh -c',
+    shellescape(_REMOTE_GENERATED_ARTIFACT_SCRIPT_FOR_TEST),
+    'codeman-generated-artifact',
     shellescape(remotePath),
     shellescape(remote.remotePath),
     ...candidateHomes.map(shellescape),
+    streamBytes ? 'stream' : 'inspect',
+    String(MAX_GENERATED_ARTIFACT_BYTES),
   ].join(' ');
   return [...buildSshConnectionArgv(remote), remoteSshTarget(remote), command];
 }
@@ -342,10 +425,6 @@ export function buildRemoteGeneratedArtifactCachePath(
     .digest('hex')
     .slice(0, 16);
   return join(dataPath('generated-artifacts', sessionId, digest), sanitizeCacheFileName(basename(remotePath)));
-}
-
-export function buildRemoteGeneratedArtifactFetchArgs(remote: SessionRemote, remotePath: string): string[] {
-  return [...buildSshConnectionArgv(remote), remoteSshTarget(remote), `cat -- ${shellescape(remotePath)}`];
 }
 
 function sanitizeCacheFileName(fileName: string): string {

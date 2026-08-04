@@ -32,22 +32,25 @@ function mockRemoteSsh(options: {
   fetchBytes?: Buffer;
 }): void {
   execFile.mockImplementation((...args: unknown[]) => {
-    const sshArgs = args[1] as string[];
     const callback = args.at(-1);
     if (typeof callback !== 'function') return {};
-    if (!String(sshArgs.at(-1)).includes('cat --')) {
-      const fields = [
-        'FILE',
-        options.filePath,
-        'SIZE',
-        String(options.size),
-        ...(options.workspace ? ['WORKSPACE', options.workspace] : []),
-        ...(options.homes ?? []).flatMap((home, index) => [`HOME${index}`, home]),
-      ];
-      callback(null, { stdout: Buffer.from(`${fields.join('\0')}\0`), stderr: Buffer.alloc(0) });
-    } else {
-      callback(null, { stdout: options.fetchBytes ?? Buffer.from('remote-image-bytes'), stderr: Buffer.alloc(0) });
-    }
+    const data =
+      options.fetchBytes ??
+      (options.size <= MAX_GENERATED_ARTIFACT_BYTES ? Buffer.alloc(options.size) : Buffer.alloc(0));
+    const fields = [
+      'FILE',
+      options.filePath,
+      'SIZE',
+      String(options.size),
+      ...(options.workspace ? ['WORKSPACE', options.workspace] : []),
+      ...(options.homes ?? []).flatMap((home, index) => [`HOME${index}`, home]),
+      'DATA_SIZE',
+      String(data.length),
+    ];
+    callback(null, {
+      stdout: Buffer.concat([Buffer.from(`${fields.join('\0')}\0DATA\0`), data]),
+      stderr: Buffer.alloc(0),
+    });
     return {};
   });
 }
@@ -264,7 +267,7 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('rejects a remote canonical symlink escape without fetching bytes or disclosing paths', async () => {
+  it('rejects a remote canonical symlink escape without caching or disclosing paths', async () => {
     const remote: SessionRemote = {
       hostId: 'mac-mini',
       label: 'Mac mini',
@@ -290,7 +293,7 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     expect(ctx.broadcast).not.toHaveBeenCalled();
   });
 
-  it('rejects an oversized remote artifact after inspection and before fetch or route side effects', async () => {
+  it('rejects an oversized remote artifact before streaming bytes or route side effects', async () => {
     const remote: SessionRemote = {
       hostId: 'mac-mini',
       label: 'Mac mini',
@@ -378,7 +381,7 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
       success: true,
       data: { fileName: 'remote_mockup.png', attachmentId: expect.stringMatching(/^att_/) },
     });
-    expect(execFile).toHaveBeenCalledTimes(2);
+    expect(execFile).toHaveBeenCalledTimes(1);
     for (const [command, args] of execFile.mock.calls as [string, string[]][]) {
       expect(command).toBe('ssh');
       expect(args).toEqual(
