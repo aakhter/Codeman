@@ -160,6 +160,27 @@ describe('COD-232 terminal document link provider', () => {
     expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
   });
 
+  it.each([
+    ['sentence punctuation', '.'],
+    ['the following blank cell', ' '],
+  ])('ends a single-row file URI on its final character before %s', (_label, suffix) => {
+    const uri = 'file:///workspace/project/out/report.pdf';
+    const { provide } = makeHarness(`${uri}${suffix}`);
+
+    const [link] = provide();
+
+    expect(link.range.end).toEqual({ x: uri.length, y: 1 });
+  });
+
+  it('does not activate a file URI when a touch lands on following punctuation', () => {
+    const uri = 'file:///workspace/project/out/report.pdf';
+    const { app, fileUriSpy } = makeHarness(`${uri}.`);
+
+    expect(app._activateTerminalLinkAtPoint.call(app, (uri.length - 0.5) * 10, 10)).toBe(true);
+    expect(app._activateTerminalLinkAtPoint.call(app, (uri.length + 0.5) * 10, 10)).toBe(false);
+    expect(fileUriSpy).toHaveBeenCalledOnce();
+  });
+
   it('does not link unsupported file URI extensions', () => {
     const { provide, fileUriSpy } = makeHarness('Saved to: file:///workspace/project/out/archive.zip');
 
@@ -187,6 +208,16 @@ describe('COD-232 terminal document link provider', () => {
     expect(link.text).toBe(uri);
     expect(link.range.start.y).toBe(1);
     expect(link.range.end.y).toBe(2);
+  });
+
+  it('ends a wrapped file URI on its final cell instead of the following punctuation cell', () => {
+    const first = 'file:///workspace/project/out/generated-';
+    const second = 'report.pdf.';
+    const { provide } = makeHarness([{ text: first }, { text: second, isWrapped: true }], { cols: first.length });
+
+    const [link] = provide(2);
+
+    expect(link.range.end).toEqual({ x: second.length - 1, y: 2 });
   });
 
   it('captures the originating session for a file URI when links are provided', () => {

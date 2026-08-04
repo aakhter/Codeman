@@ -1528,7 +1528,7 @@ Object.assign(CodemanApp.prototype, {
         for (const candidate of findFileUris()) {
           if (overlapsLink(candidate.startIndex, candidate.endIndex)) continue;
           const start = coordAt(candidate.startIndex);
-          const end = coordAt(candidate.endIndex);
+          const end = coordAt(candidate.endIndex - 1);
           reserveLink(candidate.startIndex, candidate.endIndex);
           links.push({
             text: candidate.uri,
