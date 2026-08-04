@@ -86,6 +86,7 @@ function makeHarness(
   let provider: { provideLinks: (line: number, callback: (links?: Link[]) => void) => void } | undefined;
   const originalSessionId = options.sessionId ?? 'origin-session';
   const previewSpy = vi.fn();
+  const fileUriSpy = vi.fn();
   const logSpy = vi.fn();
   const app = {
     terminal: {
@@ -114,6 +115,7 @@ function makeHarness(
     activeSessionId: originalSessionId,
     sessions: new Map([[originalSessionId, { workingDir: options.workingDir ?? '/workspace/project' }]]),
     openFilePreview: previewSpy,
+    openFileUriPreview: fileUriSpy,
     openLogViewerWindow: logSpy,
     _openTerminalUrl: proto._openTerminalUrl,
     _terminalCellFromClientPoint: proto._terminalCellFromClientPoint,
@@ -130,10 +132,74 @@ function makeHarness(
     return links ?? [];
   }
 
-  return { app, provide, previewSpy, logSpy, openSpy, originalSessionId };
+  return { app, provide, previewSpy, fileUriSpy, logSpy, openSpy, originalSessionId };
 }
 
 describe('COD-232 terminal document link provider', () => {
+  it('links a strict generated-image file URI before ordinary URL and path candidates', () => {
+    const uri = 'file:///Users/saqeb/.codex-personal/generated_images/mockup.png';
+    const { provide, fileUriSpy, openSpy, previewSpy, originalSessionId } = makeHarness(`Saved to: ${uri}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([uri]);
+    links[0].activate(null, links[0].text);
+    expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('preserves percent encoding while trimming sentence punctuation from a file URI', () => {
+    const uri = 'file:///workspace/project/out/mockup%20one.pdf';
+    const { provide, fileUriSpy, originalSessionId } = makeHarness(`Preview (${uri}).`);
+
+    const [link] = provide();
+
+    expect(link.text).toBe(uri);
+    link.activate(null, link.text);
+    expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
+  });
+
+  it('does not link unsupported file URI extensions', () => {
+    const { provide, fileUriSpy } = makeHarness('Saved to: file:///workspace/project/out/archive.zip');
+
+    expect(provide()).toEqual([]);
+    expect(fileUriSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not link network authorities, relative forms, or a file prefix embedded in another token', () => {
+    const { provide, fileUriSpy } = makeHarness(
+      'file://server/share/report.pdf file:relative/report.pdf notfile:///workspace/out/report.pdf'
+    );
+
+    expect(provide()).toEqual([]);
+    expect(fileUriSpy).not.toHaveBeenCalled();
+  });
+
+  it('joins a wrapped file URI into one cross-row link', () => {
+    const first = 'Saved file:///workspace/project/out/generated-';
+    const second = 'mockup%20one.webp';
+    const uri = 'file:///workspace/project/out/generated-mockup%20one.webp';
+    const { provide } = makeHarness([{ text: first }, { text: second, isWrapped: true }], { cols: first.length });
+
+    const [link] = provide(2);
+
+    expect(link.text).toBe(uri);
+    expect(link.range.start.y).toBe(1);
+    expect(link.range.end.y).toBe(2);
+  });
+
+  it('captures the originating session for a file URI when links are provided', () => {
+    const uri = 'file:///workspace/project/out/report.docx';
+    const { app, provide, fileUriSpy, originalSessionId } = makeHarness(uri);
+    const [link] = provide();
+
+    app.activeSessionId = 'different-active-session';
+    link.activate(null, link.text);
+
+    expect(fileUriSpy).toHaveBeenCalledWith(uri, originalSessionId);
+  });
+
   it('links the roadmap DOCX reference and opens the shared preview', () => {
     const path = 'out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
     const { provide, previewSpy, originalSessionId } = makeHarness(`Created ${path}`);

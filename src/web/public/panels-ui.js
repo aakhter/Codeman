@@ -4010,6 +4010,76 @@ Object.assign(CodemanApp.prototype, {
     if (headerBtn) headerBtn.setAttribute('aria-expanded', 'false');
   },
 
+  async openFileUriPreview(fileUri, sessionId) {
+    if (!sessionId || !fileUri) return;
+
+    const overlay = this.$('filePreviewOverlay');
+    const titleEl = this.$('filePreviewTitle');
+    const bodyEl = this.$('filePreviewBody');
+    const footerEl = this.$('filePreviewFooter');
+    if (!overlay || !bodyEl) return;
+
+    this._stopFilePreviewPolling();
+    this._resetFilePreviewExternalAction?.();
+    this._resetFilePreviewOriginalDownloadAction?.();
+
+    overlay.classList.add('visible');
+    this._restorePreviewSize();
+    if (titleEl) titleEl.textContent = fileUri;
+    bodyEl.innerHTML = '<div class="binary-message">Loading...</div>';
+    if (footerEl) footerEl.textContent = '';
+    this._hideFilePreviewNavigation();
+
+    const requestToken = Symbol('file-uri-preview');
+    const resolverState = { sessionId, fileUri, requestToken, mode: 'file-uri-resolver' };
+    this.filePreviewState = resolverState;
+    const ownsPreview = () => this.filePreviewState === resolverState && resolverState.requestToken === requestToken;
+    const renderError = (message) => {
+      if (!ownsPreview()) return;
+      const safeMessage = typeof message === 'string' && message.trim() ? message.trim().slice(0, 300) : 'Unable to preview file';
+      bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(safeMessage)}</div>`;
+    };
+
+    let response;
+    try {
+      response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/file-uri-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uri: fileUri }),
+      });
+    } catch (err) {
+      if (!ownsPreview()) return;
+      console.error('Failed to resolve file URI preview:', err);
+      renderError('Unable to preview file');
+      return;
+    }
+    if (!ownsPreview()) return;
+
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (err) {
+      if (!ownsPreview()) return;
+      console.error('Failed to parse file URI preview response:', err);
+      renderError('Unable to preview file');
+      return;
+    }
+    if (!ownsPreview()) return;
+
+    const fileName = payload?.data?.fileName;
+    const attachmentId = payload?.data?.attachmentId;
+    if (!response.ok || payload?.success !== true) {
+      renderError(payload?.error);
+      return;
+    }
+    if (typeof fileName !== 'string' || !fileName || typeof attachmentId !== 'string' || !attachmentId) {
+      renderError('Unable to preview file');
+      return;
+    }
+
+    return this.openFilePreview(fileName, sessionId, attachmentId);
+  },
+
   async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null) {
     if (!sessionId || !filePath) return;
 

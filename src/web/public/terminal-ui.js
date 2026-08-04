@@ -1261,7 +1261,14 @@ Object.assign(CodemanApp.prototype, {
     };
 
     const normalizePreviewPath = (candidate, workingDir) => {
-      if (!candidate || candidate.length > 1000 || candidate.includes('\\') || candidate.includes('://')) return null;
+      if (
+        !candidate ||
+        candidate.length > 1000 ||
+        candidate.includes('\\') ||
+        candidate.includes('://') ||
+        candidate.toLowerCase().startsWith('file:')
+      )
+        return null;
       if (!candidate.includes('/')) return null;
 
       const extension = candidate.slice(candidate.lastIndexOf('.') + 1).toLowerCase();
@@ -1448,11 +1455,99 @@ Object.assign(CodemanApp.prototype, {
         }
 
         const links = [];
+        const occupiedOffsets = new Uint8Array(lineText.length);
+        const overlapsLink = (startIndex, endIndex) => {
+          for (let index = startIndex; index < endIndex; index++) {
+            if (occupiedOffsets[index]) return true;
+          }
+          return false;
+        };
+        const reserveLink = (startIndex, endIndex) => {
+          occupiedOffsets.fill(1, startIndex, endIndex);
+        };
         const originatingSessionId = self.activeSessionId;
         const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
 
-        // Pattern 0: URLs (https://, http://, webexteams://) — matched first so
-        // they take priority over file-path patterns.
+        // Pattern 0: strict local file URIs. Scan before ordinary URLs and paths,
+        // retaining the encoded URI for the authenticated resolver to decode. The
+        // scan and candidate length are bounded so hostile terminal output cannot
+        // turn a hover into unbounded work.
+        const FILE_URI_PREFIX = 'file:///';
+        const MAX_FILE_URI_LENGTH = 2000;
+        const fileUriExtensions = new Set([
+          'png',
+          'jpg',
+          'jpeg',
+          'gif',
+          'webp',
+          'pdf',
+          'docx',
+          'pptx',
+          'xlsx',
+          'md',
+          'txt',
+        ]);
+        const isFileUriDelimiter = (char) => !char || /[\s"'<>|;&\x00-\x1f]/.test(char);
+        const findFileUris = () => {
+          const candidates = [];
+          let searchIndex = 0;
+          while (searchIndex < lineText.length) {
+            const startIndex = lineText.indexOf(FILE_URI_PREFIX, searchIndex);
+            if (startIndex === -1) break;
+            if (startIndex > 0 && /[A-Za-z0-9_.-]/.test(lineText[startIndex - 1])) {
+              searchIndex = startIndex + FILE_URI_PREFIX.length;
+              continue;
+            }
+            let endIndex = startIndex + FILE_URI_PREFIX.length;
+            const limit = Math.min(lineText.length, startIndex + MAX_FILE_URI_LENGTH + 1);
+            while (endIndex < limit && !isFileUriDelimiter(lineText[endIndex])) endIndex++;
+            if (endIndex === limit && endIndex < lineText.length && !isFileUriDelimiter(lineText[endIndex])) {
+              while (endIndex < lineText.length && !isFileUriDelimiter(lineText[endIndex])) endIndex++;
+              searchIndex = endIndex;
+              continue;
+            }
+
+            let cleanedEnd = endIndex;
+            while (cleanedEnd > startIndex && /[.,;:!?)\]}]/.test(lineText[cleanedEnd - 1])) cleanedEnd--;
+            const uri = lineText.slice(startIndex, cleanedEnd);
+            const pathname = uri.split(/[?#]/, 1)[0];
+            const dotIndex = pathname.lastIndexOf('.');
+            const extension = dotIndex === -1 ? '' : pathname.slice(dotIndex + 1).toLowerCase();
+            if (
+              uri.length > FILE_URI_PREFIX.length &&
+              uri[FILE_URI_PREFIX.length] !== '/' &&
+              fileUriExtensions.has(extension)
+            ) {
+              candidates.push({ uri, startIndex, endIndex: cleanedEnd });
+            }
+            searchIndex = Math.max(endIndex, startIndex + FILE_URI_PREFIX.length);
+          }
+          return candidates;
+        };
+
+        for (const candidate of findFileUris()) {
+          if (overlapsLink(candidate.startIndex, candidate.endIndex)) continue;
+          const start = coordAt(candidate.startIndex);
+          const end = coordAt(candidate.endIndex);
+          reserveLink(candidate.startIndex, candidate.endIndex);
+          links.push({
+            text: candidate.uri,
+            range: { start, end },
+            decorations: { pointerCursor: true, underline: true },
+            activate() {
+              self.openFileUriPreview(candidate.uri, originatingSessionId);
+            },
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
+            },
+          });
+        }
+
+        // Pattern 1: URLs (https://, http://, webexteams://) — matched before
+        // file-path patterns.
         //
         // A single `&` is PART of the URL: it separates query parameters, so excluding
         // it truncated every real query string (`?post=1479&action=edit` linked only
@@ -1466,10 +1561,12 @@ Object.assign(CodemanApp.prototype, {
           const cleaned = url.replace(/[.,;:!?)&]+$/, '');
           const startCol = lineText.indexOf(cleaned, matchIndex);
           if (startCol === -1) return;
+          const endCol = startCol + cleaned.length;
+          if (overlapsLink(startCol, endCol)) return;
 
           const start = coordAt(startCol);
-          const end = coordAt(startCol + cleaned.length);
-          if (links.some((l) => l.range.start.x === start.x && l.range.start.y === start.y)) return;
+          const end = coordAt(endCol);
+          reserveLink(startCol, endCol);
 
           links.push({
             text: cleaned,
@@ -1487,7 +1584,7 @@ Object.assign(CodemanApp.prototype, {
           });
         };
 
-        // Pattern 1: Commands with file paths (tail -f, cat, head, grep pattern, etc.)
+        // Pattern 2: Commands with file paths (tail -f, cat, head, grep pattern, etc.)
         // Handles: tail -f /path, grep pattern /path, cat -n /path
         // ⚠ The arg group must stay linear-time: `(?:[^\s\/]*\s+)*` (empty-matchable
         // token, unbounded) backtracks exponentially on lines with a trigger word
@@ -1495,7 +1592,7 @@ Object.assign(CodemanApp.prototype, {
         // the whole tab on hover. Non-empty token + bounded reps is O(n).
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
-        // Pattern 2: Legacy standalone absolute paths. In-workspace previewable
+        // Pattern 3: Legacy standalone absolute paths. In-workspace previewable
         // paths are claimed by the document scanner (findPreviewReferences) first;
         // this remains the live-log fallback for paths outside the session workspace.
         // Image/PDF extensions are included so pasted-attachment paths
@@ -1504,7 +1601,7 @@ Object.assign(CodemanApp.prototype, {
         const extPattern =
           /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js|png|jpe?g|gif|webp|bmp|svg|pdf))\b/g;
 
-        // Pattern 3: Bash() tool output
+        // Pattern 4: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
         /** Extensions that should open the image/document preview, not the log viewer. */
@@ -1513,10 +1610,12 @@ Object.assign(CodemanApp.prototype, {
         const addLogLink = (filePath, matchIndex) => {
           const startCol = lineText.indexOf(filePath, matchIndex);
           if (startCol === -1) return;
+          const endCol = startCol + filePath.length;
+          if (overlapsLink(startCol, endCol)) return;
 
           const start = coordAt(startCol);
-          const end = coordAt(startCol + filePath.length);
-          if (links.some((l) => l.range.start.x === start.x && l.range.start.y === start.y)) return;
+          const end = coordAt(endCol);
+          reserveLink(startCol, endCol);
 
           links.push({
             text: filePath,
@@ -1563,7 +1662,8 @@ Object.assign(CodemanApp.prototype, {
           for (const reference of findPreviewReferences(lineText, workingDir)) {
             const start = coordAt(reference.startIndex);
             const end = coordAt(reference.endIndex - 1);
-            if (links.some((l) => l.range.start.x === start.x && l.range.start.y === start.y)) continue;
+            if (overlapsLink(reference.startIndex, reference.endIndex)) continue;
+            reserveLink(reference.startIndex, reference.endIndex);
 
             links.push({
               text: reference.text,
