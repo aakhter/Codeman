@@ -18,6 +18,7 @@ import { createReadStream, realpathSync, type ReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import {
   ApiErrorCode,
   createErrorResponse,
@@ -88,6 +89,7 @@ import {
   remoteWorkspacePath,
 } from '../../remote-sftp.js';
 import { dataPath } from '../../config/instance.js';
+import { registerGeneratedArtifactAttachment } from '../../generated-artifact-attachments.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
 import { FilesystemBrowseQuerySchema, FilesystemPreviewQuerySchema } from '../schemas.js';
 
@@ -120,6 +122,27 @@ const MIME_TYPES: Record<string, string> = {
 
 function sanitizeDownloadName(fileName: string): string {
   return fileName.replace(/["\\\r\n]/g, '_');
+}
+
+function parsePreviewFileUri(uri: unknown): string {
+  if (typeof uri !== 'string' || uri.trim().length === 0) {
+    throw new AttachmentRegistrationError('Missing file URI', 400);
+  }
+
+  let filePath: string;
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== 'file:') throw new Error('scheme');
+    filePath = fileURLToPath(parsed);
+  } catch {
+    throw new AttachmentRegistrationError('Invalid file URI', 400);
+  }
+
+  const extension = extname(filePath).slice(1).toLowerCase();
+  if (!isAbsolute(filePath) || !isSupportedAttachmentExtension(extension)) {
+    throw new AttachmentRegistrationError('Unsupported file URI', 400);
+  }
+  return filePath;
 }
 
 function buildContentDisposition(disposition: 'inline' | 'attachment', fileName: string): string {
@@ -1413,6 +1436,64 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       };
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read file: ${getErrorMessage(err)}`);
+    }
+  });
+
+  // Resolve a Codex terminal file:// URI through the generated-artifact guard
+  // and return only the registry's opaque, sanitized attachment event.
+  app.post('/api/sessions/:id/file-uri-preview', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    if (session.mode !== 'codex') {
+      reply
+        .code(403)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File URI preview is only available for Codex sessions'));
+      return;
+    }
+
+    try {
+      const uri = req.body && typeof req.body === 'object' ? (req.body as { uri?: unknown }).uri : undefined;
+      const filePath = parsePreviewFileUri(uri);
+      const registered = await registerGeneratedArtifactAttachment({
+        sessionId: id,
+        filePath,
+        sessionWorkingDir: session.workingDir,
+        remote: session.remote,
+      });
+      const record = attachmentRegistry.get(id, registered.attachmentId);
+      if (!record) throw new Error('Registered attachment record is unavailable');
+
+      session.upsertAttachmentHistory(
+        buildExternalAttachmentHistoryItem({
+          sessionId: id,
+          externalPath: record.filePath,
+          fileName: record.fileName,
+          extension: record.extension,
+          size: record.size,
+          mtimeMs: record.mtimeMs,
+          timestamp: record.timestamp,
+        })
+      );
+      ctx.persistSessionState(session);
+
+      const event = attachmentRecordToEvent(record);
+      ctx.broadcast(SseEvent.AttachmentDetected, event);
+      return { success: true, data: event };
+    } catch (err) {
+      if (err instanceof AttachmentRegistrationError) {
+        reply.code(err.statusCode).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message));
+        return;
+      }
+      req.log.warn(
+        {
+          sessionId: id,
+          remote: Boolean(session.remote),
+          errorName: err instanceof Error ? err.name : 'UnknownError',
+        },
+        'File URI preview registration failed'
+      );
+      reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'File is unavailable'));
+      return;
     }
   });
 
