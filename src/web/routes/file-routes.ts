@@ -131,8 +131,9 @@ function parsePreviewFileUri(uri: unknown): string {
 
   let filePath: string;
   try {
+    if (!/^file:\/\/\//i.test(uri)) throw new Error('form');
     const parsed = new URL(uri);
-    if (parsed.protocol !== 'file:') throw new Error('scheme');
+    if (parsed.protocol !== 'file:' || parsed.hostname !== '') throw new Error('scheme');
     filePath = fileURLToPath(parsed);
   } catch {
     throw new AttachmentRegistrationError('Invalid file URI', 400);
@@ -1486,9 +1487,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       }
       req.log.warn(
         {
+          category: 'file-uri-preview',
+          code: session.remote ? 'remote-unavailable' : 'local-unavailable',
           sessionId: id,
           remote: Boolean(session.remote),
-          errorName: err instanceof Error ? err.name : 'UnknownError',
         },
         'File URI preview registration failed'
       );
