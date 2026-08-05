@@ -50,10 +50,10 @@ import {
   type SessionCheckpointMode,
   type OpenCodeConfig,
   type CodexConfig,
-  type AgyConfig,
   type GeminiConfig,
   type EffortLevel,
   type SessionAttachmentHistoryItem,
+  type AntigravityConfig,
   type SessionRemote,
   type SessionSource,
   type SessionDocker,
@@ -71,6 +71,9 @@ import {
   MAX_SESSION_TOKENS,
   execPattern,
   getClaudeCliVersion,
+  getClaudeBinaryPath,
+  spawnPtyWithHelperRepair,
+  resolveLocalShell,
 } from './utils/index.js';
 import {
   MAX_TERMINAL_BUFFER_SIZE,
@@ -188,7 +191,7 @@ const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 const TMUX_ABSOLUTE_ROW_START_PATTERN = /\x1b\[\d+;1H/g;
 
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy';
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity';
 }
 
 export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
@@ -223,8 +226,8 @@ function getModeLabel(mode: SessionMode): string {
       return 'Codex';
     case 'gemini':
       return 'Gemini';
-    case 'agy':
-      return 'Agy';
+    case 'antigravity':
+      return 'Antigravity';
     case 'shell':
       return 'Shell';
     case 'claude':
@@ -245,7 +248,9 @@ function getModeLabel(mode: SessionMode): string {
  * session-routes.ts.
  */
 export function isAltScreenStripMode(mode: SessionMode): boolean {
-  return mode === 'codex' || mode === 'claude' || mode === 'gemini' || mode === 'agy';
+  // Antigravity is deliberately excluded (upstream #201): its Go TUI is
+  // unverified against the alt-screen strip, like opencode's.
+  return mode === 'codex' || mode === 'claude' || mode === 'gemini';
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
@@ -509,13 +514,13 @@ export class Session extends EventEmitter {
   private _openCodeConfig: OpenCodeConfig | undefined;
   // Codex configuration (only for mode === 'codex')
   private _codexConfig: CodexConfig | undefined;
-  // Agy configuration (only for mode === 'agy')
-  private _agyConfig: AgyConfig | undefined;
   // Gemini configuration (only for mode === 'gemini')
   private _geminiConfig: GeminiConfig | undefined;
   // Debug capture (CODEMAN_CODEX_RAW_LOG=1): set to true after the first
   // write failure so we don't spam the server log.
   private _codexRawLogErrored = false;
+  // Antigravity configuration (only for mode === 'antigravity')
+  private _antigravityConfig: AntigravityConfig | undefined;
   private _resumeSessionId: string | undefined;
 
   // Native external-CLI session/rollout id captured at PARK time (COD-124 unit 2,
@@ -610,10 +615,10 @@ export class Session extends EventEmitter {
       openCodeConfig?: OpenCodeConfig;
       /** Codex configuration (only for mode === 'codex') */
       codexConfig?: CodexConfig;
-      /** Agy configuration (only for mode === 'agy') */
-      agyConfig?: AgyConfig;
       /** Gemini configuration (only for mode === 'gemini') */
       geminiConfig?: GeminiConfig;
+      /** Antigravity configuration (only for mode === 'antigravity') */
+      antigravityConfig?: AntigravityConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
       resumeSessionId?: string;
       /** Native external-CLI session/rollout id captured at park time (COD-124 unit 2, Gap B) */
@@ -711,12 +716,17 @@ export class Session extends EventEmitter {
     }
 
     // Apply Agy configuration
-    if (config.agyConfig) {
-      this._agyConfig = config.agyConfig;
+    if (config.antigravityConfig) {
+      this._antigravityConfig = config.antigravityConfig;
     }
     // Apply Gemini configuration
     if (config.geminiConfig) {
       this._geminiConfig = config.geminiConfig;
+    }
+
+    // Apply Antigravity configuration
+    if (config.antigravityConfig) {
+      this._antigravityConfig = config.antigravityConfig;
     }
 
     // Apply env overrides (exported at spawn, not persisted to disk).
@@ -1117,18 +1127,18 @@ export class Session extends EventEmitter {
         ...this._geminiConfig,
         resumeSession: this._geminiConfig?.resumeSession ?? this._nativeResumeId,
       };
-    } else if (this.mode === 'agy') {
-      this._agyConfig = {
-        ...this._agyConfig,
-        resumeSession: this._agyConfig?.resumeSession ?? this._nativeResumeId,
+    } else if (this.mode === 'antigravity') {
+      this._antigravityConfig = {
+        ...this._antigravityConfig,
+        resumeConversationId: this._antigravityConfig?.resumeConversationId ?? this._nativeResumeId ?? undefined,
       };
     }
     // claude/shell: no on-disk resume mechanism — nativeResumeId stays inert.
   }
 
   /** Agy CLI configuration for this session. */
-  get agyConfig(): AgyConfig | undefined {
-    return this._agyConfig;
+  get antigravityConfig(): AntigravityConfig | undefined {
+    return this._antigravityConfig;
   }
 
   // Note: _buildPermissionArgs removed — now using buildInteractiveArgs from session-cli-builder.ts
@@ -1672,8 +1682,8 @@ export class Session extends EventEmitter {
       cliLatestVersion: this._cliLatestVersion || undefined,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
-      agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
+      antigravityConfig: this._antigravityConfig,
       resumeSessionId: this._resumeSessionId,
       nativeResumeId: this._nativeResumeId,
       effort: this._effort,
@@ -1836,13 +1846,18 @@ export class Session extends EventEmitter {
     const attachCommand = IS_TEST_MODE ? process.execPath : mux.getAttachCommand();
     const attachArgs = IS_TEST_MODE ? ['-e', TEST_PTY_SCRIPT] : mux.getAttachArgs(this._muxSession!.muxName);
     try {
-      this.ptyProcess = pty.spawn(attachCommand, attachArgs, {
-        name: 'xterm-256color',
-        cols: ptyCols,
-        rows: ptyRows,
-        cwd: resolveMuxAttachCwd(this.workingDir, this._remote, this._docker),
-        env: buildMuxAttachEnv(this._truecolorEnabled),
-      });
+      this.ptyProcess = spawnPtyWithHelperRepair(() =>
+        pty.spawn(attachCommand, attachArgs, {
+          name: 'xterm-256color',
+          cols: ptyCols,
+          rows: ptyRows,
+          cwd: resolveMuxAttachCwd(this.workingDir, this._remote, this._docker),
+          // Truecolor is settings-driven here (COD-75 upstream hardcoded it per-mode);
+          // buildEnvExports() in tmux-manager.ts reads the same flag so the attach
+          // client and the tmux session agree.
+          env: buildMuxAttachEnv(this._truecolorEnabled),
+        })
+      );
     } catch (spawnErr) {
       console.error(`[Session] Failed to spawn PTY for ${options.spawnErrLabel}:`, spawnErr);
       this.emit('error', `Failed to attach to mux session: ${spawnErr}`);
@@ -1905,8 +1920,8 @@ export class Session extends EventEmitter {
       allowedTools: this._allowedTools,
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
-      agyConfig: this._agyConfig,
       geminiConfig: this._geminiConfig,
+      antigravityConfig: this._antigravityConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
       effort: this._effort,
@@ -2111,8 +2126,8 @@ export class Session extends EventEmitter {
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
             codexConfig: this._codexConfig,
-            agyConfig: this._agyConfig,
             geminiConfig: this._geminiConfig,
+            antigravityConfig: this._antigravityConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
@@ -2198,21 +2213,24 @@ export class Session extends EventEmitter {
       if (this.mode === 'gemini') {
         throw new Error('Gemini sessions require tmux. Direct PTY fallback is not supported.');
       }
-      if (this.mode === 'agy') {
-        throw new Error('Agy sessions require tmux. Direct PTY fallback is not supported.');
+      // Antigravity sessions require tmux for env override injection via setenv
+      if (this.mode === 'antigravity') {
+        throw new Error('Antigravity sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
         // This ensures subagents can be directly matched to the correct tab
         const args = buildInteractiveArgs(this.id, this._claudeMode, this._model, this._allowedTools, this._effort);
-        this.ptyProcess = pty.spawn('claude', args, {
-          name: 'xterm-256color',
-          cols: 120,
-          rows: 40,
-          cwd: this.workingDir,
-          // Merge envOverrides after buildClaudeEnv so user settings shadow defaults.
-          env: { ...buildClaudeEnv(this.id, this._truecolorEnabled), ...(this._envOverrides ?? {}) },
-        });
+        this.ptyProcess = spawnPtyWithHelperRepair(() =>
+          pty.spawn(getClaudeBinaryPath(), args, {
+            name: 'xterm-256color',
+            cols: 120,
+            rows: 40,
+            cwd: this.workingDir,
+            // Merge envOverrides after buildClaudeEnv so user settings shadow defaults.
+            env: { ...buildClaudeEnv(this.id, this._truecolorEnabled), ...(this._envOverrides ?? {}) },
+          })
+        );
       } catch (spawnErr) {
         console.error('[Session] Failed to spawn Claude PTY:', spawnErr);
         this._status = 'stopped';
@@ -2458,8 +2476,9 @@ export class Session extends EventEmitter {
 
     this._resetBuffers();
 
-    // Use user's default shell or bash
-    const shell = process.env.SHELL || '/bin/bash';
+    // Use user's default shell, falling back to a shell that actually exists.
+    // Shared with the tmux pane command so both paths launch the same binary.
+    const shell = resolveLocalShell();
     console.log(
       '[Session] Starting shell session with:',
       shell + (this._useMux ? ` (with ${this._mux!.backend})` : '')
@@ -2519,13 +2538,15 @@ export class Session extends EventEmitter {
     // Fallback to direct PTY if mux is not used
     if (!this.ptyProcess) {
       try {
-        this.ptyProcess = pty.spawn(shell, [], {
-          name: 'xterm-256color',
-          cols: 120,
-          rows: 40,
-          cwd: this.workingDir,
-          env: buildShellEnv(this.id),
-        });
+        this.ptyProcess = spawnPtyWithHelperRepair(() =>
+          pty.spawn(shell, [], {
+            name: 'xterm-256color',
+            cols: 120,
+            rows: 40,
+            cwd: this.workingDir,
+            env: buildShellEnv(this.id),
+          })
+        );
       } catch (spawnErr) {
         console.error('[Session] Failed to spawn shell PTY:', spawnErr);
         this._status = 'stopped';
@@ -2625,14 +2646,16 @@ export class Session extends EventEmitter {
         const args = buildPromptArgs(prompt, model, this._claudeMode, this._allowedTools);
 
         try {
-          this.ptyProcess = pty.spawn('claude', args, {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
-            cwd: this.workingDir,
-            // Merge envOverrides after buildClaudeEnv so user settings shadow defaults.
-            env: { ...buildClaudeEnv(this.id, this._truecolorEnabled), ...(this._envOverrides ?? {}) },
-          });
+          this.ptyProcess = spawnPtyWithHelperRepair(() =>
+            pty.spawn(getClaudeBinaryPath(), args, {
+              name: 'xterm-256color',
+              cols: 120,
+              rows: 40,
+              cwd: this.workingDir,
+              // Merge envOverrides after buildClaudeEnv so user settings shadow defaults.
+              env: { ...buildClaudeEnv(this.id, this._truecolorEnabled), ...(this._envOverrides ?? {}) },
+            })
+          );
         } catch (spawnErr) {
           console.error('[Session] Failed to spawn Claude PTY for runPrompt:', spawnErr);
           this.emit(

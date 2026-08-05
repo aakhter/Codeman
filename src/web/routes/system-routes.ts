@@ -380,10 +380,21 @@ export function registerSystemRoutes(
   app.get('/api/system/repo-status', async () => getRepositoryStatus());
 
   // ═══════════════════════════════════════════════════════════════
-  // CLI Integrations (OpenCode, Codex, Gemini)
+  // CLI Integrations (Claude, OpenCode, Codex, Gemini, Antigravity)
   // ═══════════════════════════════════════════════════════════════
 
-  // ========== OpenCode ===
+  // ========== Claude ==========
+
+  app.get('/api/claude/status', async () => {
+    const { isClaudeAvailable, findClaudeDir } = await import('../../utils/claude-cli-resolver.js');
+    return {
+      available: isClaudeAvailable(),
+      path: findClaudeDir(),
+    };
+  });
+
+  // ========== OpenCode ==========
+
   app.get('/api/opencode/status', async () => {
     const { isOpenCodeAvailable, resolveOpenCodeDir } = await import('../../utils/opencode-cli-resolver.js');
     return {
@@ -411,13 +422,23 @@ export function registerSystemRoutes(
     };
   });
 
-  // ========== Agy ==========
+  // ========== Antigravity ==========
 
-  app.get('/api/agy/status', async () => {
-    const { isAgyAvailable, resolveAgyDir } = await import('../../utils/agy-cli-resolver.js');
+  app.get('/api/antigravity/status', async () => {
+    const { isAntigravityAvailable, resolveAntigravityDir } = await import('../../utils/antigravity-cli-resolver.js');
     return {
-      available: isAgyAvailable(),
-      path: resolveAgyDir(),
+      available: isAntigravityAvailable(),
+      path: resolveAntigravityDir(),
+    };
+  });
+
+  // Legacy alias kept so an older cached frontend keeps working after the
+  // agy -> antigravity rename (session-ui.js still probes /api/agy/status).
+  app.get('/api/agy/status', async () => {
+    const { isAntigravityAvailable, resolveAntigravityDir } = await import('../../utils/antigravity-cli-resolver.js');
+    return {
+      available: isAntigravityAvailable(),
+      path: resolveAntigravityDir(),
     };
   });
 

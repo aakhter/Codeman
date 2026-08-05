@@ -152,7 +152,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
     expect(command).toContain("-o 'StrictHostKeyChecking=accept-new'");
     expect(command).toContain('-t');
     expect(command).toContain('aakht@192.168.55.170');
-    expect(command).toContain('tmux -L codeman new-session -A');
+    expect(command).toContain('tmux -L codeman-remote new-session -A');
 
     // Connection options come BEFORE -t / the target / the tmux command.
     const idxProxy = command.indexOf('ProxyCommand=');
@@ -165,16 +165,21 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
     // Reconstruct the command using the SAME nested POSIX
     // single-quote escaping the production code uses, to prove byte-identity.
     const sh = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
-    const remoteName = `codeman-${SESSION_ID.slice(0, 8)}`;
+    const remoteName = `codeman-ssh-${SESSION_ID.slice(0, 8)}`;
     const path = sh('/home/ubuntu/work');
-    const paneCommand = `cd ${path} && ${REMOTE_PATH_BOOTSTRAP}; exec bash -l`;
+    const paneCommand = `cd ${path} && ${REMOTE_PATH_BOOTSTRAP}; exec "\${SHELL:-/bin/sh}" -i -l`;
     const tmuxInvocation = `${REMOTE_PATH_BOOTSTRAP}; ${[
-      `tmux -L codeman new-session -A -s ${remoteName} -c ${path} ${sh(paneCommand)}`,
-      'set -g status off',
-      'set -g mouse off',
-      'set -sg escape-time 0',
-      'set -g prefix C-q',
-      'set -g window-size latest',
+      `tmux -L codeman-remote new-session -A -s ${remoteName} -c ${path} ${sh(paneCommand)}`,
+      `set -t ${remoteName} status off`,
+      `set -t ${remoteName} mouse off`,
+      `set -t ${remoteName} prefix C-q`,
+      'set -s escape-time 0',
+      // COD-106 — shared/collaborative sizing, per-session scoped (never -g).
+      `set -t ${remoteName} window-size latest`,
+      // #210 — keep a CRASHED pane for diagnosis. `failed` (not `on`, which would
+      // also strand a pane after a clean `exit`), and LAST because tmux aborts the
+      // remaining commands of a `\;` chain on error and `failed` needs tmux >= 3.2.
+      `set -t ${remoteName} remain-on-exit failed`,
     ].join(' \\; ')}`;
     const expected = `ssh -o BatchMode=yes -o ConnectTimeout=10 -t ${remoteSshTarget(baseRemote)} ${sh(tmuxInvocation)}`;
     expect(command).toBe(expected);

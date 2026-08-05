@@ -321,6 +321,9 @@ Object.assign(CodemanApp.prototype, {
         select.dataset.listenerAdded = 'true';
       }
       this.setupQuickStartCasePicker();
+      // The phone overview labels rows with their case name, and a case rename or
+      // link does not go through the session-tab renderer.
+      this._refreshMobileOverviewIfVisible?.();
     } catch (err) {
       console.error('Failed to load cases:', err);
     }
@@ -407,7 +410,7 @@ Object.assign(CodemanApp.prototype, {
     this._renderSessionTabsImmediate?.();
   },
 
-  /** Run using the selected mode (Claude Code, OpenCode, Codex, or Gemini) */
+  /** Run using the selected mode (Claude Code, OpenCode, Codex, Gemini, or Antigravity) */
   async run() {
     if (this._runInFlight) return;
 
@@ -431,8 +434,8 @@ Object.assign(CodemanApp.prototype, {
       if (mode === 'gemini') {
         return await this.runGemini();
       }
-      if (mode === 'agy') {
-        return await this.runAgy();
+      if (mode === 'antigravity') {
+        return await this.runAntigravity();
       }
       if (mode === 'shell') {
         return await this.runShell();
@@ -474,6 +477,7 @@ Object.assign(CodemanApp.prototype, {
     // Load history sessions when menu opens
     if (menu.classList.contains('active')) {
       this._loadRunModeHistory();
+      this._refreshRunModeAvailability(menu);
       const close = (ev) => {
         if (!menu.contains(ev.target)) {
           menu.classList.remove('active');
@@ -481,6 +485,25 @@ Object.assign(CodemanApp.prototype, {
         }
       };
       setTimeout(() => document.addEventListener('click', close), 0);
+    }
+  },
+
+  /**
+   * #201: hides run-mode dropdown entries for CLIs that aren't installed, so
+   * picking one doesn't spawn a session that immediately errors out.
+   *
+   * Shell has no external CLI dependency and is never gated, which is also what
+   * guarantees the menu is never empty. Scoped to `menu` rather than the document:
+   * `.run-mode-option` is also the class the saved-dashboard rows and the history
+   * rows use, and a bare querySelector would find whichever came first in the DOM.
+   *
+   * Antigravity is in this list even though #201 predates it — it is a run mode
+   * like the rest, and `agy` is the LEAST likely of the five to be installed.
+   */
+  _refreshRunModeAvailability(menu) {
+    for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity']) {
+      const btn = menu.querySelector(`.run-mode-option[data-mode="${mode}"]`);
+      if (btn) btn.style.display = this.isCliAvailable(mode) ? 'flex' : 'none';
     }
   },
 
@@ -542,7 +565,7 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'agy' ? 'Run AG' : mode === 'shell' ? 'Run SH' : 'Run';
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'shell' ? 'Run SH' : 'Run';
     }
   },
 
@@ -615,13 +638,43 @@ Object.assign(CodemanApp.prototype, {
     return startNumber;
   },
 
+  /**
+   * Launch progress may use the terminal only on the session-less home screen.
+   * When another session is active, mutating the shared xterm would serialize
+   * launch chrome into that session's snapshot during the subsequent switch.
+   */
+  _beginSessionLaunchStatus(message, ansiColor = '1;32') {
+    const ownsTerminal = !this.activeSessionId;
+    if (ownsTerminal) {
+      this.terminal.clear();
+      this.terminal.writeln(`\x1b[${ansiColor}m ${message}\x1b[0m`);
+      this.terminal.writeln('');
+    } else {
+      this.showToast?.(message, 'info');
+    }
+    return ownsTerminal;
+  },
+
+  _appendSessionLaunchStatus(ownsTerminal, message, ansiColor = '90') {
+    if (!ownsTerminal || this.activeSessionId) return;
+    this.terminal.writeln(`\x1b[${ansiColor}m ${message}\x1b[0m`);
+  },
+
+  _reportSessionLaunchError(ownsTerminal, message) {
+    if (ownsTerminal && !this.activeSessionId) {
+      this.terminal.writeln(`\x1b[1;31m Error: ${message}\x1b[0m`);
+    } else {
+      this.showToast?.(message, 'error');
+    }
+  },
+
   async runClaude() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     const tabCount = Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
 
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting ${tabCount} Claude session(s) in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} Claude session(s) in ${caseName}...`
+    );
     // Focus terminal NOW, in the synchronous user-gesture context (button click).
     // iOS Safari ignores programmatic focus() after any await, so this must happen
     // before the first async call. The keyboard opens here and stays open through
@@ -706,7 +759,7 @@ Object.assign(CodemanApp.prototype, {
           await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
           remoteIds.push(data.data.sessionId);
         }
-        this.terminal.writeln(`\x1b[90m All ${tabCount} remote session(s) ready\x1b[0m`);
+        this._appendSessionLaunchStatus(ownsLaunchTerminal, `All ${tabCount} remote session(s) ready`);
         if (remoteIds[0]) {
           await this.selectSession(remoteIds[0]);
           this.loadQuickStartCases();
@@ -740,7 +793,7 @@ Object.assign(CodemanApp.prototype, {
       const modelOverride = globalSettings.claudeModel || (useOpus1m ? 'opus[1m]' : '');
 
       // Step 1: Create all sessions in parallel
-      this.terminal.writeln(`\x1b[90m Creating ${tabCount} session(s)...\x1b[0m`);
+      this._appendSessionLaunchStatus(ownsLaunchTerminal, `Creating ${tabCount} session(s)...`);
       const createPromises = sessionNames.map(name =>
         fetch('/api/sessions', {
           method: 'POST',
@@ -785,12 +838,12 @@ Object.assign(CodemanApp.prototype, {
       ));
 
       // Step 3: Start all sessions in parallel (biggest speedup)
-      this.terminal.writeln(`\x1b[90m Starting ${tabCount} session(s) in parallel...\x1b[0m`);
+      this._appendSessionLaunchStatus(ownsLaunchTerminal, `Starting ${tabCount} session(s) in parallel...`);
       await Promise.all(sessionIds.map(id =>
         fetch(`/api/sessions/${id}/interactive`, { method: 'POST' })
       ));
 
-      this.terminal.writeln(`\x1b[90m All ${tabCount} sessions ready\x1b[0m`);
+      this._appendSessionLaunchStatus(ownsLaunchTerminal, `All ${tabCount} sessions ready`);
 
       // Auto-switch to the new session using selectSession (does proper refresh)
       if (firstSessionId) {
@@ -800,7 +853,7 @@ Object.assign(CodemanApp.prototype, {
 
       this.terminal.focus();
     } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
@@ -843,9 +896,10 @@ Object.assign(CodemanApp.prototype, {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     const shellCount = Math.min(20, Math.max(1, parseInt(document.getElementById('shellCount').value) || 1));
 
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;33m Starting ${shellCount} Shell session(s) in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${shellCount} Shell session(s) in ${caseName}...`,
+      '1;33'
+    );
 
     try {
       // Get the case path
@@ -956,7 +1010,7 @@ Object.assign(CodemanApp.prototype, {
 
       this.terminal.focus();
     } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
@@ -967,9 +1021,7 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting OpenCode session in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting OpenCode session in ${caseName}...`);
     // Focus in sync gesture context (see runClaude comment)
     this.terminal.focus();
 
@@ -979,8 +1031,10 @@ Object.assign(CodemanApp.prototype, {
         const statusRes = await fetch('/api/opencode/status');
         const status = (await statusRes.json()).data;
         if (!status.available) {
-          this.terminal.writeln('\x1b[1;31m OpenCode CLI not found.\x1b[0m');
-          this.terminal.writeln('\x1b[90m Install with: curl -fsSL https://opencode.ai/install | bash\x1b[0m');
+          this._reportSessionLaunchError(
+            ownsLaunchTerminal,
+            'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash'
+          );
           return;
         }
       }
@@ -1013,7 +1067,7 @@ Object.assign(CodemanApp.prototype, {
 
       this.terminal.focus();
     } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
@@ -1024,9 +1078,7 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Codex session in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Codex session in ${caseName}...`);
     this.terminal.focus();
 
     try {
@@ -1034,8 +1086,10 @@ Object.assign(CodemanApp.prototype, {
         const statusRes = await fetch('/api/codex/status');
         const status = (await statusRes.json()).data;
         if (!status.available) {
-          this.terminal.writeln('\x1b[1;31m Codex CLI not found.\x1b[0m');
-          this.terminal.writeln('\x1b[90m Install with: npm install -g @openai/codex\x1b[0m');
+          this._reportSessionLaunchError(
+            ownsLaunchTerminal,
+            'Codex CLI not found. Install with: npm install -g @openai/codex'
+          );
           return;
         }
       }
@@ -1052,6 +1106,7 @@ Object.assign(CodemanApp.prototype, {
           ...(isRemote ? {} : {
             codexConfig: {
               dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
+              animations: globalSettings.codexAnimationsEnabled ?? false,
               renderMode: 'hybrid',
             },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -1068,24 +1123,31 @@ Object.assign(CodemanApp.prototype, {
 
       this.terminal.focus();
     } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
-  async runAgy() {
+  async runAntigravity() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // Remote/docker cases run agy on the OTHER side — skip the local status probe and the
+    // local-only config/env below (quick-start rejects them for remote cases).
+    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Agy session in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Antigravity session in ${caseName}...`);
     this.terminal.focus();
 
     try {
-      const statusRes = await fetch('/api/agy/status');
-      const status = (await statusRes.json()).data;
-      if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m Agy CLI not found.\x1b[0m');
-        return;
+      if (!isRemote) {
+        const statusRes = await fetch('/api/antigravity/status');
+        const status = (await statusRes.json()).data;
+        if (!status.available) {
+          this._reportSessionLaunchError(
+            ownsLaunchTerminal,
+            'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
+          );
+          return;
+        }
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
@@ -1094,12 +1156,17 @@ Object.assign(CodemanApp.prototype, {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseName,
-          mode: 'agy',
-          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          mode: 'antigravity',
+          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(isRemote ? {} : {
+            antigravityConfig: { dangerouslySkipPermissions: true },
+            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          }),
         })
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Agy');
+      if (!data.success) throw new Error(data.error || 'Failed to start Antigravity');
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -1107,7 +1174,7 @@ Object.assign(CodemanApp.prototype, {
 
       this.terminal.focus();
     } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
@@ -1118,9 +1185,7 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Gemini session in ${caseName}...`);
     this.terminal.focus();
 
     try {
@@ -1128,8 +1193,10 @@ Object.assign(CodemanApp.prototype, {
         const statusRes = await fetch('/api/gemini/status');
         const status = (await statusRes.json()).data;
         if (!status.available) {
-          this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
-          this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
+          this._reportSessionLaunchError(
+            ownsLaunchTerminal,
+            'Gemini CLI not found. Install with: npm install -g @google/gemini-cli'
+          );
           return;
         }
       }
@@ -1158,87 +1225,7 @@ Object.assign(CodemanApp.prototype, {
 
       this.terminal.focus();
     } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
-    }
-  },
-
-  async runGemini() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Gemini session in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
-    this.terminal.focus();
-
-    try {
-      const statusRes = await fetch('/api/gemini/status');
-      const status = (await statusRes.json()).data;
-      if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m Gemini CLI not found.\x1b[0m');
-        this.terminal.writeln('\x1b[90m Install with: npm install -g @google/gemini-cli\x1b[0m');
-        return;
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'gemini',
-          geminiConfig: { approvalMode: 'yolo' },
-          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
-    }
-  },
-
-  async runAgy() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-
-    this.terminal.clear();
-    this.terminal.writeln(`\x1b[1;32m Starting Agy session in ${caseName}...\x1b[0m`);
-    this.terminal.writeln('');
-    this.terminal.focus();
-
-    try {
-      const statusRes = await fetch('/api/agy/status');
-      const status = (await statusRes.json()).data;
-      if (!status.available) {
-        this.terminal.writeln('\x1b[1;31m Agy CLI not found.\x1b[0m');
-        return;
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'agy',
-          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Agy');
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this.terminal.writeln(`\x1b[1;31m Error: ${err.message}\x1b[0m`);
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
@@ -1254,7 +1241,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Reset to an appropriate tab — Summary for external CLIs (Respawn/Ralph are Claude-only)
     const isAltMode =
-      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'agy';
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity';
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -1285,7 +1272,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Hide Claude-specific options for external CLI sessions
     const isExternalCli =
-      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'agy';
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity';
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isExternalCli ? 'none' : ''; });
 
@@ -3582,7 +3569,7 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     // Keep in sync with SessionMode (src/types/session.ts). A mode missing from
     // this allowlist silently downgrades to 'claude' — that's how 'shell' used to
     // reset on every reload via the server-sync path (this.runMode = serverValue).
-    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy'];
+    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity'];
     this._runMode = VALID_RUN_MODES.includes(mode) ? mode : 'claude';
   },
 });

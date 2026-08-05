@@ -8,13 +8,13 @@
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
  * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
- * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' (which CLI backend)
+ * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
  * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, resumeSessionId)
  * - GeminiConfig — Gemini CLI-specific settings (model, approvalMode, resumeSession)
- * - AgyConfig — Agy CLI-specific settings (model, resumeSession)
+ * - AntigravityConfig — Antigravity CLI (agy) settings (model, dangerouslySkipPermissions, resumeConversationId)
  *
  * Cross-domain relationships:
  * - SessionState.respawnConfig embeds RespawnConfig (respawn domain)
@@ -49,7 +49,7 @@ export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error' | 'parked';
 export type ClaudeMode = 'dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools';
 
 /** Session mode: which CLI backend a session runs */
-export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'agy';
+export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity';
 export type SessionCheckpointMode = 'compact' | 'clear' | 'new';
 
 export interface SessionCheckpointState {
@@ -74,7 +74,10 @@ export interface SessionCheckpointState {
   updatedAt: number;
 }
 
-export type RemoteCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'agy'>;
+export type RemoteCommandMode = Extract<
+  SessionMode,
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity'
+>;
 
 /**
  * Advanced SSH connection options shared by RemoteHost and SessionRemote.
@@ -182,7 +185,10 @@ export interface RemoteSessionInfo {
 // into the same long-lived container. See `docs/docker-cases-plan.md`.
 
 /** Which CLI backends a Docker case can run (same set as remote). */
-export type DockerCommandMode = Extract<SessionMode, 'shell' | 'claude' | 'opencode' | 'codex' | 'gemini'>;
+export type DockerCommandMode = Extract<
+  SessionMode,
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity'
+>;
 
 /** Container engine. Docker and Podman differ in the uid/userns + host-gateway alias. */
 export type DockerEngine = 'docker' | 'podman';
@@ -331,6 +337,8 @@ export interface CodexConfig {
   dangerouslyBypassApprovals?: boolean;
   /** Bypass Codex hook trust prompts for externally-sandboxed automation. */
   dangerouslyBypassHookTrust?: boolean;
+  /** Enable Codex's decorative TUI animations. Disable to reduce remote terminal redraws. */
+  animations?: boolean;
   /** Browser rendering strategy for Codex sessions. Hybrid TUI is the only supported mode. */
   renderMode?: CodexRenderMode;
 }
@@ -345,12 +353,14 @@ export interface GeminiConfig {
   resumeSession?: string;
 }
 
-/** Agy CLI session configuration */
-export interface AgyConfig {
-  /** Model identifier (e.g., "claude-3-5-sonnet"). Passed via --model. */
+/** Antigravity CLI (agy) session configuration */
+export interface AntigravityConfig {
+  /** Model identifier. Passed via --model. */
   model?: string;
-  /** Resume a previous Agy session ("latest" for --continue, or conversation ID for --conversation). */
-  resumeSession?: string;
+  /** Auto-approve all tool permission requests (passes --dangerously-skip-permissions). Absent = agy's default prompting. */
+  dangerouslySkipPermissions?: boolean;
+  /** Resume a previous conversation by ID (passed via --conversation). */
+  resumeConversationId?: string;
 }
 
 /**
@@ -527,8 +537,8 @@ export interface SessionState {
   codexConfig?: CodexConfig;
   /** Gemini-specific configuration (only for mode === 'gemini') */
   geminiConfig?: GeminiConfig;
-  /** Agy-specific configuration (only for mode === 'agy') */
-  agyConfig?: AgyConfig;
+  /** Antigravity-specific configuration (only for mode === 'antigravity') */
+  antigravityConfig?: AntigravityConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
   /**

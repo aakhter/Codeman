@@ -102,7 +102,7 @@ export function registerRespawnRoutes(
       session.mode === 'opencode' ||
       session.mode === 'codex' ||
       session.mode === 'gemini' ||
-      session.mode === 'agy'
+      session.mode === 'antigravity'
     ) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
@@ -250,7 +250,7 @@ export function registerRespawnRoutes(
       session.mode === 'opencode' ||
       session.mode === 'codex' ||
       session.mode === 'gemini' ||
-      session.mode === 'agy'
+      session.mode === 'antigravity'
     ) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
@@ -324,7 +324,7 @@ export function registerRespawnRoutes(
       session.mode === 'opencode' ||
       session.mode === 'codex' ||
       session.mode === 'gemini' ||
-      session.mode === 'agy'
+      session.mode === 'antigravity'
     ) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }

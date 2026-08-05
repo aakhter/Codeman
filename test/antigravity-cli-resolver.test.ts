@@ -23,12 +23,12 @@ beforeEach(async () => {
   vi.clearAllMocks();
 });
 
-describe('resolveAgyDir', () => {
+describe('resolveAntigravityDir', () => {
   it('returns directory from `which agy` when found in PATH', async () => {
     mockedExecSync.mockReturnValue('/home/user/.local/bin/agy\n');
     mockedExistsSync.mockReturnValue(true);
-    const { resolveAgyDir } = await import('../src/utils/agy-cli-resolver.js');
-    expect(resolveAgyDir()).toBe('/home/user/.local/bin');
+    const { resolveAntigravityDir } = await import('../src/utils/antigravity-cli-resolver.js');
+    expect(resolveAntigravityDir()).toBe('/home/user/.local/bin');
   });
 
   it('returns null when agy is not found anywhere', async () => {
@@ -36,8 +36,8 @@ describe('resolveAgyDir', () => {
       throw new Error('not found');
     });
     mockedExistsSync.mockReturnValue(false);
-    const { resolveAgyDir } = await import('../src/utils/agy-cli-resolver.js');
-    expect(resolveAgyDir()).toBeNull();
+    const { resolveAntigravityDir } = await import('../src/utils/antigravity-cli-resolver.js');
+    expect(resolveAntigravityDir()).toBeNull();
   });
 
   it('falls back to common install dirs when `which` fails', async () => {
@@ -45,18 +45,18 @@ describe('resolveAgyDir', () => {
       throw new Error('not found');
     });
     mockedExistsSync.mockImplementation((p) => String(p).endsWith('/.local/bin/agy'));
-    const { resolveAgyDir } = await import('../src/utils/agy-cli-resolver.js');
-    const result = resolveAgyDir();
+    const { resolveAntigravityDir } = await import('../src/utils/antigravity-cli-resolver.js');
+    const result = resolveAntigravityDir();
     expect(result).toMatch(/\.local\/bin$/);
   });
 });
 
-describe('isAgyAvailable', () => {
-  it('returns true when resolveAgyDir returns a path', async () => {
+describe('isAntigravityAvailable', () => {
+  it('returns true when resolveAntigravityDir returns a path', async () => {
     mockedExecSync.mockReturnValue('/home/user/.local/bin/agy\n');
     mockedExistsSync.mockReturnValue(true);
-    const { isAgyAvailable } = await import('../src/utils/agy-cli-resolver.js');
-    expect(isAgyAvailable()).toBe(true);
+    const { isAntigravityAvailable } = await import('../src/utils/antigravity-cli-resolver.js');
+    expect(isAntigravityAvailable()).toBe(true);
   });
 
   it('returns false when agy cannot be found', async () => {
@@ -64,7 +64,7 @@ describe('isAgyAvailable', () => {
       throw new Error('not found');
     });
     mockedExistsSync.mockReturnValue(false);
-    const { isAgyAvailable } = await import('../src/utils/agy-cli-resolver.js');
-    expect(isAgyAvailable()).toBe(false);
+    const { isAntigravityAvailable } = await import('../src/utils/antigravity-cli-resolver.js');
+    expect(isAntigravityAvailable()).toBe(false);
   });
 });

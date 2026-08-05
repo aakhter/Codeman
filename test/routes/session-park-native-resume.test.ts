@@ -305,14 +305,14 @@ describe('POST /api/sessions/:id/park — gemini native resume id capture (COD-2
   });
 });
 
-describe('POST /api/sessions/:id/park — agy native resume id capture (COD-251)', () => {
+describe('POST /api/sessions/:id/park — antigravity native resume id capture (COD-251)', () => {
   let harness: RouteTestHarness;
   let geminiHomeDir: string;
   let prevGeminiHome: string | undefined;
 
   beforeEach(async () => {
     harness = await createRouteTestHarness(registerSessionRoutes);
-    harness.ctx._session.mode = 'agy';
+    harness.ctx._session.mode = 'antigravity';
     prevGeminiHome = process.env.GEMINI_HOME;
     geminiHomeDir = mkdtempSync(join(tmpdir(), 'codeman-agy-home-'));
     process.env.GEMINI_HOME = geminiHomeDir;

@@ -19,6 +19,7 @@ import {
   type SessionColor,
   type CodexConfig,
   type GeminiConfig,
+  type AntigravityConfig,
 } from '../../types.js';
 import { Session, isAltScreenStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -343,11 +344,13 @@ export function _resetPasteRateBuckets(): void {
 
 /**
  * Security (multi-user §6.3): the Claude-only permission-mode downgrade does not
- * cover the other CLIs' bypass switches. Codex `--dangerously-bypass-approvals-and-sandbox`
- * and Gemini `--approval-mode yolo` disable the safety classifier the non-granted-user
- * downgrade is meant to keep on, so clamp them for a non-granted owner. buildGeminiCommand
- * defaults an ABSENT approvalMode to yolo, so the gemini config must be MATERIALIZED
- * (auto_edit) even when the request sent none. No-op in single-user mode / for a granted
+ * cover the other CLIs' bypass switches. Codex `--dangerously-bypass-approvals-and-sandbox`,
+ * Gemini `--approval-mode yolo`, and Antigravity `--dangerously-skip-permissions` disable
+ * the safety classifier the non-granted-user downgrade is meant to keep on, so clamp them
+ * for a non-granted owner. buildGeminiCommand defaults an ABSENT approvalMode to yolo, so
+ * the gemini config must be MATERIALIZED (auto_edit) even when the request sent none.
+ * Antigravity is like Codex: an ABSENT config already defaults safe (no bypass flag), so
+ * only a sent config needs the flag forced off. No-op in single-user mode / for a granted
  * owner (canUsernameRunPrivilegedCommands returns true when !isMultiUserMode()).
  */
 /**
@@ -405,15 +408,23 @@ function disarmRespawnForPark(ctx: RespawnPort & InfraPort, id: string): void {
 async function clampExternalCliBypassForOwner(
   owner: string | undefined,
   codexConfig: CodexConfig | undefined,
-  geminiConfig: GeminiConfig | undefined
-): Promise<{ codexConfig: CodexConfig | undefined; geminiConfig: GeminiConfig | undefined }> {
+  geminiConfig: GeminiConfig | undefined,
+  antigravityConfig: AntigravityConfig | undefined
+): Promise<{
+  codexConfig: CodexConfig | undefined;
+  geminiConfig: GeminiConfig | undefined;
+  antigravityConfig: AntigravityConfig | undefined;
+}> {
   const granted = await canUsernameRunPrivilegedCommands(owner);
-  if (granted) return { codexConfig, geminiConfig };
-  // Non-granted: force codex bypass off (only meaningful when a config was sent) and
-  // materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default).
+  if (granted) return { codexConfig, geminiConfig, antigravityConfig };
+  // Non-granted: force codex/antigravity bypass off (only meaningful when a config was
+  // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default).
   const clampedCodex = codexConfig ? { ...codexConfig, dangerouslyBypassApprovals: false } : codexConfig;
   const clampedGemini: GeminiConfig = { ...(geminiConfig ?? {}), approvalMode: 'auto_edit' };
-  return { codexConfig: clampedCodex, geminiConfig: clampedGemini };
+  const clampedAntigravity = antigravityConfig
+    ? { ...antigravityConfig, dangerouslySkipPermissions: false }
+    : antigravityConfig;
+  return { codexConfig: clampedCodex, geminiConfig: clampedGemini, antigravityConfig: clampedAntigravity };
 }
 
 export function registerSessionRoutes(
@@ -545,7 +556,7 @@ export function registerSessionRoutes(
       body.mode !== 'opencode' &&
       body.mode !== 'codex' &&
       body.mode !== 'gemini' &&
-      body.mode !== 'agy' &&
+      body.mode !== 'antigravity' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       (workingDir.startsWith(CASES_DIR + '/') || workingDir.startsWith(managedCasesBase + '/'));
@@ -610,12 +621,21 @@ export function registerSessionRoutes(
         );
       }
     }
+    if (body.mode === 'antigravity') {
+      const { isAntigravityAvailable } = await import('../../utils/antigravity-cli-resolver.js');
+      if (!isAntigravityAvailable()) {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
+        );
+      }
+    }
 
-    // Check Agy availability if requested
-    if (body.mode === 'agy') {
-      const { isAgyAvailable } = await import('../../utils/agy-cli-resolver.js');
-      if (!isAgyAvailable()) {
-        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Agy CLI not found.');
+    // Check Antigravity availability if requested
+    if (body.mode === 'antigravity') {
+      const { isAntigravityAvailable } = await import('../../utils/antigravity-cli-resolver.js');
+      if (!isAntigravityAvailable()) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Antigravity CLI not found.');
       }
     }
 
@@ -658,20 +678,20 @@ export function registerSessionRoutes(
           ? body.codexConfig?.model
           : mode === 'gemini'
             ? body.geminiConfig?.model
-            : mode === 'agy'
-              ? body.agyConfig?.model
+            : mode === 'antigravity'
+              ? body.antigravityConfig?.model
               : mode !== 'shell'
                 ? modelConfig?.defaultModel || undefined
                 : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     // Section 6.3: force non-granted users to a classifier-guarded mode.
     const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, owner);
-    // Section 6.3: clamp Codex/Gemini bypass switches for a non-granted owner (no-op single-user/granted).
-    const { codexConfig: gatedCodexConfig, geminiConfig: gatedGeminiConfig } = await clampExternalCliBypassForOwner(
-      owner,
-      body.codexConfig,
-      body.geminiConfig
-    );
+    // Section 6.3: clamp Codex/Gemini/Antigravity bypass switches for a non-granted owner (no-op single-user/granted).
+    const {
+      codexConfig: gatedCodexConfig,
+      geminiConfig: gatedGeminiConfig,
+      antigravityConfig: gatedAntigravityConfig,
+    } = await clampExternalCliBypassForOwner(owner, body.codexConfig, body.geminiConfig, body.antigravityConfig);
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
     const checkpointEnabled = await ctx.getCheckpointDefaultEnabled();
@@ -687,8 +707,8 @@ export function registerSessionRoutes(
       allowedTools: claudeModeConfig.allowedTools,
       openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
       codexConfig: mode === 'codex' ? gatedCodexConfig : undefined,
-      agyConfig: mode === 'agy' ? body.agyConfig : undefined,
       geminiConfig: mode === 'gemini' ? gatedGeminiConfig : undefined,
+      antigravityConfig: mode === 'antigravity' ? gatedAntigravityConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
       effort: body.effort,
@@ -913,12 +933,12 @@ export function registerSessionRoutes(
 
     try {
       // Auto-detect completion phrase from CLAUDE.md BEFORE starting (only if globally enabled and not explicitly disabled by user)
-      // Ralph tracker is not supported for opencode / codex / gemini sessions
+      // Ralph tracker is not supported for opencode / codex / gemini / antigravity sessions
       if (
         session.mode !== 'opencode' &&
         session.mode !== 'codex' &&
         session.mode !== 'gemini' &&
-        session.mode !== 'agy' &&
+        session.mode !== 'antigravity' &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -1649,7 +1669,7 @@ export function registerSessionRoutes(
   // reuse gemini's projects/chats layout. history.jsonl is NDJSON; the last
   // entry whose workspace matches ours and that carries a conversationId wins.
   // A literal 'latest' means "resume the most recent conversation" (--continue
-  // in buildAgyCommand()), so it is never returned as a captured id.
+  // in buildAntigravityCommand()), so it is never returned as a captured id.
   async function findAgySessionId(workingDir: string): Promise<string | null> {
     try {
       const raw = await fs.readFile(join(geminiHome(), 'antigravity-cli', 'history.jsonl'), 'utf8');
@@ -1703,7 +1723,7 @@ export function registerSessionRoutes(
       }
       if (session.mode === 'opencode') return await findOpencodeSessionId(session.workingDir);
       if (session.mode === 'gemini') return await findGeminiSessionId(session.workingDir);
-      if (session.mode === 'agy') return await findAgySessionId(session.workingDir);
+      if (session.mode === 'antigravity') return await findAgySessionId(session.workingDir);
       return null;
     } catch {
       return null;
@@ -1920,7 +1940,10 @@ export function registerSessionRoutes(
     // the canonical scrollback. We therefore request the FULL history capture
     // even on tab switch for these modes (bounded by tmux history-limit).
     const isCaptureOnlyTuiMode =
-      session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'opencode' || session.mode === 'agy';
+      session.mode === 'codex' ||
+      session.mode === 'gemini' ||
+      session.mode === 'opencode' ||
+      session.mode === 'antigravity';
     const muxName = session.muxName;
     // COD-180: a remote session's canonical scrollback lives ONLY on the remote
     // tmux server — the local wrapper is a nested-tmux client repainted in
@@ -2330,8 +2353,8 @@ export function registerSessionRoutes(
       modelOverride,
       openCodeConfig,
       codexConfig,
-      agyConfig,
       geminiConfig,
+      antigravityConfig,
       envOverrides,
       effort,
     } = parseBody(QuickStartSchema, req.body);
@@ -2376,7 +2399,7 @@ export function registerSessionRoutes(
         modelOverride !== undefined ||
         codexConfig ||
         geminiConfig ||
-        agyConfig ||
+        antigravityConfig ||
         openCodeConfig
       ) {
         return createErrorResponse(
@@ -2404,6 +2427,7 @@ export function registerSessionRoutes(
         effort ||
         codexConfig ||
         geminiConfig ||
+        antigravityConfig ||
         openCodeConfig
       ) {
         return createErrorResponse(
@@ -2490,10 +2514,21 @@ export function registerSessionRoutes(
           );
         }
       }
-      if (mode === 'agy') {
-        const { isAgyAvailable } = await import('../../utils/agy-cli-resolver.js');
-        if (!isAgyAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Agy CLI not found.');
+      if (mode === 'antigravity') {
+        const { isAntigravityAvailable } = await import('../../utils/antigravity-cli-resolver.js');
+        if (!isAntigravityAvailable()) {
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Antigravity CLI not found.');
+        }
+      }
+
+      // Check Antigravity availability if requested
+      if (mode === 'antigravity') {
+        const { isAntigravityAvailable } = await import('../../utils/antigravity-cli-resolver.js');
+        if (!isAntigravityAvailable()) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
+          );
         }
       }
 
@@ -2541,8 +2576,8 @@ export function registerSessionRoutes(
         writeFileSync(join(resolvedCasePath, 'CLAUDE.md'), claudeMd);
 
         // Write .claude/settings.local.json with hooks for desktop notifications
-        // (Claude-specific — OpenCode, Codex, and Gemini use their own systems)
-        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini') {
+        // (Claude-specific — OpenCode, Codex, Gemini, and Antigravity use their own systems)
+        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini' && mode !== 'antigravity') {
           await writeHooksConfig(resolvedCasePath);
         }
 
@@ -2562,7 +2597,14 @@ export function registerSessionRoutes(
     // Scaffold hooks (+ a CLAUDE.md) if MISSING so in-container permission prompts and
     // hook-idle detection fire (decision: wire hooks now). Never clobbers an existing
     // configured project. Skipped for external CLIs (they use their own systems).
-    if (docker && docker.hooksEnabled && mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini') {
+    if (
+      docker &&
+      docker.hooksEnabled &&
+      mode !== 'opencode' &&
+      mode !== 'codex' &&
+      mode !== 'gemini' &&
+      mode !== 'antigravity'
+    ) {
       try {
         if (!existsSync(join(resolvedCasePath, 'CLAUDE.md'))) {
           const templatePath = await ctx.getDefaultClaudeMdPath();
@@ -2591,7 +2633,7 @@ export function registerSessionRoutes(
       mode !== 'opencode' &&
       mode !== 'codex' &&
       mode !== 'gemini' &&
-      mode !== 'agy' &&
+      mode !== 'antigravity' &&
       !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
@@ -2610,19 +2652,19 @@ export function registerSessionRoutes(
           ? codexConfig?.model
           : mode === 'gemini'
             ? geminiConfig?.model
-            : mode === 'agy'
-              ? agyConfig?.model
+            : mode === 'antigravity'
+              ? antigravityConfig?.model
               : mode !== 'shell'
                 ? qsModelConfig?.defaultModel || undefined
                 : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const qsEffectiveClaudeMode = await resolveClaudeModeForUsername(qsClaudeModeConfig.claudeMode, owner);
-    // Section 6.3: clamp Codex/Gemini bypass switches for a non-granted owner (no-op single-user/granted).
-    const { codexConfig: qsGatedCodexConfig, geminiConfig: qsGatedGeminiConfig } = await clampExternalCliBypassForOwner(
-      owner,
-      codexConfig,
-      geminiConfig
-    );
+    // Section 6.3: clamp Codex/Gemini/Antigravity bypass switches for a non-granted owner (no-op single-user/granted).
+    const {
+      codexConfig: qsGatedCodexConfig,
+      geminiConfig: qsGatedGeminiConfig,
+      antigravityConfig: qsGatedAntigravityConfig,
+    } = await clampExternalCliBypassForOwner(owner, codexConfig, geminiConfig, antigravityConfig);
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
     const qsCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
@@ -2644,8 +2686,8 @@ export function registerSessionRoutes(
       owner,
       openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
       codexConfig: mode === 'codex' ? qsGatedCodexConfig : undefined,
-      agyConfig: mode === 'agy' ? agyConfig : undefined,
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
+      antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
@@ -2904,7 +2946,12 @@ export function registerSessionRoutes(
       for (let end = maxLook - 1; end >= idx; end--) {
         const candidates: string[] = [];
         if (end === idx) {
-          candidates.push(segments[idx]);
+          // Skip an EMPTY segment: `isDir(current + '/' + '')` stats `current + '/'`,
+          // which always succeeds, so the empty candidate would match unconditionally
+          // and swallow the doubled dash that is the whole signature of a dotdir. It
+          // then resolves "/home/x/.sib" to "/home/x//sib" whenever a non-dot sibling
+          // exists, and shadows the dotdir branch below in every other case.
+          if (segments[idx] !== '') candidates.push(segments[idx]);
         } else {
           candidates.push(segments.slice(idx, end + 1).join('-'));
           candidates.push(segments.slice(idx, end + 1).join('_'));
@@ -2914,6 +2961,25 @@ export function registerSessionRoutes(
           if (await isDir(candidate)) {
             const result = await tryDecode(end + 1, candidate);
             if (result) return result;
+          }
+        }
+      }
+      // The encoder maps both '/' and '.' to '-', so a literal '.' in the
+      // original path (e.g. "/home/timkjr/.codeman") collapses into an empty
+      // split segment here. Retry this window as a dotdir/dotfile: ".<join>".
+      if (segments[idx] === '' && idx + 1 < segments.length) {
+        const dotMaxLook = Math.min(idx + 1 + 4, segments.length);
+        for (let end = dotMaxLook - 1; end >= idx + 1; end--) {
+          const dotCandidates =
+            end === idx + 1
+              ? [segments[idx + 1]]
+              : [segments.slice(idx + 1, end + 1).join('-'), segments.slice(idx + 1, end + 1).join('_')];
+          for (const child of dotCandidates) {
+            const candidate = current + '/.' + child;
+            if (await isDir(candidate)) {
+              const result = await tryDecode(end + 1, candidate);
+              if (result) return result;
+            }
           }
         }
       }
@@ -2934,7 +3000,10 @@ export function registerSessionRoutes(
       for (let end = i; end < maxLook; end++) {
         const candidates: string[] = [];
         if (end === i) {
-          candidates.push(segments[i]);
+          // Same empty-segment skip as tryDecode above. This loop is shortest-match
+          // first, so without it the empty candidate matches on the very first try
+          // and sets `matched`, leaving the dotdir branch below permanently dead.
+          if (segments[i] !== '') candidates.push(segments[i]);
         } else {
           candidates.push(segments.slice(i, end + 1).join('_'));
           candidates.push(segments.slice(i, end + 1).join('-'));
@@ -2950,9 +3019,41 @@ export function registerSessionRoutes(
         }
         if (matched) break;
       }
+      if (!matched && segments[i] === '' && i + 1 < segments.length) {
+        const dotMaxLook = Math.min(i + 1 + 4, segments.length);
+        for (let end = i + 1; end < dotMaxLook; end++) {
+          const dotCandidates =
+            end === i + 1
+              ? [segments[i + 1]]
+              : [segments.slice(i + 1, end + 1).join('_'), segments.slice(i + 1, end + 1).join('-')];
+          for (const child of dotCandidates) {
+            const candidate = current + '/.' + child;
+            if (await isDir(candidate)) {
+              current = candidate;
+              i = end + 1;
+              matched = true;
+              break;
+            }
+          }
+          if (matched) break;
+        }
+      }
       if (!matched) {
-        current = current + '/' + segments[i];
-        i++;
+        if (segments[i] === '') {
+          // Nothing on disk matched (the usual reason this fallback runs at all is
+          // that the directory was deleted). An empty segment still means the
+          // encoder ate a literal '.', so guess the dotdir form rather than
+          // appending a bare '/' and emitting a "//" path.
+          if (i + 1 < segments.length) {
+            current = current + '/.' + segments[i + 1];
+            i += 2;
+          } else {
+            i++;
+          }
+        } else {
+          current = current + '/' + segments[i];
+          i++;
+        }
       }
     }
     const finalExists = await fs

@@ -318,6 +318,10 @@ Object.assign(CodemanApp.prototype, {
     if (fvbEl) fvbEl.checked = settings.showFileViewerButton ?? defaults.showFileViewerButton ?? true;
     document.getElementById('appSettingsShowAttachmentsButton').checked = settings.showAttachmentsButton ?? defaults.showAttachmentsButton ?? false;
     document.getElementById('appSettingsSkin').value = settings.skin ?? defaults.skin ?? 'daylight-blue';
+    // Entrance animations. Deliberately NOT part of the settings payload: the
+    // styles persist to their own localStorage keys via setAnimTheme(), which
+    // keeps them per-device without touching the .strict() SettingsUpdateSchema.
+    this._syncEntranceAnimSetting?.();
     // WebGL renderer (desktop only — mobile always uses the DOM renderer, so hide
     // the toggle there so it can't promise something that won't apply).
     document.getElementById('appSettingsWebglRenderer').checked = settings.webglRendererEnabled ?? defaults.webglRendererEnabled ?? true;
@@ -333,6 +337,14 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = this.planUsageChipEnabled(settings);
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
+    // Phone overview home screen: only meaningful under 430px, so the row is
+    // hidden elsewhere rather than offering a toggle that changes nothing.
+    document.getElementById('appSettingsMobileOverview').checked = settings.mobileOverviewEnabled ?? defaults.mobileOverviewEnabled ?? false;
+    const phoneOnly = MobileDetection.getDeviceType() === 'mobile' ? '' : 'none';
+    const mobileOverviewItem = document.getElementById('appSettingsMobileOverviewItem');
+    if (mobileOverviewItem) mobileOverviewItem.style.display = phoneOnly;
+    const phoneSection = document.getElementById('appSettingsPhoneSection');
+    if (phoneSection) phoneSection.style.display = phoneOnly;
     // Session Manager, Away Digest and Cron buttons all default OFF (opt-in under
     // Display → Header Displays; the Cron button also ships with btn-cron--hidden
     // in the template, so an unchecked box and a hidden button stay consistent).
@@ -369,8 +381,15 @@ Object.assign(CodemanApp.prototype, {
     claudeModeSelect.onchange = () => {
       allowedToolsRow.style.display = claudeModeSelect.value === 'allowedTools' ? '' : 'none';
     };
-    // Codex CLI settings
-    document.getElementById('appSettingsCodexDangerouslyBypassApprovals').checked = settings.codexDangerouslyBypassApprovals ?? false;
+    // Codex CLI settings. The inputs are always populated (and always read back
+    // by saveAppSettings), even when the tab is hidden below, so a user without
+    // codex installed can never silently wipe the codex prefs of an instance
+    // that does have it.
+    document.getElementById('appSettingsCodexDangerouslyBypassApprovals').checked =
+      settings.codexDangerouslyBypassApprovals ?? false;
+    document.getElementById('appSettingsCodexAnimations').checked =
+      settings.codexAnimationsEnabled ?? false;
+    this._applyCodexSettingsVisibility();
     // Terminal history settings
     document.getElementById('appSettingsTerminalScrollbackLines').value =
       settings.terminalScrollbackLines ?? defaults.terminalScrollbackLines;
@@ -437,7 +456,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('eventIdleAudio').checked = idlePref.audio ?? false;
     // Response complete (stop)
     const stopPref = eventTypes.stop || {};
-    document.getElementById('eventStopEnabled').checked = stopPref.enabled ?? true;
+    document.getElementById('eventStopEnabled').checked = stopPref.enabled ?? false;
     document.getElementById('eventStopBrowser').checked = stopPref.browser ?? false;
     document.getElementById('eventStopPush').checked = stopPref.push ?? false;
     document.getElementById('eventStopAudio').checked = stopPref.audio ?? false;
@@ -501,6 +520,29 @@ Object.assign(CodemanApp.prototype, {
     // Activate focus trap
     this.activeFocusTrap = new FocusTrap(modal);
     this.activeFocusTrap.activate();
+  },
+
+  /**
+   * Show the App Settings "Codex CLI" tab only on instances where the codex
+   * binary actually resolves. Both settings on it (approval bypass, animated
+   * status effects) are passed to `codex` at launch, so on a box without codex
+   * the tab is a promise nothing can keep.
+   *
+   * Availability comes from the injected `window.__codemanCliAvailable`, shared
+   * with the welcome buttons and the run-mode dropdown, so the tab never flickers
+   * in and back out. Only the tab BUTTON is toggled: the panel already carries
+   * `.modal-tab-content.hidden` unless it is the selected tab, and
+   * openAppSettings() always reopens on Display, so an unreachable button is
+   * enough to keep the panel unreachable.
+   *
+   * Note the inverted default versus the run buttons: an UNKNOWN flag hides this
+   * tab. Hiding a settings tab costs a user nothing (the values stay in the DOM
+   * and are still saved), whereas hiding a run button would leave a working
+   * install with nothing to click.
+   */
+  _applyCodexSettingsVisibility() {
+    const btn = document.querySelector('#appSettingsModal .modal-tab-btn[data-tab="settings-codex"]');
+    if (btn) btn.style.display = window.__codemanCliAvailable?.codex === true ? '' : 'none';
   },
 
   switchSettingsTab(tabName) {
@@ -772,6 +814,42 @@ Object.assign(CodemanApp.prototype, {
     };
     poll();
     this._updatePollTimer = setInterval(poll, 1500);
+  },
+
+  /**
+   * Is `tool` installed on the server? Reads `window.__codemanCliAvailable`,
+   * injected by renderIndexHtml (see the comment there for why this is injected
+   * rather than fetched per surface).
+   *
+   * Unknown reads as AVAILABLE. A missing flag means the page was rendered by a
+   * build that predates the injection, or by a solo popup: hiding every run
+   * button on a doubt would leave nothing to click, and the pre-existing failure
+   * mode for a genuinely missing CLI is just an error toast.
+   */
+  isCliAvailable(tool) {
+    const flags = window.__codemanCliAvailable;
+    if (!flags || typeof flags !== 'object') return true;
+    return flags[tool] !== false;
+  },
+
+  /**
+   * #200: show a welcome-screen button only where the thing it launches exists.
+   * The markup ships them hidden, so an old cached page can never flash a button
+   * for a tool this server does not have.
+   */
+  applyWelcomeCliVisibility() {
+    const buttons = [
+      ['welcomeClaudeBtn', 'claude'],
+      ['welcomeOpencodeBtn', 'opencode'],
+      ['welcomeGeminiBtn', 'gemini'],
+      // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
+      // without cloudflared can only ever produce "cloudflared not found".
+      ['welcomeTunnelBtn', 'cloudflared'],
+    ];
+    for (const [id, tool] of buttons) {
+      const btn = document.getElementById(id);
+      if (btn) btn.style.display = this.isCliAvailable(tool) ? 'flex' : 'none';
+    }
   },
 
   async loadTunnelStatus() {
@@ -1610,6 +1688,7 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
+      mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
       showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
       showCronButton: document.getElementById('appSettingsShowCronButton').checked,
@@ -1639,6 +1718,7 @@ Object.assign(CodemanApp.prototype, {
         (parseInt(document.getElementById('appSettingsTerminalBufferMaxMiB').value, 10) || 32) * 1024 * 1024,
       terminalBufferTrimBytes:
         (parseInt(document.getElementById('appSettingsTerminalBufferTrimMiB').value, 10) || 24) * 1024 * 1024,
+      codexAnimationsEnabled: document.getElementById('appSettingsCodexAnimations').checked,
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       claudeModel: document.getElementById('appSettingsClaudeModel').value,
@@ -1768,7 +1848,7 @@ Object.assign(CodemanApp.prototype, {
           audio: document.getElementById('eventSubagentAudio').checked,
         },
       },
-      _version: 4,
+      _version: 5,
     };
     if (this.notificationManager) {
       this.notificationManager.preferences = notifPrefsToSave;
@@ -1790,6 +1870,10 @@ Object.assign(CodemanApp.prototype, {
 
     // Apply CJK input visibility immediately
     this._updateCjkInputState();
+
+    // The phone home surface (overview vs welcome) may have just been toggled.
+    // Only re-decide while a home screen is actually up.
+    if (!this.activeSessionId) this.showWelcome();
 
     // Apply keyboard bar mode
     KeyboardAccessoryBar.setMode(settings.extendedKeyboardBar ? 'extended' : 'simple');
@@ -1823,6 +1907,8 @@ Object.assign(CodemanApp.prototype, {
       showSessionButton: _ssb,
       showAwayDigestButton: _adb,
       showCronButton: _crb,
+      // Phone-only home surface, and absent from SettingsUpdateSchema (.strict()).
+      mobileOverviewEnabled: _mov,
       ...serverSettings
     } = settings;
     try {
@@ -2087,6 +2173,10 @@ Object.assign(CodemanApp.prototype, {
         showSessionButton: false,
         showAwayDigestButton: false,
         showCronButton: false,
+        // Phone home screen: the C logo opens the session overview instead of the
+        // welcome screen. ON by default here, and the escape hatch if it ever
+        // misbehaves on a device (the gate treats only an explicit false as off).
+        mobileOverviewEnabled: true,
         // Remote auto-reconnect (COD-108) — on by default
         remoteAutoReconnect: true,
         // Input
@@ -2613,6 +2703,7 @@ Object.assign(CodemanApp.prototype, {
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
+          'mobileOverviewEnabled',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. It
@@ -2647,7 +2738,8 @@ Object.assign(CodemanApp.prototype, {
         if (notificationPreferences && this.notificationManager) {
           const localNotifPrefs = localStorage.getItem(this.notificationManager.getStorageKey());
           if (!localNotifPrefs) {
-            this.notificationManager.preferences = notificationPreferences;
+            this.notificationManager.preferences =
+              this.notificationManager.normalizePreferences(notificationPreferences);
             this.notificationManager.savePreferences();
           }
         }

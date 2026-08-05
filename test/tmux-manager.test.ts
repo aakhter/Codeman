@@ -10,8 +10,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   TmuxManager,
-  buildRemoteLaunchCommand,
   buildCodexCommand,
+  buildRemoteKillCommand,
+  buildRemoteLaunchCommand,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -113,6 +114,14 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('Codex command builder', () => {
+    it('controls decorative TUI animation through Codex config', () => {
+      expect(buildCodexCommand({ animations: false })).toBe('codex --config tui.animations=false');
+      expect(buildCodexCommand({ animations: true })).toBe('codex --config tui.animations=true');
+      expect(buildCodexCommand()).toBe('codex');
+    });
+  });
+
   describe('remote launch command builder', () => {
     it('wraps codex command overrides in a remote tmux attach-or-create', () => {
       const command = buildRemoteLaunchCommand({
@@ -132,7 +141,7 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('BatchMode=yes');
       expect(command).toContain('ubuntu@10.0.0.42');
       expect(command).toContain('/home/ubuntu/work');
-      expect(command).toContain('tmux -L codeman new-session -A -s codeman-abcd1234');
+      expect(command).toContain('tmux -L codeman-remote new-session -A -s codeman-ssh-abcd1234');
       expect(command).toContain('exec codx personal');
       // COD-104: remote agent now lives in remote tmux, not a child of the ssh channel.
       expect(command).not.toContain('bash -lc');
@@ -151,7 +160,31 @@ describe('TmuxManager (unit)', () => {
         },
       });
 
-      expect(command).toContain('exec bash -l');
+      expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l');
+      // `failed`, not `on`: `on` also keeps the pane after a CLEAN exit, so typing
+      // `exit` in a remote shell strands a dead pane that the next launch's `-A`
+      // reattaches to instead of starting a shell.
+      expect(command).toContain('remain-on-exit failed');
+      expect(command).not.toContain('remain-on-exit on');
+      // Last in the chain: tmux aborts the rest of a `\;` sequence after an error,
+      // and `failed` needs tmux >= 3.2 on the REMOTE host. Trailing, a rejection
+      // costs only this option instead of every setting after it.
+      expect(command.trimEnd().endsWith("remain-on-exit failed'")).toBe(true);
+    });
+
+    it('defaults claude to a non-interactive launch (--dangerously-skip-permissions)', () => {
+      const command = buildRemoteLaunchCommand({
+        mode: 'claude',
+        remote: { hostId: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', remotePath: '/w' },
+        sessionId: 'abc123def456',
+      });
+      // Routed through an interactive login shell so ~/.local/bin (where `claude`
+      // typically lives) is on PATH — ssh's remote-command execution is neither
+      // interactive nor login, so a bare `exec claude` fails with "command not found".
+      // The inner quoting is escaped twice over (once per shellescape() layer), so
+      // assert on the unescaped substrings rather than the literal quoted form.
+      expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l -c');
+      expect(command).toContain('claude --dangerously-skip-permissions');
     });
   });
 

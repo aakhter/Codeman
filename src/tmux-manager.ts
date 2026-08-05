@@ -48,9 +48,9 @@ import {
   type SessionMode,
   type OpenCodeConfig,
   type CodexConfig,
-  type AgyConfig,
   type GeminiConfig,
   type EffortLevel,
+  type AntigravityConfig,
   type SessionRemote,
   type SessionDocker,
   type DockerCommandMode,
@@ -76,7 +76,9 @@ import {
   resolveOpenCodeDir,
   resolveCodexDir,
   resolveGeminiDir,
-  resolveAgyDir,
+  resolveAntigravityDir,
+  resolveLocalShell,
+  loginShellArgs,
 } from './utils/index.js';
 import type {
   TerminalMultiplexer,
@@ -91,6 +93,7 @@ import {
   buildSshConnectionArgs,
   buildSshConnectionArgv,
   defaultRemoteCommandForMode,
+  remoteLoginShellCommand,
   remoteSshTarget,
   withRemotePathBootstrap,
 } from './remote-hosts.js';
@@ -805,6 +808,10 @@ export function buildCodexCommand(config?: CodexConfig): string {
     parts.push('--dangerously-bypass-hook-trust');
   }
 
+  if (config?.animations !== undefined) {
+    parts.push('--config', `tui.animations=${config.animations ? 'true' : 'false'}`);
+  }
+
   if (config?.model) {
     const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
     if (safeModel) parts.push('--model', safeModel);
@@ -848,27 +855,28 @@ function buildGeminiCommand(config?: GeminiConfig): string {
 }
 
 /**
- * Build the Agy CLI command with appropriate flags.
+ * Build the Antigravity CLI (agy) command with appropriate flags.
  *
- * Uses --dangerously-skip-permissions to match Codeman's Claude default.
- * --continue resumes the latest conversation; --conversation <id> resumes
- * a specific one.
+ * Unlike gemini's yolo default, `--dangerously-skip-permissions` is only added
+ * when the config explicitly asks for it (the frontend sends it for parity with
+ * Codeman's Claude default; the multi-user clamp strips it for non-granted owners,
+ * and an ABSENT config stays at agy's own prompting default — safe like Codex).
  */
-function buildAgyCommand(config?: AgyConfig): string {
-  const parts = ['agy', '--dangerously-skip-permissions'];
+function buildAntigravityCommand(config?: AntigravityConfig): string {
+  const parts = ['agy'];
+
+  if (config?.dangerouslySkipPermissions) {
+    parts.push('--dangerously-skip-permissions');
+  }
 
   if (config?.model) {
     const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
     if (safeModel) parts.push('--model', safeModel);
   }
 
-  if (config?.resumeSession) {
-    if (config.resumeSession === 'latest') {
-      parts.push('--continue');
-    } else {
-      const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeSession) ? config.resumeSession : undefined;
-      if (safeId) parts.push('--conversation', safeId);
-    }
+  if (config?.resumeConversationId) {
+    const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeConversationId) ? config.resumeConversationId : undefined;
+    if (safeId) parts.push('--conversation', safeId);
   }
 
   return parts.join(' ');
@@ -900,8 +908,8 @@ export function buildSpawnCommand(options: {
   allowedTools?: string;
   openCodeConfig?: OpenCodeConfig;
   codexConfig?: CodexConfig;
-  agyConfig?: AgyConfig;
   geminiConfig?: GeminiConfig;
+  antigravityConfig?: AntigravityConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
 }): string {
@@ -932,22 +940,51 @@ export function buildSpawnCommand(options: {
   if (options.mode === 'gemini') {
     return buildGeminiCommand(options.geminiConfig);
   }
-  if (options.mode === 'agy') {
-    return buildAgyCommand(options.agyConfig);
+  if (options.mode === 'antigravity') {
+    return buildAntigravityCommand(options.antigravityConfig);
   }
-  return '$SHELL';
+  // #208: NOT the literal '$SHELL'. This string is embedded in the `bash -c "…"`
+  // argument of the respawn-pane line, which execSync runs through `/bin/sh -c`,
+  // so a `$SHELL` here is expanded by the SERVER process's shell against the
+  // SERVER process's env — empty in containers and system systemd units, leaving
+  // the pane command ending in a dangling `&&` ("syntax error: unexpected end of
+  // file", pane dead on arrival). Resolve it in Node and quote the result.
+  // #209: launch it as a LOGIN shell, which is what tmux itself does for a pane
+  // with no `default-command`, so a Codeman shell tab matches a hand-started tmux
+  // one. That is what picks up /etc/profile and /etc/profile.d/* — a systemd
+  // --user service never sourced them, so its PATH is what every pane inherited.
+  // The flags come from loginShellArgs() rather than being hardcoded: they are
+  // appended to a path that ultimately comes from the passwd entry, and a shell
+  // that rejects an unknown flag exits on the spot, which is #208 all over again.
+  const shell = resolveLocalShell();
+  return `${shellescape(shell)}${loginShellArgs(shell)}`;
 }
+
+/**
+ * Dedicated tmux socket for remote sessions. A Codeman instance running on the
+ * TARGET host watches its own `codeman` socket and would otherwise see our
+ * session name, so its `reconcileSessions()` would ADOPT our session (attach a
+ * PTY, resize, respawn-pane it locally) — the cross-machine form of the "2nd
+ * instance attaches live sessions" hazard. A private socket keeps our remote
+ * sessions off that instance's radar entirely.
+ */
+const REMOTE_TMUX_SOCKET = 'codeman-remote';
 
 /**
  * Deterministic, reattach-stable remote tmux session name for a Codeman session.
  *
- * Derived from the same stable field the LOCAL muxName uses
- * (`codeman-${sessionId.slice(0, 8)}`), so reconnecting (which re-issues the
- * exact same `ssh … new-session -A`) lands back in the SAME remote session.
- * Must NOT be random/time-based — it has to be stable across reconnects.
+ * Derived from the same stable field the LOCAL muxName uses (the first 8 chars
+ * of the sessionId), so reconnecting (which re-issues the exact same
+ * `ssh … new-session -A`) lands back in the SAME remote session. Must NOT be
+ * random/time-based — it has to be stable across reconnects.
+ *
+ * The `codeman-ssh-` prefix is deliberately chosen to FAIL a remote Codeman's
+ * `SAFE_MUX_NAME_PATTERN` (`^codeman-[a-f0-9-]+$`) — the `s`/`h` letters mean a
+ * remote instance's discovery never treats one as its own session (belt to the
+ * dedicated-socket suspenders above).
  */
 export function remoteTmuxSessionName(sessionId: string): string {
-  return `codeman-${sessionId.slice(0, 8)}`;
+  return `codeman-ssh-${sessionId.slice(0, 8)}`;
 }
 
 /**
@@ -988,15 +1025,17 @@ export function buildRemoteLaunchCommand(options: {
   // hardcoding --dangerously-skip-permissions, so a non-granted multi-user user's
   // downgraded 'auto' actually reaches the remote agent (the default command otherwise
   // ignored claudeMode). A per-host `commands.<mode>` override stays authoritative
-  // (admin's explicit choice). For the DEFAULT single-user config (skip), the emitted
-  // command is byte-identical to before.
+  // (admin's explicit choice). Wrapped in `$SHELL -i -l -c` for the same reason as
+  // `defaultRemoteCommandForMode`: the agent CLIs live under a per-user PATH entry
+  // that only an interactive login shell resolves (see that function's comment).
+  // Codex keeps its own builder so per-session codexConfig flags survive the wrap.
   const override = remote.commands?.[mode];
   const modeCommand = override
     ? override
     : mode === 'codex'
-      ? `exec ${buildCodexCommand(codexConfig)}`
+      ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
       : mode === 'claude'
-        ? `exec claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`
+        ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
         : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
@@ -1006,33 +1045,56 @@ export function buildRemoteLaunchCommand(options: {
   const paneCommand = `cd ${shellescape(remote.remotePath)} && ${withRemotePathBootstrap(modeCommand)}`;
 
   // The tmux command line, with `\;` separating commands so the config `set`s
-  // apply on the SAME connection (and are idempotent on reattach). The remote
-  // `-L codeman` server is dedicated to Codeman remote sessions, so global (`-g`)
-  // option scoping is safe here.
+  // apply on the SAME connection (and are idempotent on reattach). Options are
+  // scoped per-session (`set -t <name>` / server `set -s`), NEVER `-g`, so a
+  // shared remote tmux server's other sessions keep their own prefix/mouse.
   //
   // COD-180 — the remote tmux history is the CANONICAL scrollback for a remote
   // session (the local wrapper accumulates none: nested tmux repaints in place).
   // Without an explicit history-limit the remote server runs the tmux default
-  // (2000 lines) and long sessions silently lose their oldest history. It must run
-  // BEFORE new-session (any tmux command auto-starts the server) and is
-  // server-scoped (`set -g`) because the session does not yet exist.
+  // (2000 lines) and long sessions silently lose their oldest history.
+  //
+  // COD-180 — history-limit is the ONE option that stays `-g`, and it must run
+  // BEFORE new-session: a session option cannot be scoped to a session that does
+  // not exist yet, and applying it afterwards only affects panes created later,
+  // leaving the pane we just made on tmux's 2000-line default. Unlike
+  // prefix/mouse/status it changes no interactive behavior of a sibling session —
+  // only the scrollback budget of panes created from here on.
   const historyLimitPrefix =
     historyLimit && Number.isFinite(historyLimit) ? [`set -g history-limit ${Math.floor(historyLimit)}`] : [];
   const tmuxInvocation = withRemotePathBootstrap(
-    'tmux -L codeman ' +
-      [
-        ...historyLimitPrefix,
-        `new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`,
-        'set -g status off',
-        'set -g mouse off',
-        'set -sg escape-time 0',
-        'set -g prefix C-q',
-        // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
-        // to the SMALLEST attached client, so two Codemans at different viewports
-        // would fight (clamp to the smaller). `window-size latest` sizes to the
-        // most-recently-active client instead, so concurrent clients coexist.
-        'set -g window-size latest',
-      ].join(' \\; ')
+    [
+      `tmux -L ${REMOTE_TMUX_SOCKET} ${[...historyLimitPrefix, `new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`].join(' \\; ')}`,
+      `set -t ${remoteName} status off`,
+      `set -t ${remoteName} mouse off`,
+      `set -t ${remoteName} prefix C-q`,
+      'set -s escape-time 0',
+      // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
+      // to the SMALLEST attached client, so two Codemans at different viewports
+      // would fight (clamp to the smaller). `window-size latest` sizes to the
+      // most-recently-active client instead, so concurrent clients coexist.
+      // Per-session scoped (`set -t <name>`, matching #145's hardening) so a shared
+      // remote tmux server's other sessions keep their own sizing behavior.
+      `set -t ${remoteName} window-size latest`,
+      // #210: keep a CRASHED pane so the failure is still on screen. Without this,
+      // tmux destroys the pane -> window -> session (and, being the only session,
+      // the whole remote server) the instant the pane command exits, which tears the
+      // local `ssh -t` attach down with it; reconnect's `-A` then builds a fresh
+      // session and the cycle can repeat as a flap loop with no evidence surviving.
+      // That is how the exit-127 PATH bug fixed above stayed invisible.
+      //
+      // `failed`, NOT `on`: `on` keeps the pane on a CLEAN exit too, so typing
+      // `exit` in a remote shell leaves a dead pane behind, the session outlives it,
+      // and the next launch's `-A` reattaches to that corpse ("Pane is dead (status
+      // 0)") instead of starting a shell — verified against a real tmux. `failed`
+      // keeps the pane only on a non-zero exit, which is exactly the diagnostic case.
+      //
+      // LAST in the chain on purpose: tmux aborts the remaining commands of a `\;`
+      // sequence once one errors (also verified), and `failed` needs tmux >= 3.2 on
+      // the REMOTE host. Trailing, a rejection costs only this option; leading, it
+      // would silently drop status/mouse/prefix/escape-time/window-size with it.
+      `set -t ${remoteName} remain-on-exit failed`,
+    ].join(' \\; ')
   );
 
   // ssh runs its trailing args through the remote login shell, so the entire
@@ -1160,6 +1222,8 @@ function appendResumeFlag(modeCommand: string, mode: SessionMode, resumeId: stri
       return `${modeCommand} --resume ${resumeId}`;
     case 'codex':
       return `${modeCommand} resume ${resumeId}`;
+    case 'antigravity':
+      return `${modeCommand} --conversation ${resumeId}`;
     default:
       return modeCommand; // shell / opencode: no resume
   }
@@ -1700,14 +1764,22 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
     // background/color palette negotiation matches xterm's 24-bit renderer.
     const colorTermExport =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy' || truecolorEnabled
+      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || truecolorEnabled
         ? 'export COLORTERM=truecolor'
         : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
+      // Settings-driven (see colorTermExport above); upstream hardcodes this
+      // per-mode, we honor the user's truecolor toggle instead.
       colorTermExport,
-      ...(mode === 'codex' || mode === 'gemini' || mode === 'agy' ? ['unset NO_COLOR'] : []),
+      ...(mode === 'codex' || mode === 'gemini' || mode === 'antigravity' ? ['unset NO_COLOR'] : []),
+      // Stamp each Codex pane with a unique originator so the response-viewer
+      // can locate THIS pane's rollout exactly — codex writes the value into
+      // session_meta.originator of every rollout it creates. Without it,
+      // rollouts are matched by cwd+mtime and two panes in the same directory
+      // bleed into each other.
+      ...(mode === 'codex' ? [`export CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codeman_${sessionId}`] : []),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,
@@ -1783,8 +1855,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const dir = resolveGeminiDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
-    if (mode === 'agy') {
-      const dir = resolveAgyDir();
+    if (mode === 'antigravity') {
+      const dir = resolveAntigravityDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
     return { pathExport: '', dir: null };
@@ -1833,8 +1905,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
-      agyConfig,
       geminiConfig,
+      antigravityConfig,
       resumeSessionId,
       envOverrides,
       effort,
@@ -1889,8 +1961,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (mode === 'gemini' && !cliDir) {
       throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
     }
-    if (mode === 'agy' && !cliDir) {
-      throw new Error('Agy CLI not found. Install from antigravity.');
+    if (mode === 'antigravity' && !cliDir) {
+      throw new Error(
+        'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
+      );
     }
 
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
@@ -1919,8 +1993,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
-      agyConfig,
       geminiConfig,
+      antigravityConfig,
       resumeSessionId,
       effort,
     });
@@ -2155,8 +2229,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
-      agyConfig,
       geminiConfig,
+      antigravityConfig,
       resumeSessionId,
       envOverrides,
       effort,
@@ -2208,8 +2282,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       allowedTools,
       openCodeConfig,
       codexConfig,
-      agyConfig,
       geminiConfig,
+      antigravityConfig,
       resumeSessionId,
       effort,
     });

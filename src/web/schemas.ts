@@ -16,6 +16,7 @@ import {
   MIN_TERMINAL_BUFFER_BYTES,
   MIN_TERMINAL_SCROLLBACK_LINES,
 } from '../config/terminal-history.js';
+import { MAX_EDITABLE_BYTES } from '../config/file-editing.js';
 
 // ========== Path Validation ==========
 
@@ -83,10 +84,34 @@ export const FilesystemPreviewQuerySchema = z.object({
     .optional(),
 });
 
+/**
+ * Body validation for `PUT /api/sessions/:id/file-content` (File Viewer edit
+ * mode). `content.max()` counts UTF-16 code units, which for UTF-8 output is
+ * always <= the byte length, so it is a coarse pre-filter that never rejects
+ * valid content; the handler enforces the exact MAX_EDITABLE_BYTES byte cap.
+ * Workspace containment and symlink resolution are enforced by the route via
+ * validateSessionFilePath after parsing.
+ */
+export const FileWriteSchema = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine((p) => !p.includes('\0') && !p.includes('\n') && !p.includes('\r'), {
+        message: 'Invalid path',
+      }),
+    content: z.string().max(MAX_EDITABLE_BYTES),
+    baseHash: z.string().regex(/^[a-f0-9]{64}$/, 'baseHash must be a sha256 hex digest'),
+    eol: z.enum(['lf', 'crlf']).optional(),
+    force: z.boolean().optional(),
+  })
+  .strict();
+
 // ========== Env Var Allowlist ==========
 
 /** Allowlisted env var key prefixes */
-const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 'GOOGLE_'];
+const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 'GOOGLE_', 'ANTIGRAVITY_'];
 
 /** Env var keys that are always blocked (security-sensitive) */
 const BLOCKED_ENV_KEYS = new Set([
@@ -116,7 +141,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, and GOOGLE_* keys are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, and ANTIGRAVITY_* keys are allowed.',
     }
   );
 
@@ -183,6 +208,7 @@ const CodexConfigSchema = z
       .optional(),
     dangerouslyBypassApprovals: z.boolean().optional(),
     dangerouslyBypassHookTrust: z.boolean().optional(),
+    animations: z.boolean().optional(),
     renderMode: z
       .enum(['scrollback', 'hybrid'])
       .optional()
@@ -207,15 +233,16 @@ const GeminiConfigSchema = z
   })
   .optional();
 
-/** Schema for Agy CLI-specific configuration */
-const AgyConfigSchema = z
+/** Schema for Antigravity CLI (agy)-specific configuration */
+const AntigravityConfigSchema = z
   .object({
     model: z
       .string()
       .max(100)
       .regex(/^[a-zA-Z0-9._\-/]+$/)
       .optional(),
-    resumeSession: z
+    dangerouslySkipPermissions: z.boolean().optional(),
+    resumeConversationId: z
       .string()
       .max(100)
       .regex(/^[a-zA-Z0-9._-]+$/)
@@ -229,7 +256,7 @@ export const CreateSessionSchema = z.object({
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
     .optional(),
   workingDir: safePathSchema.optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
   name: z.string().max(100).optional(),
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
@@ -241,7 +268,7 @@ export const CreateSessionSchema = z.object({
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
-  agyConfig: AgyConfigSchema,
+  antigravityConfig: AntigravityConfigSchema,
   /** Resume a previous Claude conversation by its session ID (used for reboot recovery) */
   resumeSessionId: z
     .string()
@@ -368,6 +395,7 @@ const RemoteCommandOverridesSchema = z
     opencode: z.string().min(1).max(300).optional(),
     codex: z.string().min(1).max(300).optional(),
     gemini: z.string().min(1).max(300).optional(),
+    antigravity: z.string().min(1).max(300).optional(),
   })
   .strict()
   .optional();
@@ -668,11 +696,11 @@ export const QuickStartSchema = z.object({
    *  a real host dir, so the settings file crosses the bind mount); rejected for
    *  remote cases (the file would be written on the WRONG machine). */
   modelOverride: z.string().max(50).optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'agy']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
-  agyConfig: AgyConfigSchema,
+  antigravityConfig: AntigravityConfigSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
@@ -861,6 +889,7 @@ export const SettingsUpdateSchema = z
     showResponseViewer: z.boolean().optional(),
     // Codex CLI settings
     codexDangerouslyBypassApprovals: z.boolean().optional(),
+    codexAnimationsEnabled: z.boolean().optional(),
     // Terminal history and retention
     terminalScrollbackLines: z
       .number()
@@ -1086,7 +1115,7 @@ const noNewlines = (v: string) => !/[\r\n]/.test(v);
 /** Shared field shape for creating/updating a scheduled job. */
 const CronJobBaseSchema = z.object({
   name: z.string().min(1).max(200),
-  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini']),
+  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']),
   workingDir: safePathSchema,
   launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
   promptMode: z.enum(['inline_text', 'prompt_file_path']),
