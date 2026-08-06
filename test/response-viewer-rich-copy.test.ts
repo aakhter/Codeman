@@ -163,3 +163,57 @@ describe('response viewer rich copy', () => {
     expect(html).toContain('>Copy Markdown</button>');
   });
 });
+
+/**
+ * COD-263 — quote/comment blocks get the same one-click copy affordance as code
+ * blocks. Behavioral: drives the real _renderMarkdown post-pass and the real
+ * _quoteBlockText, not a source grep.
+ *
+ * ⚠ These assertions run in CI only — the jsdom environment is broken on the
+ * AA-DESKTOP box ("No such built-in module: node:" at env setup), so the
+ * authoritative local evidence for COD-263 is the Playwright run on beta
+ * recorded in the Jira note, not a green from this file.
+ */
+describe('COD-263 quote/comment copy', () => {
+  function render(md: string): HTMLElement {
+    const host = document.createElement('div');
+    host.innerHTML = app._renderMarkdown(md);
+    return host;
+  }
+
+  it('wraps a quote block and gives it a copy button', () => {
+    const host = render('> quoted passage\n');
+    expect(host.querySelectorAll('.rv-quote-wrap').length).toBe(1);
+    const btn = host.querySelector('.rv-quote-wrap .rv-copy-btn');
+    expect(btn).not.toBeNull();
+    expect(btn?.getAttribute('aria-label')).toBe('Copy quote');
+    // The blockquote must survive INSIDE the wrapper — the styling hangs off it.
+    expect(host.querySelector('.rv-quote-wrap > blockquote')?.textContent).toContain('quoted passage');
+  });
+
+  it('wraps only TOP-LEVEL quotes, so a nested quote adds no second button', () => {
+    const host = render('> outer\n>\n> > inner\n');
+    expect(host.querySelectorAll('blockquote').length).toBeGreaterThan(1);
+    expect(host.querySelectorAll('.rv-quote-wrap').length).toBe(1);
+    expect(host.querySelectorAll('.rv-copy-btn').length).toBe(1);
+  });
+
+  it('leaves prose without quotes untouched', () => {
+    const host = render('just a paragraph\n');
+    expect(host.querySelectorAll('.rv-quote-wrap').length).toBe(0);
+  });
+
+  it('_quoteBlockText separates paragraphs with a blank line', () => {
+    // textContent would concatenate them into one run-on line — that is the
+    // whole reason this helper exists.
+    const host = render('> first para\n>\n> second para\n');
+    const bq = host.querySelector('.rv-quote-wrap > blockquote') as HTMLElement;
+    expect(app._quoteBlockText(bq)).toBe('first para\n\nsecond para');
+  });
+
+  it('_quoteBlockText falls back to textContent for an inline-only quote', () => {
+    const bq = document.createElement('blockquote');
+    bq.textContent = '  inline only  ';
+    expect(app._quoteBlockText(bq)).toBe('inline only');
+  });
+});

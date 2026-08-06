@@ -13434,6 +13434,22 @@ kbd {
   padding-right: 76px;
 }
 
+/* ── Quote/comment block one-click copy (COD-263) ──────────────────────────
+   Same affordance and toolbar as code blocks, so a quoted passage or a review
+   comment can be lifted in one click. The wrapper carries the margin the
+   blockquote used to own, so wrapping does not change vertical rhythm. */
+.rv-text .rv-quote-wrap,
+.response-viewer-body .rv-quote-wrap {
+  position: relative;
+  margin: 1em 0;
+}
+
+.rv-text .rv-quote-wrap > blockquote,
+.response-viewer-body .rv-quote-wrap > blockquote {
+  margin: 0;
+  padding-right: 44px; /* reserve room for the copy button */
+}
+
 .rv-code-actions {
   position: absolute;
   top: 6px;
@@ -13492,8 +13508,13 @@ kbd {
 
 .rv-text li > p { margin: 0.2em 0; }
 
+/* Descendant, NOT child: COD-263 wraps quotes in .rv-quote-wrap for the copy
+   button, so a blockquote in the latest-response view (markdown rendered
+   straight into the body) now sits one level deeper — the same nesting the
+   .rv-code-wrap comment above documents for <pre>. A `>` here silently drops
+   the quote chrome the moment the wrapper appears. */
 .rv-text blockquote,
-.response-viewer-body > blockquote {
+.response-viewer-body blockquote {
   border-left: 3px solid var(--accent);
   background: rgba(var(--accent-rgb), 0.06);
   margin: 0.8em 0;

@@ -2155,6 +2155,30 @@ class CodemanApp {
           wrap.appendChild(actions);
           wrap.appendChild(pre);
         });
+        // COD-263: quote/comment blocks get the SAME one-click copy affordance as
+        // code blocks. Only TOP-LEVEL blockquotes are wrapped — a nested quote
+        // would otherwise sprout a second button inside its parent's copy region,
+        // and copying the outer block already includes the inner text.
+        tmpl.content.querySelectorAll('blockquote').forEach((bq) => {
+          if (bq.parentElement?.closest('blockquote')) return;
+
+          const wrap = document.createElement('div');
+          wrap.className = 'rv-quote-wrap';
+
+          const actions = document.createElement('div');
+          actions.className = 'rv-code-actions';
+
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'rv-copy-btn';
+          copyBtn.type = 'button';
+          copyBtn.setAttribute('aria-label', 'Copy quote');
+          copyBtn.setAttribute('title', 'Copy quote');
+          actions.appendChild(copyBtn);
+
+          bq.parentNode.insertBefore(wrap, bq);
+          wrap.appendChild(actions);
+          wrap.appendChild(bq);
+        });
         return tmpl.innerHTML;
       } catch { /* fall through */ }
     }
@@ -2272,13 +2296,16 @@ class CodemanApp {
         return;
       }
 
-      // One-click copy: lift the raw source from the sibling <pre><code>.
+      // One-click copy: lift the raw source from the sibling <pre><code>, or —
+      // COD-263 — the rendered text of the sibling <blockquote>.
       const copyBtn = ev.target.closest('.rv-copy-btn');
       if (copyBtn) {
         ev.preventDefault();
         ev.stopPropagation();
         const code = copyBtn.closest('.rv-code-wrap')?.querySelector('pre code');
-        const ok = code ? await this._copyText(code.textContent || '') : false;
+        const quote = copyBtn.closest('.rv-quote-wrap')?.querySelector('blockquote');
+        const text = code ? code.textContent || '' : quote ? this._quoteBlockText(quote) : null;
+        const ok = text !== null ? await this._copyText(text) : false;
         copyBtn.classList.remove('rv-copied', 'rv-copy-failed');
         copyBtn.classList.add(ok ? 'rv-copied' : 'rv-copy-failed');
         clearTimeout(copyBtn._resetTimer);
@@ -2314,6 +2341,21 @@ class CodemanApp {
       const nowrap = pre.classList.toggle('rv-nowrap');
       wrap.classList.toggle('rv-wrap-nowrap', nowrap);
     });
+  }
+
+  /**
+   * COD-263 — plain text of a rendered quote/comment block, for one-click copy.
+   *
+   * Not `textContent`: a multi-paragraph blockquote renders as sibling <p>s, and
+   * textContent concatenates them with NO separator, so two paragraphs would be
+   * pasted as one run-on line. Join the block-level children with a blank line
+   * instead, and fall back to textContent for a quote with only inline content.
+   */
+  _quoteBlockText(quote) {
+    const blocks = Array.from(quote?.children || [])
+      .map((el) => (el.textContent || '').trim())
+      .filter(Boolean);
+    return blocks.length ? blocks.join('\n\n') : (quote?.textContent || '').trim();
   }
 
   /**
