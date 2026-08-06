@@ -196,3 +196,37 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).not.toContain('12345.9');
   });
 });
+
+describe('COD-276 remote agent launches source user shell env', () => {
+  it('wraps agent modes so the remote CLI inherits the user shell env', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'opencode',
+      sessionId: 'abcd1234-5678-90ab-cdef-1234567890ab',
+      remote: baseRemote,
+    });
+    expect(command).toContain('exec bash -lc');
+    expect(command).toContain('exec opencode');
+    expect(command).toContain('login_shell=${SHELL:-');
+  });
+
+  it('still honors per-mode command overrides for agent modes', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      sessionId: 'abcd1234-5678-90ab-cdef-1234567890ab',
+      remote: { ...baseRemote, commands: { codex: 'exec codx personal' } },
+    });
+    expect(command).toContain('exec bash -lc');
+    expect(command).toContain('exec codx personal');
+  });
+
+  it('keeps shell mode launch unchanged (no user-shell wrapper)', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'shell',
+      sessionId: 'abcd1234-5678-90ab-cdef-1234567890ab',
+      remote: baseRemote,
+    });
+    expect(command).toContain('exec bash -l');
+    expect(command).not.toContain('exec bash -lc');
+    expect(command).not.toContain('login_shell=');
+  });
+});

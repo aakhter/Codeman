@@ -12,6 +12,8 @@ import {
   TmuxManager,
   buildRemoteLaunchCommand,
   buildCodexCommand,
+  buildLocalPaneCommand,
+  buildNofileLimitCommand,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -134,8 +136,10 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('/home/ubuntu/work');
       expect(command).toContain('tmux -L codeman new-session -A -s codeman-abcd1234');
       expect(command).toContain('exec codx personal');
-      // COD-104: remote agent now lives in remote tmux, not a child of the ssh channel.
-      expect(command).not.toContain('bash -lc');
+      // COD-104: remote agent lives in remote tmux (attach-or-create), not a child of ssh.
+      // COD-276: agent modes now re-exec through the user's login shell INSIDE the remote
+      // tmux pane so the CLI inherits the user's shell env; the override command still wins.
+      expect(command).toContain('exec bash -lc');
     });
 
     it('uses default shell command when no override is configured', () => {
@@ -1174,5 +1178,31 @@ describe('isUsableWorkingDir', () => {
       return { isDirectory: () => true } as never;
     });
     expect(isUsableWorkingDir('/home/u/racy')).toBe(false);
+  });
+});
+
+describe('COD-276 buildLocalPaneCommand', () => {
+  it('wraps agent modes with the user-shell-env builder (zsh/zshrc handled upstream)', () => {
+    const out = buildLocalPaneCommand({
+      mode: 'opencode',
+      pathExport: 'export PATH="/u/.opencode/bin:$PATH" && ',
+      envExports: ['export CODEMAN_MUX=1'],
+      cmd: 'opencode --model sonnet',
+    });
+    expect(out).toContain(buildNofileLimitCommand());
+    expect(out).toContain('exec bash -lc');
+    expect(out).toContain('exec opencode --model sonnet');
+    // pathExport trailing ' && ' is normalized for the inner builder
+    expect(out).not.toContain('" &&   &&');
+  });
+
+  it('leaves shell mode unchanged', () => {
+    const out = buildLocalPaneCommand({
+      mode: 'shell',
+      pathExport: '',
+      envExports: ['export CODEMAN_MUX=1'],
+      cmd: '$SHELL',
+    });
+    expect(out).toBe(`${buildNofileLimitCommand()} && export CODEMAN_MUX=1 && $SHELL`);
   });
 });

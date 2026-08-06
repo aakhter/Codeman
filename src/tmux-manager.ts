@@ -78,6 +78,7 @@ import {
   resolveGeminiDir,
   resolveAgyDir,
 } from './utils/index.js';
+import { buildUserShellEnvCommand } from './utils/user-shell-env.js';
 import type {
   TerminalMultiplexer,
   MuxSession,
@@ -938,6 +939,33 @@ export function buildSpawnCommand(options: {
   return '$SHELL';
 }
 
+/** Whether a mode launches an external agent CLI whose env must be inherited. */
+function isAgentCliMode(mode: SessionMode): boolean {
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'agy';
+}
+
+/**
+ * COD-276 — assemble the local pane launch command. Agent modes re-`exec` through
+ * the user's login shell so the CLI inherits the user's shell env; `shell` mode is
+ * unchanged. `pathExport` is the `export PATH="…" && ` string from buildPathExport.
+ */
+export function buildLocalPaneCommand(opts: {
+  mode: SessionMode;
+  pathExport: string;
+  envExports: string[];
+  cmd: string;
+}): string {
+  const nofile = buildNofileLimitCommand();
+  if (isAgentCliMode(opts.mode)) {
+    return `${nofile} && ${buildUserShellEnvCommand({
+      pathExport: opts.pathExport.replace(/ && $/, ''),
+      envExports: opts.envExports,
+      cmd: opts.cmd,
+    })}`;
+  }
+  return `${nofile} && ${opts.pathExport}${opts.envExports.join(' && ')} && ${opts.cmd}`;
+}
+
 /**
  * Deterministic, reattach-stable remote tmux session name for a Codeman session.
  *
@@ -1003,7 +1031,13 @@ export function buildRemoteLaunchCommand(options: {
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
   // tmux, so the path needs shell-quoting here. `exec` replaces the shell with
   // the CLI so the pane PID is the agent itself.
-  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${withRemotePathBootstrap(modeCommand)}`;
+  // COD-276: agent modes re-exec through the user's login shell so the remote CLI
+  // inherits the user's shell env (bash -lc, or zsh -lc + explicit ~/.zshrc). The
+  // per-host `commands.<mode>` override remains authoritative for WHICH command runs.
+  const effectiveMode = isAgentCliMode(mode)
+    ? buildUserShellEnvCommand({ cmd: modeCommand.replace(/^exec\s+/, '') })
+    : modeCommand;
+  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${withRemotePathBootstrap(effectiveMode)}`;
 
   // The tmux command line, with `\;` separating commands so the config `set`s
   // apply on the SAME connection (and are idempotent on reattach). The remote
@@ -1907,9 +1941,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         : mode === 'codex'
           ? await resolveHeadroomRouted('codex')
           : undefined;
-    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
-      ' && '
-    );
+    const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
 
     const baseCmd = buildSpawnCommand({
       mode,
@@ -1930,7 +1962,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     try {
       // Build the full command to run inside tmux
-      const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
+      const localFullCmd = buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
       const fullCmd = docker
         ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
         : remote
@@ -2196,9 +2228,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         : mode === 'codex'
           ? await resolveHeadroomRouted('codex')
           : undefined;
-    const envExportsStr = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl).join(
-      ' && '
-    );
+    const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
 
     const baseCmd = buildSpawnCommand({
       mode,
@@ -2215,7 +2245,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     });
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);
-    const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
+    const localFullCmd = buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
     const fullCmd = docker
       ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
       : remote
