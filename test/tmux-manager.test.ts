@@ -136,8 +136,10 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('/home/ubuntu/work');
       expect(command).toContain('tmux -L codeman new-session -A -s codeman-abcd1234');
       expect(command).toContain('exec codx personal');
-      // COD-104: remote agent now lives in remote tmux, not a child of the ssh channel.
-      expect(command).not.toContain('bash -lc');
+      // COD-104: remote agent lives in remote tmux (attach-or-create), not a child of ssh.
+      // COD-276: agent modes now re-exec through the user's login shell INSIDE the remote
+      // tmux pane so the CLI inherits the user's shell env; the override command still wins.
+      expect(command).toContain('exec bash -lc');
     });
 
     it('uses default shell command when no override is configured', () => {
