@@ -4094,6 +4094,10 @@ Object.assign(CodemanApp.prototype, {
     this._stopFilePreviewPolling();
     this._resetFilePreviewExternalAction?.();
     this._resetFilePreviewOriginalDownloadAction?.();
+    // Edit mode is per-document: a (re)open always lands in read mode, and the
+    // Edit button stays hidden until the server says this file is editable.
+    // `?.` matches the sibling resets above (partial hosts in unit harnesses).
+    this._resetFilePreviewEdit?.();
 
     // Show overlay with loading state
     overlay.classList.add('visible');
@@ -4435,6 +4439,11 @@ Object.assign(CodemanApp.prototype, {
       st.previewCopyUrl = null;
     }
     this.filePreviewContent = '';
+    // Re-decided per render: only the text branch below re-offers Edit, so any
+    // other type (image/video/binary/diff) leaves the button hidden.
+    this.filePreviewEditTarget = null;
+    const editBtnEl = this.$('filePreviewEditBtn');
+    if (editBtnEl) editBtnEl.hidden = true;
 
     if (data.type === 'image') {
       this.filePreviewZoom = 1;
@@ -4550,6 +4559,15 @@ Object.assign(CodemanApp.prototype, {
       const text = await textRes.text();
       if (!isCurrentPreview()) return false;
       this.filePreviewContent = text;
+      // Edit affordance (issue #212): the server decides — `editable` is its own
+      // dry-run of the edit=1 gate (allowlist + sensitive/blocked + .git + size +
+      // UTF-8). Attachment previews come from a different endpoint that never sets
+      // it, so external documents stay read-only without a special case here.
+      if (data.editable === true && !attachmentId) {
+        this.filePreviewEditTarget = { sessionId, filePath };
+        const editBtn = this.$('filePreviewEditBtn');
+        if (editBtn) editBtn.hidden = false;
+      }
       // Reset any prior outline scroll-spy before re-rendering (no observer leaks).
       this._teardownOutlineScrollSpy();
       // Restore persisted client-only view prefs (COD-62).
@@ -4743,6 +4761,13 @@ Object.assign(CodemanApp.prototype, {
     const st = this.filePreviewState;
     const overlay = this.$('filePreviewOverlay');
     if (!st || !overlay || !overlay.classList.contains('visible') || document.hidden) return;
+    // Never poll while the editor is open: a change on disk re-renders the body
+    // wholesale (_renderFilePreviewBody replaces innerHTML), which would destroy
+    // the textarea and every unsaved keystroke in it. The agent writing the file
+    // underneath the editor is exactly when this fires, and it is also exactly
+    // what the save path's baseHash 409 is there to catch — so the right answer
+    // is to stop refreshing, not to merge.
+    if (this.filePreviewEdit) return;
     if (this._filePreviewPolling) return; // don't overlap slow fetches
     this._filePreviewPolling = true;
     try {
@@ -5592,6 +5617,10 @@ Object.assign(CodemanApp.prototype, {
   },
 
   closeFilePreview() {
+    // Closing with an unsaved edit buffer would discard it silently — the buffer
+    // lives only in the textarea. Ask first, and abort the close on Cancel.
+    if (this.filePreviewEdit?.dirty && !confirm('Discard unsaved changes?')) return;
+    this._resetFilePreviewEdit();
     this._stopFilePreviewPolling();
     this._resetFilePreviewExternalAction?.();
     this._hideFilePreviewNavigation();
