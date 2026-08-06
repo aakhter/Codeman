@@ -1031,7 +1031,13 @@ export function buildRemoteLaunchCommand(options: {
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
   // tmux, so the path needs shell-quoting here. `exec` replaces the shell with
   // the CLI so the pane PID is the agent itself.
-  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${withRemotePathBootstrap(modeCommand)}`;
+  // COD-276: agent modes re-exec through the user's login shell so the remote CLI
+  // inherits the user's shell env (bash -lc, or zsh -lc + explicit ~/.zshrc). The
+  // per-host `commands.<mode>` override remains authoritative for WHICH command runs.
+  const effectiveMode = isAgentCliMode(mode)
+    ? buildUserShellEnvCommand({ cmd: modeCommand.replace(/^exec\s+/, '') })
+    : modeCommand;
+  const paneCommand = `cd ${shellescape(remote.remotePath)} && ${withRemotePathBootstrap(effectiveMode)}`;
 
   // The tmux command line, with `\;` separating commands so the config `set`s
   // apply on the SAME connection (and are idempotent on reattach). The remote
