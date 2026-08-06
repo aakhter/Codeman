@@ -12,6 +12,8 @@ import {
   TmuxManager,
   buildRemoteLaunchCommand,
   buildCodexCommand,
+  buildLocalPaneCommand,
+  buildNofileLimitCommand,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -1174,5 +1176,31 @@ describe('isUsableWorkingDir', () => {
       return { isDirectory: () => true } as never;
     });
     expect(isUsableWorkingDir('/home/u/racy')).toBe(false);
+  });
+});
+
+describe('COD-276 buildLocalPaneCommand', () => {
+  it('wraps agent modes with the user-shell-env builder (zsh/zshrc handled upstream)', () => {
+    const out = buildLocalPaneCommand({
+      mode: 'opencode',
+      pathExport: 'export PATH="/u/.opencode/bin:$PATH" && ',
+      envExports: ['export CODEMAN_MUX=1'],
+      cmd: 'opencode --model sonnet',
+    });
+    expect(out).toContain(buildNofileLimitCommand());
+    expect(out).toContain('exec bash -lc');
+    expect(out).toContain('exec opencode --model sonnet');
+    // pathExport trailing ' && ' is normalized for the inner builder
+    expect(out).not.toContain('" &&   &&');
+  });
+
+  it('leaves shell mode unchanged', () => {
+    const out = buildLocalPaneCommand({
+      mode: 'shell',
+      pathExport: '',
+      envExports: ['export CODEMAN_MUX=1'],
+      cmd: '$SHELL',
+    });
+    expect(out).toBe(`${buildNofileLimitCommand()} && export CODEMAN_MUX=1 && $SHELL`);
   });
 });
