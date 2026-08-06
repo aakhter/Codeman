@@ -367,6 +367,11 @@ function parseSessionPrefix(name) {
   return null;
 }
 
+// Registry actions the document-level capture loop must NOT dispatch, because a
+// surface closer to the keystroke owns them and the loop's unconditional
+// preventDefault() would break that surface. See the document capture loop below.
+const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set(['copyTerminalSelection']);
+
 const DEFAULT_SHORTCUTS = [
   {
     id: 'show-shortcuts',
@@ -398,6 +403,22 @@ const DEFAULT_SHORTCUTS = [
     label: 'Clear Terminal',
     bindings: [{ modifiers: ['ctrl'], key: 'l' }],
     action: 'clearTerminal',
+  },
+  {
+    id: 'copy-selection',
+    group: 'Terminal',
+    label: 'Copy Selection',
+    // Bindings match on `key`, not `code`: xterm decides which byte to emit from the
+    // PRODUCED character, so intercepting a physical KeyC that doesn't produce "c"
+    // would diverge from the chord that actually sends ^C.
+    bindings: [
+      { modifiers: ['ctrl'], key: 'c' },
+      { modifiers: ['ctrl', 'shift'], key: 'C' },
+    ],
+    // Dispatched by shouldCopyTerminalSelectionFromShortcut() in terminal-ui.js and
+    // deliberately absent from SHORTCUT_ACTIONS: the generic capture loop always
+    // preventDefaults on a match, which would cost the user the interrupt key.
+    action: 'copyTerminalSelection',
   },
   {
     id: 'increase-font',
@@ -890,6 +911,10 @@ class CodemanApp {
     this.applyLocalization();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
+    // Must run before the first session:created can arrive: markSessionTabEntering()
+    // ignores ids until this sets up its state, which is what keeps the tabs
+    // restored on page load from animating.
+    this.initEntranceAnimations?.();
     // Remove mobile-init class now that JS has applied visibility settings.
     // The inline <script> in <head> added this to prevent flash-of-content on mobile.
     document.documentElement.classList.remove('mobile-init');
@@ -1205,12 +1230,6 @@ class CodemanApp {
         return;
       }
 
-      if (this.shouldOpenCommandPaletteFromShortcut?.(e)) {
-        e.preventDefault();
-        this.openCommandPalette();
-        return;
-      }
-
       // Escape - close panels and modals (different logic: no preventDefault, no return)
       if (e.key === 'Escape') {
         // The View Response overlay is a top-level layer: close it first and
@@ -1263,6 +1282,12 @@ class CodemanApp {
       }
 
       for (const shortcut of this.getShortcutRegistry()) {
+        // Smart copy (#211) is dispatched by shouldCopyTerminalSelectionFromShortcut()
+        // in terminal-ui.js, never from here: this loop preventDefaults on every
+        // match, so with no selection Ctrl+C would be swallowed and the user would
+        // lose the interrupt key. Upstream gets this by omitting the action from its
+        // SHORTCUT_ACTIONS map; we dispatch by method name, so the skip is explicit.
+        if (NON_DOCUMENT_SHORTCUT_ACTIONS.has(shortcut.action)) continue;
         if (this.matchesShortcutEvent(e, shortcut)) {
           e.preventDefault();
           this.runShortcutAction(shortcut);
@@ -1819,6 +1844,12 @@ class CodemanApp {
       this.sessionOrder.push(data.id);
       this.saveSessionOrder();
     }
+    // Idempotent per id: the POST response and the session:created event both
+    // land here, and a batch launched together cascades in creation order.
+    this.markSessionTabEntering?.(data.id);
+    // The pane is one shared element, so it is only marked here and played when
+    // this session is actually selected (see selectSession).
+    this.markTerminalEntering?.(data.id);
     this.renderSessionTabs();
     this.updateCost();
     // COD-97: keep the Monitor's mux list in sync with the open tabs.
@@ -2124,6 +2155,30 @@ class CodemanApp {
           wrap.appendChild(actions);
           wrap.appendChild(pre);
         });
+        // COD-263: quote/comment blocks get the SAME one-click copy affordance as
+        // code blocks. Only TOP-LEVEL blockquotes are wrapped — a nested quote
+        // would otherwise sprout a second button inside its parent's copy region,
+        // and copying the outer block already includes the inner text.
+        tmpl.content.querySelectorAll('blockquote').forEach((bq) => {
+          if (bq.parentElement?.closest('blockquote')) return;
+
+          const wrap = document.createElement('div');
+          wrap.className = 'rv-quote-wrap';
+
+          const actions = document.createElement('div');
+          actions.className = 'rv-code-actions';
+
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'rv-copy-btn';
+          copyBtn.type = 'button';
+          copyBtn.setAttribute('aria-label', 'Copy quote');
+          copyBtn.setAttribute('title', 'Copy quote');
+          actions.appendChild(copyBtn);
+
+          bq.parentNode.insertBefore(wrap, bq);
+          wrap.appendChild(actions);
+          wrap.appendChild(bq);
+        });
         return tmpl.innerHTML;
       } catch { /* fall through */ }
     }
@@ -2241,13 +2296,16 @@ class CodemanApp {
         return;
       }
 
-      // One-click copy: lift the raw source from the sibling <pre><code>.
+      // One-click copy: lift the raw source from the sibling <pre><code>, or —
+      // COD-263 — the rendered text of the sibling <blockquote>.
       const copyBtn = ev.target.closest('.rv-copy-btn');
       if (copyBtn) {
         ev.preventDefault();
         ev.stopPropagation();
         const code = copyBtn.closest('.rv-code-wrap')?.querySelector('pre code');
-        const ok = code ? await this._copyText(code.textContent || '') : false;
+        const quote = copyBtn.closest('.rv-quote-wrap')?.querySelector('blockquote');
+        const text = code ? code.textContent || '' : quote ? this._quoteBlockText(quote) : null;
+        const ok = text !== null ? await this._copyText(text) : false;
         copyBtn.classList.remove('rv-copied', 'rv-copy-failed');
         copyBtn.classList.add(ok ? 'rv-copied' : 'rv-copy-failed');
         clearTimeout(copyBtn._resetTimer);
@@ -2283,6 +2341,21 @@ class CodemanApp {
       const nowrap = pre.classList.toggle('rv-nowrap');
       wrap.classList.toggle('rv-wrap-nowrap', nowrap);
     });
+  }
+
+  /**
+   * COD-263 — plain text of a rendered quote/comment block, for one-click copy.
+   *
+   * Not `textContent`: a multi-paragraph blockquote renders as sibling <p>s, and
+   * textContent concatenates them with NO separator, so two paragraphs would be
+   * pasted as one run-on line. Join the block-level children with a blank line
+   * instead, and fall back to textContent for a quote with only inline content.
+   */
+  _quoteBlockText(quote) {
+    const blocks = Array.from(quote?.children || [])
+      .map((el) => (el.textContent || '').trim())
+      .filter(Boolean);
+    return blocks.length ? blocks.join('\n\n') : (quote?.textContent || '').trim();
   }
 
   /**
@@ -2778,7 +2851,7 @@ class CodemanApp {
   _onSessionResized(data) {
     if (data.id !== this.activeSessionId || !this.terminal) return;
     const session = this.sessions.get(data.id);
-    if (session?.mode !== 'codex' && session?.mode !== 'gemini' && session?.mode !== 'agy') return;
+    if (session?.mode !== 'codex' && session?.mode !== 'gemini' && session?.mode !== 'antigravity') return;
     // Our own resize (or one that happens to match us) can't misalign our view.
     if (this.terminal.cols === data.cols && this.terminal.rows === data.rows) return;
     this._foreignResizeDirty = data.id;
@@ -2839,7 +2912,7 @@ class CodemanApp {
   /** COD-182: any codex/gemini/agy tab — stale rows can appear locally too (reattach/reconnect churn). */
   _isTuiSession(sessionId) {
     const session = this.sessions.get(sessionId);
-    return session?.mode === 'codex' || session?.mode === 'gemini' || session?.mode === 'agy';
+    return session?.mode === 'codex' || session?.mode === 'gemini' || session?.mode === 'antigravity';
   }
 
   /** COD-180: remote codex/gemini sessions — the live nested-tmux stream corrupts scrollback; reconcile heals it. */
@@ -4448,6 +4521,13 @@ class CodemanApp {
   }
 
   _renderSessionTabsImmediate() {
+    // Same guard as renderSessionTabs()/_fullRenderSessionTabs(): the incremental
+    // branch below rewrites .tab-name's innerHTML, which destroys the inline rename
+    // <input> mid-keystroke. Guarding only the scheduler is not enough: a render
+    // debounced just BEFORE the rename opened still fires ~100ms later and lands
+    // here directly. finishRename() re-renders on both commit and cancel, so a
+    // render dropped here is picked back up when the rename settles.
+    if (this._inlineRenameActive) return;
     const container = this.$('sessionTabs');
     const existingTabs = container.querySelectorAll('.session-tab[data-id]');
     const existingIds = new Set([...existingTabs].map(t => t.dataset.id));
@@ -4611,6 +4691,13 @@ class CodemanApp {
     }
 
     this.updateTabOverflowMode();
+    // After the wrap measurement: the `unroll` style starts tabs at max-width 0,
+    // so measuring mid-animation would decide the wrap on collapsed widths.
+    this._applyTabEntrances?.();
+    // Phone overview rides on this one call: every state change it cares about
+    // (create, delete, idle, working, exit, hook alerts via updateTabAlertFromHooks)
+    // already funnels through here. No-ops unless that surface is showing.
+    this._refreshMobileOverviewIfVisible?.();
   }
 
   // Auto-wrap desktop session tabs to a second row when they overflow one row,
@@ -4745,7 +4832,7 @@ class CodemanApp {
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'agy' ? '<span class="tab-mode agy" aria-hidden="true">ag</span>' : ''}
+              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : ''}
               <span class="tab-name" data-session-id="${id}">${(() => { const p = parseSessionPrefix(name); return p && p.suffix ? '<span class="tab-prefix">' + escapeHtml(p.prefix) + '</span><span class="tab-suffix">: ' + escapeHtml(p.suffix) + '</span>' : escapeHtml(name); })()}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
@@ -4784,6 +4871,9 @@ class CodemanApp {
     // toggle (applyTabWrapSettings calls this) which would otherwise leave a stale
     // tabs-auto-wrap class until the next content render.
     this.updateTabOverflowMode();
+    // Newly created tabs animate in; a re-render mid-cascade resumes them rather
+    // than restarting, since this rebuild just destroyed the animating elements.
+    this._applyTabEntrances?.();
   }
 
   // Set up arrow key navigation for session tabs (accessibility)
@@ -5333,6 +5423,10 @@ class CodemanApp {
     // typing on the ordered WS path instead of temporary HTTP fallback.
     this._connectWs(sessionId);
     this.hideWelcome();
+    // Terminal-pane entrance: plays for a freshly created session, and on every
+    // switch when that option is on. Transform/opacity/clip-path only, xterm's
+    // FitAddon reads the untransformed layout box, so this cannot reach the PTY.
+    this.playTerminalEntrance?.(sessionId);
     // Clear idle hooks on view, but keep action hooks until user interacts
     this.clearPendingHooks(sessionId, 'idle_prompt');
     // Instant active-class toggle (no 100ms debounce), then schedule full render for badges/status
@@ -5851,8 +5945,8 @@ class CodemanApp {
           ? 'Kill Tmux & Codex'
           : session.mode === 'gemini'
             ? 'Kill Tmux & Gemini'
-            : session.mode === 'agy'
-              ? 'Kill Tmux & Agy'
+            : session.mode === 'antigravity'
+              ? 'Kill Tmux & Antigravity'
               : 'Kill Tmux & Claude Code';
     }
 

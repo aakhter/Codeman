@@ -17,10 +17,10 @@ describe('COD-106 shared remote sessions', () => {
 
   it('launch command sets window-size latest (so multi-client attach does not clamp to smallest)', () => {
     const cmd = buildRemoteLaunchCommand({ mode: 'shell', remote, sessionId: 'cod106aaa' });
-    expect(cmd).toContain('set -g window-size latest');
+    expect(cmd).toContain('window-size latest');
     // still has the COD-104 config (no regression)
-    expect(cmd).toContain('set -g status off');
-    expect(cmd).toContain('new-session -A -s codeman-cod106aa');
+    expect(cmd).toContain('status off');
+    expect(cmd).toContain('new-session -A -s codeman-ssh-cod106aa');
   });
 
   it('parses session_attached as a CLIENT COUNT (>1 = shared)', () => {

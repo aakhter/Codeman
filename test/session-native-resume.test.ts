@@ -8,7 +8,7 @@
  *  - startInteractive() merges a captured nativeResumeId into the
  *    mode-specific config (codexConfig.resumeSessionId /
  *    openCodeConfig.continueSession / geminiConfig.resumeSession /
- *    agyConfig.resumeSession — see the matching CLI builders in
+ *    antigravityConfig.resumeConversationId — see the matching CLI builders in
  *    tmux-manager.ts) so a relaunch resumes the original conversation,
  *    without clobbering an explicit caller-supplied id (COD-251 extends this
  *    from codex-only to opencode/gemini/agy).
@@ -219,34 +219,40 @@ describe('Session nativeResumeId (COD-124 Gap B)', () => {
     expect(session.geminiConfig?.resumeSession).toBe('explicit-target-id');
   });
 
-  it('merges nativeResumeId into agyConfig.resumeSession on resume (agy mode)', () => {
+  it('merges nativeResumeId into antigravityConfig.resumeConversationId on resume (antigravity mode)', () => {
     const session = track(
-      new Session({ id: 'native-resume-merge-agy', workingDir: '/tmp', mode: 'agy', mux: makeFakeMux(), useMux: true })
+      new Session({
+        id: 'native-resume-merge-antigravity',
+        workingDir: '/tmp',
+        mode: 'antigravity',
+        mux: makeFakeMux(),
+        useMux: true,
+      })
     );
     session.setNativeResumeId('agy-conversation-id');
-    expect(session.agyConfig?.resumeSession).toBeUndefined();
+    expect(session.antigravityConfig?.resumeConversationId).toBeUndefined();
 
     (session as unknown as SessionInternals)._applyNativeResumeIdForResume();
 
-    expect(session.agyConfig?.resumeSession).toBe('agy-conversation-id');
+    expect(session.antigravityConfig?.resumeConversationId).toBe('agy-conversation-id');
   });
 
-  it('does not clobber an explicit caller-supplied resumeSession (agy mode)', () => {
+  it('does not clobber an explicit caller-supplied resumeSession (antigravity mode)', () => {
     const session = track(
       new Session({
-        id: 'native-resume-explicit-wins-agy',
+        id: 'native-resume-explicit-wins-antigravity',
         workingDir: '/tmp',
-        mode: 'agy',
+        mode: 'antigravity',
         mux: makeFakeMux(),
         useMux: true,
-        agyConfig: { resumeSession: 'explicit-target-id' },
+        antigravityConfig: { resumeConversationId: 'explicit-target-id' },
       })
     );
     session.setNativeResumeId('captured-at-park-id');
 
     (session as unknown as SessionInternals)._applyNativeResumeIdForResume();
 
-    expect(session.agyConfig?.resumeSession).toBe('explicit-target-id');
+    expect(session.antigravityConfig?.resumeConversationId).toBe('explicit-target-id');
   });
 
   it.each(['claude', 'shell'] as const)('does not invent a resume mechanism for mode %s', (mode) => {

@@ -10,8 +10,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   TmuxManager,
-  buildRemoteLaunchCommand,
   buildCodexCommand,
+  buildRemoteKillCommand,
+  buildRemoteLaunchCommand,
   buildLocalPaneCommand,
   buildNofileLimitCommand,
   formatPaneSnapshot,
@@ -115,6 +116,14 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('Codex command builder', () => {
+    it('controls decorative TUI animation through Codex config', () => {
+      expect(buildCodexCommand({ animations: false })).toBe('codex --config tui.animations=false');
+      expect(buildCodexCommand({ animations: true })).toBe('codex --config tui.animations=true');
+      expect(buildCodexCommand()).toBe('codex');
+    });
+  });
+
   describe('remote launch command builder', () => {
     it('wraps codex command overrides in a remote tmux attach-or-create', () => {
       const command = buildRemoteLaunchCommand({
@@ -134,12 +143,12 @@ describe('TmuxManager (unit)', () => {
       expect(command).toContain('BatchMode=yes');
       expect(command).toContain('ubuntu@10.0.0.42');
       expect(command).toContain('/home/ubuntu/work');
-      expect(command).toContain('tmux -L codeman new-session -A -s codeman-abcd1234');
+      expect(command).toContain('tmux -L codeman-remote new-session -A -s codeman-ssh-abcd1234');
       expect(command).toContain('exec codx personal');
       // COD-104: remote agent lives in remote tmux (attach-or-create), not a child of ssh.
-      // COD-276: agent modes now re-exec through the user's login shell INSIDE the remote
-      // tmux pane so the CLI inherits the user's shell env; the override command still wins.
-      expect(command).toContain('exec bash -lc');
+      // A per-host override is used bare (no login-shell wrapper) — remote user-env
+      // sourcing is handled by defaultRemoteCommandForMode/remoteLoginShellCommand.
+      expect(command).not.toContain('bash -lc');
     });
 
     it('uses default shell command when no override is configured', () => {
@@ -155,7 +164,31 @@ describe('TmuxManager (unit)', () => {
         },
       });
 
-      expect(command).toContain('exec bash -l');
+      expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l');
+      // `failed`, not `on`: `on` also keeps the pane after a CLEAN exit, so typing
+      // `exit` in a remote shell strands a dead pane that the next launch's `-A`
+      // reattaches to instead of starting a shell.
+      expect(command).toContain('remain-on-exit failed');
+      expect(command).not.toContain('remain-on-exit on');
+      // Last in the chain: tmux aborts the rest of a `\;` sequence after an error,
+      // and `failed` needs tmux >= 3.2 on the REMOTE host. Trailing, a rejection
+      // costs only this option instead of every setting after it.
+      expect(command.trimEnd().endsWith("remain-on-exit failed'")).toBe(true);
+    });
+
+    it('defaults claude to a non-interactive launch (--dangerously-skip-permissions)', () => {
+      const command = buildRemoteLaunchCommand({
+        mode: 'claude',
+        remote: { hostId: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', remotePath: '/w' },
+        sessionId: 'abc123def456',
+      });
+      // Routed through an interactive login shell so ~/.local/bin (where `claude`
+      // typically lives) is on PATH — ssh's remote-command execution is neither
+      // interactive nor login, so a bare `exec claude` fails with "command not found".
+      // The inner quoting is escaped twice over (once per shellescape() layer), so
+      // assert on the unescaped substrings rather than the literal quoted form.
+      expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l -c');
+      expect(command).toContain('claude --dangerously-skip-permissions');
     });
   });
 
@@ -1182,7 +1215,7 @@ describe('isUsableWorkingDir', () => {
 });
 
 describe('COD-276 buildLocalPaneCommand', () => {
-  it('wraps agent modes with the user-shell-env builder (zsh/zshrc handled upstream)', () => {
+  it('routes agent modes through the user login shell so the CLI inherits user env', () => {
     const out = buildLocalPaneCommand({
       mode: 'opencode',
       pathExport: 'export PATH="/u/.opencode/bin:$PATH" && ',
@@ -1190,9 +1223,13 @@ describe('COD-276 buildLocalPaneCommand', () => {
       cmd: 'opencode --model sonnet',
     });
     expect(out).toContain(buildNofileLimitCommand());
-    expect(out).toContain('exec bash -lc');
-    expect(out).toContain('exec opencode --model sonnet');
-    // pathExport trailing ' && ' is normalized for the inner builder
+    // login-shell re-exec wrapper: <shell> -i -l -c with Codeman env after the profile
+    expect(out).toContain('exec');
+    expect(out).toContain('-i -l -c ');
+    expect(out).toContain(
+      'export PATH="/u/.opencode/bin:$PATH" && export CODEMAN_MUX=1 && exec opencode --model sonnet'
+    );
+    // pathExport trailing ' && ' is normalized for the inner command
     expect(out).not.toContain('" &&   &&');
   });
 

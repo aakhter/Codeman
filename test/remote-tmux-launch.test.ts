@@ -2,7 +2,7 @@
  * @fileoverview COD-104 — durable remote sessions inside a remote tmux server.
  *
  * Unit tests for `buildRemoteLaunchCommand`: it must emit an attach-or-create
- * (`tmux -L codeman new-session -A -s codeman-<id> …`) against a remote tmux
+ * (`tmux -L codeman-remote new-session -A -s codeman-ssh-<id> …`) against a remote tmux
  * server so the remote agent survives an SSH drop, and reattaches on reconnect.
  *
  * These tests are tmux-safe (pure command-string construction; no real tmux,
@@ -26,7 +26,7 @@ const baseRemote: SessionRemote = {
 const SESSION_ID = 'abcd1234-5678-90ab-cdef-1234567890ab';
 // The remote session name is derived from the same stable field the local
 // muxName uses: codeman-${sessionId.slice(0, 8)}.
-const EXPECTED_NAME = 'codeman-abcd1234';
+const EXPECTED_NAME = 'codeman-ssh-abcd1234';
 
 describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', () => {
   it('emits ssh + remote tmux new-session -A on the canonical -L codeman socket', () => {
@@ -42,7 +42,7 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).toContain('ubuntu@10.0.0.42');
 
     // Remote tmux server on the canonical socket, idempotent attach-or-create.
-    expect(command).toContain('tmux -L codeman new-session -A');
+    expect(command).toContain('tmux -L codeman-remote new-session -A');
     expect(command).toContain(`-s ${EXPECTED_NAME}`);
     // Must NOT use the old bash -lc exec form (remote agent was a child of ssh).
     expect(command).not.toContain('bash -lc');
@@ -56,11 +56,11 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     });
 
     expect(command).toContain('/home/ubuntu/work');
-    expect(command).toContain('exec bash -l');
-    expect(command).toContain('set -g status off');
-    expect(command).toContain('set -g mouse off');
-    expect(command).toContain('set -sg escape-time 0');
-    expect(command).toContain('set -g prefix C-q');
+    expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l');
+    expect(command).toContain(`set -t ${EXPECTED_NAME} status off`);
+    expect(command).toContain(`set -t ${EXPECTED_NAME} mouse off`);
+    expect(command).toContain('set -s escape-time 0');
+    expect(command).toContain(`set -t ${EXPECTED_NAME} prefix C-q`);
   });
 
   it('honors per-mode command overrides inside the remote tmux session', () => {
@@ -70,7 +70,7 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
       remote: { ...baseRemote, commands: { codex: 'exec codx personal' } },
     });
 
-    expect(command).toContain('tmux -L codeman new-session -A');
+    expect(command).toContain('tmux -L codeman-remote new-session -A');
     expect(command).toContain('exec codx personal');
   });
 
@@ -82,7 +82,7 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
       codexConfig: { dangerouslyBypassApprovals: true },
     });
 
-    expect(command).toContain('exec codex --dangerously-bypass-approvals-and-sandbox');
+    expect(command).toContain('codex --dangerously-bypass-approvals-and-sandbox');
   });
 
   it('omits -p when no port is set', () => {
@@ -150,9 +150,9 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     // path still quoted for the /bin/sh -c that tmux runs it under.
     // The pane command is one tmux argument; the path is still single-quoted for
     // the /bin/sh -c that tmux runs it under, so the deepest `cd` gets the space
-    // path intact and `exec bash -l` follows.
+    // path intact and the login-shell launch follows.
     const paneCmd = tmuxArgs.find((a) => a.includes('&& export PATH='));
-    expect(paneCmd).toBe(`cd '${spacePath}' && ${REMOTE_PATH_BOOTSTRAP}; exec bash -l`);
+    expect(paneCmd).toBe(`cd '${spacePath}' && ${REMOTE_PATH_BOOTSTRAP}; exec "\${SHELL:-/bin/sh}" -i -l`);
   });
 
   it('derives a deterministic, reattach-stable session name from sessionId', () => {
@@ -182,7 +182,7 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
   it('omits history-limit when not provided (legacy callers unchanged)', () => {
     const command = buildRemoteLaunchCommand({ mode: 'shell', sessionId: SESSION_ID, remote: baseRemote });
     expect(command).not.toContain('history-limit');
-    expect(command).toContain('tmux -L codeman new-session -A');
+    expect(command).toContain('tmux -L codeman-remote new-session -A');
   });
 
   it('floors a fractional history-limit (never emits a non-integer into the shell command)', () => {
@@ -194,39 +194,5 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     });
     expect(command).toContain('set -g history-limit 12345');
     expect(command).not.toContain('12345.9');
-  });
-});
-
-describe('COD-276 remote agent launches source user shell env', () => {
-  it('wraps agent modes so the remote CLI inherits the user shell env', () => {
-    const command = buildRemoteLaunchCommand({
-      mode: 'opencode',
-      sessionId: 'abcd1234-5678-90ab-cdef-1234567890ab',
-      remote: baseRemote,
-    });
-    expect(command).toContain('exec bash -lc');
-    expect(command).toContain('exec opencode');
-    expect(command).toContain('login_shell=${SHELL:-');
-  });
-
-  it('still honors per-mode command overrides for agent modes', () => {
-    const command = buildRemoteLaunchCommand({
-      mode: 'codex',
-      sessionId: 'abcd1234-5678-90ab-cdef-1234567890ab',
-      remote: { ...baseRemote, commands: { codex: 'exec codx personal' } },
-    });
-    expect(command).toContain('exec bash -lc');
-    expect(command).toContain('exec codx personal');
-  });
-
-  it('keeps shell mode launch unchanged (no user-shell wrapper)', () => {
-    const command = buildRemoteLaunchCommand({
-      mode: 'shell',
-      sessionId: 'abcd1234-5678-90ab-cdef-1234567890ab',
-      remote: baseRemote,
-    });
-    expect(command).toContain('exec bash -l');
-    expect(command).not.toContain('exec bash -lc');
-    expect(command).not.toContain('login_shell=');
   });
 });

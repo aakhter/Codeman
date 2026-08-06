@@ -669,7 +669,7 @@ Object.assign(CodemanApp.prototype, {
 
   _buildCommandPaletteNewSessionItem(query = '') {
     const mode = this.runMode || this._runMode || 'claude';
-    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini' };
+    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity' };
     const caseName = this._findCommandPaletteCaseMatch(query) || document.getElementById('quickStartCase')?.value || 'testcase';
     return {
       id: 'new-session',
@@ -4094,6 +4094,10 @@ Object.assign(CodemanApp.prototype, {
     this._stopFilePreviewPolling();
     this._resetFilePreviewExternalAction?.();
     this._resetFilePreviewOriginalDownloadAction?.();
+    // Edit mode is per-document: a (re)open always lands in read mode, and the
+    // Edit button stays hidden until the server says this file is editable.
+    // `?.` matches the sibling resets above (partial hosts in unit harnesses).
+    this._resetFilePreviewEdit?.();
 
     // Show overlay with loading state
     overlay.classList.add('visible');
@@ -4435,6 +4439,11 @@ Object.assign(CodemanApp.prototype, {
       st.previewCopyUrl = null;
     }
     this.filePreviewContent = '';
+    // Re-decided per render: only the text branch below re-offers Edit, so any
+    // other type (image/video/binary/diff) leaves the button hidden.
+    this.filePreviewEditTarget = null;
+    const editBtnEl = this.$('filePreviewEditBtn');
+    if (editBtnEl) editBtnEl.hidden = true;
 
     if (data.type === 'image') {
       this.filePreviewZoom = 1;
@@ -4550,6 +4559,15 @@ Object.assign(CodemanApp.prototype, {
       const text = await textRes.text();
       if (!isCurrentPreview()) return false;
       this.filePreviewContent = text;
+      // Edit affordance (issue #212): the server decides — `editable` is its own
+      // dry-run of the edit=1 gate (allowlist + sensitive/blocked + .git + size +
+      // UTF-8). Attachment previews come from a different endpoint that never sets
+      // it, so external documents stay read-only without a special case here.
+      if (data.editable === true && !attachmentId) {
+        this.filePreviewEditTarget = { sessionId, filePath };
+        const editBtn = this.$('filePreviewEditBtn');
+        if (editBtn) editBtn.hidden = false;
+      }
       // Reset any prior outline scroll-spy before re-rendering (no observer leaks).
       this._teardownOutlineScrollSpy();
       // Restore persisted client-only view prefs (COD-62).
@@ -4743,6 +4761,13 @@ Object.assign(CodemanApp.prototype, {
     const st = this.filePreviewState;
     const overlay = this.$('filePreviewOverlay');
     if (!st || !overlay || !overlay.classList.contains('visible') || document.hidden) return;
+    // Never poll while the editor is open: a change on disk re-renders the body
+    // wholesale (_renderFilePreviewBody replaces innerHTML), which would destroy
+    // the textarea and every unsaved keystroke in it. The agent writing the file
+    // underneath the editor is exactly when this fires, and it is also exactly
+    // what the save path's baseHash 409 is there to catch — so the right answer
+    // is to stop refreshing, not to merge.
+    if (this.filePreviewEdit) return;
     if (this._filePreviewPolling) return; // don't overlap slow fetches
     this._filePreviewPolling = true;
     try {
@@ -5592,6 +5617,10 @@ Object.assign(CodemanApp.prototype, {
   },
 
   closeFilePreview() {
+    // Closing with an unsaved edit buffer would discard it silently — the buffer
+    // lives only in the textarea. Ask first, and abort the close on Cancel.
+    if (this.filePreviewEdit?.dirty && !confirm('Discard unsaved changes?')) return;
+    this._resetFilePreviewEdit();
     this._stopFilePreviewPolling();
     this._resetFilePreviewExternalAction?.();
     this._hideFilePreviewNavigation();
@@ -5603,6 +5632,172 @@ Object.assign(CodemanApp.prototype, {
       overlay.classList.remove('visible');
     }
     this.filePreviewContent = '';
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // File Viewer edit mode (issue #212 — docs/file-viewer-edit-plan.md)
+  // ═══════════════════════════════════════════════════════════════
+
+  _resetFilePreviewEdit() {
+    this.filePreviewEdit = null;
+    this.filePreviewEditTarget = null;
+    const editBtn = this.$('filePreviewEditBtn');
+    if (editBtn) editBtn.hidden = true;
+    const editBar = this.$('filePreviewEditBar');
+    if (editBar) editBar.hidden = true;
+    const dirtyEl = this.$('filePreviewDirty');
+    if (dirtyEl) dirtyEl.hidden = true;
+    const saveBtn = this.$('filePreviewSaveBtn');
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Save';
+    }
+  },
+
+  async enterFilePreviewEdit() {
+    const target = this.filePreviewEditTarget;
+    if (!target || this.filePreviewEdit) return;
+    const bodyEl = this.$('filePreviewBody');
+    const footerEl = this.$('filePreviewFooter');
+    if (!bodyEl) return;
+
+    // Always re-fetch with edit=1: the preview buffer may be line-truncated and
+    // a truncated buffer must never become an edit buffer. Parse the envelope
+    // even on non-ok responses so the specific refusal ("too large to edit
+    // here") reaches the toast instead of a generic failure.
+    let data;
+    try {
+      const res = await fetch(
+        `/api/sessions/${target.sessionId}/file-content?path=${encodeURIComponent(target.filePath)}&edit=1`
+      );
+      const result = await res.json().catch(() => null);
+      if (!result || result.success !== true) {
+        throw new Error(result?.error || `Failed to load file for editing (HTTP ${res.status})`);
+      }
+      data = result.data;
+    } catch (err) {
+      this.showToast(err.message, 'error');
+      return;
+    }
+
+    this.filePreviewEdit = {
+      sessionId: target.sessionId,
+      filePath: target.filePath,
+      baseHash: data.hash,
+      eol: data.eol,
+      original: data.content,
+      dirty: false,
+      saving: false,
+    };
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'file-preview-editor';
+    textarea.spellcheck = false;
+    textarea.setAttribute('autocapitalize', 'off');
+    textarea.setAttribute('autocorrect', 'off');
+    textarea.setAttribute('autocomplete', 'off');
+    textarea.wrap = 'off';
+    textarea.value = data.content;
+    textarea.addEventListener('input', () => this._onFilePreviewEditInput());
+    bodyEl.innerHTML = '';
+    bodyEl.appendChild(textarea);
+    // Deliberately no autofocus: on phones that would pop the OS keyboard
+    // before the user has scrolled to the line they want to change.
+
+    const editBtn = this.$('filePreviewEditBtn');
+    if (editBtn) editBtn.hidden = true;
+    const editBar = this.$('filePreviewEditBar');
+    if (editBar) editBar.hidden = false;
+    if (footerEl) {
+      const eolNote = data.eol === 'crlf' ? ' • CRLF' : '';
+      footerEl.textContent = `Editing • ${data.totalLines} lines • ${this.formatFileSize(data.size)}${eolNote}`;
+    }
+  },
+
+  _onFilePreviewEditInput() {
+    const edit = this.filePreviewEdit;
+    if (!edit) return;
+    const textarea = this.$('filePreviewBody')?.querySelector('textarea.file-preview-editor');
+    if (!textarea) return;
+    edit.dirty = textarea.value !== edit.original;
+    const dirtyEl = this.$('filePreviewDirty');
+    if (dirtyEl) dirtyEl.hidden = !edit.dirty;
+    const saveBtn = this.$('filePreviewSaveBtn');
+    if (saveBtn) saveBtn.disabled = !edit.dirty || edit.saving;
+  },
+
+  cancelFilePreviewEdit() {
+    const edit = this.filePreviewEdit;
+    if (!edit) return;
+    if (edit.dirty && !confirm('Discard unsaved changes?')) return;
+    const { sessionId, filePath } = edit;
+    this._resetFilePreviewEdit();
+    this.openFilePreview(filePath, sessionId);
+  },
+
+  async saveFilePreviewEdit(force = false) {
+    const edit = this.filePreviewEdit;
+    if (!edit || edit.saving) return;
+    const textarea = this.$('filePreviewBody')?.querySelector('textarea.file-preview-editor');
+    if (!textarea) return;
+
+    edit.saving = true;
+    const saveBtn = this.$('filePreviewSaveBtn');
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+    }
+    const restoreSaveState = () => {
+      edit.saving = false;
+      if (saveBtn) saveBtn.textContent = 'Save';
+      this._onFilePreviewEditInput();
+    };
+
+    let result = null;
+    let status = 0;
+    try {
+      const res = await fetch(`/api/sessions/${edit.sessionId}/file-content`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: edit.filePath,
+          content: textarea.value,
+          baseHash: edit.baseHash,
+          eol: edit.eol ?? undefined, // Zod .optional() rejects null
+          force: force || undefined,
+        }),
+      });
+      status = res.status;
+      result = await res.json().catch(() => null);
+    } catch (err) {
+      restoreSaveState();
+      this.showToast(`Save failed: ${err.message}`, 'error');
+      return;
+    }
+
+    if (status === 409 || result?.errorCode === 'CONFLICT') {
+      restoreSaveState();
+      if (
+        confirm(
+          'File changed on disk since you loaded it.\nOK overwrites it with your version; Cancel keeps your draft open.'
+        )
+      ) {
+        this.saveFilePreviewEdit(true);
+      }
+      return;
+    }
+    if (!result || result.success !== true) {
+      restoreSaveState();
+      this.showToast(`Save failed: ${result?.error || `HTTP ${status}`}`, 'error');
+      return;
+    }
+
+    const { sessionId, filePath } = edit;
+    this._resetFilePreviewEdit();
+    this.showToast('Saved', 'success');
+    // Re-open in read mode — re-fetching shows the truth on disk (including the
+    // server-side EOL normalization) rather than trusting the local buffer.
+    this.openFilePreview(filePath, sessionId);
   },
 
   // ═══════════════════════════════════════════════════════════════

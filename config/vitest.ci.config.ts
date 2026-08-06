@@ -26,6 +26,7 @@ export default defineConfig({
       'test/webgl-fallback.test.ts', // browser (Playwright)
       'test/file-browser-session-preview.browser.test.ts', // browser (Playwright + chromium)
       'test/terminal-document-link.browser.test.ts', // browser/touch (Playwright + chromium)
+      'test/terminal-copy-shortcut.test.ts', // browser (Playwright)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,

@@ -6,7 +6,7 @@ export interface ResponseViewerTranscriptBlock {
   text: string;
 }
 
-const EXTERNAL_CLI_MODES = new Set(['codex', 'gemini', 'opencode', 'agy']);
+const EXTERNAL_CLI_MODES = new Set(['codex', 'gemini', 'opencode', 'antigravity']);
 
 function isPromptLine(line: string): boolean {
   return /^\s*›\s*/.test(line);

@@ -40,4 +40,46 @@ describe('keyboard shortcuts', () => {
     expect(helpHtml).toContain('<kbd>Ctrl/Cmd/Option</kbd>+<kbd>K</kbd>');
     expect(readme).toMatch(/\| `Ctrl\/Cmd\/Option\+K`\s+\| Find open session or start a new one\s+\|/);
   });
+
+  it('gates the palette chord in the xterm custom key handler (no 0x0b kill-line into the PTY)', () => {
+    // The document-level capture handler opens the palette, but preventDefault()
+    // does NOT stop xterm from evaluating Ctrl+K into 0x0b and writing it to the
+    // live PTY — terminal-ui.js must return false for the palette chord.
+    expect(terminalUiSource).toMatch(/ev\.type === 'keydown' && this\.shouldOpenCommandPaletteFromShortcut\?\.\(ev\)/);
+  });
+
+  it('dispatches document shortcuts through the shortcut registry (rebind/disable aware)', () => {
+    // The legacy hardcoded SHORTCUTS table must stay gone — dispatch goes through
+    // getShortcutRegistry() + matchesShortcutEvent() so overrides and per-shortcut
+    // disables (App Settings → Shortcuts) actually take effect.
+    expect(appSource).not.toContain('const SHORTCUTS = [');
+    // Downstream shape: the action indirection lives in runShortcutAction(),
+    // not upstream's inline SHORTCUT_ACTIONS map. Same registry dispatch.
+    expect(appSource).toContain('runShortcutAction(shortcut)');
+    expect(appSource).toContain('for (const shortcut of this.getShortcutRegistry())');
+    expect(appSource).toContain('if (this.matchesShortcutEvent(e, shortcut))');
+    // Downstream enforces the per-shortcut disable inside matchesShortcutEvent()
+    // rather than in the dispatch loop — same effect, one place.
+    expect(appSource).toContain(
+      'if (!shortcut || shortcut.disabled || !Array.isArray(shortcut.bindings)) return false;'
+    );
+  });
+
+  it('keeps the interrupt when Ctrl+C copies a selection (#211)', () => {
+    // The xterm handler owns this decision, and the no-selection path must fall
+    // through with NO preventDefault so xterm still evaluates Ctrl+C into 0x03.
+    expect(terminalUiSource).toContain('this.shouldCopyTerminalSelectionFromShortcut?.(ev)');
+    expect(terminalUiSource).toMatch(
+      /const selection = this\.terminal\.hasSelection\?\.\(\) \? this\.terminal\.getSelection\(\) : '';/
+    );
+    expect(terminalUiSource).toContain('void this.copyTerminalSelection(selection);');
+    expect(appSource).toContain("id: 'copy-selection'");
+  });
+
+  it('documents the terminal copy shortcut in help and README', () => {
+    expect(helpHtml).toContain('<kbd>Ctrl</kbd>+<kbd>C</kbd>');
+    expect(helpHtml).toContain('<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>');
+    expect(readme).toContain('`Ctrl/Cmd+C`');
+    expect(readme).toContain('`Ctrl+Shift+C`');
+  });
 });
