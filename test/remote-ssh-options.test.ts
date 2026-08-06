@@ -24,6 +24,7 @@ import {
   buildSshConnectionArgs,
   buildRemoteTmuxCheckCommand,
   REMOTE_PATH_BOOTSTRAP,
+  REMOTE_LOGIN_SHELL_RESOLVE,
   remoteSshTarget,
 } from '../src/remote-hosts.js';
 import { buildRemoteLaunchCommand } from '../src/tmux-manager.js';
@@ -167,7 +168,7 @@ describe('COD-107 buildRemoteLaunchCommand — threads connection args', () => {
     const sh = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
     const remoteName = `codeman-ssh-${SESSION_ID.slice(0, 8)}`;
     const path = sh('/home/ubuntu/work');
-    const paneCommand = `cd ${path} && ${REMOTE_PATH_BOOTSTRAP}; exec "\${SHELL:-/bin/sh}" -i -l`;
+    const paneCommand = `cd ${path} && ${REMOTE_PATH_BOOTSTRAP}; ${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l`;
     const tmuxInvocation = `${REMOTE_PATH_BOOTSTRAP}; ${[
       `tmux -L codeman-remote new-session -A -s ${remoteName} -c ${path} ${sh(paneCommand)}`,
       `set -t ${remoteName} status off`,

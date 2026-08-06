@@ -11,6 +11,7 @@ import {
   readRemoteCases,
   readRemoteHosts,
   REMOTE_PATH_BOOTSTRAP,
+  REMOTE_LOGIN_SHELL_RESOLVE,
   remoteDisplayPath,
   remoteSshTarget,
   writeRemoteCases,
@@ -60,15 +61,23 @@ describe('remote-hosts domain', () => {
   });
 
   it('returns safe mode defaults and remote display values', () => {
-    expect(defaultRemoteCommandForMode('shell')).toBe('exec "${SHELL:-/bin/sh}" -i -l');
+    // Login shell is resolved from the passwd entry (getent/dscl), not the tmux
+    // server's $SHELL, so a macOS/zsh user gets zsh and ~/.zshrc is sourced (COD-277).
+    expect(defaultRemoteCommandForMode('shell')).toBe(`${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l`);
     // Routed through an interactive login shell so per-user PATH entries (e.g.
     // ~/.local/bin, ~/.opencode/bin) resolve — a bare `exec codex` sees only
     // sshd's minimal default PATH and fails with "command not found".
-    expect(defaultRemoteCommandForMode('codex')).toBe('exec "${SHELL:-/bin/sh}" -i -l -c \'codex\'');
+    expect(defaultRemoteCommandForMode('codex')).toBe(
+      `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l -c 'codex'`
+    );
     // Mirrors the local claude default so the remote agent runs non-interactively.
     expect(defaultRemoteCommandForMode('claude')).toBe(
-      'exec "${SHELL:-/bin/sh}" -i -l -c \'claude --dangerously-skip-permissions\''
+      `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l -c 'claude --dangerously-skip-permissions'`
     );
+    // The resolver must consult the passwd entry (getent Linux / dscl macOS), not $SHELL.
+    expect(REMOTE_LOGIN_SHELL_RESOLVE).toContain('getent passwd');
+    expect(REMOTE_LOGIN_SHELL_RESOLVE).toContain('dscl . -read');
+    expect(REMOTE_LOGIN_SHELL_RESOLVE).toContain('"${SHELL:-/bin/sh}"');
     expect(remoteSshTarget({ id: 'h1', label: 'H1', host: 'box.local', username: 'aamer' })).toBe('aamer@box.local');
     expect(remoteDisplayPath({ username: 'aamer', host: 'box.local', path: '/opt/work' })).toBe(
       'aamer@box.local:/opt/work'

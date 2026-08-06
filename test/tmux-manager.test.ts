@@ -24,6 +24,7 @@ import {
 } from '../src/tmux-manager.js';
 import { execSync, exec } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
+import { REMOTE_LOGIN_SHELL_RESOLVE } from '../src/remote-hosts.js';
 
 // ============================================================================
 // Unit Tests (mocked)
@@ -164,7 +165,7 @@ describe('TmuxManager (unit)', () => {
         },
       });
 
-      expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l');
+      expect(command).toContain(`${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l`);
       // `failed`, not `on`: `on` also keeps the pane after a CLEAN exit, so typing
       // `exit` in a remote shell strands a dead pane that the next launch's `-A`
       // reattaches to instead of starting a shell.
@@ -187,7 +188,7 @@ describe('TmuxManager (unit)', () => {
       // interactive nor login, so a bare `exec claude` fails with "command not found".
       // The inner quoting is escaped twice over (once per shellescape() layer), so
       // assert on the unescaped substrings rather than the literal quoted form.
-      expect(command).toContain('exec "${SHELL:-/bin/sh}" -i -l -c');
+      expect(command).toContain(`${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l -c`);
       expect(command).toContain('claude --dangerously-skip-permissions');
     });
   });

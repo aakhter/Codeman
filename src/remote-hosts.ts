@@ -59,34 +59,33 @@ export async function writeRemoteCases(configDir: string, cases: RemoteCase[]): 
 }
 
 /**
- * The remote user's login shell, defaulted and quoted.
+ * Shell fragment that resolves the remote user's ACTUAL login shell before exec.
  *
- * The default is belt-and-braces, not a live bug: an empty `$SHELL` would expand
- * to `exec  -i -l`, which the shell reads as `exec -i` — "not found", pane dead on
- * arrival, the #208 failure all over again (verified: `sh -c 'exec $SHELL -i -l'`
- * with SHELL unset prints `exec: -i: not found`). In practice tmux always exports
- * SHELL into a pane from its own `default-shell` option, so the command as USED
- * here is safe either way (also verified). The default matters because these
- * strings are the seed values a per-host `commands.*` override is edited from, and
- * nothing constrains where an edited one ends up running. Quoted for a shell path
- * containing spaces. `/bin/sh` exists on every POSIX host.
+ * We must NOT rely on `$SHELL` alone: inside a remote tmux pane, `$SHELL` comes
+ * from the remote tmux SERVER's inherited environment, which is not guaranteed to
+ * be the user's passwd login shell. Confirmed on mac-mini (COD-277): a zsh user's
+ * meridian opencode session launched via `/bin/bash -i -l`, so `~/.zshrc` was never
+ * sourced and a zshrc-only env var (COMPOSIO_CONSUMER_KEY) was missing from the
+ * agent env; `zsh -i -l` carries it. So resolve from the passwd entry instead:
+ * `getent` on Linux, `dscl` on macOS, then `$SHELL`, then `/bin/sh` — each guarded
+ * so a nologin/exotic shell (or an unusable path) falls through rather than dead-
+ * panning on `-i -l`. Ends in `; ` so `exec "$login_shell"` can follow.
  */
-const REMOTE_LOGIN_SHELL = '"${SHELL:-/bin/sh}"';
+export const REMOTE_LOGIN_SHELL_RESOLVE =
+  'login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"; ' +
+  '[ -n "$login_shell" ] && [ -x "$login_shell" ] || login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | cut -c 12-)"; ' +
+  '[ -n "$login_shell" ] && [ -x "$login_shell" ] || login_shell="${SHELL:-/bin/sh}"; ';
 
 /**
  * Run `command` through the remote user's interactive login shell, so per-user
- * PATH entries (~/.local/bin, ~/.opencode/bin, …) are resolved before the CLI name
- * is looked up. ssh's remote-command execution is neither interactive nor login,
- * so a bare `exec claude` sees only sshd's minimal default PATH and dies with
- * "command not found" (exit 127).
- *
- * Shells that take neither flag (nushell, elvish, …) cannot be detected from here
- * the way `loginShellArgs()` detects them locally, since the shell is whatever the
- * REMOTE passwd says. A host like that is what the per-host `commands.*` override
- * is for.
+ * PATH entries (~/.local/bin, ~/.opencode/bin, …) and rc-file env (~/.zshrc etc.)
+ * are resolved before the CLI name is looked up. ssh's remote-command execution is
+ * neither interactive nor login, so a bare `exec claude` sees only sshd's minimal
+ * default PATH and dies with "command not found" (exit 127). The login shell is
+ * resolved from the passwd entry at runtime (see REMOTE_LOGIN_SHELL_RESOLVE).
  */
 export function remoteLoginShellCommand(command: string): string {
-  return `exec ${REMOTE_LOGIN_SHELL} -i -l -c ${shellescape(command)}`;
+  return `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l -c ${shellescape(command)}`;
 }
 
 export function defaultRemoteCommandForMode(mode: SessionMode): string {
@@ -96,15 +95,14 @@ export function defaultRemoteCommandForMode(mode: SessionMode): string {
   // remote-command execution is neither interactive nor login, so a bare `exec
   // claude` sees only sshd's minimal default PATH and fails with "command not
   // found" (exit 127) — confirmed via `tmux capture-pane` on the
-  // remain-on-exit-preserved dead pane. Route through `$SHELL -i -l -c`, the same
-  // fix already used for shell mode below, so PATH is fully resolved before the
-  // CLI name is looked up.
+  // remain-on-exit-preserved dead pane. Route through the resolved login shell
+  // `-i -l -c` (see remoteLoginShellCommand), so PATH and rc-file env are fully
+  // resolved before the CLI name is looked up.
   const commands: Record<RemoteCommandMode, string> = {
-    // $SHELL, not a hardcoded bash: sshd sets it from the remote user's
-    // /etc/passwd entry, so this launches their actual login shell (zsh,
-    // fish, etc.). -i -l so it sources rc files (~/.zshrc etc.), matching
-    // the local shell-mode launch.
-    shell: `exec ${REMOTE_LOGIN_SHELL} -i -l`,
+    // Resolve the user's ACTUAL login shell (getent/dscl) so a macOS/zsh user gets
+    // zsh and ~/.zshrc is sourced — `$SHELL` in a pane is the tmux server's, which
+    // was bash and skipped ~/.zshrc (COD-277). -i -l sources the rc files.
+    shell: `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l`,
     // Mirror the LOCAL claude default so the remote agent runs non-interactively
     // (no trust-folder/permission prompt that nothing on the remote answers). The
     // per-host `commands.claude` override stays the escape hatch.
