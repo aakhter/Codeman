@@ -1294,7 +1294,7 @@ export function registerSessionRoutes(
     let liveMuxBuffer: string | null = null;
 
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true });
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, { fullHistory: true });
       if (liveMuxBuffer !== null && liveMuxBuffer.length === 0) {
         liveMuxBuffer = null;
       }
@@ -1887,7 +1887,7 @@ export function registerSessionRoutes(
       const frameMuxName = session.muxName;
       let frame: string | null = null;
       if (frameMuxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, frameMuxName, { visibleFrame: true });
+        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, frameMuxName, { visibleFrame: true });
       }
       if (
         (frame === null || frame.length === 0) &&
@@ -1954,7 +1954,10 @@ export function registerSessionRoutes(
     let liveMuxBuffer: string | null = null;
     let remoteCaptureFailed = false;
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true, lastLines });
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, {
+        fullHistory: true,
+        lastLines,
+      });
       if (liveMuxBuffer === null || liveMuxBuffer.length === 0) {
         remoteCaptureFailed = true;
         liveMuxBuffer = null;

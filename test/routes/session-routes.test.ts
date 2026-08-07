@@ -21,9 +21,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyMultipart from '@fastify/multipart';
-import { join } from 'node:path';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, mkdir, writeFile } from 'node:fs/promises';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
@@ -995,6 +993,7 @@ and effort involved in moving workloads.
       expect(body.data.source).toBe('mux-full-history');
       expect(remoteSpy).toHaveBeenCalledWith(
         (harness.ctx._session as { remote?: unknown }).remote,
+        harness.ctx._sessionId,
         harness.ctx._session.muxName,
         { fullHistory: true }
       );
@@ -1178,6 +1177,7 @@ and effort involved in moving workloads.
         expect(body.data.terminalBuffer).toBe('REMOTE_FRAME');
         expect(remoteSpy).toHaveBeenCalledWith(
           (harness.ctx._session as { remote?: unknown }).remote,
+          harness.ctx._sessionId,
           harness.ctx._session.muxName,
           { visibleFrame: true }
         );

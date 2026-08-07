@@ -15,10 +15,26 @@ describe('COD-109 buildRemoteKillCommand', () => {
     remotePath: '/tmp',
   };
 
-  it('emits a remote kill-session against the codeman socket (no -t — non-interactive)', () => {
-    const cmd = buildRemoteKillCommand(base, 'codeman-abc12345');
+  it('emits a remote kill-session against the dedicated codeman-remote socket for owned sessions', () => {
+    const cmd = buildRemoteKillCommand(base, 'codeman-ssh-abc12345');
     expect(cmd).toContain(
-      `aakht@192.168.55.170 '${REMOTE_PATH_BOOTSTRAP}; tmux -L codeman kill-session -t '\\''codeman-abc12345'\\'''`
+      `aakht@192.168.55.170 '${REMOTE_PATH_BOOTSTRAP}; tmux -L codeman-remote kill-session -t '\\''codeman-ssh-abc12345'\\'''`
+    );
+    expect(cmd.startsWith('ssh -o BatchMode=yes ')).toBe(true);
+    expect(cmd).not.toContain('-o BatchMode=yes -t');
+  });
+
+  it('emits a kill-session against the canonical codeman socket for non-owned attached sessions', () => {
+    const cmd = buildRemoteKillCommand({ ...base, owned: false }, 'codeman-disco1');
+    expect(cmd).toContain(
+      `aakht@192.168.55.170 '${REMOTE_PATH_BOOTSTRAP}; tmux -L codeman kill-session -t '\\''codeman-disco1'\\'''`
+    );
+  });
+
+  it('emits a remote kill-session against the codeman socket (no -t — non-interactive)', () => {
+    const cmd = buildRemoteKillCommand(base, 'codeman-ssh-abc12345');
+    expect(cmd).toContain(
+      `aakht@192.168.55.170 '${REMOTE_PATH_BOOTSTRAP}; tmux -L codeman-remote kill-session -t '\\''codeman-ssh-abc12345'\\'''`
     );
     expect(cmd.startsWith('ssh -o BatchMode=yes ')).toBe(true);
     // kill-session needs no PTY — must NOT request the ssh `-t` flag (attach uses

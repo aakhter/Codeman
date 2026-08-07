@@ -659,11 +659,11 @@ export function captureStartFlag(lastLines?: number): string {
  * a delimiter line, then the pane geometry. One ssh roundtrip fetches both so
  * the snapshot and its cursor position are consistent.
  */
-export function buildRemoteFrameCommand(target: string): string {
+export function buildRemoteFrameCommand(target: string, socket = 'codeman'): string {
   return (
-    `tmux -L codeman capture-pane -p -e -t ${shellescape(target)}; ` +
+    `tmux -L ${socket} capture-pane -p -e -t ${shellescape(target)}; ` +
     `printf '${REMOTE_FRAME_GEOM_DELIM}\\n'; ` +
-    `tmux -L codeman display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
+    `tmux -L ${socket} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
   );
 }
 
@@ -697,6 +697,14 @@ const UNSAFE_PATH_CHARS = /[;&|$`(){}<>'"\n\r]/;
  */
 function isValidMuxName(name: string): boolean {
   return SAFE_MUX_NAME_PATTERN.test(name) || LEGACY_MUX_NAME_PATTERN.test(name);
+}
+
+/** Remote tmux session targets are `codeman-ssh-<hex>` for owned sessions or a
+ * discovered `codeman-*` name (e.g. `codeman-disco1`) for non-owned attaches.
+ * The `ssh` prefix deliberately fails SAFE_MUX_NAME_PATTERN, so we validate
+ * with a wider but still shell-safe pattern here. */
+function isValidRemoteTmuxTarget(name: string): boolean {
+  return /^codeman-[a-zA-Z0-9._-]+$/.test(name);
 }
 
 function isValidTerminalDimension(value: number): boolean {
@@ -1182,7 +1190,8 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
  * `buildSshConnectionArgs` (COD-107), identical to launch/attach/discovery.
  */
 export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
-  const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`);
+  const socket = remote.owned !== false ? REMOTE_TMUX_SOCKET : 'codeman';
+  const tmuxInvocation = withRemotePathBootstrap(`tmux -L ${socket} kill-session -t ${shellescape(remoteSessionName)}`);
   const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
@@ -2525,7 +2534,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // through to the local teardown.
     if (session.remote) {
       const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(sessionId);
-      if (isValidMuxName(remoteName)) {
+      if (isValidRemoteTmuxTarget(remoteName)) {
         try {
           await execAsync(buildRemoteKillCommand(session.remote, remoteName), { timeout: EXEC_TIMEOUT_MS });
           console.log(`[TmuxManager] COD-109 killed owned remote session ${remoteName} on ${session.remote.host}`);
@@ -3588,12 +3597,23 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    */
   async captureRemotePaneBuffer(
     remote: SessionRemote,
+    sessionId: string,
     muxName: string,
     opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
   ): Promise<string | null> {
     if (IS_TEST_MODE) return '';
-    const target = remote.remoteSessionName || muxName;
-    if (!isValidMuxName(target)) {
+    // Owned sessions (this Codeman launched them via `new-session -A`) live on
+    // the dedicated `codeman-remote` socket under their deterministic
+    // `codeman-ssh-<id8>` name. Non-owned (discovered + attached) sessions were
+    // created by another instance on the canonical `codeman` socket and carry
+    // their existing name in `remote.remoteSessionName`. Capture from whichever
+    // socket/name holds the canonical scrollback, mirroring the launch/attach
+    // logic in buildRemoteSessionCommand.
+    const owned = remote.owned !== false;
+    const isOwnedRemoteTarget = owned && !remote.remoteSessionName;
+    const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId) || muxName;
+    const socket = isOwnedRemoteTarget ? REMOTE_TMUX_SOCKET : 'codeman';
+    if (!isValidRemoteTmuxTarget(target)) {
       console.error('[TmuxManager] Invalid remote session name in captureRemotePaneBuffer:', target);
       return null;
     }
@@ -3601,7 +3621,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // parity with the local visible path (formatPaneSnapshot). ONE combined ssh
     // invocation fetches capture + geometry; a delimiter line separates them.
     if (opts?.visibleFrame) {
-      const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target));
+      const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target, socket));
       const frameArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), frameCmd];
       try {
         const { stdout } = await execFileAsync('ssh', frameArgv, {
@@ -3618,7 +3638,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // The remote login shell may not have tmux on PATH (macOS non-interactive
     // zsh lacks /opt/homebrew/bin) — bootstrap PATH exactly like the launcher.
     const captureCmd = withRemotePathBootstrap(
-      `tmux -L codeman capture-pane -p -e ${opts?.fullHistory ? `${captureStartFlag(opts?.lastLines)} ` : ''}-t ${shellescape(target)}`
+      `tmux -L ${socket} capture-pane -p -e ${opts?.fullHistory ? `${captureStartFlag(opts?.lastLines)} ` : ''}-t ${shellescape(target)}`
     );
     const argv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), captureCmd];
     try {
@@ -3634,7 +3654,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       }
       try {
         const cursorCmd = withRemotePathBootstrap(
-          `tmux -L codeman display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
+          `tmux -L ${socket} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
         );
         const cursorArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), cursorCmd];
         const { stdout: cursor } = await execFileAsync('ssh', cursorArgv, {
