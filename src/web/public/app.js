@@ -5148,23 +5148,6 @@ class CodemanApp {
   }
 
   /**
-   * Clean up state from the previous session before switching tabs.
-   * Handles: WebSocket teardown, CJK clear, flicker filter, tab completion,
-   * terminal write queue, IME composition, and local echo flush.
-   * @param {string} newSessionId - The session being switched TO.
-   */
-  _isUsableXtermSnapshot(snapshot) {
-    if (!snapshot || typeof snapshot !== 'string' || snapshot.length < 8) return false;
-    const visibleText = snapshot
-      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-      .replace(/\x1b[()][0-2A-Z]/g, '')
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
-      .trim();
-    return visibleText.length >= 3;
-  }
-
-  /**
    * Persist one xterm snapshot to localStorage, bounded to a fixed key budget
    * regardless of how many sessions are live, and resilient to quota errors.
    * The previous inline version only pruned snapshots for sessions that no

@@ -2349,32 +2349,6 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  /**
-   * COD-139: Toggle a session's pin via POST /api/sessions/:id/pin.
-   * Pinned sessions float to the top of the session manager list. Returns true
-   * on success. The live re-sort happens when the session:pinned SSE event
-   * fires (handled in app.js), so callers don't need to re-render themselves.
-   * @param {string} sessionId
-   * @param {boolean} pinned explicit desired pin state (idempotent)
-   * @returns {Promise<boolean>}
-   */
-  async _setSessionPinned(sessionId, pinned) {
-    try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ pinned }),
-      });
-      if (!res.ok) return false;
-      const data = await res.json();
-      return data?.success === true;
-    } catch (err) {
-      console.error('[_setSessionPinned]', err);
-      return false;
-    }
-  },
-
   /** COD-124: human-readable label per park obligation code (backend's stable order). */
   _PARK_OBLIGATION_LABELS: {
     respawn: 'Respawn cycling is armed',

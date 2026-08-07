@@ -1686,7 +1686,6 @@ Object.assign(CodemanApp.prototype, {
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
-      showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
@@ -2177,8 +2176,6 @@ Object.assign(CodemanApp.prototype, {
         // welcome screen. ON by default here, and the escape hatch if it ever
         // misbehaves on a device (the gate treats only an explicit false as off).
         mobileOverviewEnabled: true,
-        // Remote auto-reconnect (COD-108) — on by default
-        remoteAutoReconnect: true,
         // Input
         gestureControlEnabled: false,
         // Feature toggles - keep background-heavy tracking off on mobile
