@@ -30,6 +30,13 @@ describe('COD-187 buildRemoteFrameCommand', () => {
     // capture must come BEFORE geometry so parse order matches
     expect(cmd.indexOf('capture-pane')).toBeLessThan(cmd.indexOf('display-message'));
   });
+
+  it('honors the remote tmux socket for owned sessions (capture must target codeman-remote)', () => {
+    const cmd = buildRemoteFrameCommand('codeman-ssh-abcd1234', 'codeman-remote');
+    expect(cmd).toContain('tmux -L codeman-remote capture-pane');
+    expect(cmd).toContain('tmux -L codeman-remote display-message');
+    expect(cmd).toContain("capture-pane -p -e -t 'codeman-ssh-abcd1234'");
+  });
 });
 
 describe('COD-187 parseRemoteFrameCapture', () => {

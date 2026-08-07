@@ -52,6 +52,20 @@ describe('tmux full-history pane capture (COD-47)', () => {
     expect(body).toContain('opts');
     expect(body).toContain('this.capturePaneBuffer(muxName, target, opts)');
   });
+
+  it('COD-279: remote history capture targets the dedicated codeman-remote socket and codeman-ssh name', () => {
+    // Regression: owned remote sessions live on `-L codeman-remote` under a
+    // `codeman-ssh-<id8>` name. The history (full-history) capture must use the
+    // same socket the launcher created, or it resolves the wrong (nonexistent)
+    // tmux socket and degrades to the local wrapper -> "history unavailable".
+    const sig = source.indexOf('captureRemotePaneBuffer(');
+    expect(sig).toBeGreaterThan(-1);
+    const body = source.slice(sig, sig + 4000);
+    expect(body).toContain('REMOTE_TMUX_SOCKET');
+    expect(body).toContain('remoteTmuxSessionName(sessionId)');
+    expect(body).toContain('`tmux -L ${socket} capture-pane');
+    expect(body).toContain('`tmux -L ${socket} display-message');
+  });
 });
 
 describe('COD-189 local history-limit ordering', () => {

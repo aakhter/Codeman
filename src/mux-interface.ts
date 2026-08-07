@@ -300,6 +300,7 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   captureRemotePaneBuffer?(
     remote: SessionRemote,
+    sessionId: string,
     muxName: string,
     opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
   ): Promise<string | null>;
