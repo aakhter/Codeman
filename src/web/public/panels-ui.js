@@ -1160,6 +1160,28 @@ Object.assign(CodemanApp.prototype, {
     return labels[source] || source;
   },
 
+  /**
+   * COD-121: live-refresh the unified session list when sessions change
+   * (created/updated/deleted via SSE). Only touches surfaces that are currently
+   * showing — the open Session Manager modal and/or the visible welcome list —
+   * and is debounced so an event burst collapses into one re-fetch. The current
+   * search query is preserved.
+   */
+  _onSessionListMaybeChanged() {
+    const modal = document.getElementById('sessionManagerModal');
+    if (modal && modal.classList.contains('active')) {
+      this._debouncedCall(
+        'sessionManagerRefresh',
+        () => this._loadSessionManagerList(this._sessionManagerQuery || ''),
+        400
+      );
+    }
+    const welcome = document.getElementById('welcomeOverlay');
+    if (welcome && welcome.classList.contains('visible')) {
+      this._debouncedCall('welcomeHistoryRefresh', () => this.loadHistorySessions(), 600);
+    }
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Token Statistics Modal
@@ -5340,6 +5362,267 @@ Object.assign(CodemanApp.prototype, {
       overlay.classList.remove('visible');
     }
     this.filePreviewContent = '';
+  },
+
+  copyFilePreviewContent() {
+    if (this.filePreviewState?.previewKind === 'image') {
+      return this._copyFilePreviewImage();
+    }
+    if (this.filePreviewContent) {
+      navigator.clipboard
+        .writeText(this.filePreviewContent)
+        .then(() => {
+          this.showToast('Copied to clipboard', 'success');
+        })
+        .catch(() => {
+          this.showToast('Failed to copy', 'error');
+        });
+    }
+  },
+
+  async _copyFilePreviewImage() {
+    const imageUrl = this.filePreviewState?.previewCopyUrl;
+    if (!imageUrl) {
+      this.showToast('Failed to copy image to clipboard', 'error');
+      return false;
+    }
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        throw new Error('Image clipboard API unavailable');
+      }
+      const res = await fetch(imageUrl);
+      if (!res.ok) throw new Error(`Failed to fetch image (${res.status})`);
+      let blob = await res.blob();
+      const contentType = res.headers?.get?.('content-type') || '';
+      if ((!blob.type || blob.type === 'application/octet-stream') && contentType.startsWith('image/')) {
+        blob = new Blob([blob], { type: contentType });
+      }
+      if (!blob.type.startsWith('image/')) {
+        throw new Error(`Unexpected clipboard type: ${blob.type || 'unknown'}`);
+      }
+      const item = new ClipboardItem({ [blob.type]: blob });
+      await navigator.clipboard.write([item]);
+      this.showToast('Copied image to clipboard', 'success');
+      return true;
+    } catch (err) {
+      console.error('Failed to copy preview image:', err);
+      this.showToast('Failed to copy image to clipboard', 'error');
+      return false;
+    }
+  },
+
+  // ───────────────────────── Document preview: outline / reading view / word count (COD-62) ─────────
+
+  /** Collapse whitespace and count words, dropping empties. Pure. */
+  _countWords(text) {
+    if (!text) return 0;
+    return text
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0).length;
+  },
+
+  /** Format the footer reading meta: "1,234 words · ~6 min read" (200 wpm, min 1 min). Pure. */
+  _formatReadingMeta(words) {
+    const minutes = Math.max(1, Math.round(words / 200));
+    return `${words.toLocaleString()} words · ~${minutes} min read`;
+  },
+
+  /** Slugify heading text into a DOM id; dedupe via the provided used-id set. */
+  _slugifyHeading(text, used) {
+    let base =
+      String(text || '')
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '') || 'section';
+    let id = base;
+    let i = 1;
+    while (used.has(id)) id = `${base}-${i++}`;
+    used.add(id);
+    return id;
+  },
+
+  /**
+   * Build a nested outline <nav> from the already-rendered+sanitized prose container.
+   * Assigns stable ids to headings that lack one. Returns null when fewer than 2 headings.
+   * Heading text is read via textContent only (never innerHTML).
+   */
+  _buildDocumentOutline(prose) {
+    if (!prose) return null;
+    const headings = [...prose.querySelectorAll('h1,h2,h3,h4,h5,h6')];
+    if (headings.length < 2) return null;
+    const used = new Set();
+    headings.forEach((h) => {
+      if (h.id) used.add(h.id);
+    });
+    const nav = document.createElement('nav');
+    nav.className = 'document-outline';
+    nav.id = 'documentOutline';
+    const list = document.createElement('ul');
+    list.className = 'document-outline-list';
+    headings.forEach((h) => {
+      if (!h.id) h.id = this._slugifyHeading(h.textContent, used);
+      const level = Number(h.tagName.slice(1)) || 1;
+      const li = document.createElement('li');
+      li.className = `document-outline-item document-outline-l${level}`;
+      const a = document.createElement('a');
+      a.className = 'document-outline-link';
+      a.href = `#${h.id}`;
+      a.dataset.outlineTarget = h.id;
+      a.textContent = h.textContent || '';
+      li.appendChild(a);
+      list.appendChild(li);
+    });
+    nav.appendChild(list);
+    nav.addEventListener('click', (e) => {
+      const link = e.target.closest('a[data-outline-target]');
+      if (!link) return;
+      e.preventDefault();
+      const target = prose.querySelector(`#${CSS.escape(link.dataset.outlineTarget)}`);
+      if (target) target.scrollIntoView({ block: 'start' });
+    });
+    return nav;
+  },
+
+  /** (Re)create the scroll-spy IntersectionObserver tying headings to nav entries. */
+  _setupOutlineScrollSpy(nav, prose) {
+    this._teardownOutlineScrollSpy();
+    const scroller = this.$('filePreviewBody');
+    if (!nav || !prose || !scroller || typeof IntersectionObserver === 'undefined') return;
+    const headings = [...prose.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter((h) => h.id);
+    const linkFor = (id) => nav.querySelector(`a[data-outline-target="${CSS.escape(id)}"]`);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((en) => en.isIntersecting);
+        if (!visible) return;
+        nav.querySelectorAll('a.active').forEach((a) => a.classList.remove('active'));
+        const link = linkFor(visible.target.id);
+        if (link) link.classList.add('active');
+      },
+      { root: scroller, rootMargin: '0px 0px -70% 0px', threshold: 0 }
+    );
+    headings.forEach((h) => observer.observe(h));
+    this._documentOutlineObserver = observer;
+  },
+
+  _teardownOutlineScrollSpy() {
+    if (this._documentOutlineObserver) {
+      this._documentOutlineObserver.disconnect();
+      this._documentOutlineObserver = null;
+    }
+  },
+
+  _readPreviewPref(key) {
+    try {
+      return localStorage.getItem(key) === '1';
+    } catch {
+      return false;
+    }
+  },
+
+  _writePreviewPref(key, on) {
+    try {
+      localStorage.setItem(key, on ? '1' : '0');
+    } catch {
+      /* jsdom / private mode */
+    }
+  },
+
+  /** Toggle the outline sidebar open/closed and persist the preference. */
+  toggleDocumentOutline() {
+    const layout = this.$('filePreviewBody')?.querySelector('.document-preview-layout');
+    const nav = this.$('documentOutline');
+    if (!layout || !nav) return;
+    const open = !layout.classList.contains('outline-open');
+    layout.classList.toggle('outline-open', open);
+    const btn = this.$('filePreviewFooter')?.querySelector('.document-outline-btn');
+    if (btn) btn.classList.toggle('active', open);
+    this._writePreviewPref('codeman.preview.outlineOpen', open);
+  },
+
+  /** Toggle reading-view (constrained measure) on the prose container and persist the preference. */
+  toggleReadingView() {
+    const overlay = this.$('filePreviewOverlay');
+    const prose = overlay?.querySelector('.document-preview-markdown, .document-preview-text');
+    if (!prose) return;
+    const on = !this.readingViewActive;
+    this.readingViewActive = on;
+    prose.classList.toggle('reading-view', on);
+    const btn = this.$('filePreviewFooter')?.querySelector('.document-reading-btn');
+    if (btn) btn.classList.toggle('active', on);
+    this._writePreviewPref('codeman.preview.readingView', on);
+  },
+
+  getFileIcon(ext) {
+    if (!ext) return '\uD83D\uDCC4';
+
+    const icons = {
+      ts: '\uD83D\uDCD8',
+      tsx: '\uD83D\uDCD8',
+      js: '\uD83D\uDCD2',
+      jsx: '\uD83D\uDCD2',
+      mjs: '\uD83D\uDCD2',
+      cjs: '\uD83D\uDCD2',
+      py: '\uD83D\uDC0D',
+      pyx: '\uD83D\uDC0D',
+      pyw: '\uD83D\uDC0D',
+      rs: '\uD83E\uDD80',
+      go: '\uD83D\uDC39',
+      c: '\u2699\uFE0F',
+      cpp: '\u2699\uFE0F',
+      h: '\u2699\uFE0F',
+      hpp: '\u2699\uFE0F',
+      html: '\uD83C\uDF10',
+      htm: '\uD83C\uDF10',
+      css: '\uD83C\uDFA8',
+      scss: '\uD83C\uDFA8',
+      sass: '\uD83C\uDFA8',
+      less: '\uD83C\uDFA8',
+      json: '\uD83D\uDCCB',
+      yaml: '\uD83D\uDCCB',
+      yml: '\uD83D\uDCCB',
+      xml: '\uD83D\uDCCB',
+      toml: '\uD83D\uDCCB',
+      csv: '\uD83D\uDCCB',
+      md: '\uD83D\uDCDD',
+      markdown: '\uD83D\uDCDD',
+      txt: '\uD83D\uDCDD',
+      rst: '\uD83D\uDCDD',
+      png: '\uD83D\uDDBC\uFE0F',
+      jpg: '\uD83D\uDDBC\uFE0F',
+      jpeg: '\uD83D\uDDBC\uFE0F',
+      gif: '\uD83D\uDDBC\uFE0F',
+      svg: '\uD83D\uDDBC\uFE0F',
+      webp: '\uD83D\uDDBC\uFE0F',
+      ico: '\uD83D\uDDBC\uFE0F',
+      bmp: '\uD83D\uDDBC\uFE0F',
+      mp4: '\uD83C\uDFAC',
+      webm: '\uD83C\uDFAC',
+      mov: '\uD83C\uDFAC',
+      mp3: '\uD83C\uDFB5',
+      wav: '\uD83C\uDFB5',
+      ogg: '\uD83C\uDFB5',
+      sh: '\uD83D\uDCBB',
+      bash: '\uD83D\uDCBB',
+      zsh: '\uD83D\uDCBB',
+      env: '\uD83D\uDD10',
+      gitignore: '\uD83D\uDEAB',
+      dockerfile: '\uD83D\uDC33',
+      lock: '\uD83D\uDD12',
+    };
+
+    return icons[ext.toLowerCase()] || '\uD83D\uDCC4';
+  },
+
+  formatFileSize(bytes) {
+    if (bytes === undefined || bytes === null) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   },
 
   // ═══════════════════════════════════════════════════════════════
