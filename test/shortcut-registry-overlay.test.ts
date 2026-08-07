@@ -50,6 +50,18 @@ describe('shortcut registry and overlay', () => {
     }
   });
 
+  it('keeps the shortcut settings panel as a direct visible child of the settings modal body', () => {
+    const document = parse(htmlSource);
+    const shortcutSettings = findElementById(document, 'settings-shortcuts');
+    expect(shortcutSettings).not.toBeNull();
+
+    const parentClasses =
+      shortcutSettings?.parentNode && 'attrs' in shortcutSettings.parentNode
+        ? shortcutSettings.parentNode.attrs.find((attribute) => attribute.name === 'class')?.value
+        : undefined;
+    expect(parentClasses?.split(/\s+/)).toContain('modal-body');
+  });
+
   it('adds Ctrl/Option question-mark bindings for the overlay', () => {
     expect(appSource).toContain("id: 'show-shortcuts'");
     expect(appSource).toContain("modifiers: ['ctrl']");
