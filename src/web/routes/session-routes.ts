@@ -2395,15 +2395,18 @@ export function registerSessionRoutes(
 
       // Per-session config that is applied to the LOCAL tmux/CLI wrapper does not
       // cross ssh. Reject rather than pretend it worked; remote customization goes
-      // through the host command override.
+      // through the host command override. COD-282: allow the matching per-CLI config
+      // for the requested mode (opencode/codex/gemini/antigravity) so the builder can
+      // embed --model / --session flags into the remote login-shell command; other
+      // modes' configs and generic claude knobs still require the host override.
       if (
         (envOverrides && Object.keys(envOverrides).length > 0) ||
         effort ||
         modelOverride !== undefined ||
-        codexConfig ||
-        geminiConfig ||
-        antigravityConfig ||
-        openCodeConfig
+        (codexConfig && mode !== 'codex') ||
+        (geminiConfig && mode !== 'gemini') ||
+        (antigravityConfig && mode !== 'antigravity') ||
+        (openCodeConfig && mode !== 'opencode')
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
