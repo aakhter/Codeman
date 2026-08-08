@@ -218,6 +218,34 @@ export function detectCodexCheckpointWorkingFrame(data: string): boolean {
   );
 }
 
+/**
+ * Rendered-frame working evidence used only by checkpoint sequencing, the
+ * Claude counterpart of detectCodexCheckpointWorkingFrame.
+ *
+ * Claude keeps its `❯` input row visible for the WHOLE of a `/compact`, so
+ * prompt visibility cannot distinguish idle from busy and the operation is
+ * only observable through its progress row. That row is marked with a
+ * `✻`/`✽`-class glyph, not the braille SPINNER_PATTERN, which is why the
+ * spinner check alone never fired and every compact reported
+ * `operation-not-accepted` while plainly succeeding.
+ *
+ * The discriminator is an animation glyph followed by a label ending in an
+ * ellipsis, e.g. `✢ Compacting conversation… `. The elapsed timer and percent
+ * (`✽ Compacting conversation… (55s) ▰▰▱ 46%`) must NOT be required: they only
+ * appear once there is progress to report, roughly 15s in, which is well past
+ * the 8s acceptance window — that delay is exactly what made an earlier
+ * timer-based pattern still report `operation-not-accepted`.
+ *
+ * Completed rows read `✻ Cogitated for 5s` — same glyph family, no ellipsis —
+ * and persist on screen while Claude sits idle, so they must not match:
+ * reading one as working would hold `ready` false forever and stall every
+ * checkpoint in `waiting-ready`. The glyph anchor also keeps the `❯` input row
+ * out of it, whose ghost-suggestion text can legitimately contain an ellipsis.
+ */
+export function detectClaudeCheckpointWorkingFrame(data: string): boolean {
+  return SPINNER_PATTERN.test(data) || /\besc to interrupt\b/.test(data) || /^\s*[·✢✳∗✻✽]\s+\S[^\n]*…/m.test(data);
+}
+
 function getModeLabel(mode: SessionMode): string {
   switch (mode) {
     case 'opencode':
@@ -1375,16 +1403,18 @@ export class Session extends EventEmitter {
 
     if (rendered) {
       // formatPaneSnapshot paints rows with absolute cursor moves and no EOLs.
-      // Restore Codex row boundaries before the generic ANSI strip so `›` and
-      // working evidence retain their line semantics. Claude stays unchanged.
-      const checkpointFrame =
-        this.mode === 'codex' ? rendered.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n') : rendered;
+      // Restore row boundaries before the generic ANSI strip so `›`/`❯` and
+      // working evidence retain their line semantics. This is not Codex-only:
+      // the prompt checks below are `^`-anchored, so an unrestored frame is a
+      // single line and the prompt is never visible — which stalls every
+      // checkpoint mode in `waiting-ready` until `readiness-timeout`.
+      const checkpointFrame = rendered.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n');
       const plain = checkpointFrame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
       const renderedWorking =
         this.mode === 'codex'
           ? detectCodexCheckpointWorkingFrame(plain)
           : this.mode === 'claude'
-            ? SPINNER_PATTERN.test(plain)
+            ? detectClaudeCheckpointWorkingFrame(plain)
             : false;
       working = working || renderedWorking;
       const promptVisible =
