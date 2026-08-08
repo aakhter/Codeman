@@ -780,7 +780,7 @@ function buildClaudePermissionFlags(claudeMode?: ClaudeMode, allowedTools?: stri
 /**
  * Build the opencode CLI command with appropriate flags.
  */
-function buildOpenCodeCommand(config?: OpenCodeConfig): string {
+export function buildOpenCodeCommand(config?: OpenCodeConfig): string {
   const parts = ['opencode'];
 
   // Model selection — allow provider/model format (alphanumeric, dots, hyphens, slashes)
@@ -841,7 +841,7 @@ export function buildCodexCommand(config?: CodexConfig): string {
  * of `--dangerously-skip-permissions`; users can override it later through
  * Gemini config once Codeman exposes richer Gemini settings.
  */
-function buildGeminiCommand(config?: GeminiConfig): string {
+export function buildGeminiCommand(config?: GeminiConfig): string {
   const parts = ['gemini', '--skip-trust'];
 
   const approvalMode = config?.approvalMode || 'yolo';
@@ -870,7 +870,7 @@ function buildGeminiCommand(config?: GeminiConfig): string {
  * Codeman's Claude default; the multi-user clamp strips it for non-granted owners,
  * and an ABSENT config stays at agy's own prompting default — safe like Codex).
  */
-function buildAntigravityCommand(config?: AntigravityConfig): string {
+export function buildAntigravityCommand(config?: AntigravityConfig): string {
   const parts = ['agy'];
 
   if (config?.dangerouslySkipPermissions) {
@@ -1057,12 +1057,26 @@ export function buildRemoteLaunchCommand(options: {
   remote: SessionRemote;
   sessionId: string;
   codexConfig?: CodexConfig;
+  openCodeConfig?: OpenCodeConfig;
+  geminiConfig?: GeminiConfig;
+  antigravityConfig?: AntigravityConfig;
   claudeMode?: ClaudeMode;
   allowedTools?: string;
   /** Remote tmux history-limit (COD-180). Set BEFORE new-session so the initial pane gets it. */
   historyLimit?: number;
 }): string {
-  const { mode, remote, sessionId, codexConfig, claudeMode, allowedTools, historyLimit } = options;
+  const {
+    mode,
+    remote,
+    sessionId,
+    codexConfig,
+    openCodeConfig,
+    geminiConfig,
+    antigravityConfig,
+    claudeMode,
+    allowedTools,
+    historyLimit,
+  } = options;
   // §6.3: honor the session's EFFECTIVE claude permission mode on remote instead of
   // hardcoding --dangerously-skip-permissions, so a non-granted multi-user user's
   // downgraded 'auto' actually reaches the remote agent (the default command otherwise
@@ -1070,15 +1084,49 @@ export function buildRemoteLaunchCommand(options: {
   // (admin's explicit choice). Wrapped in `$SHELL -i -l -c` for the same reason as
   // `defaultRemoteCommandForMode`: the agent CLIs live under a per-user PATH entry
   // that only an interactive login shell resolves (see that function's comment).
-  // Codex keeps its own builder so per-session codexConfig flags survive the wrap.
+  // Codex/OpenCode/Gemini/Antigravity keep their own builders so per-session config flags survive the wrap.
   const override = remote.commands?.[mode];
+  function buildOpenCodeConfigEnvPrefix(config?: OpenCodeConfig): string {
+    if (!config) return '';
+    let jsonContent: string | undefined;
+    if (config.autoAllowTools) {
+      const permConfig: Record<string, unknown> = { permission: { '*': 'allow' } };
+      if (config.configContent) {
+        try {
+          const existing = JSON.parse(config.configContent) as Record<string, unknown>;
+          Object.assign(permConfig, existing);
+          permConfig.permission = { '*': 'allow' };
+        } catch {
+          /* invalid JSON, use default permConfig */
+        }
+      }
+      jsonContent = JSON.stringify(permConfig);
+    } else if (config.configContent) {
+      try {
+        JSON.parse(config.configContent);
+        jsonContent = config.configContent;
+      } catch {
+        return '';
+      }
+    }
+    if (!jsonContent) return '';
+    return `OPENCODE_CONFIG_CONTENT=${shellescape(jsonContent)} `;
+  }
   const modeCommand = override
     ? override
     : mode === 'codex'
       ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
-      : mode === 'claude'
-        ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-        : defaultRemoteCommandForMode(mode);
+      : mode === 'opencode'
+        ? remoteLoginShellCommand(
+            `${buildOpenCodeConfigEnvPrefix(openCodeConfig)}${buildOpenCodeCommand(openCodeConfig)}`
+          )
+        : mode === 'gemini'
+          ? remoteLoginShellCommand(buildGeminiCommand(geminiConfig))
+          : mode === 'antigravity'
+            ? remoteLoginShellCommand(buildAntigravityCommand(antigravityConfig))
+            : mode === 'claude'
+              ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
+              : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1208,7 +1256,15 @@ function buildRemoteSessionCommand(
   mode: SessionMode,
   remote: SessionRemote,
   sessionId: string,
-  options: { codexConfig?: CodexConfig; historyLimit?: number; claudeMode?: ClaudeMode; allowedTools?: string } = {}
+  options: {
+    codexConfig?: CodexConfig;
+    openCodeConfig?: OpenCodeConfig;
+    geminiConfig?: GeminiConfig;
+    antigravityConfig?: AntigravityConfig;
+    historyLimit?: number;
+    claudeMode?: ClaudeMode;
+    allowedTools?: string;
+  } = {}
 ): string {
   if (remote.owned === false) {
     const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId);
@@ -1219,6 +1275,9 @@ function buildRemoteSessionCommand(
     remote,
     sessionId,
     codexConfig: options.codexConfig,
+    openCodeConfig: options.openCodeConfig,
+    geminiConfig: options.geminiConfig,
+    antigravityConfig: options.antigravityConfig,
     claudeMode: options.claudeMode,
     allowedTools: options.allowedTools,
     historyLimit: options.historyLimit,
@@ -2052,7 +2111,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const fullCmd = docker
         ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
         : remote
-          ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig, claudeMode, allowedTools, historyLimit })
+          ? buildRemoteSessionCommand(mode, remote, sessionId, {
+              codexConfig,
+              openCodeConfig,
+              geminiConfig,
+              antigravityConfig,
+              claudeMode,
+              allowedTools,
+              historyLimit,
+            })
           : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
@@ -2335,7 +2402,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const fullCmd = docker
       ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
       : remote
-        ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig, claudeMode, allowedTools, historyLimit })
+        ? buildRemoteSessionCommand(mode, remote, sessionId, {
+            codexConfig,
+            openCodeConfig,
+            geminiConfig,
+            antigravityConfig,
+            claudeMode,
+            allowedTools,
+            historyLimit,
+          })
         : localFullCmd;
 
     try {

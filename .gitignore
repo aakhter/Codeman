@@ -1,3 +1,8 @@
+# Opencode local config (machine-specific, not shared)
+opencode.json
+opencode.jsonc
+.opencode/
+
 # Claude Code local files
 .agents/
 skills-lock.json

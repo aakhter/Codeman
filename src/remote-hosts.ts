@@ -116,7 +116,7 @@ export function defaultRemoteCommandForMode(mode: SessionMode): string {
 }
 
 export const REMOTE_PATH_BOOTSTRAP =
-  'export PATH=$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH';
+  'export PATH=$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH';
 
 export function withRemotePathBootstrap(command: string): string {
   return `${REMOTE_PATH_BOOTSTRAP}; ${command}`;
