@@ -13,7 +13,7 @@
  */
 
 (function (global) {
-  const DEBUG_MOBILE = new URLSearchParams(location.search).has('debugMobile');
+  const DEBUG_MOBILE = typeof URLSearchParams !== 'undefined' && typeof location !== 'undefined' ? new URLSearchParams(location.search).has('debugMobile') : false;
   function logViewport(label) {
     if (!DEBUG_MOBILE) return;
     const vv = window.visualViewport;
@@ -237,6 +237,42 @@ Object.assign(CodemanApp.prototype, {
     if (!this.activeSessionId || !Number.isFinite(deltaY)) return;
     const cell = this._terminalCellFromClientPoint(clientX, clientY);
     if (!cell) return;
+    const _session = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
+    const _isOpencode = _session?.mode === 'opencode';
+    const _isMobile =
+      typeof MobileDetection !== 'undefined' &&
+      (typeof MobileDetection.isMobile === 'function'
+        ? MobileDetection.isMobile()
+        : MobileDetection.getDeviceType?.() === 'mobile');
+    if (_isOpencode && _isMobile) {
+      const prev = this._tuiWheelAccum || 0;
+      if (Math.sign(prev) !== 0 && Math.sign(prev) !== Math.sign(deltaY)) {
+        this._tuiWheelAccum = deltaY;
+        this._tuiWheelCell = cell;
+      } else {
+        this._tuiWheelAccum = prev + deltaY;
+        this._tuiWheelCell = cell;
+      }
+      if (this._tuiWheelTimer) return;
+      this._tuiWheelTimer = setTimeout(() => {
+        const total = this._tuiWheelAccum || 0;
+        const flushCell = this._tuiWheelCell;
+        this._tuiWheelAccum = 0;
+        this._tuiWheelTimer = null;
+        this._tuiWheelCell = null;
+        if (!flushCell || !Number.isFinite(total) || total === 0) return;
+        const ch = this.terminal?._core?._renderService?.dimensions?.css?.cell?.height || 13;
+        const lines = Math.trunc(total / ch);
+        if (!lines) return;
+        const button = lines > 0 ? 65 : 64;
+        const seq = `\x1b[<${button};${flushCell.col};${flushCell.row}M`;
+        const count = Math.abs(lines);
+        for (let i = 0; i < count; i++) this._sendInputAsync(this.activeSessionId, seq);
+        const rem = total % ch;
+        if (rem !== 0) this._tuiWheelAccum = rem;
+      }, 16);
+      return;
+    }
     const threshold = 50;
     const previous = this._foregroundTuiWheelAccum || 0;
     const next = previous + deltaY;
