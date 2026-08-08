@@ -109,13 +109,15 @@ describe('spreadsheet preview renderer', () => {
     });
     expect(document.querySelectorAll('.spreadsheet-cell')).toHaveLength(2500);
     expect(document.querySelector('.spreadsheet-cell')?.textContent).toBe('<b>0</b>');
+    expect((document.querySelector('.spreadsheet-cell') as HTMLElement).style.top).toBe('20px');
+    expect((document.querySelector('.spreadsheet-cell') as HTMLElement).style.left).toBe('36px');
     expect(document.querySelector('.spreadsheet-sheet-tabs')?.hasAttribute('data-i18n-skip')).toBe(true);
     expect(document.querySelector('.spreadsheet-grid')?.hasAttribute('data-i18n-skip')).toBe(true);
     expect(Number.parseFloat((document.querySelector('.spreadsheet-grid-spacer') as HTMLElement).style.height)).toBe(
-      8_000_000
+      8_000_020
     );
     (document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement).click();
-    expect((document.querySelector('.spreadsheet-grid-spacer') as HTMLElement).style.height).toBe('20px');
+    expect((document.querySelector('.spreadsheet-grid-spacer') as HTMLElement).style.height).toBe('40px');
   });
 
   it('drops stale tiles and aborts fetch plus terminates worker on dispose', async () => {
@@ -153,6 +155,34 @@ describe('spreadsheet preview renderer', () => {
     expect(document.body.textContent).toContain('charts');
     worker.onerror?.();
     expect(document.body.textContent).toContain('Spreadsheet parser failed');
+  });
+
+  it('shows an explicit empty-sheet state without dropping workbook warnings', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }));
+    const renderer = loadRenderer(fetchMock);
+    renderer.open({ container: document.querySelector('#preview'), url: '/book.xlsx', size: 8 });
+    const worker = WorkerMock.instances[0];
+    worker.emit({ type: 'ready' });
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalled());
+    worker.emit({
+      type: 'metadata',
+      warnings: ['charts'],
+      styles: [],
+      sheets: [
+        {
+          id: '1',
+          name: 'Empty',
+          rows: 0,
+          cols: 0,
+          defaultRowHeight: 20,
+          defaultColumnWidth: 64,
+          rowOverrides: [],
+          columnOverrides: [],
+        },
+      ],
+    });
+    expect(document.body.textContent).toContain('This worksheet is empty.');
+    expect(document.body.textContent).toContain('charts');
   });
 
   it('integrates with the shared overlay and disposes the prior spreadsheet lifecycle', async () => {

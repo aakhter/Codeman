@@ -17,6 +17,8 @@ async function workbookBytes(): Promise<Buffer> {
   summary.getCell('B2').value = 42;
   summary.mergeCells('A3:C3');
   summary.getCell('A3').value = 'Merged cells';
+  summary.getCell('A100').value = 'Far row';
+  summary.getCell('Z1').value = 'Far column';
   const details = workbook.addWorksheet('Details');
   details.getCell('A1').value = 'Second sheet';
   return Buffer.from(await workbook.xlsx.writeBuffer());
@@ -81,6 +83,38 @@ describe('spreadsheet preview browser boundary', () => {
     await page.goto('https://codeman.test/');
     await expect.poll(() => page.locator('.spreadsheet-sheet-tab').count()).toBe(2);
     await expect.poll(() => page.locator('.spreadsheet-cell', { hasText: 'Local workbook' }).count()).toBe(1);
+    const initialGeometry = await page.locator('.spreadsheet-grid').evaluate((grid) => {
+      const cell = grid.querySelector('.spreadsheet-cell');
+      if (!cell) throw new Error('Missing rendered spreadsheet cell');
+      const gridRect = grid.getBoundingClientRect();
+      const cellRect = cell.getBoundingClientRect();
+      return { left: cellRect.left - gridRect.left, top: cellRect.top - gridRect.top };
+    });
+    expect(initialGeometry.left).toBeGreaterThanOrEqual(36);
+    expect(initialGeometry.top).toBeGreaterThanOrEqual(20);
+    await page.locator('.spreadsheet-grid').evaluate((grid) => {
+      grid.scrollTop = 400;
+      grid.scrollLeft = 400;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    await expect
+      .poll(() =>
+        page.locator('.spreadsheet-grid').evaluate((grid) => {
+          const bounds = grid.getBoundingClientRect();
+          return [...grid.querySelectorAll('.spreadsheet-row-heading, .spreadsheet-column-heading')].filter(
+            (heading) => {
+              const rect = heading.getBoundingClientRect();
+              return (
+                rect.right > bounds.left &&
+                rect.left < bounds.right &&
+                rect.bottom > bounds.top &&
+                rect.top < bounds.bottom
+              );
+            }
+          ).length;
+        })
+      )
+      .toBeGreaterThan(0);
     await page.getByRole('tab', { name: 'Details' }).click();
     await expect.poll(() => page.locator('.spreadsheet-cell', { hasText: 'Second sheet' }).count()).toBe(1);
     expect(await page.locator('.spreadsheet-grid').evaluate((element) => getComputedStyle(element).overflow)).toBe(

@@ -46,6 +46,14 @@ describe('spreadsheet XLSX core', () => {
     expect(() => core.inspectZipDirectory(zip)).toThrowError(/ZIP64/i);
   });
 
+  it('rejects divergent local-header and central-directory entry names', () => {
+    const zip = workbookZip();
+    const localNameLength = new DataView(zip.buffer, zip.byteOffset, zip.byteLength).getUint16(26, true);
+    expect(localNameLength).toBeGreaterThan(0);
+    zip[30] = zip[30] === 120 ? 121 : 120;
+    expect(() => core.inspectZipDirectory(zip)).toThrowError(/names do not match/i);
+  });
+
   it('uses actual streamed output for entry, total, ratio, and XML-count limits', () => {
     const inflated = 'x'.repeat(20_000);
     const bomb = fflate.zipSync({ 'xl/worksheets/sheet1.xml': fflate.strToU8(inflated) }, { level: 9 });

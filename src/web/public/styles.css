@@ -15652,6 +15652,17 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   height: 20px;
 }
 
+.spreadsheet-empty-sheet {
+  position: sticky;
+  top: 20px;
+  left: 36px;
+  z-index: 3;
+  width: max-content;
+  padding: 24px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+}
+
 .spreadsheet-cell {
   position: absolute;
   min-width: 0;

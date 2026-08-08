@@ -34,6 +34,9 @@ jobs:
       - name: Frontend JS syntax check
         run: npm run check:frontend-syntax
 
+      - name: Public asset integrity check
+        run: npm run check:public-assets
+
       - name: Format check
         run: npm run format:check
 

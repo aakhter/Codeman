@@ -3,10 +3,12 @@
 (function initSpreadsheetPreview(global) {
   'use strict';
 
-  const SPREADSHEET_ASSET_VERSION = 'a4efc07f98e5';
+  const SPREADSHEET_ASSET_VERSION = '32da4a7e606d';
   const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
   const DEFAULT_TIMEOUT_MS = 20000;
   const MAX_SCROLL_PX = 8000000;
+  const ROW_HEADING_WIDTH = 36;
+  const COLUMN_HEADING_HEIGHT = 20;
   const assets = Object.freeze({
     version: SPREADSHEET_ASSET_VERSION,
     workerUrl: `/spreadsheet-preview-worker.js?v=${SPREADSHEET_ASSET_VERSION}`,
@@ -41,6 +43,7 @@
     let spacer = null;
     let cellsLayer = null;
     let headingsLayer = null;
+    let emptySheetState = null;
     let resizeObserver = null;
     let scaleX = 1;
     let scaleY = 1;
@@ -97,11 +100,21 @@
       );
       const r1 = Math.max(
         1,
-        axisIndex(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, grid.scrollTop * scaleY) - 2
+        axisIndex(
+          sheet.rows,
+          sheet.defaultRowHeight,
+          sheet.rowOverrides,
+          Math.max(0, grid.scrollTop - COLUMN_HEADING_HEIGHT) * scaleY
+        ) - 2
       );
       const c1 = Math.max(
         1,
-        axisIndex(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, grid.scrollLeft * scaleX) - 2
+        axisIndex(
+          sheet.cols,
+          sheet.defaultColumnWidth,
+          sheet.columnOverrides,
+          Math.max(0, grid.scrollLeft - ROW_HEADING_WIDTH) * scaleX
+        ) - 2
       );
       const r2 = Math.min(
         sheet.rows,
@@ -109,7 +122,7 @@
           sheet.rows,
           sheet.defaultRowHeight,
           sheet.rowOverrides,
-          (grid.scrollTop + (grid.clientHeight || 500)) * scaleY
+          Math.max(0, grid.scrollTop - COLUMN_HEADING_HEIGHT + (grid.clientHeight || 500)) * scaleY
         ) + 2
       );
       const c2 = Math.min(
@@ -118,7 +131,7 @@
           sheet.cols,
           sheet.defaultColumnWidth,
           sheet.columnOverrides,
-          (grid.scrollLeft + (grid.clientWidth || 800)) * scaleX
+          Math.max(0, grid.scrollLeft - ROW_HEADING_WIDTH + (grid.clientWidth || 800)) * scaleX
         ) + 2
       );
       latestRequestId += 1;
@@ -129,6 +142,16 @@
         sheetId: String(activeSheetId),
         range: { r1, c1, r2, c2 },
       });
+    }
+
+    function renderWarnings(tileWarnings) {
+      const notice = container.querySelector('.spreadsheet-preview-notice');
+      if (!notice) return;
+      const warnings = [...(metadata?.warnings || []), ...(tileWarnings || [])];
+      notice.hidden = warnings.length === 0;
+      const warningLabel =
+        global.codemanT?.('Some workbook features are not shown') || 'Some workbook features are not shown';
+      notice.textContent = warnings.length ? `${warningLabel}: ${warnings.join(', ')}` : '';
     }
 
     function renderTile(tile) {
@@ -154,8 +177,8 @@
         element.dataset.row = String(cell.row);
         element.dataset.col = String(cell.col);
         element.textContent = String(cell.text ?? '');
-        element.style.top = `${axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, cell.row) / scaleY}px`;
-        element.style.left = `${axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, cell.col) / scaleX}px`;
+        element.style.top = `${COLUMN_HEADING_HEIGHT + axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, cell.row) / scaleY}px`;
+        element.style.left = `${ROW_HEADING_WIDTH + axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, cell.col) / scaleX}px`;
         const merge = mergeByAnchor.get(`${cell.row}:${cell.col}`);
         const finalRow = merge?.r2 || cell.row;
         const finalCol = merge?.c2 || cell.col;
@@ -167,7 +190,8 @@
         const heading = document.createElement('div');
         heading.className = 'spreadsheet-row-heading';
         heading.textContent = String(row);
-        heading.style.top = `${axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, row) / scaleY}px`;
+        heading.style.top = `${COLUMN_HEADING_HEIGHT + axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, row) / scaleY}px`;
+        heading.style.left = `${grid.scrollLeft}px`;
         headingsLayer.appendChild(heading);
       }
       for (let col = latestRange.c1; col <= latestRange.c2 && col < latestRange.c1 + 100; col += 1) {
@@ -177,17 +201,11 @@
         for (let value = col; value > 0; value = Math.floor((value - 1) / 26))
           label = String.fromCharCode(65 + ((value - 1) % 26)) + label;
         heading.textContent = label;
-        heading.style.left = `${axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, col) / scaleX}px`;
+        heading.style.left = `${ROW_HEADING_WIDTH + axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, col) / scaleX}px`;
+        heading.style.top = `${grid.scrollTop}px`;
         headingsLayer.appendChild(heading);
       }
-      const notice = container.querySelector('.spreadsheet-preview-notice');
-      if (notice) {
-        const warnings = [...(metadata.warnings || []), ...(tile.warnings || [])];
-        notice.hidden = warnings.length === 0;
-        const warningLabel =
-          global.codemanT?.('Some workbook features are not shown') || 'Some workbook features are not shown';
-        notice.textContent = warnings.length ? `${warningLabel}: ${warnings.join(', ')}` : '';
-      }
+      renderWarnings(tile.warnings);
     }
 
     function selectSheet(sheetId) {
@@ -209,9 +227,11 @@
         const logicalWidth = axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, sheet.cols + 1);
         scaleY = Math.max(1, logicalHeight / MAX_SCROLL_PX);
         scaleX = Math.max(1, logicalWidth / MAX_SCROLL_PX);
-        spacer.style.height = `${Math.min(MAX_SCROLL_PX, logicalHeight)}px`;
-        spacer.style.width = `${Math.min(MAX_SCROLL_PX, logicalWidth)}px`;
+        spacer.style.height = `${COLUMN_HEADING_HEIGHT + Math.min(MAX_SCROLL_PX, logicalHeight)}px`;
+        spacer.style.width = `${ROW_HEADING_WIDTH + Math.min(MAX_SCROLL_PX, logicalWidth)}px`;
       }
+      if (emptySheetState) emptySheetState.hidden = Boolean(sheet?.rows && sheet?.cols);
+      renderWarnings([]);
       requestTile();
     }
 
@@ -255,6 +275,10 @@
       const notice = document.createElement('div');
       notice.className = 'spreadsheet-preview-notice';
       notice.hidden = true;
+      emptySheetState = document.createElement('div');
+      emptySheetState.className = 'spreadsheet-empty-sheet';
+      emptySheetState.textContent = 'This worksheet is empty.';
+      emptySheetState.hidden = true;
       grid = document.createElement('div');
       grid.className = 'spreadsheet-grid';
       grid.setAttribute('data-i18n-skip', '');
@@ -264,7 +288,7 @@
       cellsLayer.className = 'spreadsheet-cells';
       headingsLayer = document.createElement('div');
       headingsLayer.className = 'spreadsheet-headings';
-      grid.append(spacer, cellsLayer, headingsLayer);
+      grid.append(spacer, cellsLayer, headingsLayer, emptySheetState);
       grid.addEventListener(
         'scroll',
         () => {

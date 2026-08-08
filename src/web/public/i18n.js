@@ -180,6 +180,7 @@
     Warning: '警告',
     'Loading spreadsheet…': '正在加载电子表格…',
     'This workbook has no visible worksheets.': '此工作簿没有可见的工作表。',
+    'This worksheet is empty.': '此工作表为空。',
     'This workbook is too large to preview (10 MB limit).': '此工作簿过大，无法预览（上限为 10 MB）。',
     'Spreadsheet preview timed out.': '电子表格预览超时。',
     'Spreadsheet preview is unavailable.': '电子表格预览不可用。',

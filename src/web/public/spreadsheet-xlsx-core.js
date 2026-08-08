@@ -73,12 +73,22 @@
       const nameLength = u16(bytes, cursor + 28);
       const extraLength = u16(bytes, cursor + 30);
       const commentLength = u16(bytes, cursor + 32);
+      const localHeaderOffset = u32(bytes, cursor + 42);
       if (compressedSize === 0xffffffff || declaredSize === 0xffffffff)
         fail('zip64', 'ZIP64 entries are not supported');
       const end = cursor + 46 + nameLength + extraLength + commentLength;
       if (end > eocd) fail('malformed', 'Malformed XLSX entry bounds');
       const name = new TextDecoder().decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
-      entries.push({ name, compressedSize, declaredSize });
+      if (localHeaderOffset + 30 > directoryOffset || u32(bytes, localHeaderOffset) !== 0x04034b50) {
+        fail('malformed', 'Malformed XLSX local file header');
+      }
+      const localNameLength = u16(bytes, localHeaderOffset + 26);
+      const localExtraLength = u16(bytes, localHeaderOffset + 28);
+      const localNameEnd = localHeaderOffset + 30 + localNameLength;
+      if (localNameEnd + localExtraLength > directoryOffset) fail('malformed', 'Malformed XLSX local entry bounds');
+      const localName = new TextDecoder().decode(bytes.subarray(localHeaderOffset + 30, localNameEnd));
+      if (localName !== name) fail('malformed', 'XLSX local and central directory names do not match');
+      entries.push({ name, compressedSize, declaredSize, localHeaderOffset });
       cursor = end;
     }
     return { entries };
