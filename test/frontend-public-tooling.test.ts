@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { format } from 'prettier';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = resolve(import.meta.dirname, '..');
@@ -18,6 +19,14 @@ describe('frontend public asset tooling', () => {
     const appJs = readFileSync(resolve(repoRoot, 'src/web/public/app.js'));
 
     expect(appJs.includes(0)).toBe(false);
+  });
+
+  it('keeps the public stylesheets syntactically valid', async () => {
+    for (const filename of ['styles.css', 'mobile.css']) {
+      const css = readFileSync(resolve(repoRoot, 'src/web/public', filename), 'utf8');
+
+      await expect(format(css, { parser: 'css', filepath: filename })).resolves.toEqual(expect.any(String));
+    }
   });
 
   it('uses the same message wrapper for brief and full response views', () => {
