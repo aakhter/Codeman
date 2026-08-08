@@ -148,13 +148,12 @@ const MobileDetection = {
   /** Set --app-height CSS variable from visual viewport.
    *  On iPad Safari with tabs, 100vh extends behind the tab bar.
    *  visualViewport.height reflects the actual visible area.
-   *  Skips when virtual keyboard is open — KeyboardHandler manages
-   *  layout via translateY + paddingBottom; shrinking --app-height
-   *  would double-count and leave zero space for the terminal. */
+   *  COD-283: always update --app-height, even with keyboardVisible, so dvh/app-height stays synced.
+   *  KeyboardHandler still applies translateY/paddingBottom on top. */
   updateAppHeight() {
-    if (typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible) return;
-    const vh = window.visualViewport?.height || window.innerHeight;
-    document.documentElement.style.setProperty('--app-height', `${vh}px`);
+    const vv = window.visualViewport;
+    const h = vv ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty('--app-height', `${h}px`);
     if (typeof logViewport === 'function') logViewport('updateAppHeight');
   },
 
@@ -505,15 +504,16 @@ const KeyboardHandler = {
    */
   _shrinkPaddingToFit() {
     try {
-      const container = document.getElementById('terminalContainer');
+      const container = document.getElementById('terminalContainer') || document.querySelector('.terminal-container');
       const main = document.querySelector('.main');
       if (!container || !main || typeof app === 'undefined' || !app.terminal) return;
       const cellH = app.terminal._core?._renderService?.dimensions?.css?.cell?.height;
       if (!cellH) return;
-      const gap = container.clientHeight - app.terminal.rows * cellH;
-      if (gap > 0 && gap < cellH) {
+      const gap = container.clientHeight - Math.floor(container.clientHeight / cellH) * cellH;
+      if (gap > 2 && gap < cellH) {
         const currentPadding = parseInt(main.style.paddingBottom) || 0;
         main.style.paddingBottom = Math.max(0, currentPadding - gap) + 'px';
+        container.style.paddingBottom = `${gap}px`;
         if (app.fitAddon)
           try {
             app.fitAddon.fit();

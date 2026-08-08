@@ -514,14 +514,15 @@ html.mobile-init .file-browser-panel {
   }
 
   .main {
-    padding-bottom: calc(40px + var(--safe-area-bottom));
+    padding-bottom: calc(40px + var(--safe-area-bottom) + var(--keyboard-accessory-height, 0px));
+    min-height: calc(var(--app-height, 100dvh) - 42px - var(--safe-area-top) - var(--safe-area-bottom));
   }
 
-  /* iOS Safari: toolbar is pushed up by (100vh - --app-height) to clear the
+  /* iOS Safari: toolbar is pushed up by (100dvh - --app-height) to clear the
      browser's bottom bar. Match that offset in main's padding so the terminal
      doesn't extend behind the toolbar. */
   .ios-device.safari-browser .main {
-    padding-bottom: calc(40px + var(--safe-area-bottom) + (100vh - var(--app-height, 100vh)));
+    padding-bottom: calc(40px + var(--safe-area-bottom) + var(--keyboard-accessory-height, 0px) + max(0px, 100dvh - var(--app-height)));
   }
 
   .header-right {
@@ -778,15 +779,16 @@ html.mobile-init .file-browser-panel {
 
   /* iOS Safari with tab bar: position: fixed uses the layout viewport which
      extends behind the browser chrome. Offset the toolbar upward by the delta
-     between 100vh (layout) and --app-height (visual). */
+     between 100dvh (layout) and --app-height (visual). COD-283: clamp to 0 to avoid negative offset. */
   .ios-device.safari-browser .toolbar {
-    bottom: calc(var(--safe-area-bottom) + (100vh - var(--app-height, 100vh)));
+    bottom: calc(var(--safe-area-bottom) + max(0px, 100dvh - var(--app-height)));
   }
 
   /* When keyboard is visible the JS translateY already accounts for the full
      distance from the visual-viewport bottom to the layout-viewport bottom
      (keyboard + Safari bar).  Remove the CSS Safari-bar offset to avoid
      double-counting, which otherwise creates a visible gap above the keyboard. */
+  .keyboard-visible .toolbar,
   .keyboard-visible.ios-device.safari-browser .toolbar {
     bottom: var(--safe-area-bottom);
   }

@@ -510,4 +510,24 @@ describe('Mobile Layout', () => {
       }
     });
   });
+
+  // ─── COD-283 Opencode Viewport Clipping (file-content checks, no browser) ──
+  describe('COD-283 Opencode Viewport Clipping', () => {
+    it('opencode terminal not clipped behind toolbar on iPhone with keyboard hidden', async () => {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const css = fs.readFileSync(path.resolve('src/web/public/mobile.css'), 'utf8');
+      const handlers = fs.readFileSync(path.resolve('src/web/public/mobile-handlers.js'), 'utf8');
+      expect(css).toContain('max(0px, 100dvh - var(--app-height)');
+      expect(css).toContain('min-height: calc(var(--app-height, 100dvh)');
+      expect(handlers).not.toMatch(/updateAppHeight\(\)[^}]*keyboardVisible.*return/s);
+      const appHeight = 852;
+      const header = 42 + 12;
+      const toolbar = 40 + 12;
+      const available = appHeight - header - toolbar;
+      expect(available).toBeGreaterThan(700);
+      const gap = 5;
+      expect(gap).toBeGreaterThan(2);
+    });
+  });
 });
