@@ -100,9 +100,12 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
 
     expect(constructorState).toBeGreaterThan(-1);
     expect(fetchStart).toBeGreaterThan(selectStart);
-    expect(fetchBlock).toContain('const requestFullHistory');
-    expect(fetchBlock).toContain('!this._sessionsLoadedSincePageOpen.has(sessionId)');
-    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal`');
+    // Upstream #205 replaced the per-page-open flag with a per-session Set and
+    // an explicit ?full=1; the invariant (first load of each session this page
+    // load gets the FULL tmux scrollback) is unchanged.
+    expect(fetchBlock).toContain('const useFullHistory');
+    expect(fetchBlock).toContain('!this._fullHistoryLoaded.has(sessionId)');
+    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?full=1`');
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
     expect(fetchBlock).toContain('this._sessionsLoadedSincePageOpen.add(sessionId)');
   });
@@ -110,7 +113,7 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
   it('does not preserve a restored Codex snapshot over a full-history replay', () => {
     const source = appSource();
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
-    const fullHistoryDecision = source.indexOf('const requestFullHistory', selectStart);
+    const fullHistoryDecision = source.indexOf('const useFullHistory', selectStart);
     const preserveDecision = source.indexOf('const preserveSnapshotScrollback', fullHistoryDecision);
     const rewriteDecision = source.indexOf('const needsRewrite', preserveDecision);
     const block = source.slice(fullHistoryDecision, rewriteDecision + 220);
@@ -119,7 +122,7 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     expect(preserveDecision).toBeGreaterThan(fullHistoryDecision);
     // The call site forwards requestFullHistory into the extracted predicate
     // (COD-92) rather than inlining a `!requestFullHistory` guard itself.
-    expect(block).toContain('requestFullHistory,');
+    expect(block).toContain('requestFullHistory: useFullHistory,');
     expect(block).toContain('preserveSnapshotScrollback');
 
     // Behavioural: a full-history replay must win even for a busy codex

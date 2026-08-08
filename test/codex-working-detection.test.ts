@@ -281,11 +281,11 @@ describe('checkpoint prompt observations', () => {
 
   it('does not treat checkpoint clear/new commands as viewer history submissions', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
-    expect(session.codexLastSubmitAt).toBe(0);
+    expect(session.lastSubmitAt).toBe(0);
     await session.writeCheckpointViaMux('/clear\r');
-    expect(session.codexLastSubmitAt).toBe(0);
+    expect(session.lastSubmitAt).toBe(0);
     await session.writeCheckpointViaMux('/new\r');
-    expect(session.codexLastSubmitAt).toBe(0);
+    expect(session.lastSubmitAt).toBe(0);
     await session.stop();
   });
 

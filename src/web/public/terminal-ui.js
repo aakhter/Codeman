@@ -30,6 +30,44 @@
   // short window, only the app's synthetic tap-to-position mouse event should
   // reach xterm.
   const TOUCH_COMPAT_MOUSE_SUPPRESS_MS = 450;
+  // Escape sequences occupy no terminal cells, so they must come out before a
+  // captured line's WIDTH can be measured (_estimateReplayRows). Covers OSC,
+  // CSI, charset designators and the short escapes tmux emits; deliberately
+  // approximate — this feeds a size comparison, not a renderer.
+  // eslint-disable-next-line no-control-regex
+  const REPLAY_ESCAPE_RE =
+    /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=!]*[ -/]*[@-~]|\x1b[()#][0-9A-Za-z]|\x1b[=>78M]/g;
+  // PageUp / PageDown as xterm.js encodes them. Used as the LAST-RESORT scroll
+  // gesture for a repaint-mode CLI whose local buffer holds no scrollback
+  // (_maybePageCliTranscript).
+  const KEY_PAGE_UP = '\x1b[5~';
+  const KEY_PAGE_DOWN = '\x1b[6~';
+  // Wheel/touch travel (in lines) that adds up to one PageUp/PageDown. Half a
+  // screen rather than a full one: the page key always jumps a whole screen, so
+  // a 1:1 mapping made the fallback feel unreachably slow with a discrete mouse
+  // wheel (Firefox reports 3 lines a notch → 12 notches per page). Overshooting
+  // the finger is the right trade against a gesture that otherwise does nothing.
+  const PAGE_KEY_SCREEN_FRACTION = 0.5;
+  // Bound on page keys emitted from one gesture batch, mirroring the SGR tick
+  // cap: a fling must not build a backlog that keeps paging after it stops.
+  const PAGE_KEY_MAX_PER_BATCH = 3;
+  // Composer navigation keys as xterm.js encodes user keystrokes: plain and
+  // modified arrows (CSI A-D, CSI 1;mA-D, SS3 A-D), Home/End (CSI H/F, SS3
+  // H/F, CSI 1~/4~), Insert/Delete/PgUp/PgDn (CSI 2~/3~/5~/6~, optional
+  // modifier). Deliberately EXCLUDES terminal query responses that also
+  // arrive via onData (DA `\x1b[?1;2c`, CPR `\x1b[12;34R`) and function
+  // keys, so only genuine cursor/editing keys trigger the local-echo flush.
+  // eslint-disable-next-line no-control-regex
+  const COMPOSER_NAV_KEY_PATTERN = /^\x1b(?:\[(?:[ABCDHF]|1;[2-8][ABCDHF]|[1-8](?:;[2-8])?~)|O[ABCDHF])$/;
+  // Prefix xterm.js puts on terminal.paste() payloads while the application
+  // has bracketed-paste mode (DECSET 2004) enabled. Codex, Claude Code and
+  // tmux all enable it, so browser pastes arrive as one onData chunk of
+  // `\x1b[200~<text>\x1b[201~`.
+  const BRACKETED_PASTE_START = '\x1b[200~';
+
+  function isComposerNavKey(data) {
+    return COMPOSER_NAV_KEY_PATTERN.test(data);
+  }
 
   function isTerminalQueryResponse(data) {
     return TERMINAL_QUERY_RESPONSE_PATTERN.test(data) || TERMINAL_OSC_RESPONSE_PATTERN.test(data);
@@ -67,8 +105,15 @@
   global.CodemanTerminalInput = {
     isTerminalQueryResponse,
     shouldSuppressTerminalQueryResponse,
+    isComposerNavKey,
+    BRACKETED_PASTE_START,
     USER_SCROLL_STICKY_SUPPRESS_MS,
     TOUCH_COMPAT_MOUSE_SUPPRESS_MS,
+    REPLAY_ESCAPE_RE,
+    KEY_PAGE_UP,
+    KEY_PAGE_DOWN,
+    PAGE_KEY_SCREEN_FRACTION,
+    PAGE_KEY_MAX_PER_BATCH,
   };
   global.CODEMAN_XTERM_THEMES = CODEMAN_XTERM_THEMES;
   global.codemanCurrentXtermTheme = currentXtermTheme;
@@ -691,20 +736,57 @@ Object.assign(CodemanApp.prototype, {
     // ignores wheel reports); older versions DO capture wheel as option
     // navigation, so they keep the local wheel.
     // Shift+wheel always scrolls xterm's local scrollback (Codeman's restored
-    // history lives there), and once the viewport left the bottom the wheel
-    // stays local until the user scrolls back down — so both scrollbacks stay
-    // reachable without a mode switch. COD-187 live-mirror tabs retain first
-    // ownership of scroll intent so an up-scroll can open their frozen history.
-    // CAPTURE phase + stopPropagation makes this funnel the single wheel owner.
+    // history lives there); the plain wheel stays on the CLI's transcript for
+    // those modes regardless of scroll position, so the CLI's input box never
+    // slides off the screen (see _shouldForwardWheelToApp).
+    //
+    // CAPTURE phase, deliberately, and Codeman owns the scroll. xterm's
+    // viewport is a vscode-style ScrollableElement that consumes wheel events
+    // itself (preventDefault + stopPropagation) whenever it believes a
+    // scrollbar exists, does NOT consult attachCustomWheelEventHandler, and —
+    // measured on the live instance — goes DEAF after terminal.reset(): a tab
+    // switch or full-history replay leaves its scroll dimensions stale, after
+    // which wheel events neither scroll nor propagate reliably. A bubble-phase
+    // listener here therefore never fired once local scrollback existed
+    // (measured: _shouldForwardWheelToApp call count stayed 0 while xterm
+    // scrolled), and after a tab switch NOTHING scrolled at all — the "input
+    // box scrolls up then it fights", "works at first, breaks after a tab
+    // switch" reports on #205.
+    //
+    // So: capture runs ancestors-first; this handler sees every wheel first
+    // and stops propagation, keeping xterm's scroller out of it entirely.
+    // Local scrolling goes through terminal.scrollLines() — buffer-level, so
+    // it keeps working after resets — with our own deltaMode normalization
+    // (_wheelScrollLines) covering Firefox's line-unit wheels. Two cases still
+    // belong to xterm and are passed through untouched:
+    //  - mouseTrackingMode active: xterm's own encoder forwards the wheel to
+    //    the PTY (htop/vim with mouse on in a shell pane);
+    //  - alternate buffer (direct-PTY fallback running vim/less): xterm's
+    //    alt-scroll handling converts the wheel to cursor keys, which is what
+    //    those apps expect.
     let wheelRaf = 0;
     let wheelDelta = 0;
     container.addEventListener(
       'wheel',
       (ev) => {
+        // A foreground TUI in the pane claims the wheel before anything else.
         if (this._handleForegroundTuiWheel(ev)) return;
+        const trackingMode = this.terminal?.modes?.mouseTrackingMode;
+        if (trackingMode && trackingMode !== 'none') return;
+        if (this.terminal?.buffer?.active?.type === 'alternate') return;
         ev.preventDefault();
         ev.stopPropagation();
-        const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
+        // COD-187 live-mirror tabs retain first ownership of scroll intent so an
+        // up-scroll can open their frozen history instead of being forwarded.
+        const isLiveMirror =
+          this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
+        // COD-283: iPhone opencode coalesces the wheel into one rAF-batched SGR
+        // burst; forwarding every tiny delta separately stuttered badly there.
+        const isOpencodeMobile =
+          this._session?.mode === 'opencode' &&
+          typeof MobileDetection !== 'undefined' &&
+          MobileDetection.isMobile?.() &&
+          MobileDetection.isMobile();
         if (isOpencodeMobile) {
           wheelDelta += ev.deltaY;
           if (wheelRaf) return;
@@ -713,7 +795,6 @@ Object.assign(CodemanApp.prototype, {
             wheelRaf = 0;
             wheelDelta = 0;
             if (!lines) return;
-            const isLiveMirror = this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
             if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
               this._sendSyntheticSgrWheel(ev.clientX, ev.clientY, lines);
               return;
@@ -722,14 +803,28 @@ Object.assign(CodemanApp.prototype, {
           });
           return;
         }
-        const lines = this._wheelScrollLines(ev);
-        const isLiveMirror =
-          this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
         if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
-          this._sendSyntheticSgrWheel(ev.clientX, ev.clientY, lines);
+          this._logScrollRouting('forward-sgr');
+          this._forwardScrollToApp(ev.clientX, ev.clientY, this._wheelScrollLines(ev));
           return;
         }
-        this._handleUserScrollIntent(lines);
+        // Local scrolling accumulates FRACTIONAL lines: a macOS trackpad emits
+        // a stream of tiny pixel deltas, and rounding each one to a whole line
+        // (the ±1 fallback) made slow drags scroll faster than the finger.
+        const lines = this._wheelScrollLinesFloat(ev);
+        // …unless there is no local scrollback to scroll, in which case page the
+        // CLI's own transcript instead of doing nothing (_maybePageCliTranscript).
+        if (this._maybePageCliTranscript(ev, lines)) return;
+        // COD-187: mirror tabs and the frozen history view route through the
+        // intent funnel (an up-scroll there OPENS history rather than scrolling);
+        // every other session takes the eased local path from #205.
+        if (this._isMirrorSession?.(this.activeSessionId) || this._viewMode === 'history') {
+          this._handleUserScrollIntent(lines);
+          return;
+        }
+        this._logScrollRouting('local-scrollback');
+        this._noteTerminalUserScroll(lines);
+        this._smoothScrollBy(lines);
       },
       { passive: false, capture: true }
     );
@@ -745,8 +840,24 @@ Object.assign(CodemanApp.prototype, {
       { passive: false, capture: true }
     );
 
-    // Touch scrolling — COD-283: native-friendly for opencode on iPhone
-    // (pan-y allows native momentum), lower threshold 8px + rAF batch.
+    // Touch scrolling — use terminal.scrollLines() for all devices.
+    // xterm.js DOM renderer doesn't populate xterm-viewport's scroll area,
+    // so native CSS scrolling (overflow-y: scroll + touch-action: pan-y)
+    // has nothing to scroll. Instead, convert touch deltas into scrollLines()
+    // calls, matching the wheel handler above, including the forwarding
+    // branch: for the sessions whose wheel goes to the CLI's own transcript
+    // (_shouldForwardWheelToApp), a touch drag must go there too, or every
+    // phone/tablet swipe scrolls the local buffer of stale repaint frames and
+    // drags the CLI's pinned input box off the screen (issue #205's mobile
+    // half). Same gate, so Shift has no touch analog but the local-scrollback
+    // opt-out setting and the CLI-version gate apply to touch exactly as they
+    // do to the wheel — including the PageUp/PageDown fallback the wheel uses
+    // when that gate is false and there is no local scrollback to scroll
+    // (_maybePageCliTranscript), which is what keeps a swipe from being a
+    // complete no-op on a phone.
+    //
+    // COD-283: opencode on iPhone additionally opts into native momentum
+    // (touch-action: pan-y) with a lower 8px threshold and rAF batching.
     {
       const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
       if (isOpencodeMobile) {
@@ -781,8 +892,20 @@ Object.assign(CodemanApp.prototype, {
           // Momentum phase — convert pixel velocity to lines
           const lines = Math.round(velocity / cellHeight());
           if (lines !== 0) {
-            const intent = this._handleUserScrollIntent(lines);
-            if (intent === 'entered-history' || intent === 'swallowed') velocity = 0;
+            // COD-187: mirror tabs and the frozen history view own scroll
+            // intent (an up-flick OPENS history), so they bypass the #205
+            // forward/page routing below.
+            if (this._isMirrorSession?.(this.activeSessionId) || this._viewMode === 'history') {
+              const intent = this._handleUserScrollIntent(lines);
+              if (intent === 'entered-history' || intent === 'swallowed') velocity = 0;
+            } else if (this._shouldForwardWheelToApp({ shiftKey: false })) {
+              // Flick momentum keeps feeding the CLI's transcript from the last
+              // touch point; the 40ms coalescer batches the per-frame reports.
+              this._forwardScrollToApp(touchLastX, touchLastY, lines);
+            } else if (!this._maybePageCliTranscript({ shiftKey: false }, lines)) {
+              this.terminal.scrollLines(lines);
+              this._maybeLoadMoreHistoryOnScroll(lines);
+            }
           }
           velocity *= 0.92;
           scrollFrame = requestAnimationFrame(scrollLoop);
@@ -881,7 +1004,21 @@ Object.assign(CodemanApp.prototype, {
             const ch = cellHeight();
             const lines = Math.trunc(pixelAccum / ch);
             if (lines !== 0) {
-              const intent = this._handleUserScrollIntent(lines);
+              // COD-187: mirror tabs and the frozen history view own scroll
+              // intent (an up-drag OPENS history); everything else takes the
+              // #205 forward/page/local routing.
+              let intent = null;
+              if (this._isMirrorSession?.(this.activeSessionId) || this._viewMode === 'history') {
+                intent = this._handleUserScrollIntent(lines);
+              } else if (this._shouldForwardWheelToApp({ shiftKey: false })) {
+                this._logScrollRouting('forward-sgr');
+                this._forwardScrollToApp(touchLastX, touchLastY, lines);
+              } else if (!this._maybePageCliTranscript({ shiftKey: false }, lines)) {
+                this._logScrollRouting('local-scrollback');
+                this._noteTerminalUserScroll(lines);
+                this.terminal.scrollLines(lines);
+                this._maybeLoadMoreHistoryOnScroll(lines);
+              }
               pixelAccum -= lines * ch;
               if (intent === 'entered-history') {
                 velocity = 0;
@@ -1136,11 +1273,23 @@ Object.assign(CodemanApp.prototype, {
         }
         this._lastTerminalData = { data, time: performance.now() };
 
+        // ── Local Echo Pass-through ──
+        // After a composer nav key (arrow/Home/End/Delete) the real cursor may
+        // sit mid-text, where the overlay's append-only buffering would corrupt
+        // both the preview and the submitted text. Such sessions are handed
+        // back to plain PTY echo until Enter or Ctrl+C submits/cancels the
+        // composer line (see the nav-key branch below).
+        const echoPassthrough =
+          this._localEchoEnabled && this._echoPassthroughSessions?.has(this.activeSessionId);
+        if (echoPassthrough && (data === '\r' || data === '\x03')) {
+          this._echoPassthroughSessions.delete(this.activeSessionId);
+        }
+
         // ── Local Echo Mode ──
         // When enabled, keystrokes are buffered locally in the overlay for
         // instant visual feedback.  Nothing is sent to the PTY until Enter
         // (or a control char) is pressed — avoids out-of-order char delivery.
-        if (this._localEchoEnabled) {
+        if (this._localEchoEnabled && !echoPassthrough) {
           if (data === '\x7f') {
             const source = this._localEchoOverlay?.removeChar();
             if (source === 'flushed') {
@@ -1157,9 +1306,16 @@ Object.assign(CodemanApp.prototype, {
               }
               this._pendingInput += data;
               flushInput();
+            } else if (source === false) {
+              // Nothing pending, nothing flushed, nothing detected. The
+              // composer may still hold text the overlay cannot see (buffer
+              // detection is suppressed after a control-char flush), so
+              // forward the backspace instead of swallowing it (issue #218);
+              // an empty composer ignores it.
+              this._pendingInput += data;
+              flushInput();
             }
             // 'pending' = removed unsent text (no PTY backspace needed)
-            // false = nothing to remove (swallow the backspace)
             return;
           }
           if (/^[\r\n]+$/.test(data)) {
@@ -1201,6 +1357,41 @@ Object.assign(CodemanApp.prototype, {
             // Single-byte ESC (user pressing Escape) still falls through to
             // the control char handler below.
             if (data.length > 1 && data.charCodeAt(0) === 27) {
+              // Bracketed paste (terminal.paste() while DECSET 2004 is on):
+              // flush typed-but-unsent overlay text FIRST so the pasted block
+              // lands after it in the composer, not before it (issue #219).
+              // The paste sequence gets its own delayed write: Codex's
+              // paste-burst handling drops keystrokes that arrive in the SAME
+              // PTY read as a bracketed paste (verified against codex 0.147),
+              // mirroring the delayed \r in the Enter branch above.
+              if (data.startsWith(window.CodemanTerminalInput.BRACKETED_PASTE_START)) {
+                const hadPending = !!this._localEchoOverlay?.pendingText;
+                this._flushLocalEchoPending();
+                if (hadPending) {
+                  flushInput();
+                  setTimeout(() => {
+                    this._pendingInput += data;
+                    flushInput();
+                  }, 80);
+                } else {
+                  this._pendingInput += data;
+                  flushInput();
+                }
+                return;
+              }
+              // Composer nav keys (arrows, Home/End, Delete, PgUp/PgDn):
+              // flush unsent text so the key edits the real composer state,
+              // then hand the session to plain PTY echo until Enter/Ctrl+C.
+              // The cursor may now sit mid-text, where append-only buffering
+              // cannot track edits (issue #218).
+              if (window.CodemanTerminalInput.isComposerNavKey(data)) {
+                this._flushLocalEchoPending();
+                if (!this._echoPassthroughSessions) this._echoPassthroughSessions = new Set();
+                this._echoPassthroughSessions.add(this.activeSessionId);
+                this._pendingInput += data;
+                flushInput();
+                return;
+              }
               // Multi-byte escape sequence — forward to PTY without clearing
               // overlay/flushed state (terminal response, not user input)
               this._pendingInput += data;
@@ -2067,7 +2258,7 @@ Object.assign(CodemanApp.prototype, {
     }
     titleSpan.appendChild(document.createTextNode(s.name || s.firstPrompt || shortDir));
 
-    // Badge row: mode (claude/codex/opencode/gemini/shell) + a LIVE pill.
+    // Badge row: mode (claude/codex/opencode/gemini/antigravity/shell) + a LIVE pill.
     const badgeRow = document.createElement('div');
     badgeRow.className = 'history-item-badges';
     if (s.mode) {
@@ -2899,6 +3090,121 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /**
+   * Post-scroll companion to _noteTerminalUserScroll: hitting the TOP of the
+   * buffer while scrolling up is the user reaching for history the browser does
+   * not have, so pull the rest of tmux's scrollback (issue #205, see
+   * _maybeRefetchFullHistory). Must be called AFTER scrollLines(), since the
+   * check is on the resulting position, and it is deliberately not folded into
+   * _noteTerminalUserScroll for exactly that reason. Cheap: one integer compare
+   * per scroll event, and the pull itself is cooldown-guarded.
+   */
+  _maybeLoadMoreHistoryOnScroll(lines) {
+    if (lines >= 0) return;
+    if (this.terminal?.buffer?.active?.viewportY === 0) this._maybeRefetchFullHistory?.();
+  },
+
+  /**
+   * Rows a `?full=1` capture will occupy once written into xterm.
+   *
+   * tmux joins wrapped rows in that capture (`capture-pane -J`), so a long
+   * logical line re-wraps into several xterm rows on write and a bare newline
+   * count would undershoot; escape sequences occupy no cells and come out
+   * first. Approximate by construction (it ignores double-width glyphs), which
+   * is fine: the only consumer is a coarse size comparison
+   * (_replayWouldShrinkBuffer), and it runs once per cooldown-guarded re-pull.
+   */
+  _estimateReplayRows(text, cols) {
+    if (typeof text !== 'string' || !text) return 0;
+    const width = cols > 0 ? cols : 80;
+    const plain = text.replace(window.CodemanTerminalInput.REPLAY_ESCAPE_RE, '');
+    let rows = 0;
+    for (const line of plain.split('\n')) {
+      const cells = line.endsWith('\r') ? line.length - 1 : line.length;
+      rows += cells > width ? Math.ceil(cells / width) : 1;
+    }
+    return rows;
+  },
+
+  /**
+   * DOWNGRADE GUARD for the scroll-to-top re-pull (issue #205, round 2).
+   *
+   * `_maybeRefetchFullHistory` resets the terminal and rewrites it from the
+   * capture, which is a straight win when tmux holds more than the browser —
+   * the burst-repaint and tab-switch losses it was built for. But a repaint-mode
+   * CLI pane keeps NO tmux history of its own (`history_size≈0` measured for a
+   * Claude pane), so there the capture is roughly ONE frame while xterm may hold
+   * hundreds of rows of replayed frames. Rewriting then DESTROYS history
+   * mid-scroll: exactly the "goes back a limited amount, repeats blocks, gets
+   * worse when I reach the top" report from the 1.12.0 retest.
+   *
+   * So refuse when the capture is smaller, with a one-screen tolerance because
+   * both sides are estimates: `buffer.active.length` includes the blank rows
+   * below the last line, and _estimateReplayRows can only approximate wrapping.
+   * Only a capture that is worse by more than a full screen counts as a
+   * downgrade, which leaves every genuine recovery case untouched.
+   */
+  _replayWouldShrinkBuffer(capture) {
+    const term = this.terminal;
+    const rowsNow = term?.buffer?.active?.length || 0;
+    if (!rowsNow) return false;
+    const screen = term?.rows || 24;
+    return this._estimateReplayRows(capture, term?.cols) + screen < rowsNow;
+  },
+
+  /**
+   * Ease-out smooth scrolling for the local wheel path. The capture-phase
+   * wheel handler owns local scrolling (xterm's own smooth scroller is
+   * bypassed, see the listener comment), so without this every notch was an
+   * instant multi-line jump. Wheel deltas accumulate into a pending line
+   * count (fractional — see _wheelScrollLinesFloat) and drain ~22% per
+   * animation frame with a one-line floor, so a single notch starts with a
+   * gentle step and glides to an exact landing; more notches mid-glide deepen
+   * the pending count, which reads as natural acceleration. A sub-line
+   * residual stays pending until further input pushes it past a whole line
+   * (that is what makes slow trackpad drags track the finger). Direction
+   * reversals cancel arithmetically. The pending amount is dropped when the
+   * active session changes mid-glide — leftover momentum must never scroll
+   * the tab the user just switched to.
+   */
+  _smoothScrollBy(lines) {
+    if (!lines) return;
+    this._smoothScrollPending = (this._smoothScrollPending || 0) + lines;
+    this._smoothScrollSession = this.activeSessionId;
+    if (this._smoothScrollFrame) return;
+    const step = () => {
+      this._smoothScrollFrame = null;
+      const pending = this._smoothScrollPending || 0;
+      if (!pending) return;
+      if (this.activeSessionId !== this._smoothScrollSession) {
+        this._smoothScrollPending = 0;
+        return;
+      }
+      if (Math.abs(pending) < 1) return; // sub-line residual: wait for more input
+      const eased = pending * 0.22;
+      const move = pending > 0 ? Math.max(1, Math.floor(eased)) : Math.min(-1, Math.ceil(eased));
+      this._smoothScrollPending = pending - move;
+      this.terminal.scrollLines(move);
+      this._maybeLoadMoreHistoryOnScroll(move);
+      if (Math.abs(this._smoothScrollPending) >= 1) this._smoothScrollFrame = requestAnimationFrame(step);
+    };
+    this._smoothScrollFrame = requestAnimationFrame(step);
+  },
+
+  /**
+   * Hand a scroll gesture (wheel tick or touch drag, already converted to
+   * lines) to the CLI as synthetic SGR wheel reports. SGR coordinates address
+   * the LIVE screen (the bottom `rows` of the buffer), so a report computed
+   * from a scrolled-up viewport would hit-test a different row entirely, and
+   * forwarding while the user stares at stale scrollback looks like the
+   * gesture is dead. Snap back first: the gesture then always acts on what the
+   * CLI is drawing now.
+   */
+  _forwardScrollToApp(clientX, clientY, lines) {
+    if (!this._terminalViewportAtBottom()) this.terminal.scrollToBottom();
+    this._sendSyntheticSgrWheel(clientX, clientY, lines);
+  },
+
   _hasRecentUserScrollUp() {
     if (typeof this._lastUserScrollUpAt !== 'number') return false;
     return performance.now() - this._lastUserScrollUpAt < window.CodemanTerminalInput.USER_SCROLL_STICKY_SUPPRESS_MS;
@@ -2995,6 +3301,23 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Flush the local-echo overlay's unsent text into `_pendingInput` (no
+   * trailing Enter) and reset overlay + flushed-state tracking. Used before
+   * forwarding sequences that must arrive AFTER the typed text (bracketed
+   * paste, composer nav keys). The caller forwards its own sequence: nav keys
+   * ride the same write, pastes get a delayed second write because codex
+   * drops keys that share a PTY read with a bracketed paste.
+   */
+  _flushLocalEchoPending() {
+    const text = this._localEchoOverlay?.pendingText || '';
+    this._localEchoOverlay?.clear();
+    this._localEchoOverlay?.suppressBufferDetection();
+    this._flushedOffsets?.delete(this.activeSessionId);
+    this._flushedTexts?.delete(this.activeSessionId);
+    if (text) this._pendingInput += text;
+  },
+
+  /**
    * Update local echo overlay state based on settings.
    * Enabled whenever the setting is on — works during idle AND busy.
    * Position is tracked dynamically by _findPrompt() on every render.
@@ -3033,8 +3356,14 @@ Object.assign(CodemanApp.prototype, {
             }
           },
         });
-      } else if (session.mode === 'shell') {
+      } else if (session.mode === 'shell' || session.mode === 'codex') {
         // Shell mode: the shell provides its own PTY echo so the overlay isn't needed.
+        // Codex mode: the composer is fully interactive per keystroke. Typing
+        // "/" pops a live-filtering command picker (issue #222), the composer
+        // grows and rewraps as it fills (#220), pastes are bracketed (#219)
+        // and arrows/history edit server-side state (#218). Buffering
+        // keystrokes until Enter starves all of that, so codex sessions use
+        // plain PTY echo like shell.
         // Disable it by clearing any pending text.
         this._localEchoOverlay.clear();
         this._localEchoEnabled = false;
@@ -3477,7 +3806,11 @@ Object.assign(CodemanApp.prototype, {
   /** Insert editable text at the active prompt without pressing Enter. */
   insertTerminalText(text) {
     if (!this.activeSessionId || !text) return;
-    if (this._localEchoEnabled && this._localEchoOverlay) {
+    if (
+      this._localEchoEnabled &&
+      this._localEchoOverlay &&
+      !this._echoPassthroughSessions?.has(this.activeSessionId)
+    ) {
       this._localEchoOverlay.appendText(text);
     } else {
       this.sendInput(text).catch(() => {});
@@ -3861,9 +4194,29 @@ Object.assign(CodemanApp.prototype, {
   // deltaY≈0 collapses to a fixed ±1 line/tick and the gesture can't page through
   // history on a trackpad (issue #154). Non-Shift and mouse-wheel paths are
   // unchanged (they carry deltaY). The `|| ±1` keeps sub-25px deltas moving.
+  //
+  // `deltaMode` says what UNIT the delta is in, and ignoring it made every
+  // non-pixel browser scroll ~4x too slowly: Firefox reports DOM_DELTA_LINE (1)
+  // with deltaY≈3 per notch, so the pixel math rounded to 0 and fell through to
+  // the ±1 fallback — one line per notch, versus 4-5 for Chrome's ~110px. In
+  // Claude mode the same value also capped the forwarded SGR report at one tick.
   _wheelScrollLines(ev) {
+    const lines = this._wheelScrollLinesFloat(ev);
+    if (!lines) return 0; // pure horizontal swipe: don't fall through to -1
+    return Math.round(lines) || (lines > 0 ? 1 : -1);
+  },
+
+  /** Unrounded variant for the smooth local-scroll path, which accumulates
+   *  sub-line fractions across events instead of forcing every tiny trackpad
+   *  delta to a whole ±1 line. Same unit handling and Shift-axis trap. */
+  _wheelScrollLinesFloat(ev) {
     const delta = ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
-    return Math.round(delta / 25) || (delta > 0 ? 1 : -1);
+    if (!delta) return 0;
+    return ev.deltaMode === 1 // DOM_DELTA_LINE (Firefox mouse wheel)
+      ? delta
+      : ev.deltaMode === 2 // DOM_DELTA_PAGE
+        ? delta * (this.terminal?.rows || 24)
+        : delta / 25; // DOM_DELTA_PIXEL (Chrome/WebKit, and every trackpad)
   },
 
   _shouldForwardWheelToApp(ev) {
@@ -3872,6 +4225,16 @@ Object.assign(CodemanApp.prototype, {
     // plain wheel to xterm's own scrollback like pre-#144, for users who prefer
     // it over forwarding the wheel to the CLI's transcript (issue #154). Cheap —
     // loadAppSettingsFromStorage() is cache-backed.
+    //
+    // FOOTGUN, and why it is handled downstream rather than here: for a
+    // repaint-mode CLI that local scrollback is EMPTY (tmux keeps no history for
+    // the pane), so this setting can silently convert a working wheel into a
+    // dead one — a plausible reading of the #205 retest, where a user whose
+    // scrolling was broken on 1.11.x may well have flipped it while hunting for
+    // a fix. Scoping the setting away from those modes would be the other
+    // option, but it would override an explicit user choice; instead the caller
+    // falls through to _maybePageCliTranscript, so the gesture still pages the
+    // CLI's transcript and the setting keeps meaning exactly what it says.
     if (this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback) return false;
     const mode = this.terminal?.modes?.mouseTrackingMode;
     if (mode && mode !== 'none') return false;
@@ -3882,7 +4245,23 @@ Object.assign(CodemanApp.prototype, {
     } else if (sessionMode !== 'codex') {
       return false;
     }
-    return this._terminalViewportAtBottom();
+    // Deliberately NOT gated on _terminalViewportAtBottom(). It used to be, so
+    // that leaving the bottom handed the wheel back to local scrollback and both
+    // histories stayed reachable without a mode switch. In practice that inverted
+    // the behavior users actually want: a repaint-mode CLI keeps NO terminal
+    // scrollback of its own (tmux reports history_size=0 for a Claude pane), so
+    // xterm's buffer holds only Codeman's REPLAYED repaint frames. Scrolling that
+    // locally drags the CLI's own pinned furniture (the prompt box, the status
+    // line) up the screen and shows stale frames underneath, which reads as "the
+    // window scrolled away" rather than "I am reading history".
+    //
+    // And it was easy to fall into: scrollToLastNonEmptyLine() parks the viewport
+    // `rows - 2` above the last non-empty row, so any tab switch onto a session
+    // with trailing blank rows left the viewport off-bottom and every later wheel
+    // went local. Forwarding unconditionally keeps the CLI's transcript as the
+    // plain wheel's target and its input box fixed in place; local scrollback is
+    // still on Shift+wheel and on the "Wheel scrolls local history" opt-out above.
+    return true;
   },
 
   // Encode wheel ticks as SGR reports (button 64 = up, 65 = down) at the pointer
@@ -3899,11 +4278,103 @@ Object.assign(CodemanApp.prototype, {
     if (!pos) return;
     const btn = lines < 0 ? 64 : 65;
     const ticks = Math.min(Math.abs(lines), 5);
+    this._queueScrollBytes(`\x1b[<${btn};${pos.col};${pos.row}M`.repeat(ticks));
+  },
+
+  /**
+   * Shared 40ms coalescer for every byte a scroll gesture sends to the PTY (SGR
+   * wheel reports and the PageUp/PageDown fallback alike). Each flush becomes a
+   * tmux send-keys server-side, so per-event writes would spawn a process storm
+   * on a single flick; the queue is bounded so a wild scroll can't build a
+   * backlog that keeps scrolling after the finger stops.
+   */
+  _queueScrollBytes(data) {
+    if (!data || !this.activeSessionId) return;
     const queued = this._wheelSgrQueue || '';
     if (queued.length > 512) return;
-    this._wheelSgrQueue = queued + `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(ticks);
+    this._wheelSgrQueue = queued + data;
     if (this._wheelSgrFlushTimer) return;
     this._wheelSgrFlushTimer = setTimeout(() => this._flushWheelSgrQueue(), 40);
+  },
+
+  /**
+   * True when this session's LOCAL scrollback is structurally empty: a Claude
+   * pane in repaint mode, where tmux reports `history_size≈0` and every frame
+   * overwrites the last, so xterm's normal buffer never grows past one screen
+   * (`baseY === 0`). Scrolling that buffer is a no-op no matter how the gesture
+   * is routed — the "wheel does nothing at all" half of the #205 retest.
+   */
+  _localScrollbackIsHollow() {
+    const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
+    if (mode !== 'claude') return false;
+    const buf = this.terminal?.buffer?.active;
+    if (!buf || buf.type === 'alternate') return false;
+    return (buf.baseY || 0) === 0;
+  },
+
+  /**
+   * LAST-RESORT scroll for a hollow local buffer: translate gesture lines into
+   * coalesced PageUp/PageDown key sends so the CLI pages its OWN transcript.
+   *
+   * The rescue path for every way `_shouldForwardWheelToApp` can come back false
+   * on a Claude session that has no local history to fall back on: the CLI
+   * version probe failed or is genuinely older than 2.1.187, or the user turned
+   * on "Wheel scrolls local history" (which pins the wheel to a buffer that,
+   * for a repaint-mode CLI, is empty — the setting's footgun). Before this, all
+   * of those produced a completely dead gesture; the #205 reporter proved the
+   * keyboard route works by paging back through intact text with Fn+Up.
+   *
+   * Triple-guarded (claude mode + gate false + `baseY === 0`), so a session with
+   * real local scrollback is never touched. Shift is excluded on purpose: it is
+   * the explicit "give me local scrollback" gesture and must keep that meaning.
+   *
+   * @returns true when the gesture was consumed here (the caller must not also
+   *          scroll locally).
+   */
+  _maybePageCliTranscript(ev, lines) {
+    if (!lines || ev?.shiftKey || !this.activeSessionId) return false;
+    if (!this._localScrollbackIsHollow()) return false;
+    // Leftover travel belongs to the tab it was made on.
+    if (this._pageKeySession !== this.activeSessionId) {
+      this._pageKeySession = this.activeSessionId;
+      this._pageKeyPending = 0;
+    }
+    const tuning = window.CodemanTerminalInput;
+    const perPage = Math.max(2, Math.round((this.terminal?.rows || 24) * tuning.PAGE_KEY_SCREEN_FRACTION));
+    const pending = (this._pageKeyPending || 0) + lines;
+    const pages = Math.trunc(pending / perPage);
+    this._pageKeyPending = pending - pages * perPage;
+    if (pages) {
+      const key = pages < 0 ? tuning.KEY_PAGE_UP : tuning.KEY_PAGE_DOWN;
+      this._queueScrollBytes(key.repeat(Math.min(Math.abs(pages), tuning.PAGE_KEY_MAX_PER_BATCH)));
+    }
+    this._logScrollRouting('page-keys');
+    return true;
+  },
+
+  /**
+   * One line in the console saying WHY a scroll gesture went where it went.
+   *
+   * Issue #205 ran two rounds of remote guesswork — is the CLI version probe
+   * empty, is the opt-out setting on, did a mouse DECSET leak past the strip? —
+   * that this single log answers directly. Logged once per session per distinct
+   * decision, so a steady gesture stays silent and a CHANGE (e.g. the version
+   * arriving late and flipping the route) still prints.
+   */
+  _logScrollRouting(decision) {
+    const sessionId = this.activeSessionId || '(none)';
+    const session = this.sessions?.get(sessionId);
+    const optOut = !!this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback;
+    const tracking = this.terminal?.modes?.mouseTrackingMode || 'none';
+    const baseY = this.terminal?.buffer?.active?.baseY ?? -1;
+    const signature = `${decision}|${session?.mode}|${session?.cliVersion}|${optOut}|${tracking}|${baseY > 0}`;
+    if (!this._scrollRoutingLogged) this._scrollRoutingLogged = new Map();
+    if (this._scrollRoutingLogged.get(sessionId) === signature) return;
+    this._scrollRoutingLogged.set(sessionId, signature);
+    console.log(
+      `[scroll] ${sessionId} → ${decision} (mode=${session?.mode || '?'}, cliVersion=${session?.cliVersion || 'unknown'}, ` +
+        `localScrollbackOptOut=${optOut}, mouseTracking=${tracking}, localScrollbackRows=${baseY})`
+    );
   },
 
   _flushWheelSgrQueue() {

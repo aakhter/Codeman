@@ -35,6 +35,8 @@ export class MockSession extends EventEmitter {
   writeBuffer: string[] = [];
   terminalBuffer: string = '';
   cancelCheckpoint = vi.fn();
+  /** Mirrors Session.lastSubmitAt — the response viewer credits history entries by it. */
+  lastSubmitAt: number = 0;
 
   private _muxName: string | null = null;
 
@@ -44,13 +46,22 @@ export class MockSession extends EventEmitter {
     this._muxName = `codeman-test-${id.slice(0, 8)}`;
   }
 
-  /** Direct PTY write (used by session.write()) */
-  write(data: string): void {
+  /**
+   * Set to simulate a session whose PTY is gone: both write paths report failure,
+   * which is the state in which input used to disappear silently.
+   */
+  failWrites = false;
+
+  /** Direct PTY write (used by session.write()). Mirrors the real boolean return. */
+  write(data: string): boolean {
+    if (this.failWrites) return false;
     this.writeBuffer.push(data);
+    return true;
   }
 
   /** Write via mux (used by respawn controller) */
   async writeViaMux(data: string): Promise<boolean> {
+    if (this.failWrites) return false;
     this.writeBuffer.push(data);
     return true;
   }
@@ -58,6 +69,10 @@ export class MockSession extends EventEmitter {
   /** Exactly-once input dedup — mirrors Session.shouldApplyInput so route tests
    *  exercising the reliable-delivery path behave like production. */
   private _appliedInputSeq = new Map<string, number>();
+  forgetInputSeq(clientId: string, seq: number): void {
+    if (this._appliedInputSeq.get(clientId) === seq) this._appliedInputSeq.set(clientId, seq - 1);
+  }
+
   shouldApplyInput(clientId: string, seq: number): boolean {
     const last = this._appliedInputSeq.get(clientId);
     if (last !== undefined && seq <= last) return false;

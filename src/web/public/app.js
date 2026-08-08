@@ -566,7 +566,18 @@ class CodemanApp {
     this._initGeneration = 0;     // dedup concurrent handleInit calls
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
-    this._initialFullBufferLoad = true; // first buffer load after a page load fetches full tmux scrollback (COD-47)
+    // Sessions whose full tmux scrollback has already been replayed this page load
+    // (COD-47). Tracked PER SESSION rather than as a single "first load" flag: the
+    // flag was consumed by whichever session auto-selected at page load, so every
+    // OTHER tab started life with one visible frame of history (issue #205).
+    this._fullHistoryLoaded = new Set();
+    // Cooldown per session for the scroll-to-top "load more history" re-pull.
+    this._fullHistoryRepullAt = new Map(); // Map<sessionId, timestamp>
+    this._fullHistoryRepullInFlight = false;
+    // Sessions whose last re-pull came back THINNER than the live buffer (a
+    // repaint-mode CLI pane, where tmux keeps no history of its own). The pull is
+    // refused for those and retried far more slowly — see _maybeRefetchFullHistory.
+    this._fullHistoryRepullUseless = new Set();
     this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
@@ -911,6 +922,7 @@ class CodemanApp {
     this.applyLocalization();
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
+    this._setupTabMiddleClickClose();
     // Must run before the first session:created can arrive: markSessionTabEntering()
     // ignores ids until this sets up its state, which is what keeps the tabs
     // restored on page load from animating.
@@ -2695,6 +2707,37 @@ class CodemanApp {
     return true;
   }
 
+  /** Build one response-viewer message so the brief and full views share markup and CSS. */
+  _buildResponseViewerMessage(text, role, agentLabel) {
+    const div = document.createElement('div');
+    const isUser = role === 'user';
+    div.className = 'rv-message ' + (isUser ? 'rv-msg-user' : 'rv-msg-assistant');
+
+    const roleBadge = document.createElement('div');
+    roleBadge.className = 'rv-role ' + (isUser ? 'rv-role-user' : 'rv-role-assistant');
+    roleBadge.textContent = isUser ? 'You' : agentLabel;
+    div.appendChild(roleBadge);
+
+    const renderedText = document.createElement('div');
+    renderedText.className = 'rv-text';
+    renderedText.innerHTML = this._renderMarkdown(text);
+    div.appendChild(renderedText);
+    return div;
+  }
+
+  _getResponseViewerAgentLabel() {
+    const mode = this.sessions.get(this.activeSessionId)?.mode;
+    return mode === 'codex'
+      ? 'Codex'
+      : mode === 'gemini'
+        ? 'Gemini'
+        : mode === 'antigravity'
+          ? 'Antigravity'
+          : mode === 'opencode'
+            ? 'OpenCode'
+            : 'Claude';
+  }
+
   async toggleResponseViewer() {
     const viewer = document.getElementById('responseViewer');
     const backdrop = document.getElementById('responseViewerBackdrop');
@@ -2716,8 +2759,15 @@ class CodemanApp {
       const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
 
-      // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome
-      if (!lastResponse && mode === 'claude') {
+      // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome.
+      // Claude + shell only: _cleanTerminalBuffer knows Claude CLI's output, and
+      // shell sessions have no transcript source at all; for TUI modes
+      // (codex/opencode/gemini/antigravity) it yields repaint garbage, so a clear
+      // placeholder beats a messy screen dump there.
+      // Reads responseSessionId, not activeSessionId: the viewer stays pinned to
+      // the conversation it opened on even if the user switches tabs mid-fetch.
+      const fallbackMode = mode || 'claude';
+      if (!lastResponse && (fallbackMode === 'claude' || fallbackMode === 'shell')) {
         const termRes = await fetch(`/api/sessions/${responseSessionId}/terminal`);
         const termData = (await termRes.json())?.data ?? {};
         if (termData.terminalBuffer) {
@@ -2729,7 +2779,11 @@ class CodemanApp {
 
       const body = document.getElementById('responseViewerBody');
       if (lastResponse) {
-        body.innerHTML = this._renderMarkdown(lastResponse);
+        // Keep the brief view inside the same message wrapper as the full
+        // conversation view. The wrapper supplies the card, role badge and
+        // descendant markdown styles that direct body children do not get.
+        body.innerHTML = '';
+        body.appendChild(this._buildResponseViewerMessage(lastResponse, 'assistant', this._getResponseViewerAgentLabel()));
         this._bindResponseViewerInteractions(body, responseSessionId);
       } else {
         body.textContent =
@@ -4674,11 +4728,12 @@ class CodemanApp {
             }
           }
         } else if (minimizedCount > 0 && !subagentBadgeEl) {
-          // Need to add badge - insert before gear icon
+          // Need to add badge - insert before the action-icon overlay so the
+          // badge stays a direct child of the tab (outside .tab-actions)
           const badgeHtml = this.renderSubagentTabBadge(id, minimizedAgents);
-          const gearEl = tab.querySelector('.tab-gear');
-          if (gearEl) {
-            gearEl.insertAdjacentHTML('beforebegin', badgeHtml);
+          const actionsEl = tab.querySelector('.tab-actions');
+          if (actionsEl) {
+            actionsEl.insertAdjacentHTML('beforebegin', badgeHtml);
           }
         } else if (minimizedCount === 0 && subagentBadgeEl) {
           // Count went to 0 - remove badge
@@ -4777,6 +4832,25 @@ class CodemanApp {
     window.dispatchEvent(new Event('resize'));
   }
 
+  // Middle-click closes a tab, mirroring browser tab strips. Session tabs go
+  // through requestCloseSession (the same confirm modal as the x button), web
+  // tabs through closeWebviewTab (same as theirs). Delegated on the container:
+  // tabs are re-rendered wholesale, the container is stable.
+  _setupTabMiddleClickClose() {
+    const container = this.$('sessionTabs');
+    if (!container || this._tabAuxClickBound) return;
+    this._tabAuxClickBound = true;
+    container.addEventListener('auxclick', (e) => {
+      if (e.button !== 1) return;
+      const tab = e.target.closest?.('.session-tab');
+      if (!tab) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (tab.dataset.id) this.requestCloseSession(tab.dataset.id);
+      else if (tab.dataset.webviewId) this.closeWebviewTab?.(tab.dataset.webviewId);
+    });
+  }
+
   _fullRenderSessionTabs() {
     if (this._inlineRenameActive) return;
     const container = this.$('sessionTabs');
@@ -4841,9 +4915,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span>
-          <span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span>
-          <span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span>
+          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span></span>
         </div>`);
       _tabIdx++;
     }
@@ -5335,6 +5407,72 @@ class CodemanApp {
     this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
   }
 
+  /**
+   * "Load more history": re-pull the whole tmux scrollback when the user scrolls up
+   * while already at the top of what the browser has.
+   *
+   * xterm's buffer is only ever a WINDOW onto tmux's real history, and two things
+   * shrink it. tmux repaints the pane rectangle instead of emitting linefeeds
+   * whenever output outpaces its flush interval, which OVERWRITES already-rendered
+   * scrollback rather than pushing rows into it (measured: a 60-line burst added 1
+   * row and destroyed 34, while the same 60 lines emitted slowly added all 60). And
+   * a tab switch replays only the visible frame. Either way tmux still holds
+   * everything (history-limit 100k by default), so the fix is to go ask for it with
+   * the same `?full=1` capture a page reload uses (issue #205).
+   *
+   * On demand rather than automatic because that capture is unbounded-ish work: at
+   * the default history limit it can be megabytes, which is fine to pay when the
+   * user is explicitly reaching for history and not fine on every tab switch.
+   *
+   * NEVER a downgrade: for a repaint-mode CLI pane tmux keeps no history of its
+   * own, so the capture can be THINNER than what xterm already holds and the
+   * reset+rewrite below would delete history mid-scroll. `_replayWouldShrinkBuffer`
+   * (terminal-ui.js) is the guard, and a session that produced one useless re-pull
+   * gets a much longer cooldown so a hollow pane stops re-fetching megabytes on
+   * every scroll-up (issue #205, round 2).
+   */
+  async _maybeRefetchFullHistory() {
+    const sessionId = this.activeSessionId;
+    if (!sessionId || this._fullHistoryRepullInFlight || this._isLoadingBuffer) return;
+    if (this.detachedSessions?.has(sessionId)) return;
+    const now = Date.now();
+    // Momentum scrolling fires this dozens of times per flick, and a burst of new
+    // output is the normal reason to want a re-pull, so cooldown rather than latch.
+    const cooldown = this._fullHistoryRepullUseless?.has(sessionId) ? 60000 : 4000;
+    if (now - (this._fullHistoryRepullAt.get(sessionId) || 0) < cooldown) return;
+    this._fullHistoryRepullAt.set(sessionId, now);
+    this._fullHistoryRepullInFlight = true;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/terminal?full=1`);
+      const buffer = (await res.json())?.data?.terminalBuffer;
+      // Bail on a tab switch mid-fetch: writing here would paint another session's
+      // history into the terminal the user is now looking at.
+      if (!buffer || this.activeSessionId !== sessionId) return;
+      if (this._replayWouldShrinkBuffer(buffer)) {
+        (this._fullHistoryRepullUseless ||= new Set()).add(sessionId);
+        this._logScrollRouting?.('repull-refused-downgrade');
+        return;
+      }
+      this._fullHistoryRepullUseless?.delete(sessionId);
+      const rowsBefore = this.terminal.buffer.active.length;
+      this._resetTerminalForReplay();
+      await this.chunkedTerminalWrite(buffer, TERMINAL_CHUNK_SIZE, sessionId);
+      if (this.activeSessionId !== sessionId) return;
+      this.terminalBufferCache.set(sessionId, buffer);
+      // Hold the user's place. The replay is a superset that grew the buffer
+      // UPWARD, so what used to be row 0 (what they were looking at) is now `delta`
+      // rows down; scrolling there reveals the recovered history above it instead
+      // of teleporting them to the bottom the way a normal buffer load does.
+      const delta = this.terminal.buffer.active.length - rowsBefore;
+      if (delta > 0) this.terminal.scrollToLine(delta);
+      else this.terminal.scrollToTop();
+    } catch {
+      // Transient (offline, 5xx) — the next scroll-up past the cooldown retries.
+    } finally {
+      this._fullHistoryRepullInFlight = false;
+    }
+  }
+
   _shouldFocusTerminalForTabSwitch() {
     if (typeof MobileDetection === 'undefined' || !MobileDetection.isTouchDevice()) {
       return true;
@@ -5525,7 +5663,7 @@ class CodemanApp {
       // (viewport + scrollback + colors) for an instant first paint. For codex
       // this is also a correctness fix — its byte-stream replay shows only the
       // latest TUI frame (the idle welcome banner) because codex doesn't include
-      // earlier conversation in its current redraw. For claude/opencode/gemini
+      // earlier conversation in its current redraw. For claude/opencode/gemini/antigravity
       // the replay is already complete, so the snapshot is purely a faster,
       // scroll-preserving first paint before the canonical fetch reconciles.
       //
@@ -5620,14 +5758,22 @@ class CodemanApp {
 
       this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
-      const requestFullHistory = session?.mode !== 'shell' && !this._sessionsLoadedSincePageOpen.has(sessionId);
+      // The first load OF EACH SESSION this page load requests the full tmux
+      // scrollback (?full=1, COD-47) so history that scrolled off the server's byte
+      // buffer comes back. Later switches to an already-replayed session keep the
+      // fast ?tail= frame path, which is why this is a Set and not a flag: the flag
+      // version gave the full replay to the auto-selected tab and one frame of
+      // history to every other one (issue #205). Applies to shell too — #205 is
+      // what restored shell scrollback, so shell must not be special-cased out.
+      const useFullHistory = !this._fullHistoryLoaded.has(sessionId);
+      if (useFullHistory) this._fullHistoryLoaded.add(sessionId);
+      this._sessionsLoadedSincePageOpen.add(sessionId);
       // COD-187: mirror tabs fetch ONLY the current cursor-positioned frame.
       const terminalUrl = mirror
         ? `/api/sessions/${sessionId}/terminal?frame=1`
-        : session?.mode === 'shell' || requestFullHistory
-          ? `/api/sessions/${sessionId}/terminal`
+        : useFullHistory
+          ? `/api/sessions/${sessionId}/terminal?full=1`
           : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
-      this._sessionsLoadedSincePageOpen.add(sessionId);
       const res = await fetch(terminalUrl);
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
@@ -5654,7 +5800,9 @@ class CodemanApp {
         const preserveSnapshotScrollback = this._shouldPreserveSnapshotScrollback({
           restoredSnapshot,
           clearedForBusy,
-          requestFullHistory,
+          // Renamed from requestFullHistory when the #205 merge replaced the
+          // per-page-open flag with the per-session _fullHistoryLoaded Set.
+          requestFullHistory: useFullHistory,
           canonicalUnchanged,
           sessionIsBusy,
           mode: session?.mode,

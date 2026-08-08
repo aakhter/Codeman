@@ -855,7 +855,24 @@ export class WebServer extends EventEmitter {
       const clientId =
         typeof query.clientId === 'string' && SSE_CLIENT_ID_RE.test(query.clientId) ? query.clientId : undefined;
 
+      // Carry over the headers the security hook already set on this reply.
+      //
+      // writeHead goes straight to the Node response and bypasses Fastify's header
+      // store, so everything the onRequest hook granted is silently dropped —
+      // including the Access-Control-Allow-Origin it emits for localhost origins.
+      // The result is an internal contradiction: a localhost page may call every
+      // /api endpoint cross-origin, but its EventSource fails CORS. The security
+      // headers (nosniff, frame-options, CSP) were lost the same way.
+      //
+      // The other raw-writeHead routes live in file-routes.ts and share a helper;
+      // this one keeps its own copy so the server does not import from a route
+      // module it registers.
+      const inherited: Record<string, number | string | string[]> = {};
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) inherited[name] = value;
+      }
       reply.raw.writeHead(200, {
+        ...inherited,
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
@@ -2654,6 +2671,10 @@ export class WebServer extends EventEmitter {
               claudeSessionStartHookReady,
               claudeSessionId: savedState?.claudeSessionId,
               claudeSessionIdentityAdopted: savedState?.claudeSessionIdentityAdopted,
+              // The pane's last Enter. Without it the response viewer would show
+              // the launch conversation until the user types again, even though
+              // the re-attached CLI is on a post-`/clear` one.
+              lastSubmitAt: savedState?.lastSubmitAt,
               // Docker metadata round-trips on recovery (mux-sessions.json carries
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
