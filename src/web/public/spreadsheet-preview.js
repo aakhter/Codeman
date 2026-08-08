@@ -3,7 +3,7 @@
 (function initSpreadsheetPreview(global) {
   'use strict';
 
-  const SPREADSHEET_ASSET_VERSION = '32da4a7e606d';
+  const SPREADSHEET_ASSET_VERSION = '97c4877fdc87';
   const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
   const DEFAULT_TIMEOUT_MS = 20000;
   const MAX_SCROLL_PX = 8000000;
@@ -154,6 +154,16 @@
       notice.textContent = warnings.length ? `${warningLabel}: ${warnings.join(', ')}` : '';
     }
 
+    function pinHeadings() {
+      if (!grid || !headingsLayer) return;
+      headingsLayer.querySelectorAll('.spreadsheet-row-heading').forEach((heading) => {
+        heading.style.left = `${grid.scrollLeft}px`;
+      });
+      headingsLayer.querySelectorAll('.spreadsheet-column-heading').forEach((heading) => {
+        heading.style.top = `${grid.scrollTop}px`;
+      });
+    }
+
     function renderTile(tile) {
       if (!current() || tile.requestId !== latestRequestId || String(tile.sheetId) !== String(activeSheetId)) return;
       const sheet = sheetMetadata();
@@ -212,6 +222,9 @@
       if (!current() || !metadata?.sheets.some((sheet) => String(sheet.id) === String(sheetId))) return;
       activeSheetId = String(sheetId);
       latestRequestId += 1;
+      latestRange = null;
+      if (cellsLayer) cellsLayer.textContent = '';
+      if (headingsLayer) headingsLayer.textContent = '';
       container.querySelectorAll('[role="tab"]').forEach((tab) => {
         const selected = tab.dataset.sheetId === activeSheetId;
         tab.setAttribute('aria-selected', String(selected));
@@ -288,10 +301,11 @@
       cellsLayer.className = 'spreadsheet-cells';
       headingsLayer = document.createElement('div');
       headingsLayer.className = 'spreadsheet-headings';
-      grid.append(spacer, cellsLayer, headingsLayer, emptySheetState);
+      grid.append(spacer, cellsLayer, headingsLayer);
       grid.addEventListener(
         'scroll',
         () => {
+          pinHeadings();
           if (scrollFrame !== null) return;
           scrollFrame = global.requestAnimationFrame(() => {
             scrollFrame = null;
@@ -300,7 +314,7 @@
         },
         { passive: true }
       );
-      shell.append(styleSheet, tabs, notice, grid);
+      shell.append(styleSheet, tabs, notice, emptySheetState, grid);
       container.appendChild(shell);
       resizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(requestTile) : null;
       resizeObserver?.observe(grid);

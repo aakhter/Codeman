@@ -27,6 +27,7 @@ export default defineConfig({
       'test/file-browser-session-preview.browser.test.ts', // browser (Playwright + chromium)
       'test/terminal-document-link.browser.test.ts', // browser/touch (Playwright + chromium)
       'test/terminal-copy-shortcut.test.ts', // browser (Playwright)
+      'test/spreadsheet-preview.browser.test.ts', // browser (Playwright + chromium)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,

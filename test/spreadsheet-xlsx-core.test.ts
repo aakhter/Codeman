@@ -54,6 +54,23 @@ describe('spreadsheet XLSX core', () => {
     expect(() => core.inspectZipDirectory(zip)).toThrowError(/names do not match/i);
   });
 
+  it('rejects central-directory entries that were not streamed through admission', () => {
+    class IncompleteUnzip {
+      constructor(private readonly onFile: (file: any) => void) {}
+      register() {}
+      push(_bytes: Uint8Array, final: boolean) {
+        if (!final) return;
+        const file: Record<string, any> = {
+          name: '[Content_Types].xml',
+          start: () => file.ondata(null, new Uint8Array(), true),
+        };
+        this.onFile(file);
+      }
+    }
+    const incomplete = { Unzip: IncompleteUnzip, UnzipInflate: class {} } as unknown as typeof fflate;
+    expect(() => core.admitXlsx(workbookZip(), incomplete)).toThrowError(/not streamed/i);
+  });
+
   it('uses actual streamed output for entry, total, ratio, and XML-count limits', () => {
     const inflated = 'x'.repeat(20_000);
     const bomb = fflate.zipSync({ 'xl/worksheets/sheet1.xml': fflate.strToU8(inflated) }, { level: 9 });

@@ -111,6 +111,12 @@ describe('spreadsheet preview renderer', () => {
     expect(document.querySelector('.spreadsheet-cell')?.textContent).toBe('<b>0</b>');
     expect((document.querySelector('.spreadsheet-cell') as HTMLElement).style.top).toBe('20px');
     expect((document.querySelector('.spreadsheet-cell') as HTMLElement).style.left).toBe('36px');
+    const grid = document.querySelector('.spreadsheet-grid') as HTMLElement;
+    grid.scrollLeft = 400;
+    grid.scrollTop = 300;
+    grid.dispatchEvent(new Event('scroll'));
+    expect((document.querySelector('.spreadsheet-row-heading') as HTMLElement).style.left).toBe('400px');
+    expect((document.querySelector('.spreadsheet-column-heading') as HTMLElement).style.top).toBe('300px');
     expect(document.querySelector('.spreadsheet-sheet-tabs')?.hasAttribute('data-i18n-skip')).toBe(true);
     expect(document.querySelector('.spreadsheet-grid')?.hasAttribute('data-i18n-skip')).toBe(true);
     expect(Number.parseFloat((document.querySelector('.spreadsheet-grid-spacer') as HTMLElement).style.height)).toBe(
@@ -170,6 +176,16 @@ describe('spreadsheet preview renderer', () => {
       styles: [],
       sheets: [
         {
+          id: '0',
+          name: 'Data',
+          rows: 1,
+          cols: 1,
+          defaultRowHeight: 20,
+          defaultColumnWidth: 64,
+          rowOverrides: [],
+          columnOverrides: [],
+        },
+        {
           id: '1',
           name: 'Empty',
           rows: 0,
@@ -181,8 +197,19 @@ describe('spreadsheet preview renderer', () => {
         },
       ],
     });
+    const request = worker.postMessage.mock.calls.at(-1)?.[0];
+    worker.emit({
+      type: 'tile',
+      requestId: request.requestId,
+      sheetId: '0',
+      cells: [{ row: 1, col: 1, text: 'old cell', styleId: 0 }],
+      warnings: [],
+    });
+    expect(document.body.textContent).toContain('old cell');
+    (document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement).click();
     expect(document.body.textContent).toContain('This worksheet is empty.');
     expect(document.body.textContent).toContain('charts');
+    expect(document.body.textContent).not.toContain('old cell');
   });
 
   it('integrates with the shared overlay and disposes the prior spreadsheet lifecycle', async () => {

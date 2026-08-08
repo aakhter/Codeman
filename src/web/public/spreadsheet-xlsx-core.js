@@ -146,12 +146,17 @@
     const limits = mergedLimits(overrides);
     const directory = inspectZipDirectory(bytes, limits);
     const directoryByName = new Map(directory.entries.map((entry) => [entry.name, entry]));
+    const expectedEntries = new Map();
+    for (const entry of directory.entries) expectedEntries.set(entry.name, (expectedEntries.get(entry.name) || 0) + 1);
+    const streamedEntries = new Map();
     const counts = { worksheets: 0, cells: 0, merges: 0, styles: 0 };
     const features = new Set();
     let totalInflated = 0;
     let seenEntries = 0;
     let thrown;
     const unzip = new zipApi.Unzip((file) => {
+      if (!directoryByName.has(file.name)) fail('malformed', 'Local XLSX entry is absent from the central directory');
+      streamedEntries.set(file.name, (streamedEntries.get(file.name) || 0) + 1);
       seenEntries += 1;
       if (seenEntries > limits.maxEntries) fail('entry-limit', 'Workbook exceeds the ZIP entries limit');
       if (/^xl\/worksheets\/[^/]+\.xml$/i.test(file.name)) {
@@ -187,6 +192,9 @@
       thrown = error;
     }
     if (thrown) throw thrown;
+    for (const [name, count] of expectedEntries) {
+      if (streamedEntries.get(name) !== count) fail('malformed', 'Central XLSX entry was not streamed for admission');
+    }
     return { counts, features: Array.from(features), inflatedBytes: totalInflated };
   }
 
