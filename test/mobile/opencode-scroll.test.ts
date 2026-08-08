@@ -36,12 +36,11 @@ describe('opencode scroll perf', () => {
   });
 
   it('fixes will-change: contain layout and auto, scrolling transform', () => {
-    expect(stylesCss).toContain('contain: layout;');
+    expect(stylesCss).toContain('contain: layout paint;');
     expect(stylesCss).toContain('will-change: auto;');
     expect(stylesCss).toMatch(/\.touch-device\s+\.terminal-container\.scrolling[^}]*will-change:\s*transform/s);
     const termBlock = stylesCss.match(/\.terminal-container\s*\{[^}]*\}/s)?.[0] ?? '';
-    expect(termBlock).toContain('contain: layout;');
-    expect(termBlock).not.toContain('paint');
+    expect(termBlock).toContain('contain: layout paint;');
     expect(termBlock).not.toContain('will-change: contents');
     expect(termBlock).toContain('will-change: auto;');
   });
