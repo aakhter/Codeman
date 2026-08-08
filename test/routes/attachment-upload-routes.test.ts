@@ -227,7 +227,7 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
     expect(body.data.attachmentType).toBe('presentation');
   });
 
-  it('200: uploads an .xlsx with a ZIP prefix as a binary attachment', async () => {
+  it('200: uploads an .xlsx with a ZIP prefix as a spreadsheet attachment', async () => {
     const res = await harness.app.inject({
       method: 'POST',
       url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
@@ -243,7 +243,7 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.data.extension).toBe('xlsx');
-    expect(body.data.attachmentType).toBe('binary');
+    expect(body.data.attachmentType).toBe('spreadsheet');
     expect(body.data.agentPath).toMatch(/^\.codeman-attachments\/forecast-.*\.xlsx$/);
     expect(attachmentRegistry.get(harness.ctx._sessionId, body.data.attachmentId)?.source).toBe('upload');
   });
