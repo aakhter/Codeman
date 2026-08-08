@@ -22,6 +22,13 @@
  * @loadorder 2 of 15 — loaded after constants.js, before voice-input.js
  */
 
+const DEBUG_MOBILE = typeof location !== 'undefined' && new URLSearchParams(location.search).has('debugMobile');
+function logViewport(label) {
+  if (!DEBUG_MOBILE) return;
+  const vv = window.visualViewport;
+  console.log(`[mobile][${label}] innerHeight=${window.innerHeight} vv.h=${vv?.height} vv.scale=${vv?.scale} appHeight=${getComputedStyle(document.documentElement).getPropertyValue('--app-height')} dvh=${window.innerHeight}`);
+}
+
 // Codeman — Mobile detection, keyboard handling, and swipe navigation
 // Loaded after constants.js, before app.js
 
@@ -148,6 +155,7 @@ const MobileDetection = {
     if (typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible) return;
     const vh = window.visualViewport?.height || window.innerHeight;
     document.documentElement.style.setProperty('--app-height', `${vh}px`);
+    if (typeof logViewport === 'function') logViewport('updateAppHeight');
   },
 
   /** Initialize mobile detection and set up resize listener */

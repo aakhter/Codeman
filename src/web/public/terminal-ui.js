@@ -13,6 +13,13 @@
  */
 
 (function (global) {
+  const DEBUG_MOBILE = new URLSearchParams(location.search).has('debugMobile');
+  function logViewport(label) {
+    if (!DEBUG_MOBILE) return;
+    const vv = window.visualViewport;
+    console.log(`[mobile][${label}] innerHeight=${window.innerHeight} vv.h=${vv?.height} vv.scale=${vv?.scale} appHeight=${getComputedStyle(document.documentElement).getPropertyValue('--app-height')} dvh=${window.innerHeight}`);
+  }
+
   const TERMINAL_QUERY_RESPONSE_PATTERN = /^\x1b\[[\?>=]?[\d;]*[cnR]$/;
   const TERMINAL_OSC_RESPONSE_PATTERN = /^\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\)$/;
   // Grace window after a manual scroll-up gesture during which sticky-scroll is
