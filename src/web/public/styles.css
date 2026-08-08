@@ -7368,6 +7368,14 @@ kbd {
   color: var(--text, #ccc);
   font-size: 12px;
 }
+.sources-file-picker {
+  flex: 1 1 140px;
+  font-size: 12px;
+  color: var(--text, #ccc);
+}
+.sources-upload-btn {
+  white-space: nowrap;
+}
 .sources-content-input {
   width: 100%;
   padding: 6px 8px;

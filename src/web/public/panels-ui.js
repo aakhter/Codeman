@@ -314,9 +314,11 @@ Object.assign(CodemanApp.prototype, {
     const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
     const urlRow = document.getElementById('sourcesUrlRow');
     const pathRow = document.getElementById('sourcesPathRow');
+    const uploadRow = document.getElementById('sourcesUploadRow');
     const contentRow = document.getElementById('sourcesContentRow');
     if (urlRow) urlRow.classList.toggle('sources-field-row--hidden', type !== 'url');
     if (pathRow) pathRow.classList.toggle('sources-field-row--hidden', type !== 'file');
+    if (uploadRow) uploadRow.classList.toggle('sources-field-row--hidden', type !== 'file');
     if (contentRow) contentRow.classList.toggle('sources-field-row--hidden', type !== 'highlight');
   },
 
@@ -368,6 +370,44 @@ Object.assign(CodemanApp.prototype, {
       </div>
       <button class="sources-card-delete" onclick="app.deleteSource('${escapeHtml(src.id)}')" aria-label="Remove source" title="Remove">&times;</button>
     </div>`;
+  },
+
+  async handleSourceUpload() {
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const fileInput = document.getElementById('sourcesFilePicker');
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+
+    const form = new FormData();
+    form.append('file', file);
+    const title = document.getElementById('sourcesTitle')?.value?.trim();
+    if (title) form.append('title', title);
+
+    const btn = document.getElementById('sourcesUploadBtn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Uploading...';
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/sources/upload`, {
+        method: 'POST',
+        body: form,
+      });
+      const json = await res.json();
+      if (json.success) {
+        if (fileInput) fileInput.value = '';
+        document.getElementById('sourcesTitle').value = '';
+        this.loadSources();
+      }
+    } catch {
+      // silent — network error
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Upload';
+      }
+    }
   },
 
   async handleAddSource(event) {

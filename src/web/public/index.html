@@ -2752,6 +2752,10 @@
             <div id="sourcesPathRow" class="sources-field-row sources-field-row--hidden">
               <input type="text" id="sourcesPath" class="sources-path-input" placeholder="relative/path/to/file.md" maxlength="1000" autocomplete="off">
             </div>
+            <div id="sourcesUploadRow" class="sources-field-row sources-field-row--hidden">
+              <input type="file" id="sourcesFilePicker" class="sources-file-picker" accept=".pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt">
+              <button type="button" class="btn-toolbar btn-sm sources-upload-btn" id="sourcesUploadBtn" onclick="app.handleSourceUpload()">Upload</button>
+            </div>
             <div id="sourcesContentRow" class="sources-field-row sources-field-row--hidden">
               <textarea id="sourcesContent" class="sources-content-input" placeholder="Highlighted text..." maxlength="10000" rows="4"></textarea>
             </div>
