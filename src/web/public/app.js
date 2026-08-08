@@ -5395,6 +5395,10 @@ class CodemanApp {
     this.terminal.options.scrollback = this._isMirrorSession(sessionId) ? 0 : this._userScrollback();
     this.activeSessionId = sessionId;
     try { localStorage.setItem('codeman-active-session', sessionId); } catch {}
+    // COD-285: sync terminal background to the session's mode *before* any
+    // buffer write/entrance animation so opencode's black panels don't stripe
+    // against the daylight slate (#161b23). See paste-1786223652769.
+    try { this.syncTerminalBackground?.(); } catch {}
     // Narrow SSE filter to the active session — server stops streaming
     // session:terminal events for other sessions to this client. Cuts
     // SSE traffic ~Nx for N concurrent sessions. Fire-and-forget; on the
@@ -5895,6 +5899,8 @@ class CodemanApp {
       if (this.activeSessionId === sessionId) {
         this.activeSessionId = null;
         try { localStorage.removeItem('codeman-active-session'); } catch {}
+        // COD-285: reset terminal background to the skin's slate when no session is active
+        try { this.syncTerminalBackground?.(); } catch {}
         // Select another session or show welcome (use sessionOrder for consistent ordering)
         if (this.sessionOrder.length > 0 && this.sessions.size > 0) {
           const nextSessionId = this.sessionOrder[0];
@@ -5985,6 +5991,7 @@ class CodemanApp {
     // Deselect active session and show welcome screen
     this.activeSessionId = null;
     try { localStorage.removeItem('codeman-active-session'); } catch {}
+    try { this.syncTerminalBackground?.(); } catch {}
     this.terminal.clear();
     this.showWelcome();
     this.renderSessionTabs();

@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.11.2
+
+### Patch Changes
+
+- Fix weird coloring when launching an opencode session — striped black/slate background on launch (paste-1786223652769). Daylight skins use #161b23 slate while opencode's Bubble Tea TUI paints pure-black (#000) panels; viewport size race left slate gaps. External CLI modes (opencode/codex/gemini/antigravity) now force a pure-black terminal + container background and contrast 1 (even under light skins) via `applyTerminalSkin`/`syncTerminalBackground`, synced synchronously on every `selectSession`/`goHome`/`closeSession` before buffer writes and entrance animations.
+
 ## 1.11.1
 
 ### Patch Changes

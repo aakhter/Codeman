@@ -63,6 +63,9 @@
   function currentSkinIsLight(skin = currentSkin()) {
     return CODEMAN_LIGHT_SKINS.has(skin);
   }
+  function isExternalCliMode(mode) {
+    return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity';
+  }
 
   global.CodemanTerminalInput = {
     isTerminalQueryResponse,
@@ -73,6 +76,7 @@
   global.CODEMAN_XTERM_THEMES = CODEMAN_XTERM_THEMES;
   global.codemanCurrentXtermTheme = currentXtermTheme;
   global.codemanCurrentSkinIsLight = currentSkinIsLight;
+  global.codemanIsExternalCliMode = isExternalCliMode;
 })(window);
 
 Object.assign(CodemanApp.prototype, {
@@ -4130,9 +4134,28 @@ Object.assign(CodemanApp.prototype, {
   // Re-theme all live xterm terminals (main + teammate) to the given skin's palette.
   // Uses the xterm v5+ live setter (full object assignment triggers a repaint for both
   // DOM and WebGL renderers) plus a belt-and-suspenders refresh().
+  // COD-285: external CLI modes (opencode/codex/gemini/antigravity) use a pure
+  // black terminal background (#000) so the TUI's own black panels don't stripe
+  // against the daylight slate (#161b23). See paste-1786223652769.
   applyTerminalSkin(skin) {
-    const theme = { ...(window.CODEMAN_XTERM_THEMES[skin] || window.CODEMAN_XTERM_THEMES['daylight-blue']) };
-    const minimumContrastRatio = window.codemanCurrentSkinIsLight(skin) ? 4.5 : 1;
+    const baseTheme = { ...(window.CODEMAN_XTERM_THEMES[skin] || window.CODEMAN_XTERM_THEMES['daylight-blue']) };
+    const activeMode = this.activeSessionId ? this.sessions?.get(this.activeSessionId)?.mode : null;
+    const isExternal = typeof isExternalCliMode === 'function' ? isExternalCliMode(activeMode) : false;
+    const isLight = window.codemanCurrentSkinIsLight(skin);
+    // COD-285: external modes render on pure black — force contrast 1 even
+    // under a light skin so Bubble Tea's colors aren't washed by the 4.5 boost.
+    const minimumContrastRatio = isExternal ? 1 : isLight ? 4.5 : 1;
+    const theme = isExternal ? { ...baseTheme, background: '#000000' } : baseTheme;
+    const containerBg = theme.background;
+    let container = null;
+    try { container = document?.getElementById?.('terminalContainer') || null; } catch {}
+    if (container) {
+      // Override the CSS var-driven slate with the mode-correct background
+      // so transparent viewport areas (allowTransparency) and the container
+      // behind the canvas both match. Clear the inline override when not external.
+      if (isExternal) container.style.background = containerBg;
+      else container.style.background = '';
+    }
     if (this.terminal) {
       this.terminal.options.minimumContrastRatio = minimumContrastRatio;
       this.terminal.options.theme = theme;
@@ -4155,6 +4178,14 @@ Object.assign(CodemanApp.prototype, {
         }
       }
     }
+  },
+
+  // COD-285: sync terminal background to the active session's mode. Called on
+  // every selectSession so a tab switch from claude (slate) to opencode (black)
+  // doesn't leave a slate/black stripe flash. Uses current skin's base theme.
+  syncTerminalBackground() {
+    const skin = (typeof document !== 'undefined' && document.documentElement.dataset.skin) || 'daylight-blue';
+    this.applyTerminalSkin(skin);
   },
 });
 
