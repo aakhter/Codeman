@@ -110,6 +110,10 @@ const MobileDetection = {
     return 'desktop';
   },
 
+  isMobile() {
+    return this.getDeviceType() === 'mobile';
+  },
+
   /** Update body classes based on device detection */
   updateBodyClass() {
     const body = document.body;

@@ -3208,14 +3208,11 @@ body.solo-mode .btn-lifecycle-log {
   background: var(--term-bg, #161b23);
   overflow: hidden;
   position: relative;
-  /* Performance: isolate layout and paint operations.
-     Do NOT use contain:strict — size containment breaks xterm.js
-     FitAddon dimension calculations. */
-  contain: layout paint;
-  /* Performance: promote to own compositor layer for isolation from
-     header/toolbar/panel repaints. Eliminates compositing stalls
-     when surrounding UI elements update during typing. */
-  will-change: contents;
+  contain: layout;
+  will-change: auto;
+}
+.touch-device .terminal-container.scrolling {
+  will-change: transform;
 }
 .terminal-container .xterm {
   width: 100%;

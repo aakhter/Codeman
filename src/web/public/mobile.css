@@ -1418,9 +1418,8 @@ html.mobile-init .file-browser-panel {
     display: block;
   }
 
-  /* Mobile terminal — JS touch handler (terminal.scrollLines()) drives
-     scrollback because xterm.js DOM renderer doesn't populate xterm-viewport's
-     scroll area.  touch-action:none lets our JS handler own the gesture. */
+  /* Mobile terminal — COD-283: opencode on iPhone uses pan-y for native
+     momentum (threshold 8 + rAF), others keep none to let JS own gesture. */
   .terminal-container {
     height: 100%;
     min-height: 0;
@@ -1428,11 +1427,19 @@ html.mobile-init .file-browser-panel {
     overflow: visible;
     touch-action: none;
   }
+  .terminal-container[style*='pan-y'] {
+    touch-action: pan-y;
+  }
 
   .terminal-container .xterm,
   .terminal-container .xterm-viewport,
   .terminal-container .xterm-screen {
     touch-action: none;
+  }
+  .terminal-container[style*='pan-y'] .xterm,
+  .terminal-container[style*='pan-y'] .xterm-viewport,
+  .terminal-container[style*='pan-y'] .xterm-screen {
+    touch-action: pan-y;
   }
 
   .response-viewer {

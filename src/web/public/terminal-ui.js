@@ -654,12 +654,32 @@ Object.assign(CodemanApp.prototype, {
     // reachable without a mode switch. COD-187 live-mirror tabs retain first
     // ownership of scroll intent so an up-scroll can open their frozen history.
     // CAPTURE phase + stopPropagation makes this funnel the single wheel owner.
+    let wheelRaf = 0;
+    let wheelDelta = 0;
     container.addEventListener(
       'wheel',
       (ev) => {
         if (this._handleForegroundTuiWheel(ev)) return;
         ev.preventDefault();
         ev.stopPropagation();
+        const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
+        if (isOpencodeMobile) {
+          wheelDelta += ev.deltaY;
+          if (wheelRaf) return;
+          wheelRaf = requestAnimationFrame(() => {
+            const lines = Math.trunc(wheelDelta / 13);
+            wheelRaf = 0;
+            wheelDelta = 0;
+            if (!lines) return;
+            const isLiveMirror = this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
+            if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
+              this._sendSyntheticSgrWheel(ev.clientX, ev.clientY, lines);
+              return;
+            }
+            this._handleUserScrollIntent(lines);
+          });
+          return;
+        }
         const lines = this._wheelScrollLines(ev);
         const isLiveMirror =
           this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
@@ -683,13 +703,21 @@ Object.assign(CodemanApp.prototype, {
       { passive: false, capture: true }
     );
 
-    // Touch scrolling — use terminal.scrollLines() for all devices.
-    // xterm.js DOM renderer doesn't populate xterm-viewport's scroll area,
-    // so native CSS scrolling (overflow-y: scroll + touch-action: pan-y)
-    // has nothing to scroll. Instead, convert touch deltas into scrollLines()
-    // calls, matching the wheel handler above.
+    // Touch scrolling — COD-283: native-friendly for opencode on iPhone
+    // (pan-y allows native momentum), lower threshold 8px + rAF batch.
     {
+      const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
+      if (isOpencodeMobile) {
+        container.style.touchAction = 'pan-y';
+      } else {
+        container.style.touchAction = 'none';
+      }
       const cellHeight = () => this.terminal._core?._renderService?.dimensions?.css?.cell?.height || 13;
+      const THRESHOLD = isOpencodeMobile ? 8 : 50;
+      let touchMoveRaf = 0;
+      let pendingDelta = 0;
+      let pendingX = 0;
+      let pendingY = 0;
       let touchLastX = 0;
       let touchLastY = 0;
       let velocity = 0;
@@ -737,6 +765,8 @@ Object.assign(CodemanApp.prototype, {
           velocity = 0;
           pixelAccum = 0;
           lastTime = 0;
+          pendingDelta = 0;
+          if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; }
           if (!touch) {
             isTouching = false;
             didScroll = true;
@@ -750,6 +780,8 @@ Object.assign(CodemanApp.prototype, {
             cancelAnimationFrame(scrollFrame);
             scrollFrame = null;
           }
+          container.classList.add('scrolling');
+          clearTimeout(this._scrollEnd);
         },
         { passive: true }
       );
@@ -769,24 +801,41 @@ Object.assign(CodemanApp.prototype, {
             const touchX = touch.clientX;
             const touchY = touch.clientY;
             if (touchGesture.moved) didScroll = true;
-            // Below the tap threshold, treat the gesture as a potential tap:
-            // don't preventDefault (iOS needs click synthesis to show the
-            // keyboard) and don't accumulate scroll distance or velocity. Without
-            // this guard, sub-threshold micro-drift still scrolls a line and
-            // leaves a non-zero velocity that touchend turns into a momentum
-            // fling, so a jittery tap would both position the cursor AND scroll.
             if (!didScroll) return;
             ev.preventDefault();
-            const delta = touchLastY - touchY; // positive = scroll down
+            const delta = touchLastY - touchY;
             velocity = delta * 1.2;
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
-              this._sendForegroundTuiWheel(delta, touchX, touchY);
+              if (Math.abs(pixelAccum + delta) >= THRESHOLD || isOpencodeMobile) {
+                pendingDelta += delta;
+                pendingX = touchX; pendingY = touchY;
+                if (touchMoveRaf) return;
+                touchMoveRaf = requestAnimationFrame(() => {
+                  const d = pendingDelta; pendingDelta = 0; touchMoveRaf = 0;
+                  this._sendForegroundTuiWheel(d, pendingX, pendingY);
+                });
+              }
               return;
             }
             pixelAccum += delta;
-            // Convert accumulated pixels to whole lines
+            if (Math.abs(pixelAccum) < THRESHOLD) return;
+            if (isOpencodeMobile) {
+              pendingDelta += pixelAccum;
+              if (touchMoveRaf) return;
+              touchMoveRaf = requestAnimationFrame(() => {
+                const ch = cellHeight();
+                const lines = Math.trunc(pendingDelta / ch);
+                pendingDelta = 0; touchMoveRaf = 0;
+                if (lines !== 0) {
+                  const intent = this._handleUserScrollIntent(lines);
+                  pixelAccum -= lines * ch;
+                  if (intent === 'entered-history') { velocity = 0; pixelAccum = 0; }
+                }
+              });
+              return;
+            }
             const ch = cellHeight();
             const lines = Math.trunc(pixelAccum / ch);
             if (lines !== 0) {
@@ -808,12 +857,15 @@ Object.assign(CodemanApp.prototype, {
           const wasTouching = isTouching;
           const touch = this._endTerminalTouchGesture(touchGesture, ev.changedTouches, ev.touches);
           isTouching = false;
+          if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; pendingDelta = 0; }
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
           if (wasTouching && !didScroll && touch && this.terminal) {
             this._handleTerminalTouchTap(touch);
           }
+          clearTimeout(this._scrollEnd);
+          this._scrollEnd = setTimeout(() => container.classList.remove('scrolling'), 300);
         },
         { passive: true }
       );
@@ -824,7 +876,11 @@ Object.assign(CodemanApp.prototype, {
           isTouching = false;
           velocity = 0;
           pixelAccum = 0;
+          pendingDelta = 0;
+          if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; }
           this._cancelTerminalTouchGesture(touchGesture);
+          clearTimeout(this._scrollEnd);
+          this._scrollEnd = setTimeout(() => container.classList.remove('scrolling'), 300);
         },
         { passive: true }
       );
