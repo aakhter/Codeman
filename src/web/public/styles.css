@@ -3395,6 +3395,9 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   box-shadow: 0 4px 20px rgba(251, 146, 60, 0.3), 0 0 40px rgba(251, 146, 60, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   border-color: rgba(253, 186, 116, 0.5);
   color: #fed7aa;
+  transform: translateY(-1px);
+}
+
 /* Antigravity: cyan identity, matching .btn-toolbar.btn-run.mode-antigravity and
    .run-mode-dot.antigravity so the welcome action reads as the same backend. */
 .welcome-btn-antigravity {
