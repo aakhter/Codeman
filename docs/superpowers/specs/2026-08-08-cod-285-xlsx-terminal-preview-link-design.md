@@ -23,4 +23,3 @@ directly, using the normalized relative path and the session that owned the term
 - First add `.xlsx` to the complete supported-extension regression matrix and prove it fails against current runtime code.
 - Add an activation assertion for an XLSX path, including the originating session ID.
 - Run the focused terminal link-provider and regex performance tests, followed by repository quality gates and build.
-

@@ -313,6 +313,12 @@ describe('COD-232 terminal document link provider', () => {
     expect(provide()).toEqual([]);
   });
 
+  it('does not link legacy XLS files', () => {
+    const { provide } = makeHarness('Created out/legacy-workbook.xls');
+
+    expect(provide()).toEqual([]);
+  });
+
   it('normalizes ./ paths and preserves spaces inside quotes and backticks', () => {
     const { provide, previewSpy } = makeHarness('See ./docs/guide.md, "out/final report.docx" and `out/Q3 deck.pptx`.');
 
