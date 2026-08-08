@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,6 +10,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = resolve(repoRoot, 'src/web/public');
 const prettierBin = resolve(repoRoot, 'node_modules/.bin/prettier');
 const checkedExtensions = new Set(['.js', '.css', '.html', '.json']);
+const SPREADSHEET_VENDOR_MAX_BYTES = 1_100_000;
 
 function collectTextAssets(dir) {
   const files = [];
@@ -34,6 +36,31 @@ function findNullByte(buffer) {
 
 const files = collectTextAssets(publicRoot);
 const failures = [];
+
+const spreadsheetWorker = join(publicRoot, 'spreadsheet-preview-worker.js');
+const spreadsheetEntry = join(publicRoot, 'spreadsheet-preview.js');
+const spreadsheetVendors = [join(publicRoot, 'vendor', 'exceljs.min.js'), join(publicRoot, 'vendor', 'fflate.min.js')];
+
+if ([spreadsheetWorker, spreadsheetEntry, ...spreadsheetVendors].every(existsSync)) {
+  const vendorBytes = spreadsheetVendors.reduce((total, file) => total + readFileSync(file).length, 0);
+  if (vendorBytes > SPREADSHEET_VENDOR_MAX_BYTES) {
+    failures.push(`Spreadsheet vendor bundles exceed ${SPREADSHEET_VENDOR_MAX_BYTES} bytes (${vendorBytes} bytes)`);
+  }
+
+  const expectedVersion = createHash('sha256')
+    .update(readFileSync(spreadsheetWorker))
+    .update(readFileSync(spreadsheetVendors[0]))
+    .update(readFileSync(spreadsheetVendors[1]))
+    .digest('hex')
+    .slice(0, 12);
+  const entrySource = readFileSync(spreadsheetEntry, 'utf8');
+  const actualVersion = entrySource.match(/const SPREADSHEET_ASSET_VERSION = '([a-f0-9]+)'/)?.[1];
+  if (actualVersion !== expectedVersion) {
+    failures.push(
+      `SPREADSHEET_ASSET_VERSION mismatch: expected ${expectedVersion}, found ${actualVersion || 'missing'}`
+    );
+  }
+}
 
 for (const file of files) {
   const rel = relative(repoRoot, file);
