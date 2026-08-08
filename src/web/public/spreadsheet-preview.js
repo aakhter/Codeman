@@ -3,7 +3,7 @@
 (function initSpreadsheetPreviewAssets(global) {
   'use strict';
 
-  const SPREADSHEET_ASSET_VERSION = '38bbeea4b219';
+  const SPREADSHEET_ASSET_VERSION = 'fd4476b40d2e';
 
   global.CodemanSpreadsheetPreviewAssets = Object.freeze({
     version: SPREADSHEET_ASSET_VERSION,
