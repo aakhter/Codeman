@@ -2183,13 +2183,17 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Replace the shell with the actual command (no echo in terminal). Keep
       // pane launch in /tmp, then cd inside bash against the current mount table.
+      // COD-282: remote/docker launchCmd contains `$`, `$(...)` and `${...}` (REMOTE_LOGIN_SHELL_RESOLVE, $HOME, $login_shell)
+      // that must NOT be expanded by the local `bash -c "..."` outer layer. JSON.stringify wraps in double quotes
+      // where `$()` still expands even inside single quotes inside the double quotes, corrupting the remote
+      // command to `login_shell=""` / `exec ""` (exit 126). Use single-quote shellescape for remote/docker so `$`
+      // stays literal until the remote shell evaluates it; local shells have no `$` and keep JSON.stringify for
+      // backwards compat with existing tests.
       const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      await execAsync(
-        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
-        {
-          timeout: EXEC_TIMEOUT_MS,
-        }
-      );
+      const outerShellArg = remote || docker ? shellescape(launchCmd) : JSON.stringify(launchCmd);
+      await execAsync(`${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${outerShellArg}`, {
+        timeout: EXEC_TIMEOUT_MS,
+      });
 
       // Wait for tmux session to be queryable
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
@@ -2437,8 +2441,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
+      const outerShellArg2 = remote || docker ? shellescape(launchCmd) : JSON.stringify(launchCmd);
       await execAsync(
-        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
+        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${outerShellArg2}`,
         {
           timeout: EXEC_TIMEOUT_MS,
         }
