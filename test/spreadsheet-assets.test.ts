@@ -33,6 +33,7 @@ describe('COD-280 spreadsheet preview assets', () => {
     expect(check).toContain('1_100_000');
     expect(check).toContain('SPREADSHEET_ASSET_VERSION');
     expect(check).toContain('spreadsheet-preview-worker.js');
+    expect(check).toContain('spreadsheet-xlsx-core.js');
     expect(check).toContain('exceljs.min.js');
     expect(check).toContain('fflate.min.js');
     expect(check).toContain("createHash('sha256')");

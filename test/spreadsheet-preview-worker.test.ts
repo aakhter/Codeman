@@ -30,6 +30,13 @@ async function fixture(): Promise<ArrayBuffer> {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
+async function fixtureWithChartPart(): Promise<ArrayBuffer> {
+  const entries = fflate.unzipSync(new Uint8Array(await fixture()));
+  entries['xl/charts/chart1.xml'] = fflate.strToU8('<chart/>');
+  const bytes = fflate.zipSync(entries);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
 function createHarness() {
   const messages: unknown[] = [];
   const imports: string[] = [];
@@ -116,5 +123,11 @@ describe('spreadsheet preview worker', () => {
     await harness.send({ type: 'load', bytes: Uint8Array.from([1, 2, 3]).buffer });
     expect(harness.messages.at(-1)).toMatchObject({ type: 'error', code: 'malformed' });
     expect(harness.imports.some((url) => url.includes('exceljs'))).toBe(false);
+  });
+
+  it('carries detected unsupported features into workbook metadata', async () => {
+    const harness = createHarness();
+    await harness.send({ type: 'load', bytes: await fixtureWithChartPart() });
+    expect(harness.messages.at(-1)).toMatchObject({ type: 'metadata', warnings: ['charts'] });
   });
 });

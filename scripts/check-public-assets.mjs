@@ -38,10 +38,11 @@ const files = collectTextAssets(publicRoot);
 const failures = [];
 
 const spreadsheetWorker = join(publicRoot, 'spreadsheet-preview-worker.js');
+const spreadsheetCore = join(publicRoot, 'spreadsheet-xlsx-core.js');
 const spreadsheetEntry = join(publicRoot, 'spreadsheet-preview.js');
 const spreadsheetVendors = [join(publicRoot, 'vendor', 'exceljs.min.js'), join(publicRoot, 'vendor', 'fflate.min.js')];
 
-if ([spreadsheetWorker, spreadsheetEntry, ...spreadsheetVendors].every(existsSync)) {
+if ([spreadsheetWorker, spreadsheetCore, spreadsheetEntry, ...spreadsheetVendors].every(existsSync)) {
   const vendorBytes = spreadsheetVendors.reduce((total, file) => total + readFileSync(file).length, 0);
   if (vendorBytes > SPREADSHEET_VENDOR_MAX_BYTES) {
     failures.push(`Spreadsheet vendor bundles exceed ${SPREADSHEET_VENDOR_MAX_BYTES} bytes (${vendorBytes} bytes)`);
@@ -49,6 +50,7 @@ if ([spreadsheetWorker, spreadsheetEntry, ...spreadsheetVendors].every(existsSyn
 
   const expectedVersion = createHash('sha256')
     .update(readFileSync(spreadsheetWorker))
+    .update(readFileSync(spreadsheetCore))
     .update(readFileSync(spreadsheetVendors[0]))
     .update(readFileSync(spreadsheetVendors[1]))
     .digest('hex')
@@ -60,6 +62,8 @@ if ([spreadsheetWorker, spreadsheetEntry, ...spreadsheetVendors].every(existsSyn
       `SPREADSHEET_ASSET_VERSION mismatch: expected ${expectedVersion}, found ${actualVersion || 'missing'}`
     );
   }
+} else {
+  failures.push('Spreadsheet preview assets are missing; run the locked asset preparation step');
 }
 
 for (const file of files) {

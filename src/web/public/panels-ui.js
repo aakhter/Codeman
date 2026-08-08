@@ -4195,7 +4195,7 @@ Object.assign(CodemanApp.prototype, {
           });
         }
       }
-      footerEl.textContent = `${this.formatFileSize(data.size)} • spreadsheet`;
+      footerEl.textContent = `${this.formatFileSize(data.size)} • ${window.codemanT?.('Spreadsheet') || 'Spreadsheet'}`;
     } else if (data.type === 'image') {
       this.filePreviewZoom = 1;
       this.filePreviewZoomMode = 'fit';

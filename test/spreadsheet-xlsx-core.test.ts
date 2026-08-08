@@ -102,6 +102,8 @@ describe('spreadsheet XLSX core', () => {
     expect(core.formatCellValue(10, '$#,##0.00').text).toBe('$10.00');
     expect(core.formatCellValue(1, 'yyyy-mm-dd').text).toBe('1900-01-01');
     expect(core.formatCellValue(0, 'yyyy-mm-dd', true).text).toBe('1904-01-01');
+    expect(core.formatCellValue(0.5, 'hh:mm:ss').text).toBe('12:00:00');
+    expect(core.formatCellValue(1.5, 'yyyy-mm-dd hh:mm').text).toBe('1900-01-01 12:00');
     expect(core.formatCellValue(7, '[Red][<0]0.0')).toMatchObject({ text: '7', warning: expect.any(String) });
     expect(core.formatCellValue({ formula: 'SUM(A1:A2)' }, 'General')).toMatchObject({ text: '=SUM(A1:A2)' });
   });

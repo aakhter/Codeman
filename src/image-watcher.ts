@@ -335,6 +335,7 @@ export class ImageWatcher extends EventEmitter {
     if (extension === 'pdf') return 'pdf';
     if (extension === 'docx') return 'document';
     if (extension === 'pptx') return 'presentation';
+    if (extension === 'xlsx') return 'spreadsheet';
     return 'document';
   }
 }

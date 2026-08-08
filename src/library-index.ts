@@ -21,7 +21,7 @@
 import type { LibraryDocument } from './types/library.js';
 
 /** Attachment types that count as documents in the knowledge-base library. */
-const DOCUMENT_TYPES = new Set(['pdf', 'document', 'presentation', 'markdown', 'text']);
+const DOCUMENT_TYPES = new Set(['pdf', 'document', 'presentation', 'spreadsheet', 'markdown', 'text']);
 
 /** Minimal session duck-type used by harvestDocuments. */
 interface SessionLike {

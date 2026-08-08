@@ -3,7 +3,7 @@
 (function initSpreadsheetPreview(global) {
   'use strict';
 
-  const SPREADSHEET_ASSET_VERSION = '573c1c53562c';
+  const SPREADSHEET_ASSET_VERSION = 'a4efc07f98e5';
   const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
   const DEFAULT_TIMEOUT_MS = 20000;
   const MAX_SCROLL_PX = 8000000;
@@ -38,8 +38,14 @@
     let activeSheetId = null;
     let latestRequestId = 0;
     let grid = null;
+    let spacer = null;
     let cellsLayer = null;
+    let headingsLayer = null;
     let resizeObserver = null;
+    let scaleX = 1;
+    let scaleY = 1;
+    let latestRange = null;
+    let scrollFrame = null;
 
     const current = () => !disposed && isCurrent();
     const clearTimer = () => {
@@ -81,11 +87,11 @@
       if (!current() || !worker || !grid) return;
       const sheet = sheetMetadata();
       if (!sheet || sheet.rows === 0 || sheet.cols === 0) return;
-      const scaleY = Math.max(
+      scaleY = Math.max(
         1,
         axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, sheet.rows + 1) / MAX_SCROLL_PX
       );
-      const scaleX = Math.max(
+      scaleX = Math.max(
         1,
         axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, sheet.cols + 1) / MAX_SCROLL_PX
       );
@@ -97,9 +103,26 @@
         1,
         axisIndex(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, grid.scrollLeft * scaleX) - 2
       );
-      const r2 = Math.min(sheet.rows, r1 + Math.ceil((grid.clientHeight || 500) / sheet.defaultRowHeight) + 5);
-      const c2 = Math.min(sheet.cols, c1 + Math.ceil((grid.clientWidth || 800) / sheet.defaultColumnWidth) + 5);
+      const r2 = Math.min(
+        sheet.rows,
+        axisIndex(
+          sheet.rows,
+          sheet.defaultRowHeight,
+          sheet.rowOverrides,
+          (grid.scrollTop + (grid.clientHeight || 500)) * scaleY
+        ) + 2
+      );
+      const c2 = Math.min(
+        sheet.cols,
+        axisIndex(
+          sheet.cols,
+          sheet.defaultColumnWidth,
+          sheet.columnOverrides,
+          (grid.scrollLeft + (grid.clientWidth || 800)) * scaleX
+        ) + 2
+      );
       latestRequestId += 1;
+      latestRange = { r1, c1, r2, c2 };
       worker.postMessage({
         type: 'tile',
         requestId: latestRequestId,
@@ -111,8 +134,9 @@
     function renderTile(tile) {
       if (!current() || tile.requestId !== latestRequestId || String(tile.sheetId) !== String(activeSheetId)) return;
       const sheet = sheetMetadata();
-      if (!sheet || !cellsLayer) return;
+      if (!sheet || !cellsLayer || !headingsLayer || !latestRange) return;
       cellsLayer.textContent = '';
+      headingsLayer.textContent = '';
       const mergeByAnchor = new Map();
       for (const merge of tile.merges || []) {
         const match = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i.exec(merge);
@@ -130,19 +154,39 @@
         element.dataset.row = String(cell.row);
         element.dataset.col = String(cell.col);
         element.textContent = String(cell.text ?? '');
-        element.style.top = `${axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, cell.row)}px`;
-        element.style.left = `${axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, cell.col)}px`;
+        element.style.top = `${axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, cell.row) / scaleY}px`;
+        element.style.left = `${axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, cell.col) / scaleX}px`;
         const merge = mergeByAnchor.get(`${cell.row}:${cell.col}`);
         const finalRow = merge?.r2 || cell.row;
         const finalCol = merge?.c2 || cell.col;
-        element.style.height = `${Math.max(0, axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, finalRow + 1) - axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, cell.row))}px`;
-        element.style.width = `${Math.max(0, axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, finalCol + 1) - axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, cell.col))}px`;
+        element.style.height = `${Math.max(0, (axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, finalRow + 1) - axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, cell.row)) / scaleY)}px`;
+        element.style.width = `${Math.max(0, (axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, finalCol + 1) - axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, cell.col)) / scaleX)}px`;
         cellsLayer.appendChild(element);
       }
+      for (let row = latestRange.r1; row <= latestRange.r2 && row < latestRange.r1 + 200; row += 1) {
+        const heading = document.createElement('div');
+        heading.className = 'spreadsheet-row-heading';
+        heading.textContent = String(row);
+        heading.style.top = `${axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, row) / scaleY}px`;
+        headingsLayer.appendChild(heading);
+      }
+      for (let col = latestRange.c1; col <= latestRange.c2 && col < latestRange.c1 + 100; col += 1) {
+        const heading = document.createElement('div');
+        heading.className = 'spreadsheet-column-heading';
+        let label = '';
+        for (let value = col; value > 0; value = Math.floor((value - 1) / 26))
+          label = String.fromCharCode(65 + ((value - 1) % 26)) + label;
+        heading.textContent = label;
+        heading.style.left = `${axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, col) / scaleX}px`;
+        headingsLayer.appendChild(heading);
+      }
       const notice = container.querySelector('.spreadsheet-preview-notice');
-      if (notice && tile.warnings?.length) {
-        notice.hidden = false;
-        notice.textContent = tile.warnings.join(' · ');
+      if (notice) {
+        const warnings = [...(metadata.warnings || []), ...(tile.warnings || [])];
+        notice.hidden = warnings.length === 0;
+        const warningLabel =
+          global.codemanT?.('Some workbook features are not shown') || 'Some workbook features are not shown';
+        notice.textContent = warnings.length ? `${warningLabel}: ${warnings.join(', ')}` : '';
       }
     }
 
@@ -158,6 +202,15 @@
       if (grid) {
         grid.scrollTop = 0;
         grid.scrollLeft = 0;
+      }
+      const sheet = sheetMetadata();
+      if (sheet && spacer) {
+        const logicalHeight = axisOffset(sheet.rows, sheet.defaultRowHeight, sheet.rowOverrides, sheet.rows + 1);
+        const logicalWidth = axisOffset(sheet.cols, sheet.defaultColumnWidth, sheet.columnOverrides, sheet.cols + 1);
+        scaleY = Math.max(1, logicalHeight / MAX_SCROLL_PX);
+        scaleX = Math.max(1, logicalWidth / MAX_SCROLL_PX);
+        spacer.style.height = `${Math.min(MAX_SCROLL_PX, logicalHeight)}px`;
+        spacer.style.width = `${Math.min(MAX_SCROLL_PX, logicalWidth)}px`;
       }
       requestTile();
     }
@@ -205,26 +258,36 @@
       grid = document.createElement('div');
       grid.className = 'spreadsheet-grid';
       grid.setAttribute('data-i18n-skip', '');
-      const spacer = document.createElement('div');
+      spacer = document.createElement('div');
       spacer.className = 'spreadsheet-grid-spacer';
-      const first = metadata.sheets[0];
-      spacer.style.height = `${Math.min(MAX_SCROLL_PX, first.rows * first.defaultRowHeight)}px`;
-      spacer.style.width = `${Math.min(MAX_SCROLL_PX, first.cols * first.defaultColumnWidth)}px`;
       cellsLayer = document.createElement('div');
       cellsLayer.className = 'spreadsheet-cells';
-      grid.append(spacer, cellsLayer);
-      grid.addEventListener('scroll', requestTile, { passive: true });
+      headingsLayer = document.createElement('div');
+      headingsLayer.className = 'spreadsheet-headings';
+      grid.append(spacer, cellsLayer, headingsLayer);
+      grid.addEventListener(
+        'scroll',
+        () => {
+          if (scrollFrame !== null) return;
+          scrollFrame = global.requestAnimationFrame(() => {
+            scrollFrame = null;
+            requestTile();
+          });
+        },
+        { passive: true }
+      );
       shell.append(styleSheet, tabs, notice, grid);
       container.appendChild(shell);
       resizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(requestTile) : null;
       resizeObserver?.observe(grid);
-      selectSheet(first.id);
+      selectSheet(metadata.sheets[0].id);
     }
 
     function dispose() {
       if (disposed) return;
       disposed = true;
       clearTimer();
+      if (scrollFrame !== null) global.cancelAnimationFrame(scrollFrame);
       controller?.abort();
       resizeObserver?.disconnect();
       try {
@@ -269,6 +332,8 @@
           } else if (payload.type === 'tile') renderTile(payload);
           else if (payload.type === 'error') fail(payload.message);
         };
+        worker.onerror = () => fail('Spreadsheet parser failed.');
+        worker.onmessageerror = () => fail('Spreadsheet parser message failed.');
         timer = global.setTimeout(() => {
           worker?.terminate();
           fail('Spreadsheet preview timed out.');

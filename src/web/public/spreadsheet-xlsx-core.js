@@ -16,7 +16,6 @@
   });
   const MAX_ROW = 1048576;
   const MAX_COL = 16384;
-  const decoder = new TextDecoder();
 
   class XlsxPreviewError extends Error {
     constructor(code, message) {
@@ -78,7 +77,7 @@
         fail('zip64', 'ZIP64 entries are not supported');
       const end = cursor + 46 + nameLength + extraLength + commentLength;
       if (end > eocd) fail('malformed', 'Malformed XLSX entry bounds');
-      const name = decoder.decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
+      const name = new TextDecoder().decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
       entries.push({ name, compressedSize, declaredSize });
       cursor = end;
     }
@@ -96,8 +95,10 @@
 
   function createXmlCounter(name, counts, limits) {
     let tail = '';
+    const decoder = new TextDecoder();
     let sheetCells = 0;
     let sheetMerges = 0;
+    let inCellXfs = false;
     const worksheet = /^xl\/worksheets\/[^/]+\.xml$/i.test(name);
     const styles = name === 'xl/styles.xml';
     return {
@@ -118,9 +119,13 @@
           if (sheetMerges > limits.maxMergesPerSheet) fail('merge-limit', 'Worksheet exceeds the merged ranges limit');
         }
         if (styles) {
-          const styleMatches = (scan.match(/<xf(?:\s|\/?>)/g) || []).length;
-          counts.styles += styleMatches;
-          if (counts.styles > limits.maxStyles) fail('style-limit', 'Workbook exceeds the styles limit');
+          const tokens = scan.match(/<cellXfs(?:\s|>)|<\/cellXfs\s*>|<xf(?:\s|\/?>)/g) || [];
+          for (const token of tokens) {
+            if (token.startsWith('<cellXfs')) inCellXfs = true;
+            else if (token.startsWith('</cellXfs')) inCellXfs = false;
+            else if (inCellXfs) counts.styles += 1;
+          }
+          if (counts.styles > limits.maxStyles) fail('style-limit', 'Workbook exceeds the cell styles limit');
         }
         tail = text.slice(safeEnd);
       },
@@ -148,30 +153,26 @@
       const counter = createXmlCounter(file.name, counts, limits);
       let entryInflated = 0;
       file.ondata = (error, chunk, final) => {
-        if (error) {
-          thrown = error;
-          return;
+        if (error) throw error;
+        entryInflated += chunk.length;
+        totalInflated += chunk.length;
+        if (entryInflated > limits.maxEntryBytes) fail('entry-size', 'Inflated ZIP entry exceeds the entry limit');
+        if (totalInflated > limits.maxInflatedBytes) fail('inflated-size', 'Workbook exceeds the inflated bytes limit');
+        const compressed = directoryByName.get(file.name)?.compressedSize || 1;
+        if (entryInflated / Math.max(1, compressed) > limits.maxCompressionRatio) {
+          fail('compression-ratio', 'ZIP entry exceeds the compression ratio limit');
         }
-        try {
-          entryInflated += chunk.length;
-          totalInflated += chunk.length;
-          if (entryInflated > limits.maxEntryBytes) fail('entry-size', 'Inflated ZIP entry exceeds the entry limit');
-          if (totalInflated > limits.maxInflatedBytes)
-            fail('inflated-size', 'Workbook exceeds the inflated bytes limit');
-          const compressed = directoryByName.get(file.name)?.compressedSize || 1;
-          if (entryInflated / Math.max(1, compressed) > limits.maxCompressionRatio) {
-            fail('compression-ratio', 'ZIP entry exceeds the compression ratio limit');
-          }
-          counter.push(chunk, final);
-        } catch (error_) {
-          thrown = error_;
-        }
+        counter.push(chunk, final);
       };
       file.start();
     });
     unzip.register(zipApi.UnzipInflate);
     try {
-      unzip.push(bytes, true);
+      const inputChunkBytes = 64 * 1024;
+      for (let offset = 0; offset < bytes.length && !thrown; offset += inputChunkBytes) {
+        const end = Math.min(bytes.length, offset + inputChunkBytes);
+        unzip.push(bytes.subarray(offset, end), end === bytes.length);
+      }
     } catch (error) {
       thrown = error;
     }
@@ -281,12 +282,28 @@
     const code = String(format || 'General');
     if (typeof value !== 'number') return { text: String(value) };
     if (/^General$/i.test(code)) return { text: String(value) };
-    if (/^[ymdhis\-/: ]+$/i.test(code)) {
+    if (/^[ymd\-/ ]+$/i.test(code)) {
       const date = excelDate(value, Boolean(date1904));
       const yyyy = date.getUTCFullYear();
       const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
       const dd = String(date.getUTCDate()).padStart(2, '0');
       return { text: `${yyyy}-${mm}-${dd}` };
+    }
+    if (/^[hms: ]+$/i.test(code)) {
+      const seconds = Math.round((value - Math.floor(value)) * 86400) % 86400;
+      const hh = String(Math.floor(seconds / 3600)).padStart(2, '0');
+      const mm = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
+      const ss = String(seconds % 60).padStart(2, '0');
+      return { text: `${hh}:${mm}:${ss}` };
+    }
+    if (/^[ymdhis\-/: ]+$/i.test(code)) {
+      const date = excelDate(value, Boolean(date1904));
+      const yyyy = date.getUTCFullYear();
+      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(date.getUTCDate()).padStart(2, '0');
+      const hh = String(date.getUTCHours()).padStart(2, '0');
+      const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+      return { text: `${yyyy}-${mm}-${dd} ${hh}:${minutes}` };
     }
     const percent = code.includes('%');
     const decimals = code.match(/\.([0#]+)/)?.[1].length || 0;

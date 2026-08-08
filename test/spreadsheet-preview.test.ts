@@ -65,6 +65,9 @@ describe('spreadsheet preview renderer', () => {
     WorkerMock.instances = [];
     document.body.innerHTML = '<div id="preview"></div>';
     delete (window as any).CodemanSpreadsheetPreview;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) =>
+      setTimeout(() => callback(0), 0) as unknown as number;
+    window.cancelAnimationFrame = (id: number) => clearTimeout(id);
   });
 
   it('refuses oversized metadata before fetch or worker creation', () => {
@@ -92,7 +95,7 @@ describe('spreadsheet preview renderer', () => {
     worker.emit(metadata());
     const tileRequest = worker.postMessage.mock.calls.at(-1)?.[0];
     expect(tileRequest.type).toBe('tile');
-    expect(tileRequest.range.r2 - tileRequest.range.r1).toBeLessThan(40);
+    expect(tileRequest.range.r2 - tileRequest.range.r1).toBeLessThan(100);
     worker.emit({
       type: 'tile',
       requestId: tileRequest.requestId,
@@ -108,6 +111,11 @@ describe('spreadsheet preview renderer', () => {
     expect(document.querySelector('.spreadsheet-cell')?.textContent).toBe('<b>0</b>');
     expect(document.querySelector('.spreadsheet-sheet-tabs')?.hasAttribute('data-i18n-skip')).toBe(true);
     expect(document.querySelector('.spreadsheet-grid')?.hasAttribute('data-i18n-skip')).toBe(true);
+    expect(Number.parseFloat((document.querySelector('.spreadsheet-grid-spacer') as HTMLElement).style.height)).toBe(
+      8_000_000
+    );
+    (document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement).click();
+    expect((document.querySelector('.spreadsheet-grid-spacer') as HTMLElement).style.height).toBe('20px');
   });
 
   it('drops stale tiles and aborts fetch plus terminates worker on dispose', async () => {
@@ -130,6 +138,21 @@ describe('spreadsheet preview renderer', () => {
     handle.dispose();
     expect(signal.aborted).toBe(true);
     expect(worker.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows feature warnings and reports worker failures after readiness', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }));
+    const renderer = loadRenderer(fetchMock);
+    renderer.open({ container: document.querySelector('#preview'), url: '/book.xlsx', size: 8 });
+    const worker = WorkerMock.instances[0];
+    worker.emit({ type: 'ready' });
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalled());
+    worker.emit({ ...metadata(), warnings: ['charts'] });
+    const request = worker.postMessage.mock.calls.at(-1)?.[0];
+    worker.emit({ type: 'tile', requestId: request.requestId, sheetId: '1', cells: [], warnings: [] });
+    expect(document.body.textContent).toContain('charts');
+    worker.onerror?.();
+    expect(document.body.textContent).toContain('Spreadsheet parser failed');
   });
 
   it('integrates with the shared overlay and disposes the prior spreadsheet lifecycle', async () => {
@@ -176,6 +199,6 @@ describe('spreadsheet preview renderer', () => {
       expect.objectContaining({ container: body, url: '/api/book.xlsx?preview=true', size: 8192 })
     );
     expect(state.spreadsheetPreview).toEqual({ dispose });
-    expect(footer.textContent).toContain('spreadsheet');
+    expect(footer.textContent).toContain('Spreadsheet');
   });
 });

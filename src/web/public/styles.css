@@ -15620,10 +15620,36 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 }
 
 .spreadsheet-grid-spacer,
-.spreadsheet-cells {
+.spreadsheet-cells,
+.spreadsheet-headings {
   position: absolute;
   top: 0;
   left: 0;
+}
+
+.spreadsheet-row-heading,
+.spreadsheet-column-heading {
+  position: absolute;
+  z-index: 2;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.spreadsheet-row-heading {
+  left: 0;
+  width: 36px;
+  height: 20px;
+}
+
+.spreadsheet-column-heading {
+  top: 0;
+  width: 64px;
+  height: 20px;
 }
 
 .spreadsheet-cell {
