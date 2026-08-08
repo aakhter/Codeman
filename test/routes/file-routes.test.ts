@@ -696,7 +696,7 @@ describe('file-routes', () => {
       expect(body.data.url).toContain('file-raw');
     });
 
-    it('flags known-binary extensions (e.g. xlsx) instead of dumping mojibake', async () => {
+    it('classifies XLSX for browser preview without reading its bytes as text', async () => {
       mockedStat.mockResolvedValue({ size: 4096 } as never);
 
       const res = await harness.app.inject({
@@ -706,7 +706,8 @@ describe('file-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      expect(body.data.type).toBe('binary');
+      expect(body.data.type).toBe('spreadsheet');
+      expect(body.data.previewUrl).toContain('file-raw?path=sheet.xlsx&preview=true');
       expect(body.data.content).toBeUndefined();
     });
 
@@ -1042,7 +1043,7 @@ describe('file-routes', () => {
       );
     });
 
-    it('classifies XLSX metadata as binary and redirects preview to raw bytes', async () => {
+    it('classifies XLSX attachment metadata for capped browser preview', async () => {
       mockedStat.mockResolvedValue({ size: 4096, isFile: () => true, mtimeMs: 12345 } as never);
 
       const registerRes = await harness.app.inject({
@@ -1053,7 +1054,8 @@ describe('file-routes', () => {
 
       expect(registerRes.statusCode).toBe(200);
       const registerBody = JSON.parse(registerRes.body);
-      expect(registerBody.data.attachmentType).toBe('binary');
+      expect(registerBody.data.attachmentType).toBe('spreadsheet');
+      expect(registerBody.data.previewUrl).toContain('/raw?preview=true');
       const attachmentId = registerBody.data.attachmentId;
 
       const metadataRes = await harness.app.inject({
@@ -1061,14 +1063,15 @@ describe('file-routes', () => {
         url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}`,
       });
       expect(metadataRes.statusCode).toBe(200);
-      expect(JSON.parse(metadataRes.body).data.type).toBe('binary');
+      expect(JSON.parse(metadataRes.body).data.type).toBe('spreadsheet');
+      expect(JSON.parse(metadataRes.body).data.previewUrl).toContain('/raw?preview=true');
 
       const previewRes = await harness.app.inject({
         method: 'GET',
         url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/preview`,
       });
       expect(previewRes.statusCode).toBe(302);
-      expect(previewRes.headers.location).toContain(`/attachments/${attachmentId}/raw`);
+      expect(previewRes.headers.location).toContain(`/attachments/${attachmentId}/raw?preview=true`);
     });
 
     it('serves registered PNG attachment bytes with production compression enabled', async () => {
@@ -1642,6 +1645,19 @@ describe('file-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       expect(mockedCreateReadStream).toHaveBeenCalledWith('/tmp/test-workdir/huge.bin');
+    });
+
+    it('rejects an oversized XLSX browser preview before opening a stream', async () => {
+      mockedStat.mockResolvedValue({ size: 10 * 1024 * 1024 + 1 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=forecast.xlsx&preview=true`,
+      });
+
+      expect(res.statusCode).toBe(413);
+      expect(res.body).toContain('10MB limit');
+      expect(mockedCreateReadStream).not.toHaveBeenCalled();
     });
   });
 

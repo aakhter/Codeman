@@ -128,7 +128,7 @@ export function getAttachmentType(extension: string): AttachmentDetectedType {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(normalized)) return 'image';
   if (normalized === 'pdf') return 'pdf';
   if (normalized === 'pptx') return 'presentation';
-  if (normalized === 'xlsx') return 'binary';
+  if (normalized === 'xlsx') return 'spreadsheet';
   if (normalized === 'md') return 'markdown';
   if (normalized === 'txt') return 'text';
   return 'document';
@@ -136,16 +136,21 @@ export function getAttachmentType(extension: string): AttachmentDetectedType {
 
 export function buildAttachmentRoutes(
   sessionId: string,
-  attachmentId: string
+  attachmentId: string,
+  extension?: string
 ): {
   rawUrl: string;
   previewUrl: string;
   thumbnailUrl: string;
 } {
   const encodedId = encodeURIComponent(attachmentId);
+  const rawUrl = `/api/sessions/${sessionId}/attachments/${encodedId}/raw`;
   return {
-    rawUrl: `/api/sessions/${sessionId}/attachments/${encodedId}/raw`,
-    previewUrl: `/api/sessions/${sessionId}/attachments/${encodedId}/preview`,
+    rawUrl,
+    previewUrl:
+      extension?.toLowerCase().replace(/^\./, '') === 'xlsx'
+        ? `${rawUrl}?preview=true`
+        : `/api/sessions/${sessionId}/attachments/${encodedId}/preview`,
     thumbnailUrl: `/api/sessions/${sessionId}/attachments/${encodedId}/thumbnail`,
   };
 }
@@ -155,7 +160,7 @@ export function buildFileThumbnailRoute(sessionId: string, relativePath: string)
 }
 
 export function attachmentRecordToEvent(record: AttachmentRecord): AttachmentRegistrationResult {
-  const routes = buildAttachmentRoutes(record.sessionId, record.attachmentId);
+  const routes = buildAttachmentRoutes(record.sessionId, record.attachmentId, record.extension);
   return {
     sessionId: record.sessionId,
     filePath: record.fileName,

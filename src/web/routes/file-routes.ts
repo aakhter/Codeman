@@ -109,6 +109,7 @@ import {
 // Client-side hard timeout for the remote document-upload ssh transfer. Mirrors
 // the paste-image timeout (session-routes.ts) so both remote writes behave the same.
 const REMOTE_ATTACHMENT_SSH_TIMEOUT_MS = 15_000;
+export const MAX_XLSX_BROWSER_PREVIEW_BYTES = 10 * 1024 * 1024;
 
 const MIME_TYPES: Record<string, string> = {
   png: 'image/png',
@@ -709,7 +710,9 @@ async function buildDetectedAttachmentRouteItem(
   const previewUrl =
     item.extension === 'docx' || item.extension === 'pptx'
       ? `/api/sessions/${sessionId}/file-preview?path=${encodedPath}`
-      : rawUrl;
+      : item.extension === 'xlsx'
+        ? `${rawUrl}&preview=true`
+        : rawUrl;
   const thumbnailUrl = isSupportedAttachmentExtension(item.extension)
     ? buildFileThumbnailRoute(sessionId, item.relativePath)
     : undefined;
@@ -1497,18 +1500,22 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           mediaType ??
           (ext === 'pdf'
             ? 'pdf'
-            : !remote && ext === 'docx'
-              ? 'document'
-              : !remote && ext === 'pptx'
-                ? 'presentation'
-                : 'binary');
+            : ext === 'xlsx'
+              ? 'spreadsheet'
+              : !remote && ext === 'docx'
+                ? 'document'
+                : !remote && ext === 'pptx'
+                  ? 'presentation'
+                  : 'binary');
         // DOCX/PPTX conversion and thumbnails read server-local paths. Remote
         // workspaces therefore expose those files as safe raw downloads instead
         // of handing the browser an endpoint that cannot access the SSH host.
         const previewUrl =
           !remote && (ext === 'docx' || ext === 'pptx')
             ? `/api/sessions/${id}/file-preview?path=${encodeURIComponent(filePath)}`
-            : fileRawUrl;
+            : ext === 'xlsx'
+              ? `${fileRawUrl}&preview=true`
+              : fileRawUrl;
         const thumbnailUrl =
           !remote && isSupportedAttachmentExtension(ext) ? buildFileThumbnailRoute(id, filePath) : undefined;
         return {
@@ -2035,7 +2042,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
       }
 
-      const remoteRoutes = buildAttachmentRoutes(id, remoteAttachmentId);
+      const remoteRoutes = buildAttachmentRoutes(id, remoteAttachmentId, ext);
       return {
         success: true,
         data: {
@@ -2139,7 +2146,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     const agentPath =
       validateSessionFilePath(session.workingDir, dest)?.relativePath ?? join('.codeman-attachments', diskName);
-    const routes = buildAttachmentRoutes(id, attachmentId);
+    const routes = buildAttachmentRoutes(id, attachmentId, ext);
     return {
       success: true,
       data: {
@@ -2287,7 +2294,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // attachment-guard policy on every request (defense-in-depth) before streaming.
   app.get('/api/sessions/:id/attachments/:attachmentId/raw', async (req, reply) => {
     const { id, attachmentId } = req.params as { id: string; attachmentId: string };
-    const { download } = req.query as { download?: string };
+    const { download, preview } = req.query as { download?: string; preview?: string };
     const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
     if (!workingDir) return;
     const record = getAttachmentOr404(reply, id, attachmentId);
@@ -2299,8 +2306,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!servePath) return;
 
     try {
-      // 50MB cap on the by-id attachment raw route (matches the attachment POST path).
-      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true', 50 * 1024 * 1024);
+      // XLSX preview parsing is intentionally browser-local, but the preview
+      // response is capped before a stream is opened. Explicit downloads retain
+      // the existing attachment-route limit.
+      const maxSizeBytes =
+        record.extension === 'xlsx' && preview === 'true' && download !== 'true'
+          ? MAX_XLSX_BROWSER_PREVIEW_BYTES
+          : 50 * 1024 * 1024;
+      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true', maxSizeBytes);
     } catch (err) {
       reply
         .code(500)
@@ -2322,7 +2335,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // Only Office formats need server-side conversion; PDF/PNG and text formats
     // (md/txt) preview directly from their raw bytes.
     if (record.extension !== 'docx' && record.extension !== 'pptx') {
-      reply.redirect(`/api/sessions/${id}/attachments/${encodeURIComponent(attachmentId)}/raw`);
+      const previewQuery = record.extension === 'xlsx' ? '?preview=true' : '';
+      reply.redirect(`/api/sessions/${id}/attachments/${encodeURIComponent(attachmentId)}/raw${previewQuery}`);
       return;
     }
 
@@ -2563,7 +2577,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // Serve raw file content (for images/binary files)
   app.get('/api/sessions/:id/file-raw', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { path: filePath, download } = req.query as { path?: string; download?: string };
+    const {
+      path: filePath,
+      download,
+      preview,
+    } = req.query as {
+      path?: string;
+      download?: string;
+      preview?: string;
+    };
     const liveSession = ctx.sessions.get(id);
     if (liveSession?.remote) {
       // Uses the live session deliberately: remote connection details are not
@@ -2581,8 +2603,22 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         return;
       }
       try {
-        const staged = await downloadRemoteWorkspaceFile(session.remote!, filePath);
         const ext = filePath.split('.').pop()?.toLowerCase() || '';
+        if (ext === 'xlsx' && preview === 'true' && download !== 'true') {
+          const remoteInfo = await getRemoteWorkspaceFileInfo(session.remote!, filePath);
+          if (remoteInfo.size > MAX_XLSX_BROWSER_PREVIEW_BYTES) {
+            reply
+              .code(413)
+              .send(
+                createErrorResponse(
+                  ApiErrorCode.INVALID_INPUT,
+                  `File too large (${Math.round(remoteInfo.size / 1024 / 1024)}MB > 10MB limit)`
+                )
+              );
+            return;
+          }
+        }
+        const staged = await downloadRemoteWorkspaceFile(session.remote!, filePath);
         const rawBasename = filePath.split('/').pop() || 'download';
         let cleaned = false;
         const cleanup = () => {
@@ -2624,7 +2660,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     try {
       const ext = filePath.split('.').pop()?.toLowerCase() || '';
       const rawBasename = filePath!.split('/').pop() || 'download';
-      await serveRawFile(reply, resolvedPath, rawBasename, ext, download === 'true');
+      const maxSizeBytes =
+        ext === 'xlsx' && preview === 'true' && download !== 'true' ? MAX_XLSX_BROWSER_PREVIEW_BYTES : undefined;
+      await serveRawFile(reply, resolvedPath, rawBasename, ext, download === 'true', maxSizeBytes);
     } catch (err) {
       reply
         .code(500)
@@ -2656,7 +2694,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // Only Office formats need server-side conversion; PDF/PNG and text formats
     // (md/txt) preview directly from their raw bytes.
     if (ext !== 'docx' && ext !== 'pptx') {
-      reply.redirect(`/api/sessions/${id}/file-raw?path=${encodeURIComponent(filePath)}`);
+      const previewQuery = ext === 'xlsx' ? '&preview=true' : '';
+      reply.redirect(`/api/sessions/${id}/file-raw?path=${encodeURIComponent(filePath)}${previewQuery}`);
       return;
     }
 

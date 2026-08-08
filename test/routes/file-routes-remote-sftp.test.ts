@@ -185,6 +185,51 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
     expect(res.body).not.toContain('file-thumbnail');
   });
 
+  it('classifies remote XLSX metadata for capped browser preview', async () => {
+    getRemoteWorkspaceFileInfo.mockResolvedValue({ size: 1024, mtimeMs: 1 });
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=forecast.xlsx`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({
+      type: 'spreadsheet',
+      previewUrl: expect.stringContaining('file-raw?path=forecast.xlsx&preview=true'),
+    });
+  });
+
+  it('rejects an oversized remote XLSX preview before staging the file', async () => {
+    getRemoteWorkspaceFileInfo.mockResolvedValue({ size: 10 * 1024 * 1024 + 1, mtimeMs: 1 });
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=forecast.xlsx&preview=true`,
+    });
+
+    expect(res.statusCode).toBe(413);
+    expect(res.body).toContain('10MB limit');
+    expect(downloadRemoteWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the XLSX preview cap to an explicit remote download', async () => {
+    const stagedPath = join(stagingDir, 'download');
+    await fs.writeFile(stagedPath, 'remote xlsx bytes');
+    const cleanup = vi.fn(async () => undefined);
+    downloadRemoteWorkspaceFile.mockResolvedValue({ path: stagedPath, cleanup });
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=forecast.xlsx&download=true`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(downloadRemoteWorkspaceFile).toHaveBeenCalledWith(REMOTE, 'forecast.xlsx');
+    expect(getRemoteWorkspaceFileInfo).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(1));
+  });
+
   it('streams a staged remote download and removes it after the response closes', async () => {
     const stagedPath = join(stagingDir, 'download');
     await fs.writeFile(stagedPath, 'remote bytes');

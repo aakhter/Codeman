@@ -63,7 +63,15 @@ export interface ImageDetectedEvent {
   size: number;
 }
 
-export type AttachmentDetectedType = 'image' | 'pdf' | 'document' | 'presentation' | 'markdown' | 'text' | 'binary';
+export type AttachmentDetectedType =
+  | 'image'
+  | 'pdf'
+  | 'document'
+  | 'presentation'
+  | 'spreadsheet'
+  | 'markdown'
+  | 'text'
+  | 'binary';
 
 /**
  * Event emitted when a new previewable attachment file is detected in a session's
