@@ -1,5 +1,18 @@
 # aicodeman
 
+## 1.11.1
+
+### Patch Changes
+
+- - **Remote opencode session does not open (COD-282)** — bare `opencode` relied on remote login-shell PATH alone; added `$HOME/.opencode/bin` to `REMOTE_PATH_BOOTSTRAP`, wired `openCodeConfig` (`--model`/`--session`/`--fork` + inline `OPENCODE_CONFIG_CONTENT`) through `buildRemoteLaunchCommand`/`buildRemoteSessionCommand` and `TmuxManager`, and allowed matching per-CLI config in quick-start remote guard; reconnect via `new-session -A` now streams TUI with no regression for local opencode or remote claude/codex/gemini/shell.
+  - **Upload session source files from browser (COD-281)** — wire session source upload via browser with SFTP for remote hosts.
+  - **Remote history from codeman-remote socket (COD-279)** — capture remote tmux history via `codeman-remote` socket for durable remote sessions.
+  - **Expose shortcut settings panel and make overlay globally visible (COD-278)** — restored UI methods lost during deduplication and exposed shortcut settings; global overlay visibility.
+  - **Resolve remote agent login shell from passwd (COD-277)** — remote agents now resolve real login shell via `getent`/`dscl` and launch with `-i -l` so `~/.zshrc` env is sourced (e.g. `COMPOSIO_CONSUMER_KEY`).
+  - **Source user shell env for agent CLIs (COD-276)** — local and remote agent launches source user shell env via login shell wrapper.
+  - **Clickable file URI previews (COD-273)**, **attachment download (COD-261)**, **preview in new tab (COD-260)**, **checkpoint fresh-thread handoff (COD-262)**, **attachment navigation (COD-259)**, **PWA server name (COD-256)**, **checkpoint default persistence (COD-257)**, **headroom proxy attribution (COD-254)**, **macOS SFTP listing fix (COD-255)**, **codex snapshot pinning (COD-253)**, **native resume ids for opencode/gemini/agy (COD-251)**, **remote SFTP file manager (COD-252)** and **response viewer one-click copy (COD-263)** — all changes since 1.11.0 included in this patch train.
+  - **Config** — `opencode.json` untracked and kept local-only (single build agent).
+
 ## 1.11.0
 
 ### Minor Changes
