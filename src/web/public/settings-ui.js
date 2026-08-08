@@ -371,6 +371,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
+    document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     // Claude CLI settings
     const claudeModeSelect = document.getElementById('appSettingsClaudeMode');
     const allowedToolsRow = document.getElementById('allowedToolsRow');
@@ -841,6 +842,7 @@ Object.assign(CodemanApp.prototype, {
     const buttons = [
       ['welcomeClaudeBtn', 'claude'],
       ['welcomeOpencodeBtn', 'opencode'],
+      ['welcomeAntigravityBtn', 'antigravity'],
       ['welcomeGeminiBtn', 'gemini'],
       // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
       // without cloudflared can only ever produce "cloudflared not found".
@@ -1704,6 +1706,7 @@ Object.assign(CodemanApp.prototype, {
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
+      showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
@@ -1906,6 +1909,7 @@ Object.assign(CodemanApp.prototype, {
       showSessionButton: _ssb,
       showAwayDigestButton: _adb,
       showCronButton: _crb,
+      showTabDetachButton: _tdb,
       // Phone-only home surface, and absent from SettingsUpdateSchema (.strict()).
       mobileOverviewEnabled: _mov,
       ...serverSettings
@@ -2357,6 +2361,13 @@ Object.assign(CodemanApp.prototype, {
   applyHeaderVisibilitySettings() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
+
+    // Tab pop-out (open-in-new-window) button: opt-in (App Settings → Tab Bar,
+    // default OFF, per-device). Mirrored as a class on <html>: styles.css hides
+    // .tab-detach without it (a tab that is already detached keeps its icon as
+    // the re-focus affordance for the popped-out window).
+    const showTabDetach = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
+    document.documentElement.classList.toggle('tabs-show-detach', showTabDetach);
     const compactHeader = MobileDetection.getDeviceType() !== 'desktop';
     const showFontControls = compactHeader ? false : (settings.showFontControls ?? defaults.showFontControls ?? false);
     const showSystemStats = compactHeader ? false : (settings.showSystemStats ?? defaults.showSystemStats ?? true);
@@ -2700,6 +2711,7 @@ Object.assign(CodemanApp.prototype, {
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
+          'showTabDetachButton',
           'mobileOverviewEnabled',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,

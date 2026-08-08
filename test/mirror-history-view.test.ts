@@ -83,9 +83,12 @@ describe('COD-187 live-mirror structural guards', () => {
   });
 
   it('all three scroll inputs funnel through _handleUserScrollIntent', () => {
-    // wheel handler no longer scrolls directly
+    // The wheel handler never scrolls a mirror tab directly. The #205 merge
+    // grew this listener (mouse-tracking/alt-buffer passthrough, the CLI-forward
+    // branch and the opencode-mobile rAF batch all precede the funnel), so the
+    // window has to cover the whole listener rather than its first 900 chars.
     const wheel = termUi.indexOf("addEventListener(\n      'wheel'");
-    const wheelBody = termUi.slice(wheel, wheel + 900);
+    const wheelBody = termUi.slice(wheel, termUi.indexOf('{ passive: false, capture: true }', wheel));
     expect(wheelBody).toContain('_handleUserScrollIntent(lines)');
     // touchmove + momentum both call the funnel
     expect(termUi.split('_handleUserScrollIntent(lines)').length - 1).toBeGreaterThanOrEqual(3);

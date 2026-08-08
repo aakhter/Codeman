@@ -1,5 +1,182 @@
 # aicodeman
 
+## 1.12.2
+
+### Patch Changes
+
+- Codex input fixes: all four bugs reported by @DodgyBadger traced to one root cause (the zero-lag local-echo overlay buffering keystrokes until Enter, which starves codex's per-keystroke composer) and fixed in terminal-ui.js:
+  - Slash command picker never appeared in codex sessions (#222): the "/" sat in the overlay until Enter, so codex never saw it. Codex-mode sessions now use plain PTY echo (same branch as shell), so the picker pops and live-filters as you type.
+  - Arrow keys dead while typing, backspace dead after Ctrl+Backspace (#218): arrows were forwarded to a still-empty composer while typed text sat pending, and after a control-char flush the overlay swallowed every backspace. Codex bypasses the overlay entirely now; the shared overlay branch (claude/gemini/opencode) additionally flushes pending text on composer nav keys, then hands the session to pass-through until Enter/Ctrl+C, and forwards backspace instead of swallowing it when the overlay has no state.
+  - Pasting displaced the typed prompt (#219): bracketed pastes (xterm terminal.paste with DECSET 2004 active) were forwarded without flushing pending typed text, so the paste landed first. The shared branch now flushes typed text first and delays the paste sequence by 80ms, because codex's paste-burst handling drops keystrokes that arrive in the same PTY read as a bracketed paste (verified against codex 0.147.0 at the byte level).
+  - Long prompts overflowed the bottom of the screen (#220): long typed prompts existed only in the overlay DOM so codex never grew its composer; with plain PTY echo the composer grows and rewraps normally.
+
+  Verified end to end against a real codex 0.147.0 TUI driven by a headless browser: the pre-fix build reproduces all four bugs, the fixed build passes 17/17 assertions. New CI test file test/local-echo-codex-gating.test.ts (41 tests) pins the nav-key classifier, per-mode overlay gating, the flush helper, and pass-through routing. Known upstream limitation: Ctrl+Backspace deletes one character, not a word (xterm.js sends 0x08; word-delete needs kitty CSI-u encoding that xterm.js 6.0.0 cannot emit).
+
+  Mobile keyboard viewport settling fixes by @Lint111 (#229): coalesce keyboard viewport settling so rapid visualViewport resize events during keyboard show/hide no longer thrash the terminal fit, and only arm the settle logic on a real keyboard transition instead of every viewport resize.
+
+## 1.12.1
+
+### Patch Changes
+
+- Terminal scrollback fixes, round 2 of issue #205. A Claude pane's local buffer is hollow (tmux keeps no history for a repaint-mode pane), and both retest reports traced back to that fact. The scroll-to-top full-history re-pull now refuses to rewrite the terminal when the capture holds less than the browser already does, so it can no longer delete history mid-scroll on iPhone (a refused session also re-fetches far less often). When wheel-forwarding is unavailable on a Claude session (version probe failed, CLI older than 2.1.187, or the "Wheel Scrolls Local History" opt-out) and there is no local scrollback to scroll, wheel and touch now page the CLI's own transcript via coalesced PageUp/PageDown instead of doing nothing. The `claude --version` probe no longer caches a failed run for the server's lifetime (one timed-out probe used to silently disable wheel-forwarding on every device until restart); failures retry with backoff. Every scroll gesture now logs a one-line `[scroll]` routing decision to the browser console for direct diagnosis, and the opt-out setting's tooltip explains that the paging fallback is Claude-only (Codex has none).
+- 2e69e28: Bound the process-tree walk that could take a machine down.
+
+  `getChildPids` ran `pgrep -P <pid>` per node and recursed with no visited set, no
+  depth limit and no node cap. Across ~28 adopted tmux trees the fan-out exploded,
+  and because each `pgrep` blocks in the kernel while reading `/proc/<pid>/cgroup`
+  under WSL, none returned while the walk kept spawning more — ~13,000 `pgrep`
+  processes stuck in D-state out of ~39,000 total, load average above 13,000,
+  recoverable only by restarting WSL.
+
+  Now: one `ps` snapshot, breadth-first with a visited set, a depth cap and a node
+  cap, in a pure module (`proc-tree.ts`) that the regression tests exercise
+  directly. The snapshot is refreshed asynchronously, and the kill path forces a
+  fresh one so the SIGKILL escalation cannot re-read pre-SIGTERM state.
+
+- ebfcac6: An input whose delivery fails can be retried instead of being lost for good.
+
+  Both input paths recorded the `(clientId, seq)` pair as applied and acknowledged
+  the frame _before_ knowing whether the write had landed — the POST route because
+  its mux write is fire-and-forget, the WebSocket handler because it ACKed
+  unconditionally. When the write then failed, the client dropped the frame from its
+  durable queue and the server rejected the retry as a duplicate: the reliable
+  delivery layer was guaranteeing exactly-once delivery of something that had never
+  been delivered.
+
+  The bookkeeping is now rolled back on failure and the WebSocket ACK withheld, so
+  the client redelivers. `Session.write()` reports whether it reached a PTY at all
+  instead of silently swallowing the data.
+
+  Response codes are unchanged: a session can legitimately have no PTY yet (created
+  but not started), so turning that into a failure status would be a contract change
+  of its own.
+
+  Note this does not remove the root cause: the POST still answers 200 before the
+  mux write is attempted, so a client that treats any 2xx as final still cannot
+  learn about that failure. Closing that would mean awaiting the tmux child in the
+  request path.
+
+- 1a32e63: Routes that answer with `reply.raw.writeHead()` no longer drop the headers the
+  security hook set.
+
+  `writeHead` writes straight to the Node response and bypasses Fastify's header
+  store, so everything the `onRequest` hook granted was silently lost — including the
+  `Access-Control-Allow-Origin` it emits for localhost origins, and the
+  `X-Content-Type-Options` / `X-Frame-Options` / CSP headers. A localhost page could
+  therefore call every other `/api` endpoint cross-origin while its EventSource
+  failed CORS.
+
+  Affects `GET /api/events` and the three raw-writing routes in `file-routes.ts`
+  (`file-raw`, `tail-file`, `download`).
+
+## 1.12.0
+
+### Minor Changes
+
+- Terminal scrollback overhaul (issue #205), fixing every reported scroll failure across shell and CLI sessions, desktop and mobile:
+  - Shell, OpenCode and Antigravity sessions finally have working scrollback: tmux's own client-side alternate-screen switch is stripped for tmux-backed sessions (narrow strip: alt-screen toggles only, keeping `clear`'s 3J and mouse DECSETs), so xterm stays in the normal buffer instead of a scrollback-less alt buffer where the wheel turned into shell history cycling and touch scrolling did nothing. Direct-PTY fallback sessions are untouched so fullscreen apps (vim/less/htop) keep the alt screen there.
+  - The wheel listener now runs in capture phase and owns the scroll: xterm's internal vscode-style viewport scroller consumed wheel events whenever local scrollback existed (and goes deaf entirely after a tab switch or replay resets the terminal), which silently killed wheel forwarding, made scrolling break after reload/tab switches, and let the CLI's input box scroll away. Local scrolling goes through buffer-level scrollLines and keeps working after resets; mouse-tracking apps and alternate-buffer sessions are passed through untouched.
+  - Wheel AND touch scrolling now forward to the CLI's own transcript for Codex and Claude 2.1.187+, at any scroll position (the viewport snaps home first), so the input box stays pinned on desktop and phones alike. Shift+wheel and the "Wheel scrolls local history" setting still pin local scrollback.
+  - Smooth scrolling: local wheel scrolling glides with an ease-out animation (fractional line accumulation, so slow trackpad drags track the finger instead of running ahead).
+  - Full tmux history on demand: the full-scrollback replay is now per session instead of once per page load, and scrolling up at the top of the buffer re-pulls the complete tmux history, recovering everything tmux's repaint bursts or tab switches removed from the browser's copy.
+  - Firefox wheel speed: wheel deltas are normalized by deltaMode (Firefox reports line units, previously read as pixels and slowed ~4x).
+  - Remote SSH Claude sessions now probe the CLI version over ssh (same connection options and login-shell wrapper as the real launch), so wheel forwarding works for them too instead of silently staying off.
+
+  Docs: scrollback analysis and fix plan recorded in docs/, architecture invariants updated (strip flavors, capture-phase wheel ownership, per-session full-history replay); docker agent-image rebuild warning and integration-guide link fixes from the preceding docs commits.
+
+## 1.11.2
+
+### Patch Changes
+
+- Make Antigravity (`agy`) a first-class CLI everywhere, and stop presenting Gemini CLI as a consumer product now that it is enterprise-only.
+
+  Antigravity was already wired into the session layer, schemas, run-mode menu and remote/Docker command maps, but the surfaces around it were never updated. Gemini keeps full support; Antigravity now sits beside it.
+
+  Fixes:
+  - **Docker cases with `mode: 'antigravity'` were broken.** `docker/agent.Dockerfile` installs its CLIs from npm, and `agy` is not an npm package, so the binary was never in the image and the container died on command-not-found. It now gets its own installer step. The `--dir /usr/local/bin` flag is load-bearing: the installer's default `$HOME/.local/bin` resolves to root's home at build time and would be unreachable by the `agent` user the container runs as. Note the binary is roughly 190MB, making it the largest layer in the image, so rebuild with `node scripts/build-agent-image.mjs` when convenient.
+  - **Welcome screen** gained a "Run Antigravity" action, gated on `agy` being present like the other CLI buttons, styled with the same cyan identity as the toolbar run button and run-mode dot.
+  - **`install.sh`** now detects `agy` (search paths mirroring `antigravity-cli-resolver.ts`), counts it as a satisfying AI CLI so an Antigravity-only box is not told it has none, and recommends it instead of Gemini in the install hints.
+
+  Documentation corrections where it had become factually wrong: `architecture-invariants.md` described `isExternalCliMode()` as opencode/codex/gemini when the code has included antigravity for some time, said "all three modes", and omitted `ANTIGRAVITY_*` from the env-prefix allowlist row; the `agentType` enum in `cron-guide.md`, `SessionMode` in `cron-discovery.md`, and `RemoteCommandMode` in `remote-sessions.md` were all stale.
+
+  Also updated both READMEs (five CLIs, Gemini marked enterprise-only), the `antigravity` npm keyword, and comment drift in eight places. Test coverage added for the new welcome button.
+
+  Antigravity stores its state under `~/.gemini/antigravity-cli/` rather than a `~/.antigravity` directory, so the existing `.gemini` Docker credential seed already covers it. That is now recorded in a code comment so no dead configuration gets added later.
+
+- b982c5d: Keep the brief Response Viewer output inside the same message card and Markdown wrapper used by the full conversation view, so opening the viewer without clicking More preserves the same readable formatting.
+
+## 1.11.1
+
+### Patch Changes
+
+- - **Remote opencode session does not open (COD-282)** — bare `opencode` relied on remote login-shell PATH alone; added `$HOME/.opencode/bin` to `REMOTE_PATH_BOOTSTRAP`, wired `openCodeConfig` (`--model`/`--session`/`--fork` + inline `OPENCODE_CONFIG_CONTENT`) through `buildRemoteLaunchCommand`/`buildRemoteSessionCommand` and `TmuxManager`, and allowed matching per-CLI config in quick-start remote guard; reconnect via `new-session -A` now streams TUI with no regression for local opencode or remote claude/codex/gemini/shell.
+  - **Upload session source files from browser (COD-281)** — wire session source upload via browser with SFTP for remote hosts.
+  - **Remote history from codeman-remote socket (COD-279)** — capture remote tmux history via `codeman-remote` socket for durable remote sessions.
+  - **Expose shortcut settings panel and make overlay globally visible (COD-278)** — restored UI methods lost during deduplication and exposed shortcut settings; global overlay visibility.
+  - **Resolve remote agent login shell from passwd (COD-277)** — remote agents now resolve real login shell via `getent`/`dscl` and launch with `-i -l` so `~/.zshrc` env is sourced (e.g. `COMPOSIO_CONSUMER_KEY`).
+  - **Source user shell env for agent CLIs (COD-276)** — local and remote agent launches source user shell env via login shell wrapper.
+  - **Clickable file URI previews (COD-273)**, **attachment download (COD-261)**, **preview in new tab (COD-260)**, **checkpoint fresh-thread handoff (COD-262)**, **attachment navigation (COD-259)**, **PWA server name (COD-256)**, **checkpoint default persistence (COD-257)**, **headroom proxy attribution (COD-254)**, **macOS SFTP listing fix (COD-255)**, **codex snapshot pinning (COD-253)**, **native resume ids for opencode/gemini/agy (COD-251)**, **remote SFTP file manager (COD-252)** and **response viewer one-click copy (COD-263)** — all changes since 1.11.0 included in this patch train.
+  - **Config** — `opencode.json` untracked and kept local-only (single build agent).
+- fix(history): Past Sessions data quality, and gate the phone run picker on CLI availability
+
+  **Past Sessions data quality (#215).** Three bugs in the transcript scanner behind
+  the Cmd+K Session Manager and the phone overview's PAST SESSIONS list:
+  - Automated/SDK-driven transcripts (CI review bots and other tooling, which Claude
+    Code stamps with a non-`cli` `entrypoint`) were listed alongside real interactive
+    sessions even though they were never resumable. They are now excluded. Detection
+    scans every entrypoint-bearing message rather than stopping at the first, so a
+    transcript that began under an older Claude Code build and only later picked up a
+    non-`cli` entrypoint is no longer wrongly hidden.
+  - A resumed session could show a same-directory sibling's preview text as its own.
+    The `workingDir` backfill in `mergeUnifiedSessions()` now only ever applies to rows
+    that have no history entry of their own, so it can no longer overwrite a row's real
+    content with another conversation's.
+  - Sessions restarted many times accumulated enough bookkeeping lines to push the real
+    first prompt past the scanner's 16KB head-read window, leaving a blank row. The read
+    is now two-tier: 16KB first, escalating to 128KB only when that was not enough, which
+    is both correct and cheaper than reading 128KB unconditionally (measured on a real
+    transcript tree: 36% fewer bytes read, roughly 17.5% faster than the unconditional
+    version). Also restores the tail-read fallback for a file whose head read failed
+    outright (for example `EMFILE` while scanning hundreds of files), which had been
+    silently dropping the session from history.
+
+  Follow-up hardening on top of the above: the automated-transcript exclusion now
+  blocklists the SDK entrypoint shape (`sdk`, `sdk-cli`, `sdk-py`) instead of allowlisting
+  the exact value `cli`. Because the check hides rows, an allowlist failed closed on any
+  value Claude Code has not shipped yet: a future rename of the interactive entrypoint,
+  or a second interactive host, would have blanked the entire Past Sessions list with
+  nothing in the UI to explain it. An unrecognized automated entrypoint now costs a few
+  noisy rows instead, which is the annoyance this filter set out to fix rather than a
+  broken feature.
+
+  **Phone overview run picker (#214).** The "C" logo home screen's Run picker listed all
+  six backends regardless of what was installed, so tapping an uninstalled one produced a
+  failed launch instead of the entry simply not being offered. It is now gated on
+  `isCliAvailable()` exactly like the desktop toolbar's run-mode dropdown (shell exempt,
+  since it has no external CLI dependency and keeps the menu from ever being empty). The
+  picker is a hardcoded duplicate of the toolbar menu rather than a shared render, which
+  is why it never picked up the earlier gating work; a test now asserts that every mode
+  the picker offers is gated, so a newly added backend cannot silently drift again.
+
+- 73315bc: fix(web): stop the Claude response viewer from following another session's conversation
+
+  The viewer re-derived a pane's live conversation by taking the newest
+  `~/.claude/history.jsonl` entry for the pane's cwd. A cwd is shared with every
+  other Codeman tab on it, with tabs long since closed, and with any plain
+  `claude` run in the user's own terminal, so the eye followed whichever of those
+  was typed into last — and the adoption was written back to the session, so the
+  mispin persisted. Entries are now credited to a pane only when they land within
+  10s of that pane's own Enter and no other pane on the cwd submitted closer, the
+  same last-submit correlation the Codex locator already uses.
+
+  That correlation also has to survive a restart. `start()` resets
+  `claudeSessionId` to the launch id even when re-attaching to a mux session whose
+  CLI has since moved on via `/clear`, so a recovered pane pointed the viewer at
+  its pre-`/clear` transcript — and with the anchor itself living only in memory,
+  nothing corrected it until the user happened to type again. `lastSubmitAt` is
+  now persisted in `SessionState` and restored on boot recovery, so the viewer
+  re-derives the live conversation on its first poll.
+
 ## 1.11.0
 
 ### Minor Changes

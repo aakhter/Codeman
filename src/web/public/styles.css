@@ -1424,7 +1424,12 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   transition: opacity 0.05s ease-out;
 }
 
-.session-tab:hover .tab-close,
+/* Icons expand on the ACTIVE tab only (in flow): selection is a deliberate
+   click, so the width change never happens while aiming at a tab, background
+   tabs keep their full title on hover, and a stray click can only switch.
+   Middle-click closes any tab (_setupTabMiddleClickClose in app.js).
+   :focus-visible is retained so keyboard users can still reach the icons. */
+.session-tab.active .tab-close,
 .session-tab .tab-close:focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -2031,7 +2036,7 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   transition: opacity 0.15s, transform 0.2s;
 }
 
-.session-tab:hover .tab-gear,
+.session-tab.active .tab-gear,
 .session-tab .tab-gear:focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -2059,7 +2064,7 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   pointer-events: none;
   transition: opacity 0.15s;
 }
-.session-tab:hover .tab-detach,
+.session-tab.active .tab-detach,
 .session-tab .tab-detach:focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -2095,6 +2100,29 @@ html[data-line-anim="packet"] .connection-line.line-enter {
 }
 .session-tab.detached .tab-detached-badge {
   display: inline-flex;
+}
+
+/* ===== Tab action icons: active tab only =================================
+   All three per-tab icons live in a .tab-actions wrapper (in flow; it adds
+   no width of its own while the children keep the width:0 collapse above).
+   They expand only on the ACTIVE tab: selection is a deliberate click, so
+   the tab-strip geometry never shifts while the pointer is aiming, hovering
+   a background tab changes nothing (full title stays readable), and a stray
+   click can only switch sessions. Middle-click closes any tab. The phone
+   layout in mobile.css follows the same active-only pattern with its own
+   sizing; the tablet touch fallback there keeps icons always visible. */
+
+.session-tab .tab-actions {
+  display: flex;
+  align-items: center;
+}
+
+/* Pop-out button is opt-in (App Settings → Tab Bar, default off; per-device).
+   settings-ui.js mirrors the setting as the tabs-show-detach class on <html>.
+   A tab that is ALREADY detached keeps its icon regardless: it is the
+   re-focus affordance for the popped-out window. */
+html:not(.tabs-show-detach) .session-tab:not(.detached) .tab-detach {
+  display: none;
 }
 
 /* ===== Solo (detached single-session) window chrome ===================== */
@@ -3208,14 +3236,14 @@ body.solo-mode .btn-lifecycle-log {
   background: var(--term-bg, #161b23);
   overflow: hidden;
   position: relative;
-  /* Performance: isolate layout and paint operations.
-     Do NOT use contain:strict — size containment breaks xterm.js
-     FitAddon dimension calculations. */
   contain: layout paint;
-  /* Performance: promote to own compositor layer for isolation from
-     header/toolbar/panel repaints. Eliminates compositing stalls
-     when surrounding UI elements update during typing. */
-  will-change: contents;
+  will-change: auto;
+}
+.touch-device .terminal-container.scrolling {
+  will-change: transform;
+}
+.terminal-container canvas {
+  contain: strict;
 }
 .terminal-container .xterm {
   width: 100%;
@@ -3367,6 +3395,20 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   box-shadow: 0 4px 20px rgba(251, 146, 60, 0.3), 0 0 40px rgba(251, 146, 60, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   border-color: rgba(253, 186, 116, 0.5);
   color: #fed7aa;
+/* Antigravity: cyan identity, matching .btn-toolbar.btn-run.mode-antigravity and
+   .run-mode-dot.antigravity so the welcome action reads as the same backend. */
+.welcome-btn-antigravity {
+  background: linear-gradient(135deg, #0b2b33 0%, #0e7490 55%, #0891b2 100%);
+  border-color: rgba(34, 211, 238, 0.4);
+  color: #cffafe;
+  box-shadow: 0 2px 8px rgba(34, 211, 238, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.welcome-btn-antigravity:hover {
+  background: linear-gradient(135deg, #124450 0%, #0891b2 55%, #06b6d4 100%);
+  box-shadow: 0 4px 20px rgba(34, 211, 238, 0.3), 0 0 40px rgba(8, 145, 178, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(103, 232, 249, 0.5);
+  color: #ecfeff;
   transform: translateY(-1px);
 }
 
@@ -7367,6 +7409,14 @@ kbd {
   background: var(--surface, #1e1e1e);
   color: var(--text, #ccc);
   font-size: 12px;
+}
+.sources-file-picker {
+  flex: 1 1 140px;
+  font-size: 12px;
+  color: var(--text, #ccc);
+}
+.sources-upload-btn {
+  white-space: nowrap;
 }
 .sources-content-input {
   width: 100%;

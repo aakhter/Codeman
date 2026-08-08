@@ -59,6 +59,7 @@ import {
   type SessionDocker,
 } from './types.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
+import { probeRemoteCliVersion } from './remote-hosts.js';
 import type { TerminalMultiplexer, MuxSession, CommandDeliveryResult } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
 import { RalphTracker } from './ralph-tracker.js';
@@ -218,6 +219,34 @@ export function detectCodexCheckpointWorkingFrame(data: string): boolean {
   );
 }
 
+/**
+ * Rendered-frame working evidence used only by checkpoint sequencing, the
+ * Claude counterpart of detectCodexCheckpointWorkingFrame.
+ *
+ * Claude keeps its `❯` input row visible for the WHOLE of a `/compact`, so
+ * prompt visibility cannot distinguish idle from busy and the operation is
+ * only observable through its progress row. That row is marked with a
+ * `✻`/`✽`-class glyph, not the braille SPINNER_PATTERN, which is why the
+ * spinner check alone never fired and every compact reported
+ * `operation-not-accepted` while plainly succeeding.
+ *
+ * The discriminator is an animation glyph followed by a label ending in an
+ * ellipsis, e.g. `✢ Compacting conversation… `. The elapsed timer and percent
+ * (`✽ Compacting conversation… (55s) ▰▰▱ 46%`) must NOT be required: they only
+ * appear once there is progress to report, roughly 15s in, which is well past
+ * the 8s acceptance window — that delay is exactly what made an earlier
+ * timer-based pattern still report `operation-not-accepted`.
+ *
+ * Completed rows read `✻ Cogitated for 5s` — same glyph family, no ellipsis —
+ * and persist on screen while Claude sits idle, so they must not match:
+ * reading one as working would hold `ready` false forever and stall every
+ * checkpoint in `waiting-ready`. The glyph anchor also keeps the `❯` input row
+ * out of it, whose ghost-suggestion text can legitimately contain an ellipsis.
+ */
+export function detectClaudeCheckpointWorkingFrame(data: string): boolean {
+  return SPINNER_PATTERN.test(data) || /\besc to interrupt\b/.test(data) || /^\s*[·✢✳∗✻✽]\s+\S[^\n]*…/m.test(data);
+}
+
 function getModeLabel(mode: SessionMode): string {
   switch (mode) {
     case 'opencode':
@@ -253,6 +282,37 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
   return mode === 'codex' || mode === 'claude' || mode === 'gemini';
 }
 
+/**
+ * Modes that need the NARROW strip: alt-screen toggles only, leaving `\x1b[3J`
+ * and the mouse-tracking DECSETs alone. Applies to every mode `isAltScreenStripMode`
+ * excludes, but ONLY when the session is tmux-backed (`useMux`).
+ *
+ * The bug (issue #205): the tmux CLIENT emits `smcup` (`\x1b[?1049h`) as its first
+ * bytes on attach, before any program has run. Unstripped, xterm.js parks in the
+ * alternate buffer for the whole session, where `baseY` is pinned at 0 (no
+ * scrollback to reach, so touch scrolling is a no-op) and xterm's own wheel handler
+ * translates the wheel into `\x1bOA`/`\x1bOB` cursor keys — which readline receives
+ * as shell history navigation. Both reported symptoms, one sequence.
+ *
+ * Why this is safe under tmux, despite the old "shell must keep the alt screen for
+ * vim/less/htop" reasoning: tmux is a full terminal emulator and NEVER forwards a
+ * pane's alt-screen toggles to its client, it repaints instead. Captured from a real
+ * attach, `\x1b[?1049h` appears exactly once (at attach) and vim/less/htop sessions
+ * inside the pane emit zero. So the only thing stripped here is tmux's own smcup.
+ *
+ * Why it is gated on `useMux`: `startShell()`/`startInteractive()` fall back to a
+ * DIRECT PTY when mux creation fails. There the inner program's `\x1b[?1049h` really
+ * does reach xterm, and stripping it would break vim/less/htop for real.
+ *
+ * Why it is narrower than the full strip: with tmux `mouse off`, a mouse-aware
+ * program in the pane (htop, vim with `set mouse=a`) still gets its DECSETs passed
+ * through to the client, so stripping those would break its mouse support. And
+ * `\x1b[3J` from a user's own `clear` is a deliberate "wipe my scrollback".
+ */
+export function isMuxAltScreenOnlyStripMode(mode: SessionMode, useMux: boolean): boolean {
+  return useMux && !isAltScreenStripMode(mode);
+}
+
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
 
 /** PTY fallback geometry when tmux can't be queried (matches pre-#80 hardcoded values). */
@@ -268,6 +328,8 @@ const IS_TEST_MODE = !!process.env.VITEST;
 const TEST_PTY_SCRIPT = 'if (process.stdin.isTTY) process.stdin.setRawMode(true); process.stdin.pipe(process.stdout);';
 /** Delay before the in-container Claude CLI version probe (lets the container start). */
 const DOCKER_CLI_VERSION_PROBE_DELAY_MS = 3000;
+/** Delay before the over-ssh Claude CLI version probe (keeps session start off the ssh round-trip). */
+const REMOTE_CLI_VERSION_PROBE_DELAY_MS = 3000;
 
 /**
  * Ask tmux for the current window geometry of `muxName` so a re-attaching PTY
@@ -645,6 +707,8 @@ export class Session extends EventEmitter {
       terminalBufferConfig?: { maxBytes: number; trimBytes: number };
       /** tmux history limit for newly created mux sessions. */
       tmuxHistoryLimit?: number;
+      /** Restored wall-clock ms of the pane's last Enter (see `lastSubmitAt`). */
+      lastSubmitAt?: number;
       /** Remote execution metadata for sessions launched through SSH inside local tmux. */
       remote?: SessionRemote;
       /** Creating browser's terminal dims — new tmux windows spawn at this size instead of 120x40 (COD-179). */
@@ -683,6 +747,12 @@ export class Session extends EventEmitter {
     this._claudeAuthoritativeSessionId = config.claudeSessionId ?? config.resumeSessionId ?? null;
     this._claudeSessionIdentityAdopted = config.claudeSessionIdentityAdopted ?? Boolean(config.resumeSessionId);
     this._claudeSessionStartHookReady = config.claudeSessionStartHookReady ?? this.mode !== 'claude';
+    // Restored from state.json on boot recovery. start() resets _claudeSessionId
+    // to the launch id even when re-attaching to a mux session whose CLI has
+    // moved on (a `/clear` before the restart), so this anchor is what lets the
+    // response viewer re-derive the live conversation without waiting for the
+    // user to type again.
+    this._lastSubmitAt = config.lastSubmitAt ?? 0;
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;
@@ -923,6 +993,15 @@ export class Session extends EventEmitter {
   /** The tmux session name, if the session is running inside a mux */
   get muxName(): string | null {
     return this._muxSession?.muxName ?? null;
+  }
+
+  /**
+   * True when this session's PTY is a tmux client rather than the program itself.
+   * Read by the replay-side alt-screen strip, which must apply the same
+   * `useMux` gate as the live strip (isMuxAltScreenOnlyStripMode).
+   */
+  get usesMux(): boolean {
+    return this._useMux;
   }
 
   get totalCost(): number {
@@ -1334,7 +1413,7 @@ export class Session extends EventEmitter {
               sessionId: this.id,
               workingDir: this.workingDir,
               resumeSessionId: this._codexConfig?.resumeSessionId,
-              lastSubmitAt: this._codexLastSubmitAt,
+              lastSubmitAt: this._lastSubmitAt,
               competingSubmitAts: [...Session.codexSubmitTimes.entries()]
                 .filter(([sessionId]) => sessionId !== this.id)
                 .map(([, submittedAt]) => submittedAt),
@@ -1375,16 +1454,18 @@ export class Session extends EventEmitter {
 
     if (rendered) {
       // formatPaneSnapshot paints rows with absolute cursor moves and no EOLs.
-      // Restore Codex row boundaries before the generic ANSI strip so `›` and
-      // working evidence retain their line semantics. Claude stays unchanged.
-      const checkpointFrame =
-        this.mode === 'codex' ? rendered.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n') : rendered;
+      // Restore row boundaries before the generic ANSI strip so `›`/`❯` and
+      // working evidence retain their line semantics. This is not Codex-only:
+      // the prompt checks below are `^`-anchored, so an unrestored frame is a
+      // single line and the prompt is never visible — which stalls every
+      // checkpoint mode in `waiting-ready` until `readiness-timeout`.
+      const checkpointFrame = rendered.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n');
       const plain = checkpointFrame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
       const renderedWorking =
         this.mode === 'codex'
           ? detectCodexCheckpointWorkingFrame(plain)
           : this.mode === 'claude'
-            ? SPINNER_PATTERN.test(plain)
+            ? detectClaudeCheckpointWorkingFrame(plain)
             : false;
       working = working || renderedWorking;
       const promptVisible =
@@ -1694,6 +1775,7 @@ export class Session extends EventEmitter {
       respawnBlocked: this._respawnBlocked || undefined,
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
       sources: this.getSourcesForPersist(),
+      lastSubmitAt: this._lastSubmitAt || undefined,
       // envOverrides intentionally NOT on the public SessionState type — they must not
       // leak into SSE / GET /api/sessions broadcasts (schema allows OPENCODE_*, which
       // can carry secrets). For disk persistence, session-manager calls
@@ -1957,9 +2039,16 @@ export class Session extends EventEmitter {
     // SSE/WS stream carries them, keeping everything in the main buffer with
     // scrollback intact. These are controlled TUIs whose cursor-positioned
     // redraws overwrite only the cells they target, so non-erased rows keep
-    // their content. Gated to Codex/Claude (isAltScreenStripMode) — shell must
-    // keep the alt screen for vim/less/htop.
-    if (isAltScreenStripMode(this.mode)) {
+    // their content. Gated to Codex/Claude/Gemini (isAltScreenStripMode).
+    //
+    // Every OTHER mode (shell/opencode/antigravity) gets the NARROW strip when it
+    // is tmux-backed: alt-screen toggles only, because the sequence that breaks
+    // scrollback there is tmux's own client-side smcup at attach, not anything the
+    // program in the pane emitted (issue #205, see isMuxAltScreenOnlyStripMode).
+    // 3J and the mouse DECSETs stay, so `clear` and mouse-aware TUIs keep working.
+    const fullStrip = isAltScreenStripMode(this.mode);
+    const altOnlyStrip = !fullStrip && isMuxAltScreenOnlyStripMode(this.mode, this._useMux);
+    if (fullStrip || altOnlyStrip) {
       // Debug capture (codex only): when CODEMAN_CODEX_RAW_LOG=1, write the raw
       // codex PTY output (pre-strip) to a per-session log file. Used to diagnose
       // the stacked-status-bar / ghost-row rendering issues by inspecting the
@@ -1999,13 +2088,15 @@ export class Session extends EventEmitter {
         data = data.slice(0, -splitTail[0].length);
         if (!data) return;
       }
-      data = data
-        // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '')
-        // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[3J/g, '')
-        // eslint-disable-next-line no-control-regex
-        .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
+      // eslint-disable-next-line no-control-regex
+      data = data.replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '');
+      if (fullStrip) {
+        data = data
+          // eslint-disable-next-line no-control-regex
+          .replace(/\x1b\[3J/g, '')
+          // eslint-disable-next-line no-control-regex
+          .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, '');
+      }
     }
 
     // Scan terminal output for attachment requests. `codeman://attach?...` is an
@@ -2069,8 +2160,8 @@ export class Session extends EventEmitter {
     // never show it — which left cliVersion undefined and silently disabled
     // wheel-forwarding to Claude's own transcript (the only route to history in
     // repaint/alt-screen mode; issue #154). Remote sessions run claude on
-    // another host, so a local probe wouldn't reflect their version — skip them
-    // and let the banner scrape handle those. Cached process-wide, best-effort.
+    // another host, so a local probe wouldn't reflect their version; they get
+    // their own over-ssh probe below. Cached process-wide, best-effort.
     if (this.mode === 'claude' && !this._remote && !this._docker && !this._cliVersion) {
       const probedVersion = getClaudeCliVersion();
       if (probedVersion) {
@@ -2107,6 +2198,32 @@ export class Session extends EventEmitter {
             /* best-effort */
           });
       }, DOCKER_CLI_VERSION_PROBE_DELAY_MS);
+    }
+
+    // Remote sessions run claude on ANOTHER HOST, so neither the local nor the
+    // docker probe applies, and the banner-scrape fallback they were left with
+    // is the unreliable path #154 was filed for, so remote Claude cases silently
+    // never got wheel-forwarding (noted in the #205 analysis). Probe over ssh,
+    // deferred so session start never waits on the ssh round-trip.
+    if (this.mode === 'claude' && this._remote && !this._cliVersion) {
+      const remoteMeta = this._remote;
+      setTimeout(() => {
+        if (this._isStopped || this._cliVersion) return;
+        void probeRemoteCliVersion(remoteMeta, this.mode)
+          .then((version) => {
+            if (!version || this._isStopped || this._cliVersion) return;
+            this._cliVersion = version;
+            this.emit('cliInfoUpdated', {
+              version: this._cliVersion,
+              model: this._cliModel,
+              accountType: this._cliAccountType,
+              latestVersion: this._cliLatestVersion,
+            });
+          })
+          .catch(() => {
+            /* best-effort */
+          });
+      }, REMOTE_CLI_VERSION_PROBE_DELAY_MS);
     }
 
     // If mux wrapping is enabled, create or attach to a mux session
@@ -3292,37 +3409,45 @@ export class Session extends EventEmitter {
    * For interactive sessions, this is how you send user input to Claude.
    * Remember to include `\r` (carriage return) to simulate pressing Enter.
    *
-   * @param data - The input data to send (text, escape sequences, etc.)
-   *
    * @example
    * ```typescript
    * session.write('hello world');  // Text only, no Enter
    * session.write('\r');           // Enter key
    * session.write('ls -la\r');     // Command with Enter
    * ```
+   *
+   * @param data - The input data to send (text, escape sequences, etc.)
+   * @returns true if the data reached a PTY. A session whose PTY is gone still
+   * discards the data, but it used to do so with no signal at all — which is how
+   * input could disappear while the caller believed it had been delivered.
    */
-  write(data: string): void {
-    this._trackCodexSubmit(data);
-    if (this.ptyProcess) {
-      this.ptyProcess.write(data);
-    }
+  write(data: string): boolean {
+    this._trackSubmit(data);
+    if (!this.ptyProcess) return false;
+    this.ptyProcess.write(data);
+    return true;
   }
 
-  // ── Codex thread tracking ─────────────────────────────────────────────
-  // When a codex pane last submitted a message (Enter). The response-viewer
-  // correlates this against ~/.codex/history.jsonl entry timestamps to find
-  // the thread the pane is ACTUALLY on — the only signal that survives
-  // /resume, /new and /fork typed inside the codex TUI itself.
-  private _codexLastSubmitAt = 0;
+  // ── Conversation tracking ─────────────────────────────────────────────
+  // When this pane last submitted a message (Enter). The response-viewer
+  // correlates this against the CLI's own history.jsonl entry timestamps to
+  // find the conversation the pane is ACTUALLY on — the only signal that
+  // survives /clear, /resume, /new and /fork typed inside the TUI itself,
+  // none of which announce themselves on the PTY's stdout.
+  private _lastSubmitAt = 0;
 
-  get codexLastSubmitAt(): number {
-    return this._codexLastSubmitAt;
+  /** Wall-clock ms of this pane's last Enter; 0 if it has never submitted. */
+  get lastSubmitAt(): number {
+    return this._lastSubmitAt;
   }
 
-  private _trackCodexSubmit(data: string): void {
-    if (this.mode === 'codex' && (data.includes('\r') || data.includes('\n'))) {
-      this._codexLastSubmitAt = Date.now();
-      Session.codexSubmitTimes.set(this.id, this._codexLastSubmitAt);
+  private _trackSubmit(data: string): void {
+    if (data.includes('\r') || data.includes('\n')) {
+      this._lastSubmitAt = Date.now();
+      // Codex last-response resolution compares submit times ACROSS sessions (a
+      // sibling codex pane's submit would otherwise be mistaken for this one's),
+      // so codex panes additionally publish theirs to the shared map.
+      if (this.mode === 'codex') Session.codexSubmitTimes.set(this.id, this._lastSubmitAt);
     }
   }
 
@@ -3363,6 +3488,23 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * Undo the bookkeeping of {@link shouldApplyInput} for a delivery that failed.
+   *
+   * Without this, the reliable-delivery layer guarantees exactly-once delivery of
+   * something that may never have been delivered: the seq is recorded as applied
+   * BEFORE the write is attempted, so a client retry — the very mechanism the seq
+   * exists for — is rejected as a duplicate and the input is lost for good.
+   *
+   * Only rolls back if `seq` is still the newest recorded one; a later input has
+   * already superseded it and must not be re-opened.
+   */
+  forgetInputSeq(clientId: string, seq: number): void {
+    if (this._appliedInputSeq.get(clientId) === seq) {
+      this._appliedInputSeq.set(clientId, seq - 1);
+    }
+  }
+
+  /**
    * Sends input via the terminal multiplexer's direct input mechanism.
    *
    * More reliable than direct PTY write for programmatic input, especially
@@ -3379,7 +3521,7 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
-    this._trackCodexSubmit(data);
+    this._trackSubmit(data);
     if (this._mux && this._muxSession) {
       return this._mux.sendInput(this.id, data);
     }
@@ -3423,7 +3565,7 @@ export class Session extends EventEmitter {
         baselineId && !baselineIds.includes(baselineId) ? [...baselineIds, baselineId] : baselineIds;
       this._checkpointCodexFreshTransitionArmed = true;
     } else {
-      this._trackCodexSubmit(data);
+      this._trackSubmit(data);
     }
     if (this._isStopped || (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)) {
       return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };

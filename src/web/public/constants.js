@@ -125,11 +125,15 @@ function evaluateWebGLLongTaskTrip(recent, entries, now, config = WEBGL_FALLBACK
  * between device type, URL params, the sticky marker, and the user's settings
  * toggle in one testable place (terminal-ui.js calls this).
  *
- * Precedence (desktop only — mobile always skips):
+ * Precedence (desktop + iPhone when not low-power):
  *   1. user toggle OFF        -> skip (one-shot opt-out, sticky untouched)
  *   2. ?nowebgl               -> skip (one-shot opt-out, sticky untouched)
  *   3. ?webgl=force           -> enable + clear stale sticky marker
  *   4. toggle ON / untouched  -> respect the auto-fallback sticky marker
+ *
+ * Mobile: skipped by default except iPhone (isIOS && deviceType==='mobile')
+ * when not in low-power / reduced-motion — COD-283 tries WebGL on iPhone
+ * with canvas fallback on context loss or long-task stalls.
  *
  * A stored `true` is treated like the untouched default here: the checkbox
  * ships checked on desktop, so any unrelated settings save stores `true` —
@@ -137,12 +141,13 @@ function evaluateWebGLLongTaskTrip(recent, entries, now, config = WEBGL_FALLBACK
  * auto-fallback safety net. The marker is only retired by ?webgl=force or by
  * a real OFF->ON toggle flip, which saveAppSettings() detects at save time.
  *
- * @param {{deviceType?: string, noWebglParam?: boolean, forceParam?: boolean,
+ * @param {{deviceType?: string, isIOS?: boolean, isLowPower?: boolean, noWebglParam?: boolean, forceParam?: boolean,
  *          stickyDisabled?: boolean, userPrefEnabled?: (boolean|undefined)}} [input]
  * @returns {{skip: boolean, clearSticky: boolean}}
  */
 function shouldSkipWebGL(input = {}) {
-  if (input.deviceType !== 'desktop') return { skip: true, clearSticky: false };
+  const allowMobileWebGL = input.deviceType === 'mobile' && input.isIOS && !input.isLowPower;
+  if (input.deviceType !== 'desktop' && !allowMobileWebGL) return { skip: true, clearSticky: false };
   if (input.userPrefEnabled === false) return { skip: true, clearSticky: false };
   if (input.noWebglParam) return { skip: true, clearSticky: false };
   if (input.forceParam) return { skip: false, clearSticky: true };

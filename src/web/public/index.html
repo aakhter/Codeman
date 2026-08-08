@@ -337,6 +337,10 @@
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               Run Codex
             </button>
+            <button class="welcome-btn welcome-btn-antigravity" id="welcomeAntigravityBtn" style="display: none;" onclick="app.setRunMode('antigravity'); app.runAntigravity()">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Run Antigravity
+            </button>
             <button class="welcome-btn welcome-btn-gemini" id="welcomeGeminiBtn" style="display: none;" onclick="app.setRunMode('gemini'); app.runGemini()">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               Run Gemini
@@ -1384,7 +1388,7 @@
               </div>
               <!-- Input Section -->
               <div class="settings-section-header">Input</div>
-              <div class="settings-item settings-item-multiline" title="Scroll the terminal's own local scrollback with a plain mouse wheel / two-finger swipe, instead of forwarding the wheel to the CLI's transcript. Turn on if scrolling back through history doesn't work (e.g. macOS trackpad in Claude sessions). Shift+wheel always reaches local scrollback regardless.">
+              <div class="settings-item settings-item-multiline" title="Scroll the terminal's own local scrollback with a plain mouse wheel / two-finger swipe, instead of forwarding the wheel to the CLI's transcript. Leave OFF for Claude/Codex sessions: those CLIs redraw the screen in place and keep no local scrollback, so the wheel would have almost nothing to scroll. In Claude sessions Codeman then falls back to paging the CLI's own transcript; Codex sessions have no such fallback, so the wheel goes dead. Shift+wheel always reaches local scrollback regardless.">
                 <div class="settings-item-text">
                   <span class="settings-item-label">Wheel Scrolls Local History</span>
                   <span class="settings-item-desc">Plain wheel/trackpad pages the terminal scrollback</span>
@@ -1562,6 +1566,13 @@
                 <span class="settings-item-label">Tall Tabs (Name + Folder)</span>
                 <label class="switch switch-sm">
                   <input type="checkbox" id="appSettingsTabTwoRows">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="settings-item" title="Show the open-in-new-window (pop-out) button when hovering a session tab">
+                <span class="settings-item-label">Pop-out Button on Tabs</span>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="appSettingsShowTabDetachButton">
                   <span class="slider"></span>
                 </label>
               </div>
@@ -2359,7 +2370,7 @@
             <div class="form-row">
               <label>Image</label>
               <input type="text" id="dockerImage" placeholder="codeman/agent:base" autocomplete="off" autocapitalize="off" spellcheck="false">
-              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini + tmux.</span>
+              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini/opencode/agy + tmux.</span>
             </div>
             <div class="form-row">
               <label>Network</label>
@@ -2751,6 +2762,10 @@
             </div>
             <div id="sourcesPathRow" class="sources-field-row sources-field-row--hidden">
               <input type="text" id="sourcesPath" class="sources-path-input" placeholder="relative/path/to/file.md" maxlength="1000" autocomplete="off">
+            </div>
+            <div id="sourcesUploadRow" class="sources-field-row sources-field-row--hidden">
+              <input type="file" id="sourcesFilePicker" class="sources-file-picker" accept=".pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt">
+              <button type="button" class="btn-toolbar btn-sm sources-upload-btn" id="sourcesUploadBtn" onclick="app.handleSourceUpload()">Upload</button>
             </div>
             <div id="sourcesContentRow" class="sources-field-row sources-field-row--hidden">
               <textarea id="sourcesContent" class="sources-content-input" placeholder="Highlighted text..." maxlength="10000" rows="4"></textarea>

@@ -83,7 +83,9 @@ describe('document attachment UI wiring', () => {
   it('shows CLI-first guidance when the attachment drawer is empty', () => {
     expect(panelsJs).toContain('No attachments yet');
     expect(panelsJs).toContain('Show a file here by running:');
-    expect(panelsJs).toContain('codeman attach /absolute/path/to/file.pptx');
+    // COD-103 made the binary name dynamic (`aicodeman` vs `codeman`), so the
+    // guidance is a template rather than a hardcoded `codeman attach …`.
+    expect(panelsJs).toContain('${cliName} attach /absolute/path/to/file.pptx');
     expect(panelsJs).toContain('Supports .pptx, .docx, .xlsx, .pdf, .png, .md, and .txt.');
   });
 

@@ -1,6 +1,6 @@
 {
   "name": "aicodeman",
-  "version": "1.11.0",
+  "version": "1.12.2",
   "description": "Mission control for AI coding agents - run 20 autonomous agents with real-time monitoring and session persistence",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,6 @@
     "test:watch": "vitest --config config/vitest.config.ts",
     "test:coverage": "vitest run --config config/vitest.config.ts --coverage",
     "test:ci": "vitest run --config config/vitest.ci.config.ts",
-    "test:mobile": "vitest run --config test/mobile/vitest.config.ts",
     "check:frontend-syntax": "node scripts/check-frontend-syntax.mjs",
     "fix:node-pty": "node scripts/fix-node-pty.mjs",
     "typecheck": "tsc --noEmit",
@@ -35,7 +34,8 @@
     "version-packages": "changeset version && npm install --package-lock-only && node scripts/check-lockfile-sync.mjs",
     "check:lockfile": "node scripts/check-lockfile-sync.mjs",
     "knip": "npx --yes knip@latest --config config/knip.json",
-    "release": "changeset publish"
+    "release": "changeset publish",
+    "test:mobile": "vitest run --config test/mobile/vitest.config.ts"
   },
   "prettier": {
     "singleQuote": true,
@@ -56,6 +56,7 @@
     "anthropic",
     "opencode",
     "codex",
+    "antigravity",
     "gemini-cli",
     "ai-agents",
     "agent",

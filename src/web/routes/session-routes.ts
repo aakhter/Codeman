@@ -21,7 +21,7 @@ import {
   type GeminiConfig,
   type AntigravityConfig,
 } from '../../types.js';
-import { Session, isAltScreenStripMode } from '../../session.js';
+import { Session, isAltScreenStripMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
 import {
   CreateSessionSchema,
@@ -106,6 +106,8 @@ import {
   parseExternalCliTranscript,
 } from '../response-viewer-transcript.js';
 import { findActiveCodexConversation } from '../../checkpoint-conversation-identity.js';
+// LRUMap is deliberately NOT in the utils barrel — import the module directly.
+import { LRUMap } from '../../utils/lru-map.js';
 import {
   checkDockerAvailable,
   checkDockerConfigDrift,
@@ -546,7 +548,7 @@ export function registerSessionRoutes(
     //
     // For keys the caller is actively setting, strip any stale disk entry a prior
     // Codeman version may have written. Scope limited to:
-    //   - Claude mode (OpenCode/Codex/Gemini don't read .claude/settings.local.json)
+    //   - Claude mode (OpenCode/Codex/Gemini/Antigravity don't read .claude/settings.local.json)
     //   - workingDir inside CASES_DIR / the per-user case space (Codeman's managed
     //     territory — we never mutate .claude/settings.local.json in arbitrary user
     //     repos that POST /api/sessions can target, as those may have hand-authored
@@ -1123,7 +1125,8 @@ export function registerSessionRoutes(
     // Reliable delivery (POST fallback when the WebSocket is down): a 2xx IS the
     // client's ACK, so a tagged duplicate redelivery must still return 200 but
     // skip the write. Untagged requests (curl/legacy) always apply.
-    if (typeof clientId === 'string' && typeof seq === 'number' && !session.shouldApplyInput(clientId, seq)) {
+    const tagged = typeof clientId === 'string' && typeof seq === 'number';
+    if (tagged && !session.shouldApplyInput(clientId as string, seq as number)) {
       return {};
     }
     session.cancelCheckpoint('manual-takeover');
@@ -1131,21 +1134,33 @@ export function registerSessionRoutes(
     // Write input to PTY. Direct write is synchronous; writeViaMux
     // (tmux send-keys) is fire-and-forget to avoid blocking the HTTP response.
     if (useMux) {
-      // Fire-and-forget: don't block HTTP response on tmux child process.
-      // Fallback to direct write on failure.
+      // Fire-and-forget: don't block the HTTP response on a tmux child process.
+      // Fallback to a direct write on failure.
+      //
+      // Because the response has already been sent by then, a failure here is the
+      // one case the caller can never learn about — so the dedup bookkeeping is
+      // rolled back. Otherwise the seq stays recorded as applied and a retry, the
+      // very mechanism reliable delivery exists for, is rejected as a duplicate.
+      const undoOnFailure = () => {
+        if (tagged) session.forgetInputSeq(clientId as string, seq as number);
+      };
       session
         .writeViaMux(inputStr)
         .then((ok) => {
-          if (!ok) {
-            console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
-            session.write(inputStr);
-          }
+          if (ok) return;
+          console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
+          if (!session.write(inputStr)) undoOnFailure();
         })
         .catch(() => {
-          session.write(inputStr);
+          if (!session.write(inputStr)) undoOnFailure();
         });
     } else {
-      session.write(inputStr);
+      // Same rollback. NOT an error response, deliberately: a session can
+      // legitimately have no PTY yet (created but not started), and callers have
+      // always been able to write to one without a 4xx.
+      if (!session.write(inputStr) && tagged) {
+        session.forgetInputSeq(clientId as string, seq as number);
+      }
     }
     return {};
   });
@@ -1211,80 +1226,97 @@ export function registerSessionRoutes(
 
   // ========== Get Last Response (from transcript JSONL) ==========
 
-  // Resolves the most recent Claude conversation id for a session's cwd by
-  // tailing ~/.claude/history.jsonl. After `/clear`, Claude Code keeps writing
-  // to a new <uuid>.jsonl; history.jsonl is the only source-of-truth update
-  // that does not rely on project-local hooks (we intentionally don't install
-  // hooks in arbitrary user repos, see the POST /api/sessions comment).
+  // How far apart a ~/.claude/history.jsonl entry and a pane's Enter may be and
+  // still be the same submission. Claude appends to history as it accepts the
+  // prompt, so the true gap is milliseconds — this is slack for a loaded box,
+  // not a search radius.
+  const CLAUDE_SUBMIT_MATCH_MS = 10_000;
+  // history.jsonl grows forever; only the tail can hold entries near a submit.
+  const CLAUDE_HISTORY_TAIL_BYTES = 256 * 1024;
+
+  // Resolves the Claude conversation id THIS pane is currently on by matching
+  // ~/.claude/history.jsonl (which logs every submitted prompt as
+  // {project, sessionId, timestamp}) against the pane's last Enter. After
+  // `/clear` Claude keeps writing to a new <uuid>.jsonl, and history.jsonl is
+  // the only source-of-truth update that does not rely on project-local hooks
+  // (we intentionally don't install hooks in arbitrary user repos, see the
+  // POST /api/sessions comment).
   //
-  // Entries from OTHER Codeman sessions in the same cwd are filtered out by
-  // their known claudeSessionIds so concurrent tabs don't shadow each other,
-  // as long as each has had its id resolved at least once.
+  // The pane's own Enter is what makes an entry OURS. `project` alone is not:
+  // a cwd is shared by every other Codeman tab on it, by tabs long since
+  // closed, and by any plain `claude` the user runs in their own terminal —
+  // adopting the newest entry for the cwd pinned the viewer to whichever of
+  // those conversations was typed in last, so the eye showed a stranger's
+  // transcript. With no correlated entry we keep the id we have; a viewer one
+  // turn behind beats a viewer showing someone else's conversation.
+  const claudeHistoryPinCache = new LRUMap<string, { submitAt: number; claudeSessionId: string }>({ maxSize: 1024 });
   async function resolveActiveClaudeSessionIdFromHistory(
     session: Session,
     projectsDir: string
   ): Promise<string | null> {
-    const historyPath = join(homedir(), '.claude', 'history.jsonl');
+    const submitAt = session.lastSubmitAt;
+    if (!submitAt) return null; // never typed through Codeman — nothing to credit
+    const cached = claudeHistoryPinCache.get(session.id);
+    if (cached && cached.submitAt === submitAt) return cached.claudeSessionId;
+
+    // Ids another live pane is already pinned to can never be ours, and every
+    // pane sharing this cwd competes for the entry we are about to claim —
+    // including non-Claude panes, since a shell pane can run `claude` too.
     const otherClaudeIds = new Set<string>();
+    const otherSubmits: number[] = [];
     for (const s of ctx.sessions.values()) {
-      if (s.id !== session.id && s.workingDir === session.workingDir && s.claudeSessionId) {
-        otherClaudeIds.add(s.claudeSessionId);
-      }
+      if (s.id === session.id || s.workingDir !== session.workingDir) continue;
+      if (s.claudeSessionId) otherClaudeIds.add(s.claudeSessionId);
+      if (s.lastSubmitAt) otherSubmits.push(s.lastSubmitAt);
     }
 
-    let candidateSid: string | null = null;
-    try {
-      const content = await fs.readFile(historyPath, 'utf8');
-      const lines = content.split('\n');
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i];
-        if (!line) continue;
-        try {
-          const entry = JSON.parse(line) as { project?: string; sessionId?: string };
-          if (
-            entry.project === session.workingDir &&
-            typeof entry.sessionId === 'string' &&
-            !otherClaudeIds.has(entry.sessionId)
-          ) {
-            candidateSid = entry.sessionId;
-            break;
-          }
-        } catch {
-          // Skip unparseable lines
-        }
-      }
-    } catch {
-      return null;
-    }
-    if (!candidateSid || candidateSid === session.id) return candidateSid;
+    const historyPath = join(homedir(), '.claude', 'history.jsonl');
+    const stat = await fs.stat(historyPath).catch(() => null);
+    if (!stat || stat.size === 0) return null;
+    const tail = await readFileTail(historyPath, Buffer.alloc(CLAUDE_HISTORY_TAIL_BYTES), stat.size);
+    if (!tail) return null;
 
-    // Safety: only adopt if the candidate's jsonl is more recently written
-    // than our initial conversation's jsonl. Blocks stale ids inherited from
-    // a prior Codeman session that happened to share this cwd.
-    try {
-      const projectDirs = await fs.readdir(projectsDir);
+    let best: { sessionId: string; dist: number } | undefined;
+    for (const line of tail.split('\n')) {
+      if (!line) continue;
+      let entry: { project?: string; sessionId?: string; timestamp?: number };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue; // the first tail line is usually cut mid-JSON
+      }
+      const { sessionId, timestamp } = entry;
+      if (entry.project !== session.workingDir) continue;
+      if (typeof sessionId !== 'string' || !sessionId) continue;
+      if (typeof timestamp !== 'number') continue;
+      if (otherClaudeIds.has(sessionId)) continue;
+      const dist = Math.abs(timestamp - submitAt);
+      if (dist > CLAUDE_SUBMIT_MATCH_MS) continue;
+      if (otherSubmits.some((other) => Math.abs(timestamp - other) < dist)) continue; // another pane is closer
+      if (!best || dist <= best.dist) best = { sessionId, dist }; // ties: the newer entry wins
+    }
+    if (!best) return null;
+
+    // Sanity: the conversation we switch to must exist on disk and must not be
+    // staler than the one we are leaving. A `/clear` successor never is.
+    const currentSessionId = session.claudeSessionId || session.id;
+    if (best.sessionId !== currentSessionId) {
+      const projectDirs = await fs.readdir(projectsDir).catch(() => null);
+      if (!projectDirs) return null;
       let candidateMtime = 0;
-      let initialMtime = 0;
+      let currentMtime = 0;
       for (const projDir of projectDirs) {
-        try {
-          const cs = await fs.stat(join(projectsDir, projDir, `${candidateSid}.jsonl`));
-          if (cs.mtimeMs > candidateMtime) candidateMtime = cs.mtimeMs;
-        } catch {
-          /* not in this dir */
-        }
-        try {
-          const is = await fs.stat(join(projectsDir, projDir, `${session.id}.jsonl`));
-          if (is.mtimeMs > initialMtime) initialMtime = is.mtimeMs;
-        } catch {
-          /* not in this dir */
-        }
+        const candidateStat = await fs.stat(join(projectsDir, projDir, `${best.sessionId}.jsonl`)).catch(() => null);
+        if (candidateStat && candidateStat.mtimeMs > candidateMtime) candidateMtime = candidateStat.mtimeMs;
+        const currentStat = await fs.stat(join(projectsDir, projDir, `${currentSessionId}.jsonl`)).catch(() => null);
+        if (currentStat && currentStat.mtimeMs > currentMtime) currentMtime = currentStat.mtimeMs;
       }
-      if (candidateMtime === 0) return null;
-      if (initialMtime > 0 && candidateMtime <= initialMtime) return null;
-    } catch {
-      return null;
+      if (candidateMtime === 0) return null; // transcript not written yet — retry next poll
+      if (currentMtime > 0 && candidateMtime < currentMtime) return null;
     }
-    return candidateSid;
+
+    claudeHistoryPinCache.set(session.id, { submitAt, claudeSessionId: best.sessionId });
+    return best.sessionId;
   }
 
   async function getCanonicalTranscriptBuffer(session: Session): Promise<string> {
@@ -1294,7 +1326,7 @@ export function registerSessionRoutes(
     let liveMuxBuffer: string | null = null;
 
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true });
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, { fullHistory: true });
       if (liveMuxBuffer !== null && liveMuxBuffer.length === 0) {
         liveMuxBuffer = null;
       }
@@ -1531,6 +1563,11 @@ export function registerSessionRoutes(
     const activeId = await resolveActiveClaudeSessionIdFromHistory(session, projectsDir);
     if (activeId && activeId !== session.claudeSessionId) {
       session.adoptClaudeSessionId(activeId);
+      // Flush the Enter that vouched for this adoption to state.json. A `/clear`
+      // emits no completion event, so without this the anchor could still be
+      // unpersisted when the server restarts — and recovery would fall back to
+      // the launch conversation.
+      ctx.persistSessionState(session);
       // Docker sessions: keep the case's resume seed following the live conversation.
       if (session.docker) {
         void persistDockerCaseClaudeSessionId(CODEMAN_CONFIG_DIR, session.docker.containerName, activeId).catch(
@@ -1582,7 +1619,7 @@ export function registerSessionRoutes(
   async function findActiveCodexFile(session: {
     id: string;
     workingDir: string;
-    codexLastSubmitAt?: number;
+    lastSubmitAt?: number;
     codexConfig?: { resumeSessionId?: string };
   }): Promise<string | null> {
     const codexHome = process.env.CODEX_HOME || join(process.env.HOME || '/tmp', '.codex');
@@ -1591,10 +1628,10 @@ export function registerSessionRoutes(
       sessionId: session.id,
       workingDir: session.workingDir,
       resumeSessionId: session.codexConfig?.resumeSessionId,
-      lastSubmitAt: session.codexLastSubmitAt,
+      lastSubmitAt: session.lastSubmitAt,
       competingSubmitAts: [...ctx.sessions.values()]
-        .filter((other) => other.id !== session.id && other.mode === 'codex' && other.codexLastSubmitAt)
-        .map((other) => other.codexLastSubmitAt),
+        .filter((other) => other.id !== session.id && other.mode === 'codex' && other.lastSubmitAt)
+        .map((other) => other.lastSubmitAt),
     });
     return conversation?.path ?? null;
   }
@@ -1709,7 +1746,7 @@ export function registerSessionRoutes(
     mode: string;
     id: string;
     workingDir: string;
-    codexLastSubmitAt?: number;
+    lastSubmitAt?: number;
     codexConfig?: { resumeSessionId?: string };
   }): Promise<string | null> {
     try {
@@ -1757,7 +1794,7 @@ export function registerSessionRoutes(
     session: {
       id: string;
       workingDir: string;
-      codexLastSubmitAt?: number;
+      lastSubmitAt?: number;
       codexConfig?: { resumeSessionId?: string };
     },
     full: boolean
@@ -1887,7 +1924,7 @@ export function registerSessionRoutes(
       const frameMuxName = session.muxName;
       let frame: string | null = null;
       if (frameMuxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, frameMuxName, { visibleFrame: true });
+        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, frameMuxName, { visibleFrame: true });
       }
       if (
         (frame === null || frame.length === 0) &&
@@ -1954,7 +1991,10 @@ export function registerSessionRoutes(
     let liveMuxBuffer: string | null = null;
     let remoteCaptureFailed = false;
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, muxName, { fullHistory: true, lastLines });
+      liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, {
+        fullHistory: true,
+        lastLines,
+      });
       if (liveMuxBuffer === null || liveMuxBuffer.length === 0) {
         remoteCaptureFailed = true;
         liveMuxBuffer = null;
@@ -2029,6 +2069,11 @@ export function registerSessionRoutes(
         .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
         .replace(ERASE_SCROLLBACK_PATTERN, '')
         .replace(MOUSE_TRACKING_PATTERN, '');
+    } else if (isMuxAltScreenOnlyStripMode(session.mode, session.usesMux)) {
+      // tmux-backed shell/opencode/antigravity: drop tmux's own client smcup only.
+      // A byte buffer recorded before the live-side strip existed can still carry
+      // it, and one replayed `\x1b[?1049h` re-parks xterm in the alt buffer (#205).
+      strippedBuffer = strippedBuffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '');
     }
 
     if (tailBytes > 0 && strippedBuffer.length > tailBytes) {
@@ -2392,15 +2437,18 @@ export function registerSessionRoutes(
 
       // Per-session config that is applied to the LOCAL tmux/CLI wrapper does not
       // cross ssh. Reject rather than pretend it worked; remote customization goes
-      // through the host command override.
+      // through the host command override. COD-282: allow the matching per-CLI config
+      // for the requested mode (opencode/codex/gemini/antigravity) so the builder can
+      // embed --model / --session flags into the remote login-shell command; other
+      // modes' configs and generic claude knobs still require the host override.
       if (
         (envOverrides && Object.keys(envOverrides).length > 0) ||
         effort ||
         modelOverride !== undefined ||
-        codexConfig ||
-        geminiConfig ||
-        antigravityConfig ||
-        openCodeConfig
+        (codexConfig && mode !== 'codex') ||
+        (geminiConfig && mode !== 'gemini') ||
+        (antigravityConfig && mode !== 'antigravity') ||
+        (openCodeConfig && mode !== 'opencode')
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
@@ -2737,7 +2785,7 @@ export function registerSessionRoutes(
         });
         ctx.broadcast(SseEvent.SessionInteractive, { id: session.id, mode: 'shell' });
       } else {
-        // 'claude', 'opencode', 'codex', and 'gemini' modes use startInteractive()
+        // 'claude', 'opencode', 'codex', 'gemini', and 'antigravity' modes use startInteractive()
         await session.startInteractive();
         getLifecycleLog().log({
           event: 'started',
@@ -2849,6 +2897,64 @@ export function registerSessionRoutes(
       }
     }
     return undefined;
+  }
+
+  /**
+   * Is this `entrypoint` value an automated/SDK-driven invocation?
+   *
+   * ⚠️ Deliberately a BLOCKLIST on the SDK shape, not an allowlist on `'cli'`.
+   * The exclusion below hides rows, so an allowlist fails CLOSED on any value
+   * Claude Code has not shipped yet: the day it stamps a new interactive
+   * entrypoint (a rename, or a second interactive host), every transcript stops
+   * matching `'cli'` and the whole Past Sessions list goes blank with nothing in
+   * the UI to explain it. A blocklist fails OPEN instead — an automated
+   * entrypoint we do not recognize yet costs a few noisy rows, which is the
+   * annoyance this filter set out to fix rather than a broken feature.
+   *
+   * Observed values: `cli` (interactive), `sdk-cli` / `sdk-py` (automated).
+   */
+  function isAutomatedEntrypoint(entrypoint: string): boolean {
+    return /^sdk(-|$)/.test(entrypoint);
+  }
+
+  /**
+   * The `entrypoint` field Claude Code stamps on its own message records:
+   * 'cli' for a real interactive session, something else (e.g. 'sdk-py') for
+   * an SDK/automated invocation. Used to exclude non-interactive transcripts
+   * (CI review bots, etc.) from the resumable history list — they were never
+   * something a user can resume into.
+   *
+   * Scans every `"type":"user"`/`"type":"assistant"` line with an entrypoint
+   * field — not just the first one — and returns 'cli' the moment ANY of them
+   * carries it. A transcript is excluded only when every entrypoint-bearing
+   * message says something else; "first field wins" would misattribute a
+   * transcript that started under an older Claude Code version (no entrypoint
+   * on its true first message) and later picked up a non-'cli' entrypoint on
+   * some later message, wrongly hiding a genuinely interactive session. This
+   * deliberately errs toward keeping a session visible: one real interactive
+   * message anywhere is enough. Returns undefined ("unknown", fail-open) only
+   * when nothing scanned carries the field at all.
+   */
+  function extractTranscriptEntrypoint(text: string): string | undefined {
+    let start = 0;
+    let sawNonCli: string | undefined;
+    while (start < text.length) {
+      const end = text.indexOf('\n', start);
+      const line = end === -1 ? text.slice(start) : text.slice(start, end);
+      start = end === -1 ? text.length : end + 1;
+      if (!line.includes('"type":"user"') && !line.includes('"type":"assistant"')) continue;
+      if (!line.includes('"entrypoint"')) continue;
+      try {
+        const entry = JSON.parse(line);
+        if ((entry.type === 'user' || entry.type === 'assistant') && typeof entry.entrypoint === 'string') {
+          if (entry.entrypoint === 'cli') return 'cli';
+          sawNonCli ??= entry.entrypoint;
+        }
+      } catch {
+        // Malformed/truncated line — skip
+      }
+    }
+    return sawNonCli;
   }
 
   /**
@@ -3063,7 +3169,7 @@ export function registerSessionRoutes(
     return finalExists ? current : process.env.HOME || '/tmp';
   }
 
-  /** Read the first 16KB of a file for content sniffing. */
+  /** Read the first `buf.length` bytes of a file for content sniffing. */
   async function readFileHead(path: string, buf: Buffer): Promise<string | null> {
     try {
       const fd = await fs.open(path, 'r');
@@ -3106,7 +3212,12 @@ export function registerSessionRoutes(
 
   // Scan a single project directory and return all valid history sessions in it.
   // Reused by both the global overview and the single-folder drill-down.
-  async function scanProjectDir(projPath: string, projDir: string, headBuf: Buffer): Promise<HistorySession[]> {
+  async function scanProjectDir(
+    projPath: string,
+    projDir: string,
+    smallHeadBuf: Buffer,
+    headBuf: Buffer
+  ): Promise<HistorySession[]> {
     const out: HistorySession[] = [];
     const stat = await fs.stat(projPath).catch(() => null);
     if (!stat?.isDirectory()) return out;
@@ -3124,22 +3235,45 @@ export function registerSessionRoutes(
       if (!fileStat) continue;
       if (fileStat.size < 4000) continue;
 
-      let firstPrompt: string | undefined;
-      const head = await readFileHead(filePath, headBuf);
       const hasConversation = (text: string) =>
         text.includes('"type":"user"') || text.includes('"type":"assistant"') || text.includes('"type":"summary"');
 
+      // Two-tier head read: try the cheap smallHeadBuf (16KB) size first -- enough
+      // for the vast majority of transcripts -- and only escalate to the full
+      // headBuf (128KB) when that wasn't enough. Reading 128KB unconditionally for
+      // EVERY file in the directory roughly quadrupled the cost of a full scan
+      // (measured against a real ~/.claude/projects tree: ~4x both bytes read and
+      // wall time) to fix a problem only ~28% of files actually have. Escalating
+      // resolves the restart-bookkeeping case (the reason 128KB exists at all)
+      // without ever touching the tail-read fallback below for most of that 28%.
+      let head = await readFileHead(filePath, smallHeadBuf);
       let foundContent = head ? hasConversation(head) : false;
+      let firstPrompt = head ? extractFirstUserPrompt(head) : undefined;
+      if ((!foundContent || !firstPrompt) && head !== null && fileStat.size > smallHeadBuf.length) {
+        const biggerHead = await readFileHead(filePath, headBuf);
+        if (biggerHead) {
+          head = biggerHead;
+          if (!foundContent) foundContent = hasConversation(head);
+          if (!firstPrompt) firstPrompt = extractFirstUserPrompt(head);
+        }
+      }
+
       let tail: string | null = null;
-      if (!foundContent && fileStat.size > 16384) {
+      // `head === null` (a failed read -- e.g. EMFILE while scanning hundreds of
+      // files) must also get a shot at the tail, not just "file bigger than the
+      // head buffer". Losing this dropped the session from history entirely
+      // instead of giving it a second chance, for any file at or under the head
+      // buffer size whose head read happened to fail.
+      if (!foundContent && (head === null || fileStat.size > headBuf.length)) {
         const tailBuf = Buffer.alloc(32768);
         tail = await readFileTail(filePath, tailBuf, fileStat.size);
         if (tail) foundContent = hasConversation(tail);
       }
       if (!foundContent) continue;
 
-      if (head) firstPrompt = extractFirstUserPrompt(head);
-      if (!firstPrompt && fileStat.size > 65536) {
+      // firstPrompt was already attempted from head (both tiers) above; this is
+      // purely the tail fallback for whatever's left unresolved.
+      if (!firstPrompt && (head === null || fileStat.size > headBuf.length)) {
         if (!tail) {
           const tailBuf = Buffer.alloc(32768);
           tail = await readFileTail(filePath, tailBuf, fileStat.size);
@@ -3149,14 +3283,36 @@ export function registerSessionRoutes(
 
       // COD-145: last (most recent) user prompt lives near the END of the file, so
       // prefer the tail. For large files where no tail was read yet, read one
-      // (mirrors the firstPrompt > 65536 block). Small files fit in `head`, which
-      // then contains the whole transcript — scan it for the last match instead.
-      if (!tail && fileStat.size > 65536) {
+      // (mirrors the firstPrompt > headBuf.length block). Small files fit in `head`,
+      // which then contains the whole transcript — scan it for the last match instead.
+      if (!tail && fileStat.size > headBuf.length) {
         const tailBuf = Buffer.alloc(32768);
         tail = await readFileTail(filePath, tailBuf, fileStat.size);
       }
       const lastPrompt =
         (tail ? extractLastUserPrompt(tail) : undefined) ?? (head ? extractLastUserPrompt(head) : undefined);
+
+      // Automated/SDK-driven invocations (CI review bots, etc.) write transcripts
+      // into the same ~/.claude/projects tree as interactive sessions but were
+      // never something a user can resume into — no PTY, no running process, and
+      // their "conversation" is typically a single one-shot prompt (often with a
+      // full diff embedded, which is exactly why it dwarfs this scanner's read
+      // windows and shows up above as blank or as an identical boilerplate
+      // sentence across many rows). Checked last, so it reuses whatever `head`/
+      // `tail` the prompt extraction above already read rather than triggering
+      // an extra file read. Missing entrypoint (older transcripts) reads as
+      // interactive — fail open, matching every other gating check in this
+      // codebase.
+      //
+      // head and tail are checked independently and merged with "cli wins" (not
+      // a first-truthy-value `??` chain): a large file's head might land on a
+      // non-'cli' message while a real interactive message sits in the tail (or
+      // vice versa), and either one being 'cli' is enough to keep the session.
+      const headEntrypoint = head ? extractTranscriptEntrypoint(head) : undefined;
+      const tailEntrypoint = tail ? extractTranscriptEntrypoint(tail) : undefined;
+      const entrypoint =
+        headEntrypoint === 'cli' || tailEntrypoint === 'cli' ? 'cli' : (headEntrypoint ?? tailEntrypoint);
+      if (entrypoint && isAutomatedEntrypoint(entrypoint)) continue;
 
       out.push({
         sessionId,
@@ -3174,12 +3330,17 @@ export function registerSessionRoutes(
   app.get('/api/history/sessions', async (req) => {
     const query = req.query as { projectKey?: string; offset?: string; limit?: string };
 
-    if (ctx.testMode) {
-      return { sessions: [], total: 0 };
-    }
-
+    // No testMode short-circuit here (unlike /api/sessions/unified): test/setup.ts
+    // gives every test file a temp HOME, so the scan is confined and returns empty
+    // on its own — and upstream's history-quality tests (#215) need it to run.
     const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
-    const headBuf = Buffer.alloc(16384);
+    // scanProjectDir tries smallHeadBuf (16KB, the original size) first for every
+    // file and only escalates to headBuf (128KB) when that wasn't enough — see the
+    // comment at the escalation site in scanProjectDir for why unconditional 128KB
+    // reads were too expensive to keep. 128KB matches the existing precedent
+    // elsewhere in this file (line ~1431).
+    const smallHeadBuf = Buffer.alloc(16384);
+    const headBuf = Buffer.alloc(131072);
     // Multi-user: this scans the host-wide ~/.claude/projects tree, so a non-admin
     // must only see history whose decoded workingDir is inside their own case space.
     // Do NOT trust the caller-supplied projectKey — confine on the decoded path.
@@ -3197,7 +3358,7 @@ export function registerSessionRoutes(
       const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
       const limit = Math.min(100, Math.max(1, parseInt(query.limit || '20', 10) || 20));
       const projPath = join(projectsDir, query.projectKey);
-      let all = await scanProjectDir(projPath, query.projectKey, headBuf);
+      let all = await scanProjectDir(projPath, query.projectKey, smallHeadBuf, headBuf);
       // Confine to the caller's workspace (a projectKey maps to a single foreign cwd).
       if (scopeHistory) all = all.filter((r) => isWorkingDirAllowed(user, r.workingDir));
       all.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
@@ -3210,7 +3371,7 @@ export function registerSessionRoutes(
       const projectDirs = await fs.readdir(projectsDir);
       for (const projDir of projectDirs) {
         const projPath = join(projectsDir, projDir);
-        const list = await scanProjectDir(projPath, projDir, headBuf);
+        const list = await scanProjectDir(projPath, projDir, smallHeadBuf, headBuf);
         results.push(...list);
       }
     } catch {
@@ -3286,11 +3447,13 @@ export function registerSessionRoutes(
     const history: HistoryInput[] = [];
     try {
       const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
-      const headBuf = Buffer.alloc(16384);
+      // See the sibling allocation above for why there are two sizes.
+      const smallHeadBuf = Buffer.alloc(16384);
+      const headBuf = Buffer.alloc(131072);
       const projectDirs = await fs.readdir(projectsDir);
       for (const projDir of projectDirs) {
         const projPath = join(projectsDir, projDir);
-        const list = await scanProjectDir(projPath, projDir, headBuf);
+        const list = await scanProjectDir(projPath, projDir, smallHeadBuf, headBuf);
         for (const h of list) {
           history.push({
             sessionId: h.sessionId,

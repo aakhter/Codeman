@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CreateSessionSchema, QuickStartSchema } from '../src/web/schemas.js';
 import { buildSpawnCommand } from '../src/tmux-manager.js';
 import { defaultDockerCommandForMode } from '../src/docker-hosts.js';
-import { defaultRemoteCommandForMode } from '../src/remote-hosts.js';
+import { defaultRemoteCommandForMode, remoteLoginShellCommand } from '../src/remote-hosts.js';
 import { isExternalCliMode, isAltScreenStripMode } from '../src/session.js';
 
 describe('Antigravity mode schemas', () => {
@@ -120,6 +120,9 @@ describe('Antigravity mode gates', () => {
     expect(defaultDockerCommandForMode('antigravity')).toBe('exec agy');
     // Routed through an interactive login shell so per-user PATH entries resolve —
     // same fix as the other remote agent CLIs (see defaultRemoteCommandForMode).
-    expect(defaultRemoteCommandForMode('antigravity')).toBe('exec "${SHELL:-/bin/sh}" -i -l -c \'agy\'');
+    // Built from the shared helper, not a copied literal: COD-277 moved the
+    // wrapper to a passwd-resolved login shell, and what matters here is that
+    // antigravity uses the SAME wrapper as the other remote CLIs.
+    expect(defaultRemoteCommandForMode('antigravity')).toBe(remoteLoginShellCommand('agy'));
   });
 });

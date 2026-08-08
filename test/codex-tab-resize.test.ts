@@ -66,8 +66,11 @@ describe('Codex tab resize behavior', () => {
 
     expect(selectStart).toBeGreaterThan(-1);
     expect(fetchStart).toBeGreaterThan(selectStart);
-    expect(fetchBlock).toContain("session?.mode === 'shell'");
-    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal`');
+    // #205 made shell take the SAME full-history path as every other mode
+    // (that fix is what restored shell scrollback), so shell must no longer be
+    // special-cased out of it.
+    expect(fetchBlock).not.toContain("session?.mode === 'shell'");
+    expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?full=1`');
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
   });
 

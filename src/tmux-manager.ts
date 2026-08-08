@@ -22,6 +22,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { collectDescendants } from './proc-tree.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -88,7 +89,6 @@ import type {
   RespawnPaneOptions,
   CommandDeliveryResult,
 } from './mux-interface.js';
-import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import {
   buildSshConnectionArgs,
   buildSshConnectionArgv,
@@ -115,6 +115,25 @@ import {
   reconcileCodexHeadroomPatch,
   resolveHeadroomRouted,
 } from './config/headroom-routing.js';
+
+/** How long a cached process snapshot stays usable. */
+const PROC_SNAPSHOT_TTL_MS = 2000;
+
+/**
+ * How long the kill path waits for a fresh snapshot before giving up on it.
+ * Shorter than EXEC_TIMEOUT_MS on purpose: killSession has two further strategies
+ * (process group, tmux kill-session) and must reach them even when `ps` is wedged.
+ */
+const PROC_SNAPSHOT_WAIT_MS = 1500;
+import { DEFAULT_TMUX_HISTORY_LIMIT, DEFAULT_TERMINAL_BUFFER_MAX_BYTES } from './config/terminal-history.js';
+
+/**
+ * Extra stdout headroom for the full-history `capture-pane` child process on
+ * top of the consumer's byte cap: raw scrollback carries per-line SGR/ANSI
+ * overhead that the route pipeline strips before applying its cap, so the
+ * capture must be allowed to exceed the final payload size.
+ */
+const FULL_HISTORY_CAPTURE_SLACK_BYTES = 8 * 1024 * 1024;
 
 /** Delay after tmux session creation — enough for detached tmux to be queryable */
 const TMUX_CREATION_WAIT_MS = 100;
@@ -659,11 +678,11 @@ export function captureStartFlag(lastLines?: number): string {
  * a delimiter line, then the pane geometry. One ssh roundtrip fetches both so
  * the snapshot and its cursor position are consistent.
  */
-export function buildRemoteFrameCommand(target: string): string {
+export function buildRemoteFrameCommand(target: string, socket = 'codeman'): string {
   return (
-    `tmux -L codeman capture-pane -p -e -t ${shellescape(target)}; ` +
+    `tmux -L ${socket} capture-pane -p -e -t ${shellescape(target)}; ` +
     `printf '${REMOTE_FRAME_GEOM_DELIM}\\n'; ` +
-    `tmux -L codeman display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
+    `tmux -L ${socket} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
   );
 }
 
@@ -697,6 +716,14 @@ const UNSAFE_PATH_CHARS = /[;&|$`(){}<>'"\n\r]/;
  */
 function isValidMuxName(name: string): boolean {
   return SAFE_MUX_NAME_PATTERN.test(name) || LEGACY_MUX_NAME_PATTERN.test(name);
+}
+
+/** Remote tmux session targets are `codeman-ssh-<hex>` for owned sessions or a
+ * discovered `codeman-*` name (e.g. `codeman-disco1`) for non-owned attaches.
+ * The `ssh` prefix deliberately fails SAFE_MUX_NAME_PATTERN, so we validate
+ * with a wider but still shell-safe pattern here. */
+function isValidRemoteTmuxTarget(name: string): boolean {
+  return /^codeman-[a-zA-Z0-9._-]+$/.test(name);
 }
 
 function isValidTerminalDimension(value: number): boolean {
@@ -772,7 +799,7 @@ function buildClaudePermissionFlags(claudeMode?: ClaudeMode, allowedTools?: stri
 /**
  * Build the opencode CLI command with appropriate flags.
  */
-function buildOpenCodeCommand(config?: OpenCodeConfig): string {
+export function buildOpenCodeCommand(config?: OpenCodeConfig): string {
   const parts = ['opencode'];
 
   // Model selection — allow provider/model format (alphanumeric, dots, hyphens, slashes)
@@ -833,7 +860,7 @@ export function buildCodexCommand(config?: CodexConfig): string {
  * of `--dangerously-skip-permissions`; users can override it later through
  * Gemini config once Codeman exposes richer Gemini settings.
  */
-function buildGeminiCommand(config?: GeminiConfig): string {
+export function buildGeminiCommand(config?: GeminiConfig): string {
   const parts = ['gemini', '--skip-trust'];
 
   const approvalMode = config?.approvalMode || 'yolo';
@@ -862,7 +889,7 @@ function buildGeminiCommand(config?: GeminiConfig): string {
  * Codeman's Claude default; the multi-user clamp strips it for non-granted owners,
  * and an ABSENT config stays at agy's own prompting default — safe like Codex).
  */
-function buildAntigravityCommand(config?: AntigravityConfig): string {
+export function buildAntigravityCommand(config?: AntigravityConfig): string {
   const parts = ['agy'];
 
   if (config?.dangerouslySkipPermissions) {
@@ -1049,12 +1076,26 @@ export function buildRemoteLaunchCommand(options: {
   remote: SessionRemote;
   sessionId: string;
   codexConfig?: CodexConfig;
+  openCodeConfig?: OpenCodeConfig;
+  geminiConfig?: GeminiConfig;
+  antigravityConfig?: AntigravityConfig;
   claudeMode?: ClaudeMode;
   allowedTools?: string;
   /** Remote tmux history-limit (COD-180). Set BEFORE new-session so the initial pane gets it. */
   historyLimit?: number;
 }): string {
-  const { mode, remote, sessionId, codexConfig, claudeMode, allowedTools, historyLimit } = options;
+  const {
+    mode,
+    remote,
+    sessionId,
+    codexConfig,
+    openCodeConfig,
+    geminiConfig,
+    antigravityConfig,
+    claudeMode,
+    allowedTools,
+    historyLimit,
+  } = options;
   // §6.3: honor the session's EFFECTIVE claude permission mode on remote instead of
   // hardcoding --dangerously-skip-permissions, so a non-granted multi-user user's
   // downgraded 'auto' actually reaches the remote agent (the default command otherwise
@@ -1062,15 +1103,49 @@ export function buildRemoteLaunchCommand(options: {
   // (admin's explicit choice). Wrapped in `$SHELL -i -l -c` for the same reason as
   // `defaultRemoteCommandForMode`: the agent CLIs live under a per-user PATH entry
   // that only an interactive login shell resolves (see that function's comment).
-  // Codex keeps its own builder so per-session codexConfig flags survive the wrap.
+  // Codex/OpenCode/Gemini/Antigravity keep their own builders so per-session config flags survive the wrap.
   const override = remote.commands?.[mode];
+  function buildOpenCodeConfigEnvPrefix(config?: OpenCodeConfig): string {
+    if (!config) return '';
+    let jsonContent: string | undefined;
+    if (config.autoAllowTools) {
+      const permConfig: Record<string, unknown> = { permission: { '*': 'allow' } };
+      if (config.configContent) {
+        try {
+          const existing = JSON.parse(config.configContent) as Record<string, unknown>;
+          Object.assign(permConfig, existing);
+          permConfig.permission = { '*': 'allow' };
+        } catch {
+          /* invalid JSON, use default permConfig */
+        }
+      }
+      jsonContent = JSON.stringify(permConfig);
+    } else if (config.configContent) {
+      try {
+        JSON.parse(config.configContent);
+        jsonContent = config.configContent;
+      } catch {
+        return '';
+      }
+    }
+    if (!jsonContent) return '';
+    return `OPENCODE_CONFIG_CONTENT=${shellescape(jsonContent)} `;
+  }
   const modeCommand = override
     ? override
     : mode === 'codex'
       ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
-      : mode === 'claude'
-        ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-        : defaultRemoteCommandForMode(mode);
+      : mode === 'opencode'
+        ? remoteLoginShellCommand(
+            `${buildOpenCodeConfigEnvPrefix(openCodeConfig)}${buildOpenCodeCommand(openCodeConfig)}`
+          )
+        : mode === 'gemini'
+          ? remoteLoginShellCommand(buildGeminiCommand(geminiConfig))
+          : mode === 'antigravity'
+            ? remoteLoginShellCommand(buildAntigravityCommand(antigravityConfig))
+            : mode === 'claude'
+              ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
+              : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1182,7 +1257,8 @@ export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionNam
  * `buildSshConnectionArgs` (COD-107), identical to launch/attach/discovery.
  */
 export function buildRemoteKillCommand(remote: SessionRemote, remoteSessionName: string): string {
-  const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman kill-session -t ${shellescape(remoteSessionName)}`);
+  const socket = remote.owned !== false ? REMOTE_TMUX_SOCKET : 'codeman';
+  const tmuxInvocation = withRemotePathBootstrap(`tmux -L ${socket} kill-session -t ${shellescape(remoteSessionName)}`);
   const sshParts = [...buildSshConnectionArgs(remote), remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
 }
@@ -1199,7 +1275,15 @@ function buildRemoteSessionCommand(
   mode: SessionMode,
   remote: SessionRemote,
   sessionId: string,
-  options: { codexConfig?: CodexConfig; historyLimit?: number; claudeMode?: ClaudeMode; allowedTools?: string } = {}
+  options: {
+    codexConfig?: CodexConfig;
+    openCodeConfig?: OpenCodeConfig;
+    geminiConfig?: GeminiConfig;
+    antigravityConfig?: AntigravityConfig;
+    historyLimit?: number;
+    claudeMode?: ClaudeMode;
+    allowedTools?: string;
+  } = {}
 ): string {
   if (remote.owned === false) {
     const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId);
@@ -1210,6 +1294,9 @@ function buildRemoteSessionCommand(
     remote,
     sessionId,
     codexConfig: options.codexConfig,
+    openCodeConfig: options.openCodeConfig,
+    geminiConfig: options.geminiConfig,
+    antigravityConfig: options.antigravityConfig,
     claudeMode: options.claudeMode,
     allowedTools: options.allowedTools,
     historyLimit: options.historyLimit,
@@ -1246,7 +1333,7 @@ export function dockerTmuxSessionName(sessionId: string): string {
 const RESUME_ID_SAFE = /^[A-Za-z0-9._-]+$/;
 
 /**
- * Append the CLI-specific resume flag to a pane command (codex/gemini). Only fires
+ * Append the CLI-specific resume flag to a pane command (codex/gemini/antigravity). Only fires
  * when the in-container tmux is RE-CREATED (`new-session -A` makes the flag inert
  * on a live reattach), i.e. exactly when the previous live agent was lost and we
  * want to resume the conversation from the bind-mounted transcript. Claude mode
@@ -2043,7 +2130,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const fullCmd = docker
         ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
         : remote
-          ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig, claudeMode, allowedTools, historyLimit })
+          ? buildRemoteSessionCommand(mode, remote, sessionId, {
+              codexConfig,
+              openCodeConfig,
+              geminiConfig,
+              antigravityConfig,
+              claudeMode,
+              allowedTools,
+              historyLimit,
+            })
           : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
@@ -2107,13 +2202,17 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Replace the shell with the actual command (no echo in terminal). Keep
       // pane launch in /tmp, then cd inside bash against the current mount table.
+      // COD-282: remote/docker launchCmd contains `$`, `$(...)` and `${...}` (REMOTE_LOGIN_SHELL_RESOLVE, $HOME, $login_shell)
+      // that must NOT be expanded by the local `bash -c "..."` outer layer. JSON.stringify wraps in double quotes
+      // where `$()` still expands even inside single quotes inside the double quotes, corrupting the remote
+      // command to `login_shell=""` / `exec ""` (exit 126). Use single-quote shellescape for remote/docker so `$`
+      // stays literal until the remote shell evaluates it; local shells have no `$` and keep JSON.stringify for
+      // backwards compat with existing tests.
       const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      await execAsync(
-        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
-        {
-          timeout: EXEC_TIMEOUT_MS,
-        }
-      );
+      const outerShellArg = remote || docker ? shellescape(launchCmd) : JSON.stringify(launchCmd);
+      await execAsync(`${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${outerShellArg}`, {
+        timeout: EXEC_TIMEOUT_MS,
+      });
 
       // Wait for tmux session to be queryable
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
@@ -2326,7 +2425,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const fullCmd = docker
       ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
       : remote
-        ? buildRemoteSessionCommand(mode, remote, sessionId, { codexConfig, claudeMode, allowedTools, historyLimit })
+        ? buildRemoteSessionCommand(mode, remote, sessionId, {
+            codexConfig,
+            openCodeConfig,
+            geminiConfig,
+            antigravityConfig,
+            claudeMode,
+            allowedTools,
+            historyLimit,
+          })
         : localFullCmd;
 
     try {
@@ -2353,8 +2460,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
+      const outerShellArg2 = remote || docker ? shellescape(launchCmd) : JSON.stringify(launchCmd);
       await execAsync(
-        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${JSON.stringify(launchCmd)}`,
+        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${outerShellArg2}`,
         {
           timeout: EXEC_TIMEOUT_MS,
         }
@@ -2397,27 +2505,102 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
-  // Get all child process PIDs recursively
-  private getChildPids(pid: number): number[] {
-    const pids: number[] = [];
-    try {
-      const output = execSync(`pgrep -P ${pid}`, {
-        encoding: 'utf-8',
-        timeout: EXEC_TIMEOUT_MS,
-      }).trim();
-      if (output) {
-        for (const childPid of output
-          .split('\n')
-          .map((p) => parseInt(p, 10))
-          .filter((p) => !Number.isNaN(p))) {
-          pids.push(childPid);
-          pids.push(...this.getChildPids(childPid));
+  /** One `ps` snapshot of the whole process table, cached briefly. */
+  private static procSnapshot: { at: number; byParent: Map<number, number[]> } | null = null;
+  /** Single-flight guard so a hung `ps` cannot pile up parallel refreshes. */
+  private static procRefresh: { started: number; promise: Promise<Map<number, number[]>> } | null = null;
+
+  /**
+   * Fork ONE `ps` asynchronously and cache the parent -> children map.
+   *
+   * Async on purpose: a synchronous fork here would block the event loop on every
+   * stats tick, and under the procfs pathology this module exists to survive,
+   * `execSync`'s timeout cannot return at all (spawnSync waits for the unkillable
+   * child) — freezing the whole server where a hung async poll only costs staleness.
+   */
+  private static refreshProcSnapshot(): Promise<Map<number, number[]>> {
+    const inFlight = TmuxManager.procRefresh;
+    // Reuse an in-flight refresh — unless it is old enough to be presumed stuck.
+    if (inFlight && Date.now() - inFlight.started < EXEC_TIMEOUT_MS * 2) return inFlight.promise;
+
+    const started = Date.now();
+    const promise = new Promise<Map<number, number[]>>((resolve) => {
+      execFile('ps', ['-eo', 'pid=,ppid='], { timeout: EXEC_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+        if (TmuxManager.procRefresh?.started === started) TmuxManager.procRefresh = null;
+        if (err) {
+          // ANY error, not just an empty one: a timed-out or truncated `ps` yields
+          // partial output, and caching that as fresh would make whole subtrees
+          // invisible — including to the kill path. Stale beats wrong.
+          console.error('[TmuxManager] process snapshot failed:', err);
+          resolve(TmuxManager.procSnapshot?.byParent ?? new Map());
+          return;
         }
-      }
-    } catch {
-      // No children or command failed
+        const byParent = new Map<number, number[]>();
+        for (const line of String(out).split('\n')) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length < 2) continue;
+          const pid = parseInt(parts[0], 10);
+          const ppid = parseInt(parts[1], 10);
+          if (Number.isNaN(pid) || Number.isNaN(ppid)) continue;
+          const list = byParent.get(ppid);
+          if (list) list.push(pid);
+          else byParent.set(ppid, [pid]);
+        }
+        TmuxManager.procSnapshot = { at: Date.now(), byParent };
+        resolve(byParent);
+      });
+    });
+    TmuxManager.procRefresh = { started, promise };
+    return promise;
+  }
+
+  /**
+   * Best snapshot WITHOUT forking: returns the cache, kicking off a background
+   * refresh when it has gone stale, and never blocks. Stats and window-title
+   * consumers tolerate data one interval old; nothing that KILLS may use this.
+   */
+  private childrenByParent(): Map<number, number[]> {
+    const cached = TmuxManager.procSnapshot;
+    if (!cached || Date.now() - cached.at >= PROC_SNAPSHOT_TTL_MS) {
+      void TmuxManager.refreshProcSnapshot();
     }
-    return pids;
+    return cached?.byParent ?? new Map();
+  }
+
+  /**
+   * Descendants from a snapshot that is not the cached one — the kill path's variant.
+   *
+   * killSession re-scans for survivors between SIGTERM and SIGKILL, and the wait in
+   * between (200ms) sits far inside the cache TTL (2000ms): reading the cache there
+   * returns the pre-SIGTERM state verbatim, so children spawned since are invisible
+   * and SIGKILL aims at stale PIDs, guarded only by kill(pid, 0) — which cannot
+   * detect PID reuse.
+   *
+   * It forces a refresh rather than guaranteeing recency: an already-running refresh
+   * is reused, so the snapshot can predate this call by up to one `ps` runtime. A
+   * strict postdate guarantee would mean chaining a second `ps` behind every
+   * in-flight one, which is the fork storm this code exists to avoid.
+   *
+   * Bounded by design: waiting forever would freeze killSession before it reaches
+   * its process-group and tmux fallbacks.
+   */
+  private async getChildPidsFresh(pid: number): Promise<number[]> {
+    let byParent: ReadonlyMap<number, readonly number[]>;
+    try {
+      byParent = await Promise.race([
+        TmuxManager.refreshProcSnapshot(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('proc snapshot timeout')), PROC_SNAPSHOT_WAIT_MS)
+        ),
+      ]);
+    } catch {
+      console.warn('[TmuxManager] process snapshot did not return in time; using the cached one');
+      byParent = TmuxManager.procSnapshot?.byParent ?? new Map<number, number[]>();
+    }
+    return collectDescendants(pid, byParent, {
+      onTruncated: (root, cap, reason) =>
+        console.warn(`[TmuxManager] descendant walk for ${root} hit the ${cap}-${reason} cap; truncating`),
+    });
   }
 
   // Check if a process is still alive
@@ -2525,7 +2708,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // through to the local teardown.
     if (session.remote) {
       const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(sessionId);
-      if (isValidMuxName(remoteName)) {
+      if (isValidRemoteTmuxTarget(remoteName)) {
         try {
           await execAsync(buildRemoteKillCommand(session.remote, remoteName), { timeout: EXEC_TIMEOUT_MS });
           console.log(`[TmuxManager] COD-109 killed owned remote session ${remoteName} on ${session.remote.host}`);
@@ -2543,7 +2726,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const allPids: number[] = [currentPid];
 
     // Strategy 1: Kill all child processes recursively
-    let childPids = this.getChildPids(currentPid);
+    let childPids = await this.getChildPidsFresh(currentPid);
     if (childPids.length > 0) {
       console.log(`[TmuxManager] Found ${childPids.length} child processes to kill`);
       allPids.push(...childPids);
@@ -2560,7 +2743,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       await new Promise((resolve) => setTimeout(resolve, TMUX_KILL_WAIT_MS));
 
-      childPids = this.getChildPids(currentPid);
+      childPids = await this.getChildPidsFresh(currentPid);
       for (const childPid of childPids) {
         if (this.isProcessAlive(childPid)) {
           try {
@@ -2797,17 +2980,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       const [rss, cpu] = psOutput.split(/\s+/).map((x) => parseFloat(x) || 0);
 
+      // From the shared snapshot: this runs per session on every stats tick, and a
+      // pgrep per session was a fork per session per interval.
       let childCount = 0;
       try {
-        const childOutput = (
-          await execAsync(`pgrep -P ${session.pid} | wc -l`, {
-            encoding: 'utf-8',
-            timeout: EXEC_TIMEOUT_MS,
-          })
-        ).stdout.trim();
-        childCount = parseInt(childOutput, 10) || 0;
+        childCount = (this.childrenByParent().get(session.pid) ?? []).length;
       } catch {
-        // No children or command failed
+        // No children or snapshot unavailable
       }
 
       return {
@@ -2841,17 +3020,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // Step 1: Get descendant PIDs
       const descendantMap = new Map<number, number[]>();
 
-      const pgrepOutput = (
-        await execAsync(
-          `for p in ${sessionPids.join(' ')}; do children=$(pgrep -P $p 2>/dev/null | tr '\\n' ','); echo "$p:$children"; done`,
-          {
-            encoding: 'utf-8',
-            timeout: EXEC_TIMEOUT_MS,
-          }
-        )
-      ).stdout.trim();
+      // Derived from the ONE snapshot instead of a shell loop that forks a pgrep
+      // per session — the shape that turned into a fork storm under load.
+      const byParent = this.childrenByParent();
+      const childLines = sessionPids.map((p) => `${p}:${(byParent.get(p) ?? []).join(',')}`).join('\n');
 
-      for (const line of pgrepOutput.split('\n')) {
+      for (const line of childLines.split('\n')) {
         const [pidStr, childrenStr] = line.split(':');
         const sessionPid = parseInt(pidStr, 10);
         if (!Number.isNaN(sessionPid)) {
@@ -3468,7 +3642,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   capturePaneBuffer(
     muxName: string,
     paneTarget?: string,
-    opts?: { fullHistory?: boolean; lastLines?: number }
+    opts?: { fullHistory?: boolean; lastLines?: number; maxCaptureBytes?: number }
   ): string | null {
     if (IS_TEST_MODE) return '';
     const target = resolveTmuxPaneTarget(muxName, paneTarget);
@@ -3484,10 +3658,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const captureFlags = fullHistory
         ? `capture-pane -p -e ${captureStartFlag(opts?.lastLines)}`
         : 'capture-pane -p -e';
-      const rawCapture = execSync(`${this.tmux()} ${captureFlags} -t ${shellescape(target)}`, {
+      // execSync's default maxBuffer (1MB) kills multi-MB scrollback dumps
+      // (ENOBUFS) and would silently degrade full-history capture to the byte
+      // buffer for exactly the long sessions it exists for — size it from the
+      // consumer's byte cap plus ANSI-overhead slack instead.
+      const execOpts: { encoding: 'utf-8'; timeout: number; maxBuffer?: number } = {
         encoding: 'utf-8',
         timeout: EXEC_TIMEOUT_MS,
-      });
+      };
+      if (fullHistory) {
+        execOpts.maxBuffer =
+          (opts?.maxCaptureBytes ?? DEFAULT_TERMINAL_BUFFER_MAX_BYTES) + FULL_HISTORY_CAPTURE_SLACK_BYTES;
+      }
+      const rawCapture = execSync(`${this.tmux()} ${captureFlags} -t ${shellescape(target)}`, execOpts);
       // COD-190: fullHistory keeps the final screen's trailing blank rows so a
       // replayed buffer reproduces the exact tmux screen geometry (the
       // history-view no-jump landing and the appended cursor CSI both depend
@@ -3588,12 +3771,23 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    */
   async captureRemotePaneBuffer(
     remote: SessionRemote,
+    sessionId: string,
     muxName: string,
     opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
   ): Promise<string | null> {
     if (IS_TEST_MODE) return '';
-    const target = remote.remoteSessionName || muxName;
-    if (!isValidMuxName(target)) {
+    // Owned sessions (this Codeman launched them via `new-session -A`) live on
+    // the dedicated `codeman-remote` socket under their deterministic
+    // `codeman-ssh-<id8>` name. Non-owned (discovered + attached) sessions were
+    // created by another instance on the canonical `codeman` socket and carry
+    // their existing name in `remote.remoteSessionName`. Capture from whichever
+    // socket/name holds the canonical scrollback, mirroring the launch/attach
+    // logic in buildRemoteSessionCommand.
+    const owned = remote.owned !== false;
+    const isOwnedRemoteTarget = owned && !remote.remoteSessionName;
+    const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId) || muxName;
+    const socket = isOwnedRemoteTarget ? REMOTE_TMUX_SOCKET : 'codeman';
+    if (!isValidRemoteTmuxTarget(target)) {
       console.error('[TmuxManager] Invalid remote session name in captureRemotePaneBuffer:', target);
       return null;
     }
@@ -3601,7 +3795,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // parity with the local visible path (formatPaneSnapshot). ONE combined ssh
     // invocation fetches capture + geometry; a delimiter line separates them.
     if (opts?.visibleFrame) {
-      const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target));
+      const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target, socket));
       const frameArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), frameCmd];
       try {
         const { stdout } = await execFileAsync('ssh', frameArgv, {
@@ -3618,7 +3812,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // The remote login shell may not have tmux on PATH (macOS non-interactive
     // zsh lacks /opt/homebrew/bin) — bootstrap PATH exactly like the launcher.
     const captureCmd = withRemotePathBootstrap(
-      `tmux -L codeman capture-pane -p -e ${opts?.fullHistory ? `${captureStartFlag(opts?.lastLines)} ` : ''}-t ${shellescape(target)}`
+      `tmux -L ${socket} capture-pane -p -e ${opts?.fullHistory ? `${captureStartFlag(opts?.lastLines)} ` : ''}-t ${shellescape(target)}`
     );
     const argv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), captureCmd];
     try {
@@ -3634,7 +3828,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       }
       try {
         const cursorCmd = withRemotePathBootstrap(
-          `tmux -L codeman display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
+          `tmux -L ${socket} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
         );
         const cursorArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), cursorCmd];
         const { stdout: cursor } = await execFileAsync('ssh', cursorArgv, {

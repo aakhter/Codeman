@@ -25,6 +25,8 @@ import {
   buildRemoteTmuxCheckCommand,
   REMOTE_PATH_BOOTSTRAP,
   REMOTE_LOGIN_SHELL_RESOLVE,
+  buildRemoteCliVersionProbeCommand,
+  remoteLoginShellCommand,
   remoteSshTarget,
 } from '../src/remote-hosts.js';
 import { buildRemoteLaunchCommand } from '../src/tmux-manager.js';
@@ -218,5 +220,34 @@ describe('COD-107 buildRemoteTmuxCheckCommand — same connection options as the
       `ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 '${REMOTE_PATH_BOOTSTRAP}; command -v tmux'`
     );
     expect(buildRemoteTmuxCheckCommand({ username: 'ubuntu', host: '10.0.0.42', port: 2222 })).toContain('-p 2222');
+  });
+});
+
+describe('buildRemoteCliVersionProbeCommand: remote CLI version over the same connection (#205)', () => {
+  it('routes the version query through the interactive-login shell wrapper, like the launch', () => {
+    const cmd = buildRemoteCliVersionProbeCommand(baseRemote, 'claude');
+    // Same PATH-resolution wrapper as defaultRemoteCommandForMode: a bare
+    // `claude --version` over ssh sees only sshd's minimal PATH (exit 127).
+    // Built from the shared helper rather than a copied literal — COD-277 moved
+    // the wrapper from a bare `${SHELL:-/bin/sh}` to a passwd-resolved login
+    // shell, and the point of this test is that the probe uses whatever wrapper
+    // the LAUNCH uses, not one particular spelling of it.
+    expect(cmd).toContain('ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@10.0.0.42 ');
+    expect(cmd).toContain(REMOTE_LOGIN_SHELL_RESOLVE.slice(0, 40));
+    expect(cmd.endsWith(`'${remoteLoginShellCommand('claude --version').replace(/'/g, "'\\''")}'`)).toBe(true);
+  });
+
+  it('uses the shared connection args (proxy/identity/port), so it reaches what the launch reaches', () => {
+    const cmd = buildRemoteCliVersionProbeCommand(aaDesktop, 'claude');
+    expect(cmd).toContain('-o BatchMode=yes');
+    expect(cmd).toContain('-p 2222');
+    expect(cmd).toContain(`-i '${HOME}/.ssh/remote_ed25519'`);
+    expect(cmd).toContain("-o 'ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p'");
+    expect(cmd).toContain('aakht@192.168.55.170');
+  });
+
+  it('maps antigravity to its real binary name and shell to no probe at all', () => {
+    expect(buildRemoteCliVersionProbeCommand(baseRemote, 'antigravity')).toContain('agy --version');
+    expect(buildRemoteCliVersionProbeCommand(baseRemote, 'shell')).toBeNull();
   });
 });

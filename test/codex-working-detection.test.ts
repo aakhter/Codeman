@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { detectExternalCliWorkingFrame, Session } from '../src/session.js';
+import { detectClaudeCheckpointWorkingFrame, detectExternalCliWorkingFrame, Session } from '../src/session.js';
 import { formatPaneSnapshot } from '../src/tmux-manager.js';
 
 describe('Codex working detection', () => {
@@ -22,6 +22,49 @@ describe('Codex working detection', () => {
     expect(
       detectExternalCliWorkingFrame('• Starting MCP servers (3/4): bitbucket (3s • esc to interrupt)', 'codex')
     ).toBe(false);
+  });
+});
+
+describe('Claude checkpoint working detection', () => {
+  it('detects an in-progress compaction row', () => {
+    // Verbatim prod shape: Claude keeps the `❯` input row visible throughout,
+    // so this row is the only positive evidence the operation is running.
+    expect(detectClaudeCheckpointWorkingFrame('  ✽ Compacting conversation… (55s) ▰▰▰▰▰▰▱▱▱▱▱▱▱▱ 46%')).toBe(true);
+  });
+
+  it('detects the EARLY compaction row, before any timer or percentage', () => {
+    // Captured verbatim from a live pane ~2s after `/compact`. The timer and
+    // percentage only appear ~15s in, long after the 8s acceptance window, so
+    // requiring them means the driver times out on every real compaction.
+    expect(detectClaudeCheckpointWorkingFrame('✢ Compacting conversation… ')).toBe(true);
+  });
+
+  it('detects an in-progress thinking row', () => {
+    expect(detectClaudeCheckpointWorkingFrame('✻ Thinking… (12s · ↓ 1.2k tokens · esc to interrupt)')).toBe(true);
+  });
+
+  it('still detects the legacy braille spinner', () => {
+    expect(detectClaudeCheckpointWorkingFrame('⠋ Thinking…')).toBe(true);
+  });
+
+  it('does not treat a COMPLETED row as working', () => {
+    // These persist on screen while Claude sits idle at the prompt. Reading
+    // them as working would keep `ready` false forever and stall every
+    // checkpoint in `waiting-ready`.
+    expect(detectClaudeCheckpointWorkingFrame('✻ Cogitated for 5s')).toBe(false);
+    expect(detectClaudeCheckpointWorkingFrame('✻ Crunched for 2s')).toBe(false);
+    expect(detectClaudeCheckpointWorkingFrame('  ⎿  Compacted (ctrl+o to see full summary)')).toBe(false);
+  });
+
+  it('does not treat an idle Claude prompt as working', () => {
+    expect(detectClaudeCheckpointWorkingFrame('❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)')).toBe(false);
+  });
+
+  it('does not treat an ellipsis in the input row or footer as working', () => {
+    // The `❯` row carries ghost-suggestion text and the footer carries a
+    // middle-truncated path; both legitimately contain `…` while Claude is idle.
+    expect(detectClaudeCheckpointWorkingFrame('❯ List 4 instruments…')).toBe(false);
+    expect(detectClaudeCheckpointWorkingFrame('  aakht@aa-desktop:/tmp/scratchpad/ckpt-veri…')).toBe(false);
   });
 });
 
@@ -102,6 +145,92 @@ describe('checkpoint prompt observations', () => {
     await codex.stop();
   });
 
+  it('recognizes Claude prompts in absolute-row tmux snapshots', async () => {
+    // Every checkpoint mode waits for readiness first, so a prompt the
+    // observation cannot see is a `readiness-timeout` for the whole driver.
+    // The frame must come from formatPaneSnapshot: it paints rows with
+    // absolute cursor moves and no EOLs, which a hand-written '❯ prompt'
+    // string does not reproduce.
+    const claude = new Session({ workingDir: '/tmp', mode: 'claude' });
+    let frame = formatPaneSnapshot(
+      [
+        '╭─── Claude Code v2.1.224 ───╮',
+        '│  Welcome back!             │',
+        '╰────────────────────────────╯',
+        '❯ ',
+        '  bypass permissions on',
+      ],
+      { cols: 80, rows: 8, cursorX: 2, cursorY: 3 }
+    );
+    installFrame(claude, () => frame);
+
+    expect(frame).not.toContain('\n');
+    expect(claude.getCheckpointObservation()).toMatchObject({ ready: true, working: false });
+
+    frame = formatPaneSnapshot(
+      ['╭─── Claude Code ───╮', '⠋ Thinking… (esc to interrupt)', '❯ ', '  bypass permissions on'],
+      {
+        cols: 80,
+        rows: 8,
+        cursorX: 2,
+        cursorY: 2,
+      }
+    );
+    expect(claude.getCheckpointObservation()).toMatchObject({ ready: false, working: true });
+    await claude.stop();
+  });
+
+  it('treats a Claude compaction screen as working and completes the ready cycle', async () => {
+    // Verbatim prod capture: `/compact` echoed, the progress row, and an EMPTY
+    // `❯` input row that stays visible for the whole operation. Prompt
+    // visibility alone therefore cannot mean ready, or the driver reports
+    // `operation-not-accepted` while the compaction is plainly running.
+    const claude = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const geometry = { cols: 120, rows: 10, cursorX: 2, cursorY: 6 };
+    const idleRows = [
+      '● Mercury, Venus, Mars, Neptune.',
+      '✻ Cogitated for 5s',
+      '─────',
+      '❯ ',
+      '─────',
+      '  ⏵⏵ bypass permissions on',
+    ];
+    const compactingRows = [
+      '● Mercury, Venus, Mars, Neptune.',
+      '✻ Cogitated for 5s',
+      '❯ /compact',
+      '✢ Compacting conversation… ',
+      '─────',
+      '❯ ',
+      '─────',
+      '  ⏵⏵ bypass permissions on',
+    ];
+    const doneRows = [
+      '❯ /compact',
+      '  ⎿  Compacted (ctrl+o to see full summary)',
+      '─────',
+      '❯ ',
+      '─────',
+      '  ⏵⏵ bypass permissions on',
+    ];
+
+    let frame = formatPaneSnapshot(idleRows, geometry);
+    installFrame(claude, () => frame);
+    const baseline = claude.getCheckpointObservation();
+    expect(baseline).toMatchObject({ ready: true, working: false });
+
+    frame = formatPaneSnapshot(compactingRows, geometry);
+    expect(claude.getCheckpointObservation()).toMatchObject({ ready: false, working: true });
+
+    // Completion must produce a NEW ready generation, which is what the
+    // driver's `revision > baseline.revision` completion gate waits on.
+    frame = formatPaneSnapshot(doneRows, geometry);
+    const completed = claude.getCheckpointObservation();
+    expect(completed.ready).toBe(true);
+    expect(completed.revision).toBeGreaterThan(baseline.revision);
+    await claude.stop();
+  });
+
   it('increments semantic revision only after leaving and returning to ready', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
     let frame = '› prompt';
@@ -152,11 +281,11 @@ describe('checkpoint prompt observations', () => {
 
   it('does not treat checkpoint clear/new commands as viewer history submissions', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
-    expect(session.codexLastSubmitAt).toBe(0);
+    expect(session.lastSubmitAt).toBe(0);
     await session.writeCheckpointViaMux('/clear\r');
-    expect(session.codexLastSubmitAt).toBe(0);
+    expect(session.lastSubmitAt).toBe(0);
     await session.writeCheckpointViaMux('/new\r');
-    expect(session.codexLastSubmitAt).toBe(0);
+    expect(session.lastSubmitAt).toBe(0);
     await session.stop();
   });
 
