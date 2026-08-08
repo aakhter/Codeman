@@ -3212,10 +3212,12 @@ body.solo-mode .btn-lifecycle-log {
   will-change: auto;
 }
 .touch-device .terminal-container.scrolling {
-  will-change: transform;
+  will-change: auto;
 }
 .terminal-container canvas {
-  contain: strict;
+  contain: paint;
+  /* COD-284: strict containment sliced backing store on iOS Safari during
+     keyboard/viewport resize — paint keeps isolation without size containment */
 }
 .terminal-container .xterm {
   width: 100%;

@@ -302,6 +302,8 @@ const KeyboardHandler = {
       document.body.classList.add('keyboard-visible');
       // While the keyboard is open, size the app to the visual viewport so
       // xterm's bottom row and cursor sit above the OS keyboard.
+      // COD-284: let MobileDetection be SoT for --app-height; also set here for
+      // immediate layout before onKeyboardShow's rAF fit sequence.
       document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
       this.onKeyboardShow();
     }
@@ -312,8 +314,7 @@ const KeyboardHandler = {
       this.keyboardVisible = false;
       document.body.classList.remove('keyboard-visible');
       this.onKeyboardHide();
-      // Re-sync --app-height now that keyboard is gone (MobileDetection skipped
-      // updates while keyboardVisible was true)
+      // Re-sync --app-height now that keyboard is gone
       MobileDetection.updateAppHeight();
     }
 
@@ -324,6 +325,10 @@ const KeyboardHandler = {
     } else {
       document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
     }
+
+    // COD-284: also sync via MobileDetection to keep --app-height coherent
+    // when visualViewport fires without handleViewportResize (e.g. address bar)
+    if (!this.keyboardVisible) MobileDetection.updateAppHeight();
 
     this.updateLayoutForKeyboard();
     this.lastViewportHeight = currentHeight;
@@ -425,31 +430,37 @@ const KeyboardHandler = {
     // iOS Safari may scroll the document to reveal xterm's hidden textarea.
     window.scrollTo(0, 0);
 
-    // Refit terminal locally AND send resize to server so Claude Code (Ink)
-    // knows the actual terminal dimensions. Without this, Ink redraws at the
-    // old (larger) row count when the user types, causing content to scroll
-    // off the visible area with each keystroke.
-    // Note: the throttledResize handler still suppresses ongoing resize events
-    // while keyboard is up — this one-shot resize on open/close is sufficient.
+    // Refit terminal locally AND send resize to server so TUI
+    // knows the actual terminal dimensions. Without this, redraws at the
+    // old (larger) row count when the user types cause content to scroll
+    // off the visible area.
+    // COD-284: use double-rAF so --app-height layout is committed before
+    // fit, then force refresh to clear iOS canvas backing-store tears
+    // (black bars) that appear on keyboard open — especially visible with
+    // opencode's full-viewport Bubble Tea redraws.
     setTimeout(() => {
-      if (typeof app !== 'undefined' && app.terminal) {
+      if (typeof app === 'undefined' || !app.terminal) return;
+      requestAnimationFrame(() => {
         if (app.fitAddon)
           try {
             app.fitAddon.fit();
           } catch {}
-        // Eliminate terminal row quantization gap: xterm can only show whole
-        // rows, so leftover pixels create dead space below the last row.
-        // Shrink .main's paddingBottom by the gap so the terminal fills flush
-        // to the accessory bar.
         this._shrinkPaddingToFit();
-        if (app._viewMode !== 'history') app.terminal.scrollToBottom(); // COD-187: don't yank the frozen history view
-        app._syncMobileHelperTextareaToCursor?.();
-        app._localEchoOverlay?.rerender?.();
-        // Send resize to server so PTY dimensions match xterm
-        this._sendTerminalResize();
-      }
-      // Reset again after fit/resize in case layout changes triggered scroll
-      window.scrollTo(0, 0);
+        requestAnimationFrame(() => {
+          if (app.fitAddon)
+            try {
+              app.fitAddon.fit();
+            } catch {}
+          try {
+            app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
+          } catch {}
+          if (app._viewMode !== 'history') app.terminal.scrollToBottom();
+          app._syncMobileHelperTextareaToCursor?.();
+          app._localEchoOverlay?.rerender?.();
+          this._sendTerminalResize();
+          window.scrollTo(0, 0);
+        });
+      });
     }, 150);
 
     // Reposition subagent windows to stack from bottom (above keyboard)
@@ -465,16 +476,26 @@ const KeyboardHandler = {
 
     this.resetLayout();
 
-    // Refit terminal, scroll to bottom, and send resize to restore original dimensions
+    // COD-284: double-rAF + refresh mirrors onKeyboardShow to clear tears
     setTimeout(() => {
-      if (typeof app !== 'undefined' && app.fitAddon) {
+      if (typeof app === 'undefined' || !app.fitAddon) return;
+      requestAnimationFrame(() => {
         try {
           app.fitAddon.fit();
         } catch {}
-        if (app.terminal && app._viewMode !== 'history') app.terminal.scrollToBottom(); // COD-187
-        // Send resize to server to restore full terminal size
-        this._sendTerminalResize();
-      }
+        requestAnimationFrame(() => {
+          try {
+            app.fitAddon.fit();
+          } catch {}
+          if (app.terminal) {
+            try {
+              app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
+            } catch {}
+            if (app._viewMode !== 'history') app.terminal.scrollToBottom();
+          }
+          this._sendTerminalResize();
+        });
+      });
     }, 100);
 
     // Reposition subagent windows to stack from top (below header)
@@ -507,6 +528,9 @@ const KeyboardHandler = {
    * xterm can only render whole rows, so fractional-row pixels create dead
    * space below the last row. After fitAddon.fit(), measure the gap and
    * reduce padding by that amount so the terminal sits flush against the bars.
+   * COD-284: no longer sets container.style.paddingBottom — that extra padding
+   * inflated container.clientHeight on iOS and, combined with strict canvas
+   * containment, produced backing-store tears (black bars).
    */
   _shrinkPaddingToFit() {
     try {
@@ -518,12 +542,17 @@ const KeyboardHandler = {
       const gap = container.clientHeight - Math.floor(container.clientHeight / cellH) * cellH;
       if (gap > 2 && gap < cellH) {
         const currentPadding = parseInt(main.style.paddingBottom) || 0;
-        main.style.paddingBottom = Math.max(0, currentPadding - gap) + 'px';
-        container.style.paddingBottom = `${gap}px`;
+        // Only shrink main; avoid inflating container which confuses fit on iOS
+        const next = Math.max(0, currentPadding - gap);
+        if (next !== currentPadding) main.style.paddingBottom = next + 'px';
+        // Re-fit once after padding change, then refresh to clear any tear
         if (app.fitAddon)
           try {
             app.fitAddon.fit();
           } catch {}
+        try {
+          app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
+        } catch {}
       }
     } catch {}
   },

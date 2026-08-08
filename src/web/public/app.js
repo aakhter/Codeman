@@ -5505,7 +5505,12 @@ class CodemanApp {
       // Fit terminal to container BEFORE writing any buffer data.
       // If the browser was resized while viewing another session, the terminal
       // canvas may be at stale dimensions — content would render at wrong width.
-      if (this.fitAddon) this.fitAddon.fit();
+      if (this.fitAddon) {
+        try { this.fitAddon.fit(); } catch {}
+        // COD-284b: iOS canvas tear on tab switch / reload — force repaint
+        try { this.terminal?.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
+      }
+      this._syncTerminalTouchAction?.();
 
       // Also push the new dimensions to the PTY. Without this, codex/codeman
       // sees the size that was set the last time the throttled resize handler
@@ -5809,6 +5814,12 @@ class CodemanApp {
       }
       this._clearTerminalLoadState(sessionId, selectGen);
       this._scheduleTerminalRepaint();
+      // COD-284b: tab-switch / multi-reload tear — second fit+refresh after buffer paint
+      requestAnimationFrame(() => {
+        try { this.fitAddon?.fit(); } catch {}
+        try { this.terminal?.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
+        this._syncTerminalTouchAction?.();
+      });
       _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${(performance.now() - _selStart).toFixed(0)}ms`);
     } catch (err) {

@@ -666,17 +666,26 @@ Object.assign(CodemanApp.prototype, {
 
     // On mobile Safari, delay initial fit() to allow layout to settle
     // This prevents 0-column terminals caused by fit() running before container is sized
+    // COD-284: also refresh after fits to clear initial backing-store tear on
+    // load (black bars seen on opencode iPhone before keyboard interaction)
     const isMobileSafari =
       MobileDetection.getDeviceType() === 'mobile' && document.body.classList.contains('safari-browser');
     if (isMobileSafari) {
       // Wait for layout, then fit multiple times to ensure proper sizing
       requestAnimationFrame(() => {
-        this.fitAddon.fit();
-        // Double-check after another frame
-        requestAnimationFrame(() => this.fitAddon.fit());
+        try { this.fitAddon.fit(); } catch {}
+        // Double-check after another frame + force repaint
+        requestAnimationFrame(() => {
+          try { this.fitAddon.fit(); } catch {}
+          try { this.terminal.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
+        });
       });
     } else {
-      this.fitAddon.fit();
+      try { this.fitAddon.fit(); } catch {}
+      const sess = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+      if (sess?.mode === 'opencode') {
+        try { this.terminal.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
+      }
     }
 
     // Register link provider for clickable file paths in Bash tool output
@@ -698,13 +707,17 @@ Object.assign(CodemanApp.prototype, {
     // CAPTURE phase + stopPropagation makes this funnel the single wheel owner.
     let wheelRaf = 0;
     let wheelDelta = 0;
+    const isOpencodeMobileNow = () => {
+      const s = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
+      return s?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
+    };
     container.addEventListener(
       'wheel',
       (ev) => {
         if (this._handleForegroundTuiWheel(ev)) return;
         ev.preventDefault();
         ev.stopPropagation();
-        const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
+        const isOpencodeMobile = isOpencodeMobileNow();
         if (isOpencodeMobile) {
           wheelDelta += ev.deltaY;
           if (wheelRaf) return;
@@ -747,15 +760,20 @@ Object.assign(CodemanApp.prototype, {
 
     // Touch scrolling — COD-283: native-friendly for opencode on iPhone
     // (pan-y allows native momentum), lower threshold 8px + rAF batch.
+    // COD-284: isOpencodeMobile must be dynamic (session can change after init)
     {
-      const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
-      if (isOpencodeMobile) {
-        container.style.touchAction = 'pan-y';
-      } else {
-        container.style.touchAction = 'none';
-      }
+      const getIsOpencodeMobile = () => {
+        const s = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
+        return s?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
+      };
+      const syncTouchAction = () => {
+        container.style.touchAction = getIsOpencodeMobile() ? 'pan-y' : 'none';
+      };
+      syncTouchAction();
+      // Expose for selectSession tab-switch updates
+      this._syncTerminalTouchAction = syncTouchAction;
       const cellHeight = () => this.terminal._core?._renderService?.dimensions?.css?.cell?.height || 13;
-      const THRESHOLD = isOpencodeMobile ? 8 : 50;
+      const getThreshold = () => (getIsOpencodeMobile() ? 8 : 50);
       let touchMoveRaf = 0;
       let pendingDelta = 0;
       let pendingX = 0;
@@ -803,6 +821,7 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchstart',
         (ev) => {
+          syncTouchAction();
           const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);
           velocity = 0;
           pixelAccum = 0;
@@ -850,7 +869,7 @@ Object.assign(CodemanApp.prototype, {
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
-              if (Math.abs(pixelAccum + delta) >= THRESHOLD || isOpencodeMobile) {
+              if (Math.abs(pixelAccum + delta) >= getThreshold() || getIsOpencodeMobile()) {
                 pendingDelta += delta;
                 pendingX = touchX; pendingY = touchY;
                 if (touchMoveRaf) return;
@@ -862,8 +881,8 @@ Object.assign(CodemanApp.prototype, {
               return;
             }
             pixelAccum += delta;
-            if (Math.abs(pixelAccum) < THRESHOLD) return;
-            if (isOpencodeMobile) {
+            if (Math.abs(pixelAccum) < getThreshold()) return;
+            if (getIsOpencodeMobile()) {
               pendingDelta += pixelAccum;
               if (touchMoveRaf) return;
               touchMoveRaf = requestAnimationFrame(() => {
@@ -952,34 +971,44 @@ Object.assign(CodemanApp.prototype, {
 
     // Handle resize with throttling for performance
     this._resizeTimeout = null;
+    this._resizeRaf = null;
     this._lastResizeDims = null;
 
     // Minimum terminal dimensions to prevent vertical text wrapping
     const MIN_COLS = 40;
     const MIN_ROWS = 10;
 
+    const scheduleImmediateFit = () => {
+      if (this._resizeRaf) return;
+      this._resizeRaf = requestAnimationFrame(() => {
+        this._resizeRaf = null;
+        if (this.fitAddon) {
+          try { this.fitAddon.fit(); } catch {}
+          // COD-284: iOS Safari canvas backing-store tear (black bars) on
+          // keyboard open/close — force full repaint after fit. Opencode's
+          // Bubble Tea does full-viewport redraws at high frequency, making the
+          // tear highly visible vs Claude's incremental Ink updates.
+          const isIOS = typeof MobileDetection !== 'undefined' && MobileDetection.isIOS?.();
+          const sess = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+          const needsRefresh = isIOS || sess?.mode === 'opencode';
+          if (needsRefresh && this.terminal) {
+            try { this.terminal.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
+          }
+        }
+      });
+    };
+
     const throttledResize = () => {
-      // Trailing-edge debounce: ALL resize work (fit + clear + SIGWINCH) happens
-      // once after the user stops resizing. During active resize, the terminal
-      // stays at its old dimensions for up to 300ms.
-      //
-      // Why not fit() immediately? Each fitAddon.fit() reflows content at the
-      // new width — lines that were 7 rows become 10, and the overflow gets
-      // pushed into scrollback. With continuous resize events, this creates
-      // dozens of intermediate reflow states in scrollback, appearing as
-      // duplicate/garbled content when the user scrolls up.
-      //
-      // By deferring fit() to the trailing edge, there's exactly ONE reflow
-      // at the final dimensions, ONE viewport clear, and ONE Ink redraw.
+      // Immediate fit keeps canvas backing-store in sync with viewport
+      // (fixes iOS black bars on load/keyboard open/close). SIGWINCH to the
+      // PTY stays debounced to avoid reflow storms — 300ms trailing edge,
+      // one reflow at final dims.
+      scheduleImmediateFit();
       if (this._resizeTimeout) {
         clearTimeout(this._resizeTimeout);
       }
       this._resizeTimeout = setTimeout(() => {
         this._resizeTimeout = null;
-        // Fit xterm.js to final container dimensions
-        if (this.fitAddon) {
-          this.fitAddon.fit();
-        }
         // Flush any stale flicker buffer before clearing viewport
         if (this.flickerFilterBuffer) {
           if (this.flickerFilterTimeout) {
@@ -993,7 +1022,7 @@ Object.assign(CodemanApp.prototype, {
         // Local fit() still runs so xterm knows the viewport size for scrolling.
         const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
         if (this.activeSessionId && !keyboardUp) {
-          const dims = this.fitAddon.proposeDimensions();
+          const dims = this.fitAddon?.proposeDimensions?.();
           // Enforce minimum dimensions to prevent layout issues
           const cols = dims ? Math.max(dims.cols, MIN_COLS) : MIN_COLS;
           const rows = dims ? Math.max(dims.rows, MIN_ROWS) : MIN_ROWS;
@@ -1055,7 +1084,7 @@ Object.assign(CodemanApp.prototype, {
         if (this._localEchoOverlay?.hasPending) {
           this._localEchoOverlay.rerender();
         }
-      }, 300); // Trailing-edge: only fire after 300ms of no resize events
+      }, 300); // Trailing-edge: PTY resize only after 300ms of no resize events
     };
 
     window.addEventListener('resize', throttledResize);
