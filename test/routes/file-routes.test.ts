@@ -1072,6 +1072,14 @@ describe('file-routes', () => {
       });
       expect(previewRes.statusCode).toBe(302);
       expect(previewRes.headers.location).toContain(`/attachments/${attachmentId}/raw?preview=true`);
+
+      mockedStat.mockResolvedValue({ size: 10 * 1024 * 1024 + 1, isFile: () => true, mtimeMs: 12346 } as never);
+      const oversizedPreview = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/${attachmentId}/raw?preview=true`,
+      });
+      expect(oversizedPreview.statusCode).toBe(413);
+      expect(mockedCreateReadStream).not.toHaveBeenCalled();
     });
 
     it('serves registered PNG attachment bytes with production compression enabled', async () => {
@@ -1582,6 +1590,7 @@ describe('file-routes', () => {
         'deliverables/Executive Brief Final.pptx',
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       ],
+      ['xlsx', 'deliverables/Forecast Final.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
     ])(
       'downloads the exact workspace %s source with its original spaced name and official media type',
       async (_extension, filePath, mediaType) => {
