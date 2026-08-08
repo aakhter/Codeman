@@ -4164,6 +4164,7 @@ Object.assign(CodemanApp.prototype, {
     if (!bodyEl) return false;
     const bust = (url) => (data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url);
     const st = this.filePreviewState;
+    this._disposeSpreadsheetPreview?.(expectedState || st);
     if (st) {
       st.previewKind = null;
       st.previewCopyUrl = null;
@@ -4175,7 +4176,27 @@ Object.assign(CodemanApp.prototype, {
     const editBtnEl = this.$('filePreviewEditBtn');
     if (editBtnEl) editBtnEl.hidden = true;
 
-    if (data.type === 'image') {
+    if (data.type === 'spreadsheet') {
+      const renderer = window.CodemanSpreadsheetPreview;
+      if (!renderer?.open) {
+        bodyEl.innerHTML = '<div class="binary-message">Spreadsheet preview is unavailable.</div>';
+      } else {
+        bodyEl.textContent = '';
+        const previewState = expectedState || st;
+        const previewUrl = data.previewUrl || data.url;
+        if (!previewState || !previewUrl) {
+          bodyEl.innerHTML = '<div class="binary-message">Spreadsheet preview is unavailable.</div>';
+        } else {
+          previewState.spreadsheetPreview = renderer.open({
+            container: bodyEl,
+            url: bust(previewUrl),
+            size: data.size,
+            isCurrent: () => this.filePreviewState === previewState,
+          });
+        }
+      }
+      footerEl.textContent = `${this.formatFileSize(data.size)} • spreadsheet`;
+    } else if (data.type === 'image') {
       this.filePreviewZoom = 1;
       this.filePreviewZoomMode = 'fit';
       const imageUrl = bust(data.previewUrl || data.url);
@@ -4460,6 +4481,17 @@ Object.assign(CodemanApp.prototype, {
     state.previewFetchAbort = null;
   },
 
+  /** Dispose the worker/fetch lifecycle owned by a spreadsheet preview state. */
+  _disposeSpreadsheetPreview(state) {
+    if (!state?.spreadsheetPreview) return;
+    try {
+      state.spreadsheetPreview.dispose();
+    } catch {
+      // Disposal is best-effort; the state identity still prevents stale renders.
+    }
+    state.spreadsheetPreview = null;
+  },
+
   /** Re-open the current preview from scratch (COD-239 conversion Retry). */
   retryFilePreview() {
     const st = this.filePreviewState;
@@ -4482,6 +4514,7 @@ Object.assign(CodemanApp.prototype, {
     // in-flight Office conversion readiness probe before dropping its state.
     if (!keepState) {
       this._teardownOfficePreviewResources(this.filePreviewState);
+      this._disposeSpreadsheetPreview?.(this.filePreviewState);
       this.filePreviewState = null;
       this._resetFilePreviewOriginalDownloadAction?.();
     }

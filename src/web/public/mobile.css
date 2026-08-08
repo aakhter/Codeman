@@ -20,6 +20,25 @@ html.mobile-init .file-browser-panel {
   display: none !important;
 }
 
+@media (max-width: 700px) {
+  .spreadsheet-sheet-tabs {
+    padding-inline: 4px;
+    scroll-snap-type: x proximity;
+  }
+
+  .spreadsheet-sheet-tab {
+    min-width: 96px;
+    min-height: 40px;
+    scroll-snap-align: start;
+  }
+
+  .spreadsheet-grid {
+    min-height: 55vh;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x pan-y;
+  }
+}
+
 @media (max-width: 430px) {
   .file-preview-header {
     gap: 0.25rem;

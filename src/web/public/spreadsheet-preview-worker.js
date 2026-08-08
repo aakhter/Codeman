@@ -118,21 +118,35 @@ function sendTile(message) {
   const sheet = sheetsById.get(String(message.sheetId));
   if (!sheet) throw new Error('Worksheet is unavailable');
   const range = message.range;
+  if ((range.r2 - range.r1 + 1) * (range.c2 - range.c1 + 1) > 2500) {
+    throw new core.XlsxPreviewError('tile-limit', 'Requested spreadsheet tile is too large');
+  }
   const warnings = new Set();
   const cells = [];
+  const seenCells = new Set();
+  const addCell = (cell) => {
+    const key = `${cell.row}:${cell.col}`;
+    if (seenCells.has(key) || (cell.isMerged && cell.master !== cell)) return;
+    seenCells.add(key);
+    cells.push({
+      row: cell.row,
+      col: cell.col,
+      text: cellDisplay(cell, Boolean(workbook.properties?.date1904), warnings),
+      styleId: normalizeStyle(cell),
+    });
+  };
   sheet.eachRow({ includeEmpty: false }, (row) => {
     if (row.number < range.r1 || row.number > range.r2) return;
     row.eachCell({ includeEmpty: false }, (cell) => {
-      if (cell.col < range.c1 || cell.col > range.c2 || (cell.isMerged && cell.master !== cell)) return;
-      cells.push({
-        row: row.number,
-        col: cell.col,
-        text: cellDisplay(cell, Boolean(workbook.properties?.date1904), warnings),
-        styleId: normalizeStyle(cell),
-      });
+      if (cell.col < range.c1 || cell.col > range.c2) return;
+      addCell(cell);
     });
   });
   const merges = core.intersectingMerges(Array.from(sheet.model?.merges || []), range);
+  for (const merge of merges) {
+    const anchor = core.parseRange(merge);
+    if (anchor) addCell(sheet.getCell(anchor.r1, anchor.c1));
+  }
   self.postMessage({
     type: 'tile',
     requestId: message.requestId,

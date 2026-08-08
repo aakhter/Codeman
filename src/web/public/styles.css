@@ -15562,3 +15562,94 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 /* Delete sits apart from Cancel/Save so it is not fat-fingered on the way to Save. */
 .webview-modal-actions { justify-content: space-between; }
 .webview-modal-actions .btn-danger { margin-right: auto; }
+
+/* COD-280: local-only, read-only XLSX preview. */
+.spreadsheet-preview-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+.spreadsheet-sheet-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.spreadsheet-sheet-tab {
+  flex: 0 0 auto;
+  min-width: 80px;
+  max-width: 220px;
+  padding: 6px 12px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+}
+
+.spreadsheet-sheet-tab[aria-selected='true'] {
+  color: var(--text-primary);
+  border-color: var(--border);
+  background: var(--bg-secondary);
+}
+
+.spreadsheet-preview-notice {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  color: var(--warning, #f59e0b);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.spreadsheet-grid {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 220px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.spreadsheet-grid-spacer,
+.spreadsheet-cells {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.spreadsheet-cell {
+  position: absolute;
+  min-width: 0;
+  padding: 2px 5px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.spreadsheet-preview-message {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  padding: 24px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.spreadsheet-preview-message.error {
+  color: var(--danger, #ef4444);
+}

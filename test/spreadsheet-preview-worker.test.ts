@@ -107,6 +107,7 @@ describe('spreadsheet preview worker', () => {
       ])
     );
     expect(tile.merges).toContain('A4:C4');
+    expect(tile.cells).toContainEqual(expect.objectContaining({ row: 4, col: 1, text: 'Merged' }));
     expect(tile.cells.length).toBeLessThanOrEqual(9);
   });
 
