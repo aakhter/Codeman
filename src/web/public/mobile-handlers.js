@@ -26,7 +26,9 @@ const DEBUG_MOBILE = typeof location !== 'undefined' && new URLSearchParams(loca
 function logViewport(label) {
   if (!DEBUG_MOBILE) return;
   const vv = window.visualViewport;
-  console.log(`[mobile][${label}] innerHeight=${window.innerHeight} vv.h=${vv?.height} vv.scale=${vv?.scale} appHeight=${getComputedStyle(document.documentElement).getPropertyValue('--app-height')} dvh=${window.innerHeight}`);
+  console.log(
+    `[mobile][${label}] innerHeight=${window.innerHeight} vv.h=${vv?.height} vv.scale=${vv?.scale} appHeight=${getComputedStyle(document.documentElement).getPropertyValue('--app-height')} dvh=${window.innerHeight}`
+  );
 }
 
 // Codeman — Mobile detection, keyboard handling, and swipe navigation

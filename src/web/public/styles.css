@@ -3208,11 +3208,14 @@ body.solo-mode .btn-lifecycle-log {
   background: var(--term-bg, #161b23);
   overflow: hidden;
   position: relative;
-  contain: layout;
+  contain: layout paint;
   will-change: auto;
 }
 .touch-device .terminal-container.scrolling {
   will-change: transform;
+}
+.terminal-container canvas {
+  contain: strict;
 }
 .terminal-container .xterm {
   width: 100%;

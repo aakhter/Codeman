@@ -572,7 +572,9 @@ Object.assign(CodemanApp.prototype, {
     // Auto-fallback: _initWebGL installs a long-task watchdog that disables
     // WebGL sticky in localStorage after repeated GPU stalls (see app.js).
     // Force re-enable after sticky disable with ?webgl=force.
-    // Lazy-loaded: script downloaded only on desktop (saves 244KB on mobile).
+    // COD-283: try WebGL on iPhone when not low-power (prefers-reduced-motion off),
+    // fallback to canvas on context loss or long-task stalls.
+    // Lazy-loaded: script downloaded only when needed (saves 244KB when skipped).
     this._webglAddon = null;
     const _params = new URLSearchParams(location.search);
     const _stickyDisabled = (() => {
@@ -589,6 +591,8 @@ Object.assign(CodemanApp.prototype, {
         return true;
       } catch { return false; }
     })();
+    const _isIOS = typeof MobileDetection !== 'undefined' && typeof MobileDetection.isIOS === 'function' ? MobileDetection.isIOS() : false;
+    const _isLowPower = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)').matches : false;
     // User's "WebGL Renderer" toggle (Settings > Appearance). undefined = untouched
     // (desktop default on); false = explicit opt-out; true = explicit opt-in.
     const _webglSettings = this.loadAppSettingsFromStorage();
@@ -596,6 +600,8 @@ Object.assign(CodemanApp.prototype, {
     const _webglPref = _webglSettings.webglRendererEnabled ?? _webglDefaults.webglRendererEnabled;
     const { skip: skipWebGL, clearSticky: _clearWebglSticky } = shouldSkipWebGL({
       deviceType: MobileDetection.getDeviceType(),
+      isIOS: _isIOS,
+      isLowPower: _isLowPower,
       noWebglParam: _params.has('nowebgl'),
       forceParam: _params.get('webgl') === 'force',
       stickyDisabled: _stickyDisabled,
