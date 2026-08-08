@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionAttachmentHistoryItem, SessionRemote } from '../../src/types/session.js';
+import type { SessionAttachmentHistoryItem, SessionRemote, SessionStatus } from '../../src/types/session.js';
 import type { SessionSource } from '../../src/types/sources.js';
 import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
@@ -17,7 +17,14 @@ export class MockSession extends EventEmitter {
   workingDir: string = '/tmp/test-workdir';
   /** COD-241 — set by remote-session route tests; production reads `session.remote`. */
   remote?: SessionRemote;
-  status: 'idle' | 'working' | 'parked' = 'idle';
+  /**
+   * The REAL union, deliberately. This used to be `'idle' | 'working' | 'parked'`, and
+   * `'working'` is not a `SessionStatus` at all — so `signalForStatus()` fell to its
+   * `default: null` branch in every route test and the busy / stopped / error halves
+   * of the immediate-resolve mapping had zero coverage while appearing to be tested.
+   */
+  status: SessionStatus = 'idle';
+  /** `null` once the PTY is gone (or before it has ever started) — see `pid` in Session. */
   pid: number | null = 12345;
   /** COD-124 — preserved conversation ref for claude-mode resume via --resume. */
   resumeSessionId?: string;
@@ -129,7 +136,9 @@ export class MockSession extends EventEmitter {
   /** Simulate working state with spinner */
   simulateWorking(text: string = 'Thinking'): void {
     this.simulateTerminalOutput(`${text}... \u280b`);
-    this.status = 'working';
+    // 'busy' is what the real Session sets while a turn is in flight; the old
+    // 'working' here was the event name, not a status value.
+    this.status = 'busy';
     this.emit('working');
   }
 
@@ -197,6 +206,14 @@ export class MockSession extends EventEmitter {
   get muxName(): string | null {
     return this._muxName;
   }
+
+  /**
+   * Mirrors `Session.usesMux`. True by default because that is the normal
+   * configuration, and it is what makes a route's pane-liveness probe reachable:
+   * `session.pid` is the tmux ATTACH CLIENT, so a mux-backed session's worker can be
+   * dead while `pid` is still a live number.
+   */
+  usesMux: boolean = true;
 
   /** Check for active child processes (mock returns configurable list) */
   getActiveChildProcesses(): { pid: number; command: string }[] {

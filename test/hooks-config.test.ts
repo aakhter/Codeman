@@ -108,6 +108,20 @@ describe('generateHooksConfig', () => {
     expect(notifHooks[0].hooks[0].command).toContain('|| true');
   });
 
+  // On --https/tailscale installs CODEMAN_API_URL is HTTPS with a self-signed cert.
+  // A `-k`-less hook curl exits 60 there, the `|| true` swallows it, and every hook
+  // event (stop, permission_prompt, elicitation_dialog, idle_prompt, teammate_idle,
+  // task_completed) dies silently — killing respawn's idle signals and the wait
+  // endpoints' stop/blocked. The statusline exporter always carried -k; the hooks must too.
+  it('every hook curl tolerates a self-signed HTTPS API (curl -sk)', () => {
+    const serialized = JSON.stringify(generateHooksConfig());
+    // This fork's hook curl is `curl -sk -o /dev/null -X POST`, so assert the -k
+    // flag itself rather than upstream's exact spelling.
+    expect(serialized).toContain('curl -sk ');
+    expect(serialized).not.toContain('curl -s -o');
+    expect(serialized).not.toContain('curl -s -X POST');
+  });
+
   it('should set timeout to 10 seconds (hook timeout fields are seconds)', () => {
     const config = generateHooksConfig();
     const notifHooks = config.hooks.Notification as Array<{ hooks: Array<{ timeout: number }> }>;

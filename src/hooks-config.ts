@@ -60,7 +60,11 @@ function generateHookCommand(event: HookEventType): string {
   return (
     `HOOK_DATA=$(cat 2>/dev/null || echo '{}'); ` +
     `printf '{"event":"${event}","sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$HOOK_DATA" | ` +
-    `curl -s -o /dev/null -X POST "$CODEMAN_API_URL/api/hook-event" ` +
+    // `-k`, same as the statusline exporter: CODEMAN_API_URL is loopback HTTPS with
+    // a self-signed cert on --https/tailscale installs. Without it curl exits 60,
+    // the `|| true` swallows it, and ALL SIX hook events die silently: respawn loses
+    // its definitive idle signals and the wait endpoints lose stop/blocked.
+    `curl -sk -o /dev/null -X POST "$CODEMAN_API_URL/api/hook-event" ` +
     `-H 'Content-Type: application/json' ` +
     `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
     `--data @- ` +
@@ -470,8 +474,10 @@ export async function writeHooksConfig(casePath: string): Promise<void> {
  * settings.local.json that POST to /api/hook-event WITHOUT the secret — which, once the
  * gate requires it unconditionally (COD-91), silently 401 on a password-protected install.
  * Older Codeman blocks may also lack the background Bash async-rewake hook or the
- * SessionStart identity hook. Refresh any stale shape on launch so existing cases
- * gain all current behaviors.
+ * SessionStart identity hook. A further stale shape: hook curls without `-k`, which
+ * exit 60 on every --https/tailscale install (the cert is self-signed), swallowed by
+ * the hooks' own `|| true` — all six hook events die silently. Refresh any of these
+ * stale shapes on launch so existing cases gain all current behaviors.
  *
  * Deliberately surgical: regenerates ONLY when settings.local.json already contains
  * Codeman's own hook curls (they target `/api/hook-event`) and they are stale. No-op
@@ -495,8 +501,14 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
     const hasSecret = hooksJson.includes('X-Codeman-Hook-Secret');
     const hasBackgroundWake = hooksJson.includes(BACKGROUND_WAKE_MARKER);
     const hasSessionStart = hasManagedSessionStartHook(existing.hooks);
+    // Pre--k hook curls exit 60 on a self-signed HTTPS install and the hooks' own
+    // `|| true` swallows it. Detect by the ABSENCE of `curl -sk` rather than by
+    // upstream's `curl -s -X POST` substring: this fork's curl carries
+    // `-o /dev/null` (see generateHookCommand), so that substring never matches
+    // here and every case would look permanently stale.
+    const hasTlsFlaglessCurl = !hooksJson.includes('curl -sk');
     if (!isOurs) return false;
-    if (hasSecret && hasBackgroundWake && hasSessionStart) return true;
+    if (hasSecret && hasBackgroundWake && hasSessionStart && !hasTlsFlaglessCurl) return true;
     const generated = generateHooksConfig();
     const merged = {
       ...existing,
