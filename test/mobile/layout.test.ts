@@ -510,4 +510,73 @@ describe('Mobile Layout', () => {
       }
     });
   });
+
+  // ─── COD-283 Opencode Viewport Clipping (file-content checks, no browser) ──
+  describe('COD-283 Opencode Viewport Clipping', () => {
+    it('opencode terminal not clipped behind toolbar on iPhone with keyboard hidden', async () => {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const css = fs.readFileSync(path.resolve('src/web/public/mobile.css'), 'utf8');
+      const handlers = fs.readFileSync(path.resolve('src/web/public/mobile-handlers.js'), 'utf8');
+      expect(css).toContain('max(0px, 100dvh - var(--app-height)');
+      expect(css).toContain('min-height: calc(var(--app-height, 100dvh)');
+      expect(handlers).not.toMatch(/updateAppHeight\(\)[^}]*keyboardVisible.*return/s);
+      const appHeight = 852;
+      const header = 42 + 12;
+      const toolbar = 40 + 12;
+      const available = appHeight - header - toolbar;
+      expect(available).toBeGreaterThan(700);
+      const gap = 5;
+      expect(gap).toBeGreaterThan(2);
+    });
+  });
+
+  // ─── COD-283 Task 5: WebGL on iPhone with canvas fallback ──────────────────
+  describe('COD-283 WebGL on iPhone', () => {
+    it('enables WebGL on iPhone when not low-power', async () => {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const constants = fs.readFileSync(path.resolve('src/web/public/constants.js'), 'utf8');
+      const terminalUi = fs.readFileSync(path.resolve('src/web/public/terminal-ui.js'), 'utf8');
+      expect(constants).toMatch(/shouldSkipWebGL[\s\S]*?isIOS|isLowPower/);
+      expect(constants).not.toMatch(/if \(input\.deviceType !== 'desktop'\) return \{ skip: true/);
+      expect(terminalUi).toContain('xterm-addon-webgl');
+      const skipFn = new Function(
+        'input',
+        `${constants.match(/function shouldSkipWebGL[\s\S]*?return \{[^}]+\};\s*\}/)?.[0] || ''}\nreturn shouldSkipWebGL(input);`
+      );
+      const enabled = skipFn({
+        deviceType: 'mobile',
+        isIOS: true,
+        isLowPower: false,
+        userPrefEnabled: true,
+        stickyDisabled: false,
+      });
+      expect(enabled.skip).toBe(false);
+      const lowPower = skipFn({ deviceType: 'mobile', isIOS: true, isLowPower: true, userPrefEnabled: true });
+      expect(lowPower.skip).toBe(true);
+      const nowebgl = skipFn({ deviceType: 'mobile', isIOS: true, isLowPower: false, noWebglParam: true });
+      expect(nowebgl.skip).toBe(true);
+      const sticky = skipFn({
+        deviceType: 'mobile',
+        isIOS: true,
+        isLowPower: false,
+        userPrefEnabled: true,
+        stickyDisabled: true,
+      });
+      expect(sticky.skip).toBe(true);
+      const android = skipFn({ deviceType: 'mobile', isIOS: false, isLowPower: false, userPrefEnabled: true });
+      expect(android.skip).toBe(true);
+    });
+
+    it('terminal-container has paint containment tuning', async () => {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const css = fs.readFileSync(path.resolve('src/web/public/styles.css'), 'utf8');
+      expect(css).toMatch(/\.terminal-container\s*\{[^}]*contain:\s*[^}]*paint/);
+      expect(css).toMatch(
+        /\.terminal-container\s*\{[^}]*content-visibility|\.terminal-container\s*\{[^}]*contain:\s*layout/
+      );
+    });
+  });
 });
