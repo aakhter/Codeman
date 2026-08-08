@@ -1563,6 +1563,7 @@ Object.assign(CodemanApp.prototype, {
       'webp',
       'docx',
       'pptx',
+      'xlsx',
       'json',
       'yaml',
       'yml',

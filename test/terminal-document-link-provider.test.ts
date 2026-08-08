@@ -267,6 +267,17 @@ describe('COD-232 terminal document link provider', () => {
     expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
   });
 
+  it('links an XLSX reference and opens the spreadsheet preview for the originating session', () => {
+    const path = 'out/cod-280-xlsx-live-test/deliverables/cod-280-live-card-test.xlsx';
+    const { provide, previewSpy, originalSessionId } = makeHarness(`Created ${path}`);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([path]);
+    links[0].activate(null, links[0].text);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
   it('links every supported preview extension', () => {
     const extensions = [
       'pdf',
@@ -279,6 +290,7 @@ describe('COD-232 terminal document link provider', () => {
       'webp',
       'docx',
       'pptx',
+      'xlsx',
       'json',
       'yaml',
       'yml',
