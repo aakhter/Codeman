@@ -302,6 +302,11 @@
 
     <!-- Main Terminal Area -->
     <main class="main">
+      <!-- COD-286: vertical tab rail. Empty in horizontal mode; applyTabOrientation()
+           MOVES the one #sessionTabs strip in here (never clones it) when the
+           orientation setting is vertical, so every tab behaviour keeps working. -->
+      <div class="tab-rail" id="tabRail"></div>
+
       <div class="terminal-wrap">
         <div class="terminal-container" id="terminalContainer"></div>
         <!-- COD-187: frozen history view indicator for live-mirror tabs -->
@@ -1566,6 +1571,13 @@
 
               <!-- Tab Bar Section -->
               <div class="settings-section-header">Tab Bar</div>
+              <div class="settings-item" title="Show session tabs across the top or as a rail beside the terminal (not synced; phones stay horizontal)">
+                <span class="settings-item-label">Tab Orientation</span>
+                <select id="appSettingsTabOrientation" class="form-select">
+                  <option value="horizontal">Horizontal (top)</option>
+                  <option value="vertical">Vertical (side rail)</option>
+                </select>
+              </div>
               <div class="settings-item" title="Show folder path below tab name and allow tab bar to wrap into multiple rows">
                 <span class="settings-item-label">Tall Tabs (Name + Folder)</span>
                 <label class="switch switch-sm">

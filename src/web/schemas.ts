@@ -835,6 +835,11 @@ export const SettingsUpdateSchema = z
     // CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK env var. Stripped before persisting.
     acknowledgeUnauthTunnel: z.boolean().optional(),
     tabTwoRows: z.boolean().optional(),
+    // COD-286: session tabs across the top vs a vertical rail beside the terminal.
+    // Declared here (like tabTwoRows) so it persists server-side and can seed a
+    // fresh device; it is still PER-DEVICE by client policy — settings-ui.js lists
+    // it in `displayKeys`, so a server value never overwrites a device's own choice.
+    tabOrientation: z.enum(['horizontal', 'vertical']).optional(),
     // COD-242: custom keyboard shortcut overrides. Persisted server-side (settings.json)
     // so they survive restarts, deploys, and upgrades. Keyed by shortcut id; each value
     // carries an optional binding list (each binding an object: key/code/modifiers) and a

@@ -49,6 +49,7 @@
   --ring-glow: 0 0 12px -2px rgba(56, 182, 240, 0.55);
   --header-height: 36px;
   --toolbar-height: 42px;
+  --tab-rail-width: 208px;
   --glass-bg: rgba(31, 38, 48, 0.85);
   --glass-border: rgba(255, 255, 255, 0.08);
   --control-bg: rgba(255, 255, 255, 0.045);
@@ -555,6 +556,65 @@ body {
 
 .session-tabs::-webkit-scrollbar-thumb:hover {
   background: var(--border-light);
+}
+
+/* COD-286 — Vertical tab rail.
+   The rail is an empty flex child of .main until applyTabOrientation() moves the
+   #sessionTabs strip into it, so horizontal installs pay nothing but one empty
+   div. It sits ABOVE the overlays that fill .main (.welcome-overlay is z-index 10)
+   because those are `position:absolute; inset:0` on .main and would otherwise
+   cover — and swallow the clicks of — the rail's own column. */
+.tab-rail {
+  display: none;
+  flex-direction: column;
+  flex: 0 0 var(--tab-rail-width);
+  width: var(--tab-rail-width);
+  min-width: 0;
+  overflow: hidden;
+  background: var(--glass-bg);
+  border-right: 1px solid var(--glass-border);
+  position: relative;
+  z-index: 11;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail {
+  display: flex;
+}
+
+/* Column layout for the moved strip. `max-height: none` undoes the two-row /
+   auto-wrap caps, which are horizontal-mode concepts. */
+html[data-tab-orientation='vertical'] .tab-rail .session-tabs {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0.35rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab {
+  width: 100%;
+  max-width: none;
+  justify-content: flex-start;
+}
+
+/* The name block is the only part that may shrink; the status dot, badges and
+   the action icons keep their size so a long name truncates instead of crushing
+   them. `.tab-info` is the direct flex child that wraps the name row. */
+html[data-tab-orientation='vertical'] .tab-rail .session-tab > * {
+  flex-shrink: 0;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* With the tabs gone from the header, keep the right-hand cluster hard right. */
+html[data-tab-orientation='vertical'] .header-right {
+  margin-left: auto;
 }
 
 .session-tab {

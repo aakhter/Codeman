@@ -177,6 +177,16 @@ function shouldWrapHeaderRight(input) {
   return input.manualTwoRows === true || input.autoWrap === true;
 }
 
+// COD-286: Session tabs render either as the horizontal strip in the header or as
+// a vertical rail beside the terminal. Phones are excluded on purpose — their
+// layout is a fixed header plus the overview home screen, with no room for a rail
+// — so an unknown/absent setting and every phone both fall back to horizontal.
+function resolveTabOrientation(input) {
+  if (!input || input.setting !== 'vertical') return 'horizontal';
+  if (input.deviceType === 'mobile') return 'horizontal';
+  return 'vertical';
+}
+
 // COD-122: Monitor "Tmux Sessions" row label policy. A row carries up to three
 // identifiers — the tab name (user-facing L1 label), the tmux session name
 // (e.g. "codeman-1fac7304"), and the agent (Claude/Codex) session id. The tab name
@@ -240,6 +250,7 @@ if (typeof window !== 'undefined') {
   window.CodemanTabOverflow = {
     shouldAutoWrapTabs,
     shouldWrapHeaderRight,
+    resolveTabOrientation,
   };
   window.CodemanMonitorLabels = {
     resolveMonitorRowLabels,

@@ -924,6 +924,7 @@ class CodemanApp {
     this.restorePlanUsageChip();
     this.applySkin();
     this.applyLocalization();
+    this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
     this._setupTabMiddleClickClose();
@@ -4778,6 +4779,22 @@ class CodemanApp {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const manualTwoRows = deviceType === 'desktop' ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false) : false;
+
+    // COD-286: the vertical rail is a column that scrolls, so the whole
+    // horizontal overflow machinery (auto-wrap + the COD-147 header wrap) is
+    // meaningless there — and leaving `tabs-auto-wrap` set would fight the
+    // rail's own flex-direction. Drop both and bail out.
+    const orientation = window.CodemanTabOverflow?.resolveTabOrientation
+      ? window.CodemanTabOverflow.resolveTabOrientation({
+          deviceType,
+          setting: settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal',
+        })
+      : 'horizontal';
+    if (orientation === 'vertical') {
+      container.classList.remove('tabs-auto-wrap');
+      this._applyHeaderRightWrap(deviceType, false, false);
+      return;
+    }
 
     if (manualTwoRows || deviceType !== 'desktop') {
       container.classList.remove('tabs-auto-wrap');

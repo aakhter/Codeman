@@ -370,6 +370,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
+    document.getElementById('appSettingsTabOrientation').value =
+      settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     // Claude CLI settings
@@ -1706,6 +1708,7 @@ Object.assign(CodemanApp.prototype, {
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
+      tabOrientation: document.getElementById('appSettingsTabOrientation').value,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       skin: document.getElementById('appSettingsSkin').value,
@@ -1866,6 +1869,7 @@ Object.assign(CodemanApp.prototype, {
     this.applyHeaderVisibilitySettings();
     this.applySkin();
     this.applyLocalization();
+    this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
     this.applyTabWrapSettings();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
@@ -2190,6 +2194,9 @@ Object.assign(CodemanApp.prototype, {
         imageWatcherEnabled: false,
         ralphTrackerEnabled: false,
         tabTwoRows: false,
+        // COD-286: phones are forced horizontal by resolveTabOrientation anyway;
+        // this keeps the picker honest if the layout ever reaches a tablet width.
+        tabOrientation: 'horizontal',
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
         webglRendererEnabled: false, // mobile always uses the DOM renderer
@@ -2499,6 +2506,55 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  // COD-286 — horizontal strip vs vertical rail.
+  //
+  // There is exactly ONE #sessionTabs element and it MOVES between its two homes
+  // (the header, and #tabRail inside .main). Cloning it would fork every alert
+  // badge, drag handler and inline rename between two copies; moving keeps all of
+  // app.js's getElementById('sessionTabs') paths working untouched.
+  applyTabOrientation() {
+    const settings = this.loadAppSettingsFromStorage();
+    const defaults = this.getDefaultSettings();
+    const setting = settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
+    const orientation = window.CodemanTabOverflow?.resolveTabOrientation
+      ? window.CodemanTabOverflow.resolveTabOrientation({
+          deviceType: MobileDetection.getDeviceType(),
+          setting,
+        })
+      : 'horizontal';
+
+    const root = document.documentElement;
+    const previous = root.getAttribute('data-tab-orientation') || 'horizontal';
+    root.setAttribute('data-tab-orientation', orientation);
+
+    const tabsEl = document.getElementById('sessionTabs');
+    const rail = document.getElementById('tabRail');
+    const header = document.querySelector('.header');
+    const headerRight = document.getElementById('headerRight');
+    if (tabsEl && rail && header) {
+      if (orientation === 'vertical') {
+        if (tabsEl.parentElement !== rail) rail.appendChild(tabsEl);
+      } else if (tabsEl.parentElement !== header) {
+        // Back to its original slot: after the brand, before the mobile utility
+        // toggle (which precedes headerRight in the source order).
+        const anchor = header.querySelector('.mobile-header-utility-toggle') || headerRight;
+        if (anchor) header.insertBefore(tabsEl, anchor);
+        else header.appendChild(tabsEl);
+      }
+    }
+
+    if (previous !== orientation) {
+      // The rail takes width from the terminal pane, so xterm must re-measure —
+      // the ResizeObserver would eventually catch it, but 300ms late (COD-213).
+      this.updateTabOverflowMode?.();
+      this.fitAddon?.fit();
+      // Tabs and connection lines are geometry-dependent: re-render the strip and
+      // redraw the SVG lines that are aimed at each tab's rect.
+      this._fullRenderSessionTabs?.();
+      this._updateConnectionLinesImmediate?.();
+    }
+  },
+
   applyTabWrapSettings() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
@@ -2709,7 +2765,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
