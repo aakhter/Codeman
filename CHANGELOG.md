@@ -1,5 +1,13 @@
 # aicodeman
 
+## 1.11.3
+
+### Patch Changes
+
+- fix(mobile): restore iPhone middle-pane touch scroll (threshold 50 -> 8 for all touch devices)
+
+  Claude/Codex on iPhone felt frozen after COD-283/284 because terminal touch scroll used 50px threshold while opencode used 8px. Small drags never moved. Lower threshold to 8px for any touch device so short swipes scroll immediately, with momentum unchanged. Fixes "cant scroll middle txt area with touch iphone".
+
 ## 1.11.2
 
 ### Patch Changes

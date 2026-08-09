@@ -777,7 +777,12 @@ Object.assign(CodemanApp.prototype, {
       // Expose for selectSession tab-switch updates
       this._syncTerminalTouchAction = syncTouchAction;
       const cellHeight = () => this.terminal._core?._renderService?.dimensions?.css?.cell?.height || 13;
-      const getThreshold = () => (getIsOpencodeMobile() ? 8 : 50);
+      // iPhone middle-pane scroll fix: use low 8px threshold for ANY touch device.
+      // The previous 50px for Claude/Codex made small drags feel stuck ("can't scroll").
+      const getThreshold = () => {
+        const isTouch = typeof MobileDetection !== 'undefined' && MobileDetection.isTouchDevice?.() && MobileDetection.isTouchDevice();
+        return isTouch ? 8 : 50;
+      };
       let touchMoveRaf = 0;
       let pendingDelta = 0;
       let pendingX = 0;
