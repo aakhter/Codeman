@@ -189,6 +189,33 @@ describe('AiIdleChecker', () => {
 
       expect(mockedWriteFileSync).toHaveBeenCalledWith(expect.stringContaining('codeman-aicheck-'), '');
     });
+
+    it('should keep Claude stderr separate from verdict output', async () => {
+      mockedReadFileSync.mockReturnValue('IDLE\n__AICHECK_DONE__');
+
+      const checkPromise = checker.check('output');
+      await vi.advanceTimersByTimeAsync(500);
+      await checkPromise;
+
+      const spawnArgs = mockedSpawn.mock.calls[0]?.[1];
+      const command = spawnArgs?.[spawnArgs.length - 1];
+      expect(command).toEqual(expect.any(String));
+      expect(command).toContain(' 2> "');
+      expect(command).not.toContain('2>&1');
+    });
+
+    it('should include Claude stderr when no verdict is produced', async () => {
+      mockedReadFileSync.mockImplementation((path) =>
+        String(path).includes('-stderr-') ? 'Claude CLI failed to load settings' : '__AICHECK_DONE__'
+      );
+
+      const checkPromise = checker.check('output');
+      await vi.advanceTimersByTimeAsync(500);
+
+      const result = await checkPromise;
+      expect(result.verdict).toBe('ERROR');
+      expect(result.reasoning).toContain('Claude CLI failed to load settings');
+    });
   });
 
   describe('Timeout', () => {
@@ -231,6 +258,9 @@ describe('AiIdleChecker', () => {
       await checkPromise;
 
       // Should have tried to kill the tmux session (initial kill + cleanup kill)
+      // mockedExec, not mockedExecSync: COD-212 moved this fork's source to the
+      // async `exec` (via promisify), so the execSync mock upstream asserts on
+      // does not exist here.
       const killCalls = mockedExec.mock.calls.filter(
         (call) => typeof call[0] === 'string' && call[0].includes('kill-session')
       );
