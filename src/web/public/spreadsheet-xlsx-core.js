@@ -344,6 +344,214 @@
     return { text: String(value), warning: `Unsupported number format: ${code}` };
   }
 
+  // COD-287 colour resolution -------------------------------------------------
+  //
+  // ExcelJS surfaces theme and indexed palette colours WITHOUT an `argb` key
+  // (`{theme,tint}` / `{indexed}`), and theme colours are what Excel emits by
+  // default. Dropping them left cells rendering the workbook's font colour on
+  // the skin's own background, which is how black-on-dark (invisible) text got
+  // shipped. Everything below is pure so `test/spreadsheet-xlsx-core.test.ts`
+  // can pin it without a DOM.
+
+  // styles.xml `theme="N"` order. NOTE: theme1.xml's <a:clrScheme> lists
+  // dk1, lt1, dk2, lt2 — indices 0/1 and 2/3 are SWAPPED between the two.
+  const THEME_SLOT_ORDER = Object.freeze([
+    'lt1',
+    'dk1',
+    'lt2',
+    'dk2',
+    'accent1',
+    'accent2',
+    'accent3',
+    'accent4',
+    'accent5',
+    'accent6',
+    'hlink',
+    'folHlink',
+  ]);
+
+  // Default Office theme, used when theme1.xml is missing or unparseable.
+  const DEFAULT_THEME_PALETTE = Object.freeze([
+    '#ffffff',
+    '#000000',
+    '#eeece1',
+    '#1f497d',
+    '#4f81bd',
+    '#c0504d',
+    '#9bbb59',
+    '#8064a2',
+    '#4bacc6',
+    '#f79646',
+    '#0000ff',
+    '#800080',
+  ]);
+
+  // Legacy 64-entry indexed palette. Indices 64/65 are the "auto" foreground and
+  // background sentinels and deliberately have no entry here.
+  // prettier-ignore
+  const INDEXED_PALETTE = Object.freeze([
+    '#000000', '#ffffff', '#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff',
+    '#000000', '#ffffff', '#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff',
+    '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#c0c0c0', '#808080',
+    '#9999ff', '#993366', '#ffffcc', '#ccffff', '#660066', '#ff8080', '#0066cc', '#ccccff',
+    '#000080', '#ff00ff', '#ffff00', '#00ffff', '#800080', '#800000', '#008080', '#0000ff',
+    '#00ccff', '#ccffff', '#ccffcc', '#ffff99', '#99ccff', '#ff99cc', '#cc99ff', '#ffcc99',
+    '#3366ff', '#33cccc', '#99cc00', '#ffcc00', '#ff9900', '#ff6600', '#666699', '#969696',
+    '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333',
+  ]);
+
+  const MIN_CONTRAST_RATIO = 4.5;
+  // A workbook with no fill renders on Excel's implicit white sheet background,
+  // never on the viewer skin's `var(--bg-primary)`.
+  const IMPLICIT_SHEET_BACKGROUND = '#ffffff';
+  const IMPLICIT_SHEET_FOREGROUND = '#000000';
+
+  function hexToRgb(hex) {
+    const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex || ''));
+    if (!match) return null;
+    return [Number.parseInt(match[1], 16), Number.parseInt(match[2], 16), Number.parseInt(match[3], 16)];
+  }
+
+  function rgbToHex(rgb) {
+    let hex = '#';
+    for (const channel of rgb) {
+      const bounded = Math.max(0, Math.min(255, Math.round(channel)));
+      hex += (bounded < 16 ? '0' : '') + bounded.toString(16);
+    }
+    return hex;
+  }
+
+  function rgbToHsl(rgb) {
+    const r = rgb[0] / 255;
+    const g = rgb[1] / 255;
+    const b = rgb[2] / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return { h: 0, s: 0, l };
+    const delta = max - min;
+    const s = l > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+    let h;
+    if (max === r) h = (g - b) / delta + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / delta + 2;
+    else h = (r - g) / delta + 4;
+    return { h: h / 6, s, l };
+  }
+
+  function hueToChannel(p, q, hue) {
+    let t = hue;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  }
+
+  function hslToRgb(hsl) {
+    if (hsl.s === 0) {
+      const gray = hsl.l * 255;
+      return [gray, gray, gray];
+    }
+    const q = hsl.l < 0.5 ? hsl.l * (1 + hsl.s) : hsl.l + hsl.s - hsl.l * hsl.s;
+    const p = 2 * hsl.l - q;
+    return [
+      hueToChannel(p, q, hsl.h + 1 / 3) * 255,
+      hueToChannel(p, q, hsl.h) * 255,
+      hueToChannel(p, q, hsl.h - 1 / 3) * 255,
+    ];
+  }
+
+  // Excel tint acts on HSL luminance: negative darkens, positive lightens.
+  function applyTint(hex, tint) {
+    const amount = Number(tint);
+    if (!Number.isFinite(amount) || amount === 0) return hex;
+    const rgb = hexToRgb(hex);
+    if (!rgb) return hex;
+    const bounded = Math.max(-1, Math.min(1, amount));
+    const hsl = rgbToHsl(rgb);
+    const luminance = bounded < 0 ? hsl.l * (1 + bounded) : hsl.l * (1 - bounded) + bounded;
+    return rgbToHex(hslToRgb({ h: hsl.h, s: hsl.s, l: Math.max(0, Math.min(1, luminance)) }));
+  }
+
+  function parseSchemeColor(fragment) {
+    const srgb = /<(?:[A-Za-z0-9_]+:)?srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/.exec(fragment);
+    if (srgb) return `#${srgb[1].toLowerCase()}`;
+    const sys = /<(?:[A-Za-z0-9_]+:)?sysClr\b[^>]*\blastClr="([0-9A-Fa-f]{6})"/.exec(fragment);
+    if (sys) return `#${sys[1].toLowerCase()}`;
+    return undefined;
+  }
+
+  function parseThemePalette(xml) {
+    const palette = DEFAULT_THEME_PALETTE.slice();
+    const text = typeof xml === 'string' ? xml : '';
+    const scheme = /<(?:[A-Za-z0-9_]+:)?clrScheme\b[^>]*>([\s\S]*?)<\/(?:[A-Za-z0-9_]+:)?clrScheme\s*>/.exec(text);
+    if (!scheme) return palette;
+    // Fresh pattern per call: a shared /g regex would carry lastIndex across calls.
+    const slots =
+      /<(?:[A-Za-z0-9_]+:)?(lt1|dk1|lt2|dk2|accent[1-6]|hlink|folHlink)\b[^>]*>([\s\S]*?)<\/(?:[A-Za-z0-9_]+:)?\1\s*>/g;
+    let match = slots.exec(scheme[1]);
+    while (match) {
+      const index = THEME_SLOT_ORDER.indexOf(match[1]);
+      const resolved = index >= 0 ? parseSchemeColor(match[2]) : undefined;
+      if (resolved) palette[index] = resolved;
+      match = slots.exec(scheme[1]);
+    }
+    return palette;
+  }
+
+  function themePaletteOrDefault(palette) {
+    return Array.isArray(palette) && palette.length === THEME_SLOT_ORDER.length ? palette : DEFAULT_THEME_PALETTE;
+  }
+
+  // Accepts every colour shape ExcelJS emits: {argb}, {theme,tint}, {indexed}.
+  function resolveColor(color, palette) {
+    if (!color || typeof color !== 'object') return undefined;
+    const argb = color.argb;
+    if (typeof argb === 'string' && /^[A-Fa-f0-9]{8}$/.test(argb)) return `#${argb.slice(2).toLowerCase()}`;
+    const theme = color.theme;
+    if (Number.isInteger(theme) && theme >= 0 && theme < THEME_SLOT_ORDER.length) {
+      const base = themePaletteOrDefault(palette)[theme];
+      return typeof base === 'string' ? applyTint(base, color.tint) : undefined;
+    }
+    const indexed = color.indexed;
+    if (Number.isInteger(indexed) && indexed >= 0 && indexed < INDEXED_PALETTE.length) return INDEXED_PALETTE[indexed];
+    return undefined;
+  }
+
+  function channelLuminance(channel) {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+  }
+
+  function relativeLuminance(hex) {
+    const rgb = hexToRgb(hex);
+    if (!rgb) return 0;
+    return 0.2126 * channelLuminance(rgb[0]) + 0.7152 * channelLuminance(rgb[1]) + 0.0722 * channelLuminance(rgb[2]);
+  }
+
+  function contrastRatio(a, b) {
+    const first = relativeLuminance(a);
+    const second = relativeLuminance(b);
+    return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+  }
+
+  function ensureContrast(foreground, background, minRatio) {
+    const minimum = Number.isFinite(minRatio) ? minRatio : MIN_CONTRAST_RATIO;
+    if (contrastRatio(foreground, background) >= minimum) return foreground;
+    return contrastRatio('#000000', background) >= contrastRatio('#ffffff', background) ? '#000000' : '#ffffff';
+  }
+
+  // Returns a SELF-CONSISTENT pair, or nothing at all. Emitting only one half is
+  // what let workbook text land on the skin's background and vanish.
+  function resolveCellColors(fillColor, fontColor, palette) {
+    const fill = resolveColor(fillColor, palette);
+    const font = resolveColor(fontColor, palette);
+    if (!fill && !font) return {};
+    const background = fill || IMPLICIT_SHEET_BACKGROUND;
+    return { background, foreground: ensureContrast(font || IMPLICIT_SHEET_FOREGROUND, background) };
+  }
+
   global.CodemanSpreadsheetXlsxCore = Object.freeze({
     LIMITS,
     MAX_ROW,
@@ -360,5 +568,13 @@
     computeViewport,
     intersectingMerges,
     formatCellValue,
+    DEFAULT_THEME_PALETTE,
+    INDEXED_PALETTE,
+    MIN_CONTRAST_RATIO,
+    parseThemePalette,
+    resolveColor,
+    contrastRatio,
+    ensureContrast,
+    resolveCellColors,
   });
 })(typeof self !== 'undefined' ? self : globalThis);

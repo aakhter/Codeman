@@ -3,7 +3,7 @@
 (function initSpreadsheetPreview(global) {
   'use strict';
 
-  const SPREADSHEET_ASSET_VERSION = '97c4877fdc87';
+  const SPREADSHEET_ASSET_VERSION = '071964e333d6';
   const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
   const DEFAULT_TIMEOUT_MS = 20000;
   const MAX_SCROLL_PX = 8000000;
@@ -264,8 +264,12 @@
           const declarations = [];
           if (style.font?.bold) declarations.push('font-weight:700');
           if (style.font?.italic) declarations.push('font-style:italic');
-          if (/^#[a-f0-9]{6}$/i.test(style.font?.color || '')) declarations.push(`color:${style.font.color}`);
-          if (/^#[a-f0-9]{6}$/i.test(style.fill || '')) declarations.push(`background-color:${style.fill}`);
+          // COD-287: colour and background are emitted together or not at all.
+          // The worker already contrast-checked them as a pair; contributing
+          // one half would drop the cell back onto the skin's own background.
+          if (/^#[a-f0-9]{6}$/i.test(style.font?.color || '') && /^#[a-f0-9]{6}$/i.test(style.fill || '')) {
+            declarations.push(`color:${style.font.color}`, `background-color:${style.fill}`);
+          }
           if (['left', 'center', 'right'].includes(style.alignment)) declarations.push(`text-align:${style.alignment}`);
           if (style.wrapText) declarations.push('white-space:normal');
           return `.spreadsheet-style-${id}{${declarations.join(';')}}`;

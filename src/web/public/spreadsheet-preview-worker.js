@@ -12,6 +12,7 @@ let sheetsById = new Map();
 let populatedRowsById = new Map();
 let normalizedStyles = [];
 let styleIds = new Map();
+let themePalette = core.DEFAULT_THEME_PALETTE;
 
 function postError(error) {
   self.postMessage({
@@ -21,19 +22,36 @@ function postError(error) {
   });
 }
 
-function normalizedColor(color) {
-  const argb = color?.argb;
-  return typeof argb === 'string' && /^[A-Fa-f0-9]{8}$/.test(argb) ? `#${argb.slice(2)}` : undefined;
+// COD-287: ExcelJS keeps the workbook's raw theme XML on `_themes.theme1`; the
+// fflate re-read is a fallback (admission already bounded the file) and the
+// default Office palette is the last resort.
+function readThemeXml(loadedWorkbook, bytes) {
+  const stashed = loadedWorkbook?._themes?.theme1;
+  if (typeof stashed === 'string' && stashed.length > 0) return stashed;
+  try {
+    const entries = self.fflate.unzipSync(new Uint8Array(bytes), {
+      filter: (file) => file.name === 'xl/theme/theme1.xml',
+    });
+    const theme = entries['xl/theme/theme1.xml'];
+    if (theme) return new TextDecoder().decode(theme);
+  } catch (error) {
+    void error;
+  }
+  return '';
 }
 
 function normalizeStyle(cell) {
+  // COD-287: colours are resolved and contrast-checked as a PAIR. Emitting a
+  // font colour without its background lets workbook text land on the skin's
+  // `var(--bg-primary)` and disappear.
+  const colors = core.resolveCellColors(cell.fill?.fgColor, cell.font?.color, themePalette);
   const style = {
     font: {
       bold: Boolean(cell.font?.bold),
       italic: Boolean(cell.font?.italic),
-      color: normalizedColor(cell.font?.color),
+      color: colors.foreground,
     },
-    fill: normalizedColor(cell.fill?.fgColor),
+    fill: colors.background,
     alignment: ['left', 'center', 'right'].includes(cell.alignment?.horizontal) ? cell.alignment.horizontal : undefined,
     wrapText: Boolean(cell.alignment?.wrapText),
   };
@@ -102,6 +120,7 @@ async function loadWorkbook(bytes) {
   const nextRows = new Map();
   normalizedStyles = [];
   styleIds = new Map();
+  themePalette = core.parseThemePalette(readThemeXml(nextWorkbook, bytes));
   const sheets = [];
   for (const sheet of nextWorkbook.worksheets) {
     if (sheet.state === 'hidden' || sheet.state === 'veryHidden') continue;
@@ -178,6 +197,7 @@ self.onmessage = async (event) => {
       workbook = null;
       sheetsById = new Map();
       populatedRowsById = new Map();
+      themePalette = core.DEFAULT_THEME_PALETTE;
     }
   } catch (error) {
     postError(error);

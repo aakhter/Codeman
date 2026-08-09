@@ -212,6 +212,31 @@ describe('spreadsheet preview renderer', () => {
     expect(document.body.textContent).not.toContain('old cell');
   });
 
+  it('emits colour and background together or not at all (COD-287)', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }));
+    const renderer = loadRenderer(fetchMock);
+    renderer.open({ container: document.querySelector('#preview'), url: '/book.xlsx', size: 8 });
+    const worker = WorkerMock.instances[0];
+    worker.emit({ type: 'ready' });
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalled());
+    worker.emit({
+      ...metadata(),
+      styles: [
+        { font: { color: '#000000' }, fill: '#ffffff' },
+        { font: { bold: true, color: '#000000' }, fill: undefined },
+        { font: {}, fill: '#ffff00' },
+        { font: { italic: true }, alignment: 'center' },
+      ],
+    });
+    const css = (document.querySelector('.spreadsheet-preview-shell style') as HTMLElement).textContent || '';
+    expect(css).toContain('.spreadsheet-style-0{color:#000000;background-color:#ffffff}');
+    // A half pair would strand the text on the skin's own background, so drop both.
+    expect(css).toContain('.spreadsheet-style-1{font-weight:700}');
+    expect(css).toContain('.spreadsheet-style-2{}');
+    expect(css).toContain('.spreadsheet-style-3{font-style:italic;text-align:center}');
+    expect(css).not.toContain('background-color:#ffff00');
+  });
+
   it('integrates with the shared overlay and disposes the prior spreadsheet lifecycle', async () => {
     const dispose = vi.fn();
     const open = vi.fn(() => ({ dispose }));

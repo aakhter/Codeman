@@ -37,6 +37,54 @@ async function fixtureWithChartPart(): Promise<ArrayBuffer> {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
+// COD-287: theme fills, indexed colours, and unfilled cells in one workbook.
+// accent1 is forced to pure red so a resolved theme colour cannot be confused
+// with the built-in default Office palette.
+async function themedFixture(): Promise<ArrayBuffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Themed');
+  for (const ref of ['A1', 'A2', 'A3', 'A4']) sheet.getCell(ref).value = ref;
+  const entries = fflate.unzipSync(new Uint8Array(await workbook.xlsx.writeBuffer()));
+  entries['xl/theme/theme1.xml'] = fflate.strToU8(
+    '<?xml version="1.0"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+      '<a:themeElements><a:clrScheme name="Custom">' +
+      '<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>' +
+      '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>' +
+      '<a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2>' +
+      '<a:accent1><a:srgbClr val="FF0000"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2>' +
+      '<a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4>' +
+      '<a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6>' +
+      '<a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink>' +
+      '</a:clrScheme></a:themeElements></a:theme>'
+  );
+  entries['xl/styles.xml'] = fflate.strToU8(
+    '<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<fonts count="5"><font><sz val="11"/></font><font><color theme="1"/></font><font><color indexed="9"/></font>' +
+      '<font><color rgb="FF000000"/></font><font><color rgb="FF11111B"/></font></fonts>' +
+      '<fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>' +
+      '<fill><patternFill patternType="solid"><fgColor theme="4"/></patternFill></fill>' +
+      '<fill><patternFill patternType="solid"><fgColor indexed="13"/></patternFill></fill>' +
+      '<fill><patternFill patternType="solid"><fgColor rgb="FF1A1A2E"/></patternFill></fill></fills>' +
+      '<borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+      '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
+      '<xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
+      '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
+      '<xf numFmtId="0" fontId="4" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>' +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>'
+  );
+  entries['xl/worksheets/sheet1.xml'] = fflate.strToU8(
+    fflate
+      .strFromU8(entries['xl/worksheets/sheet1.xml'])
+      .replace('<c r="A1"', '<c s="1" r="A1"')
+      .replace('<c r="A2"', '<c s="2" r="A2"')
+      .replace('<c r="A3"', '<c s="3" r="A3"')
+      .replace('<c r="A4"', '<c s="4" r="A4"')
+  );
+  const bytes = fflate.zipSync(entries);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
 function createHarness() {
   const messages: unknown[] = [];
   const imports: string[] = [];
@@ -123,6 +171,28 @@ describe('spreadsheet preview worker', () => {
     await harness.send({ type: 'load', bytes: Uint8Array.from([1, 2, 3]).buffer });
     expect(harness.messages.at(-1)).toMatchObject({ type: 'error', code: 'malformed' });
     expect(harness.imports.some((url) => url.includes('exceljs'))).toBe(false);
+  });
+
+  it('resolves theme and indexed colours and emits contrast-safe colour pairs (COD-287)', async () => {
+    const harness = createHarness();
+    await harness.send({ type: 'load', bytes: await themedFixture() });
+    const metadata = harness.messages.at(-1) as Record<string, any>;
+    const sheetId = metadata.sheets[0].id;
+    await harness.send({ type: 'tile', requestId: 1, sheetId, range: { r1: 1, c1: 1, r2: 4, c2: 1 } });
+    const tile = harness.messages.at(-1) as Record<string, any>;
+    const pairs = new Map<number, { fill?: string; color?: string }>();
+    for (const cell of tile.cells as Array<{ row: number; styleId: number }>) {
+      const style = metadata.styles[cell.styleId];
+      pairs.set(cell.row, { fill: style.fill, color: style.font?.color });
+    }
+    // Theme fill (workbook's own accent1 = red) survives instead of being dropped.
+    expect(pairs.get(1)).toEqual({ fill: '#ff0000', color: '#000000' });
+    // Indexed white-on-yellow is illegible, so the foreground flips to black.
+    expect(pairs.get(2)).toEqual({ fill: '#ffff00', color: '#000000' });
+    // A black font with no fill renders on the implicit white sheet background.
+    expect(pairs.get(3)).toEqual({ fill: '#ffffff', color: '#000000' });
+    // Near-black on near-black flips the other way.
+    expect(pairs.get(4)).toEqual({ fill: '#1a1a2e', color: '#ffffff' });
   });
 
   it('carries detected unsupported features into workbook metadata', async () => {
