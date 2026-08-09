@@ -38,6 +38,7 @@
   <!-- WebGL addon lazy-loaded by app.js on desktop only (skipped on mobile, saving 244KB) -->
   <script defer src="vendor/xterm-addon-unicode11.min.js"></script>
   <script defer src="vendor/xterm-zerolag-input.js"></script>
+  <script defer src="vendor/xterm-predictive-echo.js"></script>
   <script defer src="vendor/marked.min.js"></script>
   <!-- COD-56: DOMPurify (Cure53) — allowlist HTML sanitizer for markdown-rendered agent output.
        Pinned 3.4.8; integrity (sha384): jrsBdrv4eDpEYIq32u13DPbvB6tRmqIDnA6UlgFBoexpetaiWi7g/VbfMEL1WVen.
@@ -753,7 +754,10 @@
             <span class="form-hint">
               Recommended. A proxied dashboard is served from Codeman's own address, so unchecking
               this lets its JavaScript read this page and call the API that starts agents. Uncheck
-              only for a dashboard you fully trust, or one whose own login needs cookies.
+              only for a dashboard you fully trust, or one whose own login needs cookies. Also
+              uncheck it if Codeman itself sits behind a cookie-authenticated reverse proxy
+              (e.g. Cloudflare Access): a sandboxed frame carries no auth cookie, so its asset
+              and API requests bounce to the login provider and the page loads broken.
             </span>
           </div>
           <div class="form-row">
@@ -1388,7 +1392,7 @@
               </div>
               <!-- Input Section -->
               <div class="settings-section-header">Input</div>
-              <div class="settings-item settings-item-multiline" title="Scroll the terminal's own local scrollback with a plain mouse wheel / two-finger swipe, instead of forwarding the wheel to the CLI's transcript. Leave OFF for Claude/Codex sessions: those CLIs redraw the screen in place and keep no local scrollback, so the wheel would have almost nothing to scroll. In Claude sessions Codeman then falls back to paging the CLI's own transcript; Codex sessions have no such fallback, so the wheel goes dead. Shift+wheel always reaches local scrollback regardless.">
+              <div class="settings-item settings-item-multiline" title="Scroll the terminal's own local scrollback with a plain mouse wheel / two-finger swipe, instead of forwarding the wheel to the CLI's transcript. Only Claude sessions forward, so this setting only affects them: Claude redraws the screen in place and keeps almost no local scrollback, so with this ON the wheel has little to scroll and Codeman falls back to paging Claude's own transcript. Codex, Gemini, shell and OpenCode sessions always scroll local scrollback. Shift+wheel always reaches local scrollback regardless.">
                 <div class="settings-item-text">
                   <span class="settings-item-label">Wheel Scrolls Local History</span>
                   <span class="settings-item-desc">Plain wheel/trackpad pages the terminal scrollback</span>
@@ -1741,6 +1745,14 @@
                 <span class="slider"></span>
               </label>
               <span class="form-hint">Enable experimental Agent Teams for all new Claude sessions (disabled by default)</span>
+            </div>
+            <div class="form-row form-row-switch">
+              <label>Agent Skill</label>
+              <label class="switch">
+                <input type="checkbox" id="appSettingsAgentSkill">
+                <span class="slider"></span>
+              </label>
+              <span class="form-hint">Give new Claude sessions the Codeman skill (start workers, send prompts, wait for results via the API)</span>
             </div>
             <div class="form-row">
               <label>Claude Model</label>

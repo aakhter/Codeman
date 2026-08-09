@@ -663,6 +663,7 @@ export class WebServer extends EventEmitter {
       getTerminalHistoryConfig: this.getTerminalHistoryConfig.bind(this),
       getTruecolorEnabled: this.getTruecolorEnabled.bind(this),
       getCheckpointDefaultEnabled: this.getCheckpointDefaultEnabled.bind(this),
+      getAgentSkillEnabled: this.getAgentSkillEnabled.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
       getLightSessionsState: this.getLightSessionsState.bind(this),
@@ -1753,6 +1754,13 @@ export class WebServer extends EventEmitter {
     // must not inherit the general two-second burst cache used by other reads.
     const settings = await this.readSettings(true);
     return settings.checkpointDefaultEnabled !== false;
+  }
+
+  // Whether the Codeman agent skill is injected into cases on Claude session create
+  // (synced `agentSkillEnabled` setting, default OFF; docs/agent-control-plan.md §2).
+  private async getAgentSkillEnabled(): Promise<boolean> {
+    const settings = await this.readSettings();
+    return settings.agentSkillEnabled === true;
   }
 
   // Helper to get model configuration from settings

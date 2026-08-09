@@ -1,5 +1,189 @@
 # aicodeman
 
+## 1.15.0
+
+### Minor Changes
+
+- 55bff4a: Zero-lag predictive echo for Codex sessions (mosh-style write-through prediction).
+
+  Codex's per-keystroke composer forced 1.12.2 to disable the local-echo overlay (issues #218/#219/#220/#222), leaving Codex typing at full round-trip latency on remote links. This release adds a second echo mode instead of re-enabling the first: every keystroke still goes to the PTY exactly as before (byte-identical wire behavior, pinned by vm-level and end-to-end trace-equality tests), while the new `PredictiveEchoAddon` in `xterm-zerolag-input` 0.2.0 paints the predicted glyph at the predicted cell. When the real echo lands, the prediction is confirmed and its span removed (an invisible swap); mispredictions self-heal via a two-pass mismatch cascade and a TTL.
+  - Reconciliation reads the parsed terminal buffer, never the raw stream: full-line redraws, ECH gap painting and tmux's in-place deltas all converge to the same cells. Confirmation requires the cell match PLUS a cursor advance, so placeholder glyphs and identical repaints never false-confirm; blank cells are neutral (codex clears its placeholder on the first echo).
+  - Predictions paint only while the cursor sits on the measured Codex composer row (`/^› /`, codex-cli 0.147): trust/approval modals and wrapped continuation rows get no ghosts, deliberately falling back to real echo.
+  - Ships as a SEPARATE `vendor/xterm-predictive-echo.js` bundle: the existing zerolag bundle is byte-identical (sha256-verified), and a missing or broken bundle degrades Codex to exact 1.12.2 behavior. The per-device `localEchoEnabled` toggle is the kill switch.
+  - Claude/Gemini/OpenCode/Antigravity keep buffer mode untouched; shell stays off.
+  - A post-build adversarial review added the anchor-hold rule: after an unpredicted wire edit (backspace into echoed text, cleared input, IME text commits) new predictions hold until the next parsed write, so a stale displayed cursor can never mis-anchor a run.
+  - Tests: 55 new package tests including replay suites driven by fixtures recorded from a real codex TUI through the production tmux+strip pipeline (`scripts/dev/record-codex-frames.mjs`) and a 500-iteration seeded fuzz; new vm policy/wire-neutrality suites; a 10-scenario Playwright E2E against real codex covering the #218/#219/#220/#222 retests, byte-identity, and a simulated 300ms-RTT run. The package test suite now runs in CI.
+
+### Patch Changes
+
+- Agent-skill hardening, plus a fix for the mobile browser suite.
+
+  ## The Codeman agent skill
+
+  Twelve issues found by auditing the skill against a live instance, and fixing them meant measuring things rather than reasoning about them.
+
+  **Readiness now works in every permission mode.** The ladder matched `bypass`, which is the status bar of only ONE mode. Measured one pane per mode against claude-cli 2.1.226:
+
+  | how Codeman spawned it                     | statusline              | `shift+tab` | `bypass` |
+  | ------------------------------------------ | ----------------------- | ----------- | -------- |
+  | `--dangerously-skip-permissions` (default) | `bypass permissions on` | yes         | yes      |
+  | `--permission-mode auto`                   | `auto mode on`          | yes         | no       |
+  | `--allowedTools …`                         | `don't ask on`          | yes         | no       |
+  | neither (`normal`)                         | `don't ask on`          | yes         | no       |
+  | `--permission-mode plan`                   | `plan mode on`          | yes         | no       |
+
+  Every mode ends `(shift+tab to cycle)`, and the `claudeMode` setting is not exposed on `GET /api/v1/sessions/:id`, so there was nothing to branch on. The ladder matches `shift+tab` now: universal, and space-free, which is what makes it survive the TUI stream. A non-default worker used to be reported broken after burning the full budget. ⚠️ The `+` means it only works through `--data-urlencode`; a hand-built query silently searches for `shift tab`.
+
+  **`.status` is documented as unreliable in both directions.** Measured on a live worker reading `idle` while mid-turn and actively producing output, with `lastActivityAt` equal to the moment of the call. A worker that dies inside its pane also reads `idle`. Synchronize on `stop` or an output marker; to judge from outside, sample `terminal?tail=` twice and compare.
+
+  **The self-delete guard is fail-closed.** Documented in 1.14.2; the reference files and every recipe now route through it consistently.
+
+  **Reads work on macOS.** The ANSI-strip pipelines used `sed 's/\x1b…'`, and BSD sed has no `\xHH` escape, so on macOS they silently stripped nothing and handed the agent raw ANSI.
+
+  **Injection is atomic and no longer silent.** `installAgentSkillInto()` wrote each file with a bare `writeFile`, so two sessions created concurrently in one repo could leave a reader observing a truncated SKILL.md; writes now go through temp+rename under the same lock every sibling mutator uses. And both server call sites discarded the outcome, so a `foreign` refusal (a user-authored skill is present) or a `symlink` refusal was invisible: turning the setting on, seeing nothing, and having no way to find out why. Refusals are logged now; injection stays best-effort and still cannot fail session creation.
+
+  **Reference corrections**: the `FORBIDDEN` 403 row and which auth responses are plain text rather than the JSON envelope, the input size cap, the undocumented `killMux` parameter on DELETE, and the fact that zero, negative and non-integer timeouts are rejected with a 400 rather than clamped.
+
+  **README.zh-CN.md taught a recipe that could not work**: its input example had no trailing `\r`, so Enter was never sent and the prompt sat unsubmitted, and its read step used `/output`, whose `textOutput` is always empty for interactive sessions. Its agent section is now in line with the English one. CLAUDE.md's single-line gotcha also gained the `\r` rule.
+
+  **Tests**: the `codeman skill install`/`uninstall` CLI had none, including the linked-case resolution shipped in 1.14.2; the `POST /api/sessions` injection call site was never exercised because the shared route mock hardcoded the gate off; and nothing guarded `reference/endpoints.md` against drifting from the routes it documents. All three covered now.
+
+  ## Mobile browser suite
+
+  The suite drives a real browser against a server started from TypeScript source, so it serves `src/web/public`, while `npm run build` puts the xterm vendor bundles in `dist/web/public`. Without them every `/vendor/xterm*` request 404s, `Terminal` is never defined, and every test touching `app.terminal` dies on a null. A `pretest:mobile` step now prepares them.
+
+  Hardened after two review rounds, each defect reproduced: the freshness cache trusted mtime alone, so a bundle left without its alias tail (or truncated by an interrupted `npm install`) was reported "up to date" forever while the suite died on `LocalEchoOverlay is not defined`; it now verifies content and size, and repairs what an earlier run poisoned. Builds go to a temp file private to the run and rename into place, so a partial write can never be published and two concurrent runs cannot corrupt each other. Temps whose owning process is gone are reclaimed, and only those. Freshness tracks every input the bundle derives from, not just the entry, so editing a sibling of the addon no longer leaves the suite testing a stale overlay. `npx` runs with the repo as cwd, so it uses the pinned esbuild instead of fetching an unpinned one.
+
+## 1.14.2
+
+### Patch Changes
+
+- Four reported bugs fixed, and the Codeman agent skill from 1.14.1 gets its first published build with the fixes below alongside it.
+
+  ## The Codeman agent skill
+
+  Introduced in 1.14.1 and the headline of this line. `skills/codeman` is a Claude Code skill that lets an agent running **inside** a Codeman session drive the HTTP API: start worker sessions, send them prompts, block until they finish, read their answers and clean up. It ships in the npm package and self-gates, so outside a Codeman session (`CODEMAN_MUX` unset) it refuses to act and costs unrelated sessions nothing.
+
+  ### Installing it
+
+  ```bash
+  codeman skill install                  # ~/.claude/skills/codeman, every new Claude Code session sees it
+  codeman skill install --case myproject # just that case; linked cases resolve by name too
+  codeman skill uninstall                # reverses either one
+  ```
+
+  Or turn on **App Settings > Agent Skill** (`agentSkillEnabled`, synced, default off) and Codeman injects the skill into each case when a Claude session is created there.
+
+  Installs are marker-owned: a `skills/codeman` that Codeman did not write is never touched, a stale managed copy is refreshed in place, and a symlinked skill directory is refused rather than written through. Re-run `codeman skill install` after upgrading to refresh the copy. Turning `agentSkillEnabled` back off does **not** remove already-injected copies, because a create-time sweep would yank the skill out from under other live sessions sharing that `.claude/` directory; remove them per case with `codeman skill uninstall --case <name>`.
+
+  ### Using it
+
+  Ask for orchestration in plain language ("spin up three workers, have them lint, typecheck and test in parallel, then report back") and the skill supplies the guard, the safety rules and the recipes. The flow it runs:
+  1. **Guard.** Re-runs a preamble on every shell call that refuses outside `CODEMAN_MUX=1`, reads `CODEMAN_API_URL` and `CODEMAN_SESSION_ID`, recovers a password from the data dir `.env` or the install's service definition if one is set, and defines a fail-closed `delete_session`. It re-runs it every call because shell state does not survive between an agent's tool calls.
+  2. **Start a worker** with `POST /api/v1/quick-start` (`mode` is any of `claude`, `shell`, `opencode`, `codex`, `gemini`, `antigravity`), checking `.success` before reading `.data.sessionId`.
+  3. **Wait until it is really ready.** A new session reports `idle` before its CLI has spawned, and a brand-new case shows a trust dialog first, so the skill waits for the composer's own status bar and treats the dialog as a bounded fallback.
+  4. **Send and wait in one call**: `wait`/`waitTimeout` on `POST /api/v1/sessions/:id/input`. It registers the waiter before typing, closing the race where a separate wait reports the previous turn's idle state as this turn's answer. For `claude` workers it resolves on the `stop` hook, usually within seconds.
+  5. **Read the answer** from `GET /api/v1/sessions/:id/last-response`, which returns clean transcript text rather than a screen scrape.
+  6. **Clean up** with `delete_session`, for ids it created and nothing else.
+
+  Hook-less modes (`shell` and the external CLIs) have no `stop` signal and coarse lifecycle transitions, so the skill synchronizes those with a unique split marker and `wait-output ... from=buffer`. Worked fan-out flows, the per-mode signal table, error codes and the Docker/remote caveats live in the skill's `reference/` files, loaded on demand.
+
+  ### The rules it encodes
+
+  Each of these silently wastes a run, which is why they are written down: every input must end with `\r` or Enter is never sent; input is single-line; a wait timeout is HTTP 200 with `wait.timedOut`, not an error; `stop` and `blocked` are `claude`-only; signals are edge-triggered with no history, so never fire-and-forget N prompts and then gather signal-waits one by one; a typed command echoes into the output stream, so markers must be split; a full-screen TUI stream is space-less, so match single tokens; and `pid != null` proves startup, not life, so `wait?until=exit` is the death check.
+
+  ## Bug fixes
+  - **Web tabs: long-running proxied requests were aborted after 30 seconds with no server log (#237).** The proxy wrapped each upstream fetch in a 30s `AbortSignal.timeout`, which bounds the entire exchange rather than the wait for response headers, so a dashboard endpoint doing model inference and any actively streaming response both died at 30s as a generic unlogged 502 that read as an intermittent network error. The timeout now bounds time-to-headers only and is cleared the moment headers arrive, with the default raised to 300s (`CODEMAN_WEBVIEW_TIMEOUT_MS`). Header timeouts are logged with a sanitized identity (method plus origin plus path, never the query string, which can carry the dashboard's tokens). A browser that navigates away mid-request now aborts the upstream fetch, guarded by `writableFinished` so a completed response never triggers it. The WebSocket handshake keeps its own 30s budget via the new `CODEMAN_WEBVIEW_WS_HANDSHAKE_TIMEOUT_MS`, since a handshake is connection establishment and waiting minutes on one only delays the browser's reconnect logic.
+  - **Web tabs: sandbox incompatibility with cookie-authenticated reverse proxies documented (#238).** `docs/web-tabs.md` now covers cookie auth in front of Codeman itself (Cloudflare Access and similar), where a sandboxed frame's asset and API requests carry no auth cookie, bounce to the login provider, and leave the embedded app apparently unstyled while trusted mode works. The Test button's result now states its own scope: it verifies server-to-upstream reachability, not how the page behaves in a sandboxed frame.
+  - **A described session tab now shows just the description (#232).** A session named `w2-foo-bar: some description` rendered both halves, so the generated id ate the width the chosen part needed. The tab shows the description alone, the `w<n>-<case>` id moves to the tooltip and stays in the session settings modal, and `aria-label` deliberately keeps the full name so screen readers still get the id. Undescribed tabs are unchanged. Right-click a tab to rename it inline. This also fixed a re-render loop: the incremental update compared against the full name, which a described tab never matched, so those tabs re-rendered on every pass.
+  - **`codeman status` now probes the running server (#230).** The command runs in its own fresh process and reported that process's always-stopped Ralph loop under a bare "Status:", which reads as "the server is down" while the service is running fine and agents are reachable. It now probes the real server (`CODEMAN_API_URL`, else https then http on the local port, overridable with `--url`) and reports reachability, version and live session state; any HTTP answer proves the server is up, including a 401 from a password-protected install. The Ralph loop keeps its own `codeman ralph status`. This complements `codeman web --status` from the daemon work: that answers "did I start a daemon", this answers "is a server running at all".
+
+## 1.14.1
+
+### Patch Changes
+
+- The Codeman agent skill is now installable, so an agent running inside a Codeman session can drive the API without you pasting docs into its prompt. Plus six fixes to the packaged skill, each found by running it live against a real instance.
+
+  ## What the skill is
+
+  `skills/codeman` is a Claude Code skill that teaches an agent inside a Codeman session how to start worker sessions, send them prompts, block until they finish, read their answers and clean up. It ships in the npm package. It self-gates: outside a Codeman session (`CODEMAN_MUX` unset) it refuses to act, so installing it globally costs unrelated sessions nothing.
+
+  ## Installing it
+
+  Three ways, pick one:
+
+  ```bash
+  codeman skill install                  # ~/.claude/skills/codeman, every new Claude Code session sees it
+  codeman skill install --case myproject # just that case; linked cases resolve by name too
+  codeman skill uninstall                # reverses either one
+  ```
+
+  Or turn on **App Settings > Agent Skill** (`agentSkillEnabled`, synced, default off) and Codeman injects the skill into each case when a Claude session is created there.
+
+  Installs are marker-owned: a `skills/codeman` that Codeman did not write is never touched, a stale managed copy is refreshed in place, and a symlinked skill directory is refused rather than written through. Re-run `codeman skill install` after upgrading Codeman to refresh the copy.
+
+  Note that turning `agentSkillEnabled` back off does **not** remove already-injected copies, because a create-time sweep would yank the skill out from under other live sessions sharing that `.claude/` directory. Remove them per case with `codeman skill uninstall --case <name>`.
+
+  ## Using it
+
+  Once installed, just ask: "spin up three workers and have them lint, typecheck and test in parallel, then report back". The skill supplies the guard, the safety rules and the recipes. What it does under the hood:
+
+  **1. Guard.** Every Bash call re-runs a preamble that refuses outside `CODEMAN_MUX=1`, reads `CODEMAN_API_URL` and `CODEMAN_SESSION_ID`, recovers a password from the data dir `.env` or the install's service definition if one is set, and defines a fail-closed `delete_session`. It re-runs it every call because shell state does not survive between an agent's tool calls.
+
+  **2. Start a worker.**
+
+  ```bash
+  Q=$("${CURL[@]}" -X POST "$API/api/v1/quick-start" -H 'Content-Type: application/json' \
+    -d '{"caseName":"worker-1","mode":"claude"}')
+  SID=$(jq -r 'if .success then .data.sessionId else empty end' <<<"$Q")
+  ```
+
+  `mode` is any of `claude`, `shell`, `opencode`, `codex`, `gemini`, `antigravity`.
+
+  **3. Wait until it is actually ready.** A new session reports `idle` before its CLI has spawned, and a brand-new case shows a trust dialog first, so the skill waits for the composer's own status bar and treats the dialog as a bounded fallback.
+
+  **4. Send a prompt and wait for the turn to end.**
+
+  ```bash
+  BODY=$(jq -n --arg p "$PROMPT" '{input:($p+"\r"),useMux:true,clientId:"codeman-agent-1",seq:1,wait:true,waitTimeout:60000}')
+  "${CURL[@]}" -X POST "$API/api/v1/sessions/$SID/input" -H 'Content-Type: application/json' --data-binary "$BODY"
+  ```
+
+  Send-and-wait registers the waiter before typing, which closes the race where a separate wait reports the previous turn's idle state as this turn's answer. For `claude` workers it resolves on the `stop` hook, typically within seconds.
+
+  **5. Read the answer.**
+
+  ```bash
+  "${CURL[@]}" "$API/api/v1/sessions/$SID/last-response" | jq -r '.data.text'
+  ```
+
+  **6. Clean up.** `delete_session "$SID"`, for ids you created and nothing else.
+
+  Hook-less modes (`shell` and the external CLIs) have no `stop` signal and coarse lifecycle transitions, so the skill synchronizes those with a unique split marker and `wait-output ... from=buffer` instead. Worked fan-out flows, the per-mode signal table, error codes and the Docker/remote caveats live in the skill's `reference/` files, loaded on demand.
+
+  ## The rules that bite
+
+  The skill documents these because each one silently wastes a run:
+  - **Every input must end with `\r`** or Enter is never sent and the text sits unsubmitted on the worker's prompt. `delivered:true` means "written to the pane", not "submitted".
+  - **Input is single-line.** Newlines are stripped.
+  - **A wait timeout is HTTP 200** with `wait.timedOut:true`, not an error. Loop over short waits; timeouts clamp to [1s, 600s] and the applied value comes back as `wait.timeoutMs`.
+  - **`stop` and `blocked` are `claude`-only.** Requesting them elsewhere is a 400.
+  - **Signals are edge-triggered with no history.** One that fires while no waiter is registered is unobservable afterwards, so never fire-and-forget N prompts and then gather signal-waits worker by worker.
+  - **Your typed command echoes into the output stream**, so a marker that appears verbatim in the input line matches before the command runs. Split it.
+  - **A full-screen TUI stream is space-less**, so match a single space-free token, never a phrase.
+  - **`pid != null` proves startup, not life.** A worker that dies inside its pane keeps `status:"idle"` and a pid. `wait?until=exit` is the death check.
+
+  ## Fixes to the packaged skill
+  - **The self-delete guard failed open.** The old `is_self "$SID" || curl -X DELETE ...` shape meant an undefined `is_self` exited 127, the `||` branch fired, and the agent deleted its own session with the one guard bypassed. That is reachable because shell state does not survive between tool calls, so a partially re-pasted preamble was enough. The DELETE now lives inside a fail-closed `delete_session`, which also refuses an empty id and refuses when `$SELF` is unset or too short to prove the target is not the caller.
+  - **`clientId` was built from `$$`.** The pid changes between tool calls, so the documented "resend the identical request" loop stopped being recognized as a duplicate and retyped the prompt, submitting the turn twice. It is a fixed literal now.
+  - **`GET /api/v1/sessions/:id/last-response` was undocumented.** It returns the agent's final message as clean transcript text; the terminal scrape the skill previously recommended returns a wall of TUI repaint noise with the answer buried in it. It is now the documented read path for `claude` and `codex`, with the terminal buffer demoted to diagnosis and hook-less modes. Because the transcript flush lags the `stop` signal, the recipes poll it instead of reading once.
+  - **`quick-start` responses were never checked for `.success`.** On failure `.data.sessionId` is absent, `jq -r` prints the string `null`, and the flow burned its full readiness budget against `/api/v1/sessions/null` before reporting jq noise instead of the cause.
+  - **`codeman skill install --case <name>` could not resolve a linked case.** It hardcoded `~/codeman-cases/<name>` while the server resolves through `linked-cases.json` first, so it failed with "Case not found" for a case the web UI handled fine.
+  - **Documentation corrections**: `SESSION_BUSY` on `quick-start` is the 50-session cap rather than the waiter cap; `caseName` resolves linked cases, so a generic name can land a worker in a real repo; and the claim that a toggle-off sweep exists was wrong, so the per-case `skill uninstall` cleanup is now stated in both the README and the code.
+
+  ## Also in this release
+  - **Terminal**: the wheel is no longer forwarded to codex, which ignores SGR mouse reports.
+
 ## 1.14.0
 
 ### Minor Changes

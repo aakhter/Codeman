@@ -11,6 +11,7 @@
  * - `generateHooksConfig()` — returns hooks object for settings.local.json
  * - `writeHooksConfig(casePath)` — writes hooks + env config to disk
  * - `ensureCodemanHooks(casePath)` — safely installs/updates hooks for a managed case
+ *   (no production call site yet; see its doc comment before wiring one)
  * - `updateCaseEnvVars(casePath, envVars)` — merges env vars into settings
  *
  * Hook events generated: `idle_prompt`, `permission_prompt`, `elicitation_dialog`,
@@ -26,9 +27,11 @@
  * @module hooks-config
  */
 
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile, mkdir, lstat, readdir, rename, unlink, rmdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 import type { HookEventType } from './types.js';
@@ -41,6 +44,9 @@ import { HOOK_TIMEOUT_SECONDS } from './config/auth-config.js';
  * while an App-Settings toggle injects the statusLine into the same repo — can't
  * lose each other's changes through interleaved read-then-write. Per-path chains
  * are independent; the map self-prunes when a path's chain goes idle.
+ *
+ * The agent-skill injector keys the same map on its skill DIRECTORY, which can never
+ * collide with a settings-file path, so those writers serialize against each other too.
  */
 const settingsWriteLocks = new Map<string, Promise<unknown>>();
 /**
@@ -617,6 +623,16 @@ export async function writeHooksConfig(casePath: string): Promise<void> {
  * user-owned settings file. It is therefore reserved for case quick-starts,
  * where the user has explicitly asked Codeman to manage that workspace. A
  * malformed existing file is left untouched rather than replaced.
+ *
+ * ⚠️ It has NO production call site: PR #233 landed it with the hook scripts and never
+ * wired it up, and knip can't flag it (`test/**` are entry points, so its tests count as
+ * a use). Kept anyway, because it is redundant with neither sibling: `writeHooksConfig`
+ * REPLACES a malformed settings file and rewrites unconditionally, and
+ * `refreshStaleCodemanHooks` deliberately never adds hooks to a case that has none. The
+ * one place it fits is quick-start's existing-case branch in session-routes.ts, and
+ * moving that branch onto this function is a POLICY change (hooks would come back for a
+ * user who deleted them from their case, and linked cases would start getting a hooks
+ * block they have never had), so that call is left to the owner rather than made here.
  */
 export async function ensureCodemanHooks(casePath: string): Promise<void> {
   const claudeDir = join(casePath, '.claude');
@@ -777,4 +793,208 @@ export async function applyStatusLineConfig(casePath: string, enabled: boolean):
 
     await writeFile(settingsPath, JSON.stringify(existing, null, 2) + '\n');
   });
+}
+
+// ─── Agent skill injection ───────────────────────────────────────────────────
+
+/**
+ * Version-agnostic ownership prefix for the injected agent skill, same pattern as
+ * `BACKGROUND_WAKE_MARKER_PREFIX`: ownership is decided on the prefix so a wording
+ * change in the full marker cannot disown every previously injected copy.
+ */
+const AGENT_SKILL_MARKER_PREFIX = '<!-- codeman-managed-agent-skill';
+
+/**
+ * Marker appended to the injected SKILL.md. Its presence is what makes a copy OURS:
+ * install/refresh/remove all refuse to touch a `skills/codeman` whose SKILL.md lacks
+ * it, so a user's hand-authored or hand-edited-and-de-marked skill is never clobbered.
+ */
+const AGENT_SKILL_MARKER = `${AGENT_SKILL_MARKER_PREFIX}: installed by Codeman; edits are overwritten while the agent-skill setting is on -->`;
+
+/**
+ * Packaged source of the skill: `skills/codeman/` at the package root. Resolved
+ * relative to this module so it works from `src/` (tsx dev), `dist/` (tsc build),
+ * and an npm install (`files` includes `skills`), all of which sit one level below
+ * the package root.
+ */
+function agentSkillSourceDir(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'codeman');
+}
+
+interface AgentSkillFile {
+  /** Path relative to the target skill dir (e.g. `reference/endpoints.md`). */
+  relPath: string;
+  content: string;
+}
+
+/**
+ * Read the packaged skill: SKILL.md (marker appended) plus every markdown file
+ * under `reference/`. Enumerated from disk rather than a hardcoded manifest so a
+ * new reference file ships without touching this module.
+ */
+async function readAgentSkillSource(): Promise<AgentSkillFile[]> {
+  const src = agentSkillSourceDir();
+  const skill = await readFile(join(src, 'SKILL.md'), 'utf-8');
+  const files: AgentSkillFile[] = [{ relPath: 'SKILL.md', content: `${skill.trimEnd()}\n\n${AGENT_SKILL_MARKER}\n` }];
+  let referenceNames: string[] = [];
+  try {
+    referenceNames = (await readdir(join(src, 'reference'))).filter((name) => name.endsWith('.md')).sort();
+  } catch {
+    // no reference dir in the source; SKILL.md alone is still a valid skill
+  }
+  for (const name of referenceNames) {
+    files.push({ relPath: join('reference', name), content: await readFile(join(src, 'reference', name), 'utf-8') });
+  }
+  return files;
+}
+
+/**
+ * Publish one skill file with a temp + rename, never a bare overwrite.
+ *
+ * Claude Code reads SKILL.md whole when it loads the skill, so an in-place rewrite of
+ * the file (20KB+, several write() syscalls) lets a load that lands mid-write see a
+ * TRUNCATED skill. rename() swaps the finished file in one step, so a
+ * reader sees either the old copy or the new one. The pid+random temp name matters
+ * because `codeman skill install` writes these same paths from a DIFFERENT process than
+ * the server, where the in-process lock cannot help: a shared temp name would let the
+ * two tear each other's payload (same reasoning as user-store.ts).
+ */
+async function writeSkillFileAtomic(target: string, content: string): Promise<void> {
+  // `.tmp` last, so a leftover temp is never picked up as a `.md` skill file.
+  const tmpPath = `${target}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await writeFile(tmpPath, content);
+    await rename(tmpPath, target);
+  } catch (err) {
+    await unlink(tmpPath).catch(() => {});
+    throw err;
+  }
+}
+
+async function isSymlink(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** What an install/remove actually did, so callers (CLI, logs) can say so. */
+export type AgentSkillApplyResult =
+  | 'installed' // fresh copy written
+  | 'refreshed' // our copy was stale and got rewritten
+  | 'unchanged' // our copy already matches the packaged source
+  | 'removed' // our copy deleted
+  | 'absent' // nothing there to remove
+  | 'foreign' // a copy exists but is not ours; left untouched
+  | 'symlink'; // the skill dir (or its parent) is a symlink; left untouched
+
+/**
+ * Install or refresh the Codeman agent skill into `skillDir` (a `.../codeman`
+ * directory, e.g. `<case>/.claude/skills/codeman` or `~/.claude/skills/codeman`).
+ *
+ * Refuses two shapes rather than writing through them:
+ * - a SYMLINK at the skill dir or its `skills/` parent: this repo's own dogfooding
+ *   layout (`.claude/skills/codeman -> ../../skills/codeman`) would otherwise have
+ *   the injector overwrite the repo source through the link;
+ * - a FOREIGN copy (SKILL.md present without our marker): that is the user's own
+ *   skill, and per the statusLine rule we never clobber what we did not write.
+ *
+ * Idempotent and cheap: unchanged files are not rewritten, so calling on every
+ * session create causes no mtime churn.
+ *
+ * Serialized on the skill dir through the same lock the settings writers use: two
+ * sessions created at once in one repo both inject this skill, and interleaving their
+ * ownership read with the other's write reports a bogus result (an 'unchanged' for a
+ * copy the other writer had not finished). Writes go out via temp + rename, which is
+ * what protects a concurrent skill LOAD, in this process or the CLI's.
+ */
+export async function installAgentSkillInto(skillDir: string): Promise<AgentSkillApplyResult> {
+  return withSettingsLock(skillDir, async () => {
+    if ((await isSymlink(dirname(skillDir))) || (await isSymlink(skillDir))) return 'symlink';
+
+    let existing: string | null = null;
+    try {
+      existing = await readFile(join(skillDir, 'SKILL.md'), 'utf-8');
+    } catch {
+      // absent: fresh install
+    }
+    if (existing !== null && !existing.includes(AGENT_SKILL_MARKER_PREFIX)) return 'foreign';
+
+    const files = await readAgentSkillSource();
+    let changed = false;
+    for (const file of files) {
+      const target = join(skillDir, file.relPath);
+      let current: string | null = null;
+      try {
+        current = await readFile(target, 'utf-8');
+      } catch {
+        // missing: will be written
+      }
+      if (current === file.content) continue;
+      await mkdir(dirname(target), { recursive: true });
+      await writeSkillFileAtomic(target, file.content);
+      changed = true;
+    }
+    if (!changed) return 'unchanged';
+    return existing === null ? 'installed' : 'refreshed';
+  });
+}
+
+/**
+ * Remove a Codeman-managed skill copy from `skillDir`. Same ownership and symlink
+ * refusals as the install path. Deletes only files the packaged source would have
+ * written (never `rm -rf`, so a user's extra files in the directory survive), then
+ * prunes the directories bottom-up if they emptied.
+ *
+ * Shares the install path's per-dir lock so an uninstall can't run between an install's
+ * ownership read and its writes, which would leave half the skill back on disk.
+ */
+export async function removeAgentSkillFrom(skillDir: string): Promise<AgentSkillApplyResult> {
+  return withSettingsLock(skillDir, async () => {
+    if ((await isSymlink(dirname(skillDir))) || (await isSymlink(skillDir))) return 'symlink';
+
+    let existing: string | null = null;
+    try {
+      existing = await readFile(join(skillDir, 'SKILL.md'), 'utf-8');
+    } catch {
+      return 'absent';
+    }
+    if (!existing.includes(AGENT_SKILL_MARKER_PREFIX)) return 'foreign';
+
+    // Manifest-based, with SKILL.md as the fallback when the packaged source is
+    // unreadable: removal must still work on an install whose skills/ dir went missing.
+    const files = await readAgentSkillSource().catch((): AgentSkillFile[] => [{ relPath: 'SKILL.md', content: '' }]);
+    for (const file of files) {
+      await unlink(join(skillDir, file.relPath)).catch(() => {});
+    }
+    await rmdir(join(skillDir, 'reference')).catch(() => {}); // fails when non-empty, fine
+    await rmdir(skillDir).catch(() => {});
+    await rmdir(dirname(skillDir)).catch(() => {}); // prune `.claude/skills` if now empty
+    return 'removed';
+  });
+}
+
+/**
+ * Add or remove the Codeman agent skill in `<case>/.claude/skills/codeman`,
+ * mirroring `applyStatusLineConfig`'s shape. Gated by the synced `agentSkillEnabled`
+ * app setting (default OFF); callers gate on Claude mode, since the skill is discovered
+ * via `.claude/skills/`, which only Claude Code reads.
+ *
+ * Call-site policy is ADD-ONLY on session create (callers pass `enabled: true` or
+ * skip the call), for the statusLine reason: sessions in a repo share one `.claude/`
+ * dir, so a single create while the setting is off must not yank the skill out from
+ * under other live sessions.
+ *
+ * ⚠️ Consequence: turning `agentSkillEnabled` OFF sweeps nothing. There is deliberately
+ * no server-side toggle-off sweep (it would have to walk every case, including ones
+ * with live sessions, and would hit exactly the shared-`.claude/` hazard above), so
+ * already-injected copies stay on disk until removed per case with
+ * `codeman skill uninstall --case <name>`. The `enabled: false` branch here backs that
+ * CLI and the tests; it has no server call site. Keep the README's Agent Skill note in
+ * sync if this ever changes.
+ */
+export async function applyAgentSkill(casePath: string, enabled: boolean): Promise<AgentSkillApplyResult> {
+  const skillDir = join(casePath, '.claude', 'skills', 'codeman');
+  return enabled ? installAgentSkillInto(skillDir) : removeAgentSkillFrom(skillDir);
 }

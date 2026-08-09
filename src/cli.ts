@@ -12,9 +12,11 @@ import chalk from 'chalk';
 import { createRequire } from 'module';
 import http from 'node:http';
 import https from 'node:https';
-import { readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
 import { dataPath } from './config/instance.js';
+import { installAgentSkillInto, removeAgentSkillFrom, type AgentSkillApplyResult } from './hooks-config.js';
 import { getSessionManager } from './session-manager.js';
 import { getTaskQueue } from './task-queue.js';
 import { getRalphLoop } from './ralph-loop.js';
@@ -277,6 +279,125 @@ async function postHookEvent(
     req.end();
   });
 }
+
+// ============ Skill Commands ============
+
+/** Same registry the server resolves case names through (mirrors `case-routes.ts`). */
+const LINKED_CASES_FILE = dataPath('linked-cases.json');
+
+/**
+ * Case name to directory, checking `linked-cases.json` FIRST and falling back to the
+ * shared single-user cases dir. Mirrors `resolveCasePath()` in `case-routes.ts`, which
+ * is what the web UI and `quick-start` use. Without the linked-cases lookup this
+ * command rejected every case linked in from outside `~/codeman-cases` with
+ * "Case not found", even though the server resolved the same name fine.
+ *
+ * Sync and tolerant on purpose: a missing or malformed registry means "no linked
+ * cases", never a crash.
+ */
+export function resolveCliCasePath(name: string): string {
+  try {
+    const linked = JSON.parse(readFileSync(LINKED_CASES_FILE, 'utf-8')) as Record<string, string>;
+    const target = linked?.[name];
+    if (typeof target === 'string' && target) return target;
+  } catch {
+    // no registry yet, or unreadable/invalid JSON: fall through to the cases dir
+  }
+  return join(homedir(), 'codeman-cases', name);
+}
+
+/**
+ * Resolve where `skill install` / `skill uninstall` operate. Global is
+ * `~/.claude/skills/codeman` (Claude Code's user-scope skill dir, read by every new
+ * session); `--case <name>` targets `<case>/.claude/skills/codeman`, resolved through
+ * `resolveCliCasePath()` above. The web server's automatic per-case injection
+ * (`agentSkillEnabled`) covers multi-user spaces; this CLI is a local operator tool
+ * and stays single-user.
+ *
+ * A missing case is REPORTED, not exited on: the exit lives in the wrapper below so
+ * this resolution (including the linked-cases lookup, which shipped unguarded) can be
+ * unit-tested without `process.exit(1)` taking the test runner down with it.
+ */
+export function resolveSkillTargetPath(options: {
+  case?: string;
+}): { target: string; missingCase?: undefined } | { target?: undefined; missingCase: string } {
+  if (options.case) {
+    const casePath = resolveCliCasePath(options.case);
+    if (!existsSync(casePath)) return { missingCase: casePath };
+    return { target: join(casePath, '.claude', 'skills', 'codeman') };
+  }
+  return { target: join(homedir(), '.claude', 'skills', 'codeman') };
+}
+
+/** Exit-owning wrapper around `resolveSkillTargetPath()` for the two commands below. */
+function resolveSkillTarget(options: { case?: string }): string {
+  const resolved = resolveSkillTargetPath(options);
+  if (resolved.missingCase !== undefined) {
+    console.error(chalk.red(`✗ Case not found: ${resolved.missingCase}`));
+    process.exit(1);
+  }
+  return resolved.target;
+}
+
+/** Print an AgentSkillApplyResult for humans; exit non-zero when nothing was done. */
+function reportSkillResult(result: AgentSkillApplyResult, target: string): void {
+  const messages: Record<AgentSkillApplyResult, { ok: boolean; text: string }> = {
+    installed: { ok: true, text: `Agent skill installed: ${target}` },
+    refreshed: { ok: true, text: `Agent skill refreshed (was stale): ${target}` },
+    unchanged: { ok: true, text: `Agent skill already up to date: ${target}` },
+    removed: { ok: true, text: `Agent skill removed: ${target}` },
+    absent: { ok: true, text: `Nothing to remove at ${target}` },
+    foreign: {
+      ok: false,
+      text: `${target} exists but is not Codeman-managed (no marker), refusing to touch it. Remove it yourself if you want the packaged skill there.`,
+    },
+    symlink: {
+      ok: false,
+      text: `${target} (or its parent) is a symlink, refusing to write through it.`,
+    },
+  };
+  const message = messages[result];
+  if (message.ok) {
+    console.log(chalk.green(`✓ ${message.text}`));
+  } else {
+    console.error(chalk.red(`✗ ${message.text}`));
+    process.exit(1);
+  }
+}
+
+const skillCmd = program
+  .command('skill')
+  .description('Manage the Codeman agent skill (lets an agent inside a session drive the API)');
+
+skillCmd
+  .command('install')
+  .description('Install the agent skill globally (~/.claude/skills/codeman) or into one case')
+  .option('-g, --global', 'Install into ~/.claude/skills/codeman, picked up by every new session (the default)')
+  .option('-c, --case <name>', 'Install into <case>/.claude/skills/codeman instead (linked cases resolve too)')
+  .action(async (options: { global?: boolean; case?: string }) => {
+    try {
+      const target = resolveSkillTarget(options);
+      reportSkillResult(await installAgentSkillInto(target), target);
+    } catch (err) {
+      console.error(chalk.red(`✗ Failed to install agent skill: ${getErrorMessage(err)}`));
+      process.exit(1);
+    }
+  });
+
+skillCmd
+  .command('uninstall')
+  .description('Remove a Codeman-managed agent skill copy (never touches a user-authored one)')
+  .option('-g, --global', 'Remove from ~/.claude/skills/codeman (the default)')
+  .option('-c, --case <name>', 'Remove from <case>/.claude/skills/codeman instead (linked cases resolve too)')
+  .action(async (options: { global?: boolean; case?: string }) => {
+    try {
+      const target = resolveSkillTarget(options);
+      reportSkillResult(await removeAgentSkillFrom(target), target);
+    } catch (err) {
+      console.error(chalk.red(`✗ Failed to remove agent skill: ${getErrorMessage(err)}`));
+      process.exit(1);
+    }
+  });
 
 // ============ Session Commands ============
 
@@ -1086,68 +1207,151 @@ function printStats(stats: ReturnType<ReturnType<typeof getRalphLoop>['getStats'
 
 // ============ Utility Commands ============
 
+/** What probing the web server found. */
+interface WebServerProbe {
+  reachable: boolean;
+  /** The URL that answered, or the first candidate when nothing did. */
+  url: string;
+  statusCode?: number;
+  version?: string;
+  authRequired?: boolean;
+  /** Live session states from `/api/status`, when the probe could read them. */
+  sessions?: Array<{ status?: string }>;
+}
+
+/**
+ * GET `<base>/api/status` with a short timeout, tolerating the self-signed cert an
+ * `--https` install uses. ANY HTTP answer proves the server is up: a 401 just
+ * means it wants credentials (sent when available, same env → data-dir `.env`
+ * fallback as `codeman attach`).
+ */
+function probeWebServerAt(base: string): Promise<WebServerProbe | null> {
+  let url: URL;
+  try {
+    url = new URL('/api/status', base);
+  } catch {
+    return Promise.resolve(null);
+  }
+  const envFile = readCodemanEnv();
+  const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
+  const password = process.env.CODEMAN_PASSWORD || envFile.CODEMAN_PASSWORD;
+  const transport = url.protocol === 'https:' ? https : http;
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (password) {
+    headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+  }
+
+  return new Promise((resolve) => {
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        method: 'GET',
+        path: url.pathname,
+        rejectUnauthorized: false,
+        headers,
+        timeout: 3000,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let received = 0;
+        res.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (received <= 1024 * 1024) chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const statusCode = res.statusCode ?? 0;
+          if (statusCode === 401) {
+            resolve({ reachable: true, url: base, statusCode, authRequired: true });
+            return;
+          }
+          let version: string | undefined;
+          let sessions: Array<{ status?: string }> | undefined;
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as {
+              data?: { version?: unknown; sessions?: unknown };
+            };
+            const data = parsed?.data ?? (parsed as { version?: unknown; sessions?: unknown });
+            if (typeof data?.version === 'string') version = data.version;
+            if (Array.isArray(data?.sessions)) sessions = data.sessions as Array<{ status?: string }>;
+          } catch {
+            // Not JSON, but still an answer, so still running.
+          }
+          resolve({ reachable: true, url: base, statusCode, version, sessions });
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
 program
   .command('status')
-  .description('Show overall status')
-  .option('--url <url>', 'Codeman API URL (defaults to CODEMAN_API_URL or https://127.0.0.1:3000)')
-  .action(async (options) => {
-    const apiUrl = resolveApiUrl(options.url);
-
-    // Try the running web server first — the long-lived server owns the live
-    // sessions; an in-process singleton in this short-lived CLI never sees them.
-    let summary: StatusSummary;
-    let ralphLabel: string;
-    let offline = false;
-    try {
-      const statusPayload = await fetchServerJson(apiUrl, '/api/status');
-      summary = summarizeStatus(statusPayload);
-      ralphLabel = summary.ralphActive ? chalk.green('active') : chalk.gray('idle');
-    } catch {
-      // Server unreachable — fall back to the persisted state on disk.
-      offline = true;
-      const queue = getTaskQueue();
-      const loop = getRalphLoop();
-      const stored = getSessionManager().getStoredSessions();
-      const storedValues = Object.values(stored);
-      const taskCounts = queue.getCount();
-      const loopStatus = loop.status;
-      summary = {
-        active: storedValues.filter((s) => s.status !== 'stopped').length,
-        idle: storedValues.filter((s) => s.status === 'idle').length,
-        busy: storedValues.filter((s) => s.status === 'busy').length,
-        tasks: {
-          total: taskCounts.total,
-          running: taskCounts.running,
-          completed: taskCounts.completed,
-          failed: taskCounts.failed,
-        },
-        ralphActive: loopStatus === 'running',
-      };
-      const statusColor = loopStatus === 'running' ? chalk.green : loopStatus === 'paused' ? chalk.yellow : chalk.gray;
-      ralphLabel = statusColor(loopStatus);
+  .description('Show whether the Codeman web server is running, plus session/task state')
+  .option('--url <url>', 'Server URL to probe (defaults to CODEMAN_API_URL, then local port)')
+  .action(async (options: { url?: string }) => {
+    // Issue #230: this command runs in its own fresh process, and the old output
+    // reported THAT process's (always-stopped) Ralph loop under a bare "Status:",
+    // reading as "the server is down" while the web service ran fine. Probe the
+    // real server first; the Ralph loop has its own `codeman ralph status`.
+    const port = process.env.CODEMAN_PORT || '3000';
+    const candidates = options.url
+      ? [options.url]
+      : process.env.CODEMAN_API_URL
+        ? [process.env.CODEMAN_API_URL]
+        : [`https://127.0.0.1:${port}`, `http://127.0.0.1:${port}`];
+    let probe: WebServerProbe = { reachable: false, url: candidates[0] };
+    for (const candidate of candidates) {
+      const answer = await probeWebServerAt(candidate);
+      if (answer) {
+        probe = answer;
+        break;
+      }
     }
 
     console.log(chalk.bold('\nCodeman Status'));
     console.log('─'.repeat(40));
-    if (offline) {
+    console.log(chalk.bold('\nWeb Server:'));
+    if (probe.reachable) {
+      const version = probe.version ? ` (v${probe.version})` : '';
+      console.log(`  Status: ${chalk.green('running')}${version} at ${probe.url}`);
+      if (probe.authRequired) {
+        console.log(chalk.gray('  (answers 401: set CODEMAN_PASSWORD/CODEMAN_USERNAME to see session details)'));
+      }
+    } else {
+      console.log(`  Status: ${chalk.red('not reachable')} at ${candidates.join(' or ')}`);
       console.log(
-        chalk.dim(`(offline — showing last persisted state from state.json; server at ${apiUrl} unreachable)`)
+        chalk.gray('  (start it with `codeman web`, or check your service: systemctl --user status codeman-web)')
       );
     }
 
-    console.log(chalk.bold('\nSessions:'));
-    console.log(`  Active: ${summary.active}`);
-    console.log(`  Idle: ${summary.idle}`);
-    console.log(`  Busy: ${summary.busy}`);
+    // Prefer the server's live view; fall back to the shared saved state, labeled
+    // as such, so the numbers are never silently a different thing.
+    if (probe.sessions) {
+      const live = probe.sessions;
+      console.log(chalk.bold('\nSessions (live, from the server):'));
+      console.log(`  Total: ${live.length}`);
+      console.log(`  Idle: ${live.filter((s) => s.status === 'idle').length}`);
+      console.log(`  Busy: ${live.filter((s) => s.status === 'busy').length}`);
+    } else {
+      const manager = getSessionManager();
+      const storedValues = Object.values(manager.getStoredSessions());
+      console.log(chalk.bold('\nSessions (from saved state):'));
+      console.log(`  Active: ${storedValues.filter((s) => s.status !== 'stopped').length}`);
+      console.log(`  Idle: ${storedValues.filter((s) => s.status === 'idle').length}`);
+      console.log(`  Busy: ${storedValues.filter((s) => s.status === 'busy').length}`);
+    }
 
+    const taskCounts = getTaskQueue().getCount();
     console.log(chalk.bold('\nTasks:'));
-    console.log(`  Total: ${summary.tasks.total}`);
-    console.log(`  Running: ${summary.tasks.running}`);
-    console.log(`  Completed: ${summary.tasks.completed}`);
-    console.log(`  Failed: ${summary.tasks.failed}`);
-
-    console.log(chalk.bold('\nRalph Loop:'));
-    console.log(`  Status: ${ralphLabel}`);
+    console.log(`  Total: ${taskCounts.total}`);
+    console.log(`  Pending: ${taskCounts.pending}`);
+    console.log(`  Running: ${taskCounts.running}`);
+    console.log(`  Completed: ${taskCounts.completed}`);
+    console.log(`  Failed: ${taskCounts.failed}`);
     console.log('');
   });
 

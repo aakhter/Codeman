@@ -28,6 +28,7 @@ export default defineConfig({
       'test/terminal-document-link.browser.test.ts', // browser/touch (Playwright + chromium)
       'test/terminal-copy-shortcut.test.ts', // browser (Playwright)
       'test/spreadsheet-preview.browser.test.ts', // browser (Playwright + chromium)
+      'test/codex-predictive-echo.test.ts', // browser (Playwright) + real codex binary
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,

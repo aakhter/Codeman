@@ -21,6 +21,8 @@ export interface ConfigPort {
   getTruecolorEnabled(): Promise<boolean>;
   /** COD-257: whether newly created sessions enable Agent Checkpoint (settings.json, default on). */
   getCheckpointDefaultEnabled(): Promise<boolean>;
+  /** Synced `agentSkillEnabled` app setting (default OFF); gates per-case agent-skill injection. */
+  getAgentSkillEnabled(): Promise<boolean>;
   getDefaultClaudeMdPath(): Promise<string | undefined>;
   getLightState(identity?: { username: string; role: 'admin' | 'user' }): unknown;
   getLightSessionsState(): unknown[];

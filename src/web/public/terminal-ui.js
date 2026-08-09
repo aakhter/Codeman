@@ -69,6 +69,42 @@
     return COMPOSER_NAV_KEY_PATTERN.test(data);
   }
 
+  // Codex composer-row signature, measured against codex-cli 0.147.0
+  // (docs/predictive-echo-plan.md): the composer's cursor row starts with
+  // "› " (U+203A + space) when empty (placeholder text), while typing, and
+  // while the slash picker filters. Modal rows ("Press enter to continue")
+  // and wrapped continuation rows (2-space indent) do NOT match — that is
+  // the ghost eliminator: no prediction is ever painted there.
+  const CODEX_COMPOSER_ROW_RE = /^› /;
+
+  // Classify onData for the predictive echo hook. Terminal query responses
+  // never reach this (suppressed earlier in onData); bracketed pastes, nav
+  // keys and mouse reports all start with ESC => 'clear'.
+  function classifyPredictInput(data) {
+    const cps = Array.from(data); // astral-safe
+    if (cps.length === 1) {
+      const cp = cps[0].codePointAt(0);
+      if (cp === 0x7f) return 'backspace';
+      if (cp >= 0x20) return 'char'; // incl. a single astral emoji
+      return 'clear'; // \r \n \t \x03, bare ESC, ...
+    }
+    if (data.charCodeAt(0) === 0x1b) return 'clear'; // ESC seq: nav, paste, mouse SGR
+    if (data.charCodeAt(0) >= 0x20) return 'text'; // multi-char printable (plain paste,
+    return 'clear'; //   ZWJ emoji cluster): wire only, no visual
+  }
+
+  // Predictive-echo gate: predict only while the cursor sits on the codex
+  // composer row. cursorY is baseY-relative (xterm API), hence baseY + cursorY.
+  function isCodexComposerRow(terminal) {
+    try {
+      const buf = terminal.buffer.active;
+      const line = buf.getLine(buf.baseY + buf.cursorY);
+      return !!line && CODEX_COMPOSER_ROW_RE.test(line.translateToString(true));
+    } catch {
+      return false;
+    }
+  }
+
   function isTerminalQueryResponse(data) {
     return TERMINAL_QUERY_RESPONSE_PATTERN.test(data) || TERMINAL_OSC_RESPONSE_PATTERN.test(data);
   }
@@ -106,6 +142,9 @@
     isTerminalQueryResponse,
     shouldSuppressTerminalQueryResponse,
     isComposerNavKey,
+    classifyPredictInput,
+    isCodexComposerRow,
+    CODEX_COMPOSER_ROW_RE,
     BRACKETED_PASTE_START,
     USER_SCROLL_STICKY_SUPPRESS_MS,
     TOUCH_COMPAT_MOUSE_SUPPRESS_MS,
@@ -675,6 +714,12 @@ Object.assign(CodemanApp.prototype, {
     }
 
     this._localEchoOverlay = new LocalEchoOverlay(this.terminal);
+    // Predictive write-through echo (codex): separate opt-in bundle
+    // (vendor/xterm-predictive-echo.js); when it is missing or failed to
+    // load, codex falls back to plain PTY echo exactly like 1.12.2.
+    this._predictiveEcho =
+      typeof PredictiveEchoOverlay !== 'undefined' ? new PredictiveEchoOverlay(this.terminal) : null;
+    this._predictiveEcho?.setPredictWhen((terminal) => window.CodemanTerminalInput.isCodexComposerRow(terminal));
     if (MobileDetection.isTouchDevice()) {
       this.terminal.onCursorMove(() => this._syncMobileHelperTextareaToCursor());
       this.terminal.onRender(() => this._syncMobileHelperTextareaToCursor());
@@ -728,8 +773,8 @@ Object.assign(CodemanApp.prototype, {
     this.registerFilePathLinkProvider();
 
     // Mouse wheel: forward to the TUI only for sessions verified to handle SGR
-    // wheel reports (codex, and claude 2.1.187+ — see _shouldForwardWheelToApp),
-    // local scrollback otherwise. Claude Code 2.1.187+ scrolls its own
+    // wheel reports (claude 2.1.187+ — see _shouldForwardWheelToApp), local
+    // scrollback otherwise. Claude Code 2.1.187+ scrolls its own
     // transcript on SGR wheel reports — scrolled-away tool blocks re-render
     // live and stay clickable — and its select menus no longer capture wheel
     // as option navigation (verified against 2.1.202: /model menu highlight
@@ -1510,6 +1555,13 @@ Object.assign(CodemanApp.prototype, {
             return;
           }
         }
+
+        // ── Predictive Echo (codex): visual only. A plain statement, never a
+        // `return`: control ALWAYS falls through into the send path below,
+        // which is the byte-identity guarantee for #218/#219/#220/#222 —
+        // with the predictor active, absent or throwing, the wire sees the
+        // same bytes. Body in _predictHookOnData (vm-testable).
+        this._predictHookOnData(data);
 
         // ── Normal Mode (echo disabled) ──
         this._pendingInput += data;
@@ -3367,8 +3419,9 @@ Object.assign(CodemanApp.prototype, {
         // grows and rewraps as it fills (#220), pastes are bracketed (#219)
         // and arrows/history edit server-side state (#218). Buffering
         // keystrokes until Enter starves all of that, so codex sessions use
-        // plain PTY echo like shell.
-        // Disable it by clearing any pending text.
+        // plain PTY echo like shell — visually augmented by the predictive
+        // write-through echo (see _localEchoPolicy below and the onData hook).
+        // Disable the buffer overlay by clearing any pending text.
         this._localEchoOverlay.clear();
         this._localEchoEnabled = false;
       } else {
@@ -3401,6 +3454,39 @@ Object.assign(CodemanApp.prototype, {
         });
       }
     }
+
+    // Per-session echo policy: 'buffer' (overlay), 'predict' (codex
+    // write-through, see the onData predict hook), 'off'. _localEchoEnabled
+    // keeps its exact historical values above (false for codex/shell), so
+    // every existing consumer is unchanged; this field is purely additive.
+    let policy = 'off';
+    if (session && echoEnabled) {
+      if (session.mode === 'codex') policy = 'predict';
+      else if (session.mode !== 'shell') policy = 'buffer';
+    }
+    this._localEchoPolicy = policy;
+    if (policy !== 'predict') this._predictiveEcho?.clearPredictions();
+  },
+
+  /**
+   * Predictive-echo onData hook (codex write-through). VISUAL ONLY: paints,
+   * pops or clears prediction spans and never touches _pendingInput, never
+   * sends, never throws into the caller. The onData wire path behaves
+   * byte-identically with this active, absent or broken.
+   */
+  _predictHookOnData(data) {
+    if (this._localEchoPolicy !== 'predict' || !this._predictiveEcho) return;
+    try {
+      const kind = window.CodemanTerminalInput.classifyPredictInput(data);
+      if (kind === 'char') this._predictiveEcho.predictChar(data);
+      else if (kind === 'backspace') this._predictiveEcho.predictBackspace();
+      // 'clear' AND 'text' (plain paste, IME word commits) both change the
+      // composer in ways the display has not shown yet: clear the run and let
+      // the addon's anchor hold suppress prediction until the echo catches up
+      else this._predictiveEcho.clearPredictions();
+    } catch {
+      /* predictions must never block the wire */
+    }
   },
 
   _shouldBypassLocalEchoPrintable(data) {
@@ -3416,6 +3502,8 @@ Object.assign(CodemanApp.prototype, {
       _crashDiag.log(`CJK send DROP no-session len=${text.length}`);
       return;
     }
+    // Bypasses onData (like insertTerminalText): predictions cannot see this
+    if (this._localEchoPolicy === 'predict') this._predictiveEcho?.clearPredictions();
     _crashDiag.log(`CJK send→${this.activeSessionId.slice(0, 8)} len=${text.length}`);
     this._sendInputAsync(this.activeSessionId, text);
   },
@@ -3804,6 +3892,9 @@ Object.assign(CodemanApp.prototype, {
   /** Insert editable text at the active prompt without pressing Enter. */
   insertTerminalText(text) {
     if (!this.activeSessionId || !text) return;
+    // Under predict the text goes out via sendInput (bypasses onData), so the
+    // hook never sees it: clear outstanding predictions here instead.
+    if (this._localEchoPolicy === 'predict') this._predictiveEcho?.clearPredictions();
     if (
       this._localEchoEnabled &&
       this._localEchoOverlay &&
@@ -3829,6 +3920,8 @@ Object.assign(CodemanApp.prototype, {
       this._inputFlushTimeout = null;
     }
     this._pendingInput = '';
+    // Composer content is about to change out from under any predictions
+    if (this._localEchoPolicy === 'predict') this._predictiveEcho?.clearPredictions();
 
     if (this._localEchoEnabled && this._localEchoOverlay) {
       const flushed = this._localEchoOverlay.getFlushed?.() || { count: 0, text: '' };
@@ -4180,11 +4273,20 @@ Object.assign(CodemanApp.prototype, {
 
   // Wheel forwarding gate for the container wheel handler: no Shift override,
   // xterm's own encoder dormant, viewport at the bottom, and a TUI VERIFIED to
-  // scroll its transcript on SGR wheel reports: codex, or claude 2.1.187+
-  // (older Claude Code captures wheel as select-menu option navigation; an
-  // unknown version is treated as older). Gemini is a strip mode too but its
-  // wheel behavior is unverified, so it keeps the local wheel — taps/clicks
-  // are still forwarded for it (harmless no-ops at worst).
+  // scroll its transcript on SGR wheel reports — which today is claude 2.1.187+
+  // and nothing else (older Claude Code captures wheel as select-menu option
+  // navigation; an unknown version is treated as older). Gemini and codex are
+  // strip modes too but keep the local wheel — taps/clicks are still forwarded
+  // for them (harmless no-ops at worst).
+  //
+  // Codex USED to forward here and was the #227 regression (DodgyBadger, Codex
+  // latest / Chrome / Win11: dead wheel in codex, working scrollbar drag).
+  // Measured on codex-cli 0.147.0 in a bare tmux: it never enables mouse
+  // tracking (`mouse_any_flag=0`) and SGR wheel reports fed to its PTY change
+  // NOTHING on screen — it runs an inline viewport (`alternate_on=0`) and pushes
+  // its transcript into the terminal's own scrollback (tmux `history_size`
+  // grows), so there is no in-app pager to drive and local scrollback IS the
+  // codex transcript. Forwarding therefore swallowed every tick.
   // Wheel delta → whole scroll lines. macOS trackpads turn Shift+two-finger
   // scroll into a HORIZONTAL wheel (deltaY≈0, deltaX carries the magnitude), and
   // Shift routes the wheel to local scrollback (_shouldForwardWheelToApp returns
@@ -4238,11 +4340,8 @@ Object.assign(CodemanApp.prototype, {
     if (mode && mode !== 'none') return false;
     const session = this.sessions?.get(this.activeSessionId);
     const sessionMode = session?.mode || 'claude';
-    if (sessionMode === 'claude') {
-      if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
-    } else if (sessionMode !== 'codex') {
-      return false;
-    }
+    if (sessionMode !== 'claude') return false;
+    if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
     // Deliberately NOT gated on _terminalViewportAtBottom(). It used to be, so
     // that leaving the bottom handed the wheel back to local scrollback and both
     // histories stayed reachable without a mode switch. In practice that inverted
@@ -4446,6 +4545,7 @@ Object.assign(CodemanApp.prototype, {
     localStorage.setItem('codeman-font-size', size);
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
+    this._predictiveEcho?.refreshFont();
   },
 
   loadFontSize() {
@@ -4580,6 +4680,7 @@ Object.assign(CodemanApp.prototype, {
       // Refresh it on live skin changes so typed text never keeps the prior
       // theme's dark backing surface or foreground color.
       this._localEchoOverlay?.refreshFont();
+      this._predictiveEcho?.refreshFont();
       try {
         this.terminal.refresh(0, this.terminal.rows - 1);
       } catch {}

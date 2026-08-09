@@ -404,6 +404,7 @@ Object.assign(CodemanApp.prototype, {
     );
     // Claude Permissions settings
     document.getElementById('appSettingsAgentTeams').checked = settings.agentTeamsEnabled ?? false;
+    document.getElementById('appSettingsAgentSkill').checked = settings.agentSkillEnabled ?? false;
     document.getElementById('appSettingsClaudeModel').value = settings.claudeModel ?? '';
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
@@ -1723,6 +1724,7 @@ Object.assign(CodemanApp.prototype, {
       codexAnimationsEnabled: document.getElementById('appSettingsCodexAnimations').checked,
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
+      agentSkillEnabled: document.getElementById('appSettingsAgentSkill').checked,
       claudeModel: document.getElementById('appSettingsClaudeModel').value,
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
       truecolorEnabled: document.getElementById('appSettingsTruecolor').checked,

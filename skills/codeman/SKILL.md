@@ -17,7 +17,24 @@ sessions. Every recipe below was verified live. Full endpoint tables and
 troubleshooting: [reference/endpoints.md](reference/endpoints.md). Worked multi-worker
 flows: [reference/recipes.md](reference/recipes.md).
 
-## 0. Guard — run this before anything else
+## 0. Guard, and the one thing that breaks every recipe below
+
+⚠️ **Your shell state does not survive between tool calls.** Each Bash call starts a
+fresh shell, so `$API`, `$SELF`, the `CURL` array and `delete_session` are all gone by
+the next call, and `$$` is a different pid. Three consequences, all of which have
+teeth:
+
+- **Re-run this entire preamble at the top of every Bash call that touches the API.**
+  Running it once and assuming it stuck is the single most likely way to break a run.
+- **Never re-paste only half of it.** The delete guard below is written so that a
+  missing definition deletes nothing, but that only holds if you never hand-roll a
+  `DELETE` of your own.
+- **Never put `$$` in a `clientId`.** It changes per call, so the "resend the identical
+  request" loop in §3 would stop being a duplicate and would **retype the prompt**,
+  submitting the turn twice. Use a fixed literal (`codeman-agent-1` below).
+
+Only real environment variables (`CODEMAN_*`) survive, which is why this preamble
+rebuilds everything else from them.
 
 ```bash
 test "${CODEMAN_MUX:-}" = 1 || { echo "Not inside a Codeman-managed session; refusing to act."; exit 1; }
@@ -39,13 +56,35 @@ if [ -z "${CODEMAN_PASSWORD:-}" ]; then    # stock installs: install.sh puts it 
   UNIT="$HOME/.config/systemd/user/codeman-web.service"
   PLIST="$HOME/Library/LaunchAgents/com.codeman.web.plist"
   if [ -f "$UNIT" ]; then
-    CODEMAN_PASSWORD=$(sed -n 's/^Environment="CODEMAN_PASSWORD=\(.*\)"$/\1/p' "$UNIT" | head -1)
+    # install.sh backslash-escapes " and \ in the unit value; undo it or a password
+    # containing either recovers wrong and auth fails.
+    CODEMAN_PASSWORD=$(sed -n 's/^Environment="CODEMAN_PASSWORD=\(.*\)"$/\1/p' "$UNIT" | head -1 | sed 's/\\\(["\\]\)/\1/g')
   elif [ -f "$PLIST" ]; then
-    CODEMAN_PASSWORD=$(awk '/<key>CODEMAN_PASSWORD<\/key>/{getline; print}' "$PLIST" | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
+    # install.sh XML-escapes the plist value; undo it (&amp; LAST, mirroring escape order).
+    CODEMAN_PASSWORD=$(awk '/<key>CODEMAN_PASSWORD<\/key>/{getline; print}' "$PLIST" | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p' \
+      | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g')
   fi
 fi
 AUTH=(); [ -n "${CODEMAN_PASSWORD:-}" ] && AUTH=(-u "${CODEMAN_USERNAME:-admin}:$CODEMAN_PASSWORD")
 CURL=(curl -sk "${AUTH[@]}")   # -k: harmless on http, required on https (self-signed cert)
+
+# Fail-CLOSED session delete. The DELETE lives INSIDE the guard on purpose: the older
+# `is_self "$SID" || curl -X DELETE ...` shape failed OPEN, because an undefined
+# is_self exits 127 and the `||` branch then ran the delete completely unguarded.
+# Undefined delete_session is "command not found", which deletes nothing.
+delete_session() {
+  local id="${1:-}"
+  [ -n "$id" ] || { echo "refusing: empty session id"; return 1; }
+  [ "${#SELF}" -ge 8 ] || { echo "refusing: \$SELF unset or too short to prove this is not me"; return 1; }
+  # ids appear in full AND 8-char form (Docker exports a truncated $SELF; mux names and
+  # UI surfaces carry 8-char ids), so compare by prefix in BOTH directions. Equality or
+  # a one-directional check each miss a real combination, and the miss deletes you.
+  case "$id" in "$SELF"*) echo "refusing: $id is me"; return 1 ;; esac
+  case "$SELF" in "$id"*) echo "refusing: $id is me"; return 1 ;; esac
+  "${CURL[@]}" -X DELETE "$API/api/v1/sessions/$id"
+}
+
+CID=codeman-agent-1   # FIXED literal, never "agent-$$" (see §0)
 ```
 
 - If `CODEMAN_MUX` is not `1`, **stop and say so**. Do not guess an API URL; a server
@@ -67,20 +106,16 @@ CURL=(curl -sk "${AUTH[@]}")   # -k: harmless on http, required on https (self-s
 
 You are yourself a session on this server, and the API has **no undo**.
 
-- **Never act on your own session — and know that this check is the ONLY guard.**
+- **Never act on your own session, and know that `delete_session` is the ONLY guard.**
   The server has no self-protection: a session that DELETEs its own id succeeds and
-  dies silently (verified live). Session ids appear in both full and 8-character
-  forms (Docker cases export a truncated `$SELF`; mux names and UI surfaces carry
-  8-char ids), so compare by prefix **in both directions**, never by equality:
-
-  ```bash
-  is_self() { case "$1" in "$SELF"*) return 0 ;; esac; case "$SELF" in "$1"*) return 0 ;; esac; return 1; }
-  ```
-
-  One-directional or equality checks each miss a real combination (full `$SELF` vs
-  a target you transcribed in 8-char form, or truncated `$SELF` vs a full target)
-  and the miss deletes you. Check `is_self` before every `DELETE`, kill, respawn,
-  or input call.
+  dies silently (verified live). **Always delete through `delete_session "$SID"` from
+  §0; never write a bare `curl -X DELETE` and never reintroduce the
+  `is_self … || curl -X DELETE …` shape.** That older form failed open: with the
+  function undefined (a half-re-pasted preamble, see §0) bash returns 127, the `||`
+  branch fires, and the delete runs with no self-check at all. Wrapping the request
+  inside the guard is what makes a lost preamble delete nothing instead of deleting
+  you. Apply the same prefix-both-directions reasoning before any kill, respawn, or
+  input call you write by hand.
 - **Mutating calls you may make unprompted** (this is an allowlist):
   `POST /api/v1/quick-start`, `POST /api/v1/sessions/:id/input`, and
   `DELETE /api/v1/sessions/:id` **only** for a session you created in this
@@ -123,7 +158,16 @@ You are yourself a session on this server, and the API has **no undo**.
   `{"success":false,"error","errorCode"}`. Read `.data`. Use `/api/v1/*` paths.
 - **A wait timeout is HTTP 200**, `{wait:{timedOut:true,signal:null}}` — not an error.
   Loop over short waits (60 s); proxies cut long-idle connections. Timeouts are
-  **clamped** (ceiling 600 s): read back `wait.timeoutMs` for what was applied.
+  **clamped** (ceiling 600 s): read back `wait.timeoutMs` for what was applied. The
+  clamp covers positive integers only: `0`, a negative, a fraction or `30s` is a 400,
+  so round any computed remainder and drop it entirely rather than sending zero.
+- **Never branch on `.data.status`.** It is a heuristic and is often wrong in both
+  directions: measured on a live claude worker reading `idle` while it was mid-turn
+  and actively producing output (`lastActivityAt` equal to the moment of the call),
+  and a worker that died inside its pane also reads `idle`. Synchronize on `stop` via
+  send-and-wait, or on an output marker. To judge from outside, sample
+  `terminal?tail=` twice a few seconds apart: a changing buffer is the only cheap
+  positive proof a worker is still working. `wait?until=exit` is the death check.
 - **`stop` and `blocked` fire for `claude` sessions only** (Claude Code hooks). On
   `shell`/`opencode`/`codex`/`gemini`/`antigravity`, requesting them explicitly is a
   400 — and lifecycle transitions there are coarse (a short shell command may emit
@@ -156,25 +200,61 @@ contains `❯` too — observed live). Codeman *can* auto-accept that dialog its
 the accept rides a stream match that misses on some runs (both outcomes seen live),
 so wait for the composer first and handle the dialog only as the bounded fallback —
 never send a blind Enter up front (if auto-accept already fired, it lands in the
-composer). Stage 1 is short on purpose: an already-trusted case matches `bypass` in
+composer). Stage 1 is short on purpose: an already-trusted case matches `shift+tab` in
 under a second, while a **virgin case can never pass stage 1** (the dialog is up, so
 the composer is not) and always pays it in full before the fallback runs — the long
-budget belongs to stage 3, after the dialog is answered:
+budget belongs to stage 3, after the dialog is answered.
+
+⚠️ **Match `shift+tab`, never `bypass`.** The permission mode is a server-side setting
+(`claudeMode`) that is **not** exposed on `GET /api/v1/sessions/:id`, so you cannot read
+which mode a worker runs. `bypass permissions on` is only the DEFAULT mode's statusline.
+Measured against claude-cli 2.1.226, one pane per mode:
+
+| how Codeman spawned it | statusline reads | `shift+tab` | `bypass` |
+|------------------------|------------------|-------------|----------|
+| `--dangerously-skip-permissions` (default) | `bypass permissions on` | yes | yes |
+| `--permission-mode auto` | `auto mode on` | yes | no |
+| `--allowedTools …` | `don't ask on` | yes | no |
+| neither (`normal`) | `don't ask on` | yes | no |
+
+Every mode ends its status bar with `(shift+tab to cycle)`, so `shift+tab` is the one
+token that means "the composer is up" regardless of mode, and it is space-free, which is
+what makes it survive the TUI stream. Matching `bypass` instead reports a perfectly
+healthy non-default worker as broken after burning the full ladder.
+
+⚠️ **`shift+tab` contains a `+`, so it MUST go through `--data-urlencode`.** In a
+hand-built query the `+` decodes to a space and the server searches for `shift tab`,
+which never appears (measured: `matched:false`, and the response echoes back
+`match: "shift tab"`, which is how you spot it).
+
+Stage 4 stays as the last resort for the case where even that misses: a worker that
+answers a trivial prompt **is** ready, whatever its statusline reads.
 
 ```bash
-SID=$("${CURL[@]}" -X POST "$API/api/v1/quick-start" -H 'Content-Type: application/json' \
-  -d '{"caseName":"worker-1","mode":"claude"}' | jq -r '.data.sessionId')
+# ALWAYS check .success: on failure `.data.sessionId` is null, jq -r prints the string
+# "null", and the flow below then burns its full readiness budget against
+# /api/v1/sessions/null before reporting jq noise instead of the actual cause.
+Q=$("${CURL[@]}" -X POST "$API/api/v1/quick-start" -H 'Content-Type: application/json' \
+  -d '{"caseName":"worker-1","mode":"claude"}')
+SID=$(jq -r 'if .success then .data.sessionId else empty end' <<<"$Q")
+if [ -z "$SID" ]; then
+  # SESSION_BUSY here is the 50-session cap, not the waiter cap; FORBIDDEN/CONFLICT/
+  # OPERATION_FAILED/INVALID_INPUT are the others. None are retryable in a loop.
+  jq -c '{error, errorCode}' <<<"$Q"; echo "quick-start failed; stopping."
+  exit 1
+fi
 for _ in $(seq 1 30); do   # bounded: a bad SID would otherwise poll forever
   [ "$("${CURL[@]}" "$API/api/v1/sessions/$SID" | jq '.data.pid')" != null ] && break; sleep 1
 done
 # ⚠️ pid != null proves STARTUP only, never life: a worker that later dies inside
 # its pane keeps status "idle" and a pid (the local tmux attach client, not the
 # worker). The death check is wait?until=exit, below.
-CID="agent-$$"; SEQ=1
-# the composer's status bar ("bypass permissions on") is the ready marker — Codeman
-# spawns claude in bypass mode. Single-token matches only: TUI text is space-less.
+SEQ=1   # $CID came from the §0 preamble; do NOT rebuild it from $$
+# stage 1-3: `shift+tab` is the composer's status bar in EVERY permission mode (see the
+# table above), so this works whatever `claudeMode` the server runs. Single-token
+# matches only: TUI text is space-less. The `+` needs --data-urlencode.
 R=$("${CURL[@]}" -G "$API/api/v1/sessions/$SID/wait-output" \
-    --data-urlencode 'match=bypass' --data-urlencode 'from=buffer' --data-urlencode 'timeout=5000')
+    --data-urlencode 'match=shift+tab' --data-urlencode 'from=buffer' --data-urlencode 'timeout=5000')
 if ! jq -e '.data.wait.matched' <<<"$R" >/dev/null; then
   # composer never appeared → the trust dialog is probably still up; accept it once
   T=$("${CURL[@]}" -G "$API/api/v1/sessions/$SID/wait-output" \
@@ -185,9 +265,23 @@ if ! jq -e '.data.wait.matched' <<<"$R" >/dev/null; then
     SEQ=$((SEQ+1))
   fi
   R=$("${CURL[@]}" -G "$API/api/v1/sessions/$SID/wait-output" \
-      --data-urlencode 'match=bypass' --data-urlencode 'from=buffer' --data-urlencode 'timeout=45000')
-  jq -e '.data.wait.matched' <<<"$R" >/dev/null || \
-    { echo "worker $SID never became ready; inspect terminal?tail="; }
+      --data-urlencode 'match=shift+tab' --data-urlencode 'from=buffer' --data-urlencode 'timeout=45000')
+fi
+if ! jq -e '.data.wait.matched' <<<"$R" >/dev/null; then
+  # stage 4, last resort: the composer never appeared at all. A miss is still not proof
+  # of a broken worker, and answering is proof that it works. Split the token (your keystrokes echo
+  # into the stream) and keep it unique per call. This costs the worker one turn, so
+  # it runs only after the fast path missed. It must stay AFTER stage 2, which is the
+  # only thing that clears the trust dialog: free text plus \r into a dialog still up
+  # answers it blind, which is the same footgun as the up-front Enter.
+  TOK="${RANDOM}_$$"
+  "${CURL[@]}" -X POST "$API/api/v1/sessions/$SID/input" -H 'Content-Type: application/json' \
+    -d '{"input":"reply with the word READY immediately followed by _'"$TOK"' and nothing else\r","useMux":true,"clientId":"'"$CID"'","seq":'$SEQ'}' >/dev/null
+  SEQ=$((SEQ+1))
+  "${CURL[@]}" -G "$API/api/v1/sessions/$SID/wait-output" \
+    --data-urlencode "match=READY_$TOK" --data-urlencode 'from=buffer' --data-urlencode 'timeout=60000' \
+    | jq -e '.data.wait.matched' >/dev/null \
+    || echo "worker $SID never became ready; inspect terminal?tail="
 fi
 ```
 
@@ -245,15 +339,43 @@ SEQ=$((SEQ+1))
 The typed line shows `${M}_…`, the real output shows `DONE_… rc=<exit code>`, and the
 snippet carries the exit code back to you.
 
-**Read a worker's output** — the terminal buffer, tail in **bytes** (`textOutput` in
-`GET .../output` stays empty for interactive sessions; don't use it):
+**Read a worker's answer.** For `claude` and `codex` workers this is the read path:
+`last-response` returns the agent's final message as clean text, taken from the
+transcript rather than the screen, so it carries none of the TUI's box-drawing or
+repaint noise.
 
 ```bash
-"${CURL[@]}" "$API/api/v1/sessions/$SID/terminal?tail=3000" | jq -r '.data.terminalBuffer' \
-  | sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' -e 's/\x1b([B0]//g' | grep -v '^[[:space:]]*$' | tail -30
+for _ in $(seq 1 10); do          # the transcript write LAGS the stop signal
+  TXT=$("${CURL[@]}" "$API/api/v1/sessions/$SID/last-response" | jq -r '.data.text')
+  [ -n "$TXT" ] && break; sleep 1
+done
+printf '%s\n' "$TXT"
 ```
 
-Avoid `?full=1` (entire tmux scrollback, a context bomb) unless doing a post-mortem.
+`.data` is `{text, timestamp}`. ⚠️ **Poll it, do not read it once.** `text` is written
+from the transcript file, which is flushed slightly *after* the `stop` hook fires, so a
+single read taken the instant send-and-wait returns comes back `""` even though the
+turn finished (verified live: empty on the first call, full text seconds later). `text`
+is also `""` before the worker's first completed turn, and always `""` for modes with
+no transcript (`shell`, `opencode`, `gemini`, `antigravity`, verified live), which is
+why the loop above is bounded rather than open-ended. Fall back to the terminal buffer there, tail in **bytes**
+(`textOutput` in `GET .../output` stays empty for interactive sessions; don't use it):
+
+```bash
+# \x1b is a GNU-sed extension: BSD sed (macOS) matches it as a literal "x1b", so the
+# same one-liner strips NOTHING there and hands you raw ANSI. Feed sed a real ESC.
+ESC=$(printf '\033')
+"${CURL[@]}" "$API/api/v1/sessions/$SID/terminal?tail=3000" | jq -r '.data.terminalBuffer' \
+  | sed -e "s/${ESC}\[[0-9;?]*[a-zA-Z]//g" -e "s/${ESC}([B0]//g" | grep -v '^[[:space:]]*$' | tail -30
+```
+
+⚠️ Do not use that pipeline to read a **claude/codex** answer. A full-screen TUI draws
+with cursor moves, so the stripped buffer is largely one long line: `tail -30` has
+almost nothing to split on and you get a wall of repaint noise with the answer buried
+in it (verified live, side by side with `last-response` returning the exact prose).
+The terminal buffer is for *diagnosis* (is my prompt sitting unsubmitted?), not for
+reading answers. Avoid `?full=1` (entire tmux scrollback, a context bomb) unless doing
+a post-mortem.
 
 **Detect a dead worker cheaply**: `GET .../wait?until=exit&timeout=60000` answers
 immediately (`signal:"exit"`, `immediate:true`) if the PTY is gone — including a
@@ -262,10 +384,10 @@ as `status:"idle"` with a pid (that pid is the local tmux attach client, not the
 worker). The wait routes are the only liveness check; a worker dying while a wait
 is parked resolves it within ~3 s. A session deleted mid-wait resolves in ~1 s.
 
-**Clean up** — only ids you created, `is_self`-checked, one at a time:
+**Clean up** — only ids you created, one at a time, always through the §0 helper:
 
 ```bash
-is_self "$SID" || "${CURL[@]}" -X DELETE "$API/api/v1/sessions/$SID"
+delete_session "$SID"
 ```
 
 Everything else (endpoint tables, per-mode signal table, error codes, capacity
