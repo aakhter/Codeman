@@ -645,3 +645,76 @@ describe('COD-237 unquoted absolute paths with spaces (own-line)', () => {
     expect(previewSpy).toHaveBeenCalledWith('docs/report.docx', originalSessionId);
   });
 });
+
+describe('COD-288 own-line spaced absolute path outside the workspace links nothing at all', () => {
+  // The exact line from the report: an absolute path with spaces, outside the session
+  // workspace. Before the fix the own-line rule recognized it, failed the workspace
+  // confinement check, and fell through to the space-delimited token scanner — which
+  // linked only the fragment after the LAST space as a bogus RELATIVE path.
+  const REPORTED =
+    '/mnt/c/Users/aakhter/Cisco/AI Ready Data Center Marketing - Documents/04 Moments and Activation/airdc-qtr-moments-future-plans/AIRDC-Quarterly-Moment-Strategic-Selection-and-Series-Plan.docx';
+  const REPORTED_TAIL =
+    'Activation/airdc-qtr-moments-future-plans/AIRDC-Quarterly-Moment-Strategic-Selection-and-Series-Plan.docx';
+
+  it('links nothing for the reported out-of-workspace path (no trailing fragment)', () => {
+    const { provide } = makeHarness(REPORTED, { workingDir: '/home/aakht/nas-docs' });
+    expect(provide()).toEqual([]);
+  });
+
+  it('does not linkify the fragment after the last space as a relative path', () => {
+    const { provide } = makeHarness(REPORTED, { workingDir: '/home/aakht/nas-docs' });
+    expect(provide().map((link) => link.text)).not.toContain(REPORTED_TAIL);
+  });
+
+  it('regression: the same path inside the workspace still links in full and opens the preview', () => {
+    const { provide, previewSpy, originalSessionId } = makeHarness(REPORTED, {
+      workingDir: '/mnt/c/Users/aakhter/Cisco/AI Ready Data Center Marketing - Documents',
+    });
+
+    const links = provide();
+    expect(links.map((link) => link.text)).toEqual([REPORTED]);
+    links[0].activate(null, links[0].text);
+    expect(previewSpy).toHaveBeenCalledWith(
+      '04 Moments and Activation/airdc-qtr-moments-future-plans/AIRDC-Quarterly-Moment-Strategic-Selection-and-Series-Plan.docx',
+      originalSessionId
+    );
+  });
+
+  it('links nothing when a shorter out-of-workspace spaced path has a previewable tail', () => {
+    const { provide } = makeHarness('/etc/secret files/notes/passwords.txt', { workingDir: '/mnt/c/proj' });
+    expect(provide()).toEqual([]);
+  });
+
+  it('links no partial when the own-line spaced path contains a .. traversal segment', () => {
+    // Traversal is refused for the same reason: the recognized line is ONE path, so a
+    // relative tail out of it ("other place/report.docx" -> "place/report.docx") is a
+    // partial that resolves to the wrong target.
+    const { provide } = makeHarness('/mnt/c/proj/../other place/docs/report.docx', {
+      workingDir: '/mnt/c/proj',
+    });
+    expect(provide()).toEqual([]);
+  });
+
+  it('regression: a spaced path embedded in prose is unchanged (not an own-line path)', () => {
+    // Does not start with "/", so the own-line rule never fires and token scanning
+    // keeps its pre-existing behaviour.
+    const { provide, previewSpy, originalSessionId } = makeHarness('See docs/report.docx for details', {
+      workingDir: '/mnt/c/proj',
+    });
+    expect(provide().map((link) => link.text)).toEqual(['docs/report.docx']);
+    provide()[0].activate(null, provide()[0].text);
+    expect(previewSpy).toHaveBeenCalledWith('docs/report.docx', originalSessionId);
+  });
+
+  it('regression: two space-separated absolute paths still fall through to token scanning', () => {
+    // The own-line rule excludes lines with a second " /" segment, so suppression must
+    // not reach them.
+    const { provide } = makeHarness('/mnt/c/proj/a.md /mnt/c/proj/b.pdf', { workingDir: '/mnt/c/proj' });
+    expect(provide().map((link) => link.text)).toEqual(['/mnt/c/proj/a.md', '/mnt/c/proj/b.pdf']);
+  });
+
+  it('regression: a quoted spaced path on its own line still links', () => {
+    const { provide } = makeHarness('"My Big Docs/report.docx"', { workingDir: '/mnt/c/proj' });
+    expect(provide().map((link) => link.text)).toEqual(['My Big Docs/report.docx']);
+  });
+});

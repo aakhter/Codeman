@@ -1694,6 +1694,14 @@ Object.assign(CodemanApp.prototype, {
           const startIndex = lineText.length - lineText.trimStart().length;
           return [{ text: candidate, relativePath, startIndex, endIndex: startIndex + candidate.length }];
         }
+        // COD-288: the line has been recognized as ONE spaced absolute path, so stop here
+        // even when it does not resolve (outside the workspace, or a .. traversal). Falling
+        // through to the space-delimited token scanner below would linkify only the fragment
+        // after the LAST space as a *relative* candidate — a partial path that silently
+        // resolves against the workspace to the wrong target. Link the whole path or nothing.
+        // The confinement check in normalizePreviewPath stays authoritative; this only stops
+        // the fall-through from manufacturing a bogus alternative.
+        return [];
       }
 
       const isHardDelimiter = (char) => !char || /[\s\x00-\x1f<>|;&]/.test(char);
