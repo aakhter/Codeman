@@ -901,17 +901,20 @@ Object.assign(CodemanApp.prototype, {
     // (_maybePageCliTranscript), which is what keeps a swipe from being a
     // complete no-op on a phone.
     //
-    // COD-283: opencode on iPhone additionally opts into native momentum
-    // (touch-action: pan-y) with a lower 8px threshold and rAF batching.
+    // COD-283/284: session changes must update native momentum routing too.
     {
-      const isOpencodeMobile = this._session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.() && MobileDetection.isMobile();
-      if (isOpencodeMobile) {
-        container.style.touchAction = 'pan-y';
-      } else {
-        container.style.touchAction = 'none';
-      }
+      const getIsOpencodeMobile = () => {
+        const session = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
+        return session?.mode === 'opencode' && typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.();
+      };
+      const syncTouchAction = () => {
+        container.style.touchAction = getIsOpencodeMobile() ? 'pan-y' : 'none';
+      };
+      syncTouchAction();
+      this._syncTerminalTouchAction = syncTouchAction;
       const cellHeight = () => this.terminal._core?._renderService?.dimensions?.css?.cell?.height || 13;
-      const THRESHOLD = isOpencodeMobile ? 8 : 50;
+      const getThreshold = () =>
+        typeof MobileDetection !== 'undefined' && MobileDetection.isTouchDevice?.() ? 8 : 50;
       let touchMoveRaf = 0;
       let pendingDelta = 0;
       let pendingX = 0;
@@ -1018,7 +1021,7 @@ Object.assign(CodemanApp.prototype, {
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
-              if (Math.abs(pixelAccum + delta) >= THRESHOLD || isOpencodeMobile) {
+            if (Math.abs(pixelAccum + delta) >= getThreshold() || getIsOpencodeMobile()) {
                 pendingDelta += delta;
                 pendingX = touchX; pendingY = touchY;
                 if (touchMoveRaf) return;
@@ -1030,8 +1033,8 @@ Object.assign(CodemanApp.prototype, {
               return;
             }
             pixelAccum += delta;
-            if (Math.abs(pixelAccum) < THRESHOLD) return;
-            if (isOpencodeMobile) {
+          if (Math.abs(pixelAccum) < getThreshold()) return;
+          if (getIsOpencodeMobile()) {
               pendingDelta += pixelAccum;
               if (touchMoveRaf) return;
               touchMoveRaf = requestAnimationFrame(() => {
@@ -1134,12 +1137,25 @@ Object.assign(CodemanApp.prototype, {
 
     // Handle resize with throttling for performance
     this._resizeTimeout = null;
+    this._resizeRaf = null;
     this._lastResizeDims = null;
 
     // Minimum terminal dimensions to prevent vertical text wrapping
     const MIN_COLS = 40;
     const MIN_ROWS = 10;
 
+    const scheduleImmediateFit = () => {
+      if (this._resizeRaf) return;
+      this._resizeRaf = requestAnimationFrame(() => {
+        this._resizeRaf = null;
+        try { this.fitAddon?.fit(); } catch {}
+        const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+        const needsRefresh = (typeof MobileDetection !== 'undefined' && MobileDetection.isIOS?.()) || session?.mode === 'opencode';
+        if (needsRefresh) {
+          try { this.terminal.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
+        }
+      });
+    };
     const throttledResize = () => {
       // Trailing-edge debounce: ALL resize work (fit + clear + SIGWINCH) happens
       // once after the user stops resizing. During active resize, the terminal
@@ -1153,6 +1169,7 @@ Object.assign(CodemanApp.prototype, {
       //
       // By deferring fit() to the trailing edge, there's exactly ONE reflow
       // at the final dimensions, ONE viewport clear, and ONE Ink redraw.
+      scheduleImmediateFit();
       if (this._resizeTimeout) {
         clearTimeout(this._resizeTimeout);
       }

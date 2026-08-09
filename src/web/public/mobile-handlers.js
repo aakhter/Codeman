@@ -491,17 +491,26 @@ const KeyboardHandler = {
       this._settleScrollToBottom = false;
 
       if (typeof app !== 'undefined' && app.terminal) {
-        if (app.fitAddon) {
-          try {
-            app.fitAddon.fit();
-          } catch {}
-        }
-        if (this.keyboardVisible) this._shrinkPaddingToFit();
-        // COD-187: never yank the frozen history view to the bottom.
-        if (shouldScrollToBottom && app._viewMode !== 'history') app.terminal.scrollToBottom();
-        app._syncMobileHelperTextareaToCursor?.();
-        app._localEchoOverlay?.rerender?.();
-        this._sendTerminalResize();
+        // COD-284: double-rAF waits for iOS to commit the keyboard layout,
+        // then repaints its xterm canvas before notifying the PTY.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            if (app.fitAddon) {
+              try {
+                app.fitAddon.fit();
+              } catch {}
+            }
+            if (this.keyboardVisible) this._shrinkPaddingToFit();
+            try {
+              app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
+            } catch {}
+            // COD-187: never yank the frozen history view to the bottom.
+            if (shouldScrollToBottom && app._viewMode !== 'history') app.terminal.scrollToBottom();
+            app._syncMobileHelperTextareaToCursor?.();
+            app._localEchoOverlay?.rerender?.();
+            this._sendTerminalResize();
+          })
+        );
       }
       window.scrollTo(0, 0);
     }, this.VIEWPORT_SETTLE_MS);
@@ -533,6 +542,7 @@ const KeyboardHandler = {
    * xterm can only render whole rows, so fractional-row pixels create dead
    * space below the last row. After fitAddon.fit(), measure the gap and
    * reduce padding by that amount so the terminal sits flush against the bars.
+   * COD-284: never inflate the container itself; that corrupts iOS canvas sizing.
    */
   _shrinkPaddingToFit() {
     try {
@@ -545,7 +555,6 @@ const KeyboardHandler = {
       if (gap > 2 && gap < cellH) {
         const currentPadding = parseInt(main.style.paddingBottom) || 0;
         main.style.paddingBottom = Math.max(0, currentPadding - gap) + 'px';
-        container.style.paddingBottom = `${gap}px`;
         if (app.fitAddon)
           try {
             app.fitAddon.fit();

@@ -1422,12 +1422,14 @@ html.mobile-init .file-browser-panel {
   }
 
   /* Mobile terminal — COD-283: opencode on iPhone uses pan-y for native
-     momentum (threshold 8 + rAF), others keep none to let JS own gesture. */
+     momentum (threshold 8 + rAF), others keep none to let JS own gesture.
+     COD-284: hidden prevents iOS canvas backing-store bleed (black bars) on
+     keyboard resize; visible allowed overflow to escape terminal bounds. */
   .terminal-container {
     height: 100%;
     min-height: 0;
     position: relative;
-    overflow: visible;
+    overflow: hidden;
     touch-action: none;
   }
   .terminal-container[style*='pan-y'] {
@@ -1439,9 +1441,10 @@ html.mobile-init .file-browser-panel {
   .terminal-container .xterm-screen {
     touch-action: none;
   }
-  .terminal-container[style*='pan-y'] .xterm,
-  .terminal-container[style*='pan-y'] .xterm-viewport,
-  .terminal-container[style*='pan-y'] .xterm-screen {
+  .touch-device .terminal-container[style*='pan-y'],
+  .touch-device .terminal-container[style*='pan-y'] .xterm,
+  .touch-device .terminal-container[style*='pan-y'] .xterm-viewport,
+  .touch-device .terminal-container[style*='pan-y'] .xterm-screen {
     touch-action: pan-y;
   }
 

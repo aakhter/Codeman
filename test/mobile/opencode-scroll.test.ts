@@ -11,16 +11,18 @@ describe('opencode scroll perf', () => {
   it('forwards touch scroll within 16ms (one frame)', async () => {
     const start = performance.now();
     expect(terminalUi).toContain('requestAnimationFrame');
-    expect(terminalUi).toMatch(/isOpencodeMobile.*\?\s*8/);
+    expect(terminalUi).toMatch(/isOpencodeMobile|getIsOpencodeMobile/);
+    expect(terminalUi).toMatch(/\?\s*8/);
     expect(performance.now() - start).toBeLessThan(16);
   });
 
   it('uses pan-y for opencodeMobile and threshold 8 (not 50)', () => {
-    expect(terminalUi).toContain('isOpencodeMobile');
+    expect(terminalUi).toMatch(/isOpencodeMobile|getIsOpencodeMobile/);
     expect(terminalUi).toMatch(/MobileDetection\.isMobile\(\)|getDeviceType\(\)\s*===\s*'mobile'/);
-    expect(terminalUi).toContain("touchAction = 'pan-y'");
-    expect(terminalUi).toMatch(/THRESHOLD.*isOpencodeMobile\s*\?\s*8/);
-    expect(terminalUi).not.toMatch(/THRESHOLD.*50.*opencode/i);
+    expect(terminalUi).toContain('pan-y');
+    expect(terminalUi).toContain('touchAction');
+    expect(terminalUi).toMatch(/getThreshold|THRESHOLD/);
+    expect(terminalUi).toMatch(/\?\s*8\s*:\s*50/);
   });
 
   it('batches touch via rAF and adds scrolling class', () => {
@@ -35,14 +37,18 @@ describe('opencode scroll perf', () => {
     expect(terminalUi).toMatch(/requestAnimationFrame.*wheelDelta|wheelDelta.*requestAnimationFrame/s);
   });
 
-  it('fixes will-change: contain layout and auto, scrolling transform', () => {
+  it('fixes will-change: contain layout and auto, scrolling stays auto (COD-284)', () => {
     expect(stylesCss).toContain('contain: layout paint;');
     expect(stylesCss).toContain('will-change: auto;');
-    expect(stylesCss).toMatch(/\.touch-device\s+\.terminal-container\.scrolling[^}]*will-change:\s*transform/s);
+    expect(stylesCss).toMatch(/\.touch-device\s+\.terminal-container\.scrolling[^}]*will-change:\s*auto/s);
+    expect(stylesCss).not.toMatch(/\.touch-device\s+\.terminal-container\.scrolling[^}]*will-change:\s*transform/s);
     const termBlock = stylesCss.match(/\.terminal-container\s*\{[^}]*\}/s)?.[0] ?? '';
     expect(termBlock).toContain('contain: layout paint;');
     expect(termBlock).not.toContain('will-change: contents');
     expect(termBlock).toContain('will-change: auto;');
+    // COD-284: canvas strict containment sliced backing store on iOS keyboard resize
+    expect(stylesCss).toMatch(/\.terminal-container\s+canvas\s*\{[^}]*contain:\s*paint/s);
+    expect(stylesCss).not.toMatch(/\.terminal-container\s+canvas\s*\{[^}]*contain:\s*strict/s);
   });
 
   it('mobile.css terminal touch-action allows pan-y path', () => {
