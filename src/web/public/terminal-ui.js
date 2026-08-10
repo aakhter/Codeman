@@ -1643,6 +1643,19 @@ Object.assign(CodemanApp.prototype, {
       'ts',
       'js',
     ]);
+    const attachmentExtensions = new Set([
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'pdf',
+      'docx',
+      'pptx',
+      'xlsx',
+      'md',
+      'txt',
+    ]);
 
     const normalizePathParts = (path, absolute) => {
       const parts = path.split('/');
@@ -1689,8 +1702,63 @@ Object.assign(CodemanApp.prototype, {
 
     // Scan once instead of using an ambiguous, backtracking-heavy expression.
     // Quoted/backticked spans are kept intact so workspace paths may contain spaces.
-    const findPreviewReferences = (lineText, workingDir) => {
+    const findPreviewReferences = (lineText, workingDir, session) => {
       const references = [];
+      const suppressedRanges = [];
+      const result = () => ({ references, suppressedRanges });
+      const suppress = (startIndex, endIndex) => suppressedRanges.push({ startIndex, endIndex });
+      const trimTrailingPunctuation = (value) => value.replace(/[.,;:!?)\]}]+$/, '');
+      const extensionOf = (value) => value.slice(value.lastIndexOf('.') + 1).toLowerCase();
+      const isSingleAbsolutePath = (candidate) => {
+        if (
+          !candidate.startsWith('/') ||
+          candidate.length > 1000 ||
+          /[\x00-\x1f\\"'`]/.test(candidate) ||
+          candidate.includes('://') ||
+          candidate.includes(' /') ||
+          / (?:—|–|→|=>|->) /.test(candidate)
+        )
+          return false;
+        const normalized = normalizePathParts(candidate, true);
+        if (!normalized || normalized !== candidate || !previewExtensions.has(extensionOf(candidate))) return false;
+
+        const chunks = candidate.split(/[ \t]+/);
+        for (const chunk of chunks.slice(0, -1)) {
+          const trimmed = chunk.replace(/^[([{]+/, '').replace(/[.,;:!?\])}]+$/, '');
+          if (previewExtensions.has(extensionOf(trimmed))) return false;
+        }
+        return true;
+      };
+
+      // COD-288 follow-up: numbered and bulleted list items are the one safe
+      // embedded form for an unquoted path with spaces. Reserve the full path
+      // range even when it is rejected so later token/log scanners cannot
+      // manufacture a misleading relative tail from it.
+      const markerMatch = /^(\s*(?:\d+[.)]|[-*•])[ \t]+)(\/.*)$/.exec(lineText);
+      if (markerMatch) {
+        const rawCandidate = markerMatch[2];
+        const candidate = trimTrailingPunctuation(rawCandidate);
+        const startIndex = markerMatch[1].length;
+        const endIndex = startIndex + candidate.length;
+        if (!isSingleAbsolutePath(candidate)) {
+          suppress(startIndex, lineText.length);
+          return result();
+        }
+
+        const relativePath = normalizePreviewPath(candidate, workingDir);
+        if (relativePath) {
+          references.push({ text: candidate, relativePath, startIndex, endIndex });
+          return result();
+        }
+
+        if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
+          references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
+          return result();
+        }
+
+        suppress(startIndex, lineText.length);
+        return result();
+      }
 
       // COD-237: an unquoted absolute path may legitimately contain spaces (e.g.
       // "OneDrive - Cisco"). When the ENTIRE trimmed line is a single such path that
@@ -1709,7 +1777,8 @@ Object.assign(CodemanApp.prototype, {
         const relativePath = normalizePreviewPath(candidate, workingDir);
         if (relativePath) {
           const startIndex = lineText.length - lineText.trimStart().length;
-          return [{ text: candidate, relativePath, startIndex, endIndex: startIndex + candidate.length }];
+          references.push({ text: candidate, relativePath, startIndex, endIndex: startIndex + candidate.length });
+          return result();
         }
         // COD-288: the line has been recognized as ONE spaced absolute path, so stop here
         // even when it does not resolve (outside the workspace, or a .. traversal). Falling
@@ -1718,7 +1787,9 @@ Object.assign(CodemanApp.prototype, {
         // resolves against the workspace to the wrong target. Link the whole path or nothing.
         // The confinement check in normalizePreviewPath stays authoritative; this only stops
         // the fall-through from manufacturing a bogus alternative.
-        return [];
+        const startIndex = lineText.length - lineText.trimStart().length;
+        suppress(startIndex, lineText.length);
+        return result();
       }
 
       const isHardDelimiter = (char) => !char || /[\s\x00-\x1f<>|;&]/.test(char);
@@ -1755,7 +1826,7 @@ Object.assign(CodemanApp.prototype, {
         while (index < lineText.length && !isTokenDelimiter(lineText[index])) index++;
         addCandidate(lineText.slice(start, index), start);
       }
-      return references;
+      return result();
     };
 
     // Debug: Track if provider is being invoked
@@ -1875,7 +1946,8 @@ Object.assign(CodemanApp.prototype, {
           occupiedOffsets.fill(1, startIndex, endIndex);
         };
         const originatingSessionId = self.activeSessionId;
-        const workingDir = originatingSessionId ? self.sessions?.get(originatingSessionId)?.workingDir : null;
+        const originatingSession = originatingSessionId ? self.sessions?.get(originatingSessionId) : null;
+        const workingDir = originatingSession?.workingDir ?? null;
 
         // Pre-scan with the exact ordinary-URL grammar used for link creation.
         // File-token rejection consults these same ranges so query separators
@@ -2082,18 +2154,10 @@ Object.assign(CodemanApp.prototype, {
 
         for (const reference of ordinaryUrlReferences) addUrlLink(reference);
 
-        cmdPattern.lastIndex = 0;
-        while ((match = cmdPattern.exec(lineText)) !== null) {
-          addLogLink(match[2], match.index);
-        }
-
-        bashPattern.lastIndex = 0;
-        while ((match = bashPattern.exec(lineText)) !== null) {
-          addLogLink(match[1], match.index);
-        }
-
         if (originatingSessionId) {
-          for (const reference of findPreviewReferences(lineText, workingDir)) {
+          const previewScan = findPreviewReferences(lineText, workingDir, originatingSession);
+          for (const range of previewScan.suppressedRanges) reserveLink(range.startIndex, range.endIndex);
+          for (const reference of previewScan.references) {
             const start = coordAt(reference.startIndex);
             const end = coordAt(reference.endIndex - 1);
             if (overlapsLink(reference.startIndex, reference.endIndex)) continue;
@@ -2104,6 +2168,10 @@ Object.assign(CodemanApp.prototype, {
               range: { start, end },
               decorations: { pointerCursor: true, underline: true },
               activate() {
+                if (reference.absolutePath) {
+                  self.openExternalPathPreview(reference.absolutePath, originatingSessionId);
+                  return;
+                }
                 self.openFilePreview(reference.relativePath, originatingSessionId);
               },
               hover() {
@@ -2116,10 +2184,25 @@ Object.assign(CodemanApp.prototype, {
           }
         }
 
+        cmdPattern.lastIndex = 0;
+        while ((match = cmdPattern.exec(lineText)) !== null) {
+          addLogLink(match[2], match.index);
+        }
+
+        bashPattern.lastIndex = 0;
+        while ((match = bashPattern.exec(lineText)) !== null) {
+          addLogLink(match[1], match.index);
+        }
+
         extPattern.lastIndex = 0;
         while ((match = extPattern.exec(lineText)) !== null) {
           addLogLink(match[1], match.index);
         }
+
+        // Providers above run in precedence order, not necessarily display order.
+        // Keep xterm's callback stable and left-to-right after overlap ownership is
+        // settled (for example, a legacy log path can precede a document reference).
+        links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 
         if (links.length > 0) {
           console.debug(
