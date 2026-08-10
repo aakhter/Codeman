@@ -390,6 +390,20 @@ describe('COD-232 terminal document link provider', () => {
     expect(previewSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['/home/u/ws/docs/report.md', 'docs/report.md'],
+    ['/home/u/ws/src/app.ts', 'src/app.ts'],
+    ['/home/u/ws/docs/report.pdf', 'docs/report.pdf'],
+  ])('keeps workspace documents ahead of the legacy absolute-path fallback for %s', (absolute, relative) => {
+    const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(absolute, { workingDir: '/home/u/ws' });
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
   it('keeps an ordinary URL link when its query contains a file URI value', () => {
     const url = 'https://example.com/?next=file:///tmp/report.pdf';
     const { provide, openSpy, fileUriSpy, logSpy, previewSpy } = makeHarness(`Continue at ${url}`);
@@ -829,6 +843,31 @@ describe('COD-288 marker-prefixed absolute paths', () => {
     });
 
     expect(provide()).toEqual([]);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it('recovers complete document references from a rejected marker candidate', () => {
+    const { provide: proseLinks } = makeHarness('1. /home/u/ws/out/report.docx — 12 pages', {
+      workingDir: '/home/u/ws',
+    });
+    expect(proseLinks().map((link) => link.text)).toEqual(['/home/u/ws/out/report.docx']);
+
+    const { provide: multipleLinks } = makeHarness('1. /home/u/ws/a.docx and docs/notes.md', {
+      workingDir: '/home/u/ws',
+    });
+    expect(multipleLinks().map((link) => link.text)).toEqual(['/home/u/ws/a.docx', 'docs/notes.md']);
+  });
+
+  it('rejects a greedy spaced candidate when an earlier chunk already looks like a file', () => {
+    const { provide: workspaceLinks, externalPreviewSpy: workspaceExternalSpy } = makeHarness(
+      '1. /home/u/ws/report.zip and docs/notes.md',
+      { workingDir: '/home/u/ws' }
+    );
+    expect(workspaceLinks().map((link) => link.text)).toEqual(['docs/notes.md']);
+    expect(workspaceExternalSpy).not.toHaveBeenCalled();
+
+    const { provide: externalLinks, externalPreviewSpy } = makeHarness('1. /mnt/c/kb/data.bin backup notes.pdf');
+    expect(externalLinks()).toEqual([]);
     expect(externalPreviewSpy).not.toHaveBeenCalled();
   });
 

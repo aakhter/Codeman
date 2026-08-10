@@ -1708,9 +1708,15 @@ Object.assign(CodemanApp.prototype, {
       const blockedPreviewRanges = [];
       const result = () => ({ references, suppressedRanges });
       const suppress = (startIndex, endIndex) => suppressedRanges.push({ startIndex, endIndex });
-      const blockPreview = (startIndex, endIndex) => blockedPreviewRanges.push({ startIndex, endIndex });
-      const overlapsBlockedPreview = (startIndex, endIndex) =>
-        blockedPreviewRanges.some((range) => startIndex < range.endIndex && endIndex > range.startIndex);
+      const blockPreview = (startIndex, endIndex, options = {}) =>
+        blockedPreviewRanges.push({ startIndex, endIndex, ...options });
+      const isBlockedPreview = (text, startIndex, endIndex) =>
+        blockedPreviewRanges.some((range) => {
+          if (startIndex >= range.endIndex || endIndex <= range.startIndex) return false;
+          if (range.allowAbsolute && text.startsWith('/')) return false;
+          if (range.allowRelative) return false;
+          return true;
+        });
       const trimTrailingPunctuation = (value) => value.replace(/[.,;:!?)\]}]+$/, '');
       const extensionOf = (value) => value.slice(value.lastIndexOf('.') + 1).toLowerCase();
       const isSingleAbsolutePath = (candidate) => {
@@ -1729,7 +1735,7 @@ Object.assign(CodemanApp.prototype, {
         const chunks = candidate.split(/[ \t]+/);
         for (const chunk of chunks.slice(0, -1)) {
           const trimmed = chunk.replace(/^[([{]+/, '').replace(/[.,;:!?\])}]+$/, '');
-          if (previewExtensions.has(extensionOf(trimmed))) return false;
+          if (/\.[a-z0-9]{1,10}$/i.test(trimmed)) return false;
         }
         return true;
       };
@@ -1747,10 +1753,15 @@ Object.assign(CodemanApp.prototype, {
         const candidate = trimTrailingPunctuation(rawCandidate);
         const startIndex = markerOffset + markerMatch[1].length;
         const endIndex = startIndex + candidate.length;
-        blockPreview(startIndex, lineText.length);
         if (!isSingleAbsolutePath(candidate)) {
+          const leadingToken = candidate.split(/[ \t]+/, 1)[0];
+          blockPreview(startIndex, lineText.length, {
+            allowAbsolute: true,
+            allowRelative: /^\/\S+\.[a-z0-9]{1,10}$/i.test(leadingToken),
+          });
           continue;
         }
+        blockPreview(startIndex, lineText.length);
 
         const relativePath = normalizePreviewPath(candidate, workingDir);
         if (relativePath) {
@@ -1811,7 +1822,7 @@ Object.assign(CodemanApp.prototype, {
         const text = raw.slice(startTrim, endTrim);
         const startIndex = rawStart + startTrim;
         const endIndex = rawStart + endTrim;
-        if (overlapsBlockedPreview(startIndex, endIndex)) return;
+        if (isBlockedPreview(text, startIndex, endIndex)) return;
         const relativePath = normalizePreviewPath(text, workingDir);
         if (!relativePath) return;
         references.push({ text, relativePath, startIndex, endIndex });
@@ -2225,21 +2236,17 @@ Object.assign(CodemanApp.prototype, {
           addLogLink(match[1], match.index);
         }
 
-        extPattern.lastIndex = 0;
-        while ((match = extPattern.exec(lineText)) !== null) {
-          addLogLink(match[1], match.index);
-        }
-
         // Preserve command/Bash/live-log precedence for ordinary workspace
-        // references; only unclaimed document ranges reach the static preview.
+        // references while claiming documents before the legacy absolute-path
+        // fallback, matching the provider's established behavior.
         for (const reference of previewScan.references) {
           if (!reference.absolutePath) addPreviewLink(reference);
         }
 
-        // Providers above run in precedence order, not necessarily display order.
-        // Keep xterm's callback stable and left-to-right after overlap ownership is
-        // settled (for example, a legacy log path can precede a document reference).
-        links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
+        extPattern.lastIndex = 0;
+        while ((match = extPattern.exec(lineText)) !== null) {
+          addLogLink(match[1], match.index);
+        }
 
         if (links.length > 0) {
           console.debug(

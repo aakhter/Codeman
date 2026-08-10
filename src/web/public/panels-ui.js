@@ -3785,9 +3785,11 @@ Object.assign(CodemanApp.prototype, {
 
     if (!this._externalPathPreviewRequests) this._externalPathPreviewRequests = new Map();
     const requestKey = `${sessionId}\0${absolutePath}`;
-    const existingRequest = this._externalPathPreviewRequests.get(requestKey);
-    if (existingRequest) return existingRequest;
+    const existing = this._externalPathPreviewRequests.get(requestKey);
+    if (existing && this.filePreviewState === existing.resolverState) return existing.request;
+    if (existing) this._externalPathPreviewRequests.delete(requestKey);
 
+    let resolverState;
     const request = (async () => {
       const overlay = this.$('filePreviewOverlay');
       const titleEl = this.$('filePreviewTitle');
@@ -3807,7 +3809,7 @@ Object.assign(CodemanApp.prototype, {
       this._hideFilePreviewNavigation();
 
       const requestToken = Symbol('external-path-preview');
-      const resolverState = { sessionId, absolutePath, requestToken, mode: 'external-path-resolver' };
+      resolverState = { sessionId, absolutePath, requestToken, mode: 'external-path-resolver' };
       this.filePreviewState = resolverState;
       const ownsPreview = () => this.filePreviewState === resolverState && resolverState.requestToken === requestToken;
       const renderError = (message) => {
@@ -3857,11 +3859,12 @@ Object.assign(CodemanApp.prototype, {
       return this.openFilePreview(fileName, sessionId, attachmentId, { displayPath: absolutePath });
     })();
 
-    this._externalPathPreviewRequests.set(requestKey, request);
+    const requestEntry = { request, resolverState };
+    this._externalPathPreviewRequests.set(requestKey, requestEntry);
     try {
       return await request;
     } finally {
-      if (this._externalPathPreviewRequests.get(requestKey) === request) {
+      if (this._externalPathPreviewRequests.get(requestKey) === requestEntry) {
         this._externalPathPreviewRequests.delete(requestKey);
       }
     }
@@ -4633,7 +4636,11 @@ Object.assign(CodemanApp.prototype, {
   retryFilePreview() {
     const st = this.filePreviewState;
     if (!st) return;
-    this.openFilePreview(st.filePath, st.sessionId, st.attachmentId, { displayPath: st.displayPath });
+    if (st.displayPath && st.displayPath !== st.filePath) {
+      this.openFilePreview(st.filePath, st.sessionId, st.attachmentId, { displayPath: st.displayPath });
+      return;
+    }
+    this.openFilePreview(st.filePath, st.sessionId, st.attachmentId);
   },
 
   _startFilePreviewPolling() {

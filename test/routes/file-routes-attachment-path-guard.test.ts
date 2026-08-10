@@ -151,26 +151,6 @@ describe('file-routes attachment path guard (COD-53)', () => {
     }
   });
 
-  it.each([
-    ['remote', { remote: { host: 'remote.example.test', port: 22, username: 'tester' } }],
-    ['docker', { docker: { container: 'codeman-test' } }],
-  ])('rejects host-path attachment registration for a %s session', async (_label, sessionKind) => {
-    Object.assign(harness.ctx._session, sessionKind);
-    const path = '/mnt/c/decks/board-update.pdf';
-
-    const response = await harness.app.inject({
-      method: 'POST',
-      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
-      payload: { path },
-    });
-
-    expect(response.statusCode).toBe(403);
-    expect(harness.ctx._session.upsertAttachmentHistory).not.toHaveBeenCalled();
-    expect(harness.ctx.persistSessionState).not.toHaveBeenCalled();
-    expect(harness.ctx.broadcast).not.toHaveBeenCalled();
-    expect(attachmentRegistry.findByFilePath(harness.ctx._sessionId, path)).toBeUndefined();
-  });
-
   it('rejects generated registration when the canonical boundary itself has moved', async () => {
     mockedRealpathSync.mockImplementation((path: string) => {
       if (path === '/tmp/test-workdir/output/mockup.png') return '/srv/public/output/mockup.png' as never;

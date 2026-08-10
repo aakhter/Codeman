@@ -282,6 +282,34 @@ describe('COD-288 external terminal path preview UI', () => {
     expect(openFilePreview).toHaveBeenCalledTimes(1);
   });
 
+  it('starts a fresh registration when the prior request no longer owns the overlay', async () => {
+    const firstResponse = deferred<unknown>();
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => firstResponse.promise)
+      .mockImplementationOnce(async () => ({
+        ok: true,
+        json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_new' } }),
+      }));
+    const { proto, host, openFilePreview } = makeHarness(fetch);
+
+    const staleOpening = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    host.filePreviewState = { mode: 'ordinary-preview' };
+    const reopened = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    await reopened;
+    firstResponse.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_old' } }),
+    });
+    await staleOpening;
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(openFilePreview).toHaveBeenCalledTimes(1);
+    expect(openFilePreview).toHaveBeenCalledWith('report.pdf', 'session-1', 'att_new', {
+      displayPath: absolutePath,
+    });
+  });
+
   it('ignores a registration response after the preview is closed', async () => {
     const response = deferred<unknown>();
     const fetch = vi.fn(() => response.promise);
