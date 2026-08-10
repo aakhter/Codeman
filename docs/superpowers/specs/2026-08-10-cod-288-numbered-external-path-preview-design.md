@@ -33,17 +33,18 @@ The post-marker remainder must satisfy a conservative, linear single-path check:
   URI scheme, or second space-prefixed `/`;
 - after trailing sentence punctuation is removed, it ends in one of the terminal viewer's preview extensions;
 - it contains no prose boundary (` — `, ` – `, ` → `, ` => `, or ` -> `);
-- no earlier whitespace-delimited chunk, after surrounding punctuation is removed, ends in any of the terminal viewer's 20
-  preview extensions (`pdf`, `md`, `txt`, image formats, Office formats, or the supported source/data formats).
+- no earlier whitespace-delimited chunk, after surrounding punctuation is removed, ends in an extension-like suffix. This
+  deliberately rejects more than the viewer allowlist so a non-preview file such as `report.zip` cannot anchor greedy prose.
 
 The last condition rejects greedy candidates such as `/path/report.docx — see notes.md`, where accepting the entire remainder
 would both create a dead link and suppress the real path. Ambiguous candidates fail closed. The marker is never included in
 the link range.
 
 The scanner will return structured results: preview references plus path ranges that later file scanners must suppress.
-Ordinary URL detection retains first priority. Document references and suppression ranges will then be reserved before the
-command, Bash, and legacy absolute-path patterns run. A rejected marker candidate therefore cannot fall through and become a
-partial relative or legacy log link. Command/log links outside the reserved marker-path range retain their current behavior.
+Ordinary URL detection retains first priority. External marker references and hard suppression ranges are reserved first;
+command and Bash links retain their established live-log precedence over workspace documents; workspace documents then claim
+their ranges before the legacy absolute-path fallback. Rejected candidates block only ambiguous relative fragments while
+allowing complete absolute paths, or later document references after a complete leading file token, to retain existing behavior.
 
 ## Target Classification
 
