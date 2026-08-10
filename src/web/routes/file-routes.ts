@@ -1820,7 +1820,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // Register a live external file as an explicit attachment card.
   app.post('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const body = (req.body || {}) as { path?: string };
 
     if (!body.path || typeof body.path !== 'string') {
