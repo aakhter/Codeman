@@ -31,10 +31,10 @@ The post-marker remainder must satisfy a conservative, linear single-path check:
 
 - it begins with `/`, is at most 1,000 characters, and contains no control characters, quotes, backticks, backslashes,
   URI scheme, or second space-prefixed `/`;
-- after trailing sentence punctuation is removed, it ends in one of the attachment registry's 11 supported extensions:
-  `png`, `jpg`, `jpeg`, `gif`, `webp`, `pdf`, `docx`, `pptx`, `xlsx`, `md`, or `txt`;
+- after trailing sentence punctuation is removed, it ends in one of the terminal viewer's preview extensions;
 - it contains no prose boundary (` — `, ` – `, ` → `, ` => `, or ` -> `);
-- no earlier whitespace-delimited chunk, after surrounding punctuation is removed, ends in any terminal-preview extension.
+- no earlier whitespace-delimited chunk, after surrounding punctuation is removed, ends in any of the terminal viewer's 20
+  preview extensions (`pdf`, `md`, `txt`, image formats, Office formats, or the supported source/data formats).
 
 The last condition rejects greedy candidates such as `/path/report.docx — see notes.md`, where accepting the entire remainder
 would both create a dead link and suppress the real path. Ambiguous candidates fail closed. The marker is never included in
@@ -43,17 +43,20 @@ the link range.
 The scanner will return structured results: preview references plus path ranges that later file scanners must suppress.
 Ordinary URL detection retains first priority. Document references and suppression ranges will then be reserved before the
 command, Bash, and legacy absolute-path patterns run. A rejected marker candidate therefore cannot fall through and become a
-partial relative or legacy log link.
+partial relative or legacy log link. Command/log links outside the reserved marker-path range retain their current behavior.
 
 ## Target Classification
 
 The scanner will distinguish two valid targets:
 
 1. **Workspace target:** path normalization proves the absolute path is inside the session working directory. Activation
-   calls the existing `openFilePreview(relativePath, sessionId)` flow with no registration request.
+   calls the existing `openFilePreview(relativePath, sessionId)` flow with no registration request. It retains the terminal
+   viewer's broader 20-extension set.
 2. **External local-host target:** the candidate passes the single-path grammar and attachment extension allowlist but is
-   outside the workspace. This target is available only when the originating session has neither `remote` nor `docker`
-   metadata. Activation calls a new browser helper with the complete absolute path and originating session ID.
+   outside the workspace. It must additionally end in one of the attachment registry's 11 supported extensions: `png`,
+   `jpg`, `jpeg`, `gif`, `webp`, `pdf`, `docx`, `pptx`, `xlsx`, `md`, or `txt`. This target is available only when the
+   originating session has neither `remote` nor `docker` metadata. Activation calls a new browser helper with the complete
+   absolute path and originating session ID.
 
 For remote and Docker sessions, an out-of-workspace candidate is not linked and its range remains suppressed. This prevents
 an agent-side path from being resolved accidentally against the Codeman host. Remote materialization and container-path
@@ -68,7 +71,8 @@ The helper will mirror `openFileUriPreview()`:
 3. Deduplicate concurrent activations of the same `(sessionId, absolutePath)` so double-clicking produces one request.
 4. `POST /api/sessions/:id/attachments` with `{ path }`.
 5. Validate an HTTP success envelope containing non-empty string `fileName` and `attachmentId` values.
-6. Call `openFilePreview(fileName, sessionId, attachmentId)` and restore the absolute display path after the viewer initializes.
+6. Call `openFilePreview(fileName, sessionId, attachmentId, { displayPath: absolutePath })`. The viewer uses `displayPath`
+   while creating its own new preview state and title, so the resolver never performs an unowned title write afterward.
 
 Network failures, invalid responses, and server rejections render a bounded, escaped error inside the overlay. The helper
 does not open the attachment viewer after it loses ownership.
