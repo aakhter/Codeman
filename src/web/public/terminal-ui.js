@@ -2132,6 +2132,7 @@ Object.assign(CodemanApp.prototype, {
     if (this.shouldUseMobileOverview?.()) {
       const overlay = document.getElementById('welcomeOverlay');
       if (overlay) overlay.classList.remove('visible');
+      this.hideHomeSessions?.();
       this.showMobileOverview();
       this._updateCjkInputState?.();
       return;
@@ -2144,6 +2145,9 @@ Object.assign(CodemanApp.prototype, {
       this.applyWelcomeCliVisibility();
       this.loadHistorySessions();
       this.initSearchPanel();
+      // Open tabs down the left gutter. Self-gating: a window too narrow to hold
+      // the column without overlapping the content leaves it hidden.
+      this.showHomeSessions?.();
     }
     // Home screen has no input target — hide the CJK textarea (activeSessionId
     // is null by the time we get here). Guarded: defined on the app object.
@@ -2152,6 +2156,7 @@ Object.assign(CodemanApp.prototype, {
 
   hideWelcome() {
     this.hideMobileOverview?.();
+    this.hideHomeSessions?.();
     const overlay = document.getElementById('welcomeOverlay');
     if (overlay) {
       overlay.classList.remove('visible');

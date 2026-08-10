@@ -19,7 +19,14 @@ describe('tmux full-history pane capture (COD-47)', () => {
     expect(sig).toBeGreaterThan(-1);
     // The method signature must carry the opts.fullHistory channel (COD-187
     // reformatted it multi-line and added lastLines for the lazy history page).
-    expect(source.slice(sig, sig + 240)).toContain('fullHistory');
+    // The v1.16 upstream merge moved those fields out of an inline object type
+    // and into the shared PaneCaptureOptions, so follow the type rather than
+    // scraping for the field name next to the signature.
+    expect(source.slice(sig, sig + 240)).toContain('PaneCaptureOptions');
+    const muxInterface = readFileSync(resolve(import.meta.dirname, '../src/mux-interface.ts'), 'utf8');
+    const opts = muxInterface.slice(muxInterface.indexOf('export interface PaneCaptureOptions'));
+    expect(opts.slice(0, opts.indexOf('}'))).toContain('fullHistory');
+    expect(opts.slice(0, opts.indexOf('}'))).toContain('lastLines');
   });
 
   it('full-history mode requests the entire scrollback with -S - (via captureStartFlag)', () => {

@@ -29,6 +29,7 @@ import { getLifecycleLog } from '../session-lifecycle-log.js';
 import { fileStreamManager } from '../file-stream-manager.js';
 import type { CheckpointProgress } from '../session-auto-ops.js';
 import { sessionWaits } from './session-wait-registry.js';
+import { approvalInbox } from './approval-inbox.js';
 
 /** Stored listener references for session cleanup (prevents memory leaks) */
 export interface SessionListenerRefs {
@@ -172,6 +173,7 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       // burning the caller's entire timeout learning nothing.
       sessionWaits.notifySignal(session.id, 'exit');
       sessionWaits.cancelAll(session.id);
+      approvalInbox.resolveForSession(session.id, 'session_ended');
       getLifecycleLog().log({
         event: 'exit',
         sessionId: session.id,
@@ -223,6 +225,13 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
     /** Broadcasts `session:working` — Claude started processing */
     working: () => {
       sessionWaits.notifySignal(session.id, 'working');
+      // An idle-prompt inbox item means "composer is waiting"; any working
+      // transition means input arrived, so the item is moot. ONLY the idle
+      // kind: `working` is heuristic and can flap mid-turn, so clearing a
+      // pending permission/question dialog on it would false-clear real
+      // approvals (those resolve via stop / elicitation hooks / answer-time
+      // re-capture instead).
+      approvalInbox.resolveForSession(session.id, 'resolved_in_terminal', ['idle']);
       deps.broadcast(SseEvent.SessionWorking, { id: session.id });
       const tracker = deps.getRunSummaryTracker(session.id);
       if (tracker) {

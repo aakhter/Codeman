@@ -106,6 +106,8 @@ export type HookEventType =
   | 'idle_prompt'
   | 'permission_prompt'
   | 'elicitation_dialog'
+  | 'elicitation_complete'
+  | 'elicitation_response'
   | 'stop'
   | 'teammate_idle'
   | 'task_completed'

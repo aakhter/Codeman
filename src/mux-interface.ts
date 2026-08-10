@@ -116,6 +116,8 @@ export interface RespawnPaneOptions {
   sessionId: string;
   workingDir: string;
   mode: SessionMode;
+  /** Session display name; a respawned claude keeps its `--name` peer name (version-gated, local only). */
+  name?: string;
   niceConfig?: NiceConfig;
   model?: string;
   claudeMode?: ClaudeMode;
@@ -140,6 +142,22 @@ export interface RespawnPaneOptions {
   docker?: SessionDocker;
   /** Owning username (multi-user); redundant on respawn since the Session object survives, kept for shape parity. */
   owner?: string;
+}
+
+/** Options for pane buffer capture (COD-47 full-history mode). */
+export interface PaneCaptureOptions {
+  /** Capture the entire tmux scrollback instead of just the visible frame. */
+  fullHistory?: boolean;
+  /** Bound the full-history capture to this many scrollback lines (`-S -<N>`). */
+  historyLimitLines?: number;
+  /** Return only the last N lines of the capture (the cheap `?tail=` replay path). */
+  lastLines?: number;
+  /**
+   * Byte cap the consumer will keep from the capture. Sizes the child-process
+   * stdout buffer (with slack) so multi-MB scrollback dumps aren't killed by
+   * the 1MB execSync default (ENOBUFS).
+   */
+  maxCaptureBytes?: number;
 }
 
 /**
@@ -290,7 +308,16 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Capture the active pane's current tmux buffer with ANSI escape codes preserved.
    * Pass `{ fullHistory: true }` to capture the entire scrollback (COD-47).
    */
-  captureActivePaneBuffer?(muxName: string, opts?: { fullHistory?: boolean; lastLines?: number }): string | null;
+  captureActivePaneBuffer?(muxName: string, opts?: PaneCaptureOptions): string | null;
+
+  /**
+   * Plain text of the visible frame: no styles, no cursor query, no repaint
+   * reconstruction. Deliberately cheaper than `capturePaneBuffer` because idle
+   * detection calls it on a timer: it only needs to read what the CLI is
+   * currently rendering, never to replay it into an xterm. Returns null when the
+   * pane cannot be read.
+   */
+  capturePaneText?(muxName: string, paneTarget?: string): string | null;
 
   /**
    * COD-180 — capture a REMOTE session's pane buffer on the remote tmux server

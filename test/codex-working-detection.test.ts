@@ -384,7 +384,7 @@ describe('checkpoint prompt observations', () => {
       ptyProcess: { write: (data: string) => void };
       _lastPromptTime: number;
       _status: 'idle';
-      _detectWorkingState(data: string): void;
+      _detectInteractiveActivity(data: string): void;
     };
     internals.ptyProcess = { write: vi.fn() };
     internals._lastPromptTime = 1;
@@ -392,7 +392,7 @@ describe('checkpoint prompt observations', () => {
     const baseline = session.getCheckpointObservation();
 
     await session.writeCheckpointViaMux('/clear\r');
-    internals._detectWorkingState('\x1b[2J\x1b[Hfresh Claude prompt\n❯');
+    internals._detectInteractiveActivity('\x1b[2J\x1b[Hfresh Claude prompt\n❯');
 
     expect(session.getCheckpointObservation()).toMatchObject({
       ready: true,
@@ -408,7 +408,7 @@ describe('checkpoint prompt observations', () => {
       ptyProcess: { write: (data: string) => void };
       _lastPromptTime: number;
       _status: 'idle';
-      _detectWorkingState(data: string): void;
+      _detectInteractiveActivity(data: string): void;
     };
     internals.ptyProcess = { write: vi.fn() };
     internals._lastPromptTime = 1;
@@ -416,7 +416,7 @@ describe('checkpoint prompt observations', () => {
     const baseline = session.getCheckpointObservation();
 
     await session.writeCheckpointViaMux('/clear\r');
-    internals._detectWorkingState('Error: unknown command /clear\n❯');
+    internals._detectInteractiveActivity('Error: unknown command /clear\n❯');
 
     expect(session.getCheckpointObservation()).toEqual(baseline);
     await session.stop();
@@ -725,7 +725,7 @@ describe('Codex idle transition (COD-175)', () => {
   });
 
   function feed(data: string): void {
-    (session as unknown as { _detectWorkingState(data: string): void })._detectWorkingState(data);
+    (session as unknown as { _detectInteractiveActivity(data: string): void })._detectInteractiveActivity(data);
   }
 
   it('clears isWorking and emits idle after working frames stop', () => {
@@ -762,7 +762,7 @@ describe('Codex idle transition (COD-175)', () => {
 
   it('does not arm the codex idle timer for claude mode', () => {
     const claude = new Session({ workingDir: '/tmp', mode: 'claude' });
-    (claude as unknown as { _detectWorkingState(data: string): void })._detectWorkingState('⠋ Thinking…');
+    (claude as unknown as { _detectInteractiveActivity(data: string): void })._detectInteractiveActivity('⠋ Thinking…');
     expect(claude.isWorking).toBe(true);
     // codex quiet-window elapses — claude sessions must NOT flip to idle from this path
     vi.advanceTimersByTime(20_000);
