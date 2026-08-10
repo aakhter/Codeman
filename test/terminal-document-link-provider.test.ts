@@ -446,6 +446,20 @@ describe('COD-232 terminal document link provider', () => {
     expect(previewSpy).toHaveBeenCalledWith('out/report.pdf', originalSessionId);
   });
 
+  it.each([
+    'tail -f /workspace/project/out.txt',
+    'cat /workspace/project/data.json',
+    'Bash(cat /workspace/project/notes.md)',
+  ])('preserves command and Bash live-log precedence for %s', (line) => {
+    const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(line);
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(logSpy).toHaveBeenCalledWith(link.text, originalSessionId);
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
   it('preserves standalone legacy text links outside the session workspace', () => {
     const paths = ['/tmp/result.txt', '/tmp/result.json', '/tmp/result.md'];
     const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(paths.join(' '));
@@ -780,14 +794,65 @@ describe('COD-288 marker-prefixed absolute paths', () => {
     expect(externalPreviewSpy).not.toHaveBeenCalled();
   });
 
+  it.each([`1. ${REPORTED} — updated summary, see notes.md`, '1. /workspace/project/../private/report.pdf'])(
+    'fails closed for an ambiguous or unsafe candidate: %s',
+    (line) => {
+      const { provide } = makeHarness(line, { workingDir: '/home/aakhter/projects/kb' });
+      expect(provide()).toEqual([]);
+    }
+  );
+
   it.each([
-    `1. ${REPORTED} — updated summary, see notes.md`,
-    '1. /home/user/report.pdf /tmp/other.pdf',
-    '1. /home/user/report.pdf then inspect notes.md',
-    '1. /workspace/project/../private/report.pdf',
-  ])('fails closed for an ambiguous or unsafe candidate: %s', (line) => {
-    const { provide } = makeHarness(line, { workingDir: '/home/aakhter/projects/kb' });
+    ['1. /home/user/app.log - check this', '/home/user/app.log'],
+    ['1. /home/user/project/src/foo.ts:42 fix the bug', '/home/user/project/src/foo.ts'],
+    ['- /var/log/syslog.txt: 42 errors found', '/var/log/syslog.txt'],
+  ])('preserves a complete legacy log link in rejected marker output: %s', (line, expectedPath) => {
+    const { provide, logSpy, originalSessionId } = makeHarness(line);
+    const [link] = provide();
+
+    expect(link.text).toBe(expectedPath);
+    link.activate(null, link.text);
+    expect(logSpy).toHaveBeenCalledWith(expectedPath, originalSessionId);
+  });
+
+  it('preserves both complete legacy absolute links instead of manufacturing a partial marker target', () => {
+    const { provide: proseLinks } = makeHarness('1. /home/user/report.pdf then inspect notes.md');
+    expect(proseLinks().map((link) => link.text)).toEqual(['/home/user/report.pdf']);
+
+    const { provide: multiPathLinks } = makeHarness('1. /home/user/report.pdf /tmp/other.pdf');
+    expect(multiPathLinks().map((link) => link.text)).toEqual(['/home/user/report.pdf', '/tmp/other.pdf']);
+  });
+
+  it('does not merge tab-separated absolute paths into one external attachment target', () => {
+    const { provide, externalPreviewSpy } = makeHarness('1. /mnt/c/first\t/mnt/c/second.pdf', {
+      workingDir: '/workspace/project',
+    });
+
     expect(provide()).toEqual([]);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it('finds the complete marker path when a full-width preceding row is stitched to it', () => {
+    const preceding = '─'.repeat(40);
+    const { provide } = makeHarness([{ text: preceding }, { text: `1. ${REPORTED}` }], {
+      cols: 40,
+      workingDir: '/home/aakhter/projects/kb',
+    });
+
+    const [link] = provide(2);
+    expect(link.text).toBe(REPORTED);
+    expect(link.range.start.y).toBe(2);
+  });
+
+  it('attaches a rejection handler to asynchronous external preview activation', () => {
+    const { app, provide } = makeHarness(`1. ${REPORTED}`, { workingDir: '/home/aakhter/projects/kb' });
+    const catchSpy = vi.fn();
+    app.openExternalPathPreview = vi.fn(() => ({ catch: catchSpy }));
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(catchSpy).toHaveBeenCalledOnce();
   });
 
   it.each(['/home/user/My Report.pdf', '/tmp/My Report.pdf', '/var/My Report.pdf', '/opt/My Report.pdf'])(

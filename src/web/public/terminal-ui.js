@@ -1702,11 +1702,15 @@ Object.assign(CodemanApp.prototype, {
 
     // Scan once instead of using an ambiguous, backtracking-heavy expression.
     // Quoted/backticked spans are kept intact so workspace paths may contain spaces.
-    const findPreviewReferences = (lineText, workingDir, session) => {
+    const findPreviewReferences = (lineText, workingDir, session, markerOffsets = [0]) => {
       const references = [];
       const suppressedRanges = [];
+      const blockedPreviewRanges = [];
       const result = () => ({ references, suppressedRanges });
       const suppress = (startIndex, endIndex) => suppressedRanges.push({ startIndex, endIndex });
+      const blockPreview = (startIndex, endIndex) => blockedPreviewRanges.push({ startIndex, endIndex });
+      const overlapsBlockedPreview = (startIndex, endIndex) =>
+        blockedPreviewRanges.some((range) => startIndex < range.endIndex && endIndex > range.startIndex);
       const trimTrailingPunctuation = (value) => value.replace(/[.,;:!?)\]}]+$/, '');
       const extensionOf = (value) => value.slice(value.lastIndexOf('.') + 1).toLowerCase();
       const isSingleAbsolutePath = (candidate) => {
@@ -1734,30 +1738,34 @@ Object.assign(CodemanApp.prototype, {
       // embedded form for an unquoted path with spaces. Reserve the full path
       // range even when it is rejected so later token/log scanners cannot
       // manufacture a misleading relative tail from it.
-      const markerMatch = /^(\s*(?:\d+[.)]|[-*•])[ \t]+)(\/.*)$/.exec(lineText);
-      if (markerMatch) {
+      let foundMarker = false;
+      for (const markerOffset of markerOffsets) {
+        const markerMatch = /^(\s*(?:\d+[.)]|[-*•])[ \t]+)(\/.*)$/.exec(lineText.slice(markerOffset));
+        if (!markerMatch) continue;
+        foundMarker = true;
         const rawCandidate = markerMatch[2];
         const candidate = trimTrailingPunctuation(rawCandidate);
-        const startIndex = markerMatch[1].length;
+        const startIndex = markerOffset + markerMatch[1].length;
         const endIndex = startIndex + candidate.length;
+        blockPreview(startIndex, lineText.length);
         if (!isSingleAbsolutePath(candidate)) {
-          suppress(startIndex, lineText.length);
-          return result();
+          continue;
         }
 
         const relativePath = normalizePreviewPath(candidate, workingDir);
         if (relativePath) {
           references.push({ text: candidate, relativePath, startIndex, endIndex });
-          return result();
+          continue;
         }
 
         if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
           references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
-          return result();
+          continue;
         }
 
+        // A syntactically complete marker path that cannot use the external
+        // attachment resolver must not fall through to a host-path legacy link.
         suppress(startIndex, lineText.length);
-        return result();
       }
 
       // COD-237: an unquoted absolute path may legitimately contain spaces (e.g.
@@ -1768,6 +1776,7 @@ Object.assign(CodemanApp.prototype, {
       // a second " /" segment (two space-separated absolute paths) is not merged.
       const trimmedLine = lineText.trim();
       if (
+        !foundMarker &&
         trimmedLine.startsWith('/') &&
         trimmedLine.includes(' ') &&
         !/["'`]/.test(trimmedLine) &&
@@ -1800,9 +1809,12 @@ Object.assign(CodemanApp.prototype, {
         while (startTrim < endTrim && /[([{]/.test(raw[startTrim])) startTrim++;
         while (endTrim > startTrim && /[.,;:!?\])}]/.test(raw[endTrim - 1])) endTrim--;
         const text = raw.slice(startTrim, endTrim);
+        const startIndex = rawStart + startTrim;
+        const endIndex = rawStart + endTrim;
+        if (overlapsBlockedPreview(startIndex, endIndex)) return;
         const relativePath = normalizePreviewPath(text, workingDir);
         if (!relativePath) return;
-        references.push({ text, relativePath, startIndex: rawStart + startTrim, endIndex: rawStart + endTrim });
+        references.push({ text, relativePath, startIndex, endIndex });
       };
 
       let index = 0;
@@ -1891,12 +1903,17 @@ Object.assign(CodemanApp.prototype, {
         }
 
         const rowTexts = [];
+        const markerOffsets = [];
+        let stitchedOffset = 0;
         for (let r = startRow; r <= endRow; r++) {
           const row = rowAt(r);
           if (!row) break;
           // Only the final row may be trimmed. Continuation rows fill the width by
           // definition, and trimming one would shift every later offset.
-          rowTexts.push(row.translateToString(r === endRow));
+          const rowText = row.translateToString(r === endRow);
+          if (r === startRow || !row.isWrapped) markerOffsets.push(stitchedOffset);
+          rowTexts.push(rowText);
+          stitchedOffset += rowText.length;
         }
         const lineText = rowTexts.join('');
 
@@ -2154,34 +2171,48 @@ Object.assign(CodemanApp.prototype, {
 
         for (const reference of ordinaryUrlReferences) addUrlLink(reference);
 
-        if (originatingSessionId) {
-          const previewScan = findPreviewReferences(lineText, workingDir, originatingSession);
-          for (const range of previewScan.suppressedRanges) reserveLink(range.startIndex, range.endIndex);
-          for (const reference of previewScan.references) {
-            const start = coordAt(reference.startIndex);
-            const end = coordAt(reference.endIndex - 1);
-            if (overlapsLink(reference.startIndex, reference.endIndex)) continue;
-            reserveLink(reference.startIndex, reference.endIndex);
+        const previewScan = originatingSessionId
+          ? findPreviewReferences(lineText, workingDir, originatingSession, markerOffsets)
+          : { references: [], suppressedRanges: [] };
+        for (const range of previewScan.suppressedRanges) reserveLink(range.startIndex, range.endIndex);
 
-            links.push({
-              text: reference.text,
-              range: { start, end },
-              decorations: { pointerCursor: true, underline: true },
-              activate() {
-                if (reference.absolutePath) {
-                  self.openExternalPathPreview(reference.absolutePath, originatingSessionId);
-                  return;
+        const addPreviewLink = (reference) => {
+          const start = coordAt(reference.startIndex);
+          const end = coordAt(reference.endIndex - 1);
+          if (overlapsLink(reference.startIndex, reference.endIndex)) return;
+          reserveLink(reference.startIndex, reference.endIndex);
+
+          links.push({
+            text: reference.text,
+            range: { start, end },
+            decorations: { pointerCursor: true, underline: true },
+            activate() {
+              if (reference.absolutePath) {
+                try {
+                  const pending = self.openExternalPathPreview(reference.absolutePath, originatingSessionId);
+                  if (pending && typeof pending.catch === 'function') {
+                    pending.catch((err) => console.error('Failed to open external path preview:', err));
+                  }
+                } catch (err) {
+                  console.error('Failed to open external path preview:', err);
                 }
-                self.openFilePreview(reference.relativePath, originatingSessionId);
-              },
-              hover() {
-                self._linkHovered = true;
-              },
-              leave() {
-                self._linkHovered = false;
-              },
-            });
-          }
+                return;
+              }
+              self.openFilePreview(reference.relativePath, originatingSessionId);
+            },
+            hover() {
+              self._linkHovered = true;
+            },
+            leave() {
+              self._linkHovered = false;
+            },
+          });
+        };
+
+        // Marker-qualified external paths need the attachment resolver rather
+        // than a legacy host-path link, so they claim their exact range first.
+        for (const reference of previewScan.references) {
+          if (reference.absolutePath) addPreviewLink(reference);
         }
 
         cmdPattern.lastIndex = 0;
@@ -2197,6 +2228,12 @@ Object.assign(CodemanApp.prototype, {
         extPattern.lastIndex = 0;
         while ((match = extPattern.exec(lineText)) !== null) {
           addLogLink(match[1], match.index);
+        }
+
+        // Preserve command/Bash/live-log precedence for ordinary workspace
+        // references; only unclaimed document ranges reach the static preview.
+        for (const reference of previewScan.references) {
+          if (!reference.absolutePath) addPreviewLink(reference);
         }
 
         // Providers above run in precedence order, not necessarily display order.

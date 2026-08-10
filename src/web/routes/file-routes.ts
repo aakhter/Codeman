@@ -1821,6 +1821,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.post('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
+    if (session.remote || session.docker) {
+      reply
+        .code(403)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Host-path attachments require a local session'));
+      return;
+    }
     const body = (req.body || {}) as { path?: string };
 
     if (!body.path || typeof body.path !== 'string') {
