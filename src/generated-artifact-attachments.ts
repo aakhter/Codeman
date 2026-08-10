@@ -90,8 +90,11 @@ case "$platform" in
     ;;
   Darwin)
     fd_path=/dev/fd/3
-    path_meta=$(/usr/bin/stat -L -f '%d:%i:%z' "$confirmed_file") || exit 73
-    fd_meta=$(/usr/bin/stat -L -f '%d:%i:%z' "$fd_path") || exit 73
+    # /dev/fd is mounted from devfs on macOS, so st_dev is synthetic and
+    # differs from the target file. The file ID and size still bind the path
+    # to the already-open descriptor.
+    path_meta=$(/usr/bin/stat -L -f '%i:%z' "$confirmed_file") || exit 73
+    fd_meta=$(/usr/bin/stat -L -f '%i:%z' "$fd_path") || exit 73
     ;;
   *) exit 69 ;;
 esac

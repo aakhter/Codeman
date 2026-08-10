@@ -163,6 +163,13 @@ describe('generated artifact attachments', () => {
     expect(args.at(-1)).toMatch(/ stream 52428800$/);
   });
 
+  it('uses a Darwin-safe descriptor identity check without weakening Linux checks', () => {
+    expect(_REMOTE_GENERATED_ARTIFACT_SCRIPT_FOR_TEST).toContain("path_meta=$(/usr/bin/stat -L -c '%d:%i:%s'");
+    expect(_REMOTE_GENERATED_ARTIFACT_SCRIPT_FOR_TEST).toContain("fd_meta=$(/usr/bin/stat -L -c '%d:%i:%s'");
+    expect(_REMOTE_GENERATED_ARTIFACT_SCRIPT_FOR_TEST).toContain("path_meta=$(/usr/bin/stat -L -f '%i:%z'");
+    expect(_REMOTE_GENERATED_ARTIFACT_SCRIPT_FOR_TEST).toContain("fd_meta=$(/usr/bin/stat -L -f '%i:%z'");
+  });
+
   it('keeps the original remote filename as the cache basename', () => {
     const remote: SessionRemote = {
       hostId: 'mac-mini',
