@@ -233,7 +233,15 @@ Object.assign(CodemanApp.prototype, {
     this._noteTerminalUserScroll(lines);
     this.terminal.scrollLines(lines);
     // Scrolling back down to the bottom of the history view resumes the live mirror.
-    if (this._viewMode === 'history' && lines > 0 && this.isTerminalAtBottom()) {
+    // COD-291: before the first history buffer lands, the old zero-scrollback
+    // live frame still reports "at bottom"; a trackpad reversal tail must not
+    // cancel that in-flight load.
+    if (
+      this._viewMode === 'history' &&
+      lines > 0 &&
+      this._historyInitialLoadGen !== this._historyLoadGen &&
+      this.isTerminalAtBottom()
+    ) {
       this._exitHistoryView?.();
     }
     // COD-187 lazy load: reaching the top of a PARTIAL history pulls the full depth.

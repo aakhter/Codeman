@@ -130,6 +130,27 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(appJs.indexOf('_prefetchHistory() {')).toBeGreaterThan(-1);
   });
 
+  it('COD-291: a trackpad reversal cannot exit while the initial history buffer is loading', () => {
+    expect(appJs).toContain('this._historyInitialLoadGen = 0;');
+
+    const enter = appJs.slice(appJs.indexOf('async _enterHistoryView('), appJs.indexOf('async _expandHistoryFull()'));
+    const allocate = enter.indexOf('const gen = ++this._historyLoadGen;');
+    const markPending = enter.indexOf('this._historyInitialLoadGen = gen;');
+    const finishWrite = enter.indexOf('this._finishBufferLoad(owner);');
+    const clearPending = enter.indexOf('this._historyInitialLoadGen = 0;', finishWrite);
+    expect(markPending).toBeGreaterThan(allocate);
+    expect(clearPending).toBeGreaterThan(finishWrite);
+
+    const funnel = termUi.slice(
+      termUi.indexOf('_handleUserScrollIntent(lines) {'),
+      termUi.indexOf('_handleUserScrollIntent(lines) {') + 2200
+    );
+    expect(funnel).toContain('this._historyInitialLoadGen !== this._historyLoadGen');
+
+    const exit = appJs.slice(appJs.indexOf('_exitHistoryView() {'), appJs.indexOf('_showHistoryPill(text) {'));
+    expect(exit).toContain('this._historyInitialLoadGen = 0;');
+  });
+
   it('mirror gate covers claude/codex/gemini; the legacy _isTuiSession gate stays codex/gemini-only', () => {
     const mirror = appJs.slice(
       appJs.indexOf('_isMirrorSession(sessionId) {'),
