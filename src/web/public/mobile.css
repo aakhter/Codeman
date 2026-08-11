@@ -209,13 +209,17 @@ html.mobile-init .file-browser-panel {
   }
 
   /* Compact session tabs — .tabs-two-rows override needed to match
-     specificity of .session-tabs.tabs-two-rows in styles.css (0,2,0) */
+     specificity of .session-tabs.tabs-two-rows in styles.css (0,2,0).
+     overscroll-behavior-x keeps a swipe that runs past the last tab inside the
+     strip: chained to the page it becomes the browser's back gesture, which is
+     exactly the swipe someone makes reaching for the rightmost tabs (#257). */
   .session-tabs,
   .session-tabs.tabs-two-rows {
     flex-wrap: nowrap;
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
     scrollbar-width: none;
     max-height: 52px;
     gap: 3px;
@@ -311,24 +315,6 @@ html.mobile-init .file-browser-panel {
 
   .command-palette-item {
     min-height: 56px;
-  }
-
-  .modal-tabs {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    flex-wrap: nowrap;
-  }
-
-  .modal-tabs::-webkit-scrollbar {
-    display: none;
-  }
-
-  .modal-tab-btn {
-    padding: 0.4rem 0.75rem;
-    font-size: 0.7rem;
-    white-space: nowrap;
-    flex-shrink: 0;
   }
 
   /* Settings grid stays 2-col on tablet but tighter */
@@ -644,6 +630,13 @@ html.mobile-init .file-browser-panel {
     display: none !important;
   }
 
+  /* Read My Mind 🧠 header button: never in the phone header; the phone
+     surface is the keyboard-accessory 🧠 key (same `readMyMindEnabled` gate,
+     see keyboard-accessory.js + the rmm-enabled rules in styles.css). */
+  .btn-icon-header.btn-readmymind {
+    display: none !important;
+  }
+
   /* The big labeled Admin Panel button is desktop-only (admin-gated, revealed by
      admin-ui.js). On phones admins still reach user management via App Settings →
      Users, so the cramped header stays minimal. */
@@ -751,6 +744,7 @@ html.mobile-init .file-browser-panel {
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
     scrollbar-width: none;
     max-height: 36px;
     gap: 2px;
@@ -786,6 +780,13 @@ html.mobile-init .file-browser-panel {
     width: 9px;
     height: 9px;
     box-shadow: 0 0 8px 2px color-mix(in srgb, var(--green) 55%, transparent) !important;
+  }
+
+  /* No orbiting ring on phone tabs (styles.css draws one on desktop/tablet):
+     the dot is already enlarged to 9px with a glow here, and a 15px ring in a
+     32px tab would sit on top of the tab name. The glow is the phone's tell. */
+  .session-tab .tab-status.busy::after {
+    display: none;
   }
 
   /* Truncate tab names more aggressively on mobile */
@@ -1273,6 +1274,18 @@ html.mobile-init .file-browser-panel {
     color: #ffd54f;
   }
 
+  /* Armed one-shot Ctrl (shell bar, issue #262). Phone palette is hardcoded in
+     this block, so the state needs its own entry here. Three classes beat the
+     plain .accessory-btn rules; the light-skin rule at the bottom of this file
+     is higher still at (0,3,1) and is excluded by hand there, not outranked. */
+  .accessory-btn.accessory-btn-ctrl.armed {
+    background: #2563eb;
+    border-color: rgba(59, 130, 246, 0.9);
+    color: #fff;
+    font-weight: 700;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.45);
+  }
+
   .accessory-btn:active {
     background: #3a3a3a;
   }
@@ -1408,6 +1421,35 @@ html.mobile-init .file-browser-panel {
     border-radius: 12px;
     margin: 1rem;
     width: calc(100% - 2rem);
+  }
+
+  /* Read My Mind: a small dialog (mirrors modal-sm), not a full-screen
+     takeover — it opens over the keyboard from the accessory 🧠 key and
+     should read as a quick suggestion sheet. Not modal-sm itself because
+     that caps desktop width at 340px; this modal wants 560px there. */
+  .modal-content.readmymind-modal {
+    height: auto;
+    max-height: 85vh;
+    border-radius: 12px;
+    margin: 1rem;
+    width: calc(100% - 2rem);
+  }
+  /* Four footer buttons on a narrow phone: let them wrap instead of clipping,
+     and give buttons + alternate rows finger-sized targets. The flex row
+     itself comes from the base rule in styles.css. */
+  .readmymind-modal .modal-footer {
+    flex-wrap: wrap;
+  }
+  .readmymind-modal .modal-footer .btn-toolbar {
+    flex: 1 1 auto;
+    justify-content: center;
+    min-height: 38px;
+  }
+  .readmymind-alt {
+    min-height: 38px;
+  }
+  .readmymind-steer-input {
+    min-height: 38px;
   }
 
   /* Modal safe area padding - all sides for full-screen modals */
@@ -2167,45 +2209,8 @@ html.mobile-init .file-browser-panel {
 
   /* ---- Settings Modal: Mobile Optimizations ---- */
 
-  /* Scrollable tabs row - prevent overflow on small screens */
-  .modal-tabs {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    gap: 0.25rem;
-    padding: 0 0.75rem 0.5rem 0.75rem;
-    flex-wrap: nowrap;
-  }
-
-  .modal-tabs::-webkit-scrollbar {
-    display: none;
-  }
-
-  .modal-tab-btn {
-    padding: 0.35rem 0.6rem;
-    font-size: 0.65rem;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
   /* ---- Case Modal: Mobile Touch Optimizations ---- */
 
-  /* Larger tab buttons for case modal - easy to tap */
-  #createCaseModal .modal-tabs {
-    gap: 0.5rem;
-    padding: 0.5rem 1rem 0.75rem;
-  }
-
-  #createCaseModal .modal-tab-btn {
-    flex: 1;
-    min-height: 44px;
-    padding: 0.6rem 1rem;
-    font-size: 0.8rem;
-    font-weight: 500;
-    border-radius: 8px;
-    justify-content: center;
-    text-align: center;
-  }
 
   /* Touch-friendly form inputs in case modal */
   #createCaseModal .form-row {
@@ -3054,7 +3059,13 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   color: var(--text);
 }
 
-html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-voice-mobile, .btn-settings-mobile, .btn-toolbar.btn-shell, .toolbar .btn-case-add, .accessory-btn) {
+/* `.accessory-btn:not(.armed)` on purpose: this selector is (0,3,1) — `:is()`
+   takes the specificity of its most specific argument, and `.btn-toolbar
+   .btn-shell` is two classes — so it OUTRANKS the (0,3,0) armed-Ctrl rules in
+   both stylesheets and repainted the armed modifier back to a resting button on
+   all four light skins. Excluding the state here fixes phone and tablet at once;
+   adding a class to the armed rules would only have moved the tie. */
+html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-voice-mobile, .btn-settings-mobile, .btn-toolbar.btn-shell, .toolbar .btn-case-add, .accessory-btn:not(.armed)) {
   background: var(--control-bg);
   border-color: var(--control-border);
   color: var(--text-dim);
@@ -3286,5 +3297,413 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   .offline-overlay-btn {
     width: 100%;
     padding: 0.65rem 1rem;
+  }
+}
+
+/* ============================================================================
+   App Settings, compact layout (<= 860px)
+
+   Same single scrolling document as the desktop rail layout; only the
+   navigation changes. The rail collapses to its search field and #appSettingsJump
+   takes over as the sticky "where am I / jump elsewhere" control, so a phone
+   spends its vertical budget on settings instead of on chrome.
+
+   Groups render as one inset rounded list with hairline dividers rather than a
+   stack of separate cards: at 390px the per-card borders were most of the pixels.
+   ============================================================================ */
+@media (max-width: 860px) {
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .modal-content.modal-lg {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    max-height: 100%;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  /* Rail keeps only its search field, laid out as a bar */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail {
+    flex-direction: row;
+    align-items: center;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+    padding: 10px 14px;
+    overflow: visible;
+    flex-shrink: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-items,
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-foot {
+    display: none;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-search {
+    margin: 0;
+    flex: 1;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-search input {
+    padding: 9px 10px 9px 30px;
+    border-radius: 10px;
+  }
+
+  /* Save moves into the header; the bottom action bar would cost 60px */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-save {
+    display: inline-flex;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-foot {
+    display: none;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-doc {
+    padding: 0 14px 34px;
+    flex: 1;
+  }
+
+  /* ── jump control ──────────────────────────────────────────────────── */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin: 10px 0 2px;
+    padding: 10px 12px;
+    border-radius: 11px;
+    font: inherit;
+    font-size: 0.82rem;
+    color: var(--text);
+    background: rgba(var(--accent-rgb), 0.13);
+    border: 1px solid rgba(var(--accent-rgb), 0.3);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    cursor: pointer;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-ico {
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-label {
+    font-weight: 580;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-chev {
+    margin-left: auto;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: transform 0.18s;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump[aria-expanded='true'] .set-jump-chev {
+    transform: rotate(180deg);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-veil {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 8;
+    background: rgba(4, 8, 13, 0.62);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-menu {
+    display: none;
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    z-index: 9;
+    padding: 7px;
+    border-radius: 16px;
+    /* Opaque on purpose: --floating-bg is translucent and the settings rows
+       behind the menu bleed through it. */
+    background: var(--bg-card);
+    border: 1px solid var(--control-border);
+    box-shadow: var(--elevated-shadow);
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+
+  #appSettingsModal.jump-open .set-jump-veil,
+  #appSettingsModal.jump-open .set-jump-menu {
+    display: block;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    width: 100%;
+    padding: 11px 12px;
+    border: 0;
+    border-radius: 11px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 0.82rem;
+    text-align: left;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-row svg {
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-row .set-jump-count {
+    margin-left: auto;
+    font-size: 0.62rem;
+    color: var(--text-muted);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-row.active {
+    background: rgba(var(--accent-rgb), 0.14);
+    color: var(--text);
+    font-weight: 570;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-row.active svg {
+    color: var(--accent);
+  }
+
+  /* ── sections step down: the jump pill already names the current one ── */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section {
+    padding-top: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section + .set-section {
+    border-top: 0;
+    margin-top: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head {
+    gap: 7px;
+    margin: 18px 0 2px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head svg {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    width: 12px;
+    height: 12px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head h2 {
+    font-size: 0.6rem;
+    font-weight: 640;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, var(--border), transparent);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-blurb {
+    display: none;
+  }
+
+  /* ── live layout preview ───────────────────────────────────────────── */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview {
+    margin-bottom: 12px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-stage {
+    min-height: 62px;
+  }
+
+  /* ── inset grouped list ────────────────────────────────────────────── */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group {
+    margin-top: 14px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group + .set-group {
+    margin-top: 16px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-head {
+    margin-bottom: 7px;
+    padding: 0 3px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-hint {
+    padding: 0 3px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body {
+    gap: 0;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 13px;
+    overflow: hidden;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > .set-row {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 12px 13px;
+    gap: 12px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > .set-row + .set-row {
+    border-top: 1px solid rgba(255, 255, 255, 0.055);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > .set-chips,
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > .set-modelgrid,
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > .set-minigrid,
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > #appSettingsShortcutsList {
+    padding: 12px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body > .event-type-grid {
+    padding: 12px;
+    margin: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-label {
+    font-size: 0.84rem;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-desc {
+    font-size: 0.69rem;
+    max-width: none;
+  }
+
+  /* Fields go full width under their label instead of fighting for the row */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row.has-field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 9px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row.has-field .set-select,
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row.has-field .set-input {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    box-sizing: border-box;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-actions-wide {
+    width: 100%;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-actions-wide .set-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-num {
+    width: 76px;
+  }
+
+  /* Bigger touch targets for the toggles and chips */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .switch-sm {
+    width: 40px;
+    height: 24px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .switch-sm .slider:before {
+    height: 18px;
+    width: 18px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .switch-sm input:checked + .slider:before {
+    transform: translateX(16px);
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip {
+    font-size: 0.78rem;
+    padding: 9px 14px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-modelgrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-minigrid {
+    grid-template-columns: 1fr;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mini .set-select {
+    width: 148px;
+  }
+
+  /* One scrollable line beats a ragged two-row wrap for 7 effort levels */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment::-webkit-scrollbar {
+    display: none;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment button {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+  }
+}
+
+/* ============================================================================
+   Session Options, compact layout (<= 860px)
+
+   App Settings collapses its rail and hands navigation to the sticky
+   #appSettingsJump pill. Session Options has no such pill (and no search), so
+   its rail stays put and becomes a horizontal, scrollable strip — which is
+   what its tab bar was before the two modals started sharing a surface.
+   ============================================================================ */
+@media (max-width: 860px) {
+  :is(#sessionOptionsModal, #createCaseModal) .set-rail {
+    padding: 8px 10px;
+  }
+
+  :is(#sessionOptionsModal, #createCaseModal) .set-rail-items {
+    display: flex;
+    flex-direction: row;
+    flex: 1;
+    min-width: 0;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  :is(#sessionOptionsModal, #createCaseModal) .set-rail-items::-webkit-scrollbar {
+    display: none;
+  }
+
+  :is(#sessionOptionsModal, #createCaseModal) .set-rail-item {
+    white-space: nowrap;
+    padding: 8px 12px;
+  }
+
+  /* The active marker is a left bar in the vertical rail; horizontally that
+     reads as a stray tick, so the strip uses a filled pill instead. */
+  :is(#sessionOptionsModal, #createCaseModal) .set-rail-item.active::before {
+    display: none;
+  }
+
+  :is(#sessionOptionsModal, #createCaseModal) .set-rail-item.active {
+    background: rgba(var(--accent-rgb), 0.13);
   }
 }

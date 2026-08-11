@@ -854,6 +854,283 @@ describe('Virtual Keyboard', () => {
       expect(state.sentInputs).toEqual([]);
     });
 
+    it('collapses a terminal readback without focusing the hidden textarea', async () => {
+      const point = await page.evaluate(async () => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-readback-tap-test';
+        app.sessions.set('mobile-readback-tap-test', {
+          id: 'mobile-readback-tap-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+        app.terminal.reset();
+        await new Promise<void>((resolve) =>
+          app.terminal.write('Agent readback\r\n  tap to collapse\r\n\r\n› ask', resolve)
+        );
+        app.terminal.focus();
+
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const rect = screen?.getBoundingClientRect();
+        if (!rect || !cell?.width || !cell?.height) return null;
+        return {
+          x: rect.left + cell.width * 2,
+          y: rect.top + cell.height / 2,
+        };
+      });
+      expect(point).not.toBeNull();
+
+      await page.touchscreen.tap(point!.x, point!.y);
+
+      const state = await page.evaluate(() => ({
+        activeClass: document.activeElement?.className,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(state.activeClass).not.toContain('xterm-helper-textarea');
+      expect(state.sentInputs).toHaveLength(1);
+      expect(state.sentInputs[0]).toMatch(/^\x1b\[<0;\d+;1M\x1b\[<0;\d+;1m$/);
+    });
+
+    it('keeps the hidden keyboard input focused after an inert Claude transcript tap', async () => {
+      const point = await page.evaluate(async () => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-claude-transcript-tap-test';
+        app.sessions.set('mobile-claude-transcript-tap-test', {
+          id: 'mobile-claude-transcript-tap-test',
+          mode: 'claude',
+          cliVersion: '2.1.220',
+          status: 'working',
+        });
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+        app.terminal.reset();
+        await new Promise<void>((resolve) =>
+          app.terminal.write(
+            'Transcript row one\r\nTranscript row two\r\nTranscript row three\r\nTranscript row four\r\nTranscript row five\r\nTranscript row six\r\nTranscript row seven\r\nTranscript row eight\r\nTranscript row nine\r\nTranscript row ten\r\n\r\n❯ ',
+            resolve
+          )
+        );
+        app.terminal.focus();
+
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const rect = screen?.getBoundingClientRect();
+        if (!screen || !rect || !cell?.width || !cell?.height) return null;
+        const cursorRow = app.terminal.buffer.active.cursorY;
+        const transcriptRow = Math.max(1, Math.floor(cursorRow / 2));
+        const x = rect.left + cell.width * 2;
+        const y = rect.top + cell.height * (transcriptRow + 0.5);
+        return {
+          x,
+          y,
+          intent: app._classifyMobileTerminalTap(x, y),
+          activeClass: document.activeElement?.className,
+        };
+      });
+      expect(point).toEqual(
+        expect.objectContaining({
+          intent: 'content',
+          activeClass: expect.stringContaining('xterm-helper-textarea'),
+        })
+      );
+
+      await page.touchscreen.tap(point!.x, point!.y);
+
+      const activeClass = await page.evaluate(() => document.activeElement?.className);
+      expect(activeClass).toContain('xterm-helper-textarea');
+    });
+
+    it('prevents Claude subagent status taps from opening the hidden keyboard input', async () => {
+      const point = await page.evaluate(async () => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-claude-subagent-tap-test';
+        app.sessions.set('mobile-claude-subagent-tap-test', {
+          id: 'mobile-claude-subagent-tap-test',
+          mode: 'claude',
+          cliVersion: '2.1.220',
+          status: 'working',
+        });
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        app.hideWelcome();
+        app.terminal.reset();
+        const statusRow = Math.max(0, app.terminal.rows - 2);
+        await new Promise<void>((resolve) =>
+          app.terminal.write(
+            `${'\r\n'.repeat(statusRow)}• Working (1m 50s • esc to interrupt) · 1 background teammate`,
+            resolve
+          )
+        );
+        app.terminal.focus();
+
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const rect = screen?.getBoundingClientRect();
+        if (!screen || !rect || !cell?.width || !cell?.height) return null;
+        const cursorRow = app.terminal.buffer.active.cursorY;
+        const x = rect.left + cell.width * 2;
+        const y = rect.top + cell.height * (cursorRow + 0.5);
+        return {
+          x,
+          y,
+          intent: app._classifyMobileTerminalTap(x, y),
+          cursorRow,
+          screenBottom: rect.bottom,
+        };
+      });
+      expect(point).toEqual(
+        expect.objectContaining({
+          intent: 'content',
+        })
+      );
+
+      const dispatch = await page.evaluate(({ x, y }) => {
+        const target = document.querySelector('#terminalContainer .xterm-screen');
+        if (!(target instanceof Element)) {
+          return { prevented: false, insideTerminal: false, targetClass: null };
+        }
+        const touch = new Touch({
+          identifier: 3,
+          target,
+          clientX: x,
+          clientY: y,
+          pageX: x,
+          pageY: y,
+        });
+        const allowed = target.dispatchEvent(
+          new TouchEvent('touchstart', {
+            touches: [touch],
+            changedTouches: [touch],
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        target.dispatchEvent(
+          new TouchEvent('touchend', {
+            touches: [],
+            changedTouches: [touch],
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        return {
+          prevented: !allowed,
+          insideTerminal: Boolean(target.closest('#terminalContainer')),
+          targetClass: target.className,
+        };
+      }, point!);
+
+      const state = await page.evaluate(() => ({
+        activeClass: document.activeElement?.className,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(dispatch).toEqual(
+        expect.objectContaining({
+          prevented: true,
+          insideTerminal: true,
+        })
+      );
+      expect(state.activeClass).not.toContain('xterm-helper-textarea');
+      expect(state.sentInputs).toHaveLength(1);
+    });
+
+    it('focuses the terminal helper textarea when the visible prompt is tapped', async () => {
+      const point = await page.evaluate(async () => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-focus-visible-input-test';
+        app.sessions.set('mobile-focus-visible-input-test', {
+          id: 'mobile-focus-visible-input-test',
+          mode: 'codex',
+          status: 'running',
+        });
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+        app.terminal.reset();
+        await new Promise<void>((resolve) =>
+          app.terminal.write('Agent readback\r\n  tap to collapse\r\n\r\n› ask', resolve)
+        );
+        (document.activeElement as HTMLElement | null)?.blur?.();
+
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const rect = screen?.getBoundingClientRect();
+        if (!rect || !cell?.width || !cell?.height) return null;
+        return {
+          x: rect.left + cell.width * 2,
+          y: rect.top + cell.height * (app.terminal.buffer.active.cursorY + 0.5),
+        };
+      });
+      expect(point).not.toBeNull();
+
+      await page.touchscreen.tap(point!.x, point!.y);
+
+      const state = await page.evaluate(() => ({
+        activeClass: document.activeElement?.className,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(state.activeClass).toContain('xterm-helper-textarea');
+      expect(state.sentInputs).toEqual([]);
+    });
+
+    it('focuses the live Claude cursor when a redraw omits the prompt glyph', async () => {
+      const point = await page.evaluate(async () => {
+        window.__sentInputs = [];
+        app.activeSessionId = 'mobile-focus-promptless-claude-test';
+        app.sessions.set('mobile-focus-promptless-claude-test', {
+          id: 'mobile-focus-promptless-claude-test',
+          mode: 'claude',
+          status: 'running',
+        });
+        app._sendInputAsync = (_sessionId: string, input: string) => {
+          window.__sentInputs.push(input);
+        };
+        app.hideWelcome();
+        app.terminal.reset();
+        await new Promise<void>((resolve) => app.terminal.write('Claude response\r\nready for input', resolve));
+        (document.activeElement as HTMLElement | null)?.blur?.();
+
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const rect = screen?.getBoundingClientRect();
+        if (!rect || !cell?.width || !cell?.height) return null;
+        return {
+          x: rect.left + cell.width * 2,
+          y: rect.top + cell.height * (app.terminal.buffer.active.cursorY + 0.5),
+        };
+      });
+      expect(point).not.toBeNull();
+
+      await page.touchscreen.tap(point!.x, point!.y);
+
+      const state = await page.evaluate(() => ({
+        activeClass: document.activeElement?.className,
+        sentInputs: window.__sentInputs,
+      }));
+      expect(state.activeClass).toContain('xterm-helper-textarea');
+      expect(state.sentInputs).toEqual([]);
+    });
+
     it('keeps terminal touch drag available for scrollback with the visible textarea enabled', async () => {
       const calls = await page.evaluate(async () => {
         app.activeSessionId = 'mobile-touch-scroll-test';
@@ -1164,6 +1441,183 @@ describe('Virtual Keyboard', () => {
       );
       const settled = await page.evaluate(() => app._predictiveEcho?.state.outstanding);
       expect(settled).toBe(0);
+    });
+  });
+
+  // ── Shell keyboard bar + one-shot Ctrl (issue #262) ───────────────────
+  //
+  // The bar swaps layouts per session mode, and Ctrl is a one-shot modifier
+  // applied to the next character typed on the SYSTEM keyboard, which on a
+  // phone reaches the app as xterm onData text, not a key event. These drive
+  // the real xterm instance with page.keyboard.type() and assert on what would
+  // go out on the wire (_sendInputAsync), not on DOM state alone.
+
+  describe('Shell keyboard bar', () => {
+    let context: BrowserContext;
+    let page: Page;
+
+    beforeAll(async () => {
+      ({ context, page } = await createDevicePage(REPRESENTATIVE_DEVICES['standard-phone'], BASE_URL, 'chromium'));
+      await page.waitForTimeout(WAIT.PAGE_SETTLE);
+    });
+
+    afterAll(async () => {
+      await context.close();
+    });
+
+    /** Point the app at a fake session of `mode` and re-resolve the bar. */
+    async function activateSession(mode: string, id = 'kb-shell-1'): Promise<void> {
+      await page.evaluate(`(function (id, mode) {
+        app.sessions.set(id, { id, name: id, status: 'idle', mode, workingDir: '/tmp' });
+        app.activeSessionId = id;
+        KeyboardAccessoryBar.show();
+        KeyboardAccessoryBar.refreshForActiveSession();
+      })('${id}', '${mode}')`);
+    }
+
+    /** Capture what the terminal would send, while typing on the real keyboard. */
+    async function typeAndCapture(text: string): Promise<string[]> {
+      await page.evaluate(`(function () {
+        window.__sent = [];
+        if (!app.__origSend) app.__origSend = app._sendInputAsync;
+        app._sendInputAsync = function (sessionId, input) { window.__sent.push(input); };
+        app.terminal.focus();
+      })()`);
+      await page.keyboard.type(text);
+      await page.waitForTimeout(200);
+      const sent = (await page.evaluate(`window.__sent`)) as string[];
+      await page.evaluate(`(function () { app._sendInputAsync = app.__origSend; })()`);
+      return sent;
+    }
+
+    async function tapCtrl(): Promise<void> {
+      await page.evaluate(`document.querySelector('.keyboard-accessory-bar [data-action="ctrl"]').click()`);
+    }
+
+    it('shows the terminal bar for shell sessions', async () => {
+      await activateSession('shell');
+      const actions = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.keyboard-accessory-bar [data-action]')).map(
+          (button) => (button as HTMLElement).dataset.action
+        )
+      );
+      expect(actions).toEqual([
+        'ctrl',
+        'esc',
+        'tab',
+        'scroll-up',
+        'scroll-down',
+        'arrow-left',
+        'arrow-right',
+        'paste',
+        'dismiss',
+      ]);
+    });
+
+    it('keeps the command bar for agent sessions', async () => {
+      await activateSession('claude', 'kb-agent-1');
+      const actions = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.keyboard-accessory-bar [data-action]')).map(
+          (button) => (button as HTMLElement).dataset.action
+        )
+      );
+      expect(actions).toContain('init');
+      expect(actions).not.toContain('ctrl');
+    });
+
+    it('sends Ctrl+C for the next typed character and disarms', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(true);
+
+      expect(await typeAndCapture('c')).toEqual(['\x03']);
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(false);
+      // The very next keystroke is a literal c again.
+      expect(await typeAndCapture('c')).toEqual(['c']);
+    });
+
+    it('sends Ctrl+D for the next typed character', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      expect(await typeAndCapture('d')).toEqual(['\x04']);
+    });
+
+    it('survives a terminal tap while the pane has mouse reporting on', async () => {
+      // A shell session keeps the narrow scrollback strip, so mouse DECSETs
+      // reach the browser: run vim or htop and xterm starts reporting taps
+      // through onData as \x1b[<0;31;23M. Those arrive on the same channel as
+      // typed characters, so a hook that treats every chunk as "the next
+      // keystroke" spends Ctrl on a tap and the button looks dead. Verified
+      // against a real shell session before this guard existed.
+      await activateSession('shell');
+      await page.evaluate(`app.terminal.write('\\x1b[?1000h\\x1b[?1006h')`);
+      await page.waitForTimeout(150);
+
+      await tapCtrl();
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(true);
+
+      const box = await page.locator('.xterm-screen').first().boundingBox();
+      await page.touchscreen.tap(box!.x + box!.width / 2, box!.y + box!.height / 2);
+      await page.waitForTimeout(200);
+
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(true);
+      expect(await typeAndCapture('c')).toEqual(['\x03']);
+
+      await page.evaluate(`app.terminal.write('\\x1b[?1000l\\x1b[?1006l')`);
+    });
+
+    it('cancels on a second tap of Ctrl', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      await tapCtrl();
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(false);
+      expect(await typeAndCapture('c')).toEqual(['c']);
+    });
+
+    it('shows the armed state and keeps the terminal focused', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      const state = await page.evaluate(() => {
+        const button = document.querySelector('.keyboard-accessory-bar [data-action="ctrl"]') as HTMLElement;
+        const style = getComputedStyle(button);
+        return {
+          armed: button.classList.contains('armed'),
+          pressed: button.getAttribute('aria-pressed'),
+          background: style.backgroundColor,
+          focusedTerminal: document.activeElement === (app.terminal as { textarea: Element }).textarea,
+        };
+      });
+      expect(state.armed).toBe(true);
+      expect(state.pressed).toBe('true');
+      // Armed styling must actually land (three-class rule beating the skin
+      // overrides): an invisible modifier is worse than none.
+      expect(state.background).not.toBe('rgba(0, 0, 0, 0)');
+      expect(state.focusedTerminal).toBe(true);
+    });
+
+    it('drops the armed modifier when switching sessions', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(true);
+
+      await activateSession('shell', 'kb-shell-2');
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(false);
+      expect(await typeAndCapture('c')).toEqual(['c']);
+    });
+
+    it('drops the armed modifier when the keyboard is dismissed', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      await page.evaluate(`KeyboardAccessoryBar.hide()`);
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(false);
+    });
+
+    it('spends the modifier on another accessory key instead of the next keystroke', async () => {
+      await activateSession('shell');
+      await tapCtrl();
+      await page.evaluate(`document.querySelector('.keyboard-accessory-bar [data-action="esc"]').click()`);
+      expect(await page.evaluate(`KeyboardAccessoryBar.isCtrlArmed()`)).toBe(false);
+      expect(await typeAndCapture('c')).toEqual(['c']);
     });
   });
 

@@ -525,23 +525,56 @@ Object.assign(CodemanApp.prototype, {
         const date = new Date(s.lastModified);
         const timeStr = date.toLocaleDateString('en', { month: 'short', day: 'numeric' })
           + ' ' + date.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: false });
-        const shortDir = s.workingDir.replace(/^\/home\/[^/]+\//, '~/');
+        // Shared helper, not a local regex: the copy that used to live here
+        // matched `/home/<user>/` only, so on macOS (`/Users/<user>/`) nothing was
+        // stripped and every row spent its first ~19 characters on an identical
+        // prefix — with the tail ellipsized, all rows rendered as
+        // `/Users/jordanryan/co…` and became indistinguishable (#273).
+        const shortDir = this._shortenHomePath(s.workingDir);
+        // Lead with the folder that identifies the row; the parent path trails and
+        // is what gets truncated. Truncation must never eat the identity.
+        const lastSlash = shortDir.lastIndexOf('/');
+        const leafName = lastSlash === -1 ? shortDir : shortDir.slice(lastSlash + 1);
+        // `<repo>/.claude/worktrees` in the parent path is pure noise once the pill
+        // says which worktree it is — drop it so the repo stays visible instead.
+        const parentDir = (lastSlash === -1 ? '' : shortDir.slice(0, lastSlash)).replace(/\/\.claude\/worktrees$/, '');
 
         const btn = document.createElement('button');
-        btn.className = 'run-mode-option';
+        btn.className = 'run-mode-option run-mode-hist-row';
         btn.title = s.workingDir;
         btn.dataset.sessionId = s.sessionId;
         btn.dataset.workingDir = s.workingDir;
 
-        const dirSpan = document.createElement('span');
-        dirSpan.className = 'hist-dir';
-        dirSpan.textContent = shortDir;
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'hist-name';
+        nameSpan.textContent = leafName;
+
+        const parts = [nameSpan];
+
+        // Worktree pill, same data the session rows use (#266). A worktree's
+        // directory basename is often just the worktree name, so without this two
+        // worktrees of one repo still read alike.
+        const wt = this._worktreeLabel ? this._worktreeLabel(s) : '';
+        if (wt) {
+          const wtSpan = document.createElement('span');
+          wtSpan.className = 'hist-wt';
+          wtSpan.textContent = wt;
+          parts.push(wtSpan);
+        }
+
+        if (parentDir) {
+          const dirSpan = document.createElement('span');
+          dirSpan.className = 'hist-dir';
+          dirSpan.textContent = parentDir;
+          parts.push(dirSpan);
+        }
 
         const metaSpan = document.createElement('span');
         metaSpan.className = 'hist-meta';
         metaSpan.textContent = timeStr;
+        parts.push(metaSpan);
 
-        btn.append(dirSpan, metaSpan);
+        btn.append(...parts);
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           this.resumeHistorySession(s.sessionId, s.workingDir, s.name);
@@ -1359,8 +1392,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('presetDescriptionHint').textContent = '';
 
     // Hide Ralph/Todo tab and Respawn tab for external CLI sessions (not supported)
-    const ralphTabBtn = document.querySelector('#sessionOptionsModal .modal-tab-btn[data-tab="ralph"]');
-    const respawnTabBtn = document.querySelector('#sessionOptionsModal .modal-tab-btn[data-tab="respawn"]');
+    const ralphTabBtn = document.querySelector('#sessionOptionsModal .set-rail-item[data-tab="ralph"]');
+    const respawnTabBtn = document.querySelector('#sessionOptionsModal .set-rail-item[data-tab="respawn"]');
     if (isExternalCli) {
       if (ralphTabBtn) ralphTabBtn.style.display = 'none';
       if (respawnTabBtn) respawnTabBtn.style.display = 'none';
@@ -1384,6 +1417,18 @@ Object.assign(CodemanApp.prototype, {
     }
 
     const modal = document.getElementById('sessionOptionsModal');
+
+    // Chips mirror their checkbox onto the label, the same way App Settings does
+    // (settings-ui.js: _syncSettingsChips). Registered once per page, never per
+    // open, or a long-lived tab accumulates one listener per visit.
+    if (modal.dataset.chipsReady !== '1') {
+      modal.dataset.chipsReady = '1';
+      modal.addEventListener('change', e => {
+        if (e.target?.closest?.('.set-chip')) this._syncSettingsChips();
+      });
+    }
+    this._syncSettingsChips();
+
     modal.classList.add('active');
 
     // Activate focus trap
@@ -1613,17 +1658,31 @@ Object.assign(CodemanApp.prototype, {
   // Session Options Modal Tabs
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * Show one section of the Session Options modal.
+   *
+   * The chrome is the shared `set-*` settings surface, but unlike App Settings
+   * (whose rail is a table of contents over one scrolling document) this rail
+   * is a real switcher: exactly one `.set-section` is visible and the rest
+   * carry `.hidden`. Summary owns its own scroller and Respawn is long, so
+   * stacking them into a single document would bury both.
+   */
   switchOptionsTab(tabName) {
-    // Toggle active class on tab buttons
-    document.querySelectorAll('#sessionOptionsModal .modal-tab-btn').forEach(btn => {
+    // Toggle active class on rail entries
+    document.querySelectorAll('#sessionOptionsModal .set-rail-item').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tab === tabName);
     });
 
-    // Toggle hidden class on tab content
+    // Toggle hidden class on the sections
     document.getElementById('respawn-tab').classList.toggle('hidden', tabName !== 'respawn');
     document.getElementById('context-tab').classList.toggle('hidden', tabName !== 'context');
     document.getElementById('ralph-tab').classList.toggle('hidden', tabName !== 'ralph');
     document.getElementById('summary-tab').classList.toggle('hidden', tabName !== 'summary');
+
+    // A switched-to section starts at its own top, not at the scroll offset the
+    // previous one was left at.
+    const doc = document.getElementById('sessionOptionsDoc');
+    if (doc) doc.scrollTop = 0;
 
     // Load run summary data when switching to summary tab
     if (tabName === 'summary' && this.editingSessionId) {
@@ -2179,6 +2238,11 @@ Object.assign(CodemanApp.prototype, {
     if (remoteHostSavedSelect) remoteHostSavedSelect.value = '';
     const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
     if (remoteDiscoverSection) remoteDiscoverSection.classList.remove('hidden');
+    this._resetCloneForm();
+    // Cloning needs git ON THE SERVER: hide the whole tab rather than let it fail
+    // at submit. Unknown reads as available (isCliAvailable's rule).
+    const cloneTabBtn = document.getElementById('caseCloneTabBtn');
+    if (cloneTabBtn) cloneTabBtn.style.display = this.isCliAvailable('git') ? '' : 'none';
     this.closeCaseDirectoryBrowser();
   },
 
@@ -2202,7 +2266,7 @@ Object.assign(CodemanApp.prototype, {
     this.switchCaseModalTab('case-create');
     // Wire up tab buttons
     const modal = document.getElementById('createCaseModal');
-    modal.querySelectorAll('.modal-tabs .modal-tab-btn').forEach(btn => {
+    modal.querySelectorAll('.set-rail-item').forEach(btn => {
       btn.onclick = () => this.switchCaseModalTab(btn.dataset.tab);
     });
     // Scroll-into-view on focus for mobile keyboard visibility
@@ -2226,13 +2290,16 @@ Object.assign(CodemanApp.prototype, {
     const modal = document.getElementById('createCaseModal');
     const isEditing = Boolean(this.caseEditOriginalName);
     // Toggle active class on tab buttons
-    modal.querySelectorAll('.modal-tabs .modal-tab-btn').forEach(btn => {
+    modal.querySelectorAll('.set-rail-item').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tab === tabName);
     });
-    // Toggle hidden class on tab content
-    modal.querySelectorAll('.modal-tab-content').forEach(content => {
+    // Toggle hidden class on the panels
+    modal.querySelectorAll('.set-section').forEach(content => {
       content.classList.toggle('hidden', content.id !== tabName);
     });
+    // A switched-to panel starts at its own top.
+    const doc = document.getElementById('createCaseDoc');
+    if (doc) doc.scrollTop = 0;
     // Update submit button (hide for manage tab)
     const submitBtn = document.getElementById('caseModalSubmit');
     if (tabName === 'case-manage') {
@@ -2245,15 +2312,19 @@ Object.assign(CodemanApp.prototype, {
         ? 'Save'
         : tabName === 'case-create'
           ? 'Create'
-          : tabName === 'case-remote'
-            ? 'Link Remote'
-            : tabName === 'case-docker'
-              ? 'Link Docker'
-              : 'Link';
+          : tabName === 'case-clone'
+            ? 'Clone'
+            : tabName === 'case-remote'
+              ? 'Link Remote'
+              : tabName === 'case-docker'
+                ? 'Link Docker'
+                : 'Link';
     }
     // Focus appropriate input
     if (tabName === 'case-create') {
       document.getElementById('newCaseName').focus();
+    } else if (tabName === 'case-clone') {
+      document.getElementById('cloneRepoUrl').focus();
     } else if (tabName === 'case-link') {
       document.getElementById('linkCaseName').focus();
     } else if (tabName === 'case-remote') {
@@ -2273,12 +2344,23 @@ Object.assign(CodemanApp.prototype, {
     const btn = document.getElementById('caseModalSubmit');
     const originalText = btn.textContent;
     btn.classList.add('loading');
-    btn.textContent = this.caseEditOriginalName ? 'Saving...' : this.caseModalTab === 'case-create' ? 'Creating...' : 'Linking...';
+    btn.textContent = this.caseEditOriginalName
+      ? 'Saving...'
+      : this.caseModalTab === 'case-create'
+        ? 'Creating...'
+        : this.caseModalTab === 'case-clone'
+          ? 'Cloning...'
+          : 'Linking...';
+    // A clone holds this request open for minutes; without disabling the button a
+    // second click fires a second clone (the loser then fails on ALREADY_EXISTS).
+    btn.disabled = true;
     try {
       if (this.caseEditOriginalName) {
         await this.updateCase();
       } else if (this.caseModalTab === 'case-create') {
         await this.createCase();
+      } else if (this.caseModalTab === 'case-clone') {
+        await this.cloneCase();
       } else if (this.caseModalTab === 'case-remote') {
         await this.linkRemoteCase();
       } else if (this.caseModalTab === 'case-docker') {
@@ -2288,6 +2370,7 @@ Object.assign(CodemanApp.prototype, {
       }
     } finally {
       btn.classList.remove('loading');
+      btn.disabled = false;
       btn.textContent = originalText;
     }
   },
@@ -2426,6 +2509,231 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       console.error('Failed to link case:', err);
       this.showToast('Failed to link case: ' + err.message, 'error');
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Clone Repo tab (issue #236)
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Clear the Clone tab and drop any preflight state. Called from showCreateCaseModal(). */
+  _resetCloneForm() {
+    const set = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value;
+    };
+    set('cloneRepoUrl', '');
+    set('cloneCaseName', '');
+    set('cloneRepoRef', '');
+    const shallow = document.getElementById('cloneShallow');
+    if (shallow) shallow.checked = false;
+    const start = document.getElementById('cloneStartSession');
+    if (start) start.checked = false;
+    const refs = document.getElementById('cloneRepoRefOptions');
+    if (refs) refs.replaceChildren();
+    const refHint = document.getElementById('cloneRefHint');
+    if (refHint) refHint.textContent = "Leave blank for the repository's default branch.";
+    this._cloneNameEdited = false;
+    this._clonePreflight = null;
+    clearTimeout(this._clonePreflightTimer);
+    this._clonePreflightAbort?.abort();
+    this._clonePreflightAbort = null;
+    this._setCloneStatus('Public repositories only: Codeman clones with no credentials.', '');
+    // The brain picker mirrors the toolbar run menu: never offer a CLI this box
+    // lacks (#201's rule), and preselect whatever Run is currently pointing at.
+    const brain = document.getElementById('cloneCaseBrain');
+    if (brain) {
+      for (const option of brain.options) {
+        const cli = option.dataset.cli;
+        option.hidden = !!cli && !this.isCliAvailable(cli);
+      }
+      const current = this.runMode || 'claude';
+      brain.value = [...brain.options].some((o) => o.value === current && !o.hidden) ? current : '';
+    }
+  },
+
+  _setCloneStatus(message, kind) {
+    const el = document.getElementById('cloneRepoStatus');
+    if (!el) return;
+    el.textContent = message;
+    el.className = `form-hint clone-status${kind ? ' clone-status-' + kind : ''}`;
+  },
+
+  /**
+   * Best-effort repo name out of a URL, for filling the case name as you type.
+   *
+   * Deliberately a THIN mirror of `suggestCaseNameFromRepo` (git-clone.ts) rather
+   * than a second URL parser: it only ever suggests a name, and the server's parse
+   * is the authority on whether the URL is cloneable at all. The preflight reply
+   * overwrites whatever this guessed.
+   */
+  _repoNameFromUrl(url) {
+    const trimmed = (url || '').trim().replace(/\/+$/, '');
+    if (!trimmed) return '';
+    const segment = trimmed
+      .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
+      .replace(/^[^@/]*@/, '')
+      .split(/[/:]/)
+      .filter(Boolean)
+      .pop() || '';
+    return segment
+      .replace(/\.git$/i, '')
+      .replace(/[^a-zA-Z0-9_-]+/g, '-')
+      .replace(/-{2,}/g, '-')
+      .replace(/^[-_]+|[-_]+$/g, '')
+      .slice(0, 64);
+  },
+
+  onCloneNameEdited() {
+    // Once the user types a name, autofill stops fighting them.
+    this._cloneNameEdited = !!document.getElementById('cloneCaseName')?.value.trim();
+  },
+
+  onCloneUrlInput() {
+    const url = document.getElementById('cloneRepoUrl')?.value.trim() || '';
+    const nameInput = document.getElementById('cloneCaseName');
+    if (nameInput && !this._cloneNameEdited) nameInput.value = this._repoNameFromUrl(url);
+    clearTimeout(this._clonePreflightTimer);
+    this._clonePreflightAbort?.abort();
+    this._clonePreflightAbort = null;
+    if (!url) {
+      this._setCloneStatus('Public repositories only: Codeman clones with no credentials.', '');
+      return;
+    }
+    if (this.isCliAvailable('git') === false) {
+      this._setCloneStatus('git is not installed on the Codeman host, so cloning is unavailable.', 'err');
+      return;
+    }
+    this._setCloneStatus('Checking the repository…', '');
+    this._clonePreflightTimer = setTimeout(() => this._runClonePreflight(url), 450);
+  },
+
+  /**
+   * Ask the server to parse the URL and (if it survives) query the remote, so the
+   * user learns "private repo" / "typo" / "3 tags" BEFORE waiting on a clone.
+   * Stale replies are dropped: only the response for the URL currently in the
+   * field is allowed to paint.
+   */
+  async _runClonePreflight(url) {
+    const controller = new AbortController();
+    this._clonePreflightAbort = controller;
+    try {
+      const res = await fetch('/api/cases/clone-preflight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repository: url }),
+        signal: controller.signal,
+      });
+      const env = await res.json();
+      if (document.getElementById('cloneRepoUrl')?.value.trim() !== url) return;
+      if (!env.success) {
+        this._setCloneStatus(env.error || 'Could not check that URL.', 'err');
+        return;
+      }
+      this._applyClonePreflight(env.data, url);
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      this._setCloneStatus('Could not reach Codeman to check that URL.', 'err');
+    }
+  },
+
+  _applyClonePreflight(data, url) {
+    this._clonePreflight = data;
+    const parse = data?.parse;
+    if (!parse?.cloneable) {
+      this._setCloneStatus(parse?.message || 'That URL cannot be cloned.', 'err');
+      return;
+    }
+    // The server's suggestion wins over the local guess (it is the same function
+    // the case name is validated against), but never over a name the user typed.
+    const nameInput = document.getElementById('cloneCaseName');
+    if (nameInput && !this._cloneNameEdited && parse.suggestedName) nameInput.value = parse.suggestedName;
+
+    const where = parse.owner ? `${parse.provider} ${parse.owner}/${parse.repo}` : `${parse.provider} ${parse.repo}`;
+    if (data.gitAvailable === false) {
+      this._setCloneStatus(`${where}: git is not installed on the Codeman host.`, 'err');
+      return;
+    }
+    const remote = data.remote;
+    if (remote && !remote.reachable) {
+      this._setCloneStatus(`${where}: ${remote.failure?.message || 'the remote could not be read.'}`, 'err');
+      return;
+    }
+    const refHint = document.getElementById('cloneRefHint');
+    const options = document.getElementById('cloneRepoRefOptions');
+    if (remote && options) {
+      options.replaceChildren();
+      for (const ref of [...(remote.branches || []), ...(remote.tags || [])]) {
+        const option = document.createElement('option');
+        option.value = ref;
+        options.appendChild(option);
+      }
+      if (refHint) {
+        const counts = `${remote.branches?.length || 0} branches, ${remote.tags?.length || 0} tags`;
+        refHint.textContent = remote.defaultBranch
+          ? `Blank clones the default branch (${remote.defaultBranch}). ${counts} available.`
+          : `Blank clones the default branch. ${counts} available.`;
+      }
+    }
+    const warning = parse.warnings?.[0];
+    this._setCloneStatus(warning ? `${where}: ${warning}` : `${where}: ready to clone.`, warning ? 'warn' : 'ok');
+  },
+
+  async cloneCase() {
+    const url = document.getElementById('cloneRepoUrl').value.trim();
+    const name = document.getElementById('cloneCaseName').value.trim();
+    const ref = document.getElementById('cloneRepoRef').value.trim();
+    const shallow = !!document.getElementById('cloneShallow')?.checked;
+    const brain = document.getElementById('cloneCaseBrain')?.value || '';
+    const startSession = !!document.getElementById('cloneStartSession')?.checked;
+
+    if (!url) {
+      this.showToast('Please enter a repository URL', 'error');
+      return;
+    }
+    if (!name) {
+      this.showToast('Please enter a case name', 'error');
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+      return;
+    }
+
+    this._setCloneStatus(`Cloning ${url}… this can take a while for a large repository.`, '');
+    try {
+      const res = await fetch('/api/cases/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Zod `.optional()` rejects an explicit null, and JSON.stringify keeps one
+        // on the wire — omit the empty fields instead of sending null.
+        body: JSON.stringify({ name, repository: url, ...(ref ? { ref } : {}), ...(shallow ? { shallow: true } : {}) }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        this._setCloneStatus(data.error || 'Clone failed.', 'err');
+        this.showToast(data.error || 'Failed to clone repository', 'error');
+        return;
+      }
+
+      // Setting the brain before the tab closes means the Run button is already
+      // pointing at the chosen CLI, whether or not a session starts now.
+      if (brain) this.setRunMode(brain);
+      this.closeCreateCaseModal();
+      await this.loadQuickStartCases(name);
+      await this.saveLastUsedCase(name);
+      this.showToast(`Cloned into case "${name}"`, 'success');
+      for (const warning of data.data?.warnings || []) this.showToast(warning, 'warning');
+      if (startSession) await this.run();
+    } catch (err) {
+      // A proxy/idle timeout can kill the request while git keeps going: the
+      // case:created broadcast is what makes the case show up regardless.
+      console.error('Failed to clone repository:', err);
+      this._setCloneStatus(
+        `Lost the connection while cloning: ${err.message}. If git finishes, the case still appears in the list.`,
+        'warn'
+      );
+      this.showToast('Clone request interrupted — watch the case list', 'error');
     }
   },
 
@@ -3201,7 +3509,7 @@ Object.assign(CodemanApp.prototype, {
     if (title) title.textContent = 'Edit Case';
 
     const modal = document.getElementById('createCaseModal');
-    modal.querySelectorAll('.modal-tabs .modal-tab-btn').forEach(btn => {
+    modal.querySelectorAll('.set-rail-item').forEach(btn => {
       btn.onclick = () => this.switchCaseModalTab(btn.dataset.tab);
     });
 
@@ -3347,7 +3655,9 @@ Object.assign(CodemanApp.prototype, {
     cases.forEach((c, idx) => {
       const isFirst = idx === 0;
       const isLast = idx === cases.length - 1;
-      const pathDisplay = c.path ? c.path.replace(/^\/Users\/[^/]+/, '~') : '';
+      // Was `/Users/<user>` only, the mirror image of the Run menu's bug: every
+      // case path on a Linux host rendered in full, unabbreviated.
+      const pathDisplay = c.path ? this._shortenHomePath(c.path) : '';
       const locationBadge = c.location === 'remote' ? '<span class="case-location-badge">remote</span>' : '';
       html += `
         <div class="case-manage-item" data-case="${escapeHtml(c.name)}">

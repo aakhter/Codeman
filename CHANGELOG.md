@@ -1,5 +1,106 @@
 # aicodeman
 
+## 1.16.4
+
+### Patch Changes
+
+- **Voice dictation through your Claude Code login (no API key).** The mic button can now transcribe using this machine's existing Claude Code subscription, via the same speech-to-text service the CLI's own `/voice` mode uses. Off by default (`claudeVoiceEnabled`, synced): turning it on spends the server owner's Claude subscription on transcription for anyone who can reach the UI. The OAuth token never leaves the server process, credentials are read-only (Codeman never refreshes them, which would rotate the refresh token out from under the CLI), streams are capped at 5 minutes and 4 concurrent, and the WebSocket carries the same allowed-Host + same-site Origin guard as the terminal socket. A new Speech engine picker (Auto / Claude / Deepgram / Browser) sits alongside the existing Deepgram and Web Speech paths, which are untouched.
+
+  **One settings surface.** Session Options and Add Case now use the same `set-*` chrome as App Settings instead of the old modal-tab chrome, with a left rail, grouped rows, per-group device/synced scope badges and a search box. App Settings leads with version + update; the Session Options rail stays a real switcher (one section at a time) because Summary and Respawn are each long enough to bury the other. Collapsed Add Case blocks gained a disclosure chevron.
+
+  **Read My Mind: rethink steer note (phase 3 part 2).** Rethink now carries an optional free-text note ("no, I meant the mobile bug") sent as `steer`, the highest-authority signal the predictor gets. It stays in the field across re-runs, clears on each open, and the empty-result copy points at it. The modal footer moved to the styled `btn-toolbar` convention; the bare `btn btn-*` classes it shipped with match no CSS in this codebase and rendered as unstyled browser buttons.
+
+  **Mobile terminal taps no longer fight the keyboard.** Taps on TUI-owned rows (expandable readbacks, tool results, decision menus, the working/status row) now act on the CLI without popping the keyboard, while a tap on inert transcript text keeps the keyboard reachable. Rows are told apart by the affordance the CLI prints (`ctrl+r to expand`, `tap to collapse`, `esc to interrupt`) rather than by row titles, which vary per CLI and per version. A tap with the viewport scrolled up sends no mouse report at all but still restores focus, so the keyboard is reachable after every tab switch. Thanks to @Lint111.
+
+  **Path labels abbreviate `$HOME` on both platforms.** The "show `~/project`" rule had three implementations and two were platform-specific in opposite directions: the Run menu's matched `/home/<user>/` only, so on macOS every Recent Sessions row spent its first ~19 characters on an identical `/Users/<user>/` prefix and ellipsized away the tail that identifies it (#273); the case-manage list's matched `/Users/<user>` only, so no Linux case path was ever abbreviated. Both now route through one helper, with a static guard against a fourth copy appearing.
+
+  **Run menu Recent Sessions rows are legible.** Rows now read as folder, worktree pill, dimmed parent path, timestamp, with only the parent path allowed to shrink, so truncation can never hide which project (or which worktree) a row refers to. `<repo>/.claude/worktrees` is dropped from the parent path as noise. Thanks to @jordan8037310. Follow-up fix: the widened menu was not actually usable by its rows, since `.run-mode-history` is a block scroller and its `<button>` rows stayed shrink-to-fit at ~250px inside a full-window-width menu; rows now fill the menu and it is capped at the 760px one full row costs.
+
+  **Desktop home screen** no longer clips, and shows full tab names.
+
+## 1.16.3
+
+### Patch Changes
+
+- Session rows that name their worktree, a shell keyboard bar for phones, App Settings as one scrolling document, and the Read My Mind modal on phones.
+  - **#265 / #266**: a past session whose directory no longer exists used to report
+    `$HOME` as its working directory, because history rows reconstructed a path by
+    stat-walking the filesystem and fell back to `$HOME` when nothing resolved.
+    Deleting a worktree is the normal end of its life, so every past worktree
+    session collapsed onto the same indistinguishable row. History rows now read
+    the literal `cwd` Claude Code stamps on its own records, out of buffers the
+    scanner had already loaded, so it costs no extra file reads and survives the
+    directory being removed. Sessions that ran in a worktree also carry a
+    `⑂ name · branch` pill in the Resume list and the Cmd+K session manager, and
+    both are searchable by worktree name and branch. Measured on a real install:
+    the cwd was recoverable for 215 of 216 transcripts, 212 of them from the first
+    16KB, and 28 rows that previously read `$HOME` now report their real path.
+    Reported and implemented by @jordan8037310.
+  - **#262**: a shell session now gets its own mobile accessory bar
+    (`Ctrl · Esc · Tab · ↑ · ↓ · ← · → · Paste · ⌄`), with Ctrl as a one-shot
+    modifier: tap it, and the next character goes out as its control byte. That
+    puts Ctrl+C/D/Z/R/L/A/E/W/U/K on a nine-button bar without a button per chord.
+    The modifier is applied on the CJK input path too, where the textarea owns the
+    keyboard and an armed modifier could previously neither fire nor be spent, so
+    it survived until a later keystroke and turned that one into a control byte.
+    Agent sessions keep the existing bar unchanged. Proposed by @DodgyBadger.
+  - **#257**: with several tabs open on a phone, the rightmost ones could not be
+    reached. Selecting a tab never scrolled the strip, and every ambient rebuild
+    reset `scrollLeft` to 0, so a strip the user had just swiped snapped back a
+    moment later. Reported by @DodgyBadger.
+  - **App Settings** is now a left rail acting as a table of contents over one
+    scrolling document instead of 8 tabs that wrapped onto two rows. Nine sections,
+    all mounted at once, so find-in-page works across the whole thing. The model
+    controls stop contradicting each other: the base model lives on cards and "1M
+    context window" is a switch that composes onto it, retiring the old pair of
+    settings that each claimed precedence over the other.
+  - **Read My Mind** suggestions beyond the first are no longer discarded. The
+    alternates render as tappable rows with their kind badge, tapping one swaps it
+    into the editable field without losing an in-progress edit, and Rethink now
+    records the whole shown set as rejected. The modal is sized for phones and
+    reachable from the phone keyboard bar.
+  - The desktop welcome screen carries the open tabs as a rail docked to the left
+    edge, with created and last-active stamps refreshed in place.
+  - The README now documents cloning a GitHub repository straight into a case
+    (**Add Case → Clone Repo**), which shipped in 1.16.2 but was only described in
+    the architecture docs.
+
+- 5d42f64: Home screen: make the past-conversation list usable, and let search find past sessions.
+  - **#260**: "Resume Conversation" showed 4 rows and then dumped every remaining
+    one into a fixed 240px box, with no ordering or filtering. The list now opens
+    with 10 rows, "Show more"/"Show less" grows and shrinks the box itself (the
+    height cap is class-driven instead of fixed), and the header carries a filter
+    box (matches name, folder, `#case` label and the conversation's prompts), a
+    sort control (recent / name A–Z / folder A–Z, pinned rows still first) and a
+    shown-of-total count. Filtering implies expansion, so every match is visible.
+  - **#261**: the search box could not match a past project by folder name: its
+    session corpus was the live in-memory map, while past sessions come from
+    `/api/sessions/unified`. Search now also harvests a bounded snapshot of that
+    unified list, refreshed OUTSIDE the request path (published by
+    `/api/sessions/unified`, plus a fire-and-forget rebuild when stale), so the
+    search path keeps its no-filesystem-reads property. Results for a closed
+    session resume the conversation instead of trying to select a tab that no
+    longer exists, and are badged `RESUME`. In multi-user mode the snapshot is
+    re-scoped per row on read, matching what `/api/sessions/unified` exposes.
+
+  Reported by @jordan8037310.
+
+## 1.16.2
+
+### Patch Changes
+
+- Clone a Git repository straight into a case, predict the prompt you were about to type, and point a session at a separate Claude account.
+
+  **Clone Repo (#251, proposed by @DodgyBadger in #236)**: Add Case gains a **Clone Repo** tab that clones a repository into `codeman-cases/<name>` and registers it as a normal local case. A live verdict under the URL field answers, while you type, whether the URL is cloneable without credentials, what its default branch is, and which branches and tags exist (`POST /api/cases/clone-preflight` behind `git ls-remote --symref`). The case name fills in from the parsed repo, refs come from the remote as a datalist, shallow clone is optional, and a Brain picker (installed CLIs only) points the Run button at the agent you chose. Starting a session stays opt-in, and the tab hides itself when the server has no `git`.
+
+  **Every settings writer now refuses to write through a symlink (from the #251 review, affects existing cases too)**: case contents can be foreign, and a repository can ship `.claude` or `.claude/settings.local.json` as a symlink pointing anywhere on this machine. Since `writeFile` follows links, a scaffold write could land outside the case, up to and including replacing your own `~/.claude/settings.json`. All seven writers that touch a case's `settings.local.json` (`writeHooksConfig`, `ensureCodemanHooks`, `refreshStaleCodemanHooks`, `updateCaseModel`, `updateCaseEnvVars`, `stripCaseEnvKeys`, `applyStatusLineConfig`) now go through one `withSafeSettingsWrite()` gate that runs the symlink check inside the per-path settings lock. A refusal is a warning rather than a throw, so hooks degrade to output-based idle detection instead of failing the operation. If you have deliberately symlinked a case's `.claude` or its `settings.local.json`, Codeman will now decline to write there and say so; replace the link with a real file or directory to get hooks, model and statusLine writes back.
+
+  The clone endpoint (`POST /api/cases/clone`) is synchronous by design: no job store, no polling, bounded by `GIT_CLONE_TIMEOUT_MS` (default 5 minutes). Security decisions live in a pure half of `src/git-clone.ts` so each is unit-testable without spawning anything: `<name>::<payload>` transports are refused as a family (any of them dispatches to a `git-remote-<name>` helper, which turns a clone into arbitrary command execution), a leading `-` is refused and `--` precedes every operand, argv arrays are used rather than a shell, URLs carrying credentials are refused, and non-interactive means more than `GIT_TERMINAL_PROMPT=0` (empty `GIT_ASKPASS`/`SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE=never`, empty `DISPLAY`, `GCM_INTERACTIVE=never`, `ssh -oBatchMode=yes`), since with the request held open any one of those left open is a hang instead of an error. Timeouts signal the process group, because `git clone` fans out into `git-remote-https`/`index-pack` and SIGTERM to the parent alone can leave the fetch running. Repository contents beat scaffolding: an existing `CLAUDE.md` is kept, hooks merge into whatever `.claude/settings.local.json` the repo shipped, and a repo shipping its own `.claude/settings*` is reported back as a warning, because those hooks run locally as soon as a session starts.
+
+  **Read My Mind phase 2 (#256)**: phase 1 (1.16.1) gave each case an intent profile; this turns it into the feature as pitched. Press 🧠 on a Claude session and Codeman predicts the prompt you were about to type, from your stated goals, your recent prompts in your own voice, the last assistant reply, tool activity, git state, away context, sibling sessions, and any dialog the session is waiting on. The context assembler is pure and budgeted with trust tiers, so user-stated intent outranks observed content and terminal output alone can never justify a suggestion. One shot at opus (`readMyMindModel` overrides), a strict JSON contract, and 1 to 3 suggestions typed continue / verify / redirect. The modal keeps the suggestion editable: Send, Insert (drops it on the composer without Enter), Rethink (rejections feed back into the next attempt), Dismiss. Nothing is ever auto-sent, the click is the boundary. Opt-in via App Settings, Panels (synced, default OFF), desktop header only. Agents get the same verb through the Codeman skill (`POST /api/sessions/:id/readmymind`).
+
+  **Per-session `CLAUDE_CONFIG_DIR` (#255, designed and specified by @jordan8037310)**: `schemas.ts` gains an exact-key tier (`ALLOWED_ENV_KEYS`) beside `ALLOWED_ENV_PREFIXES`, admitting `CLAUDE_CONFIG_DIR` so a case can run on a separate Claude subscription (client-billed accounts). Exact match only: other `CLAUDE_*` keys and near misses like `CLAUDE_CONFIG_DIR_EXTRA` stay rejected, blocked keys stay blocked. The key survives `getEnvOverridesForPersist()` because it is a path rather than a secret, and dropping it would silently switch a rebuilt session back to the default account after a reboot. Caveat worth knowing: a relocated config dir writes transcripts outside `~/.claude/projects`, so the response viewer, subagent windows, ultracode panel and Read My Mind go blind for that session unless `projects` is symlinked back into the shared tree.
+
 ## 1.16.1
 
 ### Patch Changes

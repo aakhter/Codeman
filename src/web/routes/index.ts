@@ -26,4 +26,5 @@ export { registerSourceRoutes } from './source-routes.js';
 export { registerMeRoutes } from './me-routes.js';
 export { registerAdminRoutes } from './admin-routes.js';
 export { registerWsRoutes } from './ws-routes.js';
+export { registerVoiceRoutes } from './voice-routes.js';
 export { registerWebviewRoutes, tryWebviewRefererFallback } from './webview-routes.js';

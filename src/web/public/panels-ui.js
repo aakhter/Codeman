@@ -933,6 +933,11 @@ Object.assign(CodemanApp.prototype, {
           claudeSessionId: s.claudeSessionId,
           pinned: s.pinned,
           pinnedAt: s.pinnedAt,
+          // Must be carried explicitly: this record is a re-projection, so any
+          // field omitted here silently vanishes from the Cmd+K list (#266).
+          gitBranch: s.gitBranch,
+          worktreeName: s.worktreeName,
+          worktreeRepo: s.worktreeRepo,
         };
         const isLive = !!this.sessions?.has?.(s.sessionId);
         if (isLive) {

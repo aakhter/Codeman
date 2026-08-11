@@ -27,6 +27,12 @@ function makeElement() {
     dataset: {},
     classList: { add() {}, remove() {}, toggle() {} },
     querySelectorAll: () => [],
+    // The settings rail (upstream) queries the modal for its entries and wires a
+    // delegated click handler on them; without these the gate test dies inside
+    // openAppSettings before it can assert on the checkpoint default.
+    querySelector: () => null,
+    addEventListener() {},
+    scrollTo() {},
   };
 }
 
@@ -39,10 +45,17 @@ describe('App Settings authoritative checkpoint gate', () => {
     const context = vm.createContext({
       CodemanApp,
       localStorage,
+      // settings-ui.js reads this as a global; in the browser voice-input.js (loaded
+      // earlier in the classic-script order) defines it. This vm loads settings-ui.js
+      // alone, so it has to be supplied or openAppSettings throws a ReferenceError.
+      DEFAULT_VOICE_KEYTERMS: 'Codeman, tmux, Claude',
       MobileDetection: { getDeviceType: () => 'desktop', isHandheldDevice: () => false, isTouchDevice: () => false },
       VoiceInput: {
         _getDeepgramConfig: () => ({}),
         getActiveProviderName: () => 'Web Speech',
+        // Added upstream (voice provider status rows); openAppSettings calls them.
+        refreshClaudeStatus: () => Promise.resolve(),
+        refreshDeepgramStatus: () => Promise.resolve(),
       },
       KeyboardAccessoryBar: { setMode() {} },
       FocusTrap: class {
@@ -54,6 +67,8 @@ describe('App Settings authoritative checkpoint gate', () => {
           return (elements[id] ??= makeElement());
         },
         querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
       },
       window: {},
       console,

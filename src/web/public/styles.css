@@ -1377,11 +1377,31 @@ html[data-line-anim="packet"] .connection-line.line-enter {
 
 .session-tab .tab-status.idle { background: var(--green); }
 .session-tab .tab-status.busy {
+  position: relative;
   background: var(--green);
   animation: pulse 1.5s infinite;
   /* Performance: GPU acceleration for animation */
   will-change: opacity;
 }
+/* Orbiting ring on a WORKING tab: the same `tab-load-spin` circle the desktop
+   home rail (.home-sessions-dot--working) and the phone overview
+   (.mobile-overview-dot--working) draw, so "working" reads identically on every
+   surface. Pseudo-element on purpose — the skin block below sets
+   `box-shadow: none` on .tab-status.busy to keep tab dots halo-free, and it
+   outranks any plain class rule here; a ring drawn with a border is untouched by
+   that and keeps the tabs quiet while still showing motion. Absolutely
+   positioned, so it never widens the tab or shifts the label. */
+.session-tab .tab-status.busy::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border: 1.5px solid color-mix(in srgb, var(--green) 25%, transparent);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: tab-load-spin 0.7s linear infinite;
+  pointer-events: none;
+}
+
 .session-tab .tab-status.error { background: var(--red); }
 .session-tab .tab-status.ended { background: var(--text-muted); opacity: 0.5; }
 
@@ -3359,10 +3379,28 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   pointer-events: auto;
 }
 
+/* The overlay fills <main> and never scrolls, so the content has to fit INSIDE
+   it rather than run off both ends: on a 1470x840 window the title sat above the
+   top edge and "Or click Run to start" below the bottom one, with no way to
+   reach either. Bounding the column at the overlay height and letting the one
+   genuinely elastic block absorb the difference (the Resume list, which already
+   scrolls internally) keeps the whole screen visible at any window height.
+   `overflow-y: auto` is the backstop for a window too short even for that. */
 .welcome-content {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  max-height: 100%;
+  overflow-y: auto;
   text-align: center;
   max-width: 520px;
   padding: 2rem;
+}
+
+/* Only the history block gives ground; the title, buttons and hint keep their
+   natural height, so nothing above or below the list ever gets squeezed. */
+.welcome-content > * {
+  flex-shrink: 0;
 }
 
 .welcome-title {
@@ -3580,11 +3618,26 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   text-align: center;
 }
 
-/* History sessions panel (welcome overlay) */
+/* History sessions panel (welcome overlay).
+   The one shrinkable child of .welcome-content: a flex column so the list below
+   can give up height on a short window instead of pushing the hint off-screen.
+   It ships `style="display:none"` and loadHistorySessions() clears that to '',
+   which is what lets this `display: flex` take effect. */
 .history-sessions {
+  display: flex;
+  flex-direction: column;
+  /* Beats the blanket `.welcome-content > * { flex-shrink: 0 }` above (same
+     specificity, later in the file): this block is the one that gives ground. */
+  flex-shrink: 1;
+  min-height: 0;
   margin-top: 1.5rem;
   width: 100%;
   max-width: 560px;
+}
+
+.history-sessions > .search-panel,
+.history-sessions > .history-header {
+  flex-shrink: 0;
 }
 
 /* ── COD-9 cross-session search (folded into the welcome history panel) ── */
@@ -3794,6 +3847,13 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: #95e6b3;
 }
 
+/* Past session (issue #261): activating the card resumes the conversation
+   rather than switching to a tab, so the badge says so. */
+.search-badge-past {
+  background: rgba(245, 158, 11, 0.18);
+  color: #f0c073;
+}
+
 .search-result-name {
   flex: 1;
   min-width: 0;
@@ -3843,22 +3903,102 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   .search-select {
     max-width: 7rem;
   }
+  /* Tablet/narrow: let the controls drop under the title instead of squeezing it. */
+  .history-header {
+    flex-wrap: wrap;
+  }
+  .history-controls {
+    width: 100%;
+    margin-left: 0;
+  }
+  .history-filter {
+    flex: 1;
+    width: auto;
+  }
+}
+
+/* Title row for the past-session list: label + count on the left, filter and
+   sort on the right (issue #260, 35 conversations in a 4-row box). */
+.history-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
 }
 
 .history-title {
   font-size: 0.85rem;
   color: var(--text-dim);
-  margin-bottom: 0.5rem;
   font-weight: 500;
   text-align: left;
 }
 
+.history-count {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  white-space: nowrap;
+}
+
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.history-filter {
+  width: 8.5rem;
+  box-sizing: border-box;
+  padding: 0.28rem 0.5rem;
+  font-size: 0.68rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color var(--transition-smooth), background var(--transition-smooth);
+}
+
+.history-filter:focus {
+  border-color: rgba(59, 130, 246, 0.5);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.history-filter::placeholder {
+  color: var(--text-dim);
+}
+
+.history-sort {
+  max-width: 7.5rem;
+}
+
+.history-empty {
+  padding: 0.75rem 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+/* Collapsed height fits the initial page of rows; expanding the LIST has to
+   expand the BOX too, or "Show more" just deepens a scroll well. */
 .history-list {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  max-height: 240px;
+  /* Shrinks (never grows) inside the bounded welcome column: on a short window
+     it gives up height so the hint below stays on screen, and scrolls the rows
+     it can no longer show. `min-height: 0` is what lets it go below content. */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(42vh, 360px);
   overflow-y: auto;
+}
+
+.history-list.expanded {
+  max-height: min(64vh, 660px);
 }
 
 .history-item {
@@ -4006,6 +4146,17 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 .history-item-badge.mode-shell {
   background: rgba(234, 179, 8, 0.2);
   color: var(--yellow);
+}
+
+/* Worktree pill (#266). Tinted off the accent so it reads as metadata rather
+   than status — LIVE is the only badge that should look like state. */
+.history-item-badge-worktree {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .history-item-meta {
@@ -4208,6 +4359,31 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 .welcome-ralph-link:hover {
   color: var(--accent);
+}
+
+/* Short window (a 1470x840 laptop is the common case): the column above now
+   fits by construction, but only by taking the space out of the Resume list,
+   which collapses to two rows. Buying ~80px back from the vertical rhythm keeps
+   the list usable without touching how the screen looks on a tall display.
+   Phones are covered by mobile.css, which loads later and compacts harder. */
+@media (max-height: 900px) {
+  .welcome-content {
+    padding: 1.25rem 2rem;
+  }
+
+  .welcome-title {
+    font-size: 2.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .welcome-actions {
+    margin-top: 1.25rem;
+    margin-bottom: 1rem;
+  }
+
+  .history-sessions {
+    margin-top: 1rem;
+  }
 }
 
 /* Bottom Toolbar */
@@ -4462,6 +4638,28 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   max-width: 250px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
 }
+
+/* Above phone width the menu becomes a full-width drawer across the bottom of the
+   window. The 250px cap above was sized for a `~/<dir>/<repo>` row, which assumed
+   the home prefix had been abbreviated — it never was on macOS, so real rows blew
+   straight through it and ellipsized into `/Users/<user>/co…`, identical on every
+   line. Width is what buys room for the worktree + branch, so the cap is lifted
+   rather than nudged. Phones keep the compact popover: mobile.css positions this
+   menu itself and a viewport-wide drawer there would cover the composer. */
+@media (min-width: 769px) {
+  .run-mode-menu {
+    /* Bounded, not viewport-wide. `100vw - 24px` spanned the whole window while
+       every row stayed shrink-to-fit at ~250px (see below), so the menu grew by
+       ~1100px of dead space. 760px is what one full row costs: name + worktree
+       pill + parent path + timestamp. */
+    max-width: none;
+    width: min(760px, calc(100vw - 24px));
+  }
+  .run-mode-history {
+    /* More rows are worth showing once each one is legible. */
+    max-height: 320px;
+  }
+}
 .run-mode-menu.active {
   display: flex;
   flex-direction: column;
@@ -4531,6 +4729,37 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
    simply pinned the menu at its max-width. */
 .run-mode-history .run-mode-option {
   max-width: 100%;
+  /* `.run-mode-history` is a block scroller, not a flex container, so these
+     <button> rows are shrink-to-fit and ignore the menu's width. Without this
+     the `flex: 1` + `text-align: right` on `.hist-dir` below have nothing to
+     expand into: the path never right-aligns and widening the menu only adds
+     empty space to its right. */
+  width: 100%;
+}
+/* Recent-session row: identity first, path last.
+   The row reads  <folder>  [⑂ worktree · branch]  <parent path>  <time>
+   with only the parent path allowed to shrink, so truncation can never hide
+   which project (or which worktree) a row refers to. */
+.run-mode-hist-row {
+  align-items: baseline;
+  gap: 8px;
+}
+.run-mode-option .hist-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.run-mode-option .hist-wt {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
 }
 .run-mode-option .hist-dir {
   flex: 1;
@@ -4541,6 +4770,11 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* The parent path is context, not identity — dim it and let it be the part
+     that loses characters first. */
+  color: var(--text-muted);
+  font-size: 0.85em;
+  text-align: right;
 }
 .run-mode-option .hist-meta {
   font-size: 0.85em;
@@ -5727,6 +5961,22 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   font-size: 0.7rem;
 }
 
+/* Clone Repo tab (issue #236): live verdict on the URL being typed. Semantic
+   tokens, so light skins inherit readable variants automatically. */
+.clone-status {
+  min-height: 1.6em;
+  overflow-wrap: anywhere;
+}
+.clone-status-ok {
+  color: var(--green);
+}
+.clone-status-warn {
+  color: var(--yellow);
+}
+.clone-status-err {
+  color: var(--red);
+}
+
 /* Preset selector */
 .preset-selector {
   display: flex;
@@ -6370,11 +6620,6 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   min-height: 0;
 }
 
-/* App Settings packs a 2-column toggle grid; give it room so right-column
-   switches aren't cramped against the edge (other modal-lg modals stay 540). */
-#appSettingsModal .modal-content.modal-lg {
-  max-width: 600px;
-}
 
 /* Mobile Case Picker - Base Styles */
 .mobile-case-picker-sheet {
@@ -7087,40 +7332,6 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 }
 
 /* Modal Tabs */
-.modal-tabs {
-  display: flex;
-  flex-wrap: wrap; /* COD-116: 9 settings tabs overflow narrow modals; wrap so none are clipped/unreachable */
-  gap: 0.5rem;
-  padding: 0 1rem 0.75rem 1rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.modal-tab-btn {
-  padding: 0.5rem 1rem;
-  font-size: 0.8rem;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.modal-tab-btn:hover {
-  background: var(--bg-input);
-  color: var(--text);
-}
-
-.modal-tab-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.modal-tab-content.hidden {
-  display: none !important;
-}
-
 /* Context Tab Settings Grid */
 .context-settings-grid {
   display: flex;
@@ -12553,6 +12764,182 @@ kbd {
   display: none !important;
 }
 
+/* Read My Mind 🧠 header button: opt-in (`readMyMindEnabled`, synced, default
+   OFF), revealed by applyHeaderVisibilitySettings(). Marker-class pattern:
+   the base display rule is !important, so hiding must also be a class. */
+.btn-readmymind {
+  display: inline-flex !important;
+}
+.btn-readmymind.btn-readmymind--hidden {
+  display: none !important;
+}
+.btn-readmymind .readmymind-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* Read My Mind modal: top suggestion in an editable single-line field with the
+   kind badge beside it and the rationale below. */
+.modal-content.readmymind-modal {
+  max-width: 560px;
+}
+.readmymind-loading {
+  padding: 14px 4px;
+  color: var(--text-dim);
+  animation: readmymind-pulse 1.4s ease-in-out infinite;
+}
+@keyframes readmymind-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.readmymind-suggestion-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.readmymind-kind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--control-border);
+  color: var(--text-dim);
+}
+.readmymind-kind-verify {
+  color: var(--warning, #e5c07b);
+}
+.readmymind-kind-redirect {
+  color: var(--accent);
+}
+.readmymind-prompt-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono-font, monospace);
+  font-size: 13px;
+  padding: 8px 10px;
+  background: var(--bg-dark);
+  color: var(--text);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+}
+.readmymind-prompt-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.readmymind-why {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.readmymind-error {
+  padding: 12px 4px;
+  color: var(--text-dim);
+}
+/* Alternate suggestions (the predictor's verify/redirect kinds): tappable rows
+   that swap into the editable field (readmymind-ui.js _rmmSelect). */
+.readmymind-alternates {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.readmymind-alt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  padding: 7px 10px;
+  background: transparent;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+.readmymind-alt:hover,
+.readmymind-alt:focus-visible {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.readmymind-alt-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono-font, monospace);
+}
+/* Rethink steer note: the user's own words about what they actually meant,
+   sent as `steer` on the next re-run (readmymind-ui.js _readMyMindPredict).
+   Dashed border marks it as the optional side channel, distinct from the
+   primary suggestion field above; it solidifies on focus. */
+.readmymind-steer-row {
+  margin-top: 10px;
+}
+.readmymind-steer-input {
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--text);
+  border: 1px dashed var(--control-border);
+  border-radius: 8px;
+}
+.readmymind-steer-input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--bg-dark);
+}
+.readmymind-steer-input::placeholder {
+  color: var(--text-dim);
+}
+/* Footer row: the buttons are btn-toolbar (display: flex, block-level), so
+   without this rule the four of them stack vertically. Mirrors the
+   runSummaryModal footer; the ≤430px block in mobile.css adds wrapping. */
+.readmymind-modal .modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+/* Send keeps the primary accent: the skin block's bare .btn-toolbar rule is
+   (0,2,1) under html:not([data-skin="og"]) and outranks the base
+   .btn-toolbar.btn-primary (0,2,0) — the specificity trap CLAUDE.md documents
+   for mobile.css — so the accent is re-asserted here at (0,4,0). Scoped to
+   this modal on purpose; un-greying every btn-primary on the new skins is a
+   design call, not this feature's. */
+.readmymind-modal .modal-footer .btn-toolbar.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.readmymind-modal .modal-footer .btn-toolbar.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+/* Keyboard-accessory 🧠 key: the phone surface for the same opt-in setting
+   (the header 🧠 button stays phone-hidden in mobile.css). The key ships in
+   BOTH bar templates (keyboard-accessory.js) but stays hidden until the bar
+   carries the marker class: setMode() rebuilds the bar's innerHTML on every
+   layout switch, so the gate must live on the bar element, not on the key.
+   Lives here rather than mobile.css because large touch tablets (>1023px)
+   never load mobile.css but do render the accessory bar. */
+.keyboard-accessory-bar .accessory-btn-rmm {
+  display: none;
+}
+.keyboard-accessory-bar.rmm-enabled .accessory-btn-rmm {
+  display: inline-flex;
+}
+
 .approvals-badge {
   position: absolute;
   top: 2px;
@@ -14124,6 +14511,20 @@ body.touch-device.cjk-input-visible .main {
   background: color-mix(in srgb, var(--yellow) 18%, var(--bg-input));
   border-color: var(--yellow);
   color: var(--yellow);
+}
+
+/* Armed one-shot Ctrl (shell bar, issue #262). Three classes on purpose, to beat
+   the plain .accessory-btn rules. It still cannot outrank the light-skin
+   compatibility rule in mobile.css, which repaints every .accessory-btn at
+   (0,3,1) — `:is()` inherits its most specific argument — so that rule excludes
+   `.armed` by hand. Without the exclusion the modifier looks unarmed on the four
+   light skins, which is worse than having no armed style at all. */
+.accessory-btn.accessory-btn-ctrl.armed {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .accessory-btn:active {
@@ -16240,14 +16641,23 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   Home screen: open tabs in the left gutter (home-sessions.js)
+   Home screen: open tabs docked down the left edge (home-sessions.js)
 
-   The welcome content is 560px wide and centered, so this column lives in dead
+   The welcome content is 560px wide and centered, so this rail lives in dead
    space. It is `position: absolute` precisely so that stays true: the centered
-   content does not move by a pixel whether the column renders or not. That in
+   content does not move by a pixel whether the rail renders or not. That in
    turn is why the width gate below has to exist — in a narrow window there is
    no gutter to sit in, and an absolute box would simply overlap the search
    panel. JS gates on the same 1180px so the two can never disagree.
+
+   It is FLUSH to the left edge and FULL HEIGHT on purpose: a floating, vertically
+   centered card in the middle of the gutter reads as debris, a docked rail with
+   an edge to hang off reads as part of the chrome.
+
+   Everything inside scales off ONE knob — the `font-size` below — because every
+   child sizes in `em`. Widen the window and the whole rail grows with it instead
+   of leaving 12px type stranded on a 2560px display. Do not reintroduce `rem`
+   or fixed px sizes for type/spacing here; that is what breaks the scaling.
 
    The working dot is the phone's, exactly: pulsing green ringed by the very
    same `tab-load-spin` a tab shows while it loads (reused from above, never
@@ -16256,14 +16666,25 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 
 .home-sessions {
   position: absolute;
-  left: 20px;
-  top: 50%;
-  transform: translateY(-50%);
+  left: 0;
+  top: 0;
+  bottom: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  width: 256px;
-  max-height: calc(100% - 3rem);
+  gap: 0.9em;
+  /* Ramps with the viewport, floored so it still clears the centered content at
+     the 1180px gate and capped so it never becomes the main event. The gutter is
+     (100vw - 560px) / 2, so 25vw is the widest ramp that still fits INSIDE it at
+     the gate (295px of 310px) — and it has to be this wide, because a row now
+     carries the full session name and the created/active stamps beside the
+     status pill, none of which may ellipsize. */
+  width: clamp(250px, 25vw, 430px);
+  padding: 1.5em 1.1em;
+  /* Fades out to the right instead of ending on a rule: a hard separator drew a
+     line down the middle of an otherwise open home screen. */
+  background: linear-gradient(90deg, color-mix(in srgb, var(--bg-card) 65%, transparent) 0%, transparent 100%);
+  /* The single scale knob: ~12px at the gate, ~17px on a 2560px display. */
+  font-size: clamp(12.2px, calc(8px + 0.35vw), 17px);
   text-align: left;
   z-index: 1;
 }
@@ -16285,12 +16706,13 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .home-sessions-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 6px;
+  gap: 0.66em;
+  flex-shrink: 0;
+  padding: 0 0.5em;
 }
 
 .home-sessions-title {
-  font-size: 0.66rem;
+  font-size: 0.87em;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -16301,25 +16723,29 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 16px;
-  padding: 0 5px;
+  min-width: 1.5em;
+  height: 1.35em;
+  padding: 0 0.42em;
   border-radius: 999px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text-dim);
-  font-size: 0.6rem;
+  font-size: 0.79em;
   font-weight: 700;
   font-family: monospace;
 }
 
+/* `min-height: 0` is what lets this scroll inside the full-height rail: without
+   it the flex item's auto minimum keeps growing and the overflow never engages. */
 .home-sessions-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0.35em;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 2px 2px 6px;
+  padding: 0.16em 0.16em 0.5em;
 }
 
 .home-sessions-list::-webkit-scrollbar {
@@ -16334,15 +16760,16 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .home-sessions-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 0.66em;
   width: 100%;
-  padding: 7px 9px;
-  border-radius: 9px;
+  padding: 0.6em 0.75em;
+  border-radius: 0.75em;
   background: var(--bg-card);
   border: 1px solid var(--border);
   color: var(--text-dim);
   font-family: inherit;
-  font-size: 0.76rem;
+  font-size: 1em;
   text-align: left;
   cursor: pointer;
   transition: background var(--transition-smooth), border-color var(--transition-smooth), color var(--transition-smooth);
@@ -16362,14 +16789,14 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 15px;
-  height: 15px;
+  width: 1.3em;
+  height: 1.3em;
   flex-shrink: 0;
-  border-radius: 3px;
+  border-radius: 0.25em;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: 0.58rem;
+  font-size: 0.76em;
   font-weight: 700;
   font-family: monospace;
 }
@@ -16377,8 +16804,8 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .home-sessions-dot {
   position: relative;
   flex-shrink: 0;
-  width: 9px;
-  height: 9px;
+  width: 0.75em;
+  height: 0.75em;
   border-radius: 50%;
   background: var(--text-muted);
 }
@@ -16392,8 +16819,13 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   background: var(--yellow);
 }
 
+/* Idle is green, but a MUTED green: still unmistakably "fine", visibly greyer
+   and darker than the vivid green a working session gets, so a glance down the
+   rail separates "running right now" from "sitting there" without reading a
+   word. Mixed toward --text-muted rather than hardcoded, so every skin keeps
+   its own green. */
 .home-sessions-dot--idle {
-  background: var(--green);
+  background: color-mix(in srgb, var(--green) 42%, var(--text-muted));
 }
 
 .home-sessions-dot--done {
@@ -16415,7 +16847,7 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .home-sessions-dot--working::after {
   content: '';
   position: absolute;
-  inset: -4px;
+  inset: -0.34em;
   border: 2px solid color-mix(in srgb, var(--green) 25%, transparent);
   border-top-color: var(--green);
   border-radius: 50%;
@@ -16425,7 +16857,7 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .home-sessions-row-body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0.12em;
   min-width: 0;
   flex: 1;
 }
@@ -16433,47 +16865,103 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .home-sessions-row-title {
   display: flex;
   align-items: center;
-  gap: 5px;
+  flex-wrap: wrap;
+  gap: 0.42em;
   min-width: 0;
   color: var(--text);
   font-weight: 600;
 }
 
+/* The name is the only thing that tells one row from another, so it is shown
+   WHOLE: the status pill moved down to the stamps line to give the body the
+   full width of the rail, and anything still too long wraps onto a second line
+   rather than ellipsizing "w34-claudeman: mindreading" into "w34-claudeman: …". */
 .home-sessions-row-title .session-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .home-sessions-row-sub {
-  font-size: 0.66rem;
+  font-size: 0.87em;
   color: var(--text-muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Age line: when the session was first created and when it last did anything,
+   plus the status pill parked on its right. Both stamps are relative and
+   refreshed in place on a timer (home-sessions.js), never by a re-render — a
+   re-render would restart the row's blink animation. */
+.home-sessions-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  /* Wraps to its own full-width line under the row (the row is `flex-wrap`),
+     so the stamps get the whole width instead of the sliver left beside the
+     status pill and ellipsize away on the narrow end of the rail. */
+  flex: 0 0 100%;
+  min-width: 0;
+  margin-top: -0.2em;
+  font-size: 0.78em;
+  font-family: monospace;
+  color: var(--text-muted);
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.home-sessions-meta-item {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.home-sessions-meta-key {
+  margin-right: 0.35em;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.home-sessions-meta-sep {
+  opacity: 0.45;
+}
+
+/* The freshest signal on the row: while a session is actually doing something,
+   its "active" stamp is the one the eye should land on. */
+.home-sessions-row--working .home-sessions-meta-active {
+  color: var(--green);
+  opacity: 0.95;
 }
 
 .home-sessions-mode {
   flex-shrink: 0;
-  padding: 0 4px;
-  border-radius: 3px;
+  padding: 0 0.35em;
+  border-radius: 0.25em;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: 0.55rem;
+  font-size: 0.72em;
   font-weight: 700;
   font-family: monospace;
   text-transform: uppercase;
 }
 
+/* Lives on the stamps line (see _buildHomeSessionRow): pushed hard right, and
+   never shrinking, so the stamps ellipsize before the status word does. */
+.home-sessions-row-meta .home-sessions-pill {
+  margin-left: auto;
+}
+
 .home-sessions-pill {
   flex-shrink: 0;
-  padding: 2px 6px;
+  padding: 0.2em 0.55em;
   border-radius: 999px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: 0.58rem;
+  font-size: 0.76em;
   font-weight: 700;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -16492,11 +16980,18 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   color: var(--yellow);
 }
 
-.home-sessions-pill--working,
-.home-sessions-pill--idle {
+.home-sessions-pill--working {
   background: color-mix(in srgb, var(--green) 15%, transparent);
   border-color: color-mix(in srgb, var(--green) 40%, transparent);
   color: var(--green);
+}
+
+/* Same muting as the idle dot, one step further: the pill is a block of color,
+   so it reads louder than a 9px dot at the same mix. */
+.home-sessions-pill--idle {
+  background: color-mix(in srgb, var(--green) 7%, transparent);
+  border-color: color-mix(in srgb, var(--green) 18%, var(--border));
+  color: color-mix(in srgb, var(--green) 45%, var(--text-muted));
 }
 
 /* Row accents: same language as the session tabs and the phone overview — red
@@ -16528,9 +17023,1552 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .session-tab .tab-status.busy::after,
   .home-sessions-row,
   .home-sessions-dot,
   .home-sessions-dot::after {
     animation: none !important;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Settings surface (#appSettingsModal + #sessionOptionsModal + #createCaseModal)
+
+   The `set-*` language: a left rail, a document of grouped rows, each row text
+   on the left and its control pinned right. All three modals use it, hence the
+   `:is()` scope — which keeps the old id specificity exactly (an `:is()` list
+   takes the specificity of its most specific argument, and all three are ids),
+   so nothing downstream of this block shifts in the cascade.
+
+   They differ in what the rail DOES, and only there:
+     • #appSettingsModal — a TABLE OF CONTENTS over ONE scrolling document.
+       Every section stays mounted, the rail follows the scroll, find-in-page
+       reaches all of it.
+     • #sessionOptionsModal — a real switcher: one `.set-section` at a time,
+       `.hidden` on the rest (switchOptionsTab in session-ui.js). Summary owns
+       its own scroller and Respawn is long, so stacking them into one document
+       would bury both.
+     • #createCaseModal: a real switcher too (switchCaseModalTab), over six
+       independent forms that keep their legacy `.form-row` markup; the adapter
+       block near the end of this file maps that markup onto the row language.
+
+   The two task modals also take a size-up that App Settings does not (their
+   own blocks further down): they are short panels you act on, not a document
+   you scan. `.modal-tabs`/`.modal-tab-btn`/`.modal-tab-content` are RETIRED:
+   no modal uses them and their rules are deleted from both stylesheets.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Deliberately narrower than the other .modal-lg users: the document is a
+   single column of rows whose control sits at the far right, so extra width
+   buys nothing but a gap between a row's text and its switch. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .modal-content.modal-lg {
+  max-width: min(760px, 95vw);
+  width: min(760px, 95vw);
+  height: min(620px, 86vh);
+  max-height: 86vh;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-shell-head {
+  flex-shrink: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* The phone layout drops the bottom action bar and saves from the header
+   instead; on desktop the footer owns Save, so this stays hidden. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-save {
+  display: none;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  padding: 8px 15px;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  background: linear-gradient(180deg, var(--accent-grad-a), var(--accent-grad-b));
+  color: var(--accent-ink);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-body {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-foot {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+/* ── rail ─────────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail {
+  display: flex;
+  flex-direction: column;
+  padding: 9px 8px;
+  border-right: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.16);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-search svg {
+  position: absolute;
+  left: 9px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px 7px 28px;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-search input:focus {
+  border-color: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.77rem;
+  cursor: pointer;
+  text-align: left;
+  position: relative;
+  transition: color 0.15s, background 0.15s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-item svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-item:hover {
+  background: var(--control-bg);
+  color: var(--text);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-item.active {
+  color: var(--accent);
+  font-weight: 580;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-item.active svg {
+  color: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-item.active::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-rail-foot {
+  margin: auto 0 0;
+  padding: 10px 10px 2px;
+  font-size: 0.62rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+}
+
+/* ── document ─────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-doc {
+  overflow-y: auto;
+  padding: 0 15px 26px;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section {
+  padding-top: 13px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section + .set-section {
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head svg {
+  color: var(--accent);
+  flex-shrink: 0;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.13);
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  box-sizing: content-box;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-head h2 {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 640;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section-blurb {
+  margin: 0 0 9px 32px;
+  font-size: 0.67rem;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-empty {
+  margin: 24px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ── groups ───────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group + .set-group {
+  margin-top: 11px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-head h4 {
+  margin: 0;
+  font-size: 0.63rem;
+  font-weight: 640;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-head::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border), transparent);
+  order: 9;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-head-toggle {
+  cursor: pointer;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-adv {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-adv svg {
+  transition: transform 0.18s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-advanced.open .set-adv svg {
+  transform: rotate(180deg);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-advanced:not(.open) .set-group-body,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-advanced:not(.open) .set-group-hint {
+  display: none;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-hint {
+  margin: -2px 0 9px;
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* ── rows ─────────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-block {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--text);
+  letter-spacing: -0.005em;
+}
+
+/* Wide enough that a description runs most of the way to its switch: the
+   complaint about this panel was the dead gap a 62ch cap left behind. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-desc {
+  font-size: 0.645rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  max-width: 78ch;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-scope,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-tag {
+  font-size: 0.52rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-scope {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  opacity: 0.8;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-tag {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.13);
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-tag-beta {
+  color: var(--yellow);
+  background: rgba(240, 194, 90, 0.12);
+  border-color: rgba(240, 194, 90, 0.28);
+}
+
+/* ── controls ─────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-select,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-input,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-num {
+  font: inherit;
+  font-size: 0.74rem;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 8px;
+  outline: none;
+  flex-shrink: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-select:focus,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-input:focus,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-num:focus {
+  border-color: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-select {
+  min-width: 190px;
+  max-width: 260px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-input {
+  width: 220px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-num {
+  width: 62px;
+  text-align: right;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-unit {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-static {
+  font-size: 0.74rem;
+  color: var(--text-dim);
+}
+
+/* The version is the first value in the first section now, so it reads as an
+   answer to "what am I running", not as one more right-aligned field. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-static-strong {
+  font-size: 0.82rem;
+  font-weight: 620;
+  color: var(--text);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .mono {
+  font-family: var(--font-mono);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-copy {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+/* The cards and the segmented control are the visible UI; the underlying
+   <select> stays in the DOM as the single source of truth that
+   openAppSettings()/saveAppSettings() read and write by id. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-field-hidden {
+  display: none !important;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-note,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-notes,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-progress {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-notes {
+  max-height: 160px;
+  overflow: auto;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(127, 127, 127, 0.08);
+  border: 1px solid var(--border);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-progress {
+  border: 1px solid var(--border);
+}
+
+/* ── chips (header buttons, panels, features, levels) ─────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  padding: 6px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--control-border);
+  background: rgba(255, 255, 255, 0.028);
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* The chip carries the icon of the button it switches on, so the list reads as
+   the header rather than as a list of names. It is also the ONLY copy of that
+   icon: the live preview clones it (settings-ui.js: _syncLayoutPreview). */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip-ico {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip-emoji {
+  font-size: 0.85em;
+  line-height: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip.is-on .set-chip-ico,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip:has(input:checked) .set-chip-ico {
+  opacity: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip::before {
+  content: '\2713';
+  font-size: 0.8em;
+  line-height: 1;
+  width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: width 0.15s, opacity 0.15s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip:hover {
+  border-color: var(--control-border-hover);
+  color: var(--text);
+}
+
+/* `.is-on` is written by settings-ui.js on load and on change; `:has()` keeps
+   the state correct for any chip toggled before that listener runs. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip.is-on,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip:has(input:checked) {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip.is-on::before,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip:has(input:checked)::before {
+  width: 0.85em;
+  opacity: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-chip:focus-within {
+  outline: 2px solid rgba(var(--accent-rgb), 0.5);
+  outline-offset: 1px;
+}
+
+/* ── live layout preview ──────────────────────────────────────────────────
+   A scale model of the app at the top of Header & Panels, rebuilt from the
+   chips on every change (settings-ui.js: _syncLayoutPreview). Everything here
+   is decoration around cloned chip icons, so it carries no icon of its own.
+   ─────────────────────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview {
+  margin: 0 0 14px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-title {
+  font-size: 0.63rem;
+  font-weight: 640;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-hint {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  opacity: 0.72;
+}
+
+/* Skin tokens only, no black/white alphas: on the four light skins a
+   hardcoded rgba(0,0,0,…) turned the whole model into a grey slab. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-frame {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-dark);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-logo {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, var(--accent-grad-a), var(--accent-grad-b));
+  flex-shrink: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-tab {
+  font-size: 0.56rem;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--control-bg);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-tab-dim {
+  opacity: 0.5;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-gap {
+  flex: 1;
+  min-width: 6px;
+}
+
+/* Wraps rather than overflows: every button switched on has to stay visible,
+   and the frame is narrower than the real header it stands in for. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-btns {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 5px;
+  color: var(--text-dim);
+  background: var(--control-bg);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-btn-fixed {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-chip {
+  font-size: 0.55rem;
+  padding: 3px 6px;
+  border-radius: 5px;
+  color: var(--text-dim);
+  background: var(--control-bg);
+  white-space: nowrap;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) svg.set-preview-ico {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) span.set-preview-ico {
+  font-size: 9px;
+  line-height: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-stage {
+  position: relative;
+  display: flex;
+  min-height: 76px;
+  padding: 9px 10px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-term {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.58rem;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-caret {
+  color: var(--accent);
+}
+
+/* Right-docked, like every real panel in the app (monitor, subagents, file
+   browser and project insights are all `position: fixed; right: …`). */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-panels {
+  position: absolute;
+  right: 9px;
+  top: 9px;
+  bottom: 9px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-panel,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-float,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.55rem;
+  padding: 3px 7px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  background: var(--control-bg);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-floats {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 5px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-float {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-tray {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-run {
+  font-size: 0.55rem;
+  font-weight: 640;
+  padding: 3px 9px;
+  border-radius: 5px;
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, var(--accent-grad-a), var(--accent-grad-b));
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-preview-empty {
+  margin: 6px 0 0;
+  font-size: 0.62rem;
+  color: var(--text-muted);
+}
+
+/* ── model cards ──────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-modelgrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-modelcard {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--control-border);
+  background: rgba(255, 255, 255, 0.028);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-modelcard:hover {
+  border-color: var(--control-border-hover);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-modelcard.selected {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: rgba(var(--accent-rgb), 0.11);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.2);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mc-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mc-name {
+  font-size: 0.72rem;
+  color: var(--text);
+  font-weight: 560;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mc-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.8);
+  opacity: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-modelcard.selected .set-mc-dot {
+  opacity: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mc-meta {
+  font-size: 0.61rem;
+  color: var(--text-muted);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mc-ctx {
+  margin-top: 2px;
+  align-self: flex-start;
+  font-size: 0.53rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row-disabled {
+  opacity: 0.45;
+}
+
+/* ── segmented control (thinking effort) ──────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.26);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment button {
+  flex: 1;
+  font: inherit;
+  font-size: 0.68rem;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment button:hover {
+  color: var(--text);
+  background: var(--control-bg);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-segment button.selected {
+  background: linear-gradient(180deg, var(--accent-grad-a), var(--accent-grad-b));
+  color: var(--accent-ink);
+  font-weight: 620;
+}
+
+/* ── task-routing 2x2 ─────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-minigrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mini {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mini-label {
+  font-size: 0.74rem;
+  color: var(--text-dim);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-mini .set-select {
+  min-width: 0;
+  width: 128px;
+}
+
+/* Search hides non-matching units; everything stays mounted underneath. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-hit-hidden {
+  display: none !important;
+}
+
+/* ── phone jump control: desktop hides it entirely ────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-menu,
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-jump-veil {
+  display: none;
+}
+
+/* ── injected sections (admin Users panel) ────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-section .form-hint {
+  display: block;
+  margin: 0 0 10px;
+}
+
+/* ── switcher modals: the rail SHOWS ONE section ──────────────────────────
+   App Settings keeps every section mounted and scrolls; Session Options and
+   Add Case show one at a time (switchOptionsTab / switchCaseModalTab toggle
+   `.hidden`), so a long Respawn tab, the Summary timeline and six case forms
+   never stack on top of each other.
+   ─────────────────────────────────────────────────────────────────────────── */
+:is(#sessionOptionsModal, #createCaseModal) .set-section.hidden {
+  display: none;
+}
+
+/* Only ever one section visible, so the separator App Settings draws between
+   consecutive sections renders as a stray line above whichever one is shown.
+   Matches the `.set-section + .set-section` rule's specificity on purpose. */
+:is(#sessionOptionsModal, #createCaseModal) .set-section + .set-section {
+  border-top: 0;
+  margin-top: 0;
+}
+
+/* Token thresholds are six digits; the default 62px field clips them. */
+#sessionOptionsModal .set-num-wide {
+  width: 86px;
+}
+
+/* Full-width controls inside a stacked row (duration presets, color swatches,
+   the preset selector, the prompt textareas). */
+#sessionOptionsModal .set-row-block > .set-row-actions,
+#sessionOptionsModal .set-row-block > .duration-presets,
+#sessionOptionsModal .set-row-block > .color-picker {
+  width: 100%;
+}
+
+#sessionOptionsModal .set-row-block > .set-row-actions > .set-select {
+  flex: 1;
+  min-width: 0;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-textarea {
+  font: inherit;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 9px;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 34px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-textarea:focus {
+  border-color: var(--accent);
+}
+
+/* Plain checkboxes in a row card: used where the options are steps of one
+   sequence rather than independent tags (chips read as the latter). */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.73rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-check input {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  cursor: pointer;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-check:hover {
+  color: var(--text);
+}
+
+/* The usage-limit note sits under its description rather than beside the
+   switch, and only appears while a pause is armed (`.active`). */
+#sessionOptionsModal .set-row-text > .auto-resume-status {
+  margin-top: 3px;
+  font-size: 0.66rem;
+}
+
+#sessionOptionsModal .set-row-text > .session-respawn-status {
+  align-self: flex-start;
+  margin-top: 3px;
+}
+
+#sessionOptionsModal .run-summary-filters {
+  margin-bottom: 0;
+}
+
+#sessionOptionsModal .run-summary-footer {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-top: 0;
+}
+
+/* ── Add Case on the settings surface ─────────────────────────────────────
+   The panels keep their legacy `.form-row` markup (six tabs of it, every id
+   read back by session-ui.js), so instead of restructuring them this maps the
+   old primitives onto the `set-*` look: a form row paints as a row card, its
+   label as a row label, its `.form-hint` as a row description. Scoped to the
+   document, so `.form-row` everywhere else is untouched.
+   ─────────────────────────────────────────────────────────────────────────── */
+#createCaseModal .set-doc .form-row {
+  margin: 0 0 3px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+#createCaseModal .set-doc .form-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+#createCaseModal .set-doc .form-row > label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 0.76rem;
+  letter-spacing: -0.005em;
+  text-transform: none;
+  color: var(--text);
+}
+
+#createCaseModal .set-doc .form-row .form-hint {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 0.645rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+#createCaseModal .set-doc .form-row > input[type='text'],
+#createCaseModal .set-doc .form-row > input[type='url'],
+#createCaseModal .set-doc .form-row > input[type='number'],
+#createCaseModal .set-doc .form-row > input[type='password'],
+#createCaseModal .set-doc .form-row > select,
+#createCaseModal .set-doc .form-row > textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.74rem;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 9px;
+  outline: none;
+}
+
+#createCaseModal .set-doc .form-row > :is(input, select, textarea):focus {
+  border-color: var(--accent);
+}
+
+/* A checkbox row is its own card: the label IS the control, so it must not
+   inherit the block label styling above. */
+#createCaseModal .set-doc .form-row > label.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+#createCaseModal .set-doc .form-row > label.checkbox-row input {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  margin: 0;
+}
+
+/* `<details>` blocks read as a collapsed group, matching the Advanced group in
+   App Settings rather than a bare underlined line of text. */
+#createCaseModal .set-doc .advanced-options {
+  margin-top: 11px;
+}
+
+#createCaseModal .set-doc .advanced-options > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 2px;
+  border-top: 0;
+  font-size: 0.63rem;
+  font-weight: 640;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+#createCaseModal .set-doc .advanced-options > summary::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border), transparent);
+}
+
+/* `display: flex` above drops the browser's own disclosure triangle, so the
+   chevron is explicit markup. Without it these rows read as plain headings and
+   nobody thinks to click them (reported on Clone options / Container settings). */
+#createCaseModal .set-doc .advanced-options > summary {
+  list-style: none;
+}
+
+#createCaseModal .set-doc .advanced-options > summary::-webkit-details-marker {
+  display: none;
+}
+
+#createCaseModal .set-doc .advanced-options > summary .set-adv-chev {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  transition: transform 0.18s, color 0.15s;
+}
+
+#createCaseModal .set-doc .advanced-options[open] > summary .set-adv-chev {
+  transform: rotate(180deg);
+}
+
+#createCaseModal .set-doc .advanced-options > summary:hover {
+  color: var(--text);
+}
+
+#createCaseModal .set-doc .advanced-options > summary:hover .set-adv-chev {
+  color: var(--accent);
+}
+
+#createCaseModal .set-doc .advanced-options-content {
+  padding-top: 4px;
+}
+
+/* Lists and free-form blocks inside a panel sit on the same card ground as the
+   rows around them. */
+#createCaseModal .set-doc .case-manage-list {
+  border-radius: 9px;
+}
+
+#createCaseModal .set-doc .set-section > .form-hint {
+  display: block;
+  font-size: 0.645rem;
+  color: var(--text-muted);
+}
+
+/* ── Add Case is a task, not a settings list ──────────────────────────────
+   The shared surface is tuned for App Settings: a long, dense document you
+   scan. Add Case is the opposite - six short forms you fill in once - so on
+   the tight surface it read as a few small fields marooned in a large empty
+   frame. It keeps the same language, one size up: a wider rail with entries
+   you can hit without aiming, bigger fields, and a shell that is only as tall
+   as the panel showing, instead of a fixed box the content has to rattle in.
+   ─────────────────────────────────────────────────────────────────────────── */
+#createCaseModal .modal-content.modal-lg {
+  max-width: min(900px, 96vw);
+  width: min(900px, 96vw);
+  height: auto;
+  min-height: min(560px, 80vh);
+  max-height: 88vh;
+}
+
+#createCaseModal .set-body {
+  grid-template-columns: 236px minmax(0, 1fr);
+}
+
+#createCaseModal .set-rail {
+  padding: 14px 12px;
+}
+
+#createCaseModal .set-rail-items {
+  gap: 3px;
+}
+
+#createCaseModal .set-rail-item {
+  gap: 12px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 540;
+}
+
+#createCaseModal .set-rail-item svg {
+  width: 19px;
+  height: 19px;
+}
+
+#createCaseModal .set-rail-item.active::before {
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+}
+
+#createCaseModal .set-rail-foot {
+  padding: 12px 8px 2px;
+  font-size: 0.68rem;
+}
+
+#createCaseModal .set-doc {
+  padding: 0 22px 22px;
+}
+
+#createCaseModal .set-section {
+  padding-top: 18px;
+}
+
+#createCaseModal .set-section-head svg {
+  padding: 6px;
+}
+
+#createCaseModal .set-section-head h2 {
+  font-size: 1.08rem;
+}
+
+#createCaseModal .set-section-blurb {
+  margin: 0 0 13px 40px;
+  font-size: 0.75rem;
+}
+
+#createCaseModal .set-doc .form-row {
+  margin: 0 0 7px;
+  padding: 11px 14px;
+  border-radius: 11px;
+}
+
+#createCaseModal .set-doc .form-row > label {
+  margin: 0 0 6px;
+  font-size: 0.88rem;
+  font-weight: 540;
+}
+
+#createCaseModal .set-doc .form-row .form-hint {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+#createCaseModal .set-doc .form-row > input[type='text'],
+#createCaseModal .set-doc .form-row > input[type='url'],
+#createCaseModal .set-doc .form-row > input[type='number'],
+#createCaseModal .set-doc .form-row > input[type='password'],
+#createCaseModal .set-doc .form-row > select,
+#createCaseModal .set-doc .form-row > textarea {
+  font-size: 0.84rem;
+  padding: 9px 12px;
+  border-radius: 9px;
+}
+
+#createCaseModal .set-doc .form-row > label.checkbox-row {
+  font-size: 0.88rem;
+  gap: 9px;
+}
+
+#createCaseModal .set-doc .form-row > label.checkbox-row input {
+  width: 16px;
+  height: 16px;
+}
+
+#createCaseModal .set-doc .advanced-options > summary {
+  padding: 8px 2px;
+  font-size: 0.7rem;
+}
+
+#createCaseModal .set-doc .set-section > .form-hint {
+  font-size: 0.72rem;
+}
+
+#createCaseModal .form-actions.set-foot {
+  padding: 12px 22px;
+}
+
+/* ── Session Options is a task too ────────────────────────────────────────
+   Same reasoning as Add Case: four short panels you act on, not a document
+   you scan, so it takes the same size-up. Height follows the panel showing,
+   which is what keeps Summary from opening as a mostly-empty box.
+   ─────────────────────────────────────────────────────────────────────────── */
+#sessionOptionsModal .modal-content.modal-lg {
+  max-width: min(900px, 96vw);
+  width: min(900px, 96vw);
+  height: auto;
+  min-height: min(560px, 80vh);
+  max-height: 88vh;
+}
+
+#sessionOptionsModal .set-body {
+  grid-template-columns: 236px minmax(0, 1fr);
+}
+
+#sessionOptionsModal .set-rail {
+  padding: 14px 12px;
+}
+
+#sessionOptionsModal .set-rail-items {
+  gap: 3px;
+}
+
+#sessionOptionsModal .set-rail-item {
+  gap: 12px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 540;
+}
+
+#sessionOptionsModal .set-rail-item svg {
+  width: 19px;
+  height: 19px;
+}
+
+#sessionOptionsModal .set-rail-item.active::before {
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+}
+
+#sessionOptionsModal .set-rail-foot {
+  padding: 12px 8px 2px;
+  font-size: 0.68rem;
+}
+
+#sessionOptionsModal .set-doc {
+  padding: 0 22px 22px;
+}
+
+#sessionOptionsModal .set-section {
+  padding-top: 18px;
+}
+
+#sessionOptionsModal .set-section-head svg {
+  padding: 6px;
+}
+
+#sessionOptionsModal .set-section-head h2 {
+  font-size: 1.08rem;
+}
+
+#sessionOptionsModal .set-section-blurb {
+  margin: 0 0 13px 40px;
+  font-size: 0.75rem;
+}
+
+#sessionOptionsModal .set-group + .set-group {
+  margin-top: 16px;
+}
+
+#sessionOptionsModal .set-group-body {
+  gap: 5px;
+}
+
+#sessionOptionsModal .set-row {
+  padding: 10px 14px;
+  border-radius: 11px;
+}
+
+#sessionOptionsModal .set-row-label {
+  font-size: 0.88rem;
+  font-weight: 540;
+}
+
+#sessionOptionsModal .set-row-desc {
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+#sessionOptionsModal .set-input,
+#sessionOptionsModal .set-select,
+#sessionOptionsModal .set-num,
+#sessionOptionsModal .set-textarea {
+  font-size: 0.82rem;
+  padding: 8px 11px;
+  border-radius: 9px;
+}
+
+#sessionOptionsModal .set-num {
+  width: 76px;
+}
+
+#sessionOptionsModal .set-num-wide {
+  width: 102px;
+}
+
+#sessionOptionsModal .set-check {
+  font-size: 0.82rem;
+}
+
+#sessionOptionsModal .set-check input {
+  width: 15px;
+  height: 15px;
+}
+
+/* ── callout ──────────────────────────────────────────────────────────────
+   For the one setting on a panel that is worth reading before the rest. It is
+   a label wrapping its own switch, so the whole card is the hit target: the
+   complaint about the flat list was that auto-resume no longer looked like
+   something you were meant to turn on.
+   ─────────────────────────────────────────────────────────────────────────── */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.14), rgba(var(--accent-rgb), 0.05));
+  border: 1px solid rgba(var(--accent-rgb), 0.42);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout:hover {
+  border-color: rgba(var(--accent-rgb), 0.68);
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.19), rgba(var(--accent-rgb), 0.08));
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout-ico {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout-desc {
+  font-size: 0.73rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-callout-switch {
+  margin-top: 3px;
+}
+
+/* Armed: the pause is scheduled, so the card states the time it will resume. */
+#sessionOptionsModal .set-callout .auto-resume-status {
+  margin-top: 5px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* Action buttons on this surface follow the rows they sit in; at the small
+   toolbar size they read as an afterthought next to a 0.88rem label. */
+#sessionOptionsModal .set-row-actions .btn-toolbar,
+#createCaseModal .set-doc .btn-toolbar {
+  font-size: 0.8rem;
+  padding: 7px 14px;
+  border-radius: 8px;
+}
+
+#sessionOptionsModal .set-row-actions #modalEnableRespawnBtn,
+#sessionOptionsModal .set-row-actions #modalStopRespawnBtn {
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 8px 20px;
+}
+
+#sessionOptionsModal .session-respawn-status {
+  font-size: 0.8rem;
+  padding: 4px 9px;
 }

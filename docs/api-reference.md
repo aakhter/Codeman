@@ -454,10 +454,44 @@ user guide: [`readmymind.md`](readmymind.md).
   `400 INVALID_INPUT` on over-long or unknown fields.
 - `DELETE /api/v1/sessions/:id/intent` -> `{ deleted: boolean }` forgets the
   case's profile entirely.
+- `POST /api/v1/sessions/:id/readmymind` predicts the user's next prompt:
+  a one-shot model call over the intent profile plus live session signals
+  (pending approval dialog, transcript tail, git state, run-summary events,
+  sibling sessions). Body is optional; the rethink flow passes
+  `{ steer?, rejected? }` (strict schema: `steer` <= 2000 chars, `rejected`
+  up to 10 strings <= 1000 chars). Answers
+  `{ suggestions: { prompt, why, kind }[], durationMs }` with 1-3 suggestions
+  (`kind`: `continue` | `verify` | `redirect`; prompts are single-line).
+  Claude-mode sessions only (`400 INVALID_INPUT` otherwise); one prediction in
+  flight per session (`409 CONFLICT`); predictor failures answer
+  `502 OPERATION_FAILED`. Takes 5-90 s and costs real tokens. Suggestions are
+  only ever returned, never sent: submitting one is the caller's explicit act.
 
-All three enforce session ownership in multi-user mode; a foreign session id
+All four enforce session ownership in multi-user mode; a foreign session id
 answers `404 NOT_FOUND` (no existence leak), and profiles of two owners of the
 same directory are distinct by construction.
+
+## Voice dictation
+
+Browser dictation transcribed through this server's Claude Code login, i.e. the
+same speech-to-text service the CLI's own `/voice` mode uses. Gated on the synced
+`claudeVoiceEnabled` setting (default OFF). Design:
+[`claude-voice-plan.md`](claude-voice-plan.md).
+
+- `GET /api/v1/voice/status` -> `{ available, reason?, subscriptionType?,
+  expiresAt? }`. `reason` is `disabled` (setting off), `no-credentials` (nobody
+  signed in to Claude Code on the server), `expired` (the access token elapsed;
+  running any Claude session refreshes it) or `malformed`. The OAuth token
+  itself is never returned by this or any other endpoint.
+- `GET /ws/voice/stream?language=&keyterms=` (WebSocket, not under `/api`)
+  relays one dictation. Client sends binary frames of signed 16-bit
+  little-endian PCM, 16 kHz mono (<= 64 KB per frame), plus JSON control frames
+  `{"t":"finalize"}` (ask for the final transcript) and `{"t":"stop"}`. Server
+  sends `{"t":"ready"}`, `{"t":"transcript","text","final"}` (each frame is the
+  WHOLE running transcript, not a delta), `{"t":"error","message"}` and
+  `{"t":"closed"}`. Close codes: `4003` disallowed Host/Origin, `4004`
+  unavailable (reason in the close reason), `4008` too many concurrent streams.
+  Streams are capped in count and length (`src/config/voice.ts`).
 
 ## Authentication
 

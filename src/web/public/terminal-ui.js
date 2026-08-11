@@ -22,6 +22,15 @@
 
   const TERMINAL_QUERY_RESPONSE_PATTERN = /^\x1b\[[\?>=]?[\d;]*[cnR]$/;
   const TERMINAL_OSC_RESPONSE_PATTERN = /^\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\)$/;
+  // Pointer and focus reports xterm emits through onData on the terminal's OWN
+  // initiative, with no key pressed: SGR mouse (DECSET 1006, also 1016), legacy
+  // X10 mouse (DECSET 1000 — three raw bytes after CSI M) and focus in/out
+  // (DECSET 1004). They are not query REPLIES, so the query-response filter
+  // above does not match them, and they must keep reaching the PTY. What they
+  // must NOT do is stand in for a keystroke: see isTerminalFocusOrMouseReport.
+  const MOUSE_SGR_REPORT_PATTERN = /^\x1b\[<\d+;\d+;\d+[Mm]$/;
+  const MOUSE_X10_REPORT_PATTERN = /^\x1b\[M[\s\S]{3}$/;
+  const FOCUS_REPORT_PATTERN = /^\x1b\[[IO]$/;
   // Grace window after a manual scroll-up gesture during which sticky-scroll is
   // suppressed, so high-frequency Codex status redraws don't snap the viewport
   // back to the bottom while the user is inspecting earlier output.
@@ -51,6 +60,7 @@
   // Bound on page keys emitted from one gesture batch, mirroring the SGR tick
   // cap: a fling must not build a backlog that keeps paging after it stops.
   const PAGE_KEY_MAX_PER_BATCH = 3;
+  const TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM = 4;
   // Composer navigation keys as xterm.js encodes user keystrokes: plain and
   // modified arrows (CSI A-D, CSI 1;mA-D, SS3 A-D), Home/End (CSI H/F, SS3
   // H/F, CSI 1~/4~), Insert/Delete/PgUp/PgDn (CSI 2~/3~/5~/6~, optional
@@ -113,6 +123,30 @@
     return isTerminalQueryResponse(data);
   }
 
+  /**
+   * Did the terminal generate this chunk itself, rather than a human pressing a
+   * key? True for mouse and focus reports (issue #262).
+   *
+   * Consumers that treat one onData chunk as "the next keystroke" must skip
+   * these. The one-shot Ctrl modifier is why this exists, and the MOUSE half is
+   * the live one: a shell session keeps the narrow scrollback strip, so mouse
+   * DECSETs reach the browser and anything the user runs that enables tracking
+   * (vim, htop, less) turns a tap into `\x1b[<0;31;23M`. Measured in a real
+   * shell session: with Ctrl armed, one tap on the terminal spent it silently.
+   *
+   * Focus reports are the same class and cost nothing to cover, but they cannot
+   * reach xterm today: `FOCUS_ESCAPE_FILTER` in session.ts strips `\x1b[?1004h`
+   * (and the reports themselves) from every PTY read, so `sendFocusMode` never
+   * turns on. Were that filter to go, the Ctrl button would spend the modifier
+   * on its OWN refocus — the bar refocuses the terminal after every key so the
+   * keyboard stays open, and that refocus emits `\x1b[I`.
+   */
+  function isTerminalFocusOrMouseReport(data) {
+    return (
+      FOCUS_REPORT_PATTERN.test(data) || MOUSE_SGR_REPORT_PATTERN.test(data) || MOUSE_X10_REPORT_PATTERN.test(data)
+    );
+  }
+
   // Per-skin xterm.js palettes. The 'daylight-blue' object equals the legacy hardcoded
   // theme, so default behavior is unchanged. Shared at module scope and exported on the
   // global so both terminal-ui.js (main terminal) and panels-ui.js (teammate terminals,
@@ -141,6 +175,7 @@
   global.CodemanTerminalInput = {
     isTerminalQueryResponse,
     shouldSuppressTerminalQueryResponse,
+    isTerminalFocusOrMouseReport,
     isComposerNavKey,
     classifyPredictInput,
     isCodexComposerRow,
@@ -153,6 +188,7 @@
     KEY_PAGE_DOWN,
     PAGE_KEY_SCREEN_FRACTION,
     PAGE_KEY_MAX_PER_BATCH,
+    TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM,
   };
   global.CODEMAN_XTERM_THEMES = CODEMAN_XTERM_THEMES;
   global.codemanCurrentXtermTheme = currentXtermTheme;
@@ -969,21 +1005,48 @@ Object.assign(CodemanApp.prototype, {
       let pixelAccum = 0;
 
       let didScroll = false; // track whether touchmove fired (tap vs scroll)
-      const touchGesture = this._createTerminalTouchGesture();
+      let touchStartY = 0;
+      let tapStartedWithTerminalFocus = false;
+      let tapStartIntentCache = null;
       const TAP_THRESHOLD = 8; // px — ignore micro-drift to distinguish tap from scroll
       container.addEventListener(
         'touchstart',
         (ev) => {
-          const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);
-          velocity = 0;
-          pixelAccum = 0;
-          lastTime = 0;
-          pendingDelta = 0;
-          if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; }
-          if (!touch) {
-            isTouching = false;
-            didScroll = true;
-            return;
+          if (ev.touches.length === 1) {
+            touchLastX = ev.touches[0].clientX;
+            touchLastY = ev.touches[0].clientY;
+            touchStartY = touchLastY;
+            velocity = 0;
+            pixelAccum = 0;
+            isTouching = true;
+            didScroll = false;
+            tapStartedWithTerminalFocus = this._isMobileTerminalInputFocused();
+            // Classifying scans the whole viewport with translateToString, and
+            // this runs at the start of EVERY gesture including scroll drags.
+            // Cache the result for the touchend of this same gesture rather than
+            // recomputing it; the cache is keyed on the exact start coordinates
+            // so a finger that moved re-classifies at its real position.
+            const touchStartIntent = this._classifyMobileTerminalTap(touchLastX, touchLastY);
+            tapStartIntentCache = { x: touchLastX, y: touchLastY, intent: touchStartIntent };
+            if (touchStartIntent === 'content') {
+              // Cancel xterm/browser focus before the compatibility click can
+              // open the OS keyboard. Content taps are re-emitted as SGR on
+              // touchend.
+              //
+              // 'history' is deliberately NOT included. A scrolled-up viewport
+              // sends nothing, so there is no compatibility click worth
+              // cancelling — and preventDefault() here, paired with touchend's
+              // early return, closes both routes to focus at once. Since
+              // selectSession() ends with scrollToLastNonEmptyLine(), that made
+              // the keyboard unreachable after every tab switch.
+              ev.preventDefault();
+              this._blurMobileTerminalInput();
+            }
+            lastTime = 0;
+            if (scrollFrame) {
+              cancelAnimationFrame(scrollFrame);
+              scrollFrame = null;
+            }
           }
           touchLastX = touch.clientX;
           touchLastY = touch.clientY;
@@ -996,7 +1059,7 @@ Object.assign(CodemanApp.prototype, {
           container.classList.add('scrolling');
           clearTimeout(this._scrollEnd);
         },
-        { passive: true }
+        { passive: false }
       );
 
       container.addEventListener(
@@ -1088,11 +1151,20 @@ Object.assign(CodemanApp.prototype, {
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
-          if (wasTouching && !didScroll && touch && this.terminal) {
-            this._handleTerminalTouchTap(touch);
+          if (!didScroll && this.terminal) {
+            const touch = ev.changedTouches && ev.changedTouches[0];
+            if (touch) {
+              this._suppressTrustedTapMouseEvents();
+              const cached =
+                tapStartIntentCache &&
+                tapStartIntentCache.x === touch.clientX &&
+                tapStartIntentCache.y === touch.clientY
+                  ? tapStartIntentCache.intent
+                  : null;
+              this._handleMobileTerminalTap(touch, tapStartedWithTerminalFocus, cached);
+            }
           }
-          clearTimeout(this._scrollEnd);
-          this._scrollEnd = setTimeout(() => container.classList.remove('scrolling'), 300);
+          tapStartedWithTerminalFocus = false;
         },
         { passive: true }
       );
@@ -1103,11 +1175,7 @@ Object.assign(CodemanApp.prototype, {
           isTouching = false;
           velocity = 0;
           pixelAccum = 0;
-          pendingDelta = 0;
-          if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; }
-          this._cancelTerminalTouchGesture(touchGesture);
-          clearTimeout(this._scrollEnd);
-          this._scrollEnd = setTimeout(() => container.classList.remove('scrolling'), 300);
+          tapStartedWithTerminalFocus = false;
         },
         { passive: true }
       );
@@ -1333,6 +1401,28 @@ Object.assign(CodemanApp.prototype, {
         ) {
           return;
         }
+
+        // ── One-shot Ctrl (mobile shell bar, issue #262) ──
+        // A virtual keyboard reports no usable key events, so a keydown hook
+        // would never see the character the modifier applies to: it arrives
+        // here as onData text. Sits AFTER the query-response filter so xterm's
+        // own DA/CPR replies can never spend the modifier, and BEFORE every
+        // send path so the control byte follows the normal control-char route
+        // (immediate flush, local-echo state cleared).
+        //
+        // Mouse and focus reports are skipped rather than suppressed: they are
+        // real bytes the PTY still needs, they just were not typed by anyone.
+        // A shell session passes mouse DECSETs through, so with vim or htop
+        // running, one tap on the terminal used to spend the modifier silently
+        // (measured against a real shell). See isTerminalFocusOrMouseReport.
+        if (
+          typeof KeyboardAccessoryBar !== 'undefined' &&
+          KeyboardAccessoryBar.isCtrlArmed?.() &&
+          !window.CodemanTerminalInput?.isTerminalFocusOrMouseReport(data)
+        ) {
+          data = KeyboardAccessoryBar.consumeCtrl(data);
+        }
+
         this._lastTerminalData = { data, time: performance.now() };
 
         // ── Local Echo Pass-through ──
@@ -2360,6 +2450,24 @@ Object.assign(CodemanApp.prototype, {
    * - workingDir under a case dir → "#caseName/subdir"
    * - Otherwise → basename (e.g. "Claudeman")
    */
+  /**
+   * Badge text for a session's git worktree, or '' when it isn't on one.
+   * `⑂ <name> · <branch>`, either half alone if that's all we know.
+   * Branch is truncated: the badge row is a single nowrap line.
+   */
+  _worktreeLabel(s) {
+    // Worktree name is REQUIRED. gitBranch alone is not worktree information —
+    // every ordinary repo session has one, and badging all of them with `⑂ master`
+    // is noise that buries the rows this badge exists to distinguish.
+    const name = s && s.worktreeName;
+    if (!name) return '';
+    let branch = s.gitBranch || '';
+    // A worktree's branch often just restates its name; don't print it twice.
+    if (branch === name || branch === `worktree-${name}`) branch = '';
+    if (branch.length > 24) branch = branch.slice(0, 23) + '\u2026';
+    return '⑂ ' + [name, branch].filter(Boolean).join(' · ');
+  },
+
   _resolveCaseLabel(workingDir, cases) {
     if (!workingDir) return '';
     let best = null;
@@ -2379,11 +2487,21 @@ Object.assign(CodemanApp.prototype, {
     return workingDir.split('/').pop() || workingDir;
   },
 
-  /** Normalize home prefixes to "~/" on both Linux and macOS */
+  /**
+   * Normalize a home prefix to "~" on both Linux (`/home/<user>`) and macOS
+   * (`/Users/<user>`). The lookahead lets the home directory ITSELF match, so a
+   * path that is exactly `$HOME` renders "~" instead of being left raw.
+   *
+   * This is the only place that pattern belongs. Two hand-rolled copies had
+   * drifted, each broken on the platform its author was not using: the Run
+   * menu's matched `/home/` only, so on macOS nothing was stripped and every
+   * Recent Sessions row spent its first ~19 characters on an identical
+   * `/Users/<user>/` prefix (#273); the case-manage list's matched `/Users/`
+   * only, so no Linux path was ever abbreviated there. Route new path labels
+   * through here rather than writing a third copy.
+   */
   _shortenHomePath(p) {
-    return (p || '')
-      .replace(/^\/home\/[^/]+\//, '~/')
-      .replace(/^\/Users\/[^/]+\//, '~/');
+    return (p || '').replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)/, '~');
   },
 
   /**
@@ -2466,7 +2584,7 @@ Object.assign(CodemanApp.prototype, {
       pin.title = 'Pinned';
       titleSpan.appendChild(pin);
     }
-    titleSpan.appendChild(document.createTextNode(s.name || s.firstPrompt || shortDir));
+    titleSpan.appendChild(document.createTextNode(this._historyRowLabel(s, shortDir)));
 
     // Badge row: mode (claude/codex/opencode/gemini/antigravity/shell) + a LIVE pill.
     const badgeRow = document.createElement('div');
@@ -2486,6 +2604,18 @@ Object.assign(CodemanApp.prototype, {
       modeBadge.className = 'history-item-badge history-item-badge-mode' + (known ? ' mode-' + modeKey : '');
       modeBadge.textContent = s.mode;
       badgeRow.appendChild(modeBadge);
+    }
+    // Worktree pill (#266): distinguishes sessions from different worktrees of the
+    // same repo, which are otherwise identical in this list. Name AND branch when
+    // both are known; a hand-made `git worktree add` yields no recoverable name,
+    // so it degrades to branch-only rather than guessing one.
+    const wtLabel = this._worktreeLabel(s);
+    if (wtLabel) {
+      const wtBadge = document.createElement('span');
+      wtBadge.className = 'history-item-badge history-item-badge-worktree';
+      wtBadge.textContent = wtLabel;
+      wtBadge.title = s.worktreeRepo ? `worktree of ${s.worktreeRepo}` : wtLabel;
+      badgeRow.appendChild(wtBadge);
     }
     if (isLive) {
       const liveBadge = document.createElement('span');
@@ -3022,7 +3152,18 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /** Number of history items shown before "Show More" */
-  _HISTORY_INITIAL_COUNT: 4,
+  _HISTORY_INITIAL_COUNT: 10,
+
+  /**
+   * How many past sessions the home screen loads (also the filter/sort corpus).
+   * 200, not the old 60, so the filter can reach a real backlog, an install with
+   * 35+ conversations would otherwise hit the ceiling before the filter is useful
+   * (raised in @jordan8037310's #263; the endpoint clamps at 500).
+   */
+  _HISTORY_FETCH_LIMIT: 200,
+
+  /** localStorage key for the per-device sort choice (#263). */
+  _HISTORY_SORT_KEY: 'codeman:historySort',
 
   async loadHistorySessions() {
     const container = document.getElementById('historySessions');
@@ -3036,7 +3177,7 @@ Object.assign(CodemanApp.prototype, {
         ? Promise.resolve(this.cases)
         : fetch('/api/cases').then((r) => (r.ok ? r.json() : null)).then((d) => d?.data || []).catch(() => []);
       const [allSessions, cases] = await Promise.all([
-        this._fetchUnifiedSessions(60),
+        this._fetchUnifiedSessions(this._HISTORY_FETCH_LIMIT),
         casesPromise,
       ]);
       if (allSessions.length === 0) {
@@ -3044,32 +3185,174 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
 
-      list.replaceChildren();
-      const initialCount = this._HISTORY_INITIAL_COUNT;
-
-      // Render initial items
-      for (let i = 0; i < Math.min(initialCount, allSessions.length); i++) {
-        list.appendChild(this._buildHistoryItem(allSessions[i], cases));
-      }
-
-      // Add "Show More" button if there are more items
-      if (allSessions.length > initialCount) {
-        const moreBtn = document.createElement('button');
-        moreBtn.className = 'history-show-more';
-        moreBtn.textContent = `Show ${allSessions.length - initialCount} more`;
-        moreBtn.addEventListener('click', () => {
-          for (let i = initialCount; i < allSessions.length; i++) {
-            list.insertBefore(this._buildHistoryItem(allSessions[i], cases), moreBtn);
-          }
-          moreBtn.remove();
-        });
-        list.appendChild(moreBtn);
-      }
+      // Keep the corpus around: filtering and sorting (issue #260) work on this
+      // array, so a re-render costs no request. Expansion survives the periodic
+      // refresh in panels-ui.js, collapsing the list under the user's cursor
+      // every few seconds would be worse than the original 4-item cap.
+      this._historyAll = allSessions;
+      this._historyCases = cases;
+      this._wireHistoryControls();
+      this._renderHistoryList();
 
       container.style.display = '';
     } catch (err) {
       console.error('[loadHistorySessions]', err);
       container.style.display = 'none';
+    }
+  },
+
+  /**
+   * Wire the filter box and sort select once; both re-render from the cached
+   * corpus. The sort choice is restored from (and saved to) localStorage, it is
+   * a per-device display preference, so it stays out of the synced settings
+   * schema, same as `codeman:skin`.
+   */
+  _wireHistoryControls() {
+    if (this._historyControlsWired) return;
+    const filter = document.getElementById('historyFilter');
+    const sort = document.getElementById('historySort');
+    if (!filter && !sort) return;
+    this._historyControlsWired = true;
+
+    if (sort) {
+      try {
+        const saved = localStorage.getItem(this._HISTORY_SORT_KEY);
+        if (saved && Array.from(sort.options).some((o) => o.value === saved)) sort.value = saved;
+      } catch {
+        /* private mode, the order just won't persist */
+      }
+    }
+
+    if (filter) {
+      filter.addEventListener('input', () => this._renderHistoryList());
+      filter.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && filter.value) {
+          // Swallow it: Escape at the welcome screen otherwise closes overlays.
+          ev.stopPropagation();
+          filter.value = '';
+          this._renderHistoryList();
+        }
+      });
+    }
+    if (sort) {
+      sort.addEventListener('change', () => {
+        try {
+          localStorage.setItem(this._HISTORY_SORT_KEY, sort.value);
+        } catch {
+          /* private mode, the order just won't persist */
+        }
+        this._renderHistoryList();
+      });
+    }
+  },
+
+  /** True when a past-session row matches the filter text (name, folder, case, prompt). */
+  _historyRowMatches(s, needle, cases) {
+    const fields = [
+      s.name,
+      s.workingDir,
+      this._resolveCaseLabel(s.workingDir, cases),
+      s.firstPrompt,
+      s.lastPrompt,
+      s.sessionId,
+    ];
+    return fields.some((f) => typeof f === 'string' && f.toLowerCase().includes(needle));
+  },
+
+  /**
+   * The text a history row shows as its title. Most transcript-backed rows have
+   * no session name at all, so this falls through to the first prompt and then
+   * to the path, and the A–Z sort keys off the SAME string, or "sort by name"
+   * would silently do nothing for exactly the rows the list is mostly made of.
+   */
+  _historyRowLabel(s, fallback) {
+    return s.name || s.firstPrompt || fallback || '';
+  },
+
+  /**
+   * Sort past-session rows. 'recent' keeps the backend order (newest first);
+   * the alphabetical modes sort by the visible title or by folder basename.
+   * Pinned rows stay on top in every mode, pinning is an explicit override and
+   * a sort that buried it would read as the pin having been lost.
+   */
+  _sortHistoryRows(rows, mode) {
+    const label = (s) => this._historyRowLabel(s, this._shortenHomePath(s.workingDir)).toLowerCase();
+    const folder = (s) => ((s.workingDir || '').split('/').pop() || '').toLowerCase();
+    const key = mode === 'name' ? label : folder;
+    // numeric collation so w2-… sorts before w10-…, and base sensitivity so case
+    // does not split a project's rows apart (from @jordan8037310's #263).
+    const sorted =
+      mode === 'recent'
+        ? rows.slice()
+        : rows
+            .slice()
+            .sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: 'base', numeric: true }));
+    const pinned = sorted.filter((s) => s.pinned);
+    return pinned.length === 0 ? sorted : pinned.concat(sorted.filter((s) => !s.pinned));
+  },
+
+  /**
+   * Render the "Resume Conversation" list from the cached corpus, applying the
+   * current filter and sort. Collapsed by default to _HISTORY_INITIAL_COUNT;
+   * "Show more" expands the list AND the box (the CSS cap is class-driven, since
+   * a fixed 240px box made expansion pointless, issue #260).
+   */
+  _renderHistoryList() {
+    const list = document.getElementById('historyList');
+    if (!list) return;
+    const all = this._historyAll || [];
+    const cases = this._historyCases || [];
+    const countEl = document.getElementById('historyCount');
+    const needle = (document.getElementById('historyFilter')?.value || '').trim().toLowerCase();
+    const mode = document.getElementById('historySort')?.value || 'recent';
+
+    const matched = needle ? all.filter((s) => this._historyRowMatches(s, needle, cases)) : all;
+    const rows = this._sortHistoryRows(matched, mode);
+    // Filtering is itself an expansion request: hiding matches behind "Show more"
+    // would defeat the point of typing a filter.
+    const expanded = !!this._historyExpanded || needle.length > 0;
+    const visible = expanded ? rows : rows.slice(0, this._HISTORY_INITIAL_COUNT);
+
+    list.replaceChildren();
+    list.classList.toggle('expanded', expanded);
+
+    if (rows.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'history-empty';
+      empty.textContent = `No conversations match "${needle}"`;
+      list.appendChild(empty);
+    }
+
+    for (const s of visible) list.appendChild(this._buildHistoryItem(s, cases));
+
+    const hidden = rows.length - visible.length;
+    if (hidden > 0) {
+      const moreBtn = document.createElement('button');
+      moreBtn.className = 'history-show-more';
+      moreBtn.textContent = `Show ${hidden} more`;
+      moreBtn.addEventListener('click', () => {
+        this._historyExpanded = true;
+        this._renderHistoryList();
+      });
+      list.appendChild(moreBtn);
+    } else if (expanded && !needle && rows.length > this._HISTORY_INITIAL_COUNT) {
+      const lessBtn = document.createElement('button');
+      lessBtn.className = 'history-show-more';
+      lessBtn.textContent = 'Show less';
+      lessBtn.addEventListener('click', () => {
+        this._historyExpanded = false;
+        this._renderHistoryList();
+        list.scrollTop = 0;
+      });
+      list.appendChild(lessBtn);
+    }
+
+    if (countEl) {
+      countEl.textContent = needle
+        ? `${rows.length} of ${all.length}`
+        : rows.length > visible.length
+          ? `${visible.length} of ${rows.length}`
+          : String(rows.length);
     }
   },
 
@@ -3658,6 +3941,20 @@ Object.assign(CodemanApp.prototype, {
     if (!this.activeSessionId) {
       _crashDiag.log(`CJK send DROP no-session len=${text.length}`);
       return;
+    }
+    // ── One-shot Ctrl (mobile shell bar, issue #262) ──
+    // While the CJK field is visible it OWNS the keyboard: onData returns early
+    // for everything it swallows, and the focus router even redirects
+    // terminal.focus() into it — which is where the accessory bar sends focus
+    // after every key. So the onData hook never sees these keystrokes, and an
+    // armed modifier could neither fire NOR be spent: it survived until a
+    // session switch and then turned an innocent keystroke into a control byte.
+    // This is the module's single choke point to the PTY, so applying it here
+    // covers typed characters, IME flushes, Enter, backspace and arrows at once.
+    // Same policy as the onData hook: the next single character is modified,
+    // anything longer merely spends the modifier.
+    if (typeof KeyboardAccessoryBar !== 'undefined' && KeyboardAccessoryBar.isCtrlArmed?.()) {
+      text = KeyboardAccessoryBar.consumeCtrl(text);
     }
     // Bypasses onData (like insertTerminalText): predictions cannot see this
     if (this._localEchoPolicy === 'predict') this._predictiveEcho?.clearPredictions();
@@ -4279,6 +4576,232 @@ Object.assign(CodemanApp.prototype, {
       xtermEl.style.setProperty('--xterm-helper-left', `${left}px`);
       xtermEl.style.setProperty('--xterm-helper-top', `${top}px`);
     } catch {}
+  },
+
+  _isMobileTerminalInputFocused() {
+    const active = document.activeElement;
+    return (
+      active === this.terminal?.textarea ||
+      active?.classList?.contains('xterm-helper-textarea') ||
+      active?.id === 'cjkInput'
+    );
+  },
+
+  /**
+   * Separate terminal input from TUI-owned content on touch devices. A hidden
+   * keyboard must not consume taps on expandable readbacks, tool results, or
+   * decision rows; those taps belong to the foreground CLI. The visible prompt
+   * row remains the deliberate keyboard target.
+   */
+  _classifyMobileTerminalTap(clientX, clientY) {
+    if (!this._terminalViewportAtBottom()) return 'history';
+
+    const pos = this._clientPointToCell(clientX, clientY);
+    if (!pos || !this.terminal) return 'input';
+
+    const mouseMode = this.terminal.modes?.mouseTrackingMode;
+    const mouseTrackingOn = !!mouseMode && mouseMode !== 'none';
+    if (!mouseTrackingOn && !this._sessionUsesServerMouseStrip()) return 'input';
+
+    const buffer = this.terminal.buffer?.active;
+    if (!buffer?.getLine) return 'input';
+
+    const rows = Math.max(1, this.terminal.rows || 1);
+    const lines = [];
+    const wrappedRows = [];
+    let hasVisibleContent = false;
+    for (let row = 0; row < rows; row++) {
+      const line = buffer.getLine(buffer.viewportY + row);
+      const text = line?.translateToString?.(true) || '';
+      lines.push(text);
+      wrappedRows.push(Boolean(line?.isWrapped));
+      if (text.trim()) hasVisibleContent = true;
+    }
+    if (!hasVisibleContent) return 'input';
+
+    const cursorRow = Math.max(0, Math.min(rows - 1, buffer.cursorY || 0));
+    const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
+    let promptRow = -1;
+    let menuSelectionVisible = false;
+
+    if (mode === 'opencode') {
+      if (lines[cursorRow]?.includes('\u2503')) promptRow = cursorRow;
+    } else {
+      for (let row = rows - 1; row >= 0; row--) {
+        const promptMatch = lines[row].match(/^\s*[❯›]/);
+        if (!promptMatch) continue;
+        const tail = lines[row].slice(promptMatch[0].length).trim();
+        // A highlighted numbered choice is a menu row, not an editable prompt.
+        const hasSiblingChoice = lines.some(
+          (line, choiceRow) => choiceRow !== row && /^\s+\d+[.)]\s/.test(line)
+        );
+        if (/^\d+[.)]\s/.test(tail) && hasSiblingChoice) {
+          menuSelectionVisible = true;
+          break;
+        }
+        promptRow = row;
+        break;
+      }
+    }
+
+    const tappedRow = pos.row - 1;
+    let logicalLineStart = tappedRow;
+    while (logicalLineStart > 0 && wrappedRows[logicalLineStart]) logicalLineStart--;
+    let logicalLineEnd = tappedRow;
+    while (logicalLineEnd + 1 < rows && wrappedRows[logicalLineEnd + 1]) logicalLineEnd++;
+    const tappedLine = lines.slice(logicalLineStart, logicalLineEnd + 1).join('');
+    // Claude's status row is TUI-owned: tapping it opens the teammate view, so it
+    // must not be treated as a keyboard target. Match the AFFORDANCE, not the
+    // wording — the bullet and verb are both unstable (claude 2.1.226 prints
+    // "✻ Cooked for 2m 6s", "✻ Baked for 9m 47s"; earlier builds printed
+    // "• Working …"), while "esc to interrupt" / "background" are what make the
+    // row actionable in the first place.
+    if (mode === 'claude' && /\b(?:esc to interrupt|background)\b/i.test(tappedLine)) {
+      return 'content';
+    }
+    if (menuSelectionVisible) return 'content';
+    if (promptRow >= 0) {
+      const inputEnd = cursorRow >= promptRow ? cursorRow : promptRow;
+      if (tappedRow >= promptRow && tappedRow <= inputEnd) return 'input';
+    } else if (
+      tappedRow === cursorRow ||
+      tappedRow >=
+        Math.max(
+          0,
+          rows -
+            window.CodemanTerminalInput
+              .TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM
+        )
+    ) {
+      // During redraws a CLI can temporarily omit its prompt marker or place
+      // the cursor above a status footer. Keep the live cursor and a stable
+      // lower-screen focus band usable without turning transcript rows above
+      // that band into keyboard targets.
+      return 'input';
+    }
+
+    return 'content';
+  },
+
+  _blurMobileTerminalInput() {
+    const active = document.activeElement;
+    if (
+      active === this.terminal?.textarea ||
+      active?.classList?.contains('xterm-helper-textarea') ||
+      active?.id === 'cjkInput'
+    ) {
+      active.blur?.();
+    }
+  },
+
+  /**
+   * Which 'content' taps should DISMISS the mobile keyboard. Expandable
+   * readbacks, tool results and decision rows are TUI-owned: tapping them acts
+   * on the CLI, so popping the keyboard there is wrong. An inert transcript row
+   * still sends its mouse report, but must keep the keyboard reachable —
+   * touchstart's preventDefault cancels the compatibility click that would
+   * otherwise focus xterm, so focus has to be restored explicitly.
+   */
+  _isActionableMobileTerminalTap(clientX, clientY) {
+    const pos = this._clientPointToCell(clientX, clientY);
+    const buffer = this.terminal?.buffer?.active;
+    if (!pos || !buffer?.getLine) return false;
+
+    const rows = Math.max(1, this.terminal.rows || 1);
+    const lines = [];
+    const wrappedRows = [];
+    for (let row = 0; row < rows; row++) {
+      const line = buffer.getLine(buffer.viewportY + row);
+      lines.push(line?.translateToString?.(true) || '');
+      wrappedRows.push(Boolean(line?.isWrapped));
+    }
+
+    const tappedRow = pos.row - 1;
+    let logicalLineStart = tappedRow;
+    while (logicalLineStart > 0 && wrappedRows[logicalLineStart]) logicalLineStart--;
+    let logicalLineEnd = tappedRow;
+    while (logicalLineEnd + 1 < rows && wrappedRows[logicalLineEnd + 1]) logicalLineEnd++;
+    const tappedLine = lines.slice(logicalLineStart, logicalLineEnd + 1).join('');
+
+    // Match the AFFORDANCE a CLI prints, not the row's title text: an
+    // expandable readback, tool result or status row advertises how to act on
+    // it ("ctrl+r to expand", "tap to collapse", "esc to interrupt"). Keying on
+    // titles instead would only recognise the exact strings a fixture happens
+    // to use, and would let a real readback keep the keyboard open.
+    //
+    // The hint sits on its own row, so a readback's TITLE row — the one a
+    // finger actually lands on — carries no affordance text itself. Look at the
+    // adjacent row too, which is how these blocks are laid out in practice.
+    // Keyed on the ACTION VERB, and deliberately not on prose verbs. A CLI hint
+    // names a key or a gesture ("ctrl+r to expand", "tap to collapse",
+    // "esc to interrupt"); "click here to open the file" is transcript content
+    // and must keep the keyboard, so `click` and bare `here` are excluded.
+    // The hint may sit mid-line — Claude's status row is
+    // "✻ Cooked for 2m 6s · esc to interrupt" — so this is not anchored.
+    const affordance =
+      /\b(?:ctrl\+\w+|shift\+\w+|esc|enter|tab|tap)\s+to\s+(?:expand|collapse|view|open|interrupt|see)\b/i;
+    const blockStart = Math.max(0, logicalLineStart - 1);
+    const blockEnd = Math.min(rows - 1, logicalLineEnd + 1);
+    for (let row = blockStart; row <= blockEnd; row++) {
+      if (affordance.test(lines[row])) return true;
+    }
+    // A Claude status row ("✻ Cooked for 2m 6s · esc to interrupt") is caught by
+    // the affordance above; there is deliberately no verb literal here, because
+    // the verb is randomised per build.
+
+    const hasMenuPrompt = lines.some((line) => /^\s*[❯›]\s+\d+[.)]\s/.test(line));
+    const hasMenuChoice = lines.some((line) => /^\s+\d+[.)]\s/.test(line));
+    return hasMenuPrompt && hasMenuChoice;
+  },
+
+  _focusMobileTerminalInput() {
+    this._syncMobileHelperTextareaToCursor();
+    const cjkInput = document.getElementById('cjkInput');
+    if (cjkInput?.classList.contains('cjk-input-visible')) {
+      cjkInput.focus();
+    } else {
+      this.terminal?.focus();
+    }
+  },
+
+  _handleMobileTerminalTap(touch, startedWithTerminalFocus, cachedIntent = null) {
+    // A guard bail-out, not a classification: there is nothing to classify. It is
+    // deliberately NOT 'history', which would claim the viewport was scrolled up.
+    if (!touch || !this.terminal) return null;
+    // touchstart already classified this exact point; reuse it rather than paying
+    // a second full-viewport scan for the same gesture.
+    const intent = cachedIntent ?? this._classifyMobileTerminalTap(touch.clientX, touch.clientY);
+    if (intent === 'history') {
+      // Scrolled up: send NO mouse report — a tap on old output must not be
+      // delivered to the CLI as a click on whatever row now occupies that cell.
+      // Focus is a separate question, and the answer is yes: the user tapped the
+      // terminal, so let them type. Blurring here stranded activeElement on
+      // <body> with no way back to the keyboard.
+      this._focusMobileTerminalInput();
+      return intent;
+    }
+
+    const mouseMode = this.terminal.modes?.mouseTrackingMode;
+    const mouseTrackingOn = !!mouseMode && mouseMode !== 'none';
+    const shouldActivate = intent === 'content' || startedWithTerminalFocus;
+    if (shouldActivate && mouseTrackingOn) {
+      // xterm's mouse encoder owns live DECSET modes. The synthetic DOM click
+      // follows the same path as a desktop click.
+      this._dispatchSyntheticTerminalClick(touch.clientX, touch.clientY);
+    } else if (shouldActivate && this._sessionUsesServerMouseStrip()) {
+      // Claude/Codex/Gemini DECSETs are stripped from the browser stream, so
+      // report directly to the PTY while retaining local touch scrollback.
+      this._sendSyntheticSgrTap(touch.clientX, touch.clientY);
+    }
+
+    if (intent === 'content' && this._isActionableMobileTerminalTap(touch.clientX, touch.clientY)) {
+      // A synthetic xterm click can focus its helper textarea. Blur after the
+      // report so collapsing a readback never opens or retains the keyboard.
+      this._blurMobileTerminalInput();
+    } else {
+      this._focusMobileTerminalInput();
+    }
+    return intent;
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -5057,13 +5580,16 @@ Object.assign(CodemanApp.prototype, {
   /** Render the grouped result cards (or empty/loading states). */
   _renderSearch(data) {
     const results = document.getElementById('searchResults');
-    const historyTitle = document.getElementById('historyTitle');
+    // The header carries the title plus the filter/sort controls (issue #260),
+    // hide the whole row, not just the title, or the controls float above the
+    // search results and act on a list that is not on screen.
+    const historyHeader = document.getElementById('historyHeader') || document.getElementById('historyTitle');
     const historyList = document.getElementById('historyList');
     if (!results) return;
 
     const searching = !!data;
     // Hide the plain "Resume Conversation" history list while a search is active.
-    if (historyTitle) historyTitle.style.display = searching ? 'none' : '';
+    if (historyHeader) historyHeader.style.display = searching ? 'none' : '';
     if (historyList) historyList.style.display = searching ? 'none' : '';
 
     results.innerHTML = '';
@@ -5132,9 +5658,11 @@ Object.assign(CodemanApp.prototype, {
     const topRow = document.createElement('div');
     topRow.className = 'search-result-top';
 
+    // A past session resumes rather than switches tabs, so it says so on the badge.
+    const isPast = r.jumpTo && r.jumpTo.kind === 'resume-session';
     const badge = document.createElement('span');
-    badge.className = 'search-result-badge search-badge-' + r.type;
-    badge.textContent = (window.CodemanSearch.SOURCE_LABELS[r.type] || r.type).replace(/s$/, '');
+    badge.className = 'search-result-badge search-badge-' + r.type + (isPast ? ' search-badge-past' : '');
+    badge.textContent = isPast ? 'Resume' : (window.CodemanSearch.SOURCE_LABELS[r.type] || r.type).replace(/s$/, '');
 
     const name = document.createElement('span');
     name.className = 'search-result-name';
@@ -5166,13 +5694,20 @@ Object.assign(CodemanApp.prototype, {
 
   /**
    * Navigate to a search result by jumpTo.kind, reusing the existing app methods:
-   *   session     → selectSession(sessionId)        (open/switch to the session)
-   *   run-summary → openRunSummary(sessionId)        (session options → summary tab)
-   *   file-preview→ openFilePreview(path, sessionId, attachmentId)
+   *   session       → selectSession(sessionId)      (open/switch to the session)
+   *   resume-session→ resumeHistorySession(...)     (past session, no tab to switch to)
+   *   run-summary   → openRunSummary(sessionId)     (session options → summary tab)
+   *   file-preview  → openFilePreview(path, sessionId, attachmentId)
    */
   _jumpToSearchResult(r) {
     const jt = r && r.jumpTo;
     if (!jt) return;
+    // A past session has to be replayed, not switched to. Do it BEFORE hiding the
+    // welcome overlay: resumeHistorySession() owns that transition itself.
+    if (jt.kind === 'resume-session') {
+      this.resumeHistorySession(jt.claudeSessionId || jt.sessionId, jt.workingDir || '', r.sessionName);
+      return;
+    }
     // Leaving the welcome overlay so the target surface is visible.
     if (typeof this.hideWelcome === 'function') this.hideWelcome();
 

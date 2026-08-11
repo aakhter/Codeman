@@ -30,7 +30,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile, mkdir, lstat, readdir, rename, unlink, rmdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, lstat, readdir, realpath, rename, unlink, rmdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -314,6 +314,64 @@ function withSettingsLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Why writing into `<casePath>/.claude/settings.local.json` must NOT proceed,
+ * or null when it is safe.
+ *
+ * Case contents can be FOREIGN (a freshly cloned repository, an imported
+ * tree): `.claude` or the settings file itself can arrive as a symlink
+ * pointing anywhere on this machine, and `writeFile` follows links, so a
+ * scaffold write would land outside the case, up to and including replacing
+ * the user's own `~/.claude/settings.json` (#251 review). Any symlink in the
+ * chain, or a `.claude` that resolves outside the case, refuses the write.
+ * A missing `.claude` is fine (the writer creates it).
+ */
+export async function settingsWriteBlocker(casePath: string): Promise<string | null> {
+  const claudeDir = join(casePath, '.claude');
+  try {
+    const dirStat = await lstat(claudeDir).catch(() => null);
+    if (dirStat?.isSymbolicLink()) return 'its .claude is a symlink';
+    if (dirStat && !dirStat.isDirectory()) return 'its .claude is a file, not a directory';
+    if (dirStat && (await realpath(claudeDir)) !== join(await realpath(casePath), '.claude')) {
+      return 'its .claude directory resolves outside the case';
+    }
+    const settingsStat = await lstat(join(claudeDir, 'settings.local.json')).catch(() => null);
+    if (settingsStat?.isSymbolicLink()) return 'its .claude/settings.local.json is a symlink';
+  } catch (err) {
+    return `its .claude paths could not be verified (${String(err)})`;
+  }
+  return null;
+}
+
+/**
+ * The ONE gate for writing `<casePath>/.claude/settings.local.json`.
+ *
+ * Serializes writers per path (withSettingsLock) and, INSIDE the lock, refuses
+ * the write when `settingsWriteBlocker` reports the target unsafe. Every
+ * settings writer in this module must go through here rather than calling
+ * `writeFile` on the settings path itself, so a repository-controlled symlink
+ * can never redirect ANY of them outside the case (#251 review: the guard
+ * originally covered only two writers, and applyStatusLineConfig was shown
+ * writing through a symlinked settings file). Refusal is a console.warn, not
+ * a throw: hooks/statusline degrade gracefully and the session still runs.
+ */
+async function withSafeSettingsWrite(
+  casePath: string,
+  purpose: string,
+  fn: (claudeDir: string, settingsPath: string) => Promise<void>
+): Promise<void> {
+  const claudeDir = join(casePath, '.claude');
+  const settingsPath = join(claudeDir, 'settings.local.json');
+  await withSettingsLock(settingsPath, async () => {
+    const blocker = await settingsWriteBlocker(casePath);
+    if (blocker) {
+      console.warn(`[hooks-config] Refusing to write ${purpose} for ${casePath}: ${blocker}`);
+      return;
+    }
+    await fn(claudeDir, settingsPath);
+  });
+}
+
+/**
  * Generates the hooks section for .claude/settings.local.json
  *
  * The hook commands read stdin JSON from Claude Code (contains tool_name,
@@ -507,8 +565,7 @@ function mergeCodemanHooks(existingValue: unknown, generated: Record<string, unk
 export async function stripCaseEnvKeys(casePath: string, keysToRemove: readonly string[]): Promise<void> {
   if (keysToRemove.length === 0) return;
 
-  const settingsPath = join(casePath, '.claude', 'settings.local.json');
-  await withSettingsLock(settingsPath, async () => {
+  await withSafeSettingsWrite(casePath, 'env-key removal', async (_claudeDir, settingsPath) => {
     if (!existsSync(settingsPath)) return;
 
     let existing: Record<string, unknown>;
@@ -540,9 +597,7 @@ export async function stripCaseEnvKeys(casePath: string, keysToRemove: readonly 
  * Merges with existing env field; removes vars set to empty string.
  */
 export async function updateCaseEnvVars(casePath: string, envVars: Record<string, string>): Promise<void> {
-  const claudeDir = join(casePath, '.claude');
-  const settingsPath = join(claudeDir, 'settings.local.json');
-  await withSettingsLock(settingsPath, async () => {
+  await withSafeSettingsWrite(casePath, 'env vars', async (claudeDir, settingsPath) => {
     if (!existsSync(claudeDir)) {
       await mkdir(claudeDir, { recursive: true });
     }
@@ -573,9 +628,7 @@ export async function updateCaseEnvVars(casePath: string, envVars: Record<string
  * Pass a non-empty string to set, or empty/null to remove.
  */
 export async function updateCaseModel(casePath: string, model: string | null): Promise<void> {
-  const claudeDir = join(casePath, '.claude');
-  const settingsPath = join(claudeDir, 'settings.local.json');
-  await withSettingsLock(settingsPath, async () => {
+  await withSafeSettingsWrite(casePath, 'model', async (claudeDir, settingsPath) => {
     if (!existsSync(claudeDir)) {
       await mkdir(claudeDir, { recursive: true });
     }
@@ -600,11 +653,11 @@ export async function updateCaseModel(casePath: string, model: string | null): P
 /**
  * Writes hooks config to .claude/settings.local.json in the given case path.
  * Merges with existing file content, only touching the `hooks` key.
+ * Refuses (with a console.warn, not a throw: hooks degrade to output-based
+ * idle detection) when `settingsWriteBlocker` reports the target unsafe.
  */
 export async function writeHooksConfig(casePath: string): Promise<void> {
-  const claudeDir = join(casePath, '.claude');
-  const settingsPath = join(claudeDir, 'settings.local.json');
-  await withSettingsLock(settingsPath, async () => {
+  await withSafeSettingsWrite(casePath, 'hooks', async (claudeDir, settingsPath) => {
     if (!existsSync(claudeDir)) {
       await mkdir(claudeDir, { recursive: true });
     }
@@ -646,9 +699,7 @@ export async function writeHooksConfig(casePath: string): Promise<void> {
  * block they have never had), so that call is left to the owner rather than made here.
  */
 export async function ensureCodemanHooks(casePath: string): Promise<void> {
-  const claudeDir = join(casePath, '.claude');
-  const settingsPath = join(claudeDir, 'settings.local.json');
-  await withSettingsLock(settingsPath, async () => {
+  await withSafeSettingsWrite(casePath, 'hooks (ensure)', async (claudeDir, settingsPath) => {
     if (!existsSync(claudeDir)) {
       await mkdir(claudeDir, { recursive: true });
     }
@@ -690,14 +741,16 @@ export async function ensureCodemanHooks(casePath: string): Promise<void> {
  * when the hooks aren't ours, so it is cheap enough to call on every Claude spawn.
  */
 export async function refreshStaleCodemanHooks(casePath: string): Promise<boolean> {
-  const settingsPath = join(casePath, '.claude', 'settings.local.json');
-  if (!existsSync(settingsPath)) return false;
-  return withSettingsLock(settingsPath, async () => {
+  if (!existsSync(join(casePath, '.claude', 'settings.local.json'))) return false;
+  // Upstream's wrapper returns void, but verifyClaudeSessionStartHookCapability below
+  // consumes this boolean, so carry the verdict out through a closure flag.
+  let sessionStartReady = false;
+  await withSafeSettingsWrite(casePath, 'hooks (refresh)', async (_claudeDir, settingsPath) => {
     let existing: Record<string, unknown>;
     try {
       existing = JSON.parse(await readFile(settingsPath, 'utf-8'));
     } catch {
-      return false; // malformed — leave it untouched (case-create owns the happy path)
+      return; // malformed — leave it untouched (case-create owns the happy path)
     }
     const hooksJson = JSON.stringify(existing.hooks ?? null);
     const isOurs = hooksJson.includes('/api/hook-event');
@@ -716,7 +769,7 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
     // Approvals Inbox needs the elicitation_complete/elicitation_response
     // matchers; their absence marks a pre-inbox hooks block.
     const hasElicitationComplete = hooksJson.includes('elicitation_complete');
-    if (!isOurs) return false;
+    if (!isOurs) return;
     if (
       hasSecret &&
       hasBackgroundWake &&
@@ -724,8 +777,10 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
       hasSubagentStopGuard &&
       hasElicitationComplete &&
       !hasTlsFlaglessCurl
-    )
-      return true;
+    ) {
+      sessionStartReady = true;
+      return;
+    }
     const generated = generateHooksConfig();
     const merged = {
       ...existing,
@@ -734,11 +789,12 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
     await writeFile(settingsPath, JSON.stringify(merged, null, 2) + '\n');
     try {
       const persisted = JSON.parse(await readFile(settingsPath, 'utf-8')) as Record<string, unknown>;
-      return hasManagedSessionStartHook(persisted.hooks);
+      sessionStartReady = hasManagedSessionStartHook(persisted.hooks);
     } catch {
-      return false;
+      return;
     }
   });
+  return sessionStartReady;
 }
 
 /** Verify authoritative fresh-thread identity support without imposing hooks on arbitrary projects. */
@@ -786,10 +842,7 @@ export function generateStatusLineCommand(): string {
  * Claude mode. Merges, preserving all other keys (hooks, env, model).
  */
 export async function applyStatusLineConfig(casePath: string, enabled: boolean): Promise<void> {
-  const claudeDir = join(casePath, '.claude');
-  const settingsPath = join(claudeDir, 'settings.local.json');
-
-  await withSettingsLock(settingsPath, async () => {
+  await withSafeSettingsWrite(casePath, 'statusLine', async (claudeDir, settingsPath) => {
     let existing: Record<string, unknown> = {};
     if (existsSync(settingsPath)) {
       try {

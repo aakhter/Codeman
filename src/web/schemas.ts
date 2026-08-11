@@ -124,6 +124,14 @@ export const FileWriteSchema = z
 /** Allowlisted env var key prefixes */
 const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 'GOOGLE_', 'ANTIGRAVITY_'];
 
+/**
+ * Allowlisted exact env var keys (checked alongside the prefixes).
+ * CLAUDE_CONFIG_DIR relocates the Claude CLI's user config (credentials,
+ * settings, stats) so a case can run on a separate Claude subscription (#255).
+ * Exact match only — CLAUDE_CONFIG_DIR_EXTRA etc. stay rejected.
+ */
+const ALLOWED_ENV_KEYS = new Set(['CLAUDE_CONFIG_DIR']);
+
 /** Env var keys that are always blocked (security-sensitive) */
 const BLOCKED_ENV_KEYS = new Set([
   'PATH',
@@ -138,6 +146,7 @@ const BLOCKED_ENV_KEYS = new Set([
 /** Validate that an env var key is allowed */
 function isAllowedEnvKey(key: string): boolean {
   if (BLOCKED_ENV_KEYS.has(key)) return false;
+  if (ALLOWED_ENV_KEYS.has(key)) return true;
   return ALLOWED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
@@ -152,7 +161,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, and ANTIGRAVITY_* keys are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_* keys and CLAUDE_CONFIG_DIR are allowed.',
     }
   );
 
@@ -397,6 +406,31 @@ export const CreateCaseSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
   description: z.string().max(1000).optional(),
+});
+
+/**
+ * Schema for POST /api/cases/clone — issue #236.
+ *
+ * `repository` is only length-bounded here on purpose: what makes an operand safe
+ * is the transport/shape analysis in `parseGitRepositoryUrl` (which also produces
+ * the user-facing rejection reason), and duplicating a weaker version of that as a
+ * regex would be the copy that drifts. The route parses before touching git.
+ */
+export const CloneCaseSchema = z.object({
+  name: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
+  repository: z.string().min(1).max(2048),
+  /** Branch or tag → `--branch <ref> --single-branch`. */
+  ref: z.string().min(1).max(200).optional(),
+  /** `--depth 1`. */
+  shallow: z.boolean().optional(),
+  description: z.string().max(1000).optional(),
+});
+
+/** Schema for POST /api/cases/clone-preflight — ask the remote what it has, clone nothing. */
+export const ClonePreflightSchema = z.object({
+  repository: z.string().min(1).max(2048),
 });
 
 const RemoteCommandOverridesSchema = z
@@ -763,6 +797,19 @@ export const IntentGoalsSchema = z
   })
   .strict();
 
+/**
+ * Body of POST /api/sessions/:id/readmymind (Read My Mind predict). Both
+ * fields are the Rethink flow: `rejected` carries suggestions the user
+ * dismissed (strong negative signal, fed back verbatim), `steer` an optional
+ * free-text correction ("no, I meant the mobile bug").
+ */
+export const ReadMyMindPredictSchema = z
+  .object({
+    steer: z.string().max(2000).optional(),
+    rejected: z.array(z.string().max(1000)).max(10).optional(),
+  })
+  .strict();
+
 // ========== Configuration ==========
 
 /**
@@ -864,6 +911,16 @@ export const SettingsUpdateSchema = z
      */
     agentSkillEnabled: z.boolean().optional(),
     /**
+     * Let browser dictation transcribe through this machine's Claude Code login,
+     * the same speech-to-text service the CLI's own `/voice` mode uses
+     * (docs/claude-voice-plan.md). SYNCED, default OFF: enabling it spends the
+     * operator's Claude subscription on transcription for anyone who can reach
+     * the UI, and routes microphone audio to Anthropic rather than to whichever
+     * provider was configured before. The Deepgram and Web Speech paths are
+     * untouched by this flag.
+     */
+    claudeVoiceEnabled: z.boolean().optional(),
+    /**
      * Approvals Inbox (header bell + drawer, phone overview answer buttons,
      * push Approve/Deny action buttons). SYNCED, default OFF (opt-in): even
      * with items pending, no surface renders and push payloads carry no
@@ -879,6 +936,12 @@ export const SettingsUpdateSchema = z
      * stored profiles stay until DELETE /api/sessions/:id/intent.
      */
     readMyMindEnabled: z.boolean().optional(),
+    /**
+     * Read My Mind predictor model override. Empty/absent = the AI-checker
+     * default (opus: prediction quality is the product and it runs only on an
+     * explicit press). Shell-safety is validated again at spawn time.
+     */
+    readMyMindModel: z.string().max(100).optional(),
     tunnelEnabled: z.boolean().optional(),
     // Action field (NOT persisted): explicit per-request acknowledgment that the
     // operator accepts exposing an UNAUTHENTICATED public tunnel (no CODEMAN_PASSWORD).
@@ -1002,6 +1065,8 @@ export const SettingsUpdateSchema = z
     // Voice settings (cross-device sync)
     voiceSettings: z
       .object({
+        /** 'auto' | 'claude' | 'deepgram' | 'webspeech'. Unknown values fall back to auto client-side. */
+        provider: z.string().max(20).optional(),
         apiKey: z.string().max(200).optional(),
         language: z.string().max(20).optional(),
         keyterms: z.string().max(500).optional(),

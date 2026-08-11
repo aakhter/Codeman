@@ -97,6 +97,7 @@ import {
 } from './session-listener-wiring.js';
 import { sessionWaits, hooksAvailableForMode } from './session-wait-registry.js';
 import { intentStore } from '../intent-store.js';
+import { AI_CHECK_MODEL } from '../config/ai-defaults.js';
 import { approvalInbox } from './approval-inbox.js';
 import {
   wireRespawnListeners,
@@ -204,6 +205,7 @@ import {
   registerMeRoutes,
   registerAdminRoutes,
   registerWsRoutes,
+  registerVoiceRoutes,
   registerWebviewRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
@@ -675,11 +677,14 @@ export class WebServer extends EventEmitter {
       getTruecolorEnabled: this.getTruecolorEnabled.bind(this),
       getCheckpointDefaultEnabled: this.getCheckpointDefaultEnabled.bind(this),
       getAgentSkillEnabled: this.getAgentSkillEnabled.bind(this),
+      getClaudeVoiceEnabled: this.getClaudeVoiceEnabled.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
       getLightSessionsState: this.getLightSessionsState.bind(this),
       startTranscriptWatcher: this.startTranscriptWatcher.bind(this),
       stopTranscriptWatcher: this.stopTranscriptWatcher.bind(this),
+      getTranscriptPath: (sessionId: string) => this.transcriptWatchers.get(sessionId)?.getPath() ?? null,
+      getReadMyMindModel: this.getReadMyMindModel.bind(this),
       // InfraPort
       mux: this.mux,
       runSummaryTrackers: this.runSummaryTrackers,
@@ -1031,6 +1036,7 @@ export class WebServer extends EventEmitter {
     registerCronRoutes(this.app, { ...ctx, cron: this.cronService });
 
     registerWsRoutes(this.app, ctx, () => this.getHostPolicy());
+    registerVoiceRoutes(this.app, ctx, () => this.getHostPolicy());
   }
 
   /**
@@ -1430,6 +1436,7 @@ export class WebServer extends EventEmitter {
         { isGeminiAvailable },
         { isAntigravityAvailable },
         { isCloudflaredAvailable },
+        { isGitAvailable },
       ] = await Promise.all([
         import('../utils/claude-cli-resolver.js'),
         import('../utils/opencode-cli-resolver.js'),
@@ -1437,6 +1444,7 @@ export class WebServer extends EventEmitter {
         import('../utils/gemini-cli-resolver.js'),
         import('../utils/antigravity-cli-resolver.js'),
         import('../utils/cloudflared-resolver.js'),
+        import('../git-clone.js'),
       ]);
       const available = {
         claude: isClaudeAvailable(),
@@ -1445,6 +1453,9 @@ export class WebServer extends EventEmitter {
         gemini: isGeminiAvailable(),
         antigravity: isAntigravityAvailable(),
         cloudflared: isCloudflaredAvailable(),
+        // Not a run mode: the Add Case → Clone tab is an offer this box cannot
+        // keep without git (issue #236), same reasoning as cloudflared above.
+        git: isGitAvailable(),
       };
       html = html.replace(
         '</head>',
@@ -1797,6 +1808,27 @@ export class WebServer extends EventEmitter {
   private async getAgentSkillEnabled(): Promise<boolean> {
     const settings = await this.readSettings();
     return settings.agentSkillEnabled === true;
+  }
+
+  // Whether browser dictation may use this machine's Claude Code credentials
+  // (synced `claudeVoiceEnabled` setting, default OFF; docs/claude-voice-plan.md).
+  // OFF by default because turning it on spends the operator's Claude subscription
+  // on transcription for anyone who can reach the UI.
+  private async getClaudeVoiceEnabled(): Promise<boolean> {
+    const settings = await this.readSettings();
+    return settings.claudeVoiceEnabled === true;
+  }
+
+  /**
+   * Read My Mind predictor model (docs/readmymind-plan.md): `readMyMindModel`
+   * setting, defaulting to the AI-checker opus model. Prediction quality is
+   * the product and runs only on an explicit press, so the cost profile is
+   * nothing like the idle checker's.
+   */
+  private async getReadMyMindModel(): Promise<string> {
+    const settings = await this.readSettings();
+    const model = typeof settings.readMyMindModel === 'string' ? settings.readMyMindModel.trim() : '';
+    return model || AI_CHECK_MODEL;
   }
 
   // Helper to get model configuration from settings
