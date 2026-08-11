@@ -122,6 +122,35 @@ describe('file-routes attachment path guard (COD-53)', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('returns not found without registration side effects for a foreign session', async () => {
+    const previousMultiUser = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    const scoped = await createRouteTestHarness(registerFileRoutes, {
+      authUser: { username: 'bob', role: 'user' },
+    });
+    scoped.ctx._session.owner = 'alice';
+    const path = '/mnt/c/decks/board-update.pdf';
+
+    try {
+      const response = await scoped.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${scoped.ctx._sessionId}/attachments`,
+        payload: { path },
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(scoped.ctx._session.upsertAttachmentHistory).not.toHaveBeenCalled();
+      expect(scoped.ctx.persistSessionState).not.toHaveBeenCalled();
+      expect(scoped.ctx.broadcast).not.toHaveBeenCalled();
+      expect(attachmentRegistry.findByFilePath(scoped.ctx._sessionId, path)).toBeUndefined();
+    } finally {
+      await scoped.app.close();
+      attachmentRegistry.clearSession(scoped.ctx._sessionId);
+      if (previousMultiUser === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = previousMultiUser;
+    }
+  });
+
   it('rejects generated registration when the canonical boundary itself has moved', async () => {
     mockedRealpathSync.mockImplementation((path: string) => {
       if (path === '/tmp/test-workdir/output/mockup.png') return '/srv/public/output/mockup.png' as never;

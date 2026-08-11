@@ -29,7 +29,9 @@ describe('document attachment UI wiring', () => {
   });
 
   it('supports opening attachment cards in the existing preview overlay by session id', () => {
-    expect(panelsJs).toContain('openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null)');
+    expect(panelsJs).toContain(
+      'openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null, options = {})'
+    );
     expect(panelsJs).toContain('openAttachmentInNewTab(sessionId, filePath, attachmentId = null)');
     expect(panelsJs).toContain('file-preview?path=');
   });

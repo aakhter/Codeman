@@ -3821,6 +3821,96 @@ Object.assign(CodemanApp.prototype, {
     if (headerBtn) headerBtn.setAttribute('aria-expanded', 'false');
   },
 
+  async openExternalPathPreview(absolutePath, sessionId) {
+    if (!sessionId || !absolutePath) return;
+
+    if (!this._externalPathPreviewRequests) this._externalPathPreviewRequests = new Map();
+    const requestKey = `${sessionId}\0${absolutePath}`;
+    const existing = this._externalPathPreviewRequests.get(requestKey);
+    if (existing && this.filePreviewState === existing.resolverState) return existing.request;
+    if (existing) this._externalPathPreviewRequests.delete(requestKey);
+
+    let resolverState;
+    const request = (async () => {
+      const overlay = this.$('filePreviewOverlay');
+      const titleEl = this.$('filePreviewTitle');
+      const bodyEl = this.$('filePreviewBody');
+      const footerEl = this.$('filePreviewFooter');
+      if (!overlay || !bodyEl) return;
+
+      this._stopFilePreviewPolling();
+      this._resetFilePreviewExternalAction?.();
+      this._resetFilePreviewOriginalDownloadAction?.();
+
+      overlay.classList.add('visible');
+      this._restorePreviewSize();
+      if (titleEl) titleEl.textContent = absolutePath;
+      bodyEl.innerHTML = '<div class="binary-message">Loading...</div>';
+      if (footerEl) footerEl.textContent = '';
+      this._hideFilePreviewNavigation();
+
+      const requestToken = Symbol('external-path-preview');
+      resolverState = { sessionId, absolutePath, requestToken, mode: 'external-path-resolver' };
+      this.filePreviewState = resolverState;
+      const ownsPreview = () => this.filePreviewState === resolverState && resolverState.requestToken === requestToken;
+      const renderError = (message) => {
+        if (!ownsPreview()) return;
+        const safeMessage =
+          typeof message === 'string' && message.trim() ? message.trim().slice(0, 300) : 'Unable to preview file';
+        bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(safeMessage)}</div>`;
+      };
+
+      let response;
+      try {
+        response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: absolutePath }),
+        });
+      } catch (err) {
+        if (!ownsPreview()) return;
+        console.error('Failed to register external path preview:', err);
+        renderError('Unable to preview file');
+        return;
+      }
+      if (!ownsPreview()) return;
+
+      let payload;
+      try {
+        payload = await response.json();
+      } catch (err) {
+        if (!ownsPreview()) return;
+        console.error('Failed to parse external path preview response:', err);
+        renderError('Unable to preview file');
+        return;
+      }
+      if (!ownsPreview()) return;
+
+      const fileName = payload?.data?.fileName;
+      const attachmentId = payload?.data?.attachmentId;
+      if (!response.ok || payload?.success !== true) {
+        renderError(payload?.error);
+        return;
+      }
+      if (typeof fileName !== 'string' || !fileName || typeof attachmentId !== 'string' || !attachmentId) {
+        renderError('Unable to preview file');
+        return;
+      }
+
+      return this.openFilePreview(fileName, sessionId, attachmentId, { displayPath: absolutePath });
+    })();
+
+    const requestEntry = { request, resolverState };
+    this._externalPathPreviewRequests.set(requestKey, requestEntry);
+    try {
+      return await request;
+    } finally {
+      if (this._externalPathPreviewRequests.get(requestKey) === requestEntry) {
+        this._externalPathPreviewRequests.delete(requestKey);
+      }
+    }
+  },
+
   async openFileUriPreview(fileUri, sessionId) {
     if (!sessionId || !fileUri) return;
 
@@ -3891,7 +3981,7 @@ Object.assign(CodemanApp.prototype, {
     return this.openFilePreview(fileName, sessionId, attachmentId);
   },
 
-  async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null) {
+  async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null, options = {}) {
     if (!sessionId || !filePath) return;
 
     const overlay = this.$('filePreviewOverlay');
@@ -3913,14 +4003,24 @@ Object.assign(CodemanApp.prototype, {
     // Show overlay with loading state
     overlay.classList.add('visible');
     this._restorePreviewSize();
-    titleEl.textContent = filePath;
+    const displayPath = typeof options.displayPath === 'string' && options.displayPath ? options.displayPath : filePath;
+    titleEl.textContent = displayPath;
     bodyEl.innerHTML = '<div class="binary-message">Loading...</div>';
     footerEl.textContent = '';
 
     const metadataUrl = attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}`
       : `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}&lines=500`;
-    const previewState = { sessionId, filePath, attachmentId, metadataUrl, signature: null, docxView: 'pdf', mtimeMs: null };
+    const previewState = {
+      sessionId,
+      filePath,
+      attachmentId,
+      displayPath,
+      metadataUrl,
+      signature: null,
+      docxView: 'pdf',
+      mtimeMs: null,
+    };
     this.filePreviewState = previewState;
     this._setFilePreviewOriginalDownloadAction?.(previewState);
     this._hideFilePreviewNavigation();
@@ -4577,6 +4677,10 @@ Object.assign(CodemanApp.prototype, {
   retryFilePreview() {
     const st = this.filePreviewState;
     if (!st) return;
+    if (st.displayPath && st.displayPath !== st.filePath) {
+      this.openFilePreview(st.filePath, st.sessionId, st.attachmentId, { displayPath: st.displayPath });
+      return;
+    }
     this.openFilePreview(st.filePath, st.sessionId, st.attachmentId);
   },
 
