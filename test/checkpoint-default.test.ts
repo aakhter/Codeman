@@ -33,7 +33,10 @@ describe('COD-257 checkpoint default', () => {
 
   it('renders clear and screen-preserving new without checkpoint /init claims', () => {
     const html = readFileSync(new URL('../src/web/public/index.html', import.meta.url), 'utf8');
-    const checkpointStart = html.indexOf('id="modalCheckpointEnabled"');
+    // Anchor on the ROW, not the input: the settings-rail migration puts the
+    // explanatory copy in .set-row-text, which precedes the control, so slicing
+    // forward from the input id would start past the very text this asserts on.
+    const checkpointStart = html.indexOf('data-search="agent checkpoint');
     const checkpointEnd = html.indexOf('File Watching', checkpointStart);
     const checkpointUi = html.slice(checkpointStart, checkpointEnd);
     expect(checkpointUi).toContain('modalCheckpointModeNew');

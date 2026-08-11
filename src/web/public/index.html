@@ -1308,22 +1308,30 @@
               <div class="set-group">
                 <div class="set-group-head"><h4>Checkpoint & tmux</h4></div>
                 <div class="set-group-body">
-            <div class="form-row form-row-switch">
-              <label class="checkbox-inline">
-                <input type="checkbox" id="modalCheckpointEnabled" onchange="app.autoSaveCheckpoint()">
-                <span>Agent Checkpoint</span>
-              </label>
+            <div class="set-row" data-search="agent checkpoint compact clear new boundary conversation">
+              <div class="set-row-text">
+                <span class="set-row-label">Agent Checkpoint</span>
+                <span class="set-row-desc">When enabled, the agent checkpoints at a clean boundary. <strong>Tick the modes it may run</strong> — compact keeps the current conversation; clear starts a fresh conversation and clears the display; new starts a fresh conversation while preserving the display. Choose with <code id="checkpointCliHint">aicodeman checkpoint -m compact|clear|new</code>. A bare <code>checkpoint</code> uses compact when allowed. Default OFF.<span id="checkpointCliPathWarning" class="cli-path-warning" hidden> ⚠ Codeman CLI not found on PATH — add <code>~/.local/bin</code> to your PATH to use this.</span></span>
+              </div>
+              <label class="switch switch-sm"><input type="checkbox" id="modalCheckpointEnabled" onchange="app.autoSaveCheckpoint()"><span class="slider"></span></label>
+            </div>
+            <div class="set-row" data-search="checkpoint modes compact clear new allowed">
+              <div class="set-row-text">
+                <span class="set-row-label">Allowed modes</span>
+                <span class="set-row-desc">Tick the modes the checkpoint may run.</span>
+              </div>
               <span class="checkpoint-modes" role="group" aria-label="Allowed checkpoint modes">
                 <label class="checkbox-inline"><input type="checkbox" id="modalCheckpointModeCompact" onchange="app.autoSaveCheckpoint()"><span>compact</span></label>
                 <label class="checkbox-inline"><input type="checkbox" id="modalCheckpointModeClear" onchange="app.autoSaveCheckpoint()"><span>clear</span></label>
                 <label class="checkbox-inline"><input type="checkbox" id="modalCheckpointModeNew" onchange="app.autoSaveCheckpoint()"><span>new</span></label>
               </span>
-              <span class="form-hint">When enabled, the agent checkpoints at a clean boundary. <strong>Tick the modes it may run</strong> — compact keeps the current conversation; clear starts a fresh conversation and clears the display; new starts a fresh conversation while preserving the display. Choose with <code id="checkpointCliHint">aicodeman checkpoint -m compact|clear|new</code>. A bare <code>checkpoint</code> uses compact when allowed. Default OFF.<span id="checkpointCliPathWarning" class="cli-path-warning" hidden> ⚠ Codeman CLI not found on PATH — add <code>~/.local/bin</code> to your PATH to use this.</span></span>
             </div>
-            <div class="form-row">
-              <label>Tmux session</label>
+            <div class="set-row" data-search="tmux session name attach codeman id">
+              <div class="set-row-text">
+                <span class="set-row-label">Tmux session</span>
+                <span class="set-row-desc">tmux session for this tab — attach with <code id="modalMuxAttachCmd" style="user-select: all;">tmux attach -t &lt;name&gt;</code> (Codeman id: <span id="modalMuxSessionId" style="user-select: all;">—</span>)</span>
+              </div>
               <span id="modalMuxName" style="font-family: var(--font-mono, monospace); user-select: all;">—</span>
-              <span class="form-hint">tmux session for this tab — attach with <code id="modalMuxAttachCmd" style="user-select: all;">tmux attach -t &lt;name&gt;</code> (Codeman id: <span id="modalMuxSessionId" style="user-select: all;">—</span>)</span>
             </div>
                 </div>
               </div>
@@ -1641,39 +1649,53 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsGestureControl"><span class="slider"></span></label>
                   </div>
+                  <div class="set-row" data-search="live mirror scrollback tmux history garbled repaint">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Live Mirror</span>
+                      <span class="set-row-desc">Agent terminals mirror the live screen; scrolling up pulls exact tmux history on demand.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsLiveMirror"><span class="slider"></span></label>
+                  </div>
                 </div>
               </div>
               <div class="set-group">
                 <div class="set-group-head"><h4>Buffers & history</h4></div>
                 <div class="set-group-body">
-            <div class="form-row" title="How many rendered terminal lines this browser keeps for the current tab. Higher values let you scroll farther back without reconnecting, but use more browser memory.">
-              <label>Browser Scrollback Lines</label>
-              <input type="number" id="appSettingsTerminalScrollbackLines" min="1000" max="1000000" step="1000" value="100000">
-              <span class="form-hint">Lines retained by xterm in this browser after reload.</span>
-            </div>
-            <div class="form-row" title="How many lines tmux keeps behind each session. Higher values improve reconnect and restore context after browser reloads or server restarts, but use more tmux memory.">
-              <label>tmux History Lines</label>
-              <input type="number" id="appSettingsTmuxHistoryLimit" min="1000" max="1000000" step="1000" value="100000">
-              <span class="form-hint">Lines retained by tmux for reconnects and new panes.</span>
-            </div>
-            <div class="form-row" title="Maximum raw terminal output Codeman keeps per session on the server. Higher values improve reload snapshots and search context, but increase server memory use.">
-              <label>Server Buffer Max MiB</label>
-              <input type="number" id="appSettingsTerminalBufferMaxMiB" min="1" max="128" step="1" value="32">
-              <span class="form-hint">Raw terminal buffer kept per session on the server.</span>
-            </div>
-            <div class="form-row" title="When the server buffer exceeds the max, Codeman trims it down to this size. Lower values free memory sooner; higher values preserve more recent terminal context.">
-              <label>Server Buffer Trim MiB</label>
-              <input type="number" id="appSettingsTerminalBufferTrimMiB" min="1" max="128" step="1" value="24">
-              <span class="form-hint">Size retained after the server buffer exceeds the max.</span>
-            </div>
-            <div class="form-row form-row-switch">
-              <label>Truecolor (24-bit color)</label>
-              <label class="switch">
-                <input type="checkbox" id="appSettingsTruecolor">
-                <span class="slider"></span>
-              </label>
-              <span class="form-hint">Set COLORTERM=truecolor for new Claude sessions (off by default; may cause color glitches)</span>
-            </div>
+                  <div class="set-row" data-search="browser scrollback lines xterm memory reload">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Browser Scrollback Lines</span>
+                      <span class="set-row-desc">Rendered lines this browser keeps for the current tab. Higher scrolls farther back, costs browser memory.</span>
+                    </div>
+                    <input type="number" id="appSettingsTerminalScrollbackLines" min="1000" max="1000000" step="1000" value="100000">
+                  </div>
+                  <div class="set-row" data-search="tmux history lines reconnect restore panes">
+                    <div class="set-row-text">
+                      <span class="set-row-label">tmux History Lines</span>
+                      <span class="set-row-desc">Lines tmux keeps behind each session, used for reconnects and new panes.</span>
+                    </div>
+                    <input type="number" id="appSettingsTmuxHistoryLimit" min="1000" max="1000000" step="1000" value="100000">
+                  </div>
+                  <div class="set-row" data-search="server buffer max mib raw terminal output memory">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Server Buffer Max MiB</span>
+                      <span class="set-row-desc">Raw terminal output kept per session on the server. Higher improves reload snapshots and search context.</span>
+                    </div>
+                    <input type="number" id="appSettingsTerminalBufferMaxMiB" min="1" max="128" step="1" value="32">
+                  </div>
+                  <div class="set-row" data-search="server buffer trim mib memory">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Server Buffer Trim MiB</span>
+                      <span class="set-row-desc">Size retained once the server buffer exceeds the max. Lower frees memory sooner.</span>
+                    </div>
+                    <input type="number" id="appSettingsTerminalBufferTrimMiB" min="1" max="128" step="1" value="24">
+                  </div>
+                  <div class="set-row" data-search="truecolor 24-bit color colorterm">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Truecolor (24-bit color)</span>
+                      <span class="set-row-desc">Set COLORTERM=truecolor for new Claude sessions. Off by default; may cause colour glitches.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsTruecolor"><span class="slider"></span></label>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1735,6 +1757,13 @@
                     <label class="set-chip" data-preview="header" data-preview-order="13" data-preview-text="42%"><input type="checkbox" id="appSettingsShowPlanUsageLimits"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4.5-5"/></svg><span>Plan Usage</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="14"><input type="checkbox" id="appSettingsShowLifecycleLog"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>Lifecycle Log</span></label>
                   </div>
+                  <div class="set-row" data-search="away digest header button summary while away">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Away Digest</span>
+                      <span class="set-row-desc">Show the Away Digest button in the header. Off by default.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsShowAwayDigest"><span class="slider"></span></label>
+                  </div>
                 </div>
               </div>
 
@@ -1789,39 +1818,6 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsSubagentActiveTabOnly" checked><span class="slider"></span></label>
                   </div>
-                </div>
-              </div>
-              <div class="set-group">
-                <div class="set-group-head"><h4>Downstream layout</h4></div>
-                <div class="set-group-body">
-              <div class="settings-item settings-item-multiline" title="Agent terminals (Claude/Codex/Gemini) show only the live screen (like a real terminal attached to tmux); scrolling up fetches the exact scrollback from tmux on demand. Eliminates garbled-scrollback artifacts from streaming TUI repaints. Turn off to restore the previous accumulate-and-heal behavior.">
-                <div class="settings-item-text">
-                  <span class="settings-item-label">Live Mirror</span>
-                  <span class="settings-item-desc">Agent terminals mirror the live screen; scroll up for exact tmux history</span>
-                </div>
-                <label class="switch switch-sm">
-                  <input type="checkbox" id="appSettingsLiveMirror">
-                  <span class="slider"></span>
-                </label>
-              </div>
-              <div class="settings-item" title="Show session tabs across the top or as a rail beside the terminal (not synced; phones stay horizontal)">
-                <span class="settings-item-label">Tab Orientation</span>
-                <select id="appSettingsTabOrientation" class="form-select">
-                  <option value="horizontal">Horizontal (top)</option>
-                  <option value="vertical">Vertical (side rail)</option>
-                </select>
-              </div>
-              <div class="settings-item" title="Show the Away Digest button in the header (opt-in, off by default)">
-                <span class="settings-item-label">Away Digest</span>
-                <label class="switch switch-sm">
-                  <input type="checkbox" id="appSettingsShowAwayDigest">
-                  <span class="slider"></span>
-                </label>
-              </div>
-                <div class="settings-item-text">
-                  <span class="settings-item-label">Live Mirror</span>
-                  <span class="settings-item-desc">Agent terminals mirror the live screen; scroll up for exact tmux history</span>
-                </div>
                 </div>
               </div>
             </section>
@@ -1919,6 +1915,16 @@
                       <span class="set-row-desc">The C logo opens the session overview instead of the welcome screen.</span>
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsMobileOverview" checked><span class="slider"></span></label>
+                  </div>
+                  <div class="set-row" data-search="tab orientation vertical rail sidebar horizontal strip">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Tab Orientation</span>
+                      <span class="set-row-desc">Session tabs across the top, or as a rail beside the terminal. Phones stay horizontal.</span>
+                    </div>
+                    <select id="appSettingsTabOrientation" class="form-select">
+                      <option value="horizontal">Horizontal (top)</option>
+                      <option value="vertical">Vertical (side rail)</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -2149,14 +2155,13 @@
               <div class="set-group">
                 <div class="set-group-head"><h4>Checkpoint</h4></div>
                 <div class="set-group-body">
-            <div class="form-row form-row-switch">
-              <label>Agent Checkpoint for new sessions</label>
-              <label class="switch">
-                <input type="checkbox" id="appSettingsCheckpointDefault" checked>
-                <span class="slider"></span>
-              </label>
-              <span class="form-hint">Enable compact and clear checkpoints when a new agent session starts. Existing sessions keep their own setting.</span>
-            </div>
+                  <div class="set-row" data-search="agent checkpoint compact clear new sessions">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Agent Checkpoint for new sessions</span>
+                      <span class="set-row-desc">Enable compact and clear checkpoints when a new agent session starts. Existing sessions keep their own setting.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsCheckpointDefault" checked><span class="slider"></span></label>
+                  </div>
                 </div>
               </div>
               <div class="set-group">
@@ -2164,33 +2169,37 @@
                 <div class="set-group-body">
             <!-- Headroom Section -->
             <div id="appSettingsHeadroomSection">
-              <div class="form-section-header">Headroom</div>
               <div class="form-row">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
                   <span id="appSettingsHeadroomDot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#64748b;flex-shrink:0;"></span>
                   <span id="appSettingsHeadroomHealth" style="font-size:0.8rem;color:var(--text-secondary);flex:1;">&#x2014;</span>
                   <button class="btn-toolbar btn-sm" id="appSettingsHeadroomTest" onclick="app._refreshHeadroomStatus()">Test</button>
                 </div>
-                <label>Proxy URL</label>
+              </div>
+              <div class="set-row" data-search="headroom proxy url endpoint host port">
+                <div class="set-row-text">
+                  <span class="set-row-label">Proxy URL</span>
+                  <span class="set-row-desc">Where the Headroom context-compression proxy is listening.</span>
+                </div>
                 <input type="text" id="appSettingsHeadroomUrl" placeholder="http://192.168.55.175:8787">
+              </div>
+              <div class="form-row">
                 <div class="form-hint" style="margin-top:8px;">Proxy-wide · all proxy clients</div>
                 <div id="appSettingsHeadroomSavings" style="margin-top:4px;margin-bottom:4px;">&#x2014;</div>
               </div>
-              <div class="form-row form-row-switch">
-                <label>Route Claude</label>
-                <label class="switch">
-                  <input type="checkbox" id="appSettingsHeadroomClaude">
-                  <span class="slider"></span>
-                </label>
-                <span class="form-hint" style="margin-top:0;margin-left:4px;">(new sessions)</span>
+              <div class="set-row" data-search="headroom route claude proxy new sessions">
+                <div class="set-row-text">
+                  <span class="set-row-label">Route Claude</span>
+                  <span class="set-row-desc">New Claude sessions launch through the Headroom proxy.</span>
+                </div>
+                <label class="switch switch-sm"><input type="checkbox" id="appSettingsHeadroomClaude"><span class="slider"></span></label>
               </div>
-              <div class="form-row form-row-switch">
-                <label>Route Codex</label>
-                <label class="switch">
-                  <input type="checkbox" id="appSettingsHeadroomCodex">
-                  <span class="slider"></span>
-                </label>
-                <span class="form-hint" style="margin-top:0;margin-left:4px;">(shared config reconciles now)</span>
+              <div class="set-row" data-search="headroom route codex proxy new sessions">
+                <div class="set-row-text">
+                  <span class="set-row-label">Route Codex</span>
+                  <span class="set-row-desc">New Codex sessions launch through the Headroom proxy.</span>
+                </div>
+                <label class="switch switch-sm"><input type="checkbox" id="appSettingsHeadroomCodex"><span class="slider"></span></label>
               </div>
               <div class="form-hint" style="margin-top:8px;">Managed-session launch / respawn snapshots</div>
               <div id="appSettingsHeadroomSessions" style="margin-top:6px;font-size:0.75rem;display:flex;flex-direction:column;gap:3px;"></div>

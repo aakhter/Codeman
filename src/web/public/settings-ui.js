@@ -661,6 +661,12 @@ Object.assign(CodemanApp.prototype, {
         for (const s of sections) {
           if (s.offsetTop - doc.scrollTop <= 140) current = s.id;
         }
+        // A short LAST section can never satisfy the 140px rule: once the document
+        // bottoms out it stops scrolling while that section's top is still below the
+        // threshold, so clicking its rail entry scrolled there and then handed the
+        // highlight back to the section above. At the bottom, the last section is by
+        // definition the current one.
+        if (doc.scrollTop + doc.clientHeight >= doc.scrollHeight - 4) current = sections[sections.length - 1].id;
         this._setActiveSettingsSection(current);
       });
     });
