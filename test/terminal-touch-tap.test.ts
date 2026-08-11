@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
+const terminalUiSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+
 function loadTerminalUiHarness() {
   const CodemanApp = function CodemanApp(this: any) {};
   class MockMouseEvent {
@@ -64,8 +66,7 @@ function loadTerminalUiHarness() {
     TERMINAL_CHUNK_SIZE: 32 * 1024,
   });
 
-  const code = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
-  vm.runInContext(code, context, { filename: 'terminal-ui.js' });
+  vm.runInContext(terminalUiSource, context, { filename: 'terminal-ui.js' });
 
   const app = new (CodemanApp as any)();
   return {
@@ -138,6 +139,19 @@ function createTerminalGrid(lines: string[], cursorY: number, wrappedRows = new 
 }
 
 describe('terminal touch tap mouse guard', () => {
+  it('binds touch listeners to one declared gesture lifecycle', () => {
+    const start = terminalUiSource.indexOf('// COD-283/284: session changes must update native momentum routing too.');
+    const end = terminalUiSource.indexOf('// ── Desktop click-to-position cursor', start);
+    const touchBlock = terminalUiSource.slice(start, end);
+    const touchStart = touchBlock.slice(touchBlock.indexOf("'touchstart'"), touchBlock.indexOf("'touchmove'"));
+    const touchCancel = touchBlock.slice(touchBlock.indexOf("'touchcancel'"));
+
+    expect(touchBlock).toContain('const touchGesture = this._createTerminalTouchGesture();');
+    expect(touchStart).toContain('const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);');
+    expect(touchStart.indexOf('const touch =')).toBeLessThan(touchStart.indexOf('touchLastX = touch.clientX;'));
+    expect(touchCancel).toContain('this._cancelTerminalTouchGesture(touchGesture);');
+  });
+
   it('recognizes focus only when a terminal input owns the active element', () => {
     const { app, setActiveElement } = loadTerminalUiHarness();
     const textarea = { classList: { contains: () => true } };

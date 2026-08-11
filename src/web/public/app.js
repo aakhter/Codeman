@@ -3169,7 +3169,8 @@ class CodemanApp {
       } else {
         this.terminal.scrollToBottom();
       }
-      if (carryLines > 0) this.terminal.scrollLines(-carryLines);
+      const carryRows = Math.max(0, Math.trunc(carryLines));
+      if (carryRows > 0) this.terminal.scrollLines(-carryRows);
       this._updateHistoryPill();
     } catch (err) {
       console.error('history view load failed:', err);

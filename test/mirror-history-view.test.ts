@@ -111,7 +111,7 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(body).not.toContain('_resetTerminalForReplay'); // reset() would drop sync mode
     // land on the exact pixels the user was watching, then apply their gesture
     const bottom = body.indexOf('scrollToBottom()');
-    const carry = body.indexOf('scrollLines(-carryLines)');
+    const carry = body.indexOf('scrollLines(-carryRows)');
     expect(bottom).toBeGreaterThan(-1);
     expect(carry).toBeGreaterThan(bottom);
   });
@@ -149,6 +149,13 @@ describe('COD-187 live-mirror structural guards', () => {
 
     const exit = appJs.slice(appJs.indexOf('_exitHistoryView() {'), appJs.indexOf('_showHistoryPill(text) {'));
     expect(exit).toContain('this._historyInitialLoadGen = 0;');
+  });
+
+  it('COD-291: fractional trackpad carry is converted to whole rows before xterm scrolling', () => {
+    const enter = appJs.slice(appJs.indexOf('async _enterHistoryView('), appJs.indexOf('async _expandHistoryFull()'));
+    expect(enter).toContain('const carryRows = Math.max(0, Math.trunc(carryLines));');
+    expect(enter).toContain('if (carryRows > 0) this.terminal.scrollLines(-carryRows);');
+    expect(enter).not.toContain('this.terminal.scrollLines(-carryLines)');
   });
 
   it('mirror gate covers claude/codex/gemini; the legacy _isTuiSession gate stays codex/gemini-only', () => {
