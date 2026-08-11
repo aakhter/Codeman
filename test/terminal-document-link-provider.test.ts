@@ -56,7 +56,7 @@ function loadTerminalUiPrototype() {
 
 function makeHarness(
   lines: FakeLine[] | string,
-  options: { sessionId?: string; workingDir?: string; cols?: number } = {}
+  options: { sessionId?: string; workingDir?: string; cols?: number; remote?: object; docker?: object } = {}
 ) {
   const { proto, openSpy } = loadTerminalUiPrototype();
   const sourceLines = typeof lines === 'string' ? [{ text: lines }] : lines;
@@ -86,6 +86,7 @@ function makeHarness(
   let provider: { provideLinks: (line: number, callback: (links?: Link[]) => void) => void } | undefined;
   const originalSessionId = options.sessionId ?? 'origin-session';
   const previewSpy = vi.fn();
+  const externalPreviewSpy = vi.fn();
   const fileUriSpy = vi.fn();
   const logSpy = vi.fn();
   const app = {
@@ -113,8 +114,18 @@ function makeHarness(
       },
     },
     activeSessionId: originalSessionId,
-    sessions: new Map([[originalSessionId, { workingDir: options.workingDir ?? '/workspace/project' }]]),
+    sessions: new Map([
+      [
+        originalSessionId,
+        {
+          workingDir: options.workingDir ?? '/workspace/project',
+          remote: options.remote,
+          docker: options.docker,
+        },
+      ],
+    ]),
     openFilePreview: previewSpy,
+    openExternalPathPreview: externalPreviewSpy,
     openFileUriPreview: fileUriSpy,
     openLogViewerWindow: logSpy,
     _openTerminalUrl: proto._openTerminalUrl,
@@ -132,7 +143,7 @@ function makeHarness(
     return links ?? [];
   }
 
-  return { app, provide, previewSpy, fileUriSpy, logSpy, openSpy, originalSessionId };
+  return { app, provide, previewSpy, externalPreviewSpy, fileUriSpy, logSpy, openSpy, originalSessionId };
 }
 
 describe('COD-232 terminal document link provider', () => {
@@ -379,6 +390,20 @@ describe('COD-232 terminal document link provider', () => {
     expect(previewSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['/home/u/ws/docs/report.md', 'docs/report.md'],
+    ['/home/u/ws/src/app.ts', 'src/app.ts'],
+    ['/home/u/ws/docs/report.pdf', 'docs/report.pdf'],
+  ])('keeps workspace documents ahead of the legacy absolute-path fallback for %s', (absolute, relative) => {
+    const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(absolute, { workingDir: '/home/u/ws' });
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
   it('keeps an ordinary URL link when its query contains a file URI value', () => {
     const url = 'https://example.com/?next=file:///tmp/report.pdf';
     const { provide, openSpy, fileUriSpy, logSpy, previewSpy } = makeHarness(`Continue at ${url}`);
@@ -433,6 +458,20 @@ describe('COD-232 terminal document link provider', () => {
     links[1].activate(null, links[1].text);
     expect(logSpy).toHaveBeenCalledWith('/var/log/app.log', originalSessionId);
     expect(previewSpy).toHaveBeenCalledWith('out/report.pdf', originalSessionId);
+  });
+
+  it.each([
+    'tail -f /workspace/project/out.txt',
+    'cat /workspace/project/data.json',
+    'Bash(cat /workspace/project/notes.md)',
+  ])('preserves command and Bash live-log precedence for %s', (line) => {
+    const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(line);
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(logSpy).toHaveBeenCalledWith(link.text, originalSessionId);
+    expect(previewSpy).not.toHaveBeenCalled();
   });
 
   it('preserves standalone legacy text links outside the session workspace', () => {
@@ -716,5 +755,171 @@ describe('COD-288 own-line spaced absolute path outside the workspace links noth
   it('regression: a quoted spaced path on its own line still links', () => {
     const { provide } = makeHarness('"My Big Docs/report.docx"', { workingDir: '/mnt/c/proj' });
     expect(provide().map((link) => link.text)).toEqual(['My Big Docs/report.docx']);
+  });
+});
+
+describe('COD-288 marker-prefixed absolute paths', () => {
+  const REPORTED =
+    '/mnt/c/kb-data/webex-archive/Isovalent and Cisco Unified Edge_265668a5/attachments/cilium-pnet-whitepaper-draft9-5.pdf';
+
+  it('links the complete numbered external path and excludes the marker from the range', () => {
+    const line = `1. ${REPORTED}`;
+    const { provide, externalPreviewSpy, originalSessionId } = makeHarness(line, {
+      workingDir: '/home/aakhter/projects/kb',
+    });
+
+    const [link] = provide();
+    expect(link.text).toBe(REPORTED);
+    expect(line.slice(link.range.start.x - 1, link.range.end.x)).toBe(REPORTED);
+    link.activate(null, link.text);
+    expect(externalPreviewSpy).toHaveBeenCalledWith(REPORTED, originalSessionId);
+  });
+
+  it.each(['12) ', '- ', '* ', '• ', '7.   ', '8.\t'])(
+    'recognizes the %s marker without including it in the link',
+    (marker) => {
+      const line = `${marker}${REPORTED}`;
+      const { provide } = makeHarness(line, { workingDir: '/home/aakhter/projects/kb' });
+      const [link] = provide();
+      expect(link.text).toBe(REPORTED);
+      expect(line.slice(link.range.start.x - 1, link.range.end.x)).toBe(REPORTED);
+    }
+  );
+
+  it('keeps an in-workspace marker path on the existing viewer without external registration', () => {
+    const absolute = '/workspace/project/My Reports/final.py';
+    const { provide, previewSpy, externalPreviewSpy, originalSessionId } = makeHarness(`1. ${absolute}`);
+
+    const [link] = provide();
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith('My Reports/final.py', originalSessionId);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['remote', { remote: { hostId: 'remote-1' } }],
+    ['docker', { docker: { containerName: 'codeman-case' } }],
+  ])('does not resolve an external path against the Codeman host for a %s session', (_label, session) => {
+    const { provide, externalPreviewSpy } = makeHarness(`1. ${REPORTED}`, {
+      workingDir: '/home/aakhter/projects/kb',
+      ...session,
+    });
+    expect(provide()).toEqual([]);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([`1. ${REPORTED} — updated summary, see notes.md`, '1. /workspace/project/../private/report.pdf'])(
+    'fails closed for an ambiguous or unsafe candidate: %s',
+    (line) => {
+      const { provide } = makeHarness(line, { workingDir: '/home/aakhter/projects/kb' });
+      expect(provide()).toEqual([]);
+    }
+  );
+
+  it.each([
+    ['1. /home/user/app.log - check this', '/home/user/app.log'],
+    ['1. /home/user/project/src/foo.ts:42 fix the bug', '/home/user/project/src/foo.ts'],
+    ['- /var/log/syslog.txt: 42 errors found', '/var/log/syslog.txt'],
+  ])('preserves a complete legacy log link in rejected marker output: %s', (line, expectedPath) => {
+    const { provide, logSpy, originalSessionId } = makeHarness(line);
+    const [link] = provide();
+
+    expect(link.text).toBe(expectedPath);
+    link.activate(null, link.text);
+    expect(logSpy).toHaveBeenCalledWith(expectedPath, originalSessionId);
+  });
+
+  it('preserves both complete legacy absolute links instead of manufacturing a partial marker target', () => {
+    const { provide: proseLinks } = makeHarness('1. /home/user/report.pdf then inspect notes.md');
+    expect(proseLinks().map((link) => link.text)).toEqual(['/home/user/report.pdf']);
+
+    const { provide: multiPathLinks } = makeHarness('1. /home/user/report.pdf /tmp/other.pdf');
+    expect(multiPathLinks().map((link) => link.text)).toEqual(['/home/user/report.pdf', '/tmp/other.pdf']);
+  });
+
+  it('does not merge tab-separated absolute paths into one external attachment target', () => {
+    const { provide, externalPreviewSpy } = makeHarness('1. /mnt/c/first\t/mnt/c/second.pdf', {
+      workingDir: '/workspace/project',
+    });
+
+    expect(provide()).toEqual([]);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it('recovers complete document references from a rejected marker candidate', () => {
+    const { provide: proseLinks } = makeHarness('1. /home/u/ws/out/report.docx — 12 pages', {
+      workingDir: '/home/u/ws',
+    });
+    expect(proseLinks().map((link) => link.text)).toEqual(['/home/u/ws/out/report.docx']);
+
+    const { provide: multipleLinks } = makeHarness('1. /home/u/ws/a.docx and docs/notes.md', {
+      workingDir: '/home/u/ws',
+    });
+    expect(multipleLinks().map((link) => link.text)).toEqual(['/home/u/ws/a.docx', 'docs/notes.md']);
+  });
+
+  it('rejects a greedy spaced candidate when an earlier chunk already looks like a file', () => {
+    const { provide: workspaceLinks, externalPreviewSpy: workspaceExternalSpy } = makeHarness(
+      '1. /home/u/ws/report.zip and docs/notes.md',
+      { workingDir: '/home/u/ws' }
+    );
+    expect(workspaceLinks().map((link) => link.text)).toEqual(['docs/notes.md']);
+    expect(workspaceExternalSpy).not.toHaveBeenCalled();
+
+    const { provide: externalLinks, externalPreviewSpy } = makeHarness('1. /mnt/c/kb/data.bin backup notes.pdf');
+    expect(externalLinks()).toEqual([]);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it('finds the complete marker path when a full-width preceding row is stitched to it', () => {
+    const preceding = '─'.repeat(40);
+    const { provide } = makeHarness([{ text: preceding }, { text: `1. ${REPORTED}` }], {
+      cols: 40,
+      workingDir: '/home/aakhter/projects/kb',
+    });
+
+    const [link] = provide(2);
+    expect(link.text).toBe(REPORTED);
+    expect(link.range.start.y).toBe(2);
+  });
+
+  it('attaches a rejection handler to asynchronous external preview activation', () => {
+    const { app, provide } = makeHarness(`1. ${REPORTED}`, { workingDir: '/home/aakhter/projects/kb' });
+    const catchSpy = vi.fn();
+    app.openExternalPathPreview = vi.fn(() => ({ catch: catchSpy }));
+
+    const [link] = provide();
+    link.activate(null, link.text);
+
+    expect(catchSpy).toHaveBeenCalledOnce();
+  });
+
+  it.each(['/home/user/My Report.pdf', '/tmp/My Report.pdf', '/var/My Report.pdf', '/opt/My Report.pdf'])(
+    'does not let the legacy absolute-path scanner resurrect a partial link for %s',
+    (path) => {
+      const { provide } = makeHarness(`1. ${path}`, { workingDir: '/workspace/project' });
+      expect(provide().map((link) => link.text)).toEqual([path]);
+    }
+  );
+
+  it('does not offer external registration for source extensions unsupported by the attachment registry', () => {
+    const { provide } = makeHarness('1. /mnt/c/shared/My Script.py', { workingDir: '/workspace/project' });
+    expect(provide()).toEqual([]);
+  });
+
+  it('maps a marker-prefixed path containing wide characters', () => {
+    const path = '/mnt/c/报告 and Notes/report.pdf';
+    const { provide } = makeHarness(`1. ${path}`, { workingDir: '/home/aakhter/projects/kb' });
+    const [link] = provide();
+    expect(link.text).toBe(path);
+    expect(link.range.start).toEqual({ x: 4, y: 1 });
+  });
+
+  it('stays linear for a long marker-prefixed candidate', () => {
+    const line = `1. /mnt/c/${'folder '.repeat(120)}report.pdf`;
+    const { provide } = makeHarness(line, { workingDir: '/workspace/project' });
+    const start = performance.now();
+    provide();
+    expect(performance.now() - start).toBeLessThan(500);
   });
 });

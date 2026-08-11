@@ -232,3 +232,191 @@ describe('COD-273 file URI preview UI', () => {
     expect(openFilePreview).not.toHaveBeenCalled();
   });
 });
+
+describe('COD-288 external terminal path preview UI', () => {
+  const absolutePath = '/mnt/c/kb-data/webex-archive/Isovalent and Cisco Unified Edge/report.pdf';
+
+  it('registers the absolute path against the originating session and preserves it as the preview title', async () => {
+    const response = deferred<unknown>();
+    const fetch = vi.fn(() => response.promise);
+    const { proto, host, overlay, title, body, footer, openFilePreview } = makeHarness(fetch);
+
+    const opening = proto.openExternalPathPreview.call(host, absolutePath, 'session / one') as Promise<void>;
+
+    expect(overlay.classList.add).toHaveBeenCalledWith('visible');
+    expect(title.textContent).toBe(absolutePath);
+    expect(body.innerHTML).toBe('<div class="binary-message">Loading...</div>');
+    expect(footer.textContent).toBe('');
+    expect(fetch).toHaveBeenCalledWith('/api/sessions/session%20%2F%20one/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: absolutePath }),
+    });
+
+    response.resolve({
+      ok: true,
+      json: vi.fn(async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_1' } })),
+    });
+    await opening;
+
+    expect(openFilePreview).toHaveBeenCalledWith('report.pdf', 'session / one', 'att_1', {
+      displayPath: absolutePath,
+    });
+  });
+
+  it('deduplicates repeated activation while the same registration is pending', async () => {
+    const response = deferred<unknown>();
+    const fetch = vi.fn(() => response.promise);
+    const { proto, host, openFilePreview } = makeHarness(fetch);
+
+    const first = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    const second = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    response.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_1' } }),
+    });
+    await Promise.all([first, second]);
+
+    expect(openFilePreview).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a fresh registration when the prior request no longer owns the overlay', async () => {
+    const firstResponse = deferred<unknown>();
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => firstResponse.promise)
+      .mockImplementationOnce(async () => ({
+        ok: true,
+        json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_new' } }),
+      }));
+    const { proto, host, openFilePreview } = makeHarness(fetch);
+
+    const staleOpening = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    host.filePreviewState = { mode: 'ordinary-preview' };
+    const reopened = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    await reopened;
+    firstResponse.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_old' } }),
+    });
+    await staleOpening;
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(openFilePreview).toHaveBeenCalledTimes(1);
+    expect(openFilePreview).toHaveBeenCalledWith('report.pdf', 'session-1', 'att_new', {
+      displayPath: absolutePath,
+    });
+  });
+
+  it('ignores a registration response after the preview is closed', async () => {
+    const response = deferred<unknown>();
+    const fetch = vi.fn(() => response.promise);
+    const { proto, host, overlay, openFilePreview } = makeHarness(fetch);
+
+    const opening = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+    proto.closeFilePreview.call(host);
+    response.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_old' } }),
+    });
+    await opening;
+
+    expect(overlay.classList.remove).toHaveBeenCalledWith('visible');
+    expect(openFilePreview).not.toHaveBeenCalled();
+  });
+
+  it('does not let an older external-path response replace a newer request', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const { proto, host, openFilePreview } = makeHarness(fetch);
+
+    const oldOpening = proto.openExternalPathPreview.call(host, '/mnt/c/shared/old.pdf', 'session-1') as Promise<void>;
+    const newOpening = proto.openExternalPathPreview.call(host, '/mnt/c/shared/new.pdf', 'session-1') as Promise<void>;
+    second.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'new.pdf', attachmentId: 'att_new' } }),
+    });
+    await newOpening;
+    first.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'old.pdf', attachmentId: 'att_old' } }),
+    });
+    await oldOpening;
+
+    expect(openFilePreview).toHaveBeenCalledTimes(1);
+    expect(openFilePreview).toHaveBeenCalledWith('new.pdf', 'session-1', 'att_new', {
+      displayPath: '/mnt/c/shared/new.pdf',
+    });
+  });
+
+  it('escapes and bounds server errors without exposing the path in the body', async () => {
+    const unsafe = `<img src=x onerror=alert(1)>${'x'.repeat(400)}`;
+    const fetch = vi.fn(async () => ({
+      ok: false,
+      json: async () => ({ success: false, error: unsafe }),
+    }));
+    const { proto, host, title, body, openFilePreview } = makeHarness(fetch);
+
+    await proto.openExternalPathPreview.call(host, absolutePath, 'session-1');
+
+    expect(title.textContent).toBe(absolutePath);
+    const boundedEscapedError = unsafe.slice(0, 300).replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    expect(body.innerHTML).toBe(`<div class="binary-message">Error: ${boundedEscapedError}</div>`);
+    expect(body.innerHTML).not.toContain('/mnt/c/kb-data');
+    expect(openFilePreview).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'a malformed success response',
+      vi.fn(async () => ({ ok: true, json: async () => ({ success: true, data: { fileName: 'report.pdf' } }) })),
+    ],
+    [
+      'a non-JSON response',
+      vi.fn(async () => ({ ok: false, json: async () => Promise.reject(new Error('bad json')) })),
+    ],
+    ['a network failure', vi.fn(async () => Promise.reject(new Error('network down')))],
+  ])('renders a safe fallback for %s', async (_label, fetch) => {
+    const { proto, host, body, openFilePreview } = makeHarness(fetch);
+
+    await proto.openExternalPathPreview.call(host, absolutePath, 'session-1');
+
+    expect(body.innerHTML).toBe('<div class="binary-message">Error: Unable to preview file</div>');
+    expect(openFilePreview).not.toHaveBeenCalled();
+  });
+
+  it('uses an optional display path without changing the registered preview identity', async () => {
+    const fetch = vi.fn();
+    const { proto, host, title } = makeHarness(fetch);
+    const metadata = deferred<unknown>();
+    Object.assign(host, {
+      openFilePreview: proto.openFilePreview,
+      _loadFilePreviewNavigation: vi.fn(),
+      _fetchFilePreviewMetadata: vi.fn(() => metadata.promise),
+      _renderFilePreviewBody: vi.fn(async () => true),
+      _filePreviewSignature: vi.fn(() => 'signature'),
+      _setFilePreviewExternalUrl: vi.fn(),
+      _setFilePreviewOriginalDownloadAction: vi.fn(),
+      _startFilePreviewPolling: vi.fn(),
+    });
+
+    const opening = proto.openFilePreview.call(host, 'report.pdf', 'session-1', 'att_1', {
+      displayPath: absolutePath,
+    }) as Promise<void>;
+
+    expect(title.textContent).toBe(absolutePath);
+    expect(host.filePreviewState).toMatchObject({
+      sessionId: 'session-1',
+      filePath: 'report.pdf',
+      attachmentId: 'att_1',
+    });
+    metadata.resolve({ type: 'text', mtimeMs: 1 });
+    await opening;
+  });
+});
