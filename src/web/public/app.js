@@ -820,6 +820,7 @@ class CodemanApp {
     this._historyExpandInFlight = false;
     this._historyEntryAccum = 0; // wheel-up accumulation toward history entry
     this._historyEntryAccumAt = 0;
+    this._historyScrollFraction = 0; // fractional wheel rows accumulated while history owns xterm
     // Cached setting flag (hot path) — read storage directly: the settings-ui
     // mixin may not be attached yet at construct time. Default ON.
     let liveMirror = true;
@@ -3105,6 +3106,7 @@ class CodemanApp {
     if (this._isLoadingBuffer) return;
     this._viewMode = 'history';
     this._historyMissedOutput = false;
+    this._historyScrollFraction = 0;
     const gen = ++this._historyLoadGen;
     this._historyInitialLoadGen = gen;
     this._showHistoryPill('History — loading…');
@@ -3224,6 +3226,7 @@ class CodemanApp {
     this._historyInitialLoadGen = 0;
     this._historyMissedOutput = false;
     this._historyPartial = false;
+    this._historyScrollFraction = 0;
     this._historyExitAt = Date.now();
     this._hideHistoryPill();
     // Stale sticky-scroll grace must not survive into live mode.

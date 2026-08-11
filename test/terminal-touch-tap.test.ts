@@ -663,6 +663,29 @@ describe('terminal touch tap mouse guard', () => {
     expect(app._wheelScrollLines({ deltaY: 0, deltaX: -100, deltaMode: 0, shiftKey: true })).toBe(-4);
   });
 
+  it('wheel: accumulates fractional history deltas before calling xterm with whole rows', () => {
+    const { app } = loadTerminalUiHarness();
+    app.activeSessionId = 'sess-1';
+    app.sessions = new Map([['sess-1', { mode: 'codex' }]]);
+    app._viewMode = 'history';
+    app._isMirrorSession = () => true;
+    app._noteTerminalUserScroll = vi.fn();
+    app.isTerminalAtBottom = () => false;
+    app.terminal = {
+      scrollLines: vi.fn(),
+      buffer: { active: { viewportY: 5 } },
+    };
+
+    expect(app._handleUserScrollIntent(0.4)).toBe('swallowed');
+    expect(app._handleUserScrollIntent(0.4)).toBe('swallowed');
+    expect(app.terminal.scrollLines).not.toHaveBeenCalled();
+
+    expect(app._handleUserScrollIntent(0.4)).toBe('scrolled');
+    expect(app.terminal.scrollLines).toHaveBeenCalledOnce();
+    expect(app.terminal.scrollLines).toHaveBeenCalledWith(1);
+    expect(Number.isInteger(app.terminal.scrollLines.mock.calls[0][0])).toBe(true);
+  });
+
   it('wheel: gates claude forwarding on CLI version 2.1.187+ (unknown or older stays local)', () => {
     const { app } = loadTerminalUiHarness();
     app.activeSessionId = 'sess-1';

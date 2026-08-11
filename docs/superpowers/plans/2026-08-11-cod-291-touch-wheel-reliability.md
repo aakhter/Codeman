@@ -13,17 +13,20 @@
 ### Task 1: Trackpad integer landing regression
 
 **Files:**
+
 - Modify: `test/mirror-history-view.test.ts`
 - Modify: `src/web/public/app.js`
 
 - [ ] Add a test requiring `_enterHistoryView` to derive a non-negative integer carry and pass that value to `terminal.scrollLines`.
 - [ ] Run `npm test -- test/mirror-history-view.test.ts` and confirm the new assertion fails against `scrollLines(-carryLines)`.
 - [ ] Truncate the positive carry to whole rows immediately before the history landing scroll.
+- [ ] Accumulate continued fractional history deltas and call xterm only when they form whole rows.
 - [ ] Rerun the focused test and confirm it passes.
 
 ### Task 2: Touch gesture lifecycle regression
 
 **Files:**
+
 - Modify: `test/terminal-touch-tap.test.ts`
 - Modify: `src/web/public/terminal-ui.js`
 
@@ -35,6 +38,7 @@
 ### Task 3: Verification and integration
 
 **Files:**
+
 - Verify all modified source, tests, docs, and built assets.
 
 - [ ] Run the two focused suites plus frontend syntax/assets, typecheck, lint, format check, lockfile check, build, and `git diff --check`.

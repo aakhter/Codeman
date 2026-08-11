@@ -8,7 +8,7 @@ The remote history backend is healthy (`mux-full-history`, 1,011 lines, not trun
 
 ## Design
 
-1. Normalize the history landing carry at the xterm boundary. `_enterHistoryView` will truncate a positive fractional carry to whole rows before calling `terminal.scrollLines`. Thresholding and prefetch behavior remain unchanged.
+1. Normalize fractional history movement at every xterm boundary. `_enterHistoryView` will truncate a positive fractional carry to whole rows for the initial landing. Once history is active, subsequent fractional wheel deltas will accumulate until they form a whole row, preserving slow movement and direction reversals without passing fractions to `terminal.scrollLines`. Thresholding and prefetch behavior remain unchanged.
 2. Restore one gesture-state lifecycle in the touch listeners. Create `touchGesture` once; begin it on `touchstart`; derive the tracked touch from that helper; update it on `touchmove`; end it on `touchend`; and cancel it on `touchcancel`.
 3. Preserve the newer mobile-tap behavior. Touch start still caches tap classification and suppresses unwanted compatibility focus. A valid unmoved gesture still routes through `_handleMobileTerminalTap`; moved or cancelled gestures never activate a tap.
 4. Restore complete per-gesture cleanup for velocity, pending animation work, the gesture state, and the scrolling CSS class.
