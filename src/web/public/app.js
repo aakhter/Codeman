@@ -811,6 +811,7 @@ class CodemanApp {
     // opens a frozen history view fed from the canonical tmux capture.
     this._viewMode = 'live'; // 'live' | 'history' — meaningful only for mirror sessions
     this._historyLoadGen = 0; // aborts stale history fetches
+    this._historyInitialLoadGen = 0; // COD-291: generation whose first history buffer is still pending
     this._historyMissedOutput = false; // live output arrived while frozen in history
     this._lastMirrorFrame = null; // {id, buf} dedupe for _refreshMirrorFrame
     this._historyExitAt = 0; // history re-entry cooldown timestamp
@@ -819,6 +820,7 @@ class CodemanApp {
     this._historyExpandInFlight = false;
     this._historyEntryAccum = 0; // wheel-up accumulation toward history entry
     this._historyEntryAccumAt = 0;
+    this._historyScrollFraction = 0; // fractional wheel rows accumulated while history owns xterm
     // Cached setting flag (hot path) — read storage directly: the settings-ui
     // mixin may not be attached yet at construct time. Default ON.
     let liveMirror = true;
@@ -3104,7 +3106,9 @@ class CodemanApp {
     if (this._isLoadingBuffer) return;
     this._viewMode = 'history';
     this._historyMissedOutput = false;
+    this._historyScrollFraction = 0;
     const gen = ++this._historyLoadGen;
+    this._historyInitialLoadGen = gen;
     this._showHistoryPill('History — loading…');
     // COD-190 no-jump anchor: remember which viewport row the last non-empty
     // line sits on. The capture strips trailing blank rows, so "bottom of
@@ -3148,6 +3152,7 @@ class CodemanApp {
       await new Promise((resolve) => this.terminal.write(`\x1b[?2026h\x1b[3J\x1b[H\x1b[2J${content}\x1b[?2026l`, resolve));
       this._finishBufferLoad(owner);
       if (gen !== this._historyLoadGen || this._viewMode !== 'history') return;
+      this._historyInitialLoadGen = 0;
       // COD-190 no-jump landing: place the history's last non-empty line on
       // the SAME viewport row it occupied in the live frame (content-anchored
       // — the capture trims trailing blanks, so plain scrollToBottom would
@@ -3166,7 +3171,8 @@ class CodemanApp {
       } else {
         this.terminal.scrollToBottom();
       }
-      if (carryLines > 0) this.terminal.scrollLines(-carryLines);
+      const carryRows = Math.max(0, Math.trunc(carryLines));
+      if (carryRows > 0) this.terminal.scrollLines(-carryRows);
       this._updateHistoryPill();
     } catch (err) {
       console.error('history view load failed:', err);
@@ -3217,8 +3223,10 @@ class CodemanApp {
     if (this._viewMode !== 'history') return;
     this._viewMode = 'live';
     this._historyLoadGen++;
+    this._historyInitialLoadGen = 0;
     this._historyMissedOutput = false;
     this._historyPartial = false;
+    this._historyScrollFraction = 0;
     this._historyExitAt = Date.now();
     this._hideHistoryPill();
     // Stale sticky-scroll grace must not survive into live mode.

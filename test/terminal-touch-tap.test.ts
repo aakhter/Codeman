@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
+const terminalUiSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+
 function loadTerminalUiHarness() {
   const CodemanApp = function CodemanApp(this: any) {};
   class MockMouseEvent {
@@ -64,8 +66,7 @@ function loadTerminalUiHarness() {
     TERMINAL_CHUNK_SIZE: 32 * 1024,
   });
 
-  const code = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
-  vm.runInContext(code, context, { filename: 'terminal-ui.js' });
+  vm.runInContext(terminalUiSource, context, { filename: 'terminal-ui.js' });
 
   const app = new (CodemanApp as any)();
   return {
@@ -138,6 +139,19 @@ function createTerminalGrid(lines: string[], cursorY: number, wrappedRows = new 
 }
 
 describe('terminal touch tap mouse guard', () => {
+  it('binds touch listeners to one declared gesture lifecycle', () => {
+    const start = terminalUiSource.indexOf('// COD-283/284: session changes must update native momentum routing too.');
+    const end = terminalUiSource.indexOf('// ── Desktop click-to-position cursor', start);
+    const touchBlock = terminalUiSource.slice(start, end);
+    const touchStart = touchBlock.slice(touchBlock.indexOf("'touchstart'"), touchBlock.indexOf("'touchmove'"));
+    const touchCancel = touchBlock.slice(touchBlock.indexOf("'touchcancel'"));
+
+    expect(touchBlock).toContain('const touchGesture = this._createTerminalTouchGesture();');
+    expect(touchStart).toContain('const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);');
+    expect(touchStart.indexOf('const touch =')).toBeLessThan(touchStart.indexOf('touchLastX = touch.clientX;'));
+    expect(touchCancel).toContain('this._cancelTerminalTouchGesture(touchGesture);');
+  });
+
   it('recognizes focus only when a terminal input owns the active element', () => {
     const { app, setActiveElement } = loadTerminalUiHarness();
     const textarea = { classList: { contains: () => true } };
@@ -647,6 +661,29 @@ describe('terminal touch tap mouse guard', () => {
     expect(app._wheelScrollLines({ deltaY: 0, deltaX: 90, deltaMode: 0, shiftKey: false })).toBe(0);
     // Shift + macOS trackpad reports the magnitude on deltaX (issue #154).
     expect(app._wheelScrollLines({ deltaY: 0, deltaX: -100, deltaMode: 0, shiftKey: true })).toBe(-4);
+  });
+
+  it('wheel: accumulates fractional history deltas before calling xterm with whole rows', () => {
+    const { app } = loadTerminalUiHarness();
+    app.activeSessionId = 'sess-1';
+    app.sessions = new Map([['sess-1', { mode: 'codex' }]]);
+    app._viewMode = 'history';
+    app._isMirrorSession = () => true;
+    app._noteTerminalUserScroll = vi.fn();
+    app.isTerminalAtBottom = () => false;
+    app.terminal = {
+      scrollLines: vi.fn(),
+      buffer: { active: { viewportY: 5 } },
+    };
+
+    expect(app._handleUserScrollIntent(0.4)).toBe('swallowed');
+    expect(app._handleUserScrollIntent(0.4)).toBe('swallowed');
+    expect(app.terminal.scrollLines).not.toHaveBeenCalled();
+
+    expect(app._handleUserScrollIntent(0.4)).toBe('scrolled');
+    expect(app.terminal.scrollLines).toHaveBeenCalledOnce();
+    expect(app.terminal.scrollLines).toHaveBeenCalledWith(1);
+    expect(Number.isInteger(app.terminal.scrollLines.mock.calls[0][0])).toBe(true);
   });
 
   it('wheel: gates claude forwarding on CLI version 2.1.187+ (unknown or older stays local)', () => {

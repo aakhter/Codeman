@@ -111,7 +111,7 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(body).not.toContain('_resetTerminalForReplay'); // reset() would drop sync mode
     // land on the exact pixels the user was watching, then apply their gesture
     const bottom = body.indexOf('scrollToBottom()');
-    const carry = body.indexOf('scrollLines(-carryLines)');
+    const carry = body.indexOf('scrollLines(-carryRows)');
     expect(bottom).toBeGreaterThan(-1);
     expect(carry).toBeGreaterThan(bottom);
   });
@@ -128,6 +128,34 @@ describe('COD-187 live-mirror structural guards', () => {
     // and the entry consumes it
     expect(appJs).toContain('this._historyPrefetch = null;');
     expect(appJs.indexOf('_prefetchHistory() {')).toBeGreaterThan(-1);
+  });
+
+  it('COD-291: a trackpad reversal cannot exit while the initial history buffer is loading', () => {
+    expect(appJs).toContain('this._historyInitialLoadGen = 0;');
+
+    const enter = appJs.slice(appJs.indexOf('async _enterHistoryView('), appJs.indexOf('async _expandHistoryFull()'));
+    const allocate = enter.indexOf('const gen = ++this._historyLoadGen;');
+    const markPending = enter.indexOf('this._historyInitialLoadGen = gen;');
+    const finishWrite = enter.indexOf('this._finishBufferLoad(owner);');
+    const clearPending = enter.indexOf('this._historyInitialLoadGen = 0;', finishWrite);
+    expect(markPending).toBeGreaterThan(allocate);
+    expect(clearPending).toBeGreaterThan(finishWrite);
+
+    const funnel = termUi.slice(
+      termUi.indexOf('_handleUserScrollIntent(lines) {'),
+      termUi.indexOf('_handleUserScrollIntent(lines) {') + 2200
+    );
+    expect(funnel).toContain('this._historyInitialLoadGen !== this._historyLoadGen');
+
+    const exit = appJs.slice(appJs.indexOf('_exitHistoryView() {'), appJs.indexOf('_showHistoryPill(text) {'));
+    expect(exit).toContain('this._historyInitialLoadGen = 0;');
+  });
+
+  it('COD-291: fractional trackpad carry is converted to whole rows before xterm scrolling', () => {
+    const enter = appJs.slice(appJs.indexOf('async _enterHistoryView('), appJs.indexOf('async _expandHistoryFull()'));
+    expect(enter).toContain('const carryRows = Math.max(0, Math.trunc(carryLines));');
+    expect(enter).toContain('if (carryRows > 0) this.terminal.scrollLines(-carryRows);');
+    expect(enter).not.toContain('this.terminal.scrollLines(-carryLines)');
   });
 
   it('mirror gate covers claude/codex/gemini; the legacy _isTuiSession gate stays codex/gemini-only', () => {

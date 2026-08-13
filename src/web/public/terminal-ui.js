@@ -230,14 +230,29 @@ Object.assign(CodemanApp.prototype, {
       }
       return 'swallowed';
     }
-    this._noteTerminalUserScroll(lines);
-    this.terminal.scrollLines(lines);
+    let scrollLines = lines;
+    if (this._viewMode === 'history') {
+      this._historyScrollFraction = (this._historyScrollFraction || 0) + lines;
+      scrollLines = Math.trunc(this._historyScrollFraction);
+      this._historyScrollFraction -= scrollLines;
+      if (!scrollLines) return 'swallowed';
+    }
+    this._noteTerminalUserScroll(scrollLines);
+    this.terminal.scrollLines(scrollLines);
     // Scrolling back down to the bottom of the history view resumes the live mirror.
-    if (this._viewMode === 'history' && lines > 0 && this.isTerminalAtBottom()) {
+    // COD-291: before the first history buffer lands, the old zero-scrollback
+    // live frame still reports "at bottom"; a trackpad reversal tail must not
+    // cancel that in-flight load.
+    if (
+      this._viewMode === 'history' &&
+      scrollLines > 0 &&
+      this._historyInitialLoadGen !== this._historyLoadGen &&
+      this.isTerminalAtBottom()
+    ) {
       this._exitHistoryView?.();
     }
     // COD-187 lazy load: reaching the top of a PARTIAL history pulls the full depth.
-    if (this._viewMode === 'history' && lines < 0 && this.terminal.buffer.active.viewportY === 0) {
+    if (this._viewMode === 'history' && scrollLines < 0 && this.terminal.buffer.active.viewportY === 0) {
       this._expandHistoryFull?.();
     }
     return 'scrolled';
@@ -1005,53 +1020,47 @@ Object.assign(CodemanApp.prototype, {
       let pixelAccum = 0;
 
       let didScroll = false; // track whether touchmove fired (tap vs scroll)
-      let touchStartY = 0;
+      const touchGesture = this._createTerminalTouchGesture();
       let tapStartedWithTerminalFocus = false;
       let tapStartIntentCache = null;
       const TAP_THRESHOLD = 8; // px — ignore micro-drift to distinguish tap from scroll
       container.addEventListener(
         'touchstart',
         (ev) => {
-          if (ev.touches.length === 1) {
-            touchLastX = ev.touches[0].clientX;
-            touchLastY = ev.touches[0].clientY;
-            touchStartY = touchLastY;
-            velocity = 0;
-            pixelAccum = 0;
-            isTouching = true;
-            didScroll = false;
-            tapStartedWithTerminalFocus = this._isMobileTerminalInputFocused();
-            // Classifying scans the whole viewport with translateToString, and
-            // this runs at the start of EVERY gesture including scroll drags.
-            // Cache the result for the touchend of this same gesture rather than
-            // recomputing it; the cache is keyed on the exact start coordinates
-            // so a finger that moved re-classifies at its real position.
-            const touchStartIntent = this._classifyMobileTerminalTap(touchLastX, touchLastY);
-            tapStartIntentCache = { x: touchLastX, y: touchLastY, intent: touchStartIntent };
-            if (touchStartIntent === 'content') {
-              // Cancel xterm/browser focus before the compatibility click can
-              // open the OS keyboard. Content taps are re-emitted as SGR on
-              // touchend.
-              //
-              // 'history' is deliberately NOT included. A scrolled-up viewport
-              // sends nothing, so there is no compatibility click worth
-              // cancelling — and preventDefault() here, paired with touchend's
-              // early return, closes both routes to focus at once. Since
-              // selectSession() ends with scrollToLastNonEmptyLine(), that made
-              // the keyboard unreachable after every tab switch.
-              ev.preventDefault();
-              this._blurMobileTerminalInput();
-            }
-            lastTime = 0;
-            if (scrollFrame) {
-              cancelAnimationFrame(scrollFrame);
-              scrollFrame = null;
-            }
+          const touch = this._beginTerminalTouchGesture(touchGesture, ev.touches);
+          velocity = 0;
+          pixelAccum = 0;
+          lastTime = 0;
+          pendingDelta = 0;
+          if (touchMoveRaf) {
+            cancelAnimationFrame(touchMoveRaf);
+            touchMoveRaf = 0;
+          }
+          if (!touch) {
+            isTouching = false;
+            didScroll = true;
+            tapStartedWithTerminalFocus = false;
+            tapStartIntentCache = null;
+            return;
           }
           touchLastX = touch.clientX;
           touchLastY = touch.clientY;
           isTouching = true;
           didScroll = false;
+          tapStartedWithTerminalFocus = this._isMobileTerminalInputFocused();
+          // Classifying scans the whole viewport with translateToString, and
+          // this runs at the start of EVERY gesture including scroll drags.
+          // Cache the result for the touchend of this same gesture rather than
+          // recomputing it; the cache is keyed on the exact start coordinates.
+          const touchStartIntent = this._classifyMobileTerminalTap(touchLastX, touchLastY);
+          tapStartIntentCache = { x: touchLastX, y: touchLastY, intent: touchStartIntent };
+          if (touchStartIntent === 'content') {
+            // Cancel xterm/browser focus before the compatibility click can
+            // open the OS keyboard. Content taps are re-emitted as SGR on
+            // touchend. History taps remain focusable.
+            ev.preventDefault();
+            this._blurMobileTerminalInput();
+          }
           if (scrollFrame) {
             cancelAnimationFrame(scrollFrame);
             scrollFrame = null;
@@ -1151,20 +1160,20 @@ Object.assign(CodemanApp.prototype, {
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
-          if (!didScroll && this.terminal) {
-            const touch = ev.changedTouches && ev.changedTouches[0];
-            if (touch) {
-              this._suppressTrustedTapMouseEvents();
-              const cached =
-                tapStartIntentCache &&
-                tapStartIntentCache.x === touch.clientX &&
-                tapStartIntentCache.y === touch.clientY
-                  ? tapStartIntentCache.intent
-                  : null;
-              this._handleMobileTerminalTap(touch, tapStartedWithTerminalFocus, cached);
-            }
+          if (wasTouching && !didScroll && touch && this.terminal) {
+            this._suppressTrustedTapMouseEvents();
+            const cached =
+              tapStartIntentCache &&
+              tapStartIntentCache.x === touch.clientX &&
+              tapStartIntentCache.y === touch.clientY
+                ? tapStartIntentCache.intent
+                : null;
+            this._handleMobileTerminalTap(touch, tapStartedWithTerminalFocus, cached);
           }
           tapStartedWithTerminalFocus = false;
+          tapStartIntentCache = null;
+          clearTimeout(this._scrollEnd);
+          this._scrollEnd = setTimeout(() => container.classList.remove('scrolling'), 300);
         },
         { passive: true }
       );
@@ -1175,7 +1184,16 @@ Object.assign(CodemanApp.prototype, {
           isTouching = false;
           velocity = 0;
           pixelAccum = 0;
+          pendingDelta = 0;
+          if (touchMoveRaf) {
+            cancelAnimationFrame(touchMoveRaf);
+            touchMoveRaf = 0;
+          }
+          this._cancelTerminalTouchGesture(touchGesture);
           tapStartedWithTerminalFocus = false;
+          tapStartIntentCache = null;
+          clearTimeout(this._scrollEnd);
+          this._scrollEnd = setTimeout(() => container.classList.remove('scrolling'), 300);
         },
         { passive: true }
       );
