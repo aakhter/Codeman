@@ -91,6 +91,11 @@ function makeSelectSessionHarness(sessionId: string): any {
   app.terminalBufferCache = new Map();
   app._xtermSnapshots = new Map();
   app._sessionsLoadedSincePageOpen = new Set();
+  // Real constructor field (app.js). The harness builds the app with
+  // Object.create, so every field selectSession touches has to be stubbed here;
+  // a missing one makes selectSession throw and the sync assertions read as
+  // "callback never scheduled".
+  app._fullHistoryLoaded = new Set();
   app._beginBufferLoad = vi.fn(() => 1);
   app._isLoadingBuffer = false;
   app._isStaleSelect = vi.fn(() => false);
@@ -358,6 +363,11 @@ describe('COD-235 direct active-session mutation sync', () => {
     app.sessions = new Map();
     app.cases = [];
     app.terminal = { clear: vi.fn(), writeln: vi.fn(), focus: vi.fn() };
+    // Added to the remote runShell path after this test was written: with no
+    // `session` in the quick-start payload it fetches the session itself, which
+    // this test's two-call fetch mock does not cover. Not what is under test —
+    // the assertion below is purely about selectSession's ordering.
+    app._ensureCreatedSessionVisible = vi.fn();
     const observedActiveSessions: Array<string | null> = [];
     app.updateFileBrowserHeaderButton = vi.fn(() => observedActiveSessions.push(app.activeSessionId));
     app.selectSession = vi.fn(function (

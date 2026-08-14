@@ -12,6 +12,19 @@ const root = resolve(import.meta.dirname, '..');
  * Keep the rest in sync with config/vitest.config.ts.
  */
 export default defineConfig({
+  // See config/vitest.config.ts for why this exists: without it every
+  // `@vitest-environment jsdom` file dies at env setup with
+  // "No such built-in module: node:" and reports "0 test" rather than failing.
+  plugins: [
+    {
+      name: 'codeman:node-builtins-in-client',
+      enforce: 'pre' as const,
+      resolveId(id: string) {
+        if (id.startsWith('node:')) return { id, external: true };
+        return null;
+      },
+    },
+  ],
   test: {
     root,
     globals: true,

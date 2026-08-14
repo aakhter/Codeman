@@ -19,9 +19,20 @@ class TestClipboardItem {
 
 beforeAll(() => {
   const read = (file: string) => readFileSync(join(publicDir, file), 'utf8');
+  // The REAL markdown pipeline, not a stub: `_renderMarkdown` no-ops unless
+  // `marked.parse` exists, and `_sanitizeHtml` fails CLOSED (escapes everything)
+  // unless `window.sanitizeMarkdownHtml` is wired. With either missing, markdown
+  // never becomes a <blockquote> and the wrapping assertions below test nothing.
+  // Both vendor bundles are committed, so this works in CI too.
   const combined =
-    'var marked, MobileDetection = {}, KeyboardHandler = {}, SwipeHandler = {}, ' +
+    'var MobileDetection = {}, KeyboardHandler = {}, SwipeHandler = {}, ' +
     'VoiceInput = {}, DeepgramProvider = {}, NotificationManager = function(){};\n' +
+    read('vendor/marked.min.js') +
+    '\n' +
+    read('vendor/dompurify.min.js') +
+    '\n' +
+    read('sanitize-html.js') +
+    '\n' +
     read('constants.js') +
     '\n' +
     read('app.js') +
@@ -169,10 +180,12 @@ describe('response viewer rich copy', () => {
  * blocks. Behavioral: drives the real _renderMarkdown post-pass and the real
  * _quoteBlockText, not a source grep.
  *
- * ⚠ These assertions run in CI only — the jsdom environment is broken on the
- * AA-DESKTOP box ("No such built-in module: node:" at env setup), so the
- * authoritative local evidence for COD-263 is the Playwright run on beta
- * recorded in the Jira note, not a green from this file.
+ * The "No such built-in module: node:" failure this file used to carry a warning
+ * about was NOT environmental and was never CI-only: Vitest 4 runs a jsdom file
+ * under Vite's CLIENT environment, which browser-externalized the `node:*`
+ * imports here and in test/setup.ts. Every jsdom file in the repo died at env
+ * setup, on every machine, having never run once. Fixed by the
+ * `codeman:node-builtins-in-client` plugin in config/vitest.config.ts.
  */
 describe('COD-263 quote/comment copy', () => {
   function render(md: string): HTMLElement {

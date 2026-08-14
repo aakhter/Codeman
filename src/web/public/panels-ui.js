@@ -3822,6 +3822,13 @@ Object.assign(CodemanApp.prototype, {
     this.saveAppSettingsToStorage(settings);
     const checkbox = document.getElementById('appSettingsShowFileBrowser');
     if (checkbox) checkbox.checked = false;
+    // COD-235: TWO header buttons drive this one panel — the session-gated Files
+    // button (#fileBrowserBtn) and the opt-in File Viewer button
+    // (.btn-file-viewer). Closing used to sync only the latter's aria-expanded,
+    // so every non-header close (the panel's X, App Settings) left the Files
+    // button stuck `.active` + aria-expanded="true". Derive it from the panel
+    // through the canonical updater instead of hand-rolling a partial sync.
+    this.updateFileBrowserHeaderButton?.();
     const headerBtn = document.querySelector('.btn-file-viewer');
     if (headerBtn) headerBtn.setAttribute('aria-expanded', 'false');
   },

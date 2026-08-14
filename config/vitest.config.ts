@@ -18,6 +18,25 @@ if (skipMobile) {
 }
 
 export default defineConfig({
+  // A `@vitest-environment jsdom` file runs under Vite's CLIENT environment
+  // (Vitest 4 maps jsdom -> client), which browser-externalizes `node:*`. These
+  // are Node tests that want a DOM, and the shared test/setup.ts builds a temp
+  // HOME out of node:fs/os/path, so that rewrite killed EVERY jsdom file in the
+  // repo before it collected a test: the externalized id round-trips to the bare
+  // specifier `node:` and throws ERR_UNKNOWN_BUILTIN_MODULE. Resolving them as
+  // genuinely external loads them natively instead. `enforce: 'pre'` is what
+  // makes this win — it has to run before vite's own browser-external resolver.
+  // Keep in sync with config/vitest.ci.config.ts. Guard: test/jsdom-environment.test.ts.
+  plugins: [
+    {
+      name: 'codeman:node-builtins-in-client',
+      enforce: 'pre' as const,
+      resolveId(id: string) {
+        if (id.startsWith('node:')) return { id, external: true };
+        return null;
+      },
+    },
+  ],
   test: {
     root,
     globals: true,

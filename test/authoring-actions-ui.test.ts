@@ -154,7 +154,9 @@ describe('COD-64 default-empty: no personal skill names baked into shipped sourc
 
 describe('COD-64 settings editor source contract', () => {
   it('App Settings modal has an Authoring tab + list container + add button', () => {
-    expect(indexHtml).toContain('data-tab="settings-authoring"');
+    // `data-section`, not `data-tab`: the App Settings rail is a table of contents
+    // over one scrolling document, and the rail entries carry data-section.
+    expect(indexHtml).toContain('data-section="settings-authoring"');
     expect(indexHtml).toContain('id="settings-authoring"');
     expect(indexHtml).toContain('id="authoringActionsList"');
     expect(indexHtml).toContain('app.addAuthoringActionRow()');
