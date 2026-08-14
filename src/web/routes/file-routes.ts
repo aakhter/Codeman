@@ -395,11 +395,13 @@ async function resolveServableAttachmentPath(
 ): Promise<string | null> {
   let pathToCheck = record.filePath;
   let resolved = false;
+  let trustedBoundaryValidated = false;
   try {
     const generatedPath = await resolveGeneratedArtifactReadPath(record);
     if (generatedPath) {
       pathToCheck = generatedPath;
       resolved = true;
+      trustedBoundaryValidated = !!record.trustedUploadBoundary && !record.generatedArtifactBoundary;
     }
   } catch (err) {
     if (err instanceof AttachmentRegistrationError) {
@@ -423,7 +425,9 @@ async function resolveServableAttachmentPath(
   const blocked =
     isBlockedAttachmentPath(pathToCheck, guard.blockedTrees) ||
     isBlockedAttachmentPath(record.filePath, guard.blockedTrees) ||
-    (guard.confineToWorkspace && (!sessionWorkingDir || !validateSessionFilePath(sessionWorkingDir, pathToCheck)));
+    (guard.confineToWorkspace &&
+      !trustedBoundaryValidated &&
+      (!sessionWorkingDir || !validateSessionFilePath(sessionWorkingDir, pathToCheck)));
 
   if (blocked) {
     reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
@@ -814,20 +818,25 @@ async function buildExternalAttachmentRouteItem(
 
   try {
     let trustedUploadBoundary: string | undefined;
-    if (item.uploadProvenance === 'codeman-upload' && sessionWorkingDir) {
+    let forceWorkspaceConfinement = false;
+    if (item.uploadProvenance === 'codeman-upload') {
+      if (!sessionWorkingDir) throw new AttachmentRegistrationError('Access to this file is blocked', 403);
       const uploadDirectory = await resolveLocalUploadDirectory(sessionWorkingDir, authUser);
+      const canonicalFile = realpathSync(item.externalPath);
+      if (dirname(canonicalFile) !== uploadDirectory.canonicalDir || pathBasename(canonicalFile) !== item.fileName) {
+        throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      }
       if (uploadDirectory.kind === 'trusted') {
-        const canonicalFile = realpathSync(item.externalPath);
-        if (dirname(canonicalFile) !== uploadDirectory.canonicalDir || pathBasename(canonicalFile) !== item.fileName) {
-          throw new AttachmentRegistrationError('Access to this file is blocked', 403);
-        }
         trustedUploadBoundary = uploadDirectory.canonicalDir;
+      } else {
+        forceWorkspaceConfinement = true;
       }
     }
     const event = await registerExternalAttachment(sessionId, item.externalPath, {
       sessionWorkingDir,
       generatedArtifactBoundary: item.uploadProvenance ? undefined : item.generatedArtifactBoundary,
       trustedUploadBoundary,
+      forceWorkspaceConfinement,
     });
     // COD-241 unit 3: expose a workspace-relative path for Codeman-uploaded
     // copies (those inside .codeman-attachments/). The frontend gates its
@@ -2132,7 +2141,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
               mtimeMs: record.mtimeMs,
               timestamp: event.timestamp,
               generatedArtifactBoundary: record.generatedArtifactBoundary,
-              uploadProvenance: 'codeman-upload',
             })
           );
           ctx.persistSessionState(session);

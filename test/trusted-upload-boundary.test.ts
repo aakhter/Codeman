@@ -32,7 +32,8 @@ describe('trusted upload boundary byte cap', () => {
   });
 
   it('never merges generated-artifact and trusted-upload authority on record reuse', async () => {
-    const { registerExternalAttachment, attachmentRegistry } = await import('../src/attachment-registry.js');
+    const { registerExternalAttachment, resolveGeneratedArtifactReadPath, attachmentRegistry } =
+      await import('../src/attachment-registry.js');
     const root = await fs.realpath(await fs.mkdtemp(join(os.tmpdir(), 'codeman-trusted-conflict-')));
     const file = join(root, 'file.pdf');
     await fs.writeFile(file, '%PDF-1.4\n');
@@ -46,6 +47,10 @@ describe('trusted upload boundary byte cap', () => {
       await expect(
         registerExternalAttachment('trusted-first', file, { generatedArtifactBoundary: root })
       ).rejects.toMatchObject({ statusCode: 403 });
+
+      const trustedRecord = attachmentRegistry.findByFilePath('trusted-first', file)!;
+      trustedRecord.generatedArtifactBoundary = root;
+      await expect(resolveGeneratedArtifactReadPath(trustedRecord)).rejects.toMatchObject({ statusCode: 403 });
     } finally {
       attachmentRegistry.clearSession('generated-first');
       attachmentRegistry.clearSession('trusted-first');

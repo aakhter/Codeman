@@ -111,10 +111,100 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
 
   afterEach(async () => {
     delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    delete process.env.CODEMAN_ATTACHMENT_CONFINE;
     resetTrustedAttachmentRootsForTests();
     attachmentRegistry.clearSession(harness.ctx._sessionId);
     await harness.app.close();
     await fs.rm(workdir, { recursive: true, force: true });
+  });
+
+  it.each(['removed', 'regular replacement'] as const)(
+    'fails closed during trusted restart reconstruction when the workspace link is %s',
+    async (replacement) => {
+      const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-trusted-')));
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+      resetTrustedAttachmentRootsForTests();
+      const link = join(workdir, '.codeman-attachments');
+      await fs.symlink(trusted, link);
+      try {
+        const upload = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+          headers: MULTIPART_HEADERS,
+          payload: uploadBody(BOUNDARY, 'Restart.pdf', 'application/pdf', PDF_BYTES),
+        });
+        expect(upload.statusCode).toBe(200);
+        attachmentRegistry.clearSession(harness.ctx._sessionId);
+        await fs.unlink(link);
+        if (replacement === 'regular replacement') await fs.mkdir(link);
+
+        const history = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        });
+        expect(history.statusCode).toBe(200);
+        expect(JSON.parse(history.body).data.items[0]).toMatchObject({ missing: true });
+        expect(JSON.parse(history.body).data.items[0].attachmentId).toBeUndefined();
+      } finally {
+        await fs.rm(trusted, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('reconstructs a normal workspace upload only inside the current regular upload directory', async () => {
+    const upload = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+      headers: MULTIPART_HEADERS,
+      payload: uploadBody(BOUNDARY, 'Workspace.pdf', 'application/pdf', PDF_BYTES),
+    });
+    expect(upload.statusCode).toBe(200);
+    const agentPath = JSON.parse(upload.body).data.agentPath;
+    attachmentRegistry.clearSession(harness.ctx._sessionId);
+
+    const history = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+    });
+    const item = JSON.parse(history.body).data.items[0];
+    expect(item).toMatchObject({ missing: false, relativePath: agentPath });
+    expect(attachmentRegistry.get(harness.ctx._sessionId, item.attachmentId)?.trustedUploadBoundary).toBeUndefined();
+  });
+
+  it('lets a freshly validated trusted boundary bypass global confinement for upload and every by-id read', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-trusted-')));
+    const unrelated = join(workdir, '..', `unrelated-${Date.now()}.pdf`);
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    process.env.CODEMAN_ATTACHMENT_CONFINE = 'true';
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    await fs.writeFile(unrelated, PDF_BYTES);
+    try {
+      const upload = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(BOUNDARY, 'Confined.pdf', 'application/pdf', PDF_BYTES),
+      });
+      expect(upload.statusCode).toBe(200);
+      const data = JSON.parse(upload.body).data;
+      const raw = await harness.app.inject({ method: 'GET', url: data.rawUrl });
+      const preview = await harness.app.inject({ method: 'GET', url: data.previewUrl });
+      const thumbnail = await harness.app.inject({ method: 'GET', url: data.thumbnailUrl });
+      expect(raw.statusCode).toBe(200);
+      expect(preview.statusCode).toBe(302);
+      expect([200, 204]).toContain(thumbnail.statusCode);
+
+      const external = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+        payload: { path: unrelated },
+      });
+      expect(external.statusCode).toBe(403);
+    } finally {
+      await fs.rm(unrelated, { force: true });
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
   });
 
   it('uploads through an exact approved symlink with a trusted read boundary and provenance', async () => {

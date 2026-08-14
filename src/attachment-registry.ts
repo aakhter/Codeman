@@ -267,6 +267,9 @@ async function resolveBoundaryReadPath(record: AttachmentRecord, boundary: strin
 
 /** Revalidate either server-private boundary type before every by-id read. */
 export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord): Promise<string | undefined> {
+  if (record.generatedArtifactBoundary && record.trustedUploadBoundary) {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
   if (record.generatedArtifactBoundary) {
     return resolveBoundaryReadPath(record, record.generatedArtifactBoundary, MAX_GENERATED_ARTIFACT_BYTES);
   }
@@ -306,7 +309,9 @@ export async function registerExternalAttachment(
   // path before doing anything else.
   const guard = await loadAttachmentGuardConfig();
 
-  if (guard.confineToWorkspace || options.forceWorkspaceConfinement) {
+  // A freshly validated trusted boundary is the sole exception to the global
+  // workspace-confinement toggle. Explicit force-confinement always wins.
+  if ((guard.confineToWorkspace && !trustedUploadBoundary) || options.forceWorkspaceConfinement) {
     // Workspace-confined: the file MUST resolve inside the session's workspace.
     // Applies when the global strict mode is on (opt-in, default OFF) OR when
     // the caller forces it for this registration (the magic-link scanner — see

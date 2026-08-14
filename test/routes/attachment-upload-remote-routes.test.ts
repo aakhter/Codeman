@@ -195,9 +195,18 @@ describe('POST /api/sessions/:id/attachments/upload — remote branch (COD-241)'
     // History appended + persisted + attachment:detected broadcast.
     expect(harness.ctx._session.upsertAttachmentHistory).toHaveBeenCalledTimes(1);
     expect(harness.ctx.persistSessionState).toHaveBeenCalled();
+    expect(harness.ctx._session.getAttachmentHistoryForPersist()?.[0].uploadProvenance).toBeUndefined();
     const detected = harness.ctx.broadcast.mock.calls.filter((c) => c[0] === 'attachment:detected');
     expect(detected.length).toBe(1);
     expect(detected[0][1].attachmentId).toBe(body.data.attachmentId);
+
+    attachmentRegistry.clearSession(harness.ctx._sessionId);
+    const history = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+    });
+    expect(history.statusCode).toBe(200);
+    expect(JSON.parse(history.body).data.items[0]).toMatchObject({ missing: false });
   });
 
   it('502: ssh transfer failure returns a specific remote-transfer error and does NOT register', async () => {
