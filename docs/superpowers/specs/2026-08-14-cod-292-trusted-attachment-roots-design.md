@@ -155,7 +155,7 @@ canonical boundary for workspace confinement.
 
 ### 5. Boundary-validated registration and reads
 
-Do not represent trust as a transient boolean on the in-memory registry. The registry is lost on restart, so authorization
+Do not rely on a transient registry-only boolean as the source of authority. The registry is lost on restart, so authorization
 must be recomputable from the workspace, persisted history provenance, and current environment configuration.
 
 Add a separate in-memory `trustedUploadBoundary` field to attachment records and validate it through a generalized shared
@@ -167,9 +167,10 @@ Every raw, preview, and thumbnail read re-resolves both file and boundary and re
 - the file still resolves inside that boundary;
 - the extension, size, and attachment blocklist remain valid.
 
-The workspace-local branch keeps `forceWorkspaceConfinement: true`. The trusted branch passes the approved canonical boundary
-and does not force workspace confinement. The trusted boundary uses `MAX_PASTE_IMAGE_BYTES`, so raising the configured upload
-limit does not make trusted uploads fail at the generated-artifact-only 50 MiB boundary cap.
+The shared boundary validator accepts an explicit byte cap. Generated artifacts retain `MAX_GENERATED_ARTIFACT_BYTES`; trusted
+uploads use `MAX_PASTE_IMAGE_BYTES`. The workspace-local branch keeps `forceWorkspaceConfinement: true`. The trusted branch
+passes the approved canonical boundary and does not force workspace confinement, so raising the configured upload limit does
+not make trusted uploads fail at the generated-artifact-only 50 MiB cap.
 
 ### 6. Persisted upload provenance
 
