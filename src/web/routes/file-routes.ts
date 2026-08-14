@@ -35,6 +35,7 @@ import {
   type FileWriteData,
   type SessionAttachmentHistoryItem,
   type SessionState,
+  type AuthUser,
 } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
 import {
@@ -85,7 +86,12 @@ import {
 } from '../route-helpers.js';
 import { parseByteRange } from '../http-range.js';
 import { isSensitivePath } from '../sensitive-path.js';
-import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
+import {
+  isBlockedAttachmentPath,
+  loadAttachmentGuardConfig,
+  resolveLocalUploadDirectory,
+  UploadDirectoryResolutionError,
+} from '../../config/attachment-guard.js';
 import { SseEvent } from '../sse-events.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 import {
@@ -798,7 +804,8 @@ async function buildDetectedAttachmentRouteItem(
 async function buildExternalAttachmentRouteItem(
   sessionId: string,
   item: SessionAttachmentHistoryItem,
-  sessionWorkingDir?: string
+  sessionWorkingDir: string | undefined,
+  authUser: AuthUser
 ): Promise<AttachmentHistoryRouteItem> {
   const safe = sanitizeAttachmentHistoryItem(item);
   if (!item.externalPath) {
@@ -806,9 +813,21 @@ async function buildExternalAttachmentRouteItem(
   }
 
   try {
+    let trustedUploadBoundary: string | undefined;
+    if (item.uploadProvenance === 'codeman-upload' && sessionWorkingDir) {
+      const uploadDirectory = await resolveLocalUploadDirectory(sessionWorkingDir, authUser);
+      if (uploadDirectory.kind === 'trusted') {
+        const canonicalFile = realpathSync(item.externalPath);
+        if (dirname(canonicalFile) !== uploadDirectory.canonicalDir || pathBasename(canonicalFile) !== item.fileName) {
+          throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+        }
+        trustedUploadBoundary = uploadDirectory.canonicalDir;
+      }
+    }
     const event = await registerExternalAttachment(sessionId, item.externalPath, {
       sessionWorkingDir,
-      generatedArtifactBoundary: item.generatedArtifactBoundary,
+      generatedArtifactBoundary: item.uploadProvenance ? undefined : item.generatedArtifactBoundary,
+      trustedUploadBoundary,
     });
     // COD-241 unit 3: expose a workspace-relative path for Codeman-uploaded
     // copies (those inside .codeman-attachments/). The frontend gates its
@@ -818,10 +837,11 @@ async function buildExternalAttachmentRouteItem(
     // is surfaced. Non-workspace published files resolve to null → no relativePath
     // → no Remove button.
     const validated = sessionWorkingDir ? validateSessionFilePath(sessionWorkingDir, item.externalPath) : null;
-    const ownedRelativePath =
-      validated &&
-      (validated.relativePath === '.codeman-attachments' ||
-        validated.relativePath.startsWith(`.codeman-attachments${sep}`))
+    const ownedRelativePath = trustedUploadBoundary
+      ? pathPosix.join('.codeman-attachments', event.fileName)
+      : validated &&
+          (validated.relativePath === '.codeman-attachments' ||
+            validated.relativePath.startsWith(`.codeman-attachments${sep}`))
         ? validated.relativePath
         : undefined;
     return {
@@ -2065,11 +2085,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           notADirectoryMessage: '.codeman-attachments is not a regular directory',
         });
       } catch (err) {
+        req.log.warn({ category: 'attachment-upload', code: 'remote-transfer-failed', sessionId: id, err });
         reply.code(502);
-        return createErrorResponse(
-          ApiErrorCode.OPERATION_FAILED,
-          `Failed to transfer document to remote host: ${getErrorMessage(err)}`
-        );
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to transfer document to remote host');
       }
 
       // 2) Cache a local copy so the attachment registry can serve preview /
@@ -2084,10 +2102,11 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       } catch (err) {
         // The remote file is already in place (the agent can use it); we just
         // cannot serve a local preview. Surface it rather than half-register.
+        req.log.warn({ category: 'attachment-upload', code: 'remote-cache-failed', sessionId: id, err });
         reply.code(500);
         return createErrorResponse(
           ApiErrorCode.OPERATION_FAILED,
-          `Uploaded to remote but failed to cache locally: ${getErrorMessage(err)}`
+          'Uploaded document could not be prepared for preview'
         );
       }
 
@@ -2113,6 +2132,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
               mtimeMs: record.mtimeMs,
               timestamp: event.timestamp,
               generatedArtifactBoundary: record.generatedArtifactBoundary,
+              uploadProvenance: 'codeman-upload',
             })
           );
           ctx.persistSessionState(session);
@@ -2124,8 +2144,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           reply.code(err.statusCode);
           return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
         }
+        req.log.warn({ category: 'attachment-upload', code: 'remote-registration-failed', sessionId: id, err });
         reply.code(500);
-        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to register upload');
       }
 
       const remoteRoutes = buildAttachmentRoutes(id, remoteAttachmentId, ext);
@@ -2148,33 +2169,25 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // (an agent could plant `.codeman-attachments -> ~/.ssh/`). lstat (not stat)
     // so we see the symlink itself; non-recursive mkdir + O_EXCL|O_NOFOLLOW on
     // the file open keep both dir-leaf creation and the write symlink-safe.
-    const attachmentsDir = join(session.workingDir, '.codeman-attachments');
+    let uploadDirectory;
     try {
-      const dirStat = await fs.lstat(attachmentsDir);
-      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-        reply.code(403);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.codeman-attachments is not a regular directory');
+      uploadDirectory = await resolveLocalUploadDirectory(session.workingDir, getAuthUser(req));
+    } catch (err) {
+      if (err instanceof UploadDirectoryResolutionError) {
+        reply.code(err.statusCode);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
       }
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      try {
-        await fs.mkdir(attachmentsDir);
-      } catch (mkErr: unknown) {
-        // Concurrent uploads race to create the dir — losers get EEXIST. Treat an
-        // already-present REAL directory as success, but re-verify it isn't a
-        // symlink a racing actor planted.
-        if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
-        const raceStat = await fs.lstat(attachmentsDir);
-        if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) {
-          reply.code(403);
-          return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.codeman-attachments is not a regular directory');
-        }
-      }
+      req.log.warn({ category: 'attachment-upload', code: 'directory-resolution-failed', sessionId: id, err });
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Upload directory is unavailable');
     }
 
-    const dest = join(attachmentsDir, diskName);
+    const dest = join(uploadDirectory.canonicalDir, diskName);
 
     try {
+      if ((await fs.realpath(uploadDirectory.canonicalDir)) !== uploadDirectory.canonicalDir) {
+        throw new Error('upload directory changed');
+      }
       const fh = await fs.open(
         dest,
         fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
@@ -2186,8 +2199,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         await fh.close();
       }
     } catch (err: unknown) {
+      req.log.warn({ category: 'attachment-upload', code: 'write-failed', sessionId: id, err });
       reply.code(500);
-      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to write upload: ${getErrorMessage(err)}`);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to write upload');
     }
 
     // Register as an 'upload' attachment (workspace-confined), then surface it
@@ -2198,7 +2212,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     try {
       const event = await registerExternalAttachment(id, dest, {
         sessionWorkingDir: session.workingDir,
-        forceWorkspaceConfinement: true,
+        forceWorkspaceConfinement: uploadDirectory.kind === 'workspace',
+        trustedUploadBoundary: uploadDirectory.kind === 'trusted' ? uploadDirectory.canonicalDir : undefined,
         source: 'upload',
       });
       attachmentId = event.attachmentId;
@@ -2214,6 +2229,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
             mtimeMs: record.mtimeMs,
             timestamp: event.timestamp,
             generatedArtifactBoundary: record.generatedArtifactBoundary,
+            uploadProvenance: 'codeman-upload',
           })
         );
         ctx.persistSessionState(session);
@@ -2226,12 +2242,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         reply.code(err.statusCode);
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
       }
+      req.log.warn({ category: 'attachment-upload', code: 'registration-failed', sessionId: id, err });
       reply.code(500);
-      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to register upload');
     }
 
-    const agentPath =
-      validateSessionFilePath(session.workingDir, dest)?.relativePath ?? join('.codeman-attachments', diskName);
+    const agentPath = pathPosix.join('.codeman-attachments', diskName);
     const routes = buildAttachmentRoutes(id, attachmentId, ext);
     return {
       success: true,
@@ -2266,6 +2282,80 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
     }
 
+    let uploadDirectory;
+    try {
+      uploadDirectory = await resolveLocalUploadDirectory(session.workingDir, getAuthUser(req));
+    } catch (err) {
+      if (err instanceof UploadDirectoryResolutionError) {
+        reply.code(err.statusCode);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
+      }
+      req.log.warn({ category: 'attachment-remove', code: 'directory-resolution-failed', sessionId: id, err });
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Upload directory is unavailable');
+    }
+
+    if (uploadDirectory.kind === 'trusted') {
+      const prefix = '.codeman-attachments/';
+      const leaf = rawPath.startsWith(prefix) ? rawPath.slice(prefix.length) : '';
+      if (!leaf || leaf === '.' || leaf === '..' || leaf.includes('/') || leaf.includes('\\') || leaf.includes(sep)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+
+      const target = join(uploadDirectory.canonicalDir, leaf);
+      let targetStat;
+      try {
+        if ((await fs.realpath(uploadDirectory.canonicalDir)) !== uploadDirectory.canonicalDir) {
+          throw new Error('trusted root changed');
+        }
+        targetStat = await fs.lstat(target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          reply.code(404);
+          return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+        }
+        req.log.warn({ category: 'attachment-remove', code: 'target-validation-failed', sessionId: id, err });
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+      if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+
+      const persistedHistory = session.getAttachmentHistoryForPersist() ?? [];
+      const owningHistory = persistedHistory.find((item) => {
+        if (item.uploadProvenance !== 'codeman-upload' || !item.externalPath) return false;
+        try {
+          return (
+            realpathSync(item.externalPath) === target &&
+            dirname(realpathSync(item.externalPath)) === uploadDirectory.canonicalDir
+          );
+        } catch {
+          return false;
+        }
+      });
+      if (!owningHistory) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+
+      try {
+        await fs.unlink(target);
+      } catch (err) {
+        req.log.warn({ category: 'attachment-remove', code: 'unlink-failed', sessionId: id, err });
+        reply.code(500);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to remove file');
+      }
+
+      const record = attachmentRegistry.findByFilePath(id, target);
+      if (record) attachmentRegistry.remove(id, record.attachmentId);
+      const removed = session.removeAttachmentHistory((item) => item.id === owningHistory.id);
+      if (removed > 0) ctx.persistSessionState(session);
+      return { success: true, data: { removed: true, path: pathPosix.join(prefix, leaf) } };
+    }
+
     // Resolve (symlink-safe) and confine to the workspace. A traversal/escape or
     // a nonexistent path returns null → 404 (also covers an already-deleted file).
     const validated = validateSessionFilePath(session.workingDir, rawPath);
@@ -2292,8 +2382,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     try {
       await fs.rm(validated.resolvedPath, { force: true });
     } catch (err: unknown) {
+      req.log.warn({ category: 'attachment-remove', code: 'workspace-remove-failed', sessionId: id, err });
       reply.code(500);
-      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to remove file: ${getErrorMessage(err)}`);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to remove file');
     }
 
     // Best-effort cleanup of the in-memory registry + persisted history so the
@@ -2320,7 +2411,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const items = await Promise.all(
       sessionHistory.history.map((item) =>
         (item.source === 'external'
-          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.workingDir)
+          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.workingDir, getAuthUser(req))
           : buildDetectedAttachmentRouteItem(id, sessionHistory.workingDir, item)
         ).catch(() => ({ ...sanitizeAttachmentHistoryItem(item), missing: true }))
       )

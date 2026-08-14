@@ -27,7 +27,9 @@
  * @module config/attachment-guard
  */
 
-import { sep } from 'node:path';
+import fs from 'node:fs/promises';
+import { isAbsolute, join, relative, sep } from 'node:path';
+import type { AuthUser } from '../types/user.js';
 import { isSensitivePath } from '../web/sensitive-path.js';
 import { readJsonConfig, SETTINGS_PATH } from '../web/route-helpers.js';
 
@@ -52,6 +54,139 @@ export interface AttachmentGuardConfig {
   blockedTrees: string[];
   /** Whether attachments must resolve inside the session workspace. */
   confineToWorkspace: boolean;
+}
+
+export type ResolvedUploadDirectory =
+  | { kind: 'workspace'; canonicalDir: string }
+  | { kind: 'trusted'; canonicalDir: string };
+
+export class UploadDirectoryResolutionError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number = 403
+  ) {
+    super(message);
+  }
+}
+
+let trustedAttachmentRootsSnapshot: Promise<readonly string[]> | undefined = parseTrustedAttachmentRoots();
+
+function warnInvalidTrustedRoot(index: number, reason: string): void {
+  console.warn(`[attachments] Ignoring CODEMAN_TRUSTED_ATTACHMENT_ROOTS entry ${index + 1}: ${reason}`);
+}
+
+async function parseTrustedAttachmentRoots(): Promise<readonly string[]> {
+  const raw = process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+  if (!raw?.trim()) return [];
+
+  const guard = await loadAttachmentGuardConfig();
+  const accepted = new Set<string>();
+  const entries = raw.split(',');
+  for (let index = 0; index < entries.length; index += 1) {
+    const candidate = entries[index].trim();
+    if (!candidate) continue;
+    if (!isAbsolute(candidate)) {
+      warnInvalidTrustedRoot(index, 'path must be absolute');
+      continue;
+    }
+    try {
+      const canonical = await fs.realpath(candidate);
+      const stat = await fs.stat(canonical);
+      if (canonical !== candidate) {
+        warnInvalidTrustedRoot(index, 'path must already be canonical');
+      } else if (!stat.isDirectory()) {
+        warnInvalidTrustedRoot(index, 'path is not a directory');
+      } else if (isBlockedAttachmentPath(canonical, guard.blockedTrees)) {
+        warnInvalidTrustedRoot(index, 'path is blocked by attachment policy');
+      } else {
+        accepted.add(canonical);
+      }
+    } catch {
+      warnInvalidTrustedRoot(index, 'path is unavailable');
+    }
+  }
+  return Object.freeze([...accepted]);
+}
+
+/** Startup-scoped, environment-only exact allowlist for trusted upload roots. */
+export function getTrustedAttachmentRoots(): Promise<readonly string[]> {
+  trustedAttachmentRootsSnapshot ??= parseTrustedAttachmentRoots();
+  return trustedAttachmentRootsSnapshot;
+}
+
+/** Test hook for changing process.env between isolated cases. */
+export function resetTrustedAttachmentRootsForTests(): void {
+  trustedAttachmentRootsSnapshot = undefined;
+}
+
+function pathIsInside(parent: string, child: string): boolean {
+  const fromParent = relative(parent, child);
+  return fromParent === '' || (fromParent !== '..' && !fromParent.startsWith(`..${sep}`) && !isAbsolute(fromParent));
+}
+
+function rejectedUploadDirectory(): UploadDirectoryResolutionError {
+  return new UploadDirectoryResolutionError('.codeman-attachments is not an approved upload directory');
+}
+
+/** Resolve the sole local upload destination used by both upload and deletion. */
+export async function resolveLocalUploadDirectory(
+  workingDir: string,
+  authUser: AuthUser
+): Promise<ResolvedUploadDirectory> {
+  let canonicalWorkspace: string;
+  try {
+    canonicalWorkspace = await fs.realpath(workingDir);
+  } catch {
+    throw rejectedUploadDirectory();
+  }
+  const attachmentsDir = join(canonicalWorkspace, '.codeman-attachments');
+
+  let stat;
+  try {
+    stat = await fs.lstat(attachmentsDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw rejectedUploadDirectory();
+    try {
+      await fs.mkdir(attachmentsDir);
+    } catch (mkdirError) {
+      if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw rejectedUploadDirectory();
+    }
+    try {
+      stat = await fs.lstat(attachmentsDir);
+    } catch {
+      throw rejectedUploadDirectory();
+    }
+  }
+
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    let canonicalDir: string;
+    try {
+      canonicalDir = await fs.realpath(attachmentsDir);
+    } catch {
+      throw rejectedUploadDirectory();
+    }
+    if (!pathIsInside(canonicalWorkspace, canonicalDir)) throw rejectedUploadDirectory();
+    return { kind: 'workspace', canonicalDir };
+  }
+
+  if (!stat.isSymbolicLink() || authUser.role !== 'admin') throw rejectedUploadDirectory();
+
+  try {
+    const canonicalDir = await fs.realpath(attachmentsDir);
+    const targetStat = await fs.stat(canonicalDir);
+    const roots = await getTrustedAttachmentRoots();
+    if (
+      !targetStat.isDirectory() ||
+      !roots.includes(canonicalDir) ||
+      (await fs.realpath(canonicalDir)) !== canonicalDir
+    ) {
+      throw rejectedUploadDirectory();
+    }
+    return { kind: 'trusted', canonicalDir };
+  } catch (err) {
+    if (err instanceof UploadDirectoryResolutionError) throw err;
+    throw rejectedUploadDirectory();
+  }
 }
 
 /** Normalizes a tree prefix: trim, drop trailing separators (but keep root). */

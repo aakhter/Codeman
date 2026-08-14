@@ -11,6 +11,7 @@ import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative, sep } from 'node:path';
 import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from './config/attachment-guard.js';
+import { MAX_PASTE_IMAGE_BYTES } from './config/buffer-limits.js';
 import { validateSessionFilePath } from './web/route-helpers.js';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
 
@@ -45,6 +46,8 @@ export interface AttachmentRecord {
   source: AttachmentSource;
   /** Server-private canonical root for generated-artifact read-time confinement. */
   generatedArtifactBoundary?: string;
+  /** Ephemeral canonical root for a Codeman upload through an approved workspace symlink. */
+  trustedUploadBoundary?: string;
 }
 
 export interface AttachmentRegistrationResult extends AttachmentDetectedEvent {
@@ -203,6 +206,8 @@ export interface RegisterExternalAttachmentOptions {
   source?: AttachmentSource;
   /** Canonical root that must continue to contain this generated artifact. */
   generatedArtifactBoundary?: string;
+  /** Freshly resolved canonical trusted-upload root; never persisted. */
+  trustedUploadBoundary?: string;
 }
 
 function isPathInsideBoundary(filePath: string, boundary: string): boolean {
@@ -213,7 +218,7 @@ function isPathInsideBoundary(filePath: string, boundary: string): boolean {
   );
 }
 
-function resolveGeneratedArtifactBoundary(resolvedPath: string, requestedBoundary: string): string {
+function resolveAttachmentBoundary(resolvedPath: string, requestedBoundary: string): string {
   let boundary: string;
   try {
     boundary = realpathSync(requestedBoundary);
@@ -226,22 +231,19 @@ function resolveGeneratedArtifactBoundary(resolvedPath: string, requestedBoundar
   return boundary;
 }
 
-/** Revalidate server-private generated-artifact provenance before every by-id read. */
-export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord): Promise<string | undefined> {
-  if (!record.generatedArtifactBoundary) return undefined;
-
+async function resolveBoundaryReadPath(record: AttachmentRecord, boundary: string, maxBytes: number): Promise<string> {
   let resolvedPath: string;
   let resolvedBoundary: string;
   try {
     resolvedPath = realpathSync(record.filePath);
-    resolvedBoundary = realpathSync(record.generatedArtifactBoundary);
+    resolvedBoundary = realpathSync(boundary);
   } catch {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
 
   if (
     resolvedPath !== record.filePath ||
-    resolvedBoundary !== record.generatedArtifactBoundary ||
+    resolvedBoundary !== boundary ||
     !isPathInsideBoundary(resolvedPath, resolvedBoundary) ||
     !isSupportedAttachmentExtension(extname(resolvedPath))
   ) {
@@ -254,13 +256,24 @@ export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord)
   } catch {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
-  if ((typeof stat.isFile === 'function' && !stat.isFile()) || stat.size > MAX_GENERATED_ARTIFACT_BYTES) {
+  if ((typeof stat.isFile === 'function' && !stat.isFile()) || stat.size > maxBytes) {
     throw new AttachmentRegistrationError(
-      stat.size > MAX_GENERATED_ARTIFACT_BYTES ? 'Attachment file is too large' : 'Access to this file is blocked',
-      stat.size > MAX_GENERATED_ARTIFACT_BYTES ? 413 : 403
+      stat.size > maxBytes ? 'Attachment file is too large' : 'Access to this file is blocked',
+      stat.size > maxBytes ? 413 : 403
     );
   }
   return resolvedPath;
+}
+
+/** Revalidate either server-private boundary type before every by-id read. */
+export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord): Promise<string | undefined> {
+  if (record.generatedArtifactBoundary) {
+    return resolveBoundaryReadPath(record, record.generatedArtifactBoundary, MAX_GENERATED_ARTIFACT_BYTES);
+  }
+  if (record.trustedUploadBoundary) {
+    return resolveBoundaryReadPath(record, record.trustedUploadBoundary, MAX_PASTE_IMAGE_BYTES);
+  }
+  return undefined;
 }
 
 export async function registerExternalAttachment(
@@ -280,8 +293,14 @@ export async function registerExternalAttachment(
   }
 
   const generatedArtifactBoundary = options.generatedArtifactBoundary
-    ? resolveGeneratedArtifactBoundary(resolvedPath, options.generatedArtifactBoundary)
+    ? resolveAttachmentBoundary(resolvedPath, options.generatedArtifactBoundary)
     : undefined;
+  const trustedUploadBoundary = options.trustedUploadBoundary
+    ? resolveAttachmentBoundary(resolvedPath, options.trustedUploadBoundary)
+    : undefined;
+  if (generatedArtifactBoundary && trustedUploadBoundary) {
+    throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+  }
 
   // COD-53: enforce the active attachment-guard policy on the symlink-resolved
   // path before doing anything else.
@@ -319,17 +338,30 @@ export async function registerExternalAttachment(
   if (generatedArtifactBoundary && stat.size > MAX_GENERATED_ARTIFACT_BYTES) {
     throw new AttachmentRegistrationError('Attachment file is too large', 413);
   }
+  if (trustedUploadBoundary && stat.size > MAX_PASTE_IMAGE_BYTES) {
+    throw new AttachmentRegistrationError('Attachment file is too large', 413);
+  }
 
   const existing = attachmentRegistry.findByFilePath(sessionId, resolvedPath);
   if (existing) {
-    if (
-      existing.generatedArtifactBoundary &&
-      generatedArtifactBoundary &&
-      existing.generatedArtifactBoundary !== generatedArtifactBoundary
-    ) {
+    if (generatedArtifactBoundary && existing.trustedUploadBoundary) {
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
     }
-    if (generatedArtifactBoundary) existing.generatedArtifactBoundary = generatedArtifactBoundary;
+    if (generatedArtifactBoundary) {
+      if (existing.generatedArtifactBoundary && existing.generatedArtifactBoundary !== generatedArtifactBoundary) {
+        throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      }
+      existing.generatedArtifactBoundary = generatedArtifactBoundary;
+    }
+    if (trustedUploadBoundary) {
+      if (existing.generatedArtifactBoundary) {
+        throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      }
+      if (existing.trustedUploadBoundary && existing.trustedUploadBoundary !== trustedUploadBoundary) {
+        throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      }
+      existing.trustedUploadBoundary = trustedUploadBoundary;
+    }
     existing.size = stat.size;
     existing.mtimeMs = stat.mtimeMs ?? 0;
     existing.timestamp = Date.now();
@@ -348,6 +380,7 @@ export async function registerExternalAttachment(
     timestamp: Date.now(),
     source: options.source ?? 'external',
     ...(generatedArtifactBoundary ? { generatedArtifactBoundary } : {}),
+    ...(trustedUploadBoundary ? { trustedUploadBoundary } : {}),
   };
   attachmentRegistry.register(record);
   return attachmentRecordToEvent(record);

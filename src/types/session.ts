@@ -454,6 +454,8 @@ export interface SessionAttachmentHistoryItem {
   externalPath?: string;
   /** Server-private canonical root for generated-artifact read-time confinement. */
   generatedArtifactBoundary?: string;
+  /** Persisted proof that Codeman created this history file through the upload endpoint. */
+  uploadProvenance?: 'codeman-upload';
 }
 
 /**

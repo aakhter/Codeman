@@ -22,6 +22,7 @@ import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { registerFileRoutes, _resetUploadRateBuckets } from '../../src/web/routes/file-routes.js';
 import { attachmentRegistry } from '../../src/attachment-registry.js';
+import { resetTrustedAttachmentRootsForTests } from '../../src/config/attachment-guard.js';
 
 interface LocalHarness {
   app: FastifyInstance;
@@ -109,9 +110,117 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
   });
 
   afterEach(async () => {
+    delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    resetTrustedAttachmentRootsForTests();
     attachmentRegistry.clearSession(harness.ctx._sessionId);
     await harness.app.close();
     await fs.rm(workdir, { recursive: true, force: true });
+  });
+
+  it('uploads through an exact approved symlink with a trusted read boundary and provenance', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+
+    try {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(BOUNDARY, 'Trusted.pdf', 'application/pdf', PDF_BYTES),
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.agentPath).toMatch(/^\.codeman-attachments\/Trusted-.*\.pdf$/);
+      const record = attachmentRegistry.get(harness.ctx._sessionId, body.data.attachmentId);
+      expect(record?.filePath).toBe(join(trusted, body.data.agentPath.split('/').at(-1)));
+      expect(record?.trustedUploadBoundary).toBe(trusted);
+      expect(record?.generatedArtifactBoundary).toBeUndefined();
+      expect(harness.ctx._session.attachmentHistory[0].source).toBe('external');
+      expect(harness.ctx._session.attachmentHistory[0].uploadProvenance).toBe('codeman-upload');
+      expect(JSON.stringify(harness.ctx._session.getAttachmentHistoryForPersist())).not.toContain(
+        'trustedUploadBoundary'
+      );
+      await expect(fs.readFile(record!.filePath)).resolves.toEqual(PDF_BYTES);
+
+      const raw = await harness.app.inject({ method: 'GET', url: body.data.rawUrl });
+      expect(raw.statusCode).toBe(200);
+      expect(raw.rawPayload).toEqual(PDF_BYTES);
+
+      const persisted = harness.ctx._session.getAttachmentHistoryForPersist()![0];
+      harness.ctx._session.upsertAttachmentHistory({ ...persisted, generatedArtifactBoundary: '/forged/wide/root' });
+      attachmentRegistry.clearSession(harness.ctx._sessionId);
+      const history = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+      expect(history.statusCode).toBe(200);
+      const reconstructedId = JSON.parse(history.body).data.items[0].attachmentId;
+      const reconstructed = attachmentRegistry.get(harness.ctx._sessionId, reconstructedId);
+      expect(reconstructed?.trustedUploadBoundary).toBe(trusted);
+      expect(reconstructed?.generatedArtifactBoundary).toBeUndefined();
+
+      const outside = join(workdir, 'outside.pdf');
+      await fs.writeFile(outside, PDF_BYTES);
+      await fs.unlink(reconstructed!.filePath);
+      await fs.symlink(outside, reconstructed!.filePath);
+      for (const suffix of ['raw', 'preview', 'thumbnail']) {
+        const blocked = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments/${reconstructedId}/${suffix}`,
+        });
+        expect(blocked.statusCode).toBe(403);
+      }
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps trusted upload names unique under concurrency', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          harness.app.inject({
+            method: 'POST',
+            url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+            headers: MULTIPART_HEADERS,
+            payload: uploadBody(BOUNDARY, 'Same.pdf', 'application/pdf', PDF_BYTES),
+          })
+        )
+      );
+      expect(responses.every((response) => response.statusCode === 200)).toBe(true);
+      expect(new Set(responses.map((response) => JSON.parse(response.body).data.agentPath)).size).toBe(4);
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an unapproved symlink without exposing its target', async () => {
+    const target = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-secret-')));
+    const configured = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-configured-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = configured;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(target, join(workdir, '.codeman-attachments'));
+    try {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(BOUNDARY, 'Nope.pdf', 'application/pdf', PDF_BYTES),
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.body).not.toContain(target);
+      expect(res.body).not.toContain(configured);
+    } finally {
+      await fs.rm(target, { recursive: true, force: true });
+      await fs.rm(configured, { recursive: true, force: true });
+    }
   });
 
   it('200: uploads a valid PDF, registers it as source:upload, writes it under .codeman-attachments/', async () => {

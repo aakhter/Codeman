@@ -134,6 +134,23 @@ describe('session attachment history', () => {
     expect(JSON.stringify(session.toState().attachmentHistory)).not.toContain('/tmp/workspace');
   });
 
+  it('persists only the recognized upload provenance marker', () => {
+    const session = new Session({ workingDir: '/tmp' });
+    const item = buildExternalAttachmentHistoryItem({
+      sessionId: session.id,
+      externalPath: '/tmp/upload.pdf',
+      fileName: 'upload.pdf',
+      extension: 'pdf',
+      size: 10,
+      uploadProvenance: 'codeman-upload',
+    });
+    session.upsertAttachmentHistory(item);
+    expect(session.getAttachmentHistoryForPersist()?.[0].uploadProvenance).toBe('codeman-upload');
+
+    session.upsertAttachmentHistory({ ...item, uploadProvenance: 'forged' } as unknown as SessionAttachmentHistoryItem);
+    expect(session.getAttachmentHistoryForPersist()?.[0].uploadProvenance).toBeUndefined();
+  });
+
   it('attaches remote mux sessions from a local cwd', () => {
     expect(
       resolveMuxAttachCwd('/Users/remote/project', {
