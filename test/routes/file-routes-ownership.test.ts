@@ -15,10 +15,10 @@ import { join } from 'node:path';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { registerFileRoutes, _resetUploadRateBuckets } from '../../src/web/routes/file-routes.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
-import { ApiErrorCode } from '../../src/types.js';
+import { ApiErrorCode, type AuthUser } from '../../src/types.js';
 
 const SESSION_OWNER = 'alice';
-const REQUEST_USER = { username: 'bob', role: 'user' as const };
+const REQUEST_USER: AuthUser = { username: 'bob', role: 'user' };
 const BOUNDARY = 'codeman-ownership-boundary';
 const MULTIPART_HEADERS = {
   host: 'codeman.test',
@@ -31,6 +31,7 @@ interface OwnershipHarness {
   app: FastifyInstance;
   ctx: MockRouteContext;
   workdir: string;
+  setRequestUser(user: AuthUser): void;
 }
 
 function uploadBody(filename: string, bytes: Buffer): Buffer {
@@ -60,8 +61,9 @@ async function createOwnershipHarness(): Promise<OwnershipHarness> {
   await app.register(fastifyMultipart, {
     limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 4, parts: 5 },
   });
+  let requestUser = REQUEST_USER;
   app.addHook('onRequest', async (req) => {
-    (req as unknown as { authUser: typeof REQUEST_USER }).authUser = REQUEST_USER;
+    (req as unknown as { authUser: AuthUser }).authUser = requestUser;
   });
 
   const ctx = createMockRouteContext();
@@ -71,7 +73,14 @@ async function createOwnershipHarness(): Promise<OwnershipHarness> {
   registerFileRoutes(app, ctx as never);
   installRouteErrorHandler(app);
   await app.ready();
-  return { app, ctx, workdir };
+  return {
+    app,
+    ctx,
+    workdir,
+    setRequestUser(user) {
+      requestUser = user;
+    },
+  };
 }
 
 describe('file and attachment route session ownership (COD-292)', () => {
@@ -113,6 +122,36 @@ describe('file and attachment route session ownership (COD-292)', () => {
 
     expectOwnershipNotFound(response, harness.ctx._sessionId);
     await expect(fs.stat(join(harness.workdir, '.codeman-attachments'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it("foreign upload attempts stay 404 and do not consume the owner's rate-limit quota", async () => {
+    const foreignStatuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt++) {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(`foreign-${attempt}.pdf`, PDF_BYTES),
+      });
+      foreignStatuses.push(response.statusCode);
+    }
+
+    harness.setRequestUser({ username: SESSION_OWNER, role: 'user' });
+    const ownerStatuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt++) {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(`owner-${attempt}.pdf`, PDF_BYTES),
+      });
+      ownerStatuses.push(response.statusCode);
+    }
+
+    expect({ foreignStatuses, ownerStatuses }).toEqual({
+      foreignStatuses: Array.from({ length: 21 }, () => 404),
+      ownerStatuses: [...Array.from({ length: 20 }, () => 200), 429],
+    });
   });
 
   it("GET /attachments hides another user's session", async () => {

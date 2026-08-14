@@ -1967,6 +1967,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
 
     const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
 
     // Rate limit per (IP, sessionId): 20/min. Defends against disk-fill DoS.
     if (!consumeUploadToken(`${req.ip}:${id}`)) {
@@ -1974,8 +1975,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       reply.header('Retry-After', '60');
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
     }
-
-    const session = findSessionOrFail(ctx, id, req);
 
     if (!req.isMultipart()) {
       reply.code(400);
