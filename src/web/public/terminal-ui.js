@@ -39,6 +39,28 @@
   // short window, only the app's synthetic tap-to-position mouse event should
   // reach xterm.
   const TOUCH_COMPAT_MOUSE_SUPPRESS_MS = 450;
+  // Finger travel (px) still counted as a tap rather than a scroll. Shared by
+  // the terminal's own touch handling (TAP_THRESHOLD, initTerminal) and the
+  // keyboard-dismiss handler (_installMobileKeyboardDismiss), which MUST agree:
+  // a gesture the terminal treats as a scroll but the dismiss handler treats as
+  // a tap would close the keyboard mid-scroll and drop the composer.
+  const MOBILE_KEYBOARD_DISMISS_TAP_SLOP = 8;
+  // Regions where a tap must NOT dismiss the on-screen keyboard
+  // (_installMobileKeyboardDismiss). Two groups: anything that is about to take
+  // focus itself, and the accessory bar, which is built to be used while the
+  // keyboard is open.
+  const MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR = [
+    'input',
+    'textarea',
+    'select',
+    'button',
+    'a[href]',
+    '[contenteditable=""]',
+    '[contenteditable="true"]',
+    '[tabindex]:not([tabindex="-1"])',
+    '.keyboard-accessory-bar',
+    '.path-picker-overlay',
+  ].join(',');
   // Escape sequences occupy no terminal cells, so they must come out before a
   // captured line's WIDTH can be measured (_estimateReplayRows). Covers OSC,
   // CSI, charset designators and the short escapes tmux emits; deliberately
@@ -189,6 +211,8 @@
     PAGE_KEY_SCREEN_FRACTION,
     PAGE_KEY_MAX_PER_BATCH,
     TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM,
+    MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR,
+    MOBILE_KEYBOARD_DISMISS_TAP_SLOP,
   };
   global.CODEMAN_XTERM_THEMES = CODEMAN_XTERM_THEMES;
   global.codemanCurrentXtermTheme = currentXtermTheme;
@@ -1023,7 +1047,9 @@ Object.assign(CodemanApp.prototype, {
       const touchGesture = this._createTerminalTouchGesture();
       let tapStartedWithTerminalFocus = false;
       let tapStartIntentCache = null;
-      const TAP_THRESHOLD = 8; // px — ignore micro-drift to distinguish tap from scroll
+      // px — ignore micro-drift to distinguish tap from scroll. Shared with the
+      // keyboard-dismiss handler so both classify the same gesture the same way.
+      const TAP_THRESHOLD = window.CodemanTerminalInput.MOBILE_KEYBOARD_DISMISS_TAP_SLOP;
       container.addEventListener(
         'touchstart',
         (ev) => {
@@ -1209,6 +1235,8 @@ Object.assign(CodemanApp.prototype, {
     // Hand-encode the SGR report for plain left-clicks on those sessions.
     container.addEventListener('click', (ev) => this._handleDesktopTerminalClick(ev));
 
+    this._installMobileKeyboardDismiss();
+
     // Welcome message
     this.showWelcome();
 
@@ -1335,7 +1363,10 @@ Object.assign(CodemanApp.prototype, {
             }
           }
         }
-        // Update subagent connection lines and local echo at new dimensions
+        // Update subagent connection lines and local echo at new dimensions.
+        // Lineage lines are desktop-only, so a resize across the 1024px boundary
+        // has to re-resolve their gate before the redraw, not just move them.
+        this.applyLineageLineSettings?.();
         this.updateConnectionLines();
         if (this._localEchoOverlay?.hasPending) {
           this._localEchoOverlay.rerender();
@@ -2604,7 +2635,7 @@ Object.assign(CodemanApp.prototype, {
     }
     titleSpan.appendChild(document.createTextNode(this._historyRowLabel(s, shortDir)));
 
-    // Badge row: mode (claude/codex/opencode/gemini/antigravity/shell) + a LIVE pill.
+    // Badge row: mode (claude/codex/opencode/gemini/antigravity/pi/shell) + a LIVE pill.
     const badgeRow = document.createElement('div');
     badgeRow.className = 'history-item-badges';
     if (s.mode) {
@@ -4004,10 +4035,17 @@ Object.assign(CodemanApp.prototype, {
     const activeSession = this.activeSessionId && this.sessions ? this.sessions.get(this.activeSessionId) : null;
     const MAX_FRAME_BYTES = activeSession?.mode === 'codex' ? 32768 : 65536;
     let deferred = false;
-    // If the user recently scrolled up, remember the viewport so we can restore
-    // it after the write — Codex status redraws would otherwise jump it.
+    // If the user is reading history, remember the viewport so we can restore it
+    // after the write — Codex status redraws would otherwise jump it.
+    //
+    // Position, not recency (#259). This was gated on _hasRecentUserScrollUp(),
+    // a 1500ms decay window, so a user who scrolled up and then actually READ
+    // for longer than that lost the protection mid-read and got dragged along by
+    // the next repaint. Being scrolled up IS the intent, however long ago it was
+    // expressed; the recency window remains as an extra guard on the sticky
+    // scroll-to-bottom below, where it protects against a mid-flush race.
     const preserveViewportY =
-      this._hasRecentUserScrollUp() && this.terminal.buffer?.active ? this.terminal.buffer.active.viewportY : null;
+      this.terminal.buffer?.active && !this.isTerminalAtBottom() ? this.terminal.buffer.active.viewportY : null;
 
     if (_joinedLen <= MAX_FRAME_BYTES) {
       this.terminal.write(joined);
@@ -4713,6 +4751,73 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Tapping outside the terminal closes the on-screen keyboard.
+   *
+   * The terminal keeps focus on a hidden textarea, and nothing ever released it:
+   * once the keyboard was up, every tap on the header, the tab strip or empty
+   * page chrome left it up, covering half a phone screen with no way to dismiss
+   * it but the OS back gesture.
+   *
+   * Deliberately narrow, because focus is not ours to steal:
+   *
+   * - only when the terminal input actually holds focus;
+   * - never for a tap inside the terminal — those are classified and routed by
+   *   `_handleMobileTerminalTap`, which owns that decision;
+   * - never for a tap on another control. Anything focusable or clickable is
+   *   about to take focus itself, and the accessory bar in particular exists to
+   *   be used WHILE the keyboard is open, so dismissing there would fight the
+   *   user. `closest()` covers taps landing on a child (an icon inside a button).
+   *
+   * Bound to `touchend` rather than `click`: a tap that dismisses the keyboard
+   * usually is not meant to activate whatever is underneath, and touchend fires
+   * before the synthesized click, so the blur lands first.
+   */
+  _installMobileKeyboardDismiss() {
+    if (this._mobileKeyboardDismissHandler) return;
+
+    // A SCROLL also ends in touchend, and dismissing there is wrong: scrolling
+    // to read something while composing must not close the keyboard and lose
+    // the composer. Track how far the finger travelled and only treat a
+    // near-stationary gesture as a tap — the same TAP_THRESHOLD the terminal's
+    // own touch handling uses, so both agree on what a tap is.
+    let startX = 0;
+    let startY = 0;
+    let moved = false;
+    this._mobileKeyboardDismissStart = (ev) => {
+      if (ev.touches.length !== 1) {
+        moved = true; // a multi-touch gesture is never a dismissing tap
+        return;
+      }
+      startX = ev.touches[0].clientX;
+      startY = ev.touches[0].clientY;
+      moved = false;
+    };
+    this._mobileKeyboardDismissMove = (ev) => {
+      if (moved || !ev.touches.length) return;
+      const dx = ev.touches[0].clientX - startX;
+      const dy = ev.touches[0].clientY - startY;
+      const slop = window.CodemanTerminalInput.MOBILE_KEYBOARD_DISMISS_TAP_SLOP;
+      if (Math.abs(dx) > slop || Math.abs(dy) > slop) {
+        moved = true;
+      }
+    };
+    this._mobileKeyboardDismissHandler = (ev) => {
+      if (moved) return;
+      if (!this._isMobileTerminalInputFocused()) return;
+      const target = ev.target;
+      if (!target || typeof target.closest !== 'function') return;
+      if (target.closest('#terminalContainer')) return;
+      if (target.closest(window.CodemanTerminalInput.MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR)) return;
+      this._blurMobileTerminalInput();
+    };
+    // Passive throughout: this never calls preventDefault, so it must not make
+    // the page feel less responsive to scrolling.
+    document.addEventListener('touchstart', this._mobileKeyboardDismissStart, { passive: true });
+    document.addEventListener('touchmove', this._mobileKeyboardDismissMove, { passive: true });
+    document.addEventListener('touchend', this._mobileKeyboardDismissHandler, { passive: true });
+  },
+
+  /**
    * Which 'content' taps should DISMISS the mobile keyboard. Expandable
    * readbacks, tool results and decision rows are TUI-owned: tapping them acts
    * on the CLI, so popping the keyboard there is wrong. An inert transcript row
@@ -4767,9 +4872,20 @@ Object.assign(CodemanApp.prototype, {
     // the affordance above; there is deliberately no verb literal here, because
     // the verb is randomised per build.
 
+    // A visible selection dialog makes its OWN rows actionable, not the whole
+    // screen. Two viewport-wide `some()` tests used to be the entire answer, so
+    // while a Claude question or permission dialog was up EVERY tap in the
+    // terminal (inert transcript, the question title, blank rows) came back
+    // actionable, and the caller blurred on each one. The on-screen keyboard
+    // could then not be opened at all until the dialog was answered, which left
+    // tapping an option row as the only interaction available: the one that
+    // commits an answer. Requiring the TAPPED line to be a numbered row keeps
+    // the dialog's own rows behaving as before (report the tap, keep the
+    // keyboard down) while any other row can still summon the keyboard, which
+    // is how a digit gets typed at a dialog instead of aimed at it.
     const hasMenuPrompt = lines.some((line) => /^\s*[❯›]\s+\d+[.)]\s/.test(line));
     const hasMenuChoice = lines.some((line) => /^\s+\d+[.)]\s/.test(line));
-    return hasMenuPrompt && hasMenuChoice;
+    return hasMenuPrompt && hasMenuChoice && /^\s*(?:[❯›]\s*)?\d+[.)]\s/.test(tappedLine);
   },
 
   _focusMobileTerminalInput() {
@@ -4815,6 +4931,20 @@ Object.assign(CodemanApp.prototype, {
     if (intent === 'content' && this._isActionableMobileTerminalTap(touch.clientX, touch.clientY)) {
       // A synthetic xterm click can focus its helper textarea. Blur after the
       // report so collapsing a readback never opens or retains the keyboard.
+      this._blurMobileTerminalInput();
+    } else if (intent === 'content' && startedWithTerminalFocus) {
+      // Tapping INERT transcript with the keyboard already up closes it.
+      //
+      // Every terminal tap re-focuses, so once the keyboard is open the only way
+      // to close it is the accessory bar's dismiss chevron. Tapping the
+      // transcript to get the screen back is the obvious gesture, and nothing
+      // else claims it: an inert row has no action to trigger, so by this point
+      // the tap has already done its only other job (the mouse report above).
+      //
+      // Scoped to 'content' ON PURPOSE. The prompt row ('input') keeps
+      // focus-then-position, so a second tap there still places the caret —
+      // pinned by "keeps the first prompt tap focus-only so it cannot activate a
+      // CLI row". Toggling there would trade away real capability.
       this._blurMobileTerminalInput();
     } else {
       this._focusMobileTerminalInput();

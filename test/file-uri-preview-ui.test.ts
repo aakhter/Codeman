@@ -144,7 +144,10 @@ describe('COD-273 file URI preview UI', () => {
 
     expect(overlay.classList.remove).toHaveBeenCalledWith('visible');
     expect(host.filePreviewState).toBeNull();
-    expect(body.innerHTML).toBe('<div class="binary-message">Loading...</div>');
+    // Empty, not the loading placeholder: closing tears down the preview body so a
+    // detached <video>/<audio> stops playing. The point stands either way — the late
+    // response wrote nothing into it.
+    expect(body.innerHTML).toBe('');
     expect(openFilePreview).not.toHaveBeenCalled();
   });
 

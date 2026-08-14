@@ -748,6 +748,17 @@ class CodemanApp {
     this.maxReconnectAttempts = 10;
     this.isOnline = navigator.onLine;
 
+    // SSE staleness watchdog. An EventSource that stops delivering does not
+    // always error (a proxy that idle-closed it, a resumed laptop), so
+    // `onerror` never fires and every SSE-driven surface freezes silently.
+    // The server heartbeats every 15s; going quiet for three of them means the
+    // stream is a zombie and has to be rebuilt. The decision is pure
+    // (computeSseStale in constants.js); these are its inputs. The threshold
+    // is an instance field so a browser test can shrink it.
+    this._sseLastMessageAt = 0;
+    this._sseStaleTimeoutMs = window.CodemanSseStale?.TIMEOUT_MS ?? 45000;
+    this._sseStaleWatchdog = null;
+
     // Connection-loss UI (banner + full-screen overlay). The decision itself is
     // pure and lives in constants.js (computeConnectionLossUi); these are just
     // its inputs. `_connDownSince` is the timestamp the transport LEFT the
@@ -783,6 +794,11 @@ class CodemanApp {
     window.addEventListener('pagehide', () => this._persistReliableNow());
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') this._persistReliableNow();
+      // A background tab's timers are throttled, so the 5s watchdog may not
+      // have run for minutes, and a wake/unlock is exactly when a stream
+      // comes back zombie. Checking here is what makes recovery feel instant
+      // instead of up to a full timeout late.
+      else this._checkSseStale();
     });
 
     // Local echo overlay — DOM overlay positioned at the visible ❯ prompt
@@ -957,6 +973,8 @@ class CodemanApp {
     this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
+    this.applyLineageLineSettings?.();
+    this._installLineageStripScrollListener?.();
     this._setupTabMiddleClickClose();
     // Must run before the first session:created can arrive: markSessionTabEntering()
     // ignores ids until this sets up its state, which is what keeps the tabs
@@ -1023,6 +1041,7 @@ class CodemanApp {
       this.applyLocalization();
       this.applyTabWrapSettings();
       this.applyMonitorVisibility();
+      this.applyLineageLineSettings?.();
       // ultracodeFloatingWindows syncs from the server (non-display key), but on a
       // FRESH device the getLightState run snapshot can seed workflowRuns BEFORE this
       // async settings load resolves — so the floating-window gate read false then and
@@ -1653,6 +1672,14 @@ class CodemanApp {
     // Clear any pending reconnect timeout to prevent duplicate connections
     this._clearTimer('sseReconnectTimeout');
 
+    // Same discipline for the staleness watchdog: connectSSE() runs on every
+    // reconnect and is the only teardown path this page-lifetime interval has,
+    // so clearing it anywhere else (or not at all) stacks intervals.
+    if (this._sseStaleWatchdog) {
+      clearInterval(this._sseStaleWatchdog);
+      this._sseStaleWatchdog = null;
+    }
+
     // Clean up existing SSE listeners before creating new connection (prevents listener accumulation)
     if (this._sseListenerCleanup) {
       this._sseListenerCleanup();
@@ -1680,11 +1707,20 @@ class CodemanApp {
     if (this.activeSessionId) _sseParams.set('sessions', this.activeSessionId);
     this.eventSource = new EventSource(`/api/events?${_sseParams.toString()}`);
 
-    // Store all event listeners for cleanup on reconnect
+    // Store all event listeners for cleanup on reconnect.
+    //
+    // Every handler is wrapped so ANY frame that arrives stamps the liveness
+    // clock the staleness watchdog reads. Doing it here (rather than at the
+    // three separate registration sites below) is what keeps a future
+    // addListener() call from silently opting out of it.
     const listeners = [];
     const addListener = (event, handler) => {
-      this.eventSource.addEventListener(event, handler);
-      listeners.push({ event, handler });
+      const stamped = (e) => {
+        this._sseLastMessageAt = Date.now();
+        handler(e);
+      };
+      this.eventSource.addEventListener(event, stamped);
+      listeners.push({ event, handler: stamped });
     };
 
     // Create cleanup function to remove all listeners
@@ -1699,6 +1735,10 @@ class CodemanApp {
 
     this.eventSource.onopen = () => {
       this.reconnectAttempts = 0;
+      // Start the liveness clock here, not at the first frame: the watchdog
+      // only ever fires while the status is 'connected', and this is the
+      // moment that becomes true.
+      this._sseLastMessageAt = Date.now();
       this.setConnectionStatus('connected');
     };
     this.eventSource.onerror = () => {
@@ -1874,6 +1914,52 @@ class CodemanApp {
       }
       this._onSessionListMaybeChanged();
     });
+
+    // Liveness heartbeat. The handler is deliberately empty: the whole point
+    // is the stamp inherited from addListener's wrapper. It still has to be
+    // REGISTERED: EventSource only dispatches named events that have a
+    // listener, so without this the frame arrives on the wire and is dropped
+    // before it can prove the stream is alive.
+    addListener(SSE_EVENTS.HEARTBEAT, () => {});
+
+    // Watchdog: a stream that goes quiet without erroring is invisible to
+    // onerror, so poll the pure staleness policy and rebuild the connection
+    // ourselves. 5s granularity against a 45s threshold: cheap, and it keeps
+    // the worst-case detection lag well under a heartbeat interval.
+    this._sseStaleWatchdog = setInterval(() => this._checkSseStale(), 5000);
+  }
+
+  /**
+   * Force a reconnect if the SSE stream has gone quiet while still claiming to
+   * be connected. Called by the 5s watchdog and on tab-visible.
+   *
+   * Recovery needs no new sync path: the reconnect re-runs `handleInit`, which
+   * already calls `_resetAllAppState()` and rebuilds everything from the
+   * server. The connection-loss UI needs nothing either: `connectSSE()` sets
+   * status 'connecting' (reconnectAttempts was zeroed by onopen), and the 2.5s
+   * grace in computeConnectionLossUi means a stream that heals in 200ms shows
+   * nothing at all.
+   */
+  _checkSseStale() {
+    const policy = window.CodemanSseStale;
+    if (!policy) return;
+    const now = Date.now();
+    const stale = policy.compute({
+      lastMessageAt: this._sseLastMessageAt,
+      now,
+      status: this._connectionStatus,
+      isOnline: this.isOnline,
+      timeoutMs: this._sseStaleTimeoutMs,
+    });
+    if (!stale) return;
+    // If a middlebox ever strips or delays heartbeats, the failure mode is
+    // "silently reconnects every 45s", and a field report of that would be
+    // undebuggable without this line.
+    console.log(
+      `[SSE] stream stale: no frame for ${now - this._sseLastMessageAt}ms ` +
+      `(threshold ${this._sseStaleTimeoutMs}ms), forcing reconnect`
+    );
+    this.connectSSE();
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1901,6 +1987,9 @@ class CodemanApp {
     // The pane is one shared element, so it is only marked here and played when
     // this session is actually selected (see selectSession).
     this.markTerminalEntering?.(data.id);
+    // A spawned session's lineage arc draws in with the tab. Keyed the same way
+    // session-lineage.js tags its paths; a no-op unless a line-entrance theme is on.
+    if (data.parentSessionId) this.markConnectionLineEntering?.('lineage:' + data.id);
     this.renderSessionTabs();
     this.updateCost();
     // COD-97: keep the Monitor's mux list in sync with the open tabs.
@@ -2772,9 +2861,11 @@ class CodemanApp {
         ? 'Gemini'
         : mode === 'antigravity'
           ? 'Antigravity'
-          : mode === 'opencode'
-            ? 'OpenCode'
-            : 'Claude';
+          : mode === 'pi'
+            ? 'Pi'
+            : mode === 'opencode'
+              ? 'OpenCode'
+              : 'Claude';
   }
 
   async toggleResponseViewer() {
@@ -2902,24 +2993,46 @@ class CodemanApp {
       if (this._viewMode !== 'history') await this._refreshMirrorFrame(this.activeSessionId);
       return;
     }
+    const sessionId = this.activeSessionId;
     try {
-      const activeSession = this.sessions.get(this.activeSessionId);
-      // COD-189: shell recovery must use the FULL reload (capture-canonical) —
-      // the byte-history tail is sparse after a fast burst (tmux jump-scroll
-      // + the 128KB render-cap drops that triggered this very recovery), so a
-      // tail refetch would faithfully reproduce the holes it should heal.
-      // Claude keeps the fast tail (its byte history IS the conversation).
-      const terminalUrl =
-        activeSession?.mode === 'claude'
-          ? `/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`
-          : `/api/sessions/${this.activeSessionId}/terminal`;
-      const res = await fetch(terminalUrl);
-      const data = (await res.json())?.data ?? {};
+      // Recovery should restore the WHOLE picture, so ask for full history
+      // rather than a tail. Measured on a 900-line shell pane: the tail rewrite
+      // replaced an 869-row buffer with 158 rows, so every backpressure refresh
+      // silently destroyed most of the scrollback it was meant to repair.
+      //
+      // A repaint-mode pane is the opposite case (tmux keeps ~one frame for it),
+      // so the full capture can be SMALLER than what xterm already holds. Reuse
+      // the same downgrade guard as the scroll-to-top re-pull and fall back to
+      // the historical tail there, leaving that case exactly as it was.
+      let res = await fetch(`/api/sessions/${sessionId}/terminal?full=1`);
+      let data = (await res.json())?.data ?? {};
+      if (data.terminalBuffer && this._replayWouldShrinkBuffer(data.terminalBuffer)) {
+        res = await fetch(`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
+        data = (await res.json())?.data ?? {};
+      }
+      // Bail on a tab switch mid-fetch: writing here would paint this session's
+      // history into the terminal the user is now looking at. The window is two
+      // fetches wide in the fallback case, so this guard is not optional.
+      if (this.activeSessionId !== sessionId) return;
       if (data.terminalBuffer) {
+        // This refresh is SERVER-triggered, so a user quietly reading scrollback
+        // did not ask for it and must not be dragged to the bottom by it (#259).
+        // The rewrite replaces the buffer, so an absolute viewportY is
+        // meaningless across it — distance from the bottom is what survives.
+        const before = this.terminal.buffer?.active;
+        const linesFromBottom = before ? Math.max(0, (before.baseY || 0) - (before.viewportY || 0)) : 0;
         this.terminal.clear();
         this.terminal.reset();
         await this.chunkedTerminalWrite(data.terminalBuffer);
-        this.terminal.scrollToBottom();
+        // A tail fetch can be partial, and the banner would otherwise keep
+        // describing the pre-refresh buffer (#258).
+        this._setHistoryTruncation(sessionId, data);
+        const target = computeRewriteScrollLine({
+          linesFromBottom,
+          baseY: this.terminal.buffer?.active?.baseY ?? 0,
+        });
+        if (target === null || typeof this.terminal.scrollToLine !== 'function') this.terminal.scrollToBottom();
+        else this.terminal.scrollToLine(target);
         // Re-position local echo overlay at new prompt location
         this._localEchoOverlay?.rerender();
         // Resize PTY to match actual browser dimensions (critical for OpenCode
@@ -4990,6 +5103,11 @@ class CodemanApp {
     this._refreshMobileOverviewIfVisible?.();
     // Same deal for the desktop home screen's tab column.
     this._refreshHomeSessionsIfVisible?.();
+    // The full-render path already redraws the connection SVG; this incremental
+    // one does not, and a badge appearing widens a tab and shifts every tab after
+    // it, sliding the lineage arcs off their anchors. Only pay for it when there
+    // is an arc to keep anchored.
+    if (this._lineageEdgeCount > 0) this.updateConnectionLines();
   }
 
   // Auto-wrap desktop session tabs to a second row when they overflow one row,
@@ -5178,7 +5296,7 @@ class CodemanApp {
           <span class="tab-status ${status}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : ''}
+              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
               <span class="tab-name" data-session-id="${id}">${escapeHtml(tabLabel)}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
@@ -5717,28 +5835,36 @@ class CodemanApp {
    * gets a much longer cooldown so a hollow pane stops re-fetching megabytes on
    * every scroll-up (issue #205, round 2).
    */
-  async _maybeRefetchFullHistory() {
+  async _maybeRefetchFullHistory({ force = false } = {}) {
     const sessionId = this.activeSessionId;
     if (!sessionId || this._fullHistoryRepullInFlight || this._isLoadingBuffer) return;
     if (this.detachedSessions?.has(sessionId)) return;
     const now = Date.now();
     // Momentum scrolling fires this dozens of times per flick, and a burst of new
     // output is the normal reason to want a re-pull, so cooldown rather than latch.
+    // `force` is the user pressing "Load full history" (#258): they asked once,
+    // explicitly, so the scroll-gesture cooldown does not apply. The downgrade
+    // guard below still does — a forced pull must not destroy history either.
     const cooldown = this._fullHistoryRepullUseless?.has(sessionId) ? 60000 : 4000;
-    if (now - (this._fullHistoryRepullAt.get(sessionId) || 0) < cooldown) return;
+    if (!force && now - (this._fullHistoryRepullAt.get(sessionId) || 0) < cooldown) return;
     this._fullHistoryRepullAt.set(sessionId, now);
     this._fullHistoryRepullInFlight = true;
     try {
       const res = await fetch(`/api/sessions/${sessionId}/terminal?full=1`);
-      const buffer = (await res.json())?.data?.terminalBuffer;
+      const payload = (await res.json())?.data ?? {};
+      const buffer = payload.terminalBuffer;
       // Bail on a tab switch mid-fetch: writing here would paint another session's
       // history into the terminal the user is now looking at.
       if (!buffer || this.activeSessionId !== sessionId) return;
       if (this._replayWouldShrinkBuffer(buffer)) {
         (this._fullHistoryRepullUseless ||= new Set()).add(sessionId);
         this._logScrollRouting?.('repull-refused-downgrade');
+        // The browser already holds more than tmux can give back, so there is
+        // nothing further to offer and the indicator must stop promising it.
+        this._setHistoryTruncation(sessionId, { ...payload, exhausted: true });
         return;
       }
+      this._setHistoryTruncation(sessionId, payload);
       this._fullHistoryRepullUseless?.delete(sessionId);
       const rowsBefore = this.terminal.buffer.active.length;
       this._resetTerminalForReplay();
@@ -5757,6 +5883,89 @@ class CodemanApp {
     } finally {
       this._fullHistoryRepullInFlight = false;
     }
+  }
+
+  /**
+   * Record how much history a replay actually carried, and refresh the banner.
+   *
+   * Called from every path that writes a fetched buffer into xterm. Keyed by
+   * session because the banner describes the ACTIVE tab and a background fetch
+   * must not relabel it.
+   */
+  _setHistoryTruncation(sessionId, payload = {}) {
+    if (!sessionId) return;
+    (this._historyTruncation ||= new Map()).set(sessionId, {
+      truncated: !!payload.truncated,
+      reason: payload.truncationReason ?? null,
+      source: payload.source ?? null,
+      fullSize: payload.fullSize ?? 0,
+      retainedBytes: payload.retainedBytes ?? 0,
+      // Set once a full-history pull has been refused as a downgrade: the
+      // browser holds more than the server can return, so there is no more.
+      exhausted: !!payload.exhausted,
+    });
+    if (sessionId === this.activeSessionId) this._renderHistoryTruncationBanner();
+  }
+
+  /** Drop banner state for a session that is going away. */
+  _clearHistoryTruncation(sessionId) {
+    this._historyTruncation?.delete(sessionId);
+    if (sessionId === this.activeSessionId) this._renderHistoryTruncationBanner();
+  }
+
+  /**
+   * Paint the partial-history banner for the active session.
+   *
+   * Three distinct states, because "we tailed for speed" and "the oldest output
+   * is gone forever" are not the same message and the old single boolean could
+   * not tell them apart:
+   *   - recoverable  → offer to load the rest
+   *   - exhausted    → say so plainly, offer nothing
+   *   - at the limit → the full capture ITSELF hit the byte ceiling
+   */
+  _renderHistoryTruncationBanner() {
+    const bar = document.getElementById('historyTruncationBar');
+    if (!bar) return;
+    const state = this.activeSessionId ? this._historyTruncation?.get(this.activeSessionId) : null;
+    const notice = computeHistoryTruncationNotice(state || {});
+    if (!notice.visible) {
+      bar.hidden = true;
+      return;
+    }
+
+    bar.textContent = '';
+    const label = document.createElement('span');
+    label.className = 'history-trunc-text';
+    label.textContent = notice.message;
+    bar.appendChild(label);
+
+    if (notice.canLoadMore) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'history-trunc-load';
+      btn.textContent = 'Load full history';
+      btn.onclick = () => {
+        btn.disabled = true;
+        btn.textContent = 'Loading…';
+        // Forced: the cooldown exists to throttle scroll gestures, not choices.
+        this._maybeRefetchFullHistory({ force: true }).finally(() => {
+          this._renderHistoryTruncationBanner();
+        });
+      };
+      bar.appendChild(btn);
+    }
+
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'history-trunc-dismiss';
+    dismiss.setAttribute('aria-label', 'Dismiss history notice');
+    dismiss.textContent = '×';
+    dismiss.onclick = () => {
+      bar.hidden = true;
+    };
+    bar.appendChild(dismiss);
+
+    bar.hidden = false;
   }
 
   _shouldFocusTerminalForTabSwitch() {
@@ -5818,6 +6027,10 @@ class CodemanApp {
     // back. The ONLY other writers are _enterHistoryView/_exitHistoryView.
     this.terminal.options.scrollback = this._isMirrorSession(sessionId) ? 0 : this._userScrollback();
     this.activeSessionId = sessionId;
+    // Repaint the partial-history banner for the tab being switched TO. The
+    // replay paths refresh it when their fetch lands; without this the previous
+    // session's notice stays on screen until then (#258).
+    this._renderHistoryTruncationBanner();
     try { localStorage.setItem('codeman-active-session', sessionId); } catch {}
     // COD-285: sync terminal background to the session's mode *before* any
     // buffer write/entrance animation so opencode's black panels don't stripe
@@ -6112,10 +6325,11 @@ class CodemanApp {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');
           this._resetTerminalForReplay();
-          // Show truncation indicator if buffer was cut
-          if (data.truncated) {
-            this.terminal.write('\x1b[90m... (earlier output truncated for performance) ...\x1b[0m\r\n\r\n');
-          }
+          // Truncation is reported OUT OF BAND (#258). This used to write a grey
+          // "... earlier output truncated ..." line into the
+          // terminal itself, which scrolls away with the output it describes,
+          // cannot be actioned, and is indistinguishable from real CLI output.
+          this._setHistoryTruncation(sessionId, data);
           // Use chunked write for large buffers to avoid UI jank
           await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
           if (this._isStaleSelect(selectGen)) {
@@ -6288,6 +6502,7 @@ class CodemanApp {
     }
     this.terminalBuffers.delete(sessionId);
     this.terminalBufferCache.delete(sessionId);
+    this._clearHistoryTruncation(sessionId);
     this._xtermSnapshots?.delete(sessionId);
     try { localStorage.removeItem(`codeman-xs-${sessionId}`); } catch {}
 
@@ -6385,7 +6600,9 @@ class CodemanApp {
             ? 'Kill Tmux & Gemini'
             : session.mode === 'antigravity'
               ? 'Kill Tmux & Antigravity'
-              : 'Kill Tmux & Claude Code';
+              : session.mode === 'pi'
+                ? 'Kill Tmux & Pi'
+                : 'Kill Tmux & Claude Code';
     }
 
     document.getElementById('closeConfirmModal').classList.add('active');

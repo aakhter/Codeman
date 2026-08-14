@@ -380,7 +380,7 @@ export function registerSystemRoutes(
   app.get('/api/system/repo-status', async () => getRepositoryStatus());
 
   // ═══════════════════════════════════════════════════════════════
-  // CLI Integrations (Claude, OpenCode, Codex, Gemini, Antigravity)
+  // CLI Integrations (Claude, OpenCode, Codex, Gemini, Antigravity, Pi)
   // ═══════════════════════════════════════════════════════════════
 
   // ========== Claude ==========
@@ -429,6 +429,21 @@ export function registerSystemRoutes(
     return {
       available: isAntigravityAvailable(),
       path: resolveAntigravityDir(),
+    };
+  });
+
+  // ========== Pi ==========
+
+  // Carries `version` on top of the sibling shape: `pi` is a short, generic binary
+  // name, so the resolver sanity-probes `pi --version` and rejects anything that
+  // is not the coding agent. Surfacing path + version makes a misresolution
+  // diagnosable from the UI instead of presenting as "the mode just doesn't work".
+  app.get('/api/pi/status', async () => {
+    const { isPiAvailable, resolvePiDir, getPiCliVersion } = await import('../../utils/pi-cli-resolver.js');
+    return {
+      available: isPiAvailable(),
+      path: resolvePiDir(),
+      version: getPiCliVersion(),
     };
   });
 

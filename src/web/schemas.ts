@@ -122,7 +122,7 @@ export const FileWriteSchema = z
 // ========== Env Var Allowlist ==========
 
 /** Allowlisted env var key prefixes */
-const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 'GOOGLE_', 'ANTIGRAVITY_'];
+const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 'GOOGLE_', 'ANTIGRAVITY_', 'PI_'];
 
 /**
  * Allowlisted exact env var keys (checked alongside the prefixes).
@@ -161,7 +161,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_* keys and CLAUDE_CONFIG_DIR are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_*, PI_* keys and CLAUDE_CONFIG_DIR are allowed.',
     }
   );
 
@@ -270,14 +270,58 @@ const AntigravityConfigSchema = z
   })
   .optional();
 
+/**
+ * Schema for Pi CLI (pi.dev)-specific configuration.
+ *
+ * No bypass field exists on purpose: pi has no permission prompts. The one
+ * privilege-shaped knob is the TRI-STATE `approveProjectTrust` (see PiConfig),
+ * which the multi-user clamp MATERIALIZES to `false` for non-granted owners.
+ */
+const PiConfigSchema = z
+  .object({
+    // `:` for a thinking suffix (`sonnet:high`), `/` for `provider/id`.
+    model: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._\-/:]+$/)
+      .optional(),
+    provider: z
+      .string()
+      .max(50)
+      .regex(/^[a-z0-9-]+$/)
+      .optional(),
+    thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    continueSession: z.boolean().optional(),
+    resumeSessionId: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._-]+$/)
+      .optional(),
+    approveProjectTrust: z.boolean().optional(),
+  })
+  .optional();
+
+/**
+ * The session that spawned the one being created — pure UI decoration, drawn as a
+ * lineage line between the two tabs. Accepted here and, equivalently, as the
+ * `X-Codeman-Parent-Session` header (the agent skill sets that once on its shared
+ * curl invocation so every spawn recipe carries it); the body wins when both are
+ * present. `resolveParentSessionId()` in route-helpers.ts re-checks it against live
+ * sessions and DROPS anything it cannot resolve — a bad value must never fail a
+ * spawn, and this is never an ownership or permission signal.
+ */
+const parentSessionIdSchema = z.string().max(100).optional();
+
 export const CreateSessionSchema = z.object({
   caseName: z
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
     .optional(),
   workingDir: safePathSchema.optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']).optional(),
   name: z.string().max(100).optional(),
+  /** Session that spawned this one — see parentSessionIdSchema. */
+  parentSessionId: parentSessionIdSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
@@ -289,6 +333,7 @@ export const CreateSessionSchema = z.object({
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
   antigravityConfig: AntigravityConfigSchema,
+  piConfig: PiConfigSchema,
   /** Resume a previous Claude conversation by its session ID (used for reboot recovery) */
   resumeSessionId: z
     .string()
@@ -441,6 +486,7 @@ const RemoteCommandOverridesSchema = z
     codex: z.string().min(1).max(300).optional(),
     gemini: z.string().min(1).max(300).optional(),
     antigravity: z.string().min(1).max(300).optional(),
+    pi: z.string().min(1).max(300).optional(),
   })
   .strict()
   .optional();
@@ -736,16 +782,19 @@ export const QuickStartSchema = z.object({
   /** Display name for the created session tab (e.g. w1-mycase). Cosmetic; the durable
    *  mux/container names derive from the session id, not this. Defaults server-side. */
   sessionName: z.string().max(128).optional(),
+  /** Session that spawned this one — see parentSessionIdSchema. */
+  parentSessionId: parentSessionIdSchema,
   /** Model override written to <case>/.claude/settings.local.json (e.g. "opus[1m]").
    *  Empty string clears. Applied for local AND docker cases (the docker workspace is
    *  a real host dir, so the settings file crosses the bind mount); rejected for
    *  remote cases (the file would be written on the WRONG machine). */
   modelOverride: z.string().max(50).optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']).optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
   antigravityConfig: AntigravityConfigSchema,
+  piConfig: PiConfigSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
@@ -1305,7 +1354,7 @@ const noNewlines = (v: string) => !/[\r\n]/.test(v);
 /** Shared field shape for creating/updating a scheduled job. */
 const CronJobBaseSchema = z.object({
   name: z.string().min(1).max(200),
-  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']),
+  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']),
   workingDir: safePathSchema,
   launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
   promptMode: z.enum(['inline_text', 'prompt_file_path']),

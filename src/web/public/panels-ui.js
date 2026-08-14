@@ -710,7 +710,7 @@ Object.assign(CodemanApp.prototype, {
 
   _buildCommandPaletteNewSessionItem(query = '') {
     const mode = this.runMode || this._runMode || 'claude';
-    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity' };
+    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi' };
     const caseName = this._findCommandPaletteCaseMatch(query) || document.getElementById('quickStartCase')?.value || 'testcase';
     return {
       id: 'new-session',
@@ -4004,6 +4004,9 @@ Object.assign(CodemanApp.prototype, {
     // Edit button stays hidden until the server says this file is editable.
     // `?.` matches the sibling resets above (partial hosts in unit harnesses).
     this._resetFilePreviewEdit?.();
+    // Stop whatever the previous preview was playing. Overwriting innerHTML
+    // only DETACHES a <video>/<audio>; a detached media element keeps playing.
+    this._stopFilePreviewMedia?.();
 
     // Show overlay with loading state
     overlay.classList.add('visible');
@@ -4409,7 +4412,13 @@ Object.assign(CodemanApp.prototype, {
       if (image?.complete) requestAnimationFrame(fitWhenReady);
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'video') {
-      bodyEl.innerHTML = `<video src="${data.url}" controls autoplay></video>`;
+      // playsinline: iOS otherwise hijacks playback into its fullscreen
+      // player, which leaves the overlay behind it and its own close button
+      // as the only way back.
+      bodyEl.innerHTML = `<video src="${escapeHtml(data.url)}" controls autoplay playsinline preload="metadata"></video>`;
+      footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
+    } else if (data.type === 'audio') {
+      bodyEl.innerHTML = `<audio src="${escapeHtml(data.url)}" controls autoplay preload="metadata"></audio>`;
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
       const st = this.filePreviewState;
@@ -5539,7 +5548,7 @@ Object.assign(CodemanApp.prototype, {
 
   /** Restore the persisted preview size and keep saving it as the user resizes (COD-67). */
   _restorePreviewSize() {
-    const win = this.$('filePreviewOverlay')?.querySelector('.file-preview-window');
+    const win = this.$('filePreviewOverlay')?.querySelector?.('.file-preview-window');
     if (!win) return;
     try {
       const saved = JSON.parse(localStorage.getItem('codeman.filePreviewSize') || 'null');
@@ -5584,6 +5593,10 @@ Object.assign(CodemanApp.prototype, {
     if (overlay) {
       overlay.classList.remove('visible');
     }
+    // The overlay is hidden with display:none, which stops it being PAINTED and
+    // nothing else: a <video>/<audio> inside it keeps playing, keeps its audio
+    // audible and keeps streaming from the server. Closing has to stop it.
+    this._stopFilePreviewMedia?.();
     this.filePreviewContent = '';
   },
 
@@ -5846,6 +5859,31 @@ Object.assign(CodemanApp.prototype, {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  },
+
+  /**
+   * Pause and unload every media element in the preview body, then empty it.
+   *
+   * Removing the element from the DOM is NOT enough — a detached HTMLMediaElement
+   * plays on until it is garbage collected, which is why the X button used to
+   * leave a video audible. pause() stops playback, dropping src + load() aborts
+   * the in-flight network fetch and puts the element back in NETWORK_EMPTY.
+   */
+  _stopFilePreviewMedia() {
+    const bodyEl = this.$('filePreviewBody');
+    if (!bodyEl) return;
+    // `?? []`: the unit harnesses hand this a partial body stub, matching how the
+    // sibling preview resets are called with `?.`.
+    for (const media of bodyEl.querySelectorAll?.('video, audio') ?? []) {
+      try {
+        media.pause();
+        media.removeAttribute('src');
+        media.load();
+      } catch (err) {
+        console.warn('Failed to stop preview media:', err);
+      }
+    }
+    bodyEl.innerHTML = '';
   },
 
   // ═══════════════════════════════════════════════════════════════

@@ -54,6 +54,7 @@ import {
   type EffortLevel,
   type SessionAttachmentHistoryItem,
   type AntigravityConfig,
+  type PiConfig,
   type SessionRemote,
   type SessionSource,
   type SessionDocker,
@@ -209,7 +210,7 @@ const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 const TMUX_ABSOLUTE_ROW_START_PATTERN = /\x1b\[\d+;1H/g;
 
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity';
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || mode === 'pi';
 }
 
 export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
@@ -274,6 +275,8 @@ function getModeLabel(mode: SessionMode): string {
       return 'Gemini';
     case 'antigravity':
       return 'Antigravity';
+    case 'pi':
+      return 'Pi';
     case 'shell':
       return 'Shell';
     case 'claude':
@@ -289,9 +292,21 @@ function getModeLabel(mode: SessionMode): string {
  * Codex, Claude Code, and Gemini are known, controlled (Ink/React) TUIs that
  * repaint via cursor positioning, so dropping the alt-screen switch is safe —
  * content stays in the normal buffer. Excluded: `shell` (arbitrary programs like
- * vim/less/htop legitimately need the alt screen) and `opencode` (renders its own
- * TUI that may rely on it). Keep parity with the replay-side strip in
- * session-routes.ts.
+ * vim/less/htop legitimately need the alt screen), `opencode` (renders its own
+ * TUI that may rely on it) and `pi` (below). Keep parity with the replay-side
+ * strip in session-routes.ts.
+ *
+ * ⚠️ Being excluded here does NOT preserve the alt screen. Every excluded mode
+ * falls through to isMuxAltScreenOnlyStripMode(), which strips the alt-screen
+ * toggles too whenever the session is tmux-backed, and pi/opencode ALWAYS are
+ * (both refuse the direct-PTY fallback). What exclusion actually buys is the rest
+ * of the full strip: `\x1b[3J` and the mouse-tracking DECSETs survive. That is the
+ * real reason pi is out: its default TUI renders into the MAIN screen with
+ * terminal-owned scrollback and is mouse-aware, so it is a `3J`/mouse consumer in
+ * a way an Ink TUI repainting in place is not. Consequence to know before
+ * debugging it: pi's runtime-switchable fullscreen TUI (`/settings`, 0.84.0+)
+ * still gets its `?1049h` stripped and paints into the main buffer, exactly like
+ * vim inside a tmux `shell` session.
  */
 export function isAltScreenStripMode(mode: SessionMode): boolean {
   // Antigravity is deliberately excluded (upstream #201): its Go TUI is
@@ -606,6 +621,8 @@ export class Session extends EventEmitter {
   private _codexRawLogErrored = false;
   // Antigravity configuration (only for mode === 'antigravity')
   private _antigravityConfig: AntigravityConfig | undefined;
+  // Pi configuration (only for mode === 'pi')
+  private _piConfig: PiConfig | undefined;
   private _resumeSessionId: string | undefined;
 
   // Native external-CLI session/rollout id captured at PARK time (COD-124 unit 2,
@@ -640,6 +657,11 @@ export class Session extends EventEmitter {
   // Owning username in multi-user mode (undefined in single-user). Stamped at create
   // from req.authUser and round-tripped through recovery like _remote/_docker.
   private _owner?: string;
+
+  // The session that spawned this one (tab lineage lines). Resolved by the create
+  // route before it reaches here, so this is always either an id that existed at
+  // create time or undefined. Decoration only — see SessionState.parentSessionId.
+  private readonly _parentSessionId?: string;
 
   // Session color for visual differentiation
   private _color: import('./types.js').SessionColor = 'default';
@@ -704,6 +726,8 @@ export class Session extends EventEmitter {
       geminiConfig?: GeminiConfig;
       /** Antigravity configuration (only for mode === 'antigravity') */
       antigravityConfig?: AntigravityConfig;
+      /** Pi configuration (only for mode === 'pi') */
+      piConfig?: PiConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
       resumeSessionId?: string;
       /** Native external-CLI session/rollout id captured at park time (COD-124 unit 2, Gap B) */
@@ -740,6 +764,8 @@ export class Session extends EventEmitter {
       docker?: SessionDocker;
       /** Owning username (multi-user mode); undefined in single-user. */
       owner?: string;
+      /** Session that spawned this one — tab lineage decoration, resolved by the caller. */
+      parentSessionId?: string;
     }
   ) {
     super();
@@ -758,7 +784,12 @@ export class Session extends EventEmitter {
     this._name = config.name || '';
     this._resumeSessionId = config.resumeSessionId;
     this._nativeResumeId = config.nativeResumeId ?? null;
-    this._lastActivityAt = this.createdAt;
+    // NOW, not `createdAt`: recovery passes the ORIGINAL creation time of a
+    // days-old tmux session, and seeding last-activity from it would report a
+    // freshly re-attached pane as having been silent for days, which the idle
+    // confirmation reads as "already quiet" and the home screens print as its
+    // idle duration. For a genuinely new session the two are the same instant.
+    this._lastActivityAt = Date.now();
     this._terminalBufferMaxSize = config.terminalBufferConfig?.maxBytes ?? MAX_TERMINAL_BUFFER_SIZE;
     this._terminalBufferTrimSize = config.terminalBufferConfig?.trimBytes ?? TERMINAL_BUFFER_TRIM_SIZE;
     this._tmuxHistoryLimit = config.tmuxHistoryLimit ?? DEFAULT_TMUX_HISTORY_LIMIT;
@@ -822,6 +853,11 @@ export class Session extends EventEmitter {
       this._antigravityConfig = config.antigravityConfig;
     }
 
+    // Apply Pi configuration
+    if (config.piConfig) {
+      this._piConfig = config.piConfig;
+    }
+
     // Apply env overrides (exported at spawn, not persisted to disk).
     // Legacy migration: pre-0.7.2 carried effort as the CLAUDE_CODE_EFFORT_LEVEL env var,
     // which hard-locks /effort switching. Extract it into _effort (--settings soft default)
@@ -841,6 +877,10 @@ export class Session extends EventEmitter {
     }
     this._docker = config.docker;
     this._owner = config.owner;
+    // Never self-parent: a session pointing at itself would draw a zero-length
+    // lineage arc under its own tab. Only reachable via the recovery path, where
+    // both the id and the saved parent come from disk.
+    this._parentSessionId = config.parentSessionId === this.id ? undefined : config.parentSessionId;
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
     }
@@ -990,6 +1030,11 @@ export class Session extends EventEmitter {
   /** Owning username in multi-user mode, else undefined. */
   get owner(): string | undefined {
     return this._owner;
+  }
+
+  /** The session that spawned this one (tab lineage decoration), else undefined. */
+  get parentSessionId(): string | undefined {
+    return this._parentSessionId;
   }
 
   /** Set the owning username (used by recovery to restore ownership). */
@@ -1745,6 +1790,7 @@ export class Session extends EventEmitter {
       remote: this._remote,
       docker: this._docker,
       owner: this._owner,
+      parentSessionId: this._parentSessionId,
       currentTaskId: this._currentTaskId,
       createdAt: this.createdAt,
       lastActivityAt: this._lastActivityAt,
@@ -1789,6 +1835,7 @@ export class Session extends EventEmitter {
       codexConfig: this._codexConfig,
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
+      piConfig: this._piConfig,
       resumeSessionId: this._resumeSessionId,
       nativeResumeId: this._nativeResumeId,
       effort: this._effort,
@@ -1960,9 +2007,9 @@ export class Session extends EventEmitter {
           cols: ptyCols,
           rows: ptyRows,
           cwd: resolveMuxAttachCwd(this.workingDir, this._remote, this._docker),
-          // Truecolor is settings-driven here (COD-75 upstream hardcoded it per-mode);
-          // buildEnvExports() in tmux-manager.ts reads the same flag so the attach
-          // client and the tmux session agree.
+          // Truecolor is settings-driven here (COD-75 upstream hardcodes it per-mode
+          // for codex/gemini/antigravity/pi); buildEnvExports() in tmux-manager.ts
+          // reads the same flag so the attach client and the tmux session agree.
           env: buildMuxAttachEnv(this._truecolorEnabled),
         })
       );
@@ -2031,6 +2078,7 @@ export class Session extends EventEmitter {
       codexConfig: this._codexConfig,
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
+      piConfig: this._piConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
       effort: this._effort,
@@ -2278,6 +2326,7 @@ export class Session extends EventEmitter {
             codexConfig: this._codexConfig,
             geminiConfig: this._geminiConfig,
             antigravityConfig: this._antigravityConfig,
+            piConfig: this._piConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
@@ -2366,6 +2415,10 @@ export class Session extends EventEmitter {
       // Antigravity sessions require tmux for env override injection via setenv
       if (this.mode === 'antigravity') {
         throw new Error('Antigravity sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      // Pi sessions require tmux for env override injection via setenv
+      if (this.mode === 'pi') {
+        throw new Error('Pi sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session

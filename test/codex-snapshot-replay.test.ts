@@ -181,19 +181,22 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
   it('uses full terminal history when refreshing an active Codex session after dropped output', () => {
     const source = appSource();
     const refreshStart = source.indexOf('async _onSessionNeedsRefresh()');
-    const fetchLine = source.indexOf('const terminalUrl', refreshStart);
-    const fetchCall = source.indexOf('const res = await fetch(terminalUrl);', fetchLine);
-    const block = source.slice(refreshStart, fetchCall + 80);
+    const fullFetch = source.indexOf('/terminal?full=1', refreshStart);
+    const switchGuard = source.indexOf('if (this.activeSessionId !== sessionId) return;', refreshStart);
+    const block = source.slice(refreshStart, switchGuard + 80);
 
     expect(refreshStart).toBeGreaterThan(-1);
-    expect(fetchLine).toBeGreaterThan(refreshStart);
-    // COD-189: full reload for everything EXCEPT claude (codex/gemini/shell
-    // all heal from the canonical capture; claude's byte history IS the
-    // conversation and keeps the fast tail).
-    expect(block).toContain("activeSession?.mode === 'claude'");
-    expect(block).toContain('?tail=');
-    expect(block).toContain('`/api/sessions/${this.activeSessionId}/terminal`');
-    expect(block).toContain('`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
+    expect(fullFetch).toBeGreaterThan(refreshStart);
+    // COD-189 wanted the FULL capture rather than the sparse byte tail for
+    // codex/gemini/shell. Upstream generalized that: recovery always asks for
+    // ?full=1, and only falls back to the tail when the replay would SHRINK the
+    // buffer (a repaint-mode pane keeps ~one frame in tmux), which covers claude
+    // too instead of special-casing it.
+    expect(block).toContain('`/api/sessions/${sessionId}/terminal?full=1`');
+    expect(block).toContain('this._replayWouldShrinkBuffer(data.terminalBuffer)');
+    expect(block).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
+    // Two fetches wide, so a tab switch mid-fetch must not paint into the new tab.
+    expect(switchGuard).toBeGreaterThan(fullFetch);
   });
 
   it('schedules a terminal buffer refresh after an unexpected active WebSocket close', () => {

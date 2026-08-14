@@ -1,5 +1,5 @@
 /**
- * @fileoverview Quick start (case loading, session spawning for Claude/Shell/OpenCode/Codex/Gemini/Antigravity),
+ * @fileoverview Quick start (case loading, session spawning for Claude/Shell/OpenCode/Codex/Gemini/Antigravity/Pi),
  * session options modal (per-session settings, color picker, rename),
  * session options tabs (Ralph config tab), case settings (CRUD, links),
  * create case modal, and mobile case picker.
@@ -437,6 +437,9 @@ Object.assign(CodemanApp.prototype, {
       if (mode === 'antigravity') {
         return await this.runAntigravity();
       }
+      if (mode === 'pi') {
+        return await this.runPi();
+      }
       if (mode === 'shell') {
         return await this.runShell();
       }
@@ -497,11 +500,11 @@ Object.assign(CodemanApp.prototype, {
    * `.run-mode-option` is also the class the saved-dashboard rows and the history
    * rows use, and a bare querySelector would find whichever came first in the DOM.
    *
-   * Antigravity is in this list even though #201 predates it — it is a run mode
-   * like the rest, and `agy` is the LEAST likely of the five to be installed.
+   * Antigravity and Pi are in this list even though #201 predates them — they are
+   * run modes like the rest, and neither `agy` nor `pi` is likely to be installed.
    */
   _refreshRunModeAvailability(menu) {
-    for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity']) {
+    for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']) {
       const btn = menu.querySelector(`.run-mode-option[data-mode="${mode}"]`);
       if (btn) btn.style.display = this.isCliAvailable(mode) ? 'flex' : 'none';
     }
@@ -598,7 +601,7 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'shell' ? 'Run SH' : 'Run';
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'pi' ? 'Run PI' : mode === 'shell' ? 'Run SH' : 'Run';
     }
   },
 
@@ -1262,6 +1265,63 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /**
+   * Launch a Pi (pi.dev) session.
+   *
+   * Deliberately sends NO piConfig: pi has no permission prompts, so there is no
+   * bypass to opt into, and project trust is pi's own `defaultProjectTrust`
+   * decision (an interactive prompt the user answers in the terminal). Sending
+   * `approveProjectTrust: true` here would silently opt every browser-launched pi
+   * session into executing repo-supplied TypeScript.
+   */
+  async runPi() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // Remote/docker cases run pi on the OTHER side — skip the local status probe and the
+    // local-only config/env below (quick-start rejects them for remote cases).
+    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
+
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Pi session in ${caseName}...`);
+    this.terminal.focus();
+
+    try {
+      if (!isRemote) {
+        const statusRes = await fetch('/api/pi/status');
+        const status = (await statusRes.json()).data;
+        if (!status.available) {
+          this._reportSessionLaunchError(
+            ownsLaunchTerminal,
+            'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+          );
+          return;
+        }
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'pi',
+          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(isRemote || Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start Pi');
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
+    }
+  },
+
   // ═══════════════════════════════════════════════════════════════
   // Session Options Modal
   // ═══════════════════════════════════════════════════════════════
@@ -1274,7 +1334,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Reset to an appropriate tab — Summary for external CLIs (Respawn/Ralph are Claude-only)
     const isAltMode =
-      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity';
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity' || session.mode === 'pi';
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -1305,7 +1365,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Hide Claude-specific options for external CLI sessions
     const isExternalCli =
-      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity';
+      session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity' || session.mode === 'pi';
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isExternalCli ? 'none' : ''; });
 
@@ -1436,9 +1496,54 @@ Object.assign(CodemanApp.prototype, {
     this.activeFocusTrap.activate();
   },
 
+  /**
+   * Write a name the server has just confirmed into the local session map.
+   *
+   * Both rename surfaces re-render the tab strip from `this.sessions` right
+   * after their PUT, so without this they depended on the `session:updated` SSE
+   * frame to carry their own write back. On a page whose SSE stream has gone
+   * quiet without erroring (a proxy that idle-closed it, a laptop resumed from
+   * sleep) that frame never lands: the PUT stores the new name, the re-render
+   * repaints the stale one, and the rename looks like it did nothing until a
+   * full page reload. The response body is authoritative, so apply it directly.
+   * The SSE frame, when it does arrive, replaces the object with the same name.
+   */
+  _applyLocalSessionName(sessionId, name) {
+    if (typeof name !== 'string') return;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.name = name;
+    this.sessions.set(sessionId, session);
+    // Mirrors _onSessionUpdated: subagent windows cache their parent's name.
+    this.updateSubagentParentNames?.(sessionId);
+  },
+
+  /**
+   * PUT a session name and return the name the server stored, or null if the
+   * request failed. `_apiPut` swallows network errors into a null Response and
+   * an API-level failure arrives as a non-ok status or `{success:false}`, so a
+   * rename that silently did nothing has to be detected here, not thrown.
+   */
+  async _putSessionName(sessionId, name) {
+    const res = await this._apiPut(`/api/sessions/${sessionId}/name`, { name });
+    if (!res || !res.ok) return null;
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch {
+      return null;
+    }
+    if (payload && payload.success === false) return null;
+    const confirmed = payload?.data?.name;
+    return typeof confirmed === 'string' ? confirmed : name;
+  },
+
   async saveSessionName() {
     if (!this.editingSessionId) return;
-    const session = this.sessions.get(this.editingSessionId);
+    // Captured: the modal can be closed (or switched to another session) while
+    // the PUT is in flight, and the name belongs to the session that was open.
+    const sessionId = this.editingSessionId;
+    const session = this.sessions.get(sessionId);
     const parsed = session ? parseSessionPrefix(session.name) : null;
     const inputVal = document.getElementById('modalSessionName').value.trim();
     let name;
@@ -1447,11 +1552,13 @@ Object.assign(CodemanApp.prototype, {
     } else {
       name = inputVal;
     }
-    try {
-      await this._apiPut(`/api/sessions/${this.editingSessionId}/name`, { name });
-    } catch (err) {
-      this.showToast('Failed to save session name: ' + err.message, 'error');
+    const confirmed = await this._putSessionName(sessionId, name);
+    if (confirmed === null) {
+      this.showToast('Failed to save session name', 'error');
+      return;
     }
+    this._applyLocalSessionName(sessionId, confirmed);
+    this.renderSessionTabs();
   },
 
   async autoSaveAutoCompact() {
@@ -1793,15 +1900,14 @@ Object.assign(CodemanApp.prototype, {
       // Skip the API call if the session vanished between focus and blur.
       const stillExists = this.sessions.has(sessionId);
       if (stillExists && fullName !== session.name) {
-        try {
-          await fetch(`/api/sessions/${sessionId}/name`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: fullName })
-          });
-        } catch (err) {
+        const confirmed = await this._putSessionName(sessionId, fullName);
+        if (confirmed === null) {
           tabName.textContent = originalContent;
           this.showToast('Failed to rename', 'error');
+        } else {
+          // The re-render below repaints from this.sessions, so the new name has
+          // to be in the map before it runs (see _applyLocalSessionName()).
+          this._applyLocalSessionName(sessionId, confirmed);
         }
       }
       // Re-render tabs to restore full tab structure
@@ -3879,7 +3985,7 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     // Keep in sync with SessionMode (src/types/session.ts). A mode missing from
     // this allowlist silently downgrades to 'claude' — that's how 'shell' used to
     // reset on every reload via the server-sync path (this.runMode = serverValue).
-    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity'];
+    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'];
     this._runMode = VALID_RUN_MODES.includes(mode) ? mode : 'claude';
   },
 });

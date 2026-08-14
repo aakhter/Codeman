@@ -260,6 +260,99 @@ function computeTabScrollLeft(input) {
   return Math.min(Math.max(Math.round(target), 0), maxScroll);
 }
 
+// Session lineage lines — geometry for the arc drawn between a tab and a tab it
+// spawned (a worker started through the codeman agent skill, which passes its own
+// id as parentSessionId). Pure: the caller measures and appends, this decides.
+//
+// ONE shape, because both endpoints live in the same horizontal strip and the subagent
+// shape (tab-bottom → window-top) has nothing to aim at: a U-bridge HANGING BELOW the
+// strip, from the parent's bottom edge to the child's bottom edge, so it reads as a
+// bracket joining two tabs rather than as a line crossing them. The dip grows with
+// horizontal distance and with `depth` (the child's index among its siblings), so
+// several children of one parent nest instead of overprinting.
+//
+// ⚠ A WRAPPED STRIP USED TO GET ITS OWN SHAPE, AND THAT SHAPE WAS THE BUG. When the
+// desktop strip wraps (`tabs-two-rows` / `tabs-auto-wrap`) a parent on row 1 and its
+// child on row 2 are ~4px apart vertically, so the old parent-bottom → child-TOP bezier
+// had a 4px span to work with and drew a flat horizontal line inside the row gap
+// (reported as "they connect already, but the lines are straight and not easy visible"),
+// and three siblings drew three of them on top of each other. Aiming BOTH ends at the
+// tab BOTTOMS and putting the control points below the LOWER row gives the wrapped case
+// the same bracket as the flat case: it leaves the parent downward, crosses the lower
+// row once, and comes back up under the child. Same formula, no branch.
+//
+// Returns null when the edge must not be drawn: a missing/degenerate rect, or an
+// endpoint scrolled outside the strip. `.session-tabs` is `overflow-x: auto`, so a
+// scrolled-out tab still HAS a rect — one lying over the logo or the header
+// buttons. Skipping is honest; clamping would point at a tab that isn't there.
+// ⚠ THE DIP IS WHAT MAKES THE ARC AN ARC, and the first shipped numbers were tuned
+// against two tabs sitting side by side. A worker the agent skill starts is appended
+// to the END of the strip, so the real span between a lead and its worker is 800-1500px,
+// not 200, and a 44px cap over 1300px of span is a 33px sag, i.e. a line that reads as
+// STRAIGHT and crosses the terminal instead of bracketing under the strip. The dip now
+// keeps growing with the span (0.085/px, ~3x steeper against the old cap) so the bracket
+// survives the distance the feature is actually used at. The ceiling is what keeps a
+// full-width pair out of the terminal's fourth line: 104 + the sibling step lands the
+// deepest sag around y=140 on a 1080 screen, the same proportion two adjacent tabs get.
+const LINEAGE_DIP_BASE_PX = 14;
+const LINEAGE_DIP_PER_PX = 0.085;
+const LINEAGE_DIP_MIN_PX = 22;
+const LINEAGE_DIP_MAX_PX = 104;
+// Siblings nest by this much. Widened with the stroke: at 2.5px plus its glow, arcs 6px
+// apart bled into one thick band instead of reading as three separate lines.
+const LINEAGE_SIBLING_STEP_PX = 8;
+const LINEAGE_STRIP_TOLERANCE_PX = 4;
+
+function computeLineagePath(input) {
+  const parent = input?.parent;
+  const child = input?.child;
+  if (!parent || !child) return null;
+
+  const pw = Number(parent.width) || 0;
+  const ph = Number(parent.height) || 0;
+  const cw = Number(child.width) || 0;
+  const ch = Number(child.height) || 0;
+  if (pw <= 0 || ph <= 0 || cw <= 0 || ch <= 0) return null;
+
+  const px = Number(parent.left) + pw / 2;
+  const cx = Number(child.left) + cw / 2;
+  if (!Number.isFinite(px) || !Number.isFinite(cx)) return null;
+
+  const strip = input?.strip;
+  if (strip && Number(strip.width) > 0) {
+    const min = Number(strip.left) - LINEAGE_STRIP_TOLERANCE_PX;
+    const max = Number(strip.left) + Number(strip.width) + LINEAGE_STRIP_TOLERANCE_PX;
+    if (px < min || px > max || cx < min || cx > max) return null;
+  }
+
+  const depth = Math.max(0, Math.min(6, Number(input?.depth) || 0));
+  const pTop = Number(parent.top);
+  const pBottom = pTop + ph;
+  const cTop = Number(child.top);
+  const cBottom = cTop + ch;
+  const sameRow = Math.abs(pTop + ph / 2 - (cTop + ch / 2)) <= Math.min(ph, ch) / 2;
+
+  // Both ends anchor on the tab BOTTOM, and the control points hang below whichever
+  // row is lower, so one formula covers a flat strip and a wrapped one.
+  const span = Math.abs(cx - px);
+  const rowDrop = Math.abs(cBottom - pBottom);
+  // ⚠ A wrapped pair needs the dip measured from the LOWER row, or the bracket would
+  // only reach the row gap again. Adding the row offset also keeps the curve clear of
+  // the row it crosses instead of grazing its bottom edge.
+  const dip =
+    Math.min(LINEAGE_DIP_MAX_PX, Math.max(LINEAGE_DIP_MIN_PX, LINEAGE_DIP_BASE_PX + span * LINEAGE_DIP_PER_PX)) +
+    depth * LINEAGE_SIBLING_STEP_PX +
+    rowDrop;
+  const yc = Math.max(pBottom, cBottom) + dip;
+  const d = `M ${r1(px)} ${r1(pBottom)} C ${r1(px)} ${r1(yc)}, ${r1(cx)} ${r1(yc)}, ${r1(cx)} ${r1(cBottom)}`;
+  return { d, endX: cx, endY: cBottom, sameRow };
+}
+
+// One decimal is plenty for a screen-space path and keeps the `d` string short.
+function r1(n) {
+  return Math.round(n * 10) / 10;
+}
+
 // COD-134 — Terminal WebSocket reconnect policy.
 //
 // Decide what to do after a terminal WebSocket closes, given the close `code`
@@ -359,6 +452,41 @@ function computeConnectionLossUi(input) {
   };
 }
 
+// SSE staleness policy: is this stream a zombie?
+//
+// An EventSource that stops delivering does not always error. A proxy that
+// idle-closed the connection, a laptop resumed from sleep, a tailnet
+// reconnect: `onerror` never fires, the header dot stays green, and every
+// SSE-driven surface (tab status dots, sessions created on another device,
+// renames) freezes until the user reloads. The server writes a
+// `sse:heartbeat` frame every 15s, so silence longer than three of them means
+// the stream is dead even though the transport still claims otherwise.
+//
+// Stale ONLY when the transport believes it is 'connected': the other states
+// already have the reconnect/backoff machinery running, and re-firing on top
+// of them would stack reconnects. That guard is also the loop breaker: a
+// forced reconnect leaves 'connected' immediately, so the watchdog cannot
+// fire again while one is in flight. `navigator.onLine === false` is not
+// staleness either; there is nothing to reconnect to yet.
+//
+// Pure: no DOM, no timers, no side effects. `now` is passed in.
+const SSE_STALE_TIMEOUT_MS = 45000; // three missed 15s heartbeats
+
+function computeSseStale(input) {
+  const {
+    lastMessageAt = null,
+    now = 0,
+    status = 'connected',
+    isOnline = true,
+    timeoutMs = SSE_STALE_TIMEOUT_MS,
+  } = input || {};
+  if (!isOnline || status !== 'connected') return false;
+  // No frame has ever arrived: `init` lands on connect, so this is a stream
+  // that has not opened yet rather than one that went quiet.
+  if (typeof lastMessageAt !== 'number' || !(lastMessageAt > 0)) return false;
+  return now - lastMessageAt >= timeoutMs;
+}
+
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -376,9 +504,19 @@ if (typeof window !== 'undefined') {
   window.CodemanWsReconnect = {
     plan: planWsReconnect,
   };
+  window.CodemanLineage = {
+    computePath: computeLineagePath,
+    DIP_MIN_PX: LINEAGE_DIP_MIN_PX,
+    DIP_MAX_PX: LINEAGE_DIP_MAX_PX,
+    SIBLING_STEP_PX: LINEAGE_SIBLING_STEP_PX,
+  };
   window.CodemanConnectionLoss = {
     compute: computeConnectionLossUi,
     GRACE_MS: CONNECTION_LOSS_GRACE_MS,
+  };
+  window.CodemanSseStale = {
+    compute: computeSseStale,
+    TIMEOUT_MS: SSE_STALE_TIMEOUT_MS,
   };
 }
 
@@ -492,6 +630,9 @@ const BUILTIN_RESPAWN_PRESETS = [
 const SSE_EVENTS = {
   // Core
   INIT: 'init',
+
+  // Transport
+  HEARTBEAT: 'sse:heartbeat',
 
   // Session lifecycle
   SESSION_CREATED: 'session:created',
@@ -725,4 +866,91 @@ const _htmlEscapePattern = /[&<>"']/g;
 function escapeHtml(text) {
   if (typeof text !== 'string') return '';
   return text.replace(_htmlEscapePattern, (ch) => _htmlEscapeMap[ch]);
+}
+
+/**
+ * Human-readable byte size for the partial-history banner (#258).
+ *
+ * Deliberately coarse: the banner is telling the user roughly how much of a
+ * transcript they are looking at, not accounting for bytes. Sub-KB amounts read
+ * as "less than 1 KB" rather than an exact count nobody can act on.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatHistoryBytes(bytes) {
+  const n = typeof bytes === 'number' && isFinite(bytes) && bytes > 0 ? bytes : 0;
+  if (n < 1024) return 'less than 1 KB';
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Decide what the partial-history banner should say (#258).
+ *
+ * PURE so the three states can be tested without a DOM. They exist because one
+ * `truncated` boolean could not distinguish messages the user acts on very
+ * differently:
+ *   - recoverable: we tailed for speed and the rest is still retained
+ *   - atCeiling:   the FULL capture itself hit the byte ceiling
+ *   - exhausted:   a full pull was refused as a downgrade, so this is all there is
+ *
+ * @param {{truncated?: boolean, reason?: string|null, source?: string|null,
+ *          fullSize?: number, retainedBytes?: number, exhausted?: boolean}} state
+ * @returns {{visible: boolean, message: string, canLoadMore: boolean}}
+ */
+function computeHistoryTruncationNotice(state = {}) {
+  if (!state.truncated) return { visible: false, message: '', canLoadMore: false };
+
+  const retained = Math.max(0, state.retainedBytes || 0);
+  const dropped = Math.max(0, (state.fullSize || 0) - retained);
+  const shown = formatHistoryBytes(retained);
+  // A full-history capture that was STILL capped is already everything tmux
+  // holds, so the remainder is out of reach rather than one request away.
+  const atCeiling = state.source === 'mux-full-history' && state.reason === 'capped';
+
+  if (state.exhausted) {
+    return {
+      visible: true,
+      message: `Showing all ${shown} of retained history. Earlier output is no longer kept for this session.`,
+      canLoadMore: false,
+    };
+  }
+  if (atCeiling) {
+    return {
+      visible: true,
+      message: `Showing the most recent ${shown}. Earlier output exceeds the retained history limit and cannot be recovered.`,
+      canLoadMore: false,
+    };
+  }
+  return {
+    visible: true,
+    message: `Showing the most recent ${shown} of this session. ${formatHistoryBytes(dropped)} more may still be retained.`,
+    canLoadMore: true,
+  };
+}
+
+/**
+ * Where to land after a rewrite that REPLACES the whole buffer (#259).
+ *
+ * The backpressure refresh clears the terminal and reloads it from a freshly
+ * fetched capture, so an absolute viewportY captured beforehand means nothing
+ * afterwards: the line it pointed at may not even exist. Distance from the
+ * BOTTOM is the anchor that survives a rewrite, so a reader stays roughly
+ * where they were reading.
+ *
+ * Returns null when the user was following live output, which the caller reads
+ * as "scroll to bottom" — the historical behavior, kept for that case.
+ *
+ * @param {{linesFromBottom?: number, baseY?: number}} input
+ * @returns {number|null}
+ */
+function computeRewriteScrollLine(input) {
+  const linesFromBottom = input?.linesFromBottom || 0;
+  if (!(linesFromBottom > 0)) return null;
+  return Math.max(0, (input?.baseY || 0) - linesFromBottom);
+}
+
+if (typeof window !== 'undefined') {
+  window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
 }

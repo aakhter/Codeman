@@ -36,6 +36,7 @@ export { resolveOpenCodeDir } from './opencode-cli-resolver.js';
 export { resolveCodexDir, isCodexAvailable } from './codex-cli-resolver.js';
 export { resolveGeminiDir, isGeminiAvailable } from './gemini-cli-resolver.js';
 export { resolveAntigravityDir, isAntigravityAvailable } from './antigravity-cli-resolver.js';
+export { resolvePiDir, isPiAvailable, getPiCliVersion } from './pi-cli-resolver.js';
 export {
   detectEnvironment,
   extractVersion,

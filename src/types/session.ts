@@ -8,13 +8,14 @@
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
  * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
- * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' (which CLI backend)
+ * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
  * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, resumeSessionId)
  * - GeminiConfig — Gemini CLI-specific settings (model, approvalMode, resumeSession)
  * - AntigravityConfig — Antigravity CLI (agy) settings (model, dangerouslySkipPermissions, resumeConversationId)
+ * - PiConfig — Pi CLI (pi.dev) settings (model, provider, thinking, resume/continue, project trust)
  *
  * Cross-domain relationships:
  * - SessionState.respawnConfig embeds RespawnConfig (respawn domain)
@@ -49,7 +50,7 @@ export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error' | 'parked';
 export type ClaudeMode = 'dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools';
 
 /** Session mode: which CLI backend a session runs */
-export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity';
+export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi';
 export type SessionCheckpointMode = 'compact' | 'clear' | 'new';
 
 export interface SessionCheckpointState {
@@ -76,7 +77,7 @@ export interface SessionCheckpointState {
 
 export type RemoteCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi'
 >;
 
 /**
@@ -187,7 +188,7 @@ export interface RemoteSessionInfo {
 /** Which CLI backends a Docker case can run (same set as remote). */
 export type DockerCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi'
 >;
 
 /** Container engine. Docker and Podman differ in the uid/userns + host-gateway alias. */
@@ -364,6 +365,37 @@ export interface AntigravityConfig {
 }
 
 /**
+ * Pi CLI (pi.dev) session configuration.
+ *
+ * Pi has NO permission prompts and no `--dangerously-skip-permissions` analog,
+ * so there is deliberately no bypass field here. The one privilege-shaped knob is
+ * `approveProjectTrust`, which controls whether pi loads and EXECUTES repo-local
+ * `.pi/` extensions (and installs missing project packages).
+ */
+export interface PiConfig {
+  /** Model pattern or ID. Supports `provider/id` and a `:<thinking>` suffix (e.g. `sonnet:high`). Passed via --model. */
+  model?: string;
+  /** Provider name (anthropic, openai, google, ...). Passed via --provider. */
+  provider?: string;
+  /** Reasoning level. Passed via --thinking. */
+  thinking?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Continue the most recent session (-c). Skipped when resumeSessionId is set (the two conflict). */
+  continueSession?: boolean;
+  /** Resume a specific session by ID or partial UUID (--session). Ids only, never paths. */
+  resumeSessionId?: string;
+  /**
+   * Tri-state project trust (repo-local `.pi/` settings/extensions/skills, plus
+   * installing missing project packages):
+   *   true   -> --approve    (trust for this run; loads and EXECUTES repository TypeScript)
+   *   false  -> --no-approve (force-deny; the trust prompt never appears)
+   *   absent -> pi's own defaultProjectTrust (ask).
+   * Multi-user: MATERIALIZED to false for non-granted owners, because pi's
+   * absent-config default is a prompt the session user could answer themselves.
+   */
+  approveProjectTrust?: boolean;
+}
+
+/**
  * Configuration for creating a new session
  */
 export interface SessionConfig {
@@ -442,6 +474,16 @@ export interface SessionState {
   docker?: SessionDocker;
   /** Owning username in multi-user mode; undefined in single-user (ignored when the flag is off) */
   owner?: string;
+  /**
+   * The Codeman session that spawned this one, supplied by the caller at create time
+   * (`parentSessionId` body field or the `X-Codeman-Parent-Session` header) and resolved
+   * against live sessions before being stored.
+   *
+   * ⚠️ UI DECORATION ONLY — it draws the lineage lines between tabs. It is never an
+   * ownership, permission, or lifecycle signal: a child outlives its parent, and an
+   * unresolvable value is dropped rather than failing the spawn.
+   */
+  parentSessionId?: string;
   /** ID of currently assigned task, null if none */
   currentTaskId: string | null;
   /** Timestamp when session was created */
@@ -539,6 +581,8 @@ export interface SessionState {
   geminiConfig?: GeminiConfig;
   /** Antigravity-specific configuration (only for mode === 'antigravity') */
   antigravityConfig?: AntigravityConfig;
+  /** Pi-specific configuration (only for mode === 'pi') */
+  piConfig?: PiConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
   /**

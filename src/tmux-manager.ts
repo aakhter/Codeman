@@ -52,6 +52,7 @@ import {
   type GeminiConfig,
   type EffortLevel,
   type AntigravityConfig,
+  type PiConfig,
   type SessionRemote,
   type SessionDocker,
   type DockerCommandMode,
@@ -79,6 +80,7 @@ import {
   resolveCodexDir,
   resolveGeminiDir,
   resolveAntigravityDir,
+  resolvePiDir,
   resolveLocalShell,
   loginShellArgs,
 } from './utils/index.js';
@@ -911,6 +913,63 @@ export function buildAntigravityCommand(config?: AntigravityConfig): string {
   return parts.join(' ');
 }
 
+/** Pi's `--thinking` levels. Runtime allowlist — defense in depth beyond the Zod enum. */
+const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * Build the Pi CLI (pi.dev) command with appropriate flags.
+ *
+ * Pi has NO permission prompts and no `--dangerously-skip-permissions` analog, so
+ * there is deliberately nothing bypass-shaped here. The privileged knob is the
+ * TRI-STATE `approveProjectTrust`: `true` -> `--approve` (trust repo-local `.pi/`
+ * config, which means loading and EXECUTING repository TypeScript and installing
+ * missing project packages), `false` -> `--no-approve` (force-deny, used by the
+ * multi-user clamp so the trust prompt never appears), absent -> pi's own
+ * `defaultProjectTrust`.
+ *
+ * `--api-key` is deliberately NEVER wired: it would put a provider secret on the
+ * spawn command line (visible in `ps` and tmux state), which is exactly what the
+ * socket-scoped `tmux setenv` discipline exists to prevent.
+ *
+ * Like the sibling builders, every user value is regex-allowlisted and silently
+ * DROPPED on failure — the result is interpolated into a `bash -c "..."` string.
+ */
+function buildPiCommand(config?: PiConfig): string {
+  const parts = ['pi'];
+
+  if (config?.approveProjectTrust === true) {
+    parts.push('--approve');
+  } else if (config?.approveProjectTrust === false) {
+    parts.push('--no-approve');
+  }
+
+  if (config?.model) {
+    // `:` for a thinking suffix (`sonnet:high`), `/` for `provider/id` (`openai/gpt-4o`).
+    const safeModel = /^[a-zA-Z0-9._\-/:]+$/.test(config.model) ? config.model : undefined;
+    if (safeModel) parts.push('--model', safeModel);
+  }
+
+  if (config?.provider) {
+    const safeProvider = /^[a-z0-9-]+$/.test(config.provider) ? config.provider : undefined;
+    if (safeProvider) parts.push('--provider', safeProvider);
+  }
+
+  if (config?.thinking && PI_THINKING_LEVELS.has(config.thinking)) {
+    parts.push('--thinking', config.thinking);
+  }
+
+  // --session and -c conflict; a valid explicit session id wins.
+  const safeSessionId =
+    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
+  if (safeSessionId) {
+    parts.push('--session', safeSessionId);
+  } else if (config?.continueSession) {
+    parts.push('-c');
+  }
+
+  return parts.join(' ');
+}
+
 /**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
@@ -953,6 +1012,7 @@ export function buildSpawnCommand(options: {
   codexConfig?: CodexConfig;
   geminiConfig?: GeminiConfig;
   antigravityConfig?: AntigravityConfig;
+  piConfig?: PiConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
   /** Codeman session name, passed to claude as `--name` (version-gated, sanitized; local spawns only). */
@@ -998,6 +1058,9 @@ export function buildSpawnCommand(options: {
   }
   if (options.mode === 'antigravity') {
     return buildAntigravityCommand(options.antigravityConfig);
+  }
+  if (options.mode === 'pi') {
+    return buildPiCommand(options.piConfig);
   }
   // #208: NOT the literal '$SHELL'. This string is embedded in the `bash -c "…"`
   // argument of the respawn-pane line, which execSync runs through `/bin/sh -c`,
@@ -1377,6 +1440,8 @@ function appendResumeFlag(modeCommand: string, mode: SessionMode, resumeId: stri
       return `${modeCommand} resume ${resumeId}`;
     case 'antigravity':
       return `${modeCommand} --conversation ${resumeId}`;
+    case 'pi':
+      return `${modeCommand} --session ${resumeId}`;
     default:
       return modeCommand; // shell / opencode: no resume
   }
@@ -1917,7 +1982,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
     // background/color palette negotiation matches xterm's 24-bit renderer.
     const colorTermExport =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || truecolorEnabled
+      mode === 'opencode' ||
+      mode === 'codex' ||
+      mode === 'gemini' ||
+      mode === 'antigravity' ||
+      mode === 'pi' ||
+      truecolorEnabled
         ? 'export COLORTERM=truecolor'
         : 'unset COLORTERM';
     const exports = [
@@ -1926,7 +1996,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // Settings-driven (see colorTermExport above); upstream hardcodes this
       // per-mode, we honor the user's truecolor toggle instead.
       colorTermExport,
-      ...(mode === 'codex' || mode === 'gemini' || mode === 'antigravity' ? ['unset NO_COLOR'] : []),
+      ...(mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || mode === 'pi' ? ['unset NO_COLOR'] : []),
       // Stamp each Codex pane with a unique originator so the response-viewer
       // can locate THIS pane's rollout exactly — codex writes the value into
       // session_meta.originator of every rollout it creates. Without it,
@@ -2016,6 +2086,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const dir = resolveAntigravityDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
+    if (mode === 'pi') {
+      const dir = resolvePiDir();
+      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+    }
     return { pathExport: '', dir: null };
   }
 
@@ -2064,6 +2138,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       codexConfig,
       geminiConfig,
       antigravityConfig,
+      piConfig,
       resumeSessionId,
       envOverrides,
       effort,
@@ -2123,6 +2198,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
       );
     }
+    if (mode === 'pi' && !cliDir) {
+      throw new Error(
+        'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+      );
+    }
 
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
     // live desired state (toggle + proxy health) right before spawn so a down proxy
@@ -2150,6 +2230,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       codexConfig,
       geminiConfig,
       antigravityConfig,
+      piConfig,
       resumeSessionId,
       effort,
       sessionName: name,
@@ -2399,6 +2480,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       codexConfig,
       geminiConfig,
       antigravityConfig,
+      piConfig,
       resumeSessionId,
       envOverrides,
       effort,
@@ -2451,6 +2533,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       codexConfig,
       geminiConfig,
       antigravityConfig,
+      piConfig,
       resumeSessionId,
       effort,
       sessionName: name,

@@ -323,6 +323,11 @@
       <div class="tab-rail" id="tabRail"></div>
 
       <div class="terminal-wrap">
+        <!-- Partial-history notice (#258). Lives OUTSIDE the terminal on purpose:
+             the old notice was a grey line written into the scrollback, so it
+             scrolled away with the output it described and could not be acted
+             on. Populated by app.js _renderHistoryTruncationBanner(). -->
+        <div class="history-trunc-bar" id="historyTruncationBar" role="status" aria-live="polite" hidden></div>
         <div class="terminal-container" id="terminalContainer"></div>
         <!-- COD-187: frozen history view indicator for live-mirror tabs -->
         <div id="historyPill" class="history-pill" hidden onclick="app._exitHistoryView?.()"></div>
@@ -370,6 +375,10 @@
             <button class="welcome-btn welcome-btn-gemini" id="welcomeGeminiBtn" style="display: none;" onclick="app.setRunMode('gemini'); app.runGemini()">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               Run Gemini
+            </button>
+            <button class="welcome-btn welcome-btn-pi" id="welcomePiBtn" style="display: none;" onclick="app.setRunMode('pi'); app.runPi()">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Run Pi
             </button>
           </div>
           <div class="welcome-qr" id="welcomeQr" onclick="app.toggleWelcomeQrSize()">
@@ -559,6 +568,9 @@
               </button>
               <button class="run-mode-option" data-mode="antigravity" onclick="app.setRunMode('antigravity')">
                 <span class="run-mode-dot antigravity"></span>Antigravity
+              </button>
+              <button class="run-mode-option" data-mode="pi" onclick="app.setRunMode('pi')">
+                <span class="run-mode-dot pi"></span>Pi
               </button>
               <div class="run-mode-sep"></div>
               <button class="run-mode-option" data-mode="shell" onclick="app.setRunMode('shell')">
@@ -851,6 +863,7 @@
                 <option value="codex">Codex</option>
                 <option value="gemini">Gemini</option>
                 <option value="antigravity">Antigravity</option>
+                <option value="pi">Pi</option>
               </select>
             </div>
             <div class="form-row"><label>Working Directory</label><input type="text" id="schWorkingDir" placeholder="/absolute/path"></div>
@@ -1909,6 +1922,13 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsShowTabDetachButton"><span class="slider"></span></label>
                   </div>
+                  <div class="set-row" id="appSettingsLineageLinesItem" data-search="lineage lines spawned worker parent connection">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Spawn Lineage Lines <span class="set-tag">desktop</span></span>
+                      <span class="set-row-desc">Draw a line under the tab strip from a session to the sessions it spawned.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsLineageLines" checked><span class="slider"></span></label>
+                  </div>
                   <div class="set-row" id="appSettingsMobileOverviewItem" data-search="overview home screen phone logo">
                     <div class="set-row-text">
                       <span class="set-row-label">Overview Home Screen <span class="set-tag">phone</span></span>
@@ -2718,6 +2738,7 @@
                 <option value="gemini" data-cli="gemini">Gemini</option>
                 <option value="opencode" data-cli="opencode">OpenCode</option>
                 <option value="antigravity" data-cli="antigravity">Antigravity</option>
+                <option value="pi" data-cli="pi">Pi</option>
                 <option value="shell">Shell (no agent)</option>
               </select>
               <span class="form-hint">Which CLI to point the Run button at once the clone finishes. Changeable any time from the Run dropdown.</span>
@@ -2841,7 +2862,7 @@
             <div class="form-row">
               <label>Image</label>
               <input type="text" id="dockerImage" placeholder="codeman/agent:base" autocomplete="off" autocapitalize="off" spellcheck="false">
-              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini/opencode/agy + tmux.</span>
+              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini/opencode/agy/pi + tmux.</span>
             </div>
             <div class="form-row">
               <label>Network</label>
@@ -3556,6 +3577,7 @@
   <script defer src="api-client.js"></script>
   <script defer src="subagent-windows.js"></script>
   <script defer src="ultracode-windows.js"></script>
+  <script defer src="session-lineage.js"></script>
   <script defer src="image-input.js"></script>
   <script defer src="document-input.js"></script>
 </body>

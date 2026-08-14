@@ -359,6 +359,12 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Phone overview home screen: only meaningful under 430px, so the row is
     // hidden elsewhere rather than offering a toggle that changes nothing.
+    // Spawn lineage lines: desktop-only (the overlay sits UNDER the fixed mobile
+    // header), so the row is hidden elsewhere rather than offering a toggle that
+    // changes nothing. Default ON — only an explicit false turns it off.
+    document.getElementById('appSettingsLineageLines').checked = settings.sessionLineageLines ?? defaults.sessionLineageLines ?? true;
+    const lineageItem = document.getElementById('appSettingsLineageLinesItem');
+    if (lineageItem) lineageItem.style.display = MobileDetection.getDeviceType() === 'desktop' ? '' : 'none';
     document.getElementById('appSettingsMobileOverview').checked = settings.mobileOverviewEnabled ?? defaults.mobileOverviewEnabled ?? false;
     const mobileOverviewItem = document.getElementById('appSettingsMobileOverviewItem');
     if (mobileOverviewItem) mobileOverviewItem.style.display = MobileDetection.getDeviceType() === 'mobile' ? '' : 'none';
@@ -1275,6 +1281,7 @@ Object.assign(CodemanApp.prototype, {
       ['welcomeOpencodeBtn', 'opencode'],
       ['welcomeAntigravityBtn', 'antigravity'],
       ['welcomeGeminiBtn', 'gemini'],
+      ['welcomePiBtn', 'pi'],
       // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
       // without cloudflared can only ever produce "cloudflared not found".
       ['welcomeTunnelBtn', 'cloudflared'],
@@ -2154,6 +2161,7 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
+      sessionLineageLines: document.getElementById('appSettingsLineageLines').checked,
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
       showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
       showCronButton: document.getElementById('appSettingsShowCronButton').checked,
@@ -2334,6 +2342,7 @@ Object.assign(CodemanApp.prototype, {
     this.applyLocalization();
     this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
     this.applyTabWrapSettings();
+    this.applyLineageLineSettings?.();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
     this.renderApprovals?.();  // Approvals Inbox toggle (hide/show bell + drawer)
@@ -2382,6 +2391,10 @@ Object.assign(CodemanApp.prototype, {
       showTabDetachButton: _tdb,
       // Phone-only home surface, and absent from SettingsUpdateSchema (.strict()).
       mobileOverviewEnabled: _mov,
+      // Desktop-only tab decoration, per-device, and likewise absent from the
+      // .strict() schema — syncing it would push a desktop-shaped choice onto
+      // devices that cannot render it at all.
+      sessionLineageLines: _sll,
       ...serverSettings
     } = settings;
     try {
@@ -3253,6 +3266,7 @@ Object.assign(CodemanApp.prototype, {
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',
+          'sessionLineageLines',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. It

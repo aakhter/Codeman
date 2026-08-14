@@ -22,6 +22,7 @@ import {
   type CodexConfig,
   type GeminiConfig,
   type AntigravityConfig,
+  type PiConfig,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -70,6 +71,7 @@ import {
   persistAndBroadcastSession,
   readJsonConfig,
   resolveCasesDir,
+  resolveParentSessionId,
   sessionCapacityMessage,
   SETTINGS_PATH,
   validatePathWithinBase,
@@ -374,6 +376,15 @@ export function _resetPasteRateBuckets(): void {
  * Antigravity is like Codex: an ABSENT config already defaults safe (no bypass flag), so
  * only a sent config needs the flag forced off. No-op in single-user mode / for a granted
  * owner (canUsernameRunPrivilegedCommands returns true when !isMultiUserMode()).
+ *
+ * Pi has no permission prompts at all, so there is no bypass switch to clamp; its
+ * privilege-shaped knob is `approveProjectTrust`, which makes pi LOAD AND EXECUTE
+ * repo-local `.pi/extensions` TypeScript and npm-install missing project packages.
+ * Pi joins the gemini-style MATERIALIZE branch, not the codex/antigravity
+ * only-if-sent one: pi's absent-config default is an interactive trust prompt the
+ * session user could simply answer "yes" to in the terminal, so merely omitting
+ * `--approve` is not a clamp. Forcing `approveProjectTrust: false` makes
+ * buildPiCommand emit `--no-approve`, and the prompt never appears.
  */
 /**
  * COD-124 unit 2, Gap A — computes which live automations are armed against
@@ -431,23 +442,35 @@ async function clampExternalCliBypassForOwner(
   owner: string | undefined,
   codexConfig: CodexConfig | undefined,
   geminiConfig: GeminiConfig | undefined,
-  antigravityConfig: AntigravityConfig | undefined
+  antigravityConfig: AntigravityConfig | undefined,
+  piConfig: PiConfig | undefined
 ): Promise<{
   codexConfig: CodexConfig | undefined;
   geminiConfig: GeminiConfig | undefined;
   antigravityConfig: AntigravityConfig | undefined;
+  piConfig: PiConfig | undefined;
 }> {
   const granted = await canUsernameRunPrivilegedCommands(owner);
-  if (granted) return { codexConfig, geminiConfig, antigravityConfig };
+  if (granted) return { codexConfig, geminiConfig, antigravityConfig, piConfig };
   // Non-granted: force codex/antigravity bypass off (only meaningful when a config was
-  // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default).
+  // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default)
+  // and pi to --no-approve (clamps an explicit true AND pi's own "ask" default).
   const clampedCodex = codexConfig ? { ...codexConfig, dangerouslyBypassApprovals: false } : codexConfig;
   const clampedGemini: GeminiConfig = { ...(geminiConfig ?? {}), approvalMode: 'auto_edit' };
   const clampedAntigravity = antigravityConfig
     ? { ...antigravityConfig, dangerouslySkipPermissions: false }
     : antigravityConfig;
-  return { codexConfig: clampedCodex, geminiConfig: clampedGemini, antigravityConfig: clampedAntigravity };
+  const clampedPi: PiConfig = { ...(piConfig ?? {}), approveProjectTrust: false };
+  return {
+    codexConfig: clampedCodex,
+    geminiConfig: clampedGemini,
+    antigravityConfig: clampedAntigravity,
+    piConfig: clampedPi,
+  };
 }
+
+/** Test hook: the clamp is the multi-user safety gate for the external CLIs' privileged flags. */
+export const _clampExternalCliBypassForOwner = clampExternalCliBypassForOwner;
 
 // ═══════════════════════════════════════════════════════════════
 // Agent wait helpers (shared by GET /wait, GET /wait-output, POST /input)
@@ -847,6 +870,7 @@ export function registerSessionRoutes(
       body.mode !== 'codex' &&
       body.mode !== 'gemini' &&
       body.mode !== 'antigravity' &&
+      body.mode !== 'pi' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       (workingDir.startsWith(CASES_DIR + '/') || workingDir.startsWith(managedCasesBase + '/'));
@@ -932,6 +956,15 @@ export function registerSessionRoutes(
         );
       }
     }
+    if (body.mode === 'pi') {
+      const { isPiAvailable } = await import('../../utils/pi-cli-resolver.js');
+      if (!isPiAvailable()) {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+        );
+      }
+    }
 
     // Check Antigravity availability if requested
     if (body.mode === 'antigravity') {
@@ -982,9 +1015,11 @@ export function registerSessionRoutes(
             ? body.geminiConfig?.model
             : mode === 'antigravity'
               ? body.antigravityConfig?.model
-              : mode !== 'shell'
-                ? modelConfig?.defaultModel || undefined
-                : undefined;
+              : mode === 'pi'
+                ? body.piConfig?.model
+                : mode !== 'shell'
+                  ? modelConfig?.defaultModel || undefined
+                  : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     // Section 6.3: force non-granted users to a classifier-guarded mode.
     const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, owner);
@@ -993,7 +1028,14 @@ export function registerSessionRoutes(
       codexConfig: gatedCodexConfig,
       geminiConfig: gatedGeminiConfig,
       antigravityConfig: gatedAntigravityConfig,
-    } = await clampExternalCliBypassForOwner(owner, body.codexConfig, body.geminiConfig, body.antigravityConfig);
+      piConfig: gatedPiConfig,
+    } = await clampExternalCliBypassForOwner(
+      owner,
+      body.codexConfig,
+      body.geminiConfig,
+      body.antigravityConfig,
+      body.piConfig
+    );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
     const checkpointEnabled = await ctx.getCheckpointDefaultEnabled();
@@ -1011,6 +1053,7 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? gatedCodexConfig : undefined,
       geminiConfig: mode === 'gemini' ? gatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? gatedAntigravityConfig : undefined,
+      piConfig: mode === 'pi' ? gatedPiConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
       effort: body.effort,
@@ -1025,6 +1068,7 @@ export function registerSessionRoutes(
       },
       initialDims: body.cols && body.rows ? { cols: body.cols, rows: body.rows } : undefined,
       owner,
+      parentSessionId: resolveParentSessionId(ctx, req, body.parentSessionId, owner),
     });
 
     ctx.addSession(session);
@@ -1235,12 +1279,16 @@ export function registerSessionRoutes(
 
     try {
       // Auto-detect completion phrase from CLAUDE.md BEFORE starting (only if globally enabled and not explicitly disabled by user)
-      // Ralph tracker is not supported for opencode / codex / gemini / antigravity sessions
+      // Ralph tracker is not supported for opencode / codex / gemini / antigravity / pi sessions.
+      // Keep this list in step with isExternalCliMode(): _processExpensiveParsers() returns early
+      // for those modes, so a tracker enabled here would never be fed, and the session would
+      // still report ralphEnabled + Ralph UI state that no other external CLI shows.
       if (
         session.mode !== 'opencode' &&
         session.mode !== 'codex' &&
         session.mode !== 'gemini' &&
         session.mode !== 'antigravity' &&
+        session.mode !== 'pi' &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -2611,6 +2659,14 @@ export function registerSessionRoutes(
         : session.terminalBuffer;
     const fullSize = rawBuffer.length;
     let truncated = false;
+    // WHY the reason and not just the boolean (#258): `truncated` is set at two
+    // sites that mean opposite things to a user. 'tail' is an intentional
+    // partial replay and the rest is still retained, so a `full=1` pull recovers
+    // it. 'capped' means we hit the byte ceiling — and on a full-history capture
+    // that is already everything tmux holds, so the oldest output is genuinely
+    // out of reach rather than one click away. Collapsing both into one flag is
+    // why the UI could only ever say "truncated for performance".
+    let truncationReason: 'capped' | 'tail' | null = null;
     let cleanBuffer: string;
 
     // Cap the payload EARLY — before the regex normalization passes below run
@@ -2621,6 +2677,7 @@ export function registerSessionRoutes(
     if (terminalBufferMaxBytes > 0 && rawBuffer.length > terminalBufferMaxBytes) {
       rawBuffer = rawBuffer.slice(-terminalBufferMaxBytes);
       truncated = true;
+      truncationReason = 'capped';
       const capNewline = rawBuffer.indexOf('\n');
       if (capNewline > 0 && capNewline < 4096) {
         rawBuffer = rawBuffer.slice(capNewline + 1);
@@ -2654,6 +2711,9 @@ export function registerSessionRoutes(
       // Banner is near the top and gets discarded by tail anyway.
       cleanBuffer = strippedBuffer.slice(-tailBytes);
       truncated = true;
+      // 'capped' already means the oldest bytes are gone for good; a tail cut on
+      // top of it does not soften that, so the stronger reason wins.
+      truncationReason ??= 'tail';
       // Avoid starting mid-ANSI-escape: find first newline within the first 4KB
       // and start from there. This prevents xterm.js from parsing a partial escape
       // sequence which corrupts cursor position for all subsequent Ink redraws.
@@ -2693,6 +2753,10 @@ export function registerSessionRoutes(
       status: session.status,
       fullSize,
       truncated,
+      truncationReason,
+      // `retainedBytes` is what this response actually carries; `fullSize` is
+      // what existed before the cut. The gap is what the indicator reports.
+      retainedBytes: cleanBuffer.length,
       source,
       historyPartial,
     };
@@ -2973,8 +3037,10 @@ export function registerSessionRoutes(
       codexConfig,
       geminiConfig,
       antigravityConfig,
+      piConfig,
       envOverrides,
       effort,
+      parentSessionId,
     } = parseBody(QuickStartSchema, req.body);
 
     // Multi-user: shell mode is arbitrary host-account execution, gated by the grant.
@@ -3011,7 +3077,7 @@ export function registerSessionRoutes(
       // Per-session config that is applied to the LOCAL tmux/CLI wrapper does not
       // cross ssh. Reject rather than pretend it worked; remote customization goes
       // through the host command override. COD-282: allow the matching per-CLI config
-      // for the requested mode (opencode/codex/gemini/antigravity) so the builder can
+      // for the requested mode (opencode/codex/gemini/antigravity/pi) so the builder can
       // embed --model / --session flags into the remote login-shell command; other
       // modes' configs and generic claude knobs still require the host override.
       if (
@@ -3021,6 +3087,7 @@ export function registerSessionRoutes(
         (codexConfig && mode !== 'codex') ||
         (geminiConfig && mode !== 'gemini') ||
         (antigravityConfig && mode !== 'antigravity') ||
+        (piConfig && mode !== 'pi') ||
         (openCodeConfig && mode !== 'opencode')
       ) {
         return createErrorResponse(
@@ -3049,6 +3116,7 @@ export function registerSessionRoutes(
         codexConfig ||
         geminiConfig ||
         antigravityConfig ||
+        piConfig ||
         openCodeConfig
       ) {
         return createErrorResponse(
@@ -3153,6 +3221,17 @@ export function registerSessionRoutes(
         }
       }
 
+      // Check Pi availability if requested
+      if (mode === 'pi') {
+        const { isPiAvailable } = await import('../../utils/pi-cli-resolver.js');
+        if (!isPiAvailable()) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+          );
+        }
+      }
+
       // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
       let linkedCases: Record<string, string> = {};
       try {
@@ -3198,7 +3277,7 @@ export function registerSessionRoutes(
 
         // Write .claude/settings.local.json with hooks for desktop notifications
         // (Claude-specific — OpenCode, Codex, Gemini, and Antigravity use their own systems)
-        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini' && mode !== 'antigravity') {
+        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini' && mode !== 'antigravity' && mode !== 'pi') {
           await writeHooksConfig(resolvedCasePath);
         }
 
@@ -3233,7 +3312,8 @@ export function registerSessionRoutes(
       mode !== 'opencode' &&
       mode !== 'codex' &&
       mode !== 'gemini' &&
-      mode !== 'antigravity'
+      mode !== 'antigravity' &&
+      mode !== 'pi'
     ) {
       try {
         if (!existsSync(join(resolvedCasePath, 'CLAUDE.md'))) {
@@ -3264,6 +3344,7 @@ export function registerSessionRoutes(
       mode !== 'codex' &&
       mode !== 'gemini' &&
       mode !== 'antigravity' &&
+      mode !== 'pi' &&
       !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
@@ -3284,9 +3365,11 @@ export function registerSessionRoutes(
             ? geminiConfig?.model
             : mode === 'antigravity'
               ? antigravityConfig?.model
-              : mode !== 'shell'
-                ? qsModelConfig?.defaultModel || undefined
-                : undefined;
+              : mode === 'pi'
+                ? piConfig?.model
+                : mode !== 'shell'
+                  ? qsModelConfig?.defaultModel || undefined
+                  : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const qsEffectiveClaudeMode = await resolveClaudeModeForUsername(qsClaudeModeConfig.claudeMode, owner);
     // Section 6.3: clamp Codex/Gemini/Antigravity bypass switches for a non-granted owner (no-op single-user/granted).
@@ -3294,7 +3377,8 @@ export function registerSessionRoutes(
       codexConfig: qsGatedCodexConfig,
       geminiConfig: qsGatedGeminiConfig,
       antigravityConfig: qsGatedAntigravityConfig,
-    } = await clampExternalCliBypassForOwner(owner, codexConfig, geminiConfig, antigravityConfig);
+      piConfig: qsGatedPiConfig,
+    } = await clampExternalCliBypassForOwner(owner, codexConfig, geminiConfig, antigravityConfig, piConfig);
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
     const qsCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
@@ -3318,6 +3402,7 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? qsGatedCodexConfig : undefined,
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
+      piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
       envOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
@@ -3331,6 +3416,7 @@ export function registerSessionRoutes(
         maxBytes: qsTerminalHistoryConfig.terminalBufferMaxBytes,
         trimBytes: qsTerminalHistoryConfig.terminalBufferTrimBytes,
       },
+      parentSessionId: resolveParentSessionId(ctx, req, parentSessionId, owner),
     });
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting

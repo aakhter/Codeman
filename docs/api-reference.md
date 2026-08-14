@@ -112,7 +112,7 @@ a genuine tunnel failure looks like, and `204` cannot carry `waitedMs` / `status
 
 **2. `stop` and `blocked` fire only for `claude` sessions.** Both come from Claude
 Code hooks, and no other mode installs them: `shell` runs no agent, and the external
-CLIs (`opencode`, `codex`, `gemini`, `antigravity`) render their own TUIs and post
+CLIs (`opencode`, `codex`, `gemini`, `antigravity`, `pi`) render their own TUIs and post
 no hooks. For every non-`claude` mode only `idle`, `working` and `exit` are
 accepted, and of those only `exit` is dependable: see the caveats under
 [Signals](#signals) before building on `idle`. Requesting `stop` or `blocked`
@@ -407,6 +407,31 @@ count against the same 16, not 16 of each. An abandoned request no longer holds 
 slot, because the routes release the waiter when the client disconnects, but a
 client that opens many concurrent waits against one session will still hit the cap.
 
+## Session lineage (`parentSessionId`)
+
+A create request may name the session that spawned it, which the web UI draws as a
+line between the two tabs. Accepted on `POST /api/v1/sessions` and
+`POST /api/v1/quick-start`, either way:
+
+```bash
+# as a body field
+-d '{"caseName":"worker-1","mode":"claude","parentSessionId":"'"$CODEMAN_SESSION_ID"'"}'
+
+# or as a header, which is what an agent driving many spawns should use: set it once
+# on the curl invocation and every spawn call carries it
+-H "X-Codeman-Parent-Session: $CODEMAN_SESSION_ID"
+```
+
+The body field wins if both are present. The value is resolved against live sessions
+(exact id, or a unique prefix of at least 8 characters) and must belong to the same
+owner as the session being created.
+
+**It cannot fail your spawn.** An unknown, stale, foreign or malformed value is
+silently dropped and the session is created without lineage — never a `400`. It is
+also pure decoration: it confers no permission, and a child is unaffected by its
+parent exiting. It appears on session state as `parentSessionId` (absent when
+unresolved) and survives a server restart.
+
 ## Approvals Inbox
 
 Cross-session queue of prompts waiting on a human (permission dialogs,
@@ -521,6 +546,29 @@ For compatibility, each request first emits the legacy payload
 `{ sessionId, mode, phase: "start" }`. This legacy event intentionally precedes
 `requested` and omits `updatedAt`; consumers that need confirmed progress should
 use the lifecycle phases above.
+
+### `sse:heartbeat` (liveness)
+
+Every 15s the server writes a `sse:heartbeat` frame to every connected client:
+
+```
+event: sse:heartbeat
+data: {"t":1755100000000}
+```
+
+`t` is the server's epoch-ms timestamp at write time. The frame carries no
+application state and can be ignored for correctness. It exists so a client can
+tell a live stream from a dead one: an `EventSource` whose connection has been
+idle-closed by a proxy (or that resumed from sleep on a stale socket) keeps
+delivering nothing without ever firing `onerror`. Clients that care should treat
+silence longer than about three intervals as a dead stream and reconnect, which
+is what the bundled frontend does.
+
+This replaced a `:keepalive` SSE **comment**, which served the same
+proxy-flushing purpose but is invisible to `EventSource` by spec and so could
+never be observed by a client. Consumers written against the old behavior are
+unaffected: `EventSource` dispatches only events that have a registered
+listener, so an unknown event name is dropped.
 
 ## Consuming from JavaScript
 

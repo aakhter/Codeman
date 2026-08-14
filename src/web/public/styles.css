@@ -330,7 +330,8 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   .search-badge-session,
   .history-view-all-btn,
   .session-tab .tab-mode.gemini,
-  .session-tab .tab-mode.antigravity
+  .session-tab .tab-mode.antigravity,
+  .session-tab .tab-mode.pi
 ) {
   color: var(--accent-d);
 }
@@ -2270,6 +2271,11 @@ body.solo-mode .btn-lifecycle-log {
   color: #22d3ee;
 }
 
+.session-tab .tab-mode.pi {
+  background: rgba(244, 114, 182, 0.2);
+  color: #f472b6;
+}
+
 /* Timer Banner - Compact */
 .timer-banner {
   display: flex;
@@ -3300,6 +3306,83 @@ body.solo-mode .btn-lifecycle-log {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Anchor for the partial-history banner, which overlays rather than stacks. */
+  position: relative;
+}
+
+/* Partial-history banner (#258).
+   OVERLAY, not a flex child, on purpose: FitAddon derives rows/cols from the
+   terminal parent's computed height, so a banner that occupied real layout
+   space would SIGWINCH the CLI every time truncation state changed and make
+   Ink repaint the world. Floating it costs a few covered rows at the top,
+   which the dismiss button releases. */
+.history-trunc-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 6; /* under the local-echo overlay (7), over terminal content */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 22%);
+}
+
+/* `.history-trunc-bar` sets display:flex, which outranks the hidden attribute's
+   UA display:none — without this the banner can never be hidden. */
+.history-trunc-bar[hidden] {
+  display: none;
+}
+
+.history-trunc-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-trunc-load {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.history-trunc-load:hover:not(:disabled) {
+  background: var(--border-light);
+}
+
+.history-trunc-load:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.history-trunc-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.history-trunc-dismiss:hover {
+  color: var(--text);
+  background: var(--bg-hover);
 }
 
 .terminal-container {
@@ -3503,6 +3586,23 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   box-shadow: 0 4px 20px rgba(34, 211, 238, 0.3), 0 0 40px rgba(8, 145, 178, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   border-color: rgba(103, 232, 249, 0.5);
   color: #ecfeff;
+  transform: translateY(-1px);
+}
+
+/* Pi (pi.dev): rose identity, matching .btn-toolbar.btn-run.mode-pi and
+   .run-mode-dot.pi so the welcome action reads as the same backend. */
+.welcome-btn-pi {
+  background: linear-gradient(135deg, #33121f 0%, #9d174d 55%, #be185d 100%);
+  border-color: rgba(244, 114, 182, 0.4);
+  color: #fce7f3;
+  box-shadow: 0 2px 8px rgba(244, 114, 182, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.welcome-btn-pi:hover {
+  background: linear-gradient(135deg, #4a1a2c 0%, #be185d 55%, #db2777 100%);
+  box-shadow: 0 4px 20px rgba(244, 114, 182, 0.3), 0 0 40px rgba(190, 24, 93, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(249, 168, 212, 0.5);
+  color: #fff1f7;
   transform: translateY(-1px);
 }
 
@@ -4615,6 +4715,26 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: #ecfeff;
 }
 
+/* Pi mode colors. NOTE: this base-sheet pair only renders on the `og` skin — the
+   nested `html:not([data-skin="og"])` block further down re-declares
+   `.btn-toolbar.btn-run` at a HIGHER specificity, which is why gemini's and
+   antigravity's gradients are dead on the default skin. Pi therefore also carries
+   a rule inside that block (search `.btn-toolbar.btn-run.mode-pi`). */
+.btn-toolbar.btn-run.mode-pi,
+.btn-toolbar.btn-run-gear.mode-pi {
+  background: linear-gradient(135deg, #33121f 0%, #9d174d 55%, #be185d 100%);
+  border-color: rgba(244, 114, 182, 0.5);
+  color: #fce7f3;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.btn-toolbar.btn-run.mode-pi:hover,
+.btn-toolbar.btn-run-gear.mode-pi:hover {
+  background: linear-gradient(135deg, #4a1a2c 0%, #be185d 55%, #db2777 100%);
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.35), 0 2px 8px rgba(190, 24, 93, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(249, 168, 212, 0.6);
+  color: #fff1f7;
+}
+
 /* Dropdown menu */
 .run-mode-menu {
   display: none;
@@ -4697,6 +4817,7 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 .run-mode-dot.codex { background: #a855f7; }
 .run-mode-dot.gemini { background: #8ab4f8; }
 .run-mode-dot.antigravity { background: #22d3ee; }
+.run-mode-dot.pi { background: #f472b6; }
 .run-mode-dot.shell { background: #94a3b8; }
 
 /* Phone-only Enter button (see index.html). Hidden by default at every width;
@@ -10386,6 +10507,94 @@ kbd {
   50% { opacity: 1; }
 }
 
+/* ===== Session lineage lines (tab → tab it spawned, session-lineage.js) =====
+   Deliberately quieter and thinner than the subagent lines above so the two
+   layers read as different things in the same SVG.
+
+   Colour comes from --session-blue, which EVERY skin block already defines and
+   already tunes for its own background, so one rule covers all seven (the four
+   light skins included). Do not add a per-skin `.lineage-line` override inside the
+   html:not([data-skin="og"]) block: a bare class rule in there resolves to (0,2,1)
+   and would outrank this one from a surprising place.
+
+   ⚠ BLUE, NOT THE VIOLET THIS SHIPPED WITH (owner call, 2026-08-14: "make these
+   lines in blue that they are better visible"). Violet sits close to the terminal's
+   own dim foreground and lost contrast the moment it crossed text. Hue therefore no
+   longer separates this layer from the subagent lines, so the separation rests
+   entirely on SHAPE (this one hangs under the strip and never reaches a window),
+   weight and dash: keep those differences intact. Per skin the two are not even the
+   same blue, since --session-blue is tuned per palette while the subagent rule
+   hardcodes #3b82f6. */
+/* ⚠ QUIETER THAN THE SUBAGENT LINES, NOT INVISIBLE. The first cut ran 2px at 0.55
+   with a single 5px glow, which reads on a design mock and disappears on a real
+   1080p desktop: a faint thread over terminal text, exactly what it is drawn on
+   top of. The weight stays UNDER the subagent lines' 3px so the two layers still
+   separate, and the second, wider glow is what buys the contrast instead: it lifts
+   the line off the terminal without thickening it. Dashes scale with the stroke
+   (4 4 on a 2.5px line reads as a dotted smudge), and `lineage-flow` marches by
+   exactly two dash cycles, so it has to move with them. */
+.connection-line.lineage-line {
+  stroke: var(--session-blue, #2b8fd9);
+  stroke-width: 2.5;
+  stroke-dasharray: 5 5;
+  stroke-linecap: round;
+  opacity: 0.72;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--session-blue, #2b8fd9))
+    drop-shadow(0 0 11px var(--session-blue, #2b8fd9));
+}
+
+/* ⚠ OUTSIDE the reduced-motion block below on purpose. A working child is the case
+   the line exists to signal, and pairing the brightness with the marching dashes
+   left every worker's arc at the resting 0.72 for anyone who turns motion off. */
+.connection-line.lineage-line--working {
+  opacity: 0.95;
+}
+
+.connection-line.lineage-line:hover {
+  opacity: 1;
+  stroke-width: 3;
+}
+
+.lineage-line-dot {
+  fill: var(--session-blue, #2b8fd9);
+  opacity: 0.85;
+  filter: drop-shadow(0 0 4px var(--session-blue, #2b8fd9)) drop-shadow(0 0 9px var(--session-blue, #2b8fd9));
+}
+
+/* The child end marches while that worker is actually working, so the line
+   itself carries the signal. Motion is opt-out-able at the OS level. */
+@media (prefers-reduced-motion: no-preference) {
+  .connection-line.lineage-line--working {
+    animation: lineage-flow 1.1s linear infinite;
+  }
+
+  .lineage-line-dot--working {
+    opacity: 1;
+    animation: lineage-dot-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+/* Two full dash cycles, so the march loops seamlessly. Tied to `stroke-dasharray`
+   above: at `5 5` the cycle is 10px, so this is -20 rather than the -16 that
+   matched the old `4 4`. Leaving them out of step makes the dashes jump once per
+   iteration. */
+@keyframes lineage-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@keyframes lineage-dot-pulse {
+  0%, 100% {
+    opacity: 0.75;
+    r: 3.5;
+  }
+  50% {
+    opacity: 1;
+    r: 4.5;
+  }
+}
+
 /* ========== Project Insights Panel (Bash File Viewers) ========== */
 
 .project-insights-panel {
@@ -15836,6 +16045,17 @@ html:not([data-skin="og"]) {
   color: #061c20;
 }
 .btn-toolbar.btn-run.mode-codex:hover { box-shadow: 0 0 14px -2px rgba(43, 203, 187, 0.45); }
+/* Pi keeps its rose identity on the non-og skins. This rule has to live INSIDE
+   this nested block: the generic `.btn-toolbar.btn-run` above resolves to (0,3,1)
+   here and would otherwise beat the base sheet's (0,3,0) `.mode-pi` pair, which
+   is exactly why gemini's and antigravity's gradients render as generic claude
+   blue on the default skin. */
+.btn-toolbar.btn-run.mode-pi {
+  background: linear-gradient(135deg, #be185d, #f472b6);
+  border-color: #be185d;
+  color: #fff1f7;
+}
+.btn-toolbar.btn-run.mode-pi:hover { box-shadow: 0 0 14px -2px rgba(244, 114, 182, 0.45); }
 .btn-toolbar.btn-run-gear {
   background: var(--accent-d);
   border-color: var(--accent);
@@ -17072,11 +17292,14 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   flex-shrink: 0;
 }
 
+/* DOM order stays close-then-save so the focus trap lands on Close;
+   row-reverse paints Save to the left of it. Below 860px, where Save joins the
+   header, the two become ONE control cluster inside a tray (mobile.css). */
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions {
   display: flex;
   flex-direction: row-reverse;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   margin-left: auto;
 }
 
@@ -17084,16 +17307,65 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
    instead; on desktop the footer owns Save, so this stays hidden. */
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-save {
   display: none;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
   font: inherit;
   font-size: 0.82rem;
   font-weight: 620;
   letter-spacing: -0.01em;
-  padding: 8px 15px;
+  padding: 0 14px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 9px;
   cursor: pointer;
   background: linear-gradient(180deg, var(--accent-grad-a), var(--accent-grad-b));
   color: var(--accent-ink);
+  transition:
+    filter 0.15s ease,
+    transform 0.1s ease;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-save:hover {
+  filter: brightness(1.08);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-save:active {
+  transform: scale(0.97);
+}
+
+/* `.modal-close` ships as a bare 1.5rem glyph with no box — fine in a plain
+   modal header, but inside the tray it needs the same footprint as Save. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions .modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 9px;
+  font-size: 1.2rem;
+  color: var(--text-dim);
+  background: transparent;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.1s ease;
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions .modal-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions .modal-close:active {
+  transform: scale(0.94);
+}
+
+/* The shared rule offsets the ring OUTWARD, which inside the tray draws it on
+   top of the tray border. Inset it so the focused button is ringed, not the
+   cluster. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions .modal-close:focus-visible {
+  outline-offset: -2px;
 }
 
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-body {
