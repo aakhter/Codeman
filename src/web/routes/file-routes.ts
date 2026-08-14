@@ -1444,7 +1444,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // remote workspace must be live so its saved connection configuration is
     // available, and findSessionOrFail preserves ownership checks.
     if (remote) findSessionOrFail(ctx, id, req);
-    const workingDir = getSessionAttachmentHistory(ctx, id, req)?.workingDir ?? findSessionOrFail(ctx, id).workingDir;
+    const workingDir =
+      getSessionAttachmentHistory(ctx, id, req)?.workingDir ?? findSessionOrFail(ctx, id, req).workingDir;
 
     if (!filePath) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
@@ -1974,7 +1975,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
     }
 
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!req.isMultipart()) {
       reply.code(400);
@@ -2259,7 +2260,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const { id } = req.params as { id: string };
     const rawPath = (req.query as { path?: string }).path;
 
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!rawPath || typeof rawPath !== 'string') {
       reply.code(400);
