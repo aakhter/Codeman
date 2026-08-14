@@ -72,17 +72,27 @@ describe('document upload error reporting', () => {
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
-  it('normalizes the displayed reason to one line and caps it at 160 characters', async () => {
+  it('normalizes and caps the entire final toast while retaining batch and first-failure context', async () => {
     const app = makeApp(loadMixin());
-    app._uploadDocument = vi.fn().mockRejectedValue(new Error(`bad\n\t${'x'.repeat(200)}`));
+    const files = [
+      { name: `bad\n${'f'.repeat(180)}.pdf` },
+      ...Array.from({ length: 10 }, (_, index) => ({ name: `ok-${index}.pdf` })),
+    ];
+    app._uploadDocument = vi.fn(async (_sessionId, file) => {
+      if (file.name.startsWith('bad')) throw new Error(`reason\r\n${'x'.repeat(200)}`);
+      return `.codeman-attachments/${file.name}`;
+    });
 
-    await app._uploadAndInsertDocuments([{ name: 'report.pdf' }]);
+    await app._uploadAndInsertDocuments(files);
 
     const finalMessage = app.showToast.mock.calls.at(-1)?.[0] as string;
-    const displayedReason = finalMessage.split(' — ')[1];
-    expect(displayedReason).toHaveLength(160);
-    expect(displayedReason).not.toMatch(/[\r\n]/);
-    expect(finalMessage).toMatch(/^1 failed: report\.pdf — bad x+$/);
+    expect(finalMessage.length).toBeLessThanOrEqual(160);
+    expect(finalMessage).not.toMatch(/[\r\n]/);
+    expect(finalMessage).toContain('9 documents ready');
+    expect(finalMessage).toContain('1 failed');
+    expect(finalMessage).toContain('max 10 per batch');
+    expect(finalMessage).toContain('bad f');
+    expect(finalMessage).toContain('reason');
   });
 
   it('uses a generic HTTP status for a non-JSON failure response', async () => {
@@ -94,5 +104,32 @@ describe('document upload error reporting', () => {
     const app = makeApp(loadMixin({ fetch }));
 
     await expect(app._uploadDocument('session-1', { name: 'report.pdf' })).rejects.toThrow('HTTP 502');
+  });
+
+  it('uses a generic upload failure for a non-JSON success response', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(new SyntaxError('unexpected response fragment')),
+    });
+    const app = makeApp(loadMixin({ fetch }));
+
+    await expect(app._uploadDocument('session-1', { name: 'report.pdf' })).rejects.toThrow('Upload failed');
+  });
+
+  it.each([
+    { success: true },
+    { success: true, data: {} },
+    { success: true, data: { agentPath: '' } },
+    { success: true, data: { agentPath: 42 } },
+  ])('rejects a malformed successful response envelope: %j', async (body) => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue(body),
+    });
+    const app = makeApp(loadMixin({ fetch }));
+
+    await expect(app._uploadDocument('session-1', { name: 'report.pdf' })).rejects.toThrow('Upload failed');
   });
 });

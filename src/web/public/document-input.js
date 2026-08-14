@@ -99,7 +99,7 @@ Object.assign(CodemanApp.prototype, {
           console.warn('Document upload failed:', err);
           results[i] = {
             ok: false,
-            fileName: this._normalizeDocumentUploadText(files[i]?.name, 'document'),
+            fileName: this._normalizeDocumentUploadText(files[i]?.name, 'document', 60),
             reason: this._normalizeDocumentUploadText(err?.message, 'Upload failed'),
           };
         } finally {
@@ -124,17 +124,19 @@ Object.assign(CodemanApp.prototype, {
     const firstFailure = failures[0];
     const parts = [];
     if (paths.length > 0) parts.push(`${paths.length} document${paths.length > 1 ? 's' : ''} ready`);
-    if (firstFailure) parts.push(`${failures.length} failed: ${firstFailure.fileName} — ${firstFailure.reason}`);
+    if (firstFailure) parts.push(`${failures.length} failed`);
     if (capped) parts.push(`max ${this._maxBatchDocuments} per batch`);
+    let finalMessage = parts.join(' · ') || 'No documents uploaded';
+    if (firstFailure) finalMessage += `: ${firstFailure.fileName} — ${firstFailure.reason}`;
     const tone = paths.length > 0 ? (failures.length > 0 || capped ? 'info' : 'success') : 'error';
-    this.showToast(parts.join(' · ') || 'No documents uploaded', tone);
+    this.showToast(this._normalizeDocumentUploadText(finalMessage, 'No documents uploaded'), tone);
   },
 
   // Server errors are untrusted display text. Keep the useful reason while
   // preventing multiline/oversized responses from taking over the toast.
-  _normalizeDocumentUploadText(value, fallback) {
+  _normalizeDocumentUploadText(value, fallback, maxLength = 160) {
     const normalized = (typeof value === 'string' ? value : fallback).replace(/\s+/g, ' ').trim();
-    return (normalized || fallback).slice(0, 160);
+    return (normalized || fallback).slice(0, maxLength);
   },
 
   async _uploadDocument(sessionId, file) {
@@ -149,16 +151,16 @@ Object.assign(CodemanApp.prototype, {
       body: form,
     });
 
+    const data = await resp.json().catch(() => null);
     if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      throw new Error(typeof data.error === 'string' && data.error ? data.error : 'HTTP ' + resp.status);
+      throw new Error(typeof data?.error === 'string' && data.error ? data.error : 'HTTP ' + resp.status);
     }
 
-    const data = await resp.json();
-    if (!data.success) {
-      throw new Error(typeof data.error === 'string' && data.error ? data.error : 'Upload failed');
+    const agentPath = data?.success === true ? data.data?.agentPath : null;
+    if (typeof agentPath !== 'string' || agentPath.trim().length === 0) {
+      throw new Error('Upload failed');
     }
-    return data.data.agentPath;
+    return agentPath;
   },
 
   // Remove a Codeman-uploaded attachment copy (COD-241 unit 3). Only ever called
