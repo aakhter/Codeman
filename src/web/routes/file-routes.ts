@@ -2497,7 +2497,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       const maxSizeBytes =
         record.extension === 'xlsx' && preview === 'true' && download !== 'true'
           ? MAX_XLSX_BROWSER_PREVIEW_BYTES
-          : 50 * 1024 * 1024;
+          : record.trustedUploadBoundary
+            ? MAX_PASTE_IMAGE_BYTES
+            : 50 * 1024 * 1024;
       await serveRawFile(
         reply,
         servePath,
