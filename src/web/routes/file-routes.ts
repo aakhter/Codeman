@@ -2939,7 +2939,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/tail-file', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath, lines } = req.query as { path?: string; lines?: string };
-    const session = findSessionOrFail(ctx, id);
+    // Ownership-aware lookup BEFORE any filesystem work or stream allocation (COD-294).
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!filePath) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
@@ -3002,7 +3003,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // malformed error envelope instead of wrapping it).
   app.delete('/api/sessions/:id/tail-file/:streamId', async (req) => {
     const { id, streamId } = req.params as { id: string; streamId: string };
-    findSessionOrFail(ctx, id); // Validates session exists
+    findSessionOrFail(ctx, id, req); // Validates the session exists AND is the caller's (COD-294)
     const closed = fileStreamManager.closeStream(streamId);
     return { closed };
   });
@@ -3024,7 +3025,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return;
     }
 
-    const session = findSessionOrFail(ctx, sessionId);
+    // Ownership-aware lookup BEFORE the path is resolved or the file is opened (COD-294).
+    const session = findSessionOrFail(ctx, sessionId, req);
     const validated = validateSessionFilePath(session.workingDir, filePath);
     if (!validated) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
