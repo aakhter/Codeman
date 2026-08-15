@@ -46,6 +46,7 @@ import {
   buildFileThumbnailRoute,
   getAttachmentType,
   isSupportedAttachmentExtension,
+  maxServableAttachmentBytes,
   resolveGeneratedArtifactReadPath,
   registerExternalAttachment,
   type AttachmentRecord,
@@ -2492,14 +2493,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     try {
       // XLSX preview parsing is intentionally browser-local, but the preview
-      // response is capped before a stream is opened. Explicit downloads retain
-      // the existing attachment-route limit.
+      // response is capped before a stream is opened. Explicit downloads fall
+      // back to the cap that admitted the bytes in the first place (COD-297) —
+      // a hardcoded number here silently 413s a legitimately uploaded file
+      // whenever the upload knob is raised above it.
       const maxSizeBytes =
         record.extension === 'xlsx' && preview === 'true' && download !== 'true'
           ? MAX_XLSX_BROWSER_PREVIEW_BYTES
-          : record.trustedUploadBoundary
-            ? MAX_PASTE_IMAGE_BYTES
-            : 50 * 1024 * 1024;
+          : maxServableAttachmentBytes(record);
       await serveRawFile(
         reply,
         servePath,

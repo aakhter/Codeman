@@ -31,6 +31,14 @@ const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
 
 export const MAX_GENERATED_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Cap for an ordinary external reference — a path the user (or a magic link)
+ * pointed at, whose bytes Codeman never admitted through an upload. Deliberately
+ * fixed: raising the upload knob must not widen what an arbitrary registry id
+ * can stream out of the host.
+ */
+export const MAX_EXTERNAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+
 export type AttachmentSource = 'detected' | 'external' | 'upload';
 
 export interface AttachmentRecord {
@@ -277,6 +285,25 @@ export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord)
     return resolveBoundaryReadPath(record, record.trustedUploadBoundary, MAX_PASTE_IMAGE_BYTES);
   }
   return undefined;
+}
+
+/**
+ * Serving cap for a registered attachment, keyed to the policy that ADMITTED
+ * its bytes (COD-297).
+ *
+ * An upload — workspace or through an approved symlink — is admitted by the
+ * multipart per-file cap, which is `MAX_PASTE_IMAGE_BYTES`. Serving it under a
+ * different (previously hardcoded 50MiB) number meant that raising the upload
+ * knob produced files that upload and register successfully and then 413 on
+ * every read. The two caps have to be the same knob.
+ *
+ * Generated artifacts and ordinary external references keep their own fixed
+ * caps, so the upload knob widens nothing but uploads.
+ */
+export function maxServableAttachmentBytes(record: AttachmentRecord): number {
+  if (record.generatedArtifactBoundary) return MAX_GENERATED_ARTIFACT_BYTES;
+  if (record.source === 'upload' || record.trustedUploadBoundary) return MAX_PASTE_IMAGE_BYTES;
+  return MAX_EXTERNAL_ATTACHMENT_BYTES;
 }
 
 export async function registerExternalAttachment(
