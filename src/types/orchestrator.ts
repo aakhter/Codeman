@@ -239,6 +239,12 @@ export interface OrchestratorPersistState {
   config: OrchestratorConfig;
   /** Execution statistics */
   stats: OrchestratorStats;
+  /**
+   * Implementation-review checkpoints (COD-265), carried here rather than in a
+   * new store so they reload with the rest of the orchestrator on restart.
+   * Optional: state written before this field existed reloads as undefined.
+   */
+  reviewCheckpoints?: import('../orchestrator-review-checkpoint.js').ReviewCheckpoint[];
 }
 
 /** Orchestrator execution statistics */

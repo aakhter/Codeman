@@ -295,8 +295,12 @@ export class StateStore {
     if (this.state.sessionOrder) {
       parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
     }
-    if (this.state.sessionOrder) {
-      parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
+    // ⚠️ This function is a hand-written ALLOWLIST, not a serializer over the
+    // whole state: a key absent here is silently dropped on every save, however
+    // correctly it was set in memory. `orchestrator` was missing, so orchestrator
+    // state never survived a restart (COD-265). Add new AppState keys here too.
+    if (this.state.orchestrator) {
+      parts.push(`"orchestrator":${JSON.stringify(this.state.orchestrator)}`);
     }
 
     return `{${parts.join(',')}}`;
