@@ -88,6 +88,7 @@ import {
 import { parseByteRange } from '../http-range.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import {
+  ensureLocalUploadDirectory,
   isBlockedAttachmentPath,
   loadAttachmentGuardConfig,
   resolveLocalUploadDirectory,
@@ -822,7 +823,11 @@ async function buildExternalAttachmentRouteItem(
     let forceWorkspaceConfinement = false;
     if (item.uploadProvenance === 'codeman-upload') {
       if (!sessionWorkingDir) throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      // COD-296: resolve-only — listing history must never create the upload
+      // directory. An absent directory means the uploaded copy is gone too, so
+      // this fails closed to `missing: true` via the catch below.
       const uploadDirectory = await resolveLocalUploadDirectory(sessionWorkingDir, authUser);
+      if (!uploadDirectory) throw new AttachmentRegistrationError('Access to this file is blocked', 403);
       const canonicalFile = realpathSync(item.externalPath);
       if (dirname(canonicalFile) !== uploadDirectory.canonicalDir || pathBasename(canonicalFile) !== item.fileName) {
         throw new AttachmentRegistrationError('Access to this file is blocked', 403);
@@ -2180,7 +2185,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // the file open keep both dir-leaf creation and the write symlink-safe.
     let uploadDirectory;
     try {
-      uploadDirectory = await resolveLocalUploadDirectory(session.workingDir, getAuthUser(req));
+      // COD-296: the upload path is the ONLY one allowed to create the directory.
+      uploadDirectory = await ensureLocalUploadDirectory(session.workingDir, getAuthUser(req));
     } catch (err) {
       if (err instanceof UploadDirectoryResolutionError) {
         reply.code(err.statusCode);
@@ -2293,6 +2299,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     let uploadDirectory;
     try {
+      // COD-296: resolve-only — a delete must not create the directory it is
+      // about to look inside.
       uploadDirectory = await resolveLocalUploadDirectory(session.workingDir, getAuthUser(req));
     } catch (err) {
       if (err instanceof UploadDirectoryResolutionError) {
@@ -2304,7 +2312,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Upload directory is unavailable');
     }
 
-    if (uploadDirectory.kind === 'trusted') {
+    // COD-296: `null` (no .codeman-attachments/ at all) deliberately falls
+    // through to the workspace branch below rather than short-circuiting. An
+    // absent directory means "no upload can live here", NOT "the target does not
+    // exist" — the workspace branch already tells those apart correctly with the
+    // directory missing: an unresolvable path 404s, and a real workspace file
+    // outside the attachments dir still 403s. Short-circuiting to 404 here
+    // silently downgraded that 403.
+    if (uploadDirectory?.kind === 'trusted') {
       const prefix = '.codeman-attachments/';
       const leaf = rawPath.startsWith(prefix) ? rawPath.slice(prefix.length) : '';
       if (!leaf || leaf === '.' || leaf === '..' || leaf.includes('/') || leaf.includes('\\') || leaf.includes(sep)) {

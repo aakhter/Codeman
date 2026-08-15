@@ -3,6 +3,7 @@ import os from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ensureLocalUploadDirectory,
   getTrustedAttachmentRoots,
   resetTrustedAttachmentRootsForTests,
   resolveLocalUploadDirectory,
@@ -61,7 +62,7 @@ describe('trusted attachment roots', () => {
   });
 
   it('creates a missing workspace upload directory non-recursively', async () => {
-    await expect(resolveLocalUploadDirectory(workspace, admin)).resolves.toEqual({
+    await expect(ensureLocalUploadDirectory(workspace, admin)).resolves.toEqual({
       kind: 'workspace',
       canonicalDir: join(workspace, '.codeman-attachments'),
     });
@@ -70,13 +71,29 @@ describe('trusted attachment roots', () => {
 
   it('handles concurrent first-use directory creation', async () => {
     const results = await Promise.all([
-      resolveLocalUploadDirectory(workspace, admin),
-      resolveLocalUploadDirectory(workspace, admin),
+      ensureLocalUploadDirectory(workspace, admin),
+      ensureLocalUploadDirectory(workspace, admin),
     ]);
     expect(results).toEqual([
       { kind: 'workspace', canonicalDir: join(workspace, '.codeman-attachments') },
       { kind: 'workspace', canonicalDir: join(workspace, '.codeman-attachments') },
     ]);
+  });
+
+  // COD-296: resolve-only is the read/delete contract — null, and no mkdir.
+  it('resolves a missing workspace upload directory to null without creating it', async () => {
+    await expect(resolveLocalUploadDirectory(workspace, admin)).resolves.toBeNull();
+    await expect(fs.lstat(join(workspace, '.codeman-attachments'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps rejecting an unapproved directory rather than returning null', async () => {
+    // An entry that EXISTS but is not approved must still throw: null means
+    // "absent", never "denied", or a caller could mistake one for the other.
+    const other = join(tempDir, 'other');
+    await fs.mkdir(other);
+    await fs.symlink(other, join(workspace, '.codeman-attachments'));
+
+    await expect(resolveLocalUploadDirectory(workspace, admin)).rejects.toMatchObject({ statusCode: 403 });
   });
 
   it('returns an existing regular workspace directory', async () => {

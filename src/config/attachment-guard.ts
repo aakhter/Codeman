@@ -128,11 +128,19 @@ function rejectedUploadDirectory(): UploadDirectoryResolutionError {
   return new UploadDirectoryResolutionError('.codeman-attachments is not an approved upload directory');
 }
 
-/** Resolve the sole local upload destination used by both upload and deletion. */
-export async function resolveLocalUploadDirectory(
+/**
+ * Shared resolution for the sole local upload destination.
+ *
+ * `create` is a REQUIRED parameter rather than an option with a default: it is
+ * the difference between a read-only request and one that mutates the user's
+ * workspace, so every caller must state which it is (COD-296). Callers reach it
+ * through the two named wrappers below, never directly.
+ */
+async function resolveUploadDirectory(
   workingDir: string,
-  authUser: AuthUser
-): Promise<ResolvedUploadDirectory> {
+  authUser: AuthUser,
+  create: boolean
+): Promise<ResolvedUploadDirectory | null> {
   let canonicalWorkspace: string;
   try {
     canonicalWorkspace = await fs.realpath(workingDir);
@@ -146,6 +154,10 @@ export async function resolveLocalUploadDirectory(
     stat = await fs.lstat(attachmentsDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw rejectedUploadDirectory();
+    // COD-296: the directory simply is not there. Resolve-only callers get null
+    // ("no uploads live here") — creating it would give a GET or a DELETE a
+    // filesystem side effect in the user's workspace.
+    if (!create) return null;
     try {
       await fs.mkdir(attachmentsDir);
     } catch (mkdirError) {
@@ -187,6 +199,39 @@ export async function resolveLocalUploadDirectory(
     if (err instanceof UploadDirectoryResolutionError) throw err;
     throw rejectedUploadDirectory();
   }
+}
+
+/**
+ * Resolve the local upload destination WITHOUT creating it — the read and delete
+ * paths (attachment-history reconstruction, DELETE …/attachments/uploaded).
+ *
+ * Returns `null` when `.codeman-attachments/` does not exist, which callers must
+ * treat as "no uploaded attachment here" (fail-closed: missing / 404). A
+ * directory that DOES exist but is not an approved destination still throws, so
+ * the security semantics are identical to {@link ensureLocalUploadDirectory}.
+ */
+export function resolveLocalUploadDirectory(
+  workingDir: string,
+  authUser: AuthUser
+): Promise<ResolvedUploadDirectory | null> {
+  return resolveUploadDirectory(workingDir, authUser, false);
+}
+
+/**
+ * Resolve the local upload destination, creating it on first use — the UPLOAD
+ * path only. This is the sole caller permitted to mutate the workspace, so
+ * anything that is not an upload must use {@link resolveLocalUploadDirectory}.
+ */
+export async function ensureLocalUploadDirectory(
+  workingDir: string,
+  authUser: AuthUser
+): Promise<ResolvedUploadDirectory> {
+  const resolved = await resolveUploadDirectory(workingDir, authUser, true);
+  // Unreachable in practice: with create=true the ENOENT branch either produces
+  // a directory or throws. Kept as a real guard so the non-null return type is
+  // proven rather than asserted.
+  if (!resolved) throw rejectedUploadDirectory();
+  return resolved;
 }
 
 /** Normalizes a tree prefix: trim, drop trailing separators (but keep root). */
