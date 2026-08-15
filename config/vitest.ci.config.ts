@@ -38,6 +38,14 @@ export default defineConfig({
       'test/opencode-resize.test.ts', // browser (Playwright)
       'test/webgl-fallback.test.ts', // browser (Playwright)
       'test/file-browser-session-preview.browser.test.ts', // browser (Playwright + chromium)
+      // COD-293: this one was missing while its three `.browser.test.ts` siblings were
+      // all listed, so `test:ci` could only pass on a machine where someone had run
+      // `npx playwright install` by hand — on a clean checkout it died with
+      // "browserType.launch: Executable doesn't exist". It is downstream-only (added by
+      // COD-261), so upstream CI never ran it and bitbucket ran nothing, which is exactly
+      // the blind spot COD-293 exists to close. It still runs under the default
+      // config/vitest.config.ts, like the other three.
+      'test/file-preview-source-download.browser.test.ts', // browser (Playwright + chromium)
       'test/terminal-document-link.browser.test.ts', // browser/touch (Playwright + chromium)
       'test/terminal-copy-shortcut.test.ts', // browser (Playwright)
       'test/spreadsheet-preview.browser.test.ts', // browser (Playwright + chromium)
