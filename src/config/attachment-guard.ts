@@ -21,6 +21,17 @@
  *     `attachmentConfineToWorkspace: boolean` and/or env
  *     `CODEMAN_ATTACHMENT_CONFINE` (`1`/`true`).
  *
+ *  3. **Trusted upload roots (OPTIONAL, default empty, ENV-ONLY).** The exact
+ *     directories an admin may point a `.codeman-attachments` symlink at, via
+ *     `CODEMAN_TRUSTED_ATTACHMENT_ROOTS` (comma-separated). Deliberately absent
+ *     from `SettingsUpdateSchema` so the browser cannot add one, and parsed ONCE
+ *     at startup (a change needs a restart). Matching is EXACT and fail-closed:
+ *     the symlink's resolved target must EQUAL a root, re-checked on every upload
+ *     and delete. ⚠️ Each entry must be absolute, canonical (an alias is refused;
+ *     a trailing separator is normalized), a real directory, not blocked by (1),
+ *     and a DEDICATED enclave — see `isDedicatedAttachmentEnclave`. Invalid
+ *     entries are dropped with a path-free warning, never a startup failure.
+ *
  * All paths passed to the predicates here MUST be absolute and symlink-resolved
  * (realpath) by the caller, mirroring `isSensitivePath`'s contract.
  *
@@ -28,10 +39,13 @@
  */
 
 import fs from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import type { AuthUser } from '../types/user.js';
 import { isSensitivePath } from '../web/sensitive-path.js';
 import { readJsonConfig, SETTINGS_PATH } from '../web/route-helpers.js';
+import { getDataDir } from './instance.js';
+import { getUserSpacesDir } from './multiuser.js';
 
 /**
  * Directory trees blocked by default, IN ADDITION to the secret-location
@@ -75,6 +89,45 @@ function warnInvalidTrustedRoot(index: number, reason: string): void {
   console.warn(`[attachments] Ignoring CODEMAN_TRUSTED_ATTACHMENT_ROOTS entry ${index + 1}: ${reason}`);
 }
 
+/**
+ * The trees a trusted root must not be, nor contain (COD-295). A trusted root is
+ * where an admin's uploads LAND and everything under it becomes servable, so it
+ * has to be a dedicated enclave. Accepting `/`, `$HOME`, `/home`, or any other
+ * ancestor of the managed trees would quietly turn "trusted root" into "the whole
+ * filesystem", which is the opposite of what the exact-root allowlist buys.
+ *
+ * Home is included on its own account: it is the ancestor of the managed trees in
+ * a default layout, but `CODEMAN_DATA_DIR` / `CODEMAN_USER_SPACES_DIR` can move
+ * those elsewhere, and home would still be far too broad.
+ */
+function managedTreesRequiringADedicatedRoot(): string[] {
+  const home = homedir();
+  return [home, getDataDir(), join(home, 'codeman-cases'), getUserSpacesDir()];
+}
+
+/**
+ * Whether `canonicalRoot` (absolute, symlink-resolved, no trailing separator) is a
+ * dedicated directory rather than one of the managed trees or an ancestor of one.
+ * A directory INSIDE a managed tree is fine — `~/.codeman/shared-attachments` is a
+ * legitimate enclave; `~/.codeman` itself is not.
+ */
+async function isDedicatedAttachmentEnclave(canonicalRoot: string): Promise<boolean> {
+  for (const tree of managedTreesRequiringADedicatedRoot()) {
+    // Compare against both the raw and the canonical form: the managed tree may not
+    // exist yet (realpath throws) and may itself sit behind a symlink (/tmp on macOS).
+    const forms = new Set([tree]);
+    try {
+      forms.add(await fs.realpath(tree));
+    } catch {
+      /* not created yet — the raw form is the best available comparison */
+    }
+    for (const form of forms) {
+      if (pathIsInside(canonicalRoot, form)) return false;
+    }
+  }
+  return true;
+}
+
 async function parseTrustedAttachmentRoots(): Promise<readonly string[]> {
   const raw = process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
   if (!raw?.trim()) return [];
@@ -83,12 +136,17 @@ async function parseTrustedAttachmentRoots(): Promise<readonly string[]> {
   const accepted = new Set<string>();
   const entries = raw.split(',');
   for (let index = 0; index < entries.length; index += 1) {
-    const candidate = entries[index].trim();
-    if (!candidate) continue;
-    if (!isAbsolute(candidate)) {
+    const raw = entries[index].trim();
+    if (!raw) continue;
+    if (!isAbsolute(raw)) {
       warnInvalidTrustedRoot(index, 'path must be absolute');
       continue;
     }
+    // Normalize a trailing separator BEFORE the canonical comparison: `realpath`
+    // strips it, so `/srv/enclave/` used to be rejected as "not canonical" and the
+    // intended root was silently disabled (COD-295). Exact-root fail-closed
+    // semantics are unchanged — a symlinked alias still fails the comparison.
+    const candidate = normalizeTree(raw);
     try {
       const canonical = await fs.realpath(candidate);
       const stat = await fs.stat(canonical);
@@ -98,6 +156,11 @@ async function parseTrustedAttachmentRoots(): Promise<readonly string[]> {
         warnInvalidTrustedRoot(index, 'path is not a directory');
       } else if (isBlockedAttachmentPath(canonical, guard.blockedTrees)) {
         warnInvalidTrustedRoot(index, 'path is blocked by attachment policy');
+      } else if (!(await isDedicatedAttachmentEnclave(canonical))) {
+        warnInvalidTrustedRoot(
+          index,
+          'path is not a dedicated directory (it is, or contains, the home directory or a Codeman-managed tree)'
+        );
       } else {
         accepted.add(canonical);
       }
