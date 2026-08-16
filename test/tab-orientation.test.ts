@@ -86,7 +86,7 @@ describe('vertical tab rail wiring (COD-286)', () => {
 
   it('re-fits the terminal when the orientation changes', () => {
     // Slice from the DEFINITION, not the earlier call site.
-    const defStart = settingsJs.indexOf('applyTabOrientation() {');
+    const defStart = settingsJs.indexOf('applyTabOrientation(options = {}) {');
     expect(defStart).toBeGreaterThan(-1);
     const applyBlock = settingsJs.slice(defStart, defStart + 2500);
     expect(applyBlock).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);

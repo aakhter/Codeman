@@ -971,6 +971,7 @@ class CodemanApp {
     this.applySkin();
     this.applyLocalization();
     this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
+    this.initTabRailResize?.();  // COD-299 — apply device width before terminal creation
     this.applyTabWrapSettings();
     this.applyMonitorVisibility();
     this.applyLineageLineSettings?.();
@@ -5014,20 +5015,30 @@ class CodemanApp {
           statusEl.className = `tab-status ${status}`;
         }
 
-        // Update name if changed. #232: a description (the `: suffix` part of the
-        // name) is the whole tab label; the generated id lives in the tooltip. The
-        // compare targets the DISPLAY text, or a described tab would re-render on
-        // every pass (textContent never equals the full name there).
+        // Update the complete DOM/accessibility name. #232's compact horizontal
+        // presentation is preserved by hiding only the prefix span in CSS; the
+        // vertical rail reveals it so wrapping can use the complete session name.
         const nameEl = tab.querySelector('.tab-name');
         if (nameEl) {
           const _p = parseSessionPrefix(name);
-          const _label = _p && _p.suffix ? _p.suffix : name;
-          if (nameEl.textContent !== _label) {
-            nameEl.textContent = _label;
-            tab.title = _p && _p.suffix
-              ? (session.workingDir ? `${_p.prefix} (${session.workingDir})` : _p.prefix)
-              : (session.workingDir || '');
+          if (nameEl.dataset.fullName !== name) {
+            nameEl.textContent = '';
+            if (_p && _p.suffix) {
+              const prefixEl = document.createElement('span');
+              prefixEl.className = 'tab-name-prefix';
+              prefixEl.textContent = `${_p.prefix}: `;
+              nameEl.append(prefixEl, document.createTextNode(_p.suffix));
+            } else {
+              nameEl.textContent = name;
+            }
+            nameEl.dataset.fullName = name;
           }
+          const accessibleName = `${name} session`;
+          const tooltip = session.workingDir && session.workingDir !== name
+            ? `${name}\n${session.workingDir}`
+            : name;
+          if (tab.getAttribute('aria-label') !== accessibleName) tab.setAttribute('aria-label', accessibleName);
+          if (tab.title !== tooltip) tab.title = tooltip;
         }
 
         // Update task badge
@@ -5281,14 +5292,17 @@ class CodemanApp {
       const tallTabsEnabled = this._tallTabsEnabled ?? false;
       const showFolder = tallTabsEnabled && session.name && folderName && folderName !== name;
 
-      // #232: a session with a description (the `: suffix` part of its name) shows
-      // JUST the description on the tab; the generated w<n>-<case> id moves to the
-      // tooltip and stays visible in the session settings modal.
+      // Keep the complete name in the DOM. #232's horizontal view hides the
+      // generated prefix span; COD-299's vertical rail reveals and wraps it.
       const parsedName = parseSessionPrefix(name);
-      const tabLabel = parsedName && parsedName.suffix ? parsedName.suffix : name;
-      const tabTooltip = parsedName && parsedName.suffix
-        ? (session.workingDir ? `${parsedName.prefix} (${session.workingDir})` : parsedName.prefix)
-        : (session.workingDir || '');
+      const tabLabelHtml = parsedName && parsedName.suffix
+        ? `<span class="tab-name-prefix">${escapeHtml(parsedName.prefix)}: </span>${escapeHtml(parsedName.suffix)}`
+        : escapeHtml(name);
+      // COD-299: CSS may clamp the visible label after two lines, but the native
+      // tooltip and accessible name always retain the complete session name.
+      const tabTooltip = session.workingDir && session.workingDir !== name
+        ? `${name}\n${session.workingDir}`
+        : name;
 
       parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
 
@@ -5298,7 +5312,7 @@ class CodemanApp {
           <span class="tab-info">
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
-              <span class="tab-name" data-session-id="${id}">${escapeHtml(tabLabel)}</span>
+              <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
@@ -5306,7 +5320,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span></span>
+          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
       _tabIdx++;
     }

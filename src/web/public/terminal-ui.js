@@ -1271,6 +1271,10 @@ Object.assign(CodemanApp.prototype, {
       });
     };
     const throttledResize = () => {
+      // COD-299: the rail controller owns terminal sizing while its width is
+      // changing. Ignore observer churn so the final 150ms settle performs the
+      // only fit/reflow and PTY resize for the gesture.
+      if (this._tabRailResizeOwnsObserver) return;
       // Trailing-edge debounce: ALL resize work (fit + clear + SIGWINCH) happens
       // once after the user stops resizing. During active resize, the terminal
       // stays at its old dimensions for up to 300ms.
