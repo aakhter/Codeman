@@ -79,12 +79,14 @@ Object.assign(CodemanApp.prototype, {
 
   /**
    * Width-driven, like every other layout decision in the app. Explicitly yields
-   * to the phone overview: that surface already lists the same sessions, and two
-   * lists of the same thing on one screen is worse than none.
+   * to the phone overview and persistent vertical tab rail: those surfaces already
+   * list the same sessions, and two lists of the same thing on one screen is worse
+   * than none.
    */
   shouldShowHomeSessions() {
     if (this.isSoloWindow) return false;
     if (this.shouldUseMobileOverview?.()) return false;
+    if (document.documentElement.getAttribute('data-tab-orientation') === 'vertical') return false;
     return window.innerWidth >= HOME_SESSIONS_MIN_WIDTH;
   },
 

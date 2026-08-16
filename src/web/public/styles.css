@@ -17148,6 +17148,13 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   display: none;
 }
 
+/* COD-300 — the persistent rail already owns session navigation in vertical
+   mode. Keep this as a CSS backstop so an orientation change can never expose
+   both left-edge rails while showHomeSessions() is re-evaluating its JS gate. */
+html[data-tab-orientation='vertical'] .home-sessions {
+  display: none !important;
+}
+
 /* Belt and braces with shouldShowHomeSessions(): a resize that outruns the
    matchMedia listener must never leave the column overlapping the content. */
 @media (max-width: 1179px) {

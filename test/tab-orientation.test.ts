@@ -97,6 +97,13 @@ describe('vertical tab rail wiring (COD-286)', () => {
     expect(settingsJs).toContain('this.applyTabOrientation');
   });
 
+  it('re-evaluates the home screen after a settings-driven orientation change', () => {
+    const applyCall = settingsJs.indexOf('this.applyTabOrientation({ settleRailWidth: true })');
+    expect(applyCall).toBeGreaterThan(-1);
+    const saveTail = settingsJs.slice(applyCall, applyCall + 1800);
+    expect(saveTail).toMatch(/if \(!this\.activeSessionId\) this\.showWelcome\(\)/);
+  });
+
   it('skips the horizontal auto-wrap machinery while vertical', () => {
     const start = appJs.indexOf('updateTabOverflowMode() {');
     expect(start).toBeGreaterThan(-1);
