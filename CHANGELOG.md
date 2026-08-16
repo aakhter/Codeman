@@ -1,5 +1,15 @@
 # aicodeman
 
+## 1.18.5
+
+### Patch Changes
+
+- Harden attachment access by enforcing session ownership across tail, download, and source routes; requiring trusted
+  attachment roots to be dedicated enclaves; aligning upload and raw-download size limits; and avoiding directory
+  creation during read and delete operations. Add Bitbucket `local` branch CI and the implementation-review checkpoint
+  contract. Make the optional vertical session rail resizable, and hide the redundant homepage Open Tabs rail while
+  vertical tabs are active while retaining its horizontal layout behavior.
+
 ## 1.18.4
 
 ### Patch Changes
