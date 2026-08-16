@@ -300,12 +300,11 @@ function computeTabScrollLeft(input) {
 // spawned (a worker started through the codeman agent skill, which passes its own
 // id as parentSessionId). Pure: the caller measures and appends, this decides.
 //
-// ONE shape, because both endpoints live in the same horizontal strip and the subagent
-// shape (tab-bottom → window-top) has nothing to aim at: a U-bridge HANGING BELOW the
-// strip, from the parent's bottom edge to the child's bottom edge, so it reads as a
-// bracket joining two tabs rather than as a line crossing them. The dip grows with
-// horizontal distance and with `depth` (the child's index among its siblings), so
-// several children of one parent nest instead of overprinting.
+// Horizontal tabs use a U-bridge HANGING BELOW the strip, from the parent's bottom
+// edge to the child's bottom edge, so the relationship reads as a bracket rather than
+// as a line crossing tabs. Vertical tabs use an orthogonal tree connector in the
+// reserved left gutter; reusing the horizontal formula there makes the equal X centers
+// collapse into the bright vertical stroke through labels reported in COD-311.
 //
 // ⚠ A WRAPPED STRIP USED TO GET ITS OWN SHAPE, AND THAT SHAPE WAS THE BUG. When the
 // desktop strip wraps (`tabs-two-rows` / `tabs-auto-wrap`) a parent on row 1 and its
@@ -342,6 +341,12 @@ const LINEAGE_DIP_MAX_PX = 64;
 // apart bled into one thick band instead of reading as three separate lines.
 const LINEAGE_SIBLING_STEP_PX = 8;
 const LINEAGE_STRIP_TOLERANCE_PX = 4;
+// COD-311: the vertical rail reserves 24px in CSS. Tracks start near its left edge
+// and move right for siblings, while both endpoints stay on the tab's left border.
+// With depth clamped to 6, 6 + (6 * 3) = 24, still inside that gutter.
+const LINEAGE_VERTICAL_TRACK_INSET_PX = 6;
+const LINEAGE_VERTICAL_SIBLING_STEP_PX = 3;
+const LINEAGE_VERTICAL_ANCHOR_CLEARANCE_PX = 4;
 // Lineage palette, assigned per CHILD in first-seen order and cycled (session-lineage.js).
 // The empty FIRST entry means "no override": the CSS then falls back to --session-blue,
 // which every skin block tunes for its own background, so a lone arc keeps the
@@ -362,21 +367,43 @@ function computeLineagePath(input) {
   const ch = Number(child.height) || 0;
   if (pw <= 0 || ph <= 0 || cw <= 0 || ch <= 0) return null;
 
-  const px = Number(parent.left) + pw / 2;
-  const cx = Number(child.left) + cw / 2;
-  if (!Number.isFinite(px) || !Number.isFinite(cx)) return null;
-
+  const orientation = input?.orientation === 'vertical' ? 'vertical' : 'horizontal';
   const strip = input?.strip;
+  const depth = Math.max(0, Math.min(6, Number(input?.depth) || 0));
+  const pLeft = Number(parent.left);
+  const cLeft = Number(child.left);
+  const pTop = Number(parent.top);
+  const cTop = Number(child.top);
+  if (![pLeft, cLeft, pTop, cTop].every(Number.isFinite)) return null;
+
+  if (orientation === 'vertical') {
+    const py = pTop + ph / 2;
+    const cy = cTop + ch / 2;
+    if (strip && Number(strip.height) > 0) {
+      const min = Number(strip.top) - LINEAGE_STRIP_TOLERANCE_PX;
+      const max = Number(strip.top) + Number(strip.height) + LINEAGE_STRIP_TOLERANCE_PX;
+      if (py < min || py > max || cy < min || cy > max) return null;
+    }
+
+    const stripLeft = strip && Number.isFinite(Number(strip.left))
+      ? Number(strip.left)
+      : Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_TRACK_INSET_PX * 2;
+    const requestedTrack =
+      stripLeft + LINEAGE_VERTICAL_TRACK_INSET_PX + depth * LINEAGE_VERTICAL_SIBLING_STEP_PX;
+    const trackX = Math.min(requestedTrack, Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_ANCHOR_CLEARANCE_PX);
+    const d = `M ${r1(pLeft)} ${r1(py)} H ${r1(trackX)} V ${r1(cy)} H ${r1(cLeft)}`;
+    return { d, endX: cLeft, endY: cy, sameRow: false };
+  }
+
+  const px = pLeft + pw / 2;
+  const cx = cLeft + cw / 2;
   if (strip && Number(strip.width) > 0) {
     const min = Number(strip.left) - LINEAGE_STRIP_TOLERANCE_PX;
     const max = Number(strip.left) + Number(strip.width) + LINEAGE_STRIP_TOLERANCE_PX;
     if (px < min || px > max || cx < min || cx > max) return null;
   }
 
-  const depth = Math.max(0, Math.min(6, Number(input?.depth) || 0));
-  const pTop = Number(parent.top);
   const pBottom = pTop + ph;
-  const cTop = Number(child.top);
   const cBottom = cTop + ch;
   const sameRow = Math.abs(pTop + ph / 2 - (cTop + ch / 2)) <= Math.min(ph, ch) / 2;
 
@@ -565,6 +592,8 @@ if (typeof window !== 'undefined') {
     DIP_MIN_PX: LINEAGE_DIP_MIN_PX,
     DIP_MAX_PX: LINEAGE_DIP_MAX_PX,
     SIBLING_STEP_PX: LINEAGE_SIBLING_STEP_PX,
+    VERTICAL_TRACK_INSET_PX: LINEAGE_VERTICAL_TRACK_INSET_PX,
+    VERTICAL_SIBLING_STEP_PX: LINEAGE_VERTICAL_SIBLING_STEP_PX,
     COLORS: LINEAGE_COLORS,
   };
   window.CodemanConnectionLoss = {
