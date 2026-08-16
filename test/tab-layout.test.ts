@@ -120,6 +120,20 @@ describe('tab layout validation and normalization', () => {
     ]);
   });
 
+  it('rejects a missing valid ref above the 512-ref ceiling without truncating the stored layout', () => {
+    const storedRefs = Array.from({ length: MAX_TAB_REFS }, (_, index) => ref(`s${index}`));
+    const input = layout([], storedRefs);
+    const snapshot = structuredClone(input);
+    const metadata = [
+      ...storedRefs.map((stored, index) => session(stored.id, index)),
+      session('missing-overflow', MAX_TAB_REFS),
+    ];
+
+    expect(() => normalizeTabLayout(input, metadata)).toThrow(/512/);
+    expect(input).toEqual(snapshot);
+    expect(input.ungrouped).toHaveLength(MAX_TAB_REFS);
+  });
+
   it('does not mutate caller input', () => {
     const input = layout([{ id: 'g', name: ' G ', refs: [ref('child')] }], [ref('parent')]);
     const snapshot = structuredClone(input);
@@ -198,6 +212,26 @@ describe('session lineage', () => {
     expect(value.ungrouped).toEqual([]);
   });
 
+  it('moves a parent subtree within one container without disturbing surrounding sibling order', () => {
+    const metadata = [
+      session('before', 0),
+      session('root', 1),
+      session('child', 2, 'root'),
+      session('grandchild', 3, 'child'),
+      session('after', 4),
+    ];
+    const input = layout([
+      {
+        id: 'g',
+        name: 'G',
+        refs: [ref('before'), ref('root'), ref('child'), ref('grandchild'), ref('after')],
+      },
+    ]);
+
+    const value = moveRef(input, ref('root'), { groupId: 'g', index: 2 }, metadata);
+    expect(value.groups[0].refs).toEqual([ref('before'), ref('after'), ref('root'), ref('child'), ref('grandchild')]);
+  });
+
   it('makes an independently moved child manual and followParent restores inheritance', () => {
     const metadata = [session('root', 0), session('child', 1, 'root'), session('grandchild', 2, 'child')];
     let value = layout([{ id: 'g', name: 'G', refs: [ref('root'), ref('child'), ref('grandchild')] }]);
@@ -221,12 +255,61 @@ describe('session lineage', () => {
     expect(value.ungrouped).toEqual([{ ...ref('b'), placement: 'manual' }, ref('a')]);
   });
 
+  it('breaks a multi-node cross-container cycle deterministically', () => {
+    const metadata = [session('a', 0, 'b'), session('b', 1, 'c'), session('c', 2, 'a'), session('tail', 3)];
+    const input = layout(
+      [
+        { id: 'one', name: 'One', refs: [ref('a')] },
+        { id: 'two', name: 'Two', refs: [ref('b')] },
+      ],
+      [ref('c'), ref('tail')]
+    );
+
+    const first = normalizeTabLayout(input, metadata);
+    expect(first.groups.map((group) => group.refs)).toEqual([[], []]);
+    expect(first.ungrouped).toEqual([{ ...ref('c'), placement: 'manual' }, ref('b'), ref('a'), ref('tail')]);
+    expect(normalizeTabLayout(first, metadata)).toEqual(first);
+  });
+
   it('materializes direct orphans and prevents a restored ID from re-adopting them', () => {
     const metadata = [session('parent', 0), session('child', 1, 'parent'), session('grandchild', 2, 'child')];
     let value = layout([], [ref('parent'), ref('child'), ref('grandchild')]);
     value = materializeOrphans(value, ['parent'], metadata);
     value = normalizeTabLayout(value, metadata);
     expect(value.ungrouped).toEqual([{ ...ref('child'), placement: 'manual' }, ref('grandchild'), ref('parent')]);
+  });
+
+  it('materializes a direct orphan in its grouped location amid surrounding refs', () => {
+    const metadata = [
+      session('before', 0),
+      session('parent', 1),
+      session('child', 2, 'parent'),
+      session('grandchild', 3, 'child'),
+      session('after', 4),
+    ];
+    const input = layout([
+      {
+        id: 'g',
+        name: 'G',
+        refs: [ref('before'), ref('parent'), ref('child'), ref('grandchild'), ref('after')],
+      },
+    ]);
+
+    const materialized = materializeOrphans(input, ['parent'], metadata);
+    expect(materialized.groups[0].refs).toEqual([
+      ref('before'),
+      { ...ref('child'), placement: 'manual' },
+      ref('grandchild'),
+      ref('after'),
+    ]);
+    const restored = normalizeTabLayout(materialized, metadata);
+    expect(restored.groups[0].refs).toEqual([
+      ref('before'),
+      { ...ref('child'), placement: 'manual' },
+      ref('grandchild'),
+      ref('after'),
+    ]);
+    expect(restored.ungrouped).toEqual([ref('parent')]);
   });
 });
 
@@ -252,5 +335,16 @@ describe('flatten projections', () => {
         highlighted: ref('s2'),
       })
     ).toEqual([ref('s2'), ref('s3'), ref('dash', 'webview'), ref('s4')]);
+  });
+
+  it('keeps a highlighted open webview visible inside a collapsed group', () => {
+    expect(
+      flattenVisibleRefs(value, {
+        liveSessionIds: new Set(['s1', 's2', 's3', 's4']),
+        openWebviewIds: new Set(['closed', 'dash']),
+        collapsedGroupIds: new Set(['collapsed']),
+        highlighted: ref('closed', 'webview'),
+      })
+    ).toEqual([ref('closed', 'webview'), ref('s3'), ref('dash', 'webview'), ref('s4')]);
   });
 });
