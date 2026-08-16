@@ -320,7 +320,21 @@
       <!-- COD-286: vertical tab rail. Empty in horizontal mode; applyTabOrientation()
            MOVES the one #sessionTabs strip in here (never clones it) when the
            orientation setting is vertical, so every tab behaviour keeps working. -->
-      <div class="tab-rail" id="tabRail"></div>
+      <div class="tab-rail" id="tabRail">
+        <div
+          class="tab-rail-resize-handle"
+          id="tabRailResizeHandle"
+          role="separator"
+          tabindex="0"
+          aria-label="Resize session rail"
+          aria-orientation="vertical"
+          aria-valuemin="208"
+          aria-valuemax="360"
+          aria-valuenow="256"
+          title="Drag to resize; arrow keys adjust; Enter resets"
+        ></div>
+      </div>
+      <div class="tab-rail-resize-shield" id="tabRailResizeShield" aria-hidden="true" hidden></div>
 
       <div class="terminal-wrap">
         <!-- Partial-history notice (#258). Lives OUTSIDE the terminal on purpose:
@@ -1953,6 +1967,19 @@
                       <option value="vertical">Vertical (side rail)</option>
                     </select>
                   </div>
+                  <div class="set-row" data-search="vertical rail sidebar width resize compact wide maximum">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Vertical Rail Width <span class="set-tag">desktop</span></span>
+                      <span class="set-row-desc">Choose a preset or drag the rail edge. Custom widths stay on this device.</span>
+                    </div>
+                    <select id="appSettingsTabRailWidth" class="form-select">
+                      <option value="custom" hidden>Custom</option>
+                      <option value="208">Compact (208px)</option>
+                      <option value="256">Default (256px)</option>
+                      <option value="320">Wide (320px)</option>
+                      <option value="360">Maximum (360px)</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             </section>
@@ -3563,6 +3590,7 @@
 
   <script defer src="sanitize-html.js"></script>
   <script defer src="app.js"></script>
+  <script defer src="tab-rail-resize.js"></script>
   <script defer src="terminal-ui.js"></script>
   <script defer src="respawn-ui.js"></script>
   <script defer src="ralph-panel.js"></script>

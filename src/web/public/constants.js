@@ -187,6 +187,42 @@ function resolveTabOrientation(input) {
   return 'vertical';
 }
 
+// COD-299: vertical-rail sizing policy. Kept pure so restore, viewport clamps,
+// and keyboard behavior do not depend on browser layout timing.
+const TAB_RAIL_MIN_WIDTH = 208;
+const TAB_RAIL_DEFAULT_WIDTH = 256;
+const TAB_RAIL_MAX_WIDTH = 360;
+
+function resolveTabRailWidth(input = {}) {
+  const viewportWidth = Number(input.viewportWidth);
+  const mainWidth = Number(input.mainWidth);
+  const minTerminalWidth = Number(input.minTerminalWidth);
+  const limits = [TAB_RAIL_MAX_WIDTH];
+  if (Number.isFinite(viewportWidth) && viewportWidth > 0) limits.push(Math.floor(viewportWidth * 0.4));
+  if (Number.isFinite(mainWidth) && mainWidth > 0 && Number.isFinite(minTerminalWidth) && minTerminalWidth > 0) {
+    limits.push(Math.floor(mainWidth - minTerminalWidth));
+  }
+  const effectiveMax = Math.max(TAB_RAIL_MIN_WIDTH, Math.min(...limits));
+  const requested = Number(input.width);
+  const width = Number.isFinite(requested) ? requested : TAB_RAIL_DEFAULT_WIDTH;
+  return Math.round(Math.min(effectiveMax, Math.max(TAB_RAIL_MIN_WIDTH, width)));
+}
+
+function resolveTabRailKeyboardWidth(input = {}) {
+  const key = input.key;
+  let width;
+  if (key === 'Home') width = TAB_RAIL_MIN_WIDTH;
+  else if (key === 'End') width = TAB_RAIL_MAX_WIDTH;
+  else if (key === 'Enter') width = TAB_RAIL_DEFAULT_WIDTH;
+  else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+    const direction = key === 'ArrowLeft' ? -1 : 1;
+    width = (Number(input.currentWidth) || TAB_RAIL_DEFAULT_WIDTH) + direction * (input.shiftKey ? 32 : 8);
+  } else {
+    return null;
+  }
+  return resolveTabRailWidth({ ...input, width });
+}
+
 // COD-122: Monitor "Tmux Sessions" row label policy. A row carries up to three
 // identifiers — the tab name (user-facing L1 label), the tmux session name
 // (e.g. "codeman-1fac7304"), and the agent (Claude/Codex) session id. The tab name
@@ -510,6 +546,13 @@ if (typeof window !== 'undefined') {
     resolveTabOrientation,
     computeTabScrollLeft,
     TAB_SCROLL_REVEAL_PX,
+  };
+  window.CodemanTabRail = {
+    DEFAULT_WIDTH: TAB_RAIL_DEFAULT_WIDTH,
+    MIN_WIDTH: TAB_RAIL_MIN_WIDTH,
+    MAX_WIDTH: TAB_RAIL_MAX_WIDTH,
+    resolveWidth: resolveTabRailWidth,
+    resolveKeyboardWidth: resolveTabRailKeyboardWidth,
   };
   window.CodemanMonitorLabels = {
     resolveMonitorRowLabels,

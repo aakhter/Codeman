@@ -49,7 +49,7 @@
   --ring-glow: 0 0 12px -2px rgba(56, 182, 240, 0.55);
   --header-height: 36px;
   --toolbar-height: 42px;
-  --tab-rail-width: 208px;
+  --tab-rail-width: 256px;
   --glass-bg: rgba(31, 38, 48, 0.85);
   --glass-border: rgba(255, 255, 255, 0.08);
   --control-bg: rgba(255, 255, 255, 0.045);
@@ -571,11 +571,70 @@ body {
   flex: 0 0 var(--tab-rail-width);
   width: var(--tab-rail-width);
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   background: var(--glass-bg);
   border-right: 1px solid var(--glass-border);
   position: relative;
   z-index: 11;
+}
+
+/* COD-299 — the visible rule is deliberately narrow. The full-height 16px hit
+   target plus keyboard controls make it easy to acquire without covering the
+   center of the active tab's compact action button or a terminal character. */
+.tab-rail-resize-handle {
+  display: none;
+  position: absolute;
+  z-index: 13;
+  top: 0;
+  right: -6px;
+  bottom: 0;
+  width: 16px;
+  cursor: ew-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.tab-rail-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 5px;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background-color var(--transition-smooth), box-shadow var(--transition-smooth);
+}
+
+html[data-tab-orientation='vertical'] .tab-rail-resize-handle {
+  display: block;
+}
+
+.tab-rail-resize-handle:hover::after,
+.tab-rail-resize-handle:focus-visible::after,
+body.tab-rail-resizing .tab-rail-resize-handle::after {
+  background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.tab-rail-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -4px;
+}
+
+.tab-rail-resize-shield {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  cursor: ew-resize;
+}
+
+.tab-rail-resize-shield[hidden] {
+  display: none;
+}
+
+body.tab-rail-resizing {
+  cursor: ew-resize;
+  user-select: none;
 }
 
 html[data-tab-orientation='vertical'] .tab-rail {
@@ -611,6 +670,35 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab > * {
 html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-info {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-row {
+  min-width: 0;
+  align-items: flex-start;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-mode {
+  flex-shrink: 0;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.25;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-rail,
+  .tab-rail-resize-handle::after {
+    transition: none;
+  }
 }
 
 /* With the tabs gone from the header, keep the right-hand cluster hard right. */
@@ -1465,6 +1553,16 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   text-overflow: ellipsis;
 }
 
+/* #232 keeps generated prefixes out of the compact horizontal label while the
+   full session name remains in the DOM for tooltips and assistive technology. */
+.session-tab .tab-name-prefix {
+  display: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
+  display: inline;
+}
+
 /* Tab folder path — hidden by default, shown via .tabs-show-folder on container */
 .session-tab .tab-folder {
   font-size: 0.6rem;
@@ -2244,6 +2342,75 @@ html[data-line-anim="packet"] .connection-line.line-enter {
 .session-tab .tab-actions {
   display: flex;
   align-items: center;
+}
+
+.session-tab .tab-more {
+  display: none;
+  width: 1.75rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: 700 1rem/1 monospace;
+  cursor: pointer;
+}
+
+/* At the legacy compact width, one overflow button replaces the three in-flow
+   icons. The actions remain keyboard/touch reachable without starving the name
+   column that COD-299 is intended to restore. */
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab .tab-actions > .tab-gear,
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab .tab-actions > .tab-detach,
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab .tab-actions > .tab-close {
+  display: none;
+}
+
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active .tab-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-tab .tab-more:hover,
+.session-tab .tab-more:focus-visible {
+  color: var(--accent-hover);
+  background: rgba(255, 255, 255, 0.1);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tab-rail-action-menu {
+  position: fixed;
+  z-index: 2000;
+  display: grid;
+  min-width: 180px;
+  padding: 0.3rem;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--btn-radius);
+  background: var(--floating-bg);
+  box-shadow: var(--elevated-shadow);
+}
+
+.tab-rail-action-menu button {
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tab-rail-action-menu button:hover,
+.tab-rail-action-menu button:focus-visible {
+  background: var(--control-bg-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tab-rail-action-menu .danger {
+  color: var(--red);
 }
 
 /* Pop-out button is opt-in (App Settings → Tab Bar, default off; per-device).
