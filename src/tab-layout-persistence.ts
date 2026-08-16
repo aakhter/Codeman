@@ -55,10 +55,10 @@ function compareSessions(a: TabLayoutSessionRecord, b: TabLayoutSessionRecord): 
 function collectSessions(input: TabLayoutMigrationInput): Map<string, TabLayoutSessionRecord> {
   const sessions = new Map<string, TabLayoutSessionRecord>();
   for (const record of input.persistedSessions) sessions.set(record.id, { ...record });
-  for (const record of input.liveSessions) {
-    const persisted = sessions.get(record.id);
-    sessions.set(record.id, persisted ? { ...persisted, ...record } : { ...record });
-  }
+  // A matching live record is authoritative as a whole. In particular, absent
+  // optional owner/parent fields mean single-user ownership and root lineage;
+  // retaining those fields from a stale persisted copy changes their semantics.
+  for (const record of input.liveSessions) sessions.set(record.id, { ...record });
   return sessions;
 }
 
