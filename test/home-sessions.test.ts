@@ -39,13 +39,16 @@ function fakeElement(): any {
  * same context — which is also the point: if that reuse ever breaks, these
  * tests stop loading rather than quietly testing a divergent copy.
  */
-function loadHomeSessionsApp(overrides: Record<string, any> = {}, innerWidth = 1512) {
+function loadHomeSessionsApp(overrides: Record<string, any> = {}, innerWidth = 1512, tabOrientation = 'horizontal') {
   const CodemanApp = function CodemanApp(this: any) {};
   const context = vm.createContext({
     CodemanApp,
     console,
     window: { innerWidth },
     document: {
+      documentElement: {
+        getAttribute: (name: string) => (name === 'data-tab-orientation' ? tabOrientation : null),
+      },
       getElementById: () => null,
       createElement: () => fakeElement(),
       createElementNS: () => fakeElement(),
@@ -171,6 +174,11 @@ describe('home sessions column: gate', () => {
     expect(app.shouldShowHomeSessions()).toBe(true);
   });
 
+  it('yields to the persistent rail when the effective tab orientation is vertical', () => {
+    expect(loadHomeSessionsApp({}, 1512, 'vertical').shouldShowHomeSessions()).toBe(false);
+    expect(loadHomeSessionsApp({}, 1512, 'horizontal').shouldShowHomeSessions()).toBe(true);
+  });
+
   it('stays out of a window too narrow to hold it beside the centered content', () => {
     // Absolutely positioned: below the gate it would overlap the search panel
     // rather than push it aside.
@@ -209,6 +217,12 @@ describe('home sessions column: wiring', () => {
     // .home-sessions is display:flex, which defeats the `hidden` attribute — the
     // module's only visibility lever — unless this rule exists.
     expect(css).toMatch(/\.home-sessions\[hidden\]\s*\{\s*display:\s*none;/);
+  });
+
+  it('has a CSS backstop that suppresses the homepage rail in vertical mode', () => {
+    expect(css).toMatch(
+      /html\[data-tab-orientation='vertical'\]\s+\.home-sessions\s*\{\s*display:\s*none\s*!important;/
+    );
   });
 
   it('reuses the tab-load spinner rather than declaring a second one', () => {

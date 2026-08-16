@@ -644,11 +644,15 @@ html[data-tab-orientation='vertical'] .tab-rail {
 /* Column layout for the moved strip. `max-height: none` undoes the two-row /
    auto-wrap caps, which are horizontal-mode concepts. */
 html[data-tab-orientation='vertical'] .tab-rail .session-tabs {
+  /* COD-311: lineage tracks own this gutter. Tabs begin to its right so a
+     parent → child tree connector never paints through status, mode or name. */
+  --lineage-vertical-gutter: 24px;
   flex-direction: column;
   flex-wrap: nowrap;
   align-items: stretch;
   gap: 2px;
   padding: 0.35rem;
+  padding-left: calc(0.35rem + var(--lineage-vertical-gutter));
   overflow-x: hidden;
   overflow-y: auto;
   max-height: none;
@@ -17146,6 +17150,13 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
    lever (el.hidden) does nothing. */
 .home-sessions[hidden] {
   display: none;
+}
+
+/* COD-300 — the persistent rail already owns session navigation in vertical
+   mode. Keep this as a CSS backstop so an orientation change can never expose
+   both left-edge rails while showHomeSessions() is re-evaluating its JS gate. */
+html[data-tab-orientation='vertical'] .home-sessions {
+  display: none !important;
 }
 
 /* Belt and braces with shouldShowHomeSessions(): a resize that outruns the

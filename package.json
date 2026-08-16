@@ -1,6 +1,6 @@
 {
   "name": "aicodeman",
-  "version": "1.18.4",
+  "version": "1.18.6",
   "description": "Mission control for AI coding agents - run 20 autonomous agents with real-time monitoring and session persistence",
   "type": "module",
   "main": "dist/index.js",
@@ -37,8 +37,7 @@
     "version-packages": "changeset version && npm install --package-lock-only && node scripts/check-lockfile-sync.mjs",
     "check:lockfile": "node scripts/check-lockfile-sync.mjs",
     "knip": "npx --yes knip@latest --config config/knip.json",
-    "release": "changeset publish",
-    "test:mobile": "vitest run --config test/mobile/vitest.config.ts"
+    "release": "changeset publish"
   },
   "prettier": {
     "singleQuote": true,
