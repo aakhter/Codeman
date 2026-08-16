@@ -70,38 +70,40 @@ Object.assign(CodemanApp.prototype, {
 
   // ── Tab strip ─────────────────────────────────────────────────────────────
 
-  /**
-   * Tab HTML for every OPEN web tab, appended by _fullRenderSessionTabs().
-   * `startIndex` continues the Alt+N numbering after the session tabs.
-   */
+  /** Legacy flat renderer retained for callers outside the unified rail. */
   renderWebviewTabs(startIndex) {
     if (!this.webviewOrder || this.webviewOrder.length === 0) return '';
     const parts = [];
     let idx = startIndex;
 
     for (const id of this.webviewOrder) {
-      const webview = this.webviews.get(id);
-      if (!webview) continue;
-      const isActive = id === this.activeWebviewId;
-      const jsonId = escapeHtml(JSON.stringify(id));
-      const icon = webview.icon ? escapeHtml(webview.icon) : '';
-
-      parts.push(`<div class="session-tab session-tab--web ${isActive ? 'active' : ''}" data-webview-id="${escapeHtml(id)}"
-          onclick="app.handleWebviewTabClick(event, ${jsonId})"
-          tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
-          aria-label="${escapeHtml(webview.name)} web tab" title="${escapeHtml(webview.url)}">
-          ${idx < 9 ? '<span class="tab-number">' + (idx + 1) + '</span>' : ''}
-          <span class="tab-web-icon" aria-hidden="true">${icon || this._webviewGlobeIcon()}</span>
-          <span class="tab-info">
-            <span class="tab-name-row">
-              <span class="tab-name">${escapeHtml(webview.name)}</span>
-            </span>
-          </span>
-          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span></span>
-        </div>`);
-      idx++;
+      const html = this.renderWebviewTab(id, idx);
+      if (html) parts.push(html);
+      if (html) idx++;
     }
     return parts.join('');
+  },
+
+  /** One open webview tab at its position in the interleaved visible ref list. */
+  renderWebviewTab(id, index) {
+    const webview = this.webviews?.get(id);
+    if (!webview) return '';
+    const isActive = id === this.activeWebviewId;
+    const jsonId = escapeHtml(JSON.stringify(id));
+    const icon = webview.icon ? escapeHtml(webview.icon) : '';
+    return `<div class="session-tab session-tab--web ${isActive ? 'active' : ''}" data-webview-id="${escapeHtml(id)}"
+        onclick="app.handleWebviewTabClick(event, ${jsonId})"
+        tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
+        aria-label="${escapeHtml(webview.name)} web tab" title="${escapeHtml(webview.url)}">
+        ${index < 9 ? '<span class="tab-number">' + (index + 1) + '</span>' : ''}
+        <span class="tab-web-icon" aria-hidden="true">${icon || this._webviewGlobeIcon()}</span>
+        <span class="tab-info">
+          <span class="tab-name-row">
+            <span class="tab-name">${escapeHtml(webview.name)}</span>
+          </span>
+        </span>
+        <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span></span>
+      </div>`;
   },
 
   _webviewGlobeIcon() {

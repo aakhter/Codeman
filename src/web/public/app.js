@@ -353,6 +353,9 @@ const _SSE_HANDLER_MAP = [
   // Session order (global tab order sync, COD-131)
   [SSE_EVENTS.SESSION_ORDER_CHANGED, '_onSessionOrderChanged'],
 
+  // Owner tab layout (COD-306)
+  [SSE_EVENTS.TAB_LAYOUT_CHANGED, '_onTabLayoutChanged'],
+
   // Web tabs (dashboard URLs)
   [SSE_EVENTS.WEBVIEW_CHANGED, '_onWebviewChanged'],
 ];
@@ -530,6 +533,16 @@ class CodemanApp {
     this.sessions = new Map();
     this._shortIdCache = new Map(); // Cache session ID .slice(0, 8) results
     this.sessionOrder = []; // Track tab order for drag-and-drop reordering
+    this.tabLayout = null;
+    this.tabLayoutVersion = null;
+    this.tabLayoutReadOnly = true;
+    this.collapsedTabGroupIds = new Set();
+    this._visibleTabRefs = [];
+    this._tabLayoutManaged = true;
+    this._tabLayoutFirstPaintPending = true;
+    this._tabLayoutCoordinator = null;
+    this._lastTabStructureKey = null;
+    this._legacySessionOrder = [];
     this.draggedTabId = null; // Currently dragged tab session ID
     this.cases = [];
     this.currentRun = null;
@@ -1320,20 +1333,7 @@ class CodemanApp {
         const code = e.code || '';
         const digitMatch = code.match(/^Digit([1-9])$/);
         if (digitMatch) {
-          const idx = parseInt(digitMatch[1], 10) - 1;
-          // Sessions occupy 1..N and web tabs continue from N+1, matching the
-          // numbers actually painted on the tabs.
-          if (idx < this.sessionOrder.length) {
-            e.preventDefault();
-            this.selectSession(this.sessionOrder[idx]);
-          } else {
-            const webIdx = idx - this.sessionOrder.length;
-            const webId = (this.webviewOrder || [])[webIdx];
-            if (webId) {
-              e.preventDefault();
-              this.openWebview(webId);
-            }
-          }
+          if (this._activateVisibleTabNumber(parseInt(digitMatch[1], 10))) e.preventDefault();
           return;
         }
         if (e.code === 'BracketLeft') {
@@ -4657,6 +4657,8 @@ class CodemanApp {
 
     // Sync sessionOrder with current sessions (preserve order, add new, remove stale)
     this.syncSessionOrder();
+    this._legacySessionOrder = [...this.sessionOrder];
+    this._loadTabLayout();
 
     if (data.respawnStatus) {
       this.respawnStatus = data.respawnStatus;
@@ -4786,6 +4788,118 @@ class CodemanApp {
     }
   }
 
+  _ensureTabLayoutCoordinator() {
+    if (this._tabLayoutCoordinator) return this._tabLayoutCoordinator;
+    this._tabLayoutCoordinator = window.CodemanTabLayout.createLoadCoordinator({
+      fetchLayout: () => this._fetchTabLayout(),
+      applyLayout: (layout) => this._applyTabLayout(layout),
+      applyFallback: () => this._applyTabLayoutFallback(),
+      scheduleRetry: (retry) => setTimeout(retry, 2000),
+      cancelRetry: (timer) => clearTimeout(timer),
+    });
+    window.addEventListener('pagehide', () => this._tabLayoutCoordinator?.dispose(), { once: true });
+    return this._tabLayoutCoordinator;
+  }
+
+  async _fetchTabLayout() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const data = await this._apiJson('/api/tab-layout', { signal: controller.signal });
+      if (!data?.layout) throw new Error('Tab layout unavailable');
+      return data.layout;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  _loadTabLayout() {
+    return this._ensureTabLayoutCoordinator().load();
+  }
+
+  _onTabLayoutChanged() {
+    this._loadTabLayout();
+  }
+
+  _tabOrientation() {
+    return document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
+  }
+
+  _projectTabLayout() {
+    const options = {
+      liveSessionIds: [...this.sessions.keys()],
+      legacySessionOrder: this._legacySessionOrder,
+      openWebviewIds: [...(this.webviewOrder || [])].filter((id) => this.webviews?.has(id)),
+      collapsedGroupIds: [...this.collapsedTabGroupIds],
+      activeSessionId: this.activeSessionId,
+      activeWebviewId: this.activeWebviewId,
+      orientation: this._tabOrientation(),
+    };
+    return this.tabLayout
+      ? window.CodemanTabLayout.project(this.tabLayout, options)
+      : window.CodemanTabLayout.projectFallback({
+          legacySessionOrder: this._legacySessionOrder,
+          liveSessionIds: options.liveSessionIds,
+          openWebviewIds: options.openWebviewIds,
+        });
+  }
+
+  _refreshTabProjection() {
+    const projection = this._projectTabLayout();
+    this.sessionOrder = projection.sessionOrder;
+    this._visibleTabRefs = projection.visibleRefs;
+    this._tabLayoutSections = projection.sections;
+    return projection;
+  }
+
+  _applyTabLayout(layout) {
+    if (
+      this.tabLayoutVersion !== null &&
+      Number.isSafeInteger(layout?.version) &&
+      layout.version < this.tabLayoutVersion
+    ) return;
+    this.tabLayout = layout;
+    this.tabLayoutVersion = layout.version;
+    this.tabLayoutReadOnly = false;
+    this._tabLayoutFirstPaintPending = false;
+    this._lastTabStructureKey = null;
+    this._refreshTabProjection();
+    this._fullRenderSessionTabs();
+  }
+
+  _applyTabLayoutFallback() {
+    // A transient refetch failure must not replace a layout that is already on
+    // screen. Initial failure paints the safe legacy-flat, read-only fallback.
+    if (this.tabLayout) return;
+    this.tabLayoutVersion = null;
+    this.tabLayoutReadOnly = true;
+    this._tabLayoutFirstPaintPending = false;
+    this._lastTabStructureKey = null;
+    this._refreshTabProjection();
+    this._fullRenderSessionTabs();
+  }
+
+  _tabStructureKey(projection) {
+    return window.CodemanTabLayout.structureKey({
+      version: this.tabLayoutVersion,
+      collapsedGroupIds: [...this.collapsedTabGroupIds],
+      orientation: this._tabOrientation(),
+      openWebviewIds: [...(this.webviewOrder || [])],
+      activeSessionId: this.activeSessionId,
+      activeWebviewId: this.activeWebviewId,
+      visibleRefs: projection.visibleRefs,
+    });
+  }
+
+  _activateVisibleTabNumber(number) {
+    const projection = this._refreshTabProjection();
+    const ref = window.CodemanTabLayout.refAtAltNumber(projection.visibleRefs, number);
+    if (ref?.kind === 'session') this.selectSession(ref.id);
+    else if (ref?.kind === 'webview') this.openWebview(ref.id);
+    else return false;
+    return true;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Debounce Utility
   // ═══════════════════════════════════════════════════════════════
@@ -4807,6 +4921,7 @@ class CodemanApp {
 
   renderSessionTabs() {
     this.updateFileBrowserHeaderButton?.();
+    if (this._tabLayoutFirstPaintPending) return;
     // Don't re-render while user is typing in the inline rename input
     if (this._inlineRenameActive) return;
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
@@ -4846,8 +4961,11 @@ class CodemanApp {
     const container = this.$('sessionTabs');
     if (!container) return;
     const tab =
-      (sessionId && container.querySelector(`.session-tab[data-id="${sessionId}"]`)) ||
-      container.querySelector('.session-tab.active');
+      [...container.querySelectorAll('.session-tab')].find((candidate) =>
+        this.activeWebviewId
+          ? candidate.dataset.webviewId === this.activeWebviewId
+          : sessionId && candidate.dataset.id === sessionId
+      ) || container.querySelector('.session-tab.active');
     if (!tab) return;
 
     const policy = window.CodemanTabOverflow?.computeTabScrollLeft;
@@ -4920,27 +5038,18 @@ class CodemanApp {
     // debounced just BEFORE the rename opened still fires ~100ms later and lands
     // here directly. finishRename() re-renders on both commit and cancel, so a
     // render dropped here is picked back up when the rename settles.
-    if (this._inlineRenameActive) return;
+    if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
     const container = this.$('sessionTabs');
-    const existingTabs = container.querySelectorAll('.session-tab[data-id]');
-    const existingIds = new Set([...existingTabs].map(t => t.dataset.id));
-    const currentIds = new Set(this.sessions.keys());
-
-    // Web tabs live in the same strip but are not in this.sessions, so they need
-    // their own change check. Without it, the session-only comparison below is
-    // vacuously "unchanged" whenever session count is stable — most visibly with
-    // ZERO sessions (0 === 0), where opening a dashboard would never draw its tab.
-    const existingWebIds = [...container.querySelectorAll('.session-tab[data-webview-id]')].map(
-      t => t.dataset.webviewId
+    const projection = this._refreshTabProjection();
+    const structureKey = this._tabStructureKey(projection);
+    const existingRefs = [...container.querySelectorAll('.session-tab')].map((tab) =>
+      tab.dataset.webviewId ? `webview:${tab.dataset.webviewId}` : `session:${tab.dataset.id}`
     );
-    const wantedWebIds = (this.webviewOrder || []).filter(id => this.webviews?.has(id));
-    const webTabsUnchanged =
-      existingWebIds.length === wantedWebIds.length && existingWebIds.every((id, i) => id === wantedWebIds[i]);
-
-    // Check if we can do incremental update (same session IDs and same web tabs)
-    const canIncremental = existingIds.size === currentIds.size &&
-      [...existingIds].every(id => currentIds.has(id)) &&
-      webTabsUnchanged;
+    const wantedRefs = projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`);
+    const canIncremental =
+      structureKey === this._lastTabStructureKey &&
+      existingRefs.length === wantedRefs.length &&
+      existingRefs.every((identity, index) => identity === wantedRefs[index]);
 
     if (canIncremental) {
       // Incremental update - only modify changed properties
@@ -5095,14 +5204,20 @@ class CodemanApp {
         }
       }
     } else {
-      // Full rebuild needed (sessions added/removed)
+      // Full rebuild needed (identity, order, grouping, collapse, orientation,
+      // locally open webviews, or exclusive active identity changed).
       this._fullRenderSessionTabs();
+      return;
     }
 
     // Keep the reveal-on-change bookkeeping honest when only the incremental
     // branch ran: _updateActiveTabImmediate has already scrolled the new active
     // tab into view, so the next full rebuild must not treat it as a change.
-    this._lastRenderedActiveTabId = this.activeSessionId;
+    this._lastRenderedActiveTabIdentity = this.activeWebviewId
+      ? `webview:${this.activeWebviewId}`
+      : this.activeSessionId
+        ? `session:${this.activeSessionId}`
+        : null;
 
     this.updateTabOverflowMode();
     // After the wrap measurement: the `unroll` style starts tabs at max-width 0,
@@ -5234,8 +5349,10 @@ class CodemanApp {
   }
 
   _fullRenderSessionTabs() {
-    if (this._inlineRenameActive) return;
+    if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
     const container = this.$('sessionTabs');
+    const projection = this._refreshTabProjection();
+    const structureKey = this._tabStructureKey(projection);
 
     // Clean up any orphaned dropdowns before re-rendering
     document.querySelectorAll('body > .subagent-dropdown').forEach(d => d.remove());
@@ -5247,7 +5364,7 @@ class CodemanApp {
     // right-hand tabs kept getting yanked back to the first one. Remember
     // where the strip was; the browser clamps the restore to the new content.
     const prevScrollLeft = container.scrollLeft;
-    const prevActiveTabId = this._lastRenderedActiveTabId;
+    const prevActiveTabIdentity = this._lastRenderedActiveTabIdentity;
     const isFirstRender = !container.querySelector('.session-tab');
 
     // Build tabs HTML using array for better string concatenation performance.
@@ -5259,9 +5376,19 @@ class CodemanApp {
     // depended on which render path happened to run. Scrolling the active tab
     // into view replaces it.
     const parts = [];
-    const tabOrder = this.sessionOrder;
+    const orientation = this._tabOrientation();
+    const tabOrder = projection.visibleRefs;
     let _tabIdx = 0;
-    for (const id of tabOrder) {
+    for (const ref of tabOrder) {
+      if (ref.kind === 'webview') {
+        const html = this.renderWebviewTab?.(ref.id, _tabIdx);
+        if (html) {
+          parts.push(html);
+          _tabIdx++;
+        }
+        continue;
+      }
+      const id = ref.id;
       const session = this.sessions.get(id);
       if (!session) continue; // Skip if session was removed
 
@@ -5304,15 +5431,15 @@ class CodemanApp {
         ? `${name}\n${session.workingDir}`
         : name;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
 
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
-          <span class="tab-status ${status}" aria-hidden="true"></span>
+          <span class="tab-status ${escapeHtml(status)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
-              <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
+              <span class="tab-name" data-session-id="${escapeHtml(id)}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
@@ -5325,12 +5452,14 @@ class CodemanApp {
       _tabIdx++;
     }
 
-    // Web tabs (dashboard URLs) render after the session tabs, continuing the
-    // Alt+N numbering. They carry data-webview-id instead of data-id, so every
-    // session-tab code path above (drag-and-drop, alerts, badges) skips them.
-    parts.push(this.renderWebviewTabs ? this.renderWebviewTabs(_tabIdx) : '');
-
-    container.innerHTML = parts.join('');
+    let renderedIndex = 0;
+    container.innerHTML = window.CodemanTabLayout.renderProjection(
+      projection,
+      orientation,
+      () => parts[renderedIndex++] || '',
+      escapeHtml
+    );
+    this._lastTabStructureKey = structureKey;
 
     // Put the strip back where the user left it, then reveal the active tab
     // only when it CHANGED (or on the first paint). Restoring unconditionally
@@ -5338,8 +5467,13 @@ class CodemanApp {
     // the strip while a background rebuild fires, without the active tab ever
     // being stranded off-screen after a switch.
     container.scrollLeft = prevScrollLeft;
-    this._lastRenderedActiveTabId = this.activeSessionId;
-    if (isFirstRender || prevActiveTabId !== this.activeSessionId) {
+    const activeTabIdentity = this.activeWebviewId
+      ? `webview:${this.activeWebviewId}`
+      : this.activeSessionId
+        ? `session:${this.activeSessionId}`
+        : null;
+    this._lastRenderedActiveTabIdentity = activeTabIdentity;
+    if (isFirstRender || prevActiveTabIdentity !== activeTabIdentity) {
       this._scrollActiveTabIntoView(this.activeSessionId, isFirstRender ? 'auto' : 'smooth');
     }
 
@@ -5456,29 +5590,18 @@ class CodemanApp {
     }
   }
 
-  // Save session order to localStorage and (debounced) sync to the server so it
-  // follows the user across devices (COD-131). localStorage stays the offline
-  // fallback; the server is authoritative and echoes back via SSE.
+  // Legacy entry point retained for old callers. Owner layout is now the sole
+  // ordering authority; COD-307 will replace this with layout-aware editing.
   saveSessionOrder() {
-    try {
-      localStorage.setItem('codeman-session-order', JSON.stringify(this.sessionOrder));
-    } catch {
-      // Ignore storage errors
-    }
-    const order = [...this.sessionOrder];
-    this._debouncedCall('saveSessionOrderServer', () => {
-      fetch('/api/session-order', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order }),
-      }).catch(() => {});
-    }, 400);
+    // COD-306: the owner layout is the sole authority. COD-307 will provide
+    // layout-aware editing; session-only persistence must not race it.
+    return;
   }
 
-  // COD-131: another device (or our own debounced push) reordered tabs. Adopt the
-  // server order as the new base and reconcile to our currently-open sessions.
-  // Guard against no-op churn so an echo of our own push doesn't flicker the tabs.
+  // Ignore legacy broadcasts while owner layout controls rendering. The old
+  // branch remains only for compatibility with unmanaged embeds.
   _onSessionOrderChanged(data) {
+    if (this._tabLayoutManaged) return;
     if (!data || !Array.isArray(data.order)) return;
     try {
       localStorage.setItem('codeman-session-order', JSON.stringify(data.order));
@@ -5497,6 +5620,10 @@ class CodemanApp {
   // Set up drag-and-drop handlers on tab elements
   setupTabDragHandlers() {
     const container = this.$('sessionTabs');
+    if (this._tabLayoutManaged) {
+      container.querySelectorAll('.session-tab[draggable]').forEach((tab) => tab.removeAttribute('draggable'));
+      return;
+    }
     const tabs = container.querySelectorAll('.session-tab[data-id]');
 
     tabs.forEach(tab => {
@@ -5580,6 +5707,7 @@ class CodemanApp {
   }
 
   moveActiveTabLeft() {
+    if (this._tabLayoutManaged) return;
     if (!this.activeSessionId) return;
     const idx = this.sessionOrder.indexOf(this.activeSessionId);
     if (idx <= 0) return;
@@ -5589,6 +5717,7 @@ class CodemanApp {
   }
 
   moveActiveTabRight() {
+    if (this._tabLayoutManaged) return;
     if (!this.activeSessionId) return;
     const idx = this.sessionOrder.indexOf(this.activeSessionId);
     if (idx === -1 || idx >= this.sessionOrder.length - 1) return;
@@ -6000,7 +6129,7 @@ class CodemanApp {
     }
     const forceReload = options?.forceReload === true;
     this.closeMobileHeaderUtilities?.();
-    if (this.activeSessionId === sessionId && !forceReload) return;
+    if (this.activeSessionId === sessionId && !this.activeWebviewId && !forceReload) return;
     if (this.activeSessionId === sessionId && forceReload) {
       this.terminalBufferCache?.delete(sessionId);
       this._clearTimer('syncWaitTimeout');
@@ -6639,18 +6768,14 @@ class CodemanApp {
 
   nextSession() {
     if (this.sessionOrder.length <= 1) return;
-
-    const currentIndex = this.sessionOrder.indexOf(this.activeSessionId);
-    const nextIndex = (currentIndex + 1) % this.sessionOrder.length;
-    this.selectSession(this.sessionOrder[nextIndex]);
+    const nextId = window.CodemanTabLayout.adjacentSession(this.sessionOrder, this.activeSessionId, 1);
+    if (nextId) this.selectSession(nextId);
   }
 
   prevSession() {
     if (this.sessionOrder.length <= 1) return;
-
-    const currentIndex = this.sessionOrder.indexOf(this.activeSessionId);
-    const prevIndex = (currentIndex - 1 + this.sessionOrder.length) % this.sessionOrder.length;
-    this.selectSession(this.sessionOrder[prevIndex]);
+    const prevId = window.CodemanTabLayout.adjacentSession(this.sessionOrder, this.activeSessionId, -1);
+    if (prevId) this.selectSession(prevId);
   }
 
   // ═══════════════════════════════════════════════════════════════

@@ -658,6 +658,30 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tabs {
   max-height: none;
 }
 
+html[data-tab-orientation='vertical'] .tab-layout-group {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-name {
+  padding: 8px 8px 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-refs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
 html[data-tab-orientation='vertical'] .tab-rail .session-tab {
   width: 100%;
   max-width: none;
