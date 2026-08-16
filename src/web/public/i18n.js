@@ -276,7 +276,7 @@
     "Steer the rethink, e.g. 'no, I meant the mobile bug'": '引导重想，例如："不，我是指移动端的问题"',
     'Steer note for Rethink': '重想的引导备注',
     'Select a session first': '请先选择一个会话',
-    'Read My Mind works on Claude sessions only': '读心术仅适用于 Claude 会话',
+    'Read My Mind supports Claude and local Codex sessions': '读心术支持 Claude 和本地 Codex 会话',
     'Prompt sent': '提示已发送',
     'Inserted, press Enter in the terminal to send': '已插入，在终端中按 Enter 发送',
     'Could not reach the session': '无法连接到会话',

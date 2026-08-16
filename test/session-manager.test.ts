@@ -58,8 +58,12 @@ vi.mock('../src/session.js', () => {
     _started = false;
     _stopped = false;
     _parked = false;
+    mode = 'claude';
     checkpointEnabled: boolean | undefined;
     resumeSessionId: string | undefined = undefined;
+    codexProviderIdentityForPersist:
+      | { version: 1; credentialSource: 'restorable' | 'session-key'; codexHome?: string }
+      | undefined;
 
     constructor(options: { workingDir: string; checkpointEnabled?: boolean }) {
       super();
@@ -95,6 +99,13 @@ vi.mock('../src/session.js', () => {
 
     getEnvOverridesForPersist() {
       return undefined;
+    }
+
+    getCodexProviderIdentityForPersist() {
+      return (
+        this.codexProviderIdentityForPersist ??
+        (this.mode === 'codex' ? { version: 1 as const, credentialSource: 'restorable' as const } : undefined)
+      );
     }
 
     getAttachmentHistoryForPersist() {
@@ -297,6 +308,24 @@ describe('SessionManager', () => {
         session.id,
         expect.objectContaining({ status: 'parked', pid: null })
       );
+    });
+
+    it('persists explicit v1 provenance for a live Codex session without env overrides and strips it from callers', async () => {
+      const session = await manager.createSession('/tmp/test');
+      session.mode = 'codex';
+
+      await manager.parkSession(session.id);
+
+      expect(mockState.store.state.sessions[session.id]).toEqual(
+        expect.objectContaining({
+          __codexProviderIdentity: {
+            version: 1,
+            credentialSource: 'restorable',
+          },
+        })
+      );
+      expect(JSON.stringify(mockState.store.state.sessions[session.id])).not.toContain('api-key-secret');
+      expect(manager.getStoredSessions()[session.id]).not.toHaveProperty('__codexProviderIdentity');
     });
 
     it('should handle non-existent session gracefully', async () => {

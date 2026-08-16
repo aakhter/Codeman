@@ -44,8 +44,9 @@ Object.assign(CodemanApp.prototype, {
       this.showToast('Select a session first', 'warning');
       return;
     }
-    if (session.mode && session.mode !== 'claude') {
-      this.showToast('Read My Mind works on Claude sessions only', 'warning');
+    const unavailableCodex = session.mode === 'codex' && (session.remote || session.docker);
+    if (unavailableCodex || (session.mode && !['claude', 'codex'].includes(session.mode))) {
+      this.showToast('Read My Mind supports Claude and local Codex sessions', 'warning');
       return;
     }
     // Rethink memory resets on each open (a fresh open is a fresh question),

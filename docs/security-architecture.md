@@ -27,6 +27,7 @@ an explicit, guided opt‑in.
 4. [Recommended remote‑access setups](#4-recommended-remoteaccess-setups)
 5. [File‑serving hardening](#5-fileserving-hardening)
 6. [tmux launch hardening](#6-tmux-launch-hardening-cod31)
+   - [Read My Mind local Codex predictor](#6a-read-my-mind-local-codex-predictor-cod-314)
 7. [Supply‑chain & build‑asset hardening](#7-supplychain--buildasset-hardening-cod28)
 8. [Multi‑instance isolation](#8-multiinstance-isolation)
 9. [Transport security headers](#9-transport-security-headers)
@@ -446,6 +447,25 @@ transient mount blip at launch poisons tmux's long‑lived cwd and crashes
   preserved.
 
 ---
+
+## 6a. Read My Mind local Codex predictor (COD-314)
+
+Read My Mind may invoke an explicit, short-lived local Codex predictor for a local Codex session. It is a noninteractive
+`codex exec --ephemeral` model invocation, not a new interactive terminal or Codeman tab, and it leaves no persisted or
+resumable Codex rollout artifact. The requester cannot choose its provider, model, environment, or rollout; provider
+selection is fixed by the authorized session, and Codex never falls back to Claude.
+
+The predictor's rollout lookup accepts only a demonstrably owned rollout in the same canonical `CODEX_HOME` namespace.
+Same-working-directory or newest-file matches are not ownership proof; ambiguity, including equal history ties, fails
+closed. Recovery preserves private, versioned provider provenance without API keys, and restored legacy, unknown, or
+lost-key sessions fail closed rather than silently changing accounts. Only creating a fresh Codex session clears that fence.
+
+The `codex exec` child runs from a private ephemeral cwd outside the case workspace. It ignores user config, rules, and
+global/project instructions; disables shell, web-search, and subagents; rejects approvals; uses a read-only command sandbox;
+and has schema validation plus bounded environment, output, and timeout controls. These constraints do not state that the
+CLI process is network-disabled. An incompatible CLI returns an update-required failure rather than receiving a weakened
+retry. The browser UI requires an explicit Send or Insert click; the prediction API returns text only, and packaged-agent
+policy requires explicit user authorization before a client separately calls the input API.
 
 ## 7. Supply‑chain & build‑asset hardening (COD‑28)
 

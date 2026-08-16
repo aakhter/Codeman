@@ -36,6 +36,6 @@ export interface ConfigPort {
    * collector tail-reads this file for prediction context.
    */
   getTranscriptPath(sessionId: string): string | null;
-  /** Read My Mind predictor model: the `readMyMindModel` setting, defaulting to AI_CHECK_MODEL. */
+  /** Claude Read My Mind model: the `readMyMindModel` setting, defaulting to AI_CHECK_MODEL. */
   getReadMyMindModel(): Promise<string>;
 }

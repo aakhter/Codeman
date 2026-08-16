@@ -123,6 +123,7 @@ import {
   findAuthoritativeCodexConversation,
   findRecentOwnedCodexConversationIds,
   invalidateCodexConversationInventory,
+  canonicalizeCodexHome,
 } from './checkpoint-conversation-identity.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
@@ -132,6 +133,8 @@ import {
   sanitizeAttachmentHistory,
   upsertAttachmentHistory as upsertAttachmentHistoryList,
 } from './session-attachment-history.js';
+import type { CodexProviderEnvironment } from './readmymind-predictor.js';
+import type { CodexProviderIdentity } from './codex-provider-identity.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -639,6 +642,8 @@ export class Session extends EventEmitter {
   // Ephemeral env overrides (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Exported by tmux
   // at spawn, preserved across respawns via persisted state. Not written to .claude/settings.local.json.
   private _envOverrides: Record<string, string> | undefined;
+  /** Recovery fence: session-scoped provider credentials existed but were never written to disk. */
+  private _codexProviderCredentialsLost = false;
 
   // Claude CLI effort level — injected as a `--settings` soft default at spawn so the
   // user can still switch in-session via /effort (incl. ultracode). Never carried as
@@ -734,6 +739,8 @@ export class Session extends EventEmitter {
       nativeResumeId?: string | null;
       /** Extra env vars exported to the CLI at spawn time (no disk persistence) */
       envOverrides?: Record<string, string>;
+      /** Private, secret-free Codex provider provenance restored from state.json. */
+      codexProviderIdentity?: CodexProviderIdentity | null;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
       effort?: EffortLevel;
       /** Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75 app setting; default off). */
@@ -862,13 +869,25 @@ export class Session extends EventEmitter {
     // Legacy migration: pre-0.7.2 carried effort as the CLAUDE_CODE_EFFORT_LEVEL env var,
     // which hard-locks /effort switching. Extract it into _effort (--settings soft default)
     // and never export it as an env var again. Explicit config.effort wins over legacy.
-    if (config.envOverrides && Object.keys(config.envOverrides).length > 0) {
-      const { CLAUDE_CODE_EFFORT_LEVEL: legacyEffort, ...restOverrides } = config.envOverrides;
+    const recoveredCodexHome = config.codexProviderIdentity?.codexHome
+      ? canonicalizeCodexHome(config.codexProviderIdentity.codexHome, config.workingDir)
+      : undefined;
+    const combinedEnvOverrides: Record<string, string> = {
+      ...(recoveredCodexHome ? { CODEX_HOME: recoveredCodexHome } : {}),
+      ...(config.envOverrides ?? {}),
+    };
+    if (Object.keys(combinedEnvOverrides).length > 0) {
+      const { CLAUDE_CODE_EFFORT_LEVEL: legacyEffort, ...restOverrides } = combinedEnvOverrides;
       this._envOverrides = Object.keys(restOverrides).length > 0 ? restOverrides : undefined;
       if (legacyEffort && isEffortLevel(legacyEffort)) {
         this._effort = legacyEffort;
       }
     }
+    this._codexProviderCredentialsLost =
+      this.mode === 'codex' &&
+      (config.codexProviderIdentity === null || config.codexProviderIdentity?.credentialSource === 'session-key') &&
+      !combinedEnvOverrides.OPENAI_API_KEY &&
+      !combinedEnvOverrides.CODEX_API_KEY;
     if (config.effort && isEffortLevel(config.effort)) {
       this._effort = config.effort;
     }
@@ -1870,6 +1889,46 @@ export class Session extends EventEmitter {
       if (key.startsWith('CLAUDE_CODE_') || key === 'CLAUDE_CONFIG_DIR') safe[key] = value;
     }
     return Object.keys(safe).length > 0 ? safe : undefined;
+  }
+
+  /**
+   * Closed, runtime-only provider identity for an isolated Codex subprocess.
+   * Exact keys only: arbitrary session overrides must never cross this seam.
+   */
+  getCodexProviderEnvironment(): CodexProviderEnvironment {
+    const environment: CodexProviderEnvironment = {};
+    if (!this._envOverrides) return environment;
+    for (const key of ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const) {
+      const value = this._envOverrides[key];
+      if (value) environment[key] = value;
+    }
+    return environment;
+  }
+
+  /** CODEX_HOME only; safe for comparing another session's rollout namespace. */
+  getCodexHomeOverride(): string | undefined {
+    return this._envOverrides?.CODEX_HOME || undefined;
+  }
+
+  /** Whether recovery lost a session-scoped API credential that cannot safely fall back. */
+  hasLostCodexProviderCredentials(): boolean {
+    return this._codexProviderCredentialsLost;
+  }
+
+  /** Secret-free, disk-only identity record. Never include this in SessionState serializers. */
+  getCodexProviderIdentityForPersist(): CodexProviderIdentity | undefined {
+    if (this.mode !== 'codex') return undefined;
+    const rawCodexHome = this.getCodexHomeOverride();
+    const codexHome = rawCodexHome ? canonicalizeCodexHome(rawCodexHome, this.workingDir) : undefined;
+    const hasSessionKey =
+      this._codexProviderCredentialsLost ||
+      Boolean(this._envOverrides?.OPENAI_API_KEY) ||
+      Boolean(this._envOverrides?.CODEX_API_KEY);
+    return {
+      version: 1,
+      credentialSource: hasSessionKey ? 'session-key' : 'restorable',
+      ...(codexHome ? { codexHome } : {}),
+    };
   }
 
   toDetailedState() {

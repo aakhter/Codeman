@@ -21,6 +21,8 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { PredictionToolCall, WorkspaceSignals } from './readmymind-context.js';
+import { MAX_READMYMIND_ASSISTANT_CHARS } from './readmymind-signal-limits.js';
+import { summarizeReadMyMindToolInput } from './readmymind-tool-summary.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -29,14 +31,8 @@ const execFileAsync = promisify(execFile);
 /** How much of the transcript tail to read. Turns are append-only JSONL, so the tail holds the newest entries. */
 export const TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 
-/** Safety cap on the extracted assistant text (the assembler truncates further). */
-const MAX_ASSISTANT_CHARS = 12_000;
-
 /** Max recent tool calls retained. */
 export const MAX_TRANSCRIPT_TOOLS = 10;
-
-const TOOL_DETAIL_KEYS = ['file_path', 'command', 'pattern', 'path', 'url', 'query', 'description'] as const;
-const MAX_TOOL_DETAIL_CHARS = 80;
 
 export interface TranscriptSignals {
   lastAssistantText: string | null;
@@ -51,18 +47,6 @@ interface TranscriptBlock {
   input?: Record<string, unknown>;
   tool_use_id?: string;
   is_error?: boolean;
-}
-
-/** One-line argument summary for a tool call, e.g. `Edit src/foo.ts` or `Bash npm test`. */
-function summarizeToolInput(input: Record<string, unknown> | undefined): string | undefined {
-  if (!input) return undefined;
-  for (const key of TOOL_DETAIL_KEYS) {
-    const value = input[key];
-    if (typeof value === 'string' && value.trim()) {
-      return value.replace(/\s+/g, ' ').trim().slice(0, MAX_TOOL_DETAIL_CHARS);
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -85,17 +69,17 @@ export function parseTranscriptSignals(lines: string[], maxTools: number = MAX_T
     const content = entry.message?.content;
     if (entry.type === 'assistant') {
       if (typeof content === 'string') {
-        if (content.trim()) lastAssistantText = content.slice(0, MAX_ASSISTANT_CHARS);
+        if (content.trim()) lastAssistantText = content.slice(0, MAX_READMYMIND_ASSISTANT_CHARS);
       } else if (Array.isArray(content)) {
         const texts: string[] = [];
         for (const block of content as TranscriptBlock[]) {
           if (block.type === 'text' && block.text) {
             texts.push(block.text);
           } else if (block.type === 'tool_use' && block.name) {
-            tools.push({ name: block.name, detail: summarizeToolInput(block.input), id: block.id });
+            tools.push({ name: block.name, detail: summarizeReadMyMindToolInput(block.input), id: block.id });
           }
         }
-        if (texts.length > 0) lastAssistantText = texts.join('\n').slice(0, MAX_ASSISTANT_CHARS);
+        if (texts.length > 0) lastAssistantText = texts.join('\n').slice(0, MAX_READMYMIND_ASSISTANT_CHARS);
       }
     } else if (entry.type === 'user' && Array.isArray(content)) {
       for (const block of content as TranscriptBlock[]) {

@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   refreshRestoredClaudeHookCapability,
+  resolveRestoredCodexProviderIdentity,
   resolveRestoredSessionName,
   resolveRestoredSessionRemote,
 } from '../src/web/server.js';
 import { generateHooksConfig } from '../src/hooks-config.js';
+import { Session } from '../src/session.js';
 import type { SessionRemote } from '../src/types.js';
 
 describe('server mux restore remote metadata', () => {
@@ -52,6 +54,52 @@ describe('server mux restore remote metadata', () => {
 
     await expect(refreshRestoredClaudeHookCapability('claude', workingDir, undefined)).resolves.toBe(true);
     expect(await readFile(settingsPath, 'utf8')).toContain('session_start');
+  });
+
+  it('reads only the private Codex provider provenance needed by Session recovery', () => {
+    expect(
+      resolveRestoredCodexProviderIdentity('codex', {
+        __codexProviderIdentity: {
+          version: 1,
+          credentialSource: 'session-key',
+          codexHome: '/tmp/alternate-codex-home',
+          OPENAI_API_KEY: 'must-not-be-restored',
+        },
+      })
+    ).toEqual({ version: 1, credentialSource: 'session-key', codexHome: '/tmp/alternate-codex-home' });
+    expect(resolveRestoredCodexProviderIdentity('claude', undefined)).toBeUndefined();
+  });
+
+  it('distinguishes explicit restorable provenance from missing, legacy, and unknown Codex recovery state', () => {
+    const explicit = resolveRestoredCodexProviderIdentity('codex', {
+      __codexProviderIdentity: { version: 1, credentialSource: 'restorable', codexHome: '/tmp/auth-file-home' },
+    });
+    expect(explicit).toEqual({ version: 1, credentialSource: 'restorable', codexHome: '/tmp/auth-file-home' });
+    expect(
+      new Session({
+        workingDir: '/tmp',
+        mode: 'codex',
+        codexProviderIdentity: explicit,
+      }).hasLostCodexProviderCredentials()
+    ).toBe(false);
+
+    for (const savedState of [
+      undefined,
+      {},
+      { __codexProviderIdentity: { CODEX_HOME: '/tmp/legacy-home', credentialsLost: false } },
+      { __codexProviderIdentity: { version: 2, credentialSource: 'restorable' } },
+      { __codexProviderIdentity: { version: 1, credentialSource: 'unknown' } },
+    ]) {
+      const unavailable = resolveRestoredCodexProviderIdentity('codex', savedState);
+      expect(unavailable).toBeNull();
+      expect(
+        new Session({
+          workingDir: '/tmp',
+          mode: 'codex',
+          codexProviderIdentity: unavailable,
+        }).hasLostCodexProviderCredentials()
+      ).toBe(true);
+    }
   });
 });
 

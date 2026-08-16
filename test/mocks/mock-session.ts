@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
 import type { SessionAttachmentHistoryItem, SessionRemote, SessionStatus } from '../../src/types/session.js';
 import type { SessionSource } from '../../src/types/sources.js';
+import type { CodexProviderEnvironment } from '../../src/readmymind-predictor.js';
 import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
 /**
@@ -34,7 +35,13 @@ export class MockSession extends EventEmitter {
     this.nativeResumeId = id;
   });
   /** COD-124 unit 2, Gap B — codex-mode config surface read by captureNativeResumeId(). */
-  codexConfig?: { resumeSessionId?: string };
+  codexConfig?: { model?: string; resumeSessionId?: string };
+  /** Closed provider identity projection used by local Codex Read My Mind. */
+  getCodexProviderEnvironment = vi.fn<() => CodexProviderEnvironment>(() => ({}));
+  /** Narrow home-only projection used to scope competing Codex submit times. */
+  getCodexHomeOverride = vi.fn<() => string | undefined>(() => undefined);
+  /** Recovery fence when session-scoped credentials could not be persisted. */
+  hasLostCodexProviderCredentials = vi.fn(() => false);
   codexLastSubmitAt?: number;
   isWorking: boolean = false;
   private _activeChildProcesses: { pid: number; command: string }[] = [];

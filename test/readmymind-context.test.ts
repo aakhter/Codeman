@@ -160,6 +160,25 @@ describe('budget drop order', () => {
     expect(ctx.prompt).toContain('STEER_MARKER');
     expect(ctx.droppedSections).not.toContain('rethink');
   });
+
+  it('hard-caps a max-shaped set containing only non-droppable sections', () => {
+    const ctx = buildPredictionContext({
+      pendingDialog: { kind: 'question', context: 'd'.repeat(2_500) },
+      goals: 'g'.repeat(8_192),
+      lastAssistantText: 'a'.repeat(7_000),
+      recentPrompts: Array.from({ length: 20 }, (_, index) => ({
+        ts: NOW - (20 - index) * 1_000,
+        text: `prompt-${index}-${'p'.repeat(490)}`,
+      })),
+      rejected: Array.from({ length: 10 }, (_, index) => `rejected-${index}-${'r'.repeat(1_000)}`),
+      steer: `steer-${'s'.repeat(2_000)}`,
+      now: NOW,
+    });
+
+    expect(ctx.prompt.length).toBeLessThanOrEqual(CONTEXT_TOTAL_BUDGET);
+    expect(ctx.includedSections).toEqual(['pendingDialog', 'goals', 'lastAssistant', 'recentPrompts', 'rethink']);
+    expect(ctx.prompt).toContain('== RETHINK');
+  });
 });
 
 describe('rethink threading', () => {

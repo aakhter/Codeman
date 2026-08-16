@@ -134,6 +134,17 @@ function truncateTail(text: string, cap: number): string {
   return text.length > cap ? text.slice(-cap) : text;
 }
 
+/** Last-resort trim that keeps a section heading and its newest tail when possible. */
+function trimSectionToLength(section: Section, length: number): string {
+  if (section.text.length <= length) return section.text;
+  if (length <= 0) return '';
+  const headingEnd = section.text.indexOf('\n');
+  const keepTail = section.key === 'recentPrompts' || section.key === 'lastAssistant' || section.key === 'rethink';
+  if (!keepTail || headingEnd === -1 || length <= headingEnd + 1) return section.text.slice(0, length);
+  const heading = section.text.slice(0, headingEnd + 1);
+  return heading + section.text.slice(-(length - heading.length));
+}
+
 /** Compact relative age: "45s", "3m", "2h", "5d". */
 export function formatAgo(ms: number): string {
   if (ms < 0) ms = 0;
@@ -326,9 +337,21 @@ export function buildPredictionContext(inputs: PredictionContextInputs): Predict
         break;
       }
     }
-    if (dropIndex === -1) break; // Only never-drop sections left; caps bound them.
+    if (dropIndex === -1) break; // Only never-drop sections remain; trim their content below.
     droppedSections.push(included[dropIndex].key);
     included.splice(dropIndex, 1);
+  }
+
+  // The individual caps predate the framing text and can exceed the total by
+  // a small amount when every never-drop source is max-shaped. Preserve every
+  // section, but reclaim the overage from the lowest-priority content first.
+  const trimOrder = ['recentPrompts', 'lastAssistant', 'goals', 'pendingDialog', 'rethink'];
+  for (const key of trimOrder) {
+    const overage = assemble(included).length - CONTEXT_TOTAL_BUDGET;
+    if (overage <= 0) break;
+    const section = included.find((candidate) => candidate.key === key);
+    if (!section) continue;
+    section.text = trimSectionToLength(section, section.text.length - overage);
   }
 
   return {
