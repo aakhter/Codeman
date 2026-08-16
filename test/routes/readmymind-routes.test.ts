@@ -136,7 +136,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
     expect(predict).toHaveBeenCalledTimes(1);
     const options = predict.mock.calls[0][0];
     expect(options.sessionId).toBe(SESSION_ID);
-    expect(options.model).toBe('claude-opus-4-5-20251101');
+    expect(options.provider).toEqual({ kind: 'claude', model: 'claude-opus-4-5-20251101' });
     expect(options.prompt).toContain('TRUST TIERS');
     expect(options.prompt).toContain('GOALS_MARKER');
   });

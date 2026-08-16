@@ -125,7 +125,11 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
 
       const { prompt } = buildPredictionContext(inputs);
       const model = await ctx.getReadMyMindModel();
-      const result = await readMyMindPredictor.predict({ sessionId: id, prompt, model });
+      const result = await readMyMindPredictor.predict({
+        sessionId: id,
+        prompt,
+        provider: { kind: 'claude', model },
+      });
       return { success: true, data: { suggestions: result.suggestions, durationMs: result.durationMs } };
     } catch (err) {
       reply.code(502);

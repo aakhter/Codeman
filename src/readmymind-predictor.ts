@@ -1,6 +1,6 @@
 /**
- * @fileoverview Read My Mind predictor: one-shot `claude -p` over the
- * assembled prediction context (docs/readmymind-plan.md).
+ * @fileoverview Read My Mind predictor: isolated one-shot provider execution
+ * over the assembled prediction context (docs/readmymind-plan.md).
  *
  * Reuses the AiCheckerBase spawn mechanics (prompt file to dodge E2BIG, a
  * throwaway detached tmux session, done-marker polling, timeout, shell-safety
@@ -19,8 +19,20 @@
  * stub `predict` without spawning anything.
  */
 
-import { execSync, spawn as childSpawn } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execSync, spawn as childSpawn, type ChildProcess } from 'node:child_process';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -52,6 +64,33 @@ const MAX_SUGGESTION_CHARS = 1_000;
 const MAX_WHY_CHARS = 300;
 const DONE_MARKER = '__RMM_DONE__';
 const POLL_INTERVAL_MS = 500;
+const CODEX_OUTPUT_POLL_INTERVAL_MS = 25;
+const CODEX_STREAM_LIMIT_BYTES = 256 * 1024;
+const CODEX_FINAL_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const CODEX_KILL_GRACE_MS = 250;
+
+const CODEX_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['suggestions'],
+  properties: {
+    suggestions: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 3,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['prompt', 'why', 'kind'],
+        properties: {
+          prompt: { type: 'string' },
+          why: { type: 'string' },
+          kind: { type: 'string', enum: ['continue', 'verify', 'redirect'] },
+        },
+      },
+    },
+  },
+};
 
 /** Lenient on extra keys (zod strips unknowns), strict on shape. */
 const SuggestionsSchema = z.object({
@@ -118,13 +157,24 @@ export interface PredictOptions {
   sessionId: string;
   /** The assembled context prompt (readmymind-context.ts). */
   prompt: string;
-  /** Model name; shell-validated before use. */
-  model: string;
+  /** Explicit provider selected from the authorized server-side session. */
+  provider: ReadMyMindProvider;
   timeoutMs?: number;
 }
 
-async function runPrediction(options: PredictOptions): Promise<PredictionResult> {
-  const { sessionId, prompt, model } = options;
+export interface CodexProviderEnvironment {
+  CODEX_HOME?: string;
+  OPENAI_API_KEY?: string;
+  CODEX_API_KEY?: string;
+}
+
+export type ReadMyMindProvider =
+  | { kind: 'claude'; model: string }
+  | { kind: 'codex'; model?: string; env: Readonly<CodexProviderEnvironment> };
+
+async function runClaudePrediction(options: PredictOptions & { provider: { kind: 'claude'; model: string } }) {
+  const { sessionId, prompt } = options;
+  const { model } = options.provider;
   const timeoutMs = options.timeoutMs ?? READMYMIND_TIMEOUT_MS;
 
   if (!isValidModelName(model)) {
@@ -227,6 +277,300 @@ async function runPrediction(options: PredictOptions): Promise<PredictionResult>
       reject(new Error(`Prediction timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
+}
+
+function buildCodexEnvironment(providerEnv: Readonly<CodexProviderEnvironment>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { PATH: getAugmentedPath() };
+  const runtimeKeys = [
+    'HOME',
+    'TMPDIR',
+    'LANG',
+    'LC_ALL',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'NODE_EXTRA_CA_CERTS',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'no_proxy',
+  ] as const;
+  for (const key of runtimeKeys) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+
+  const providerKeys = ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const;
+  for (const key of providerKeys) {
+    const value = providerEnv[key] !== undefined ? providerEnv[key] : process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
+function isMissingExecutableError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function classifyCodexExit(stderr: string): Error {
+  const rejectsRequiredIsolation =
+    /(?:unexpected|unknown|unrecognized|unsupported|invalid)\s+(?:argument|option|flag)/i.test(stderr) ||
+    /(?:unknown|unrecognized|unsupported|invalid)\s+(?:configuration|config)\s+(?:key|field|option)/i.test(stderr) ||
+    /(?:unknown|unrecognized|unsupported)\s+(?:field|key)\b/i.test(stderr) ||
+    /strict[-_ ]config[^\n]*(?:unknown|unrecognized|unsupported|invalid)/i.test(stderr);
+  if (rejectsRequiredIsolation) {
+    return new Error('The installed Codex CLI must be updated before Read My Mind can run safely.');
+  }
+  return new Error('Codex prediction failed; check Codex authentication or configuration.');
+}
+
+function terminateProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // The detached group has already exited.
+  }
+}
+
+function readBoundedCodexOutput(outputFile: string): string {
+  const buffer = Buffer.alloc(CODEX_FINAL_OUTPUT_LIMIT_BYTES + 1);
+  const fd = openSync(outputFile, 'r');
+  let bytesRead = 0;
+  try {
+    while (bytesRead < buffer.length) {
+      const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  if (bytesRead > CODEX_FINAL_OUTPUT_LIMIT_BYTES) {
+    throw new Error('Codex prediction exceeded the output limit.');
+  }
+  return buffer.toString('utf8', 0, bytesRead).trim();
+}
+
+async function runCodexPrediction(
+  options: PredictOptions & { provider: { kind: 'codex'; model?: string; env: Readonly<CodexProviderEnvironment> } }
+): Promise<PredictionResult> {
+  const { prompt, provider } = options;
+  const timeoutMs = options.timeoutMs ?? READMYMIND_TIMEOUT_MS;
+  if (provider.model !== undefined && !isValidModelName(provider.model)) {
+    throw new Error(`Invalid model name: ${String(provider.model).substring(0, 50)}`);
+  }
+
+  const privateDir = mkdtempSync(join(tmpdir(), 'codeman-rmm-codex-'));
+  const schemaFile = join(privateDir, 'schema.json');
+  const outputFile = join(privateDir, 'output.json');
+  try {
+    chmodSync(privateDir, 0o700);
+    writeFileSync(schemaFile, JSON.stringify(CODEX_OUTPUT_SCHEMA), { mode: 0o600 });
+    writeFileSync(outputFile, '', { mode: 0o600 });
+  } catch {
+    rmSync(privateDir, { recursive: true, force: true });
+    throw new Error('Codex prediction could not create its private workspace.');
+  }
+
+  const args = [
+    '--ask-for-approval',
+    'never',
+    'exec',
+    '--ephemeral',
+    '--ignore-user-config',
+    '--ignore-rules',
+    '--strict-config',
+    '--disable',
+    'shell_tool',
+    '--config',
+    'project_doc_max_bytes=0',
+    '--config',
+    'agents.enabled=false',
+    '--config',
+    'tools.web_search=false',
+    '--config',
+    'shell_environment_policy.inherit=none',
+    '--sandbox',
+    'read-only',
+    '--skip-git-repo-check',
+    '--color',
+    'never',
+    '--output-schema',
+    schemaFile,
+    '--output-last-message',
+    outputFile,
+    '--cd',
+    privateDir,
+  ];
+  if (provider.model !== undefined) args.push('--model', provider.model);
+  args.push('-');
+
+  const startTime = Date.now();
+  let child: ChildProcess;
+  try {
+    child = childSpawn('codex', args, {
+      cwd: privateDir,
+      detached: true,
+      env: buildCodexEnvironment(provider.env),
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    rmSync(privateDir, { recursive: true, force: true });
+    if (isMissingExecutableError(error)) {
+      throw new Error('Codex CLI is unavailable; install Codex and restart Codeman.');
+    }
+    throw new Error('Codex prediction could not start; check Codex authentication or configuration.');
+  }
+
+  return new Promise<PredictionResult>((resolve, reject) => {
+    let settled = false;
+    let aborting = false;
+    let abortError: Error | null = null;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stderrChunks: Buffer[] = [];
+    let timeoutTimer: NodeJS.Timeout | null = null;
+    let outputPollTimer: NodeJS.Timeout | null = null;
+    let killTimer: NodeJS.Timeout | null = null;
+
+    const cleanup = (): void => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (outputPollTimer) clearInterval(outputPollTimer);
+      if (killTimer) clearTimeout(killTimer);
+      timeoutTimer = null;
+      outputPollTimer = null;
+      killTimer = null;
+      child.removeListener('error', onError);
+      child.removeListener('close', onClose);
+      child.stdin?.removeListener('error', onStdinError);
+      child.stdout?.removeListener('data', onStdout);
+      child.stderr?.removeListener('data', onStderr);
+      try {
+        rmSync(privateDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup, matching the existing Claude runner.
+      }
+    };
+
+    const finish = (error: Error | null, result?: PredictionResult): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(result as PredictionResult);
+    };
+
+    const abort = (error: Error): void => {
+      if (settled || aborting) return;
+      aborting = true;
+      abortError = error;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (outputPollTimer) clearInterval(outputPollTimer);
+      timeoutTimer = null;
+      outputPollTimer = null;
+      terminateProcessGroup(child, 'SIGTERM');
+      killTimer = setTimeout(() => {
+        terminateProcessGroup(child, 'SIGKILL');
+        finish(error);
+      }, CODEX_KILL_GRACE_MS);
+    };
+
+    function onStdout(chunk: Buffer | string): void {
+      stdoutBytes += Buffer.byteLength(chunk);
+      if (stdoutBytes > CODEX_STREAM_LIMIT_BYTES) {
+        abort(new Error('Codex prediction exceeded the output limit.'));
+      }
+    }
+
+    function onStderr(chunk: Buffer | string): void {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stderrBytes += buffer.length;
+      if (stderrBytes > CODEX_STREAM_LIMIT_BYTES) {
+        abort(new Error('Codex prediction exceeded the output limit.'));
+        return;
+      }
+      stderrChunks.push(buffer);
+    }
+
+    function onStdinError(): void {
+      // The exit/error handler owns the public classification.
+    }
+
+    function onError(error: Error): void {
+      if (isMissingExecutableError(error)) {
+        finish(new Error('Codex CLI is unavailable; install Codex and restart Codeman.'));
+      } else {
+        finish(new Error('Codex prediction could not start; check Codex authentication or configuration.'));
+      }
+    }
+
+    function onClose(code: number | null): void {
+      if (settled) return;
+      if (aborting) {
+        finish(abortError ?? new Error('Codex prediction failed.'));
+        return;
+      }
+      if (code !== 0) {
+        finish(classifyCodexExit(Buffer.concat(stderrChunks).toString('utf8')));
+        return;
+      }
+
+      try {
+        if (statSync(outputFile).size > CODEX_FINAL_OUTPUT_LIMIT_BYTES) {
+          finish(new Error('Codex prediction exceeded the output limit.'));
+          return;
+        }
+        const raw = readBoundedCodexOutput(outputFile);
+        if (!raw) {
+          finish(new Error('Codex prediction returned no output.'));
+          return;
+        }
+        const suggestions = parsePredictionOutput(raw);
+        finish(null, { suggestions, durationMs: Date.now() - startTime });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'Codex prediction exceeded the output limit.') {
+          finish(error);
+        } else {
+          finish(new Error('Codex prediction returned invalid output.'));
+        }
+      }
+    }
+
+    child.once('error', onError);
+    child.once('close', onClose);
+    child.stdin?.on('error', onStdinError);
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+
+    outputPollTimer = setInterval(() => {
+      if (settled || aborting) return;
+      try {
+        if (statSync(outputFile).size > CODEX_FINAL_OUTPUT_LIMIT_BYTES) {
+          abort(new Error('Codex prediction exceeded the output limit.'));
+        }
+      } catch {
+        // The child may atomically replace the output; close handling validates it.
+      }
+    }, CODEX_OUTPUT_POLL_INTERVAL_MS);
+    timeoutTimer = setTimeout(() => {
+      abort(new Error(`Codex prediction timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+
+    child.stdin?.end(prompt);
+  });
+}
+
+async function runPrediction(options: PredictOptions): Promise<PredictionResult> {
+  if (options.provider.kind === 'claude') {
+    return runClaudePrediction(options as PredictOptions & { provider: { kind: 'claude'; model: string } });
+  }
+  return runCodexPrediction(
+    options as PredictOptions & {
+      provider: { kind: 'codex'; model?: string; env: Readonly<CodexProviderEnvironment> };
+    }
+  );
 }
 
 function readStderr(stderrFile: string): string {
