@@ -149,6 +149,28 @@ describe('COD-306 structure and activation policy', () => {
     expect(flat.window.document.querySelectorAll('button')).toHaveLength(projection.visibleRefs.length);
   });
 
+  it('renders a sectionless fallback flat even when the device orientation is vertical', () => {
+    const h = loadHelper();
+    const fallback = h.projectFallback({
+      legacySessionOrder: ['s2', 's1'],
+      liveSessionIds: ['s1', 's2'],
+      openWebviewIds: ['w1'],
+    });
+    const html = h.renderProjection(
+      fallback,
+      'vertical',
+      (ref: Ref, index: number) => `<button data-id="${ref.id}">${index + 1}</button>`,
+      (value: string) => value
+    );
+    const dom = new JSDOM(`<main>${html}</main>`);
+    expect(dom.window.document.querySelectorAll('.tab-layout-group')).toHaveLength(0);
+    expect([...dom.window.document.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+      '1',
+      '2',
+      '3',
+    ]);
+  });
+
   it('makes ordered identities and every structural input part of the cache key', () => {
     const h = loadHelper();
     const base = {

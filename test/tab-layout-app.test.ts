@@ -3,7 +3,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
 let CodemanApp: { prototype: Record<string, any> };
@@ -20,6 +20,14 @@ beforeAll(() => {
     read('app.js') +
     '\n' +
     read('webview-tabs.js') +
+    '\n' +
+    read('mobile-overview.js') +
+    '\n' +
+    read('home-sessions.js') +
+    '\n' +
+    read('panels-ui.js') +
+    '\n' +
+    read('session-lineage.js') +
     '\n;globalThis.__TabLayoutCodemanApp = CodemanApp;';
   const previousInterval = window.setInterval;
   const previousAnimationFrame = window.requestAnimationFrame;
@@ -95,6 +103,8 @@ beforeEach(() => {
   document.body.innerHTML = '';
 });
 
+afterEach(() => vi.useRealTimers());
+
 describe('COD-306 CodemanApp integration', () => {
   it('defers the rail render scheduler while first layout paint is pending', () => {
     const app = makeApp();
@@ -142,6 +152,121 @@ describe('COD-306 CodemanApp integration', () => {
     expect(
       [...document.querySelectorAll<HTMLElement>('.session-tab')].map((tab) => tab.dataset.webviewId || tab.dataset.id)
     ).toEqual(['s2', 'w1', 's1', 's3']);
+  });
+
+  it('renders phone mode flat with grouped-then-ungrouped order', () => {
+    const app = makeApp();
+    document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
+    app._fullRenderSessionTabs();
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(0);
+    expect(
+      [...document.querySelectorAll<HTMLElement>('.session-tab')].map((tab) => tab.dataset.webviewId || tab.dataset.id)
+    ).toEqual(['s2', 'w1', 's1', 's3']);
+  });
+
+  it('paints vertical failure as read-only legacy flat, schedules retry, then adopts success', async () => {
+    vi.useFakeTimers();
+    const app = makeApp();
+    app._fullRenderSessionTabs();
+    let attempt = 0;
+    app._fetchTabLayout = vi.fn(async () => {
+      attempt++;
+      if (attempt === 1) throw new Error('offline');
+      return { ...layout, version: 12 };
+    });
+    app._tabLayoutCoordinator = null;
+
+    await app._loadTabLayout();
+    expect(app.tabLayout).toBeNull();
+    expect(app.tabLayoutReadOnly).toBe(true);
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(0);
+    const fallbackTabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(fallbackTabs.map((tab) => tab.dataset.webviewId || tab.dataset.id)).toEqual(['s1', 's2', 's3', 'w1']);
+    expect(fallbackTabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2', '3', '4']);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(app._fetchTabLayout).toHaveBeenCalledTimes(2);
+    expect(app.tabLayoutVersion).toBe(12);
+    expect(app.tabLayoutReadOnly).toBe(false);
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(2);
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('refreshes visible home/mobile consumers when an adopted projection reorders sessions', () => {
+    const app = makeApp();
+    const home = document.createElement('div');
+    home.id = 'homeSessions';
+    home.hidden = false;
+    const mobile = document.createElement('div');
+    mobile.id = 'mobileOverview';
+    mobile.classList.add('visible');
+    document.body.append(home, mobile);
+    app.renderHomeSessions = vi.fn();
+    app.renderMobileOverview = vi.fn();
+    app._debouncedCall = (_key: string, fn: () => void) => fn();
+    app._applyTabLayout({
+      ...layout,
+      version: 9,
+      groups: [{ id: 'reordered', name: 'Reordered', refs: [{ kind: 'session', id: 's3' }] }],
+      ungrouped: [
+        { kind: 'session', id: 's1' },
+        { kind: 'session', id: 's2' },
+      ],
+    });
+    expect(app.sessionOrder).toEqual(['s3', 's1', 's2']);
+    expect(app.renderHomeSessions).toHaveBeenCalledOnce();
+    expect(app.renderMobileOverview).toHaveBeenCalledOnce();
+  });
+
+  it('feeds complete projected session order to palette, switching, cleanup, and lineage consumers', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._refreshTabProjection();
+    expect(app.sessionOrder).toEqual(['s2', 's1', 's3']);
+
+    app.cases = [];
+    app._buildCommandPaletteNewSessionItem = () => ({ id: 'new', type: 'new-session' });
+    expect(
+      app
+        .buildCommandPaletteItems()
+        .filter((item: any) => item.type === 'session')
+        .map((item: any) => item.sessionId)
+    ).toEqual(['s2', 's1', 's3']);
+
+    app.selectSession = vi.fn();
+    app.nextSession();
+    expect(app.selectSession).toHaveBeenCalledWith('s1');
+
+    app.sessions.get('s1').parentSessionId = 's2';
+    app.sessions.get('s3').parentSessionId = 's2';
+    expect(app._collectLineageEdges().map((edge: any) => edge.childId)).toEqual(['s1', 's3']);
+
+    app.terminalBuffers = new Map();
+    app.terminalBufferCache = new Map();
+    app.projectInsights = new Map();
+    app.pendingHooks = new Map();
+    app.tabAlerts = new Map();
+    app.attachmentHistoryCounts = new Map();
+    app.terminalLoadStates = new Map();
+    app.idleTimers = new Map();
+    app.ralphStates = new Map();
+    app.ralphClosedSessions = new Set();
+    app.respawnStatus = {};
+    app.respawnTimers = {};
+    app.respawnCountdownTimers = {};
+    app.respawnActionLogs = {};
+    app._clearHistoryTruncation = () => {};
+    app._persistReliableState = () => {};
+    app.clearCountdownTimers = () => {};
+    app.closeSessionLogViewerWindows = () => {};
+    app.closeSessionImagePopups = () => {};
+    app.closeSessionAttachmentCards = () => {};
+    app.closeSessionSubagentWindows = () => {};
+    app.saveSessionOrder = () => {};
+    app._cleanupSessionData('s1');
+    expect(app.sessionOrder).toEqual(['s2', 's3']);
   });
 
   it('sequences concurrent app loads and routes layout-change invalidation through refetch', async () => {

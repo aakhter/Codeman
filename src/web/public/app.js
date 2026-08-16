@@ -4868,9 +4868,9 @@ class CodemanApp {
   }
 
   _applyTabLayoutFallback() {
-    // A transient refetch failure must not replace a layout that is already on
-    // screen. Initial failure paints the safe legacy-flat, read-only fallback.
-    if (this.tabLayout) return;
+    // Any failed owner-layout read makes the authoritative ordering unknown.
+    // Paint the safe legacy-flat projection read-only until a retry succeeds.
+    this.tabLayout = null;
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;
     this._tabLayoutFirstPaintPending = false;
@@ -5496,6 +5496,8 @@ class CodemanApp {
     // Newly created tabs animate in; a re-render mid-cascade resumes them rather
     // than restarting, since this rebuild just destroyed the animating elements.
     this._applyTabEntrances?.();
+    this._refreshMobileOverviewIfVisible?.();
+    this._refreshHomeSessionsIfVisible?.();
   }
 
   // Set up arrow key navigation for session tabs (accessibility)

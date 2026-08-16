@@ -160,8 +160,10 @@
 
   function renderProjection(projection, orientation, renderRef, escapeHtml) {
     const refs = Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [];
-    if (orientation !== 'vertical') return refs.map((ref, index) => renderRef(ref, index)).join('');
     const sections = Array.isArray(projection?.sections) ? projection.sections : [];
+    if (orientation !== 'vertical' || sections.length === 0) {
+      return refs.map((ref, index) => renderRef(ref, index)).join('');
+    }
     let index = 0;
     return sections
       .map((section) => {
