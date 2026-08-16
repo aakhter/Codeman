@@ -59,6 +59,8 @@ import { RespawnController, RespawnConfig } from '../respawn-controller.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import { createMultiplexer } from '../mux-factory.js';
 import { getStore } from '../state-store.js';
+import { TabLayoutService } from '../tab-layout-service.js';
+import { readWebviews } from '../webview-store.js';
 import { extractCompletionPhrase } from '../ralph-config.js';
 import { fileStreamManager } from '../file-stream-manager.js';
 import {
@@ -89,6 +91,7 @@ import { getLifecycleLog } from '../session-lifecycle-log.js';
 import { PushSubscriptionStore } from '../push-store.js';
 import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
+import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
 import {
   type SessionListenerRefs,
   createSessionListeners,
@@ -207,6 +210,7 @@ import {
   registerWsRoutes,
   registerVoiceRoutes,
   registerWebviewRoutes,
+  registerTabLayoutRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { CronService } from '../cron/cron-service.js';
@@ -284,6 +288,7 @@ export class WebServer extends EventEmitter {
   private cronService!: CronService;
   private sse: SseStreamManager;
   private store = getStore();
+  private tabLayouts!: TabLayoutService;
   private host: string;
   private port: number;
   private https: boolean;
@@ -387,6 +392,12 @@ export class WebServer extends EventEmitter {
       },
       this.cleanup
     );
+    this.tabLayouts = new TabLayoutService({
+      store: this.store,
+      sessions: this.sessions,
+      readWebviews: () => readWebviews(getDataDir()),
+      broadcast: this.broadcast.bind(this),
+    });
 
     // Approvals Inbox → SSE. The singleton has no server reference; these
     // callbacks are its only way out. Broadcasts carry sessionId, so the
@@ -642,9 +653,16 @@ export class WebServer extends EventEmitter {
     return {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
-      addSession: (session: Session) => {
+      addSession: async (session: Session) => {
         this.sessions.set(session.id, session);
+        try {
+          await this.tabLayouts.sessionCreated(session.owner ?? '@single');
+        } catch (error) {
+          this.sessions.delete(session.id);
+          throw error;
+        }
       },
+      tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),
       setupSessionListeners: this.setupSessionListeners.bind(this),
       persistSessionState: this.persistSessionState.bind(this),
@@ -1028,6 +1046,7 @@ export class WebServer extends EventEmitter {
     registerAdminRoutes(this.app, ctx);
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx);
+    registerTabLayoutRoutes(this.app, ctx);
 
     // Cron: build the service from the same context, recompute
     // due times for any persisted jobs, then expose it to its routes.
@@ -1338,7 +1357,10 @@ export class WebServer extends EventEmitter {
       // Only remove from state.json if we're also killing the mux session.
       // When killMux=false (server shutdown), preserve state for recovery.
       if (killMux) {
-        this.store.demoteOrRemoveSession(sessionId);
+        const result = this.store.demoteOrRemoveSession(sessionId);
+        if (result === 'removed') {
+          await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);
+        }
       }
     }
 
@@ -2065,13 +2087,14 @@ export class WebServer extends EventEmitter {
    * Called on startup and can be called via API endpoint.
    * @returns Number of sessions cleaned up
    */
-  private cleanupStaleSessions(): number {
+  private async cleanupStaleSessions(): Promise<number> {
     const activeSessionIds = new Set(this.sessions.keys());
     const result = this.store.cleanupStaleSessions(activeSessionIds);
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {
       lifecycleLog.log({ event: 'stale_cleaned', sessionId: s.id, name: s.name });
     }
+    await this.tabLayouts.sessionsRemoved(result.cleaned);
     return result.count;
   }
 
@@ -2205,6 +2228,11 @@ export class WebServer extends EventEmitter {
       event === SseEvent.SessionStatusTelemetry
     ) {
       return { adminOnly: true };
+    }
+    // Layout payloads contain only trusted routing metadata. Route them to that
+    // exact owner plus admins, never by resolving a client-supplied ref.
+    if (event.startsWith('tab:')) {
+      return deriveTabLayoutSseHint(data);
     }
     // Session-scoped families: resolve the owner from the payload's session id.
     const SESSION_PREFIXES = [
@@ -2456,6 +2484,7 @@ export class WebServer extends EventEmitter {
     // CRITICAL: Skip in test mode to prevent tests from picking up user sessions
     if (!this.testMode) {
       await this.restoreMuxSessions();
+      this.tabLayouts.markRestorationComplete();
 
       // Instance-scoped reaper: after restore, `docker rm -f` managed containers of
       // THIS instance whose case is gone from docker-cases.json (best-effort, never
@@ -2473,7 +2502,8 @@ export class WebServer extends EventEmitter {
     }
 
     // Clean up stale sessions from state file that don't have active mux sessions
-    this.cleanupStaleSessions();
+    await this.cleanupStaleSessions();
+    await this.tabLayouts.reconcileAfterRestoration();
 
     // Bound disk use under heavy paste-image traffic: delete `paste-*` files
     // older than 7 days from each live session's .claude-images/ hourly.

@@ -545,16 +545,16 @@ export class StateStore {
    */
   cleanupStaleSessions(activeSessionIds: Set<string>): {
     count: number;
-    cleaned: Array<{ id: string; name?: string }>;
+    cleaned: Array<{ id: string; name?: string; owner?: string }>;
   } {
     const allSessionIds = Object.keys(this.state.sessions);
-    const cleaned: Array<{ id: string; name?: string }> = [];
+    const cleaned: Array<{ id: string; name?: string; owner?: string }> = [];
 
     for (const sessionId of allSessionIds) {
       if (!activeSessionIds.has(sessionId)) {
         if (this.state.sessions[sessionId]?.pinned === true) continue; // COD-142: pinned records persist even with no live session
         const name = this.state.sessions[sessionId]?.name;
-        cleaned.push({ id: sessionId, name });
+        cleaned.push({ id: sessionId, name, owner: this.state.sessions[sessionId]?.owner });
         delete this.state.sessions[sessionId];
         this.cachedSessionJsons.delete(sessionId);
         this.dirtySessions.delete(sessionId);

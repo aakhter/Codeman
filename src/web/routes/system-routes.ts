@@ -50,7 +50,7 @@ import {
 import { SseEvent } from '../sse-events.js';
 import { getInstallInfo, checkForUpdate, startUpdate, getUpdateStatusForApi } from '../self-update.js';
 import { getRepositoryStatus } from '../repo-status.js';
-import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
+import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort, TabLayoutPort } from '../ports/index.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
 import { AUTH_SESSION_TTL_MS } from '../../config/auth-config.js';
@@ -133,7 +133,7 @@ export function resolveSpanUrl(hostHeader: string | undefined, fallbackPort = '3
 
 export function registerSystemRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort
 ): void {
   const windowStatesPath = dataPath('subagent-window-states.json');
   const parentMapPath = dataPath('subagent-parents.json');
@@ -488,6 +488,7 @@ export function registerSystemRoutes(
     for (const s of result.cleaned) {
       lifecycleLog.log({ event: 'stale_cleaned', sessionId: s.id, name: s.name });
     }
+    await ctx.tabLayouts.sessionsRemoved(result.cleaned);
     return { cleanedSessions: result.count };
   });
 
