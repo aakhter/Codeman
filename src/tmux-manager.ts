@@ -93,6 +93,7 @@ import type {
   CommandDeliveryResult,
   PaneCaptureOptions,
 } from './mux-interface.js';
+import type { CodexProviderEnvironment } from './codex-provider-identity.js';
 import {
   buildSshConnectionArgs,
   buildSshConnectionArgv,
@@ -365,6 +366,41 @@ export function resolveActivePaneTarget(output: string): string | null {
     if (paneId && active === '1') return paneId;
   }
   return null;
+}
+
+const CODEX_PROVIDER_ENVIRONMENT_KEYS = ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const;
+
+/** Parse `tmux show-environment` through the closed Codex provider allowlist. */
+export function parseTmuxCodexProviderEnvironment(output: string): CodexProviderEnvironment {
+  const environment: CodexProviderEnvironment = {};
+  for (const line of output.split('\n')) {
+    const equals = line.indexOf('=');
+    if (equals <= 0) continue;
+    const key = line.slice(0, equals);
+    const value = line.slice(equals + 1);
+    if (!value || !CODEX_PROVIDER_ENVIRONMENT_KEYS.includes(key as (typeof CODEX_PROVIDER_ENVIRONMENT_KEYS)[number])) {
+      continue;
+    }
+    environment[key as (typeof CODEX_PROVIDER_ENVIRONMENT_KEYS)[number]] = value;
+  }
+  return environment;
+}
+
+export type TmuxEnvironmentExecutor = (file: string, args: string[]) => Promise<{ stdout: string }>;
+
+export async function readTmuxCodexProviderEnvironment(
+  socket: string,
+  muxName: string,
+  tracked: boolean,
+  execute: TmuxEnvironmentExecutor
+): Promise<CodexProviderEnvironment | null> {
+  if (!tracked || !SAFE_TMUX_SOCKET_PATTERN.test(socket) || !isValidMuxName(muxName)) return null;
+  try {
+    const { stdout } = await execute('tmux', ['-L', socket, 'show-environment', '-t', muxName]);
+    return parseTmuxCodexProviderEnvironment(stdout);
+  } catch {
+    return null;
+  }
 }
 
 type GraphemeSegmenter = {
@@ -3079,6 +3115,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     return { alive, dead, discovered };
+  }
+
+  async getCodexProviderEnvironment(muxName: string): Promise<CodexProviderEnvironment | null> {
+    if (IS_TEST_MODE) return null;
+    const tracked = [...this.sessions.values()].some((session) => session.muxName === muxName);
+    return readTmuxCodexProviderEnvironment(this.tmuxSocket, muxName, tracked, async (file, args) => {
+      const { stdout } = await execFileAsync(file, args, {
+        encoding: 'utf8',
+        timeout: EXEC_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+      return { stdout };
+    });
   }
 
   async getProcessStats(sessionId: string): Promise<ProcessStats | null> {

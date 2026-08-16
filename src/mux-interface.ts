@@ -22,6 +22,7 @@ import type {
   SessionRemote,
   SessionDocker,
 } from './types.js';
+import type { CodexProviderEnvironment } from './codex-provider-identity.js';
 
 export type CommandDeliveryStage = 'text' | 'enter';
 
@@ -211,6 +212,12 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /** Get process stats for a single session */
   getProcessStats(sessionId: string): Promise<ProcessStats | null>;
+
+  /**
+   * Read the closed Codex provider environment from one surviving local tmux session.
+   * `null` means unreadable; `{}` means it was read successfully and uses ambient authentication.
+   */
+  getCodexProviderEnvironment?(muxName: string): Promise<CodexProviderEnvironment | null>;
 
   // ========== Input ==========
 
