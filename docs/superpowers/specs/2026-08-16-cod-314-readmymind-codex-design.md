@@ -6,6 +6,11 @@ Approved direction: provider lanes are strict. Claude sessions use Claude for pr
 requested Claude CLI design review could not run because the enterprise account had reached its session limit, so the user
 authorized Codex to proceed with an internal architecture and security review before this specification was written.
 
+Implementation review refined the design in four places: Read My Mind uses strict owned-rollout resolution rather than the
+response viewer's legacy cwd fallback; equal history ties fail closed; competitor scoping is by canonical same-home identity;
+and recovery persists private, versioned provenance with no secrets. These are design constraints, not a claim that a
+rollout can be recovered in every circumstance.
+
 ## Problem
 
 Read My Mind is presented as a global opt-in feature, but its implementation deliberately shipped as Claude-only. The
@@ -61,9 +66,9 @@ The pre-document review found six constraints that shape the implementation:
    the case workspace.
 4. **`codex exec` should not create another conversation artifact.** Use `--ephemeral`; consume only the final response file,
    not progress JSONL or terminal rendering.
-5. **Rollout ownership is security-sensitive.** Read My Mind must call the existing `findActiveCodexConversation()` resolver
-   with the same history-pin, originator, resume-ID, and legacy-cwd precedence as the response viewer. It must not select the
-   newest rollout by path or modification time alone.
+5. **Rollout ownership is security-sensitive.** Read My Mind uses strict owned resolution: history-pin, originator, and
+   configured/native resume identity are eligible, but the response viewer's legacy cwd fallback is not. Equal history ties
+   and any ambiguity fail closed. It must not select the newest rollout by path or modification time alone.
 6. **Parser duplication will drift.** The response viewer's Codex message parsing moves to a shared pure module and retains
    its existing mixed-version deduplication and injected-context filtering. Read My Mind consumes that module's bounded
    signal view.
@@ -102,8 +107,8 @@ allowlisted detail keys (`file_path`, `command`, `pattern`, `path`, `url`, `quer
 output or treat it as user intent. Image-only inputs may remain visible in the response viewer but are not added to the
 prompt-style history used by Read My Mind.
 
-The response viewer continues to read the complete rollout because it renders expandable history. Read My Mind tail-reads a
-bounded region, currently 256 KiB, and drops the first partial line when the read begins mid-file. The active rollout path is
+The response viewer continues to read the complete rollout because it renders expandable history. Read My Mind tail-reads
+an exact bounded 256 KiB region and drops the first partial line when the read begins mid-file. The active rollout path is
 resolved before this read; the collector never scans arbitrary rollout files itself.
 
 ### 3. Codex context assembly
@@ -114,8 +119,9 @@ For a Codex session, the route:
 
 1. Derives the provider environment through a new narrow `Session` accessor that returns only the Codex child keys needed by
    server-side provider operations. The values never enter `SessionState`, SSE, response bodies, or logs.
-2. Resolves the active rollout with `findActiveCodexConversation()`, using the session's effective `CODEX_HOME`, session ID,
-   working directory, configured resume ID, last submit time, and competing Codex submit times.
+2. Resolves the active rollout with strict owned resolution, using the session's effective `CODEX_HOME`, session ID,
+   configured resume ID, native resume ID, last submit time, and competing Codex submit times. Competitors are considered
+   only when their homes have the same canonical identity; a same working directory is not ownership proof.
 3. Reads the bounded Read My Mind signal projection from that rollout.
 4. Merges the rollout's recent textual user prompts with the case intent profile's existing prompt entries, orders them by
    timestamp, and retains the newest context-budget allowance. Repeated user prompts from different sources or turns remain
@@ -148,7 +154,8 @@ type ReadMyMindProvider =
 ```
 
 The route constructs this value from the already-authorized session. Request bodies cannot choose the provider, model, or
-environment.
+environment. Session overrides supply session-scoped Codex identity; `OPENAI_API_KEY` remains a process-level fallback and
+is never made public session state.
 
 The Claude branch remains behaviorally unchanged: it uses the existing validated model, temporary prompt/output files,
 detached tmux process, timeout, and cleanup path.
@@ -209,11 +216,12 @@ parity that the implementation cannot provide.
 
 The predictor builds a minimal child environment rather than forwarding the server's entire environment. It includes the
 augmented executable path, the small set of operating-system values required for the CLI to start, and the effective Codex
-provider identity. A narrow Session method returns `CODEX_HOME`, `OPENAI_API_KEY`, and `CODEX_API_KEY` if configured; global
-values for those keys remain the fallback. It does not return arbitrary environment overrides. The operating-system values
-are enumerated, not inherited wholesale, and `shell_environment_policy.inherit=none` prevents any model-launched subprocess
-from inheriting even that launcher environment. Tests prove the method is not serialized by `toState()` or persisted through
-the existing safe persistence accessor.
+provider identity. A narrow Session method returns session overrides for `CODEX_HOME`, `OPENAI_API_KEY`, and `CODEX_API_KEY`;
+process-level values remain the fallback. It does not return arbitrary environment overrides. The operating-system values are
+enumerated, not inherited wholesale, and `shell_environment_policy.inherit=none` prevents any model-launched subprocess from
+inheriting even that launcher environment. Private versioned provenance preserves only restorable `CODEX_HOME` and
+session-key state, never keys; absent, unknown, or lost-key restored provenance fails closed. Tests prove these values are
+not serialized by `toState()` or exposed through API state.
 
 ### 6. Codex CLI compatibility
 
@@ -251,8 +259,9 @@ the current predictor. Provider-specific copy is actionable but safe:
 | Provider exceeds 90 seconds                  | 502 timeout message                |
 | Final output is empty or violates the schema | 502 prediction-contract message    |
 
-The UI continues to render prediction text only through `value`/`textContent`. Send and Insert remain the only routes from a
-suggestion to the active terminal, and both require an explicit human click.
+The UI continues to render prediction text only through `value`/`textContent`. It locally warns and refuses to open for
+unsupported modes before the request. Send and Insert remain the only routes from a suggestion to the active terminal, and
+both require an explicit human click.
 
 ## Security invariants
 

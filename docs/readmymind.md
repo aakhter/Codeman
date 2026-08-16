@@ -1,17 +1,19 @@
 # Read My Mind
 
-Codeman's per-case memory of what you are trying to accomplish, and the 🧠 button that turns it into a predicted next prompt. Each case gets an **intent profile**: a freeform `goals` text (written by you or your agent) plus the prompts you actually submitted, captured automatically while the feature is on. Pressing 🧠 feeds that profile and the live session signals to a one-shot model call and shows the predicted prompt for you to send, edit, or rethink. Nothing is ever sent to a session automatically. Design doc: [`readmymind-plan.md`](readmymind-plan.md).
+Codeman's per-case memory of what you are trying to accomplish, and the 🧠 button that turns it into a predicted next prompt. Each case has an **intent profile**: freeform `goals` written by you or your agent, plus the Claude prompts captured while the feature is on. Pressing 🧠 asks a short-lived predictor process for one to three suggestions; you can send, insert, edit, rethink, or dismiss them. Nothing is sent to a session automatically. Design and history: [`readmymind-plan.md`](readmymind-plan.md).
 
-## What it does
+## What it supports
 
-- Captures the prompts you submit in Claude sessions into a per-case history (50 most recent, bounded).
-- Lets you (or your agent) record explicit goals per case.
-- Predicts your next prompt on demand (the 🧠 header button, or `POST .../readmymind` for agents): the suggestion arrives in a modal with Send / Insert / Rethink / Dismiss.
-- Exposes the profile over the HTTP API, and to agents through the `codeman` skill, so an agent can ground its work in what you actually want instead of guessing from the last screenful.
+Read My Mind supports **Claude sessions** and **local Codex sessions** only. Provider lanes are strict:
+
+- A Claude session runs one-shot `claude -p` with Claude context and the Claude-only `readMyMindModel` setting.
+- A local Codex session runs a separate ephemeral, noninteractive `codex exec` child using that session's provider identity and conversation rollout. It is a short-lived predictor process, not a new interactive Codeman tab or conversation.
+
+There is no cross-provider fallback: a failed Codex prediction never starts Claude, and a failed Claude prediction never starts Codex. Remote-SSH and Docker Codex sessions, plus Shell, OpenCode, Gemini, Antigravity, and Pi, are unsupported. The UI warns before opening Read My Mind for an unsupported session; the global setting being on does not make every mode eligible. Claude's existing scope is unchanged.
 
 ## Turning it on
 
-App Settings → Header & Panels → Cross-session features → **Read My Mind** (synced setting `readMyMindEnabled`, default **OFF**). It gates everything: capture, the header button, and nothing shows anywhere while it is off. The API equivalent:
+App Settings → Header & Panels → Cross-session features → **Read My Mind** (synced setting `readMyMindEnabled`, default **OFF**). It gates capture and the desktop/phone controls. The API equivalent:
 
 ```bash
 curl -sk -X PUT https://localhost:3000/api/settings \
@@ -19,54 +21,54 @@ curl -sk -X PUT https://localhost:3000/api/settings \
   -d '{"readMyMindEnabled": true}'
 ```
 
-Add `-u user:password` if your install has `CODEMAN_PASSWORD` set, and drop `-k`/use `http://` for a plain-HTTP dev server. Turning it OFF stops capture immediately; existing profiles stay until you delete them (below).
+Add `-u user:password` if your install has `CODEMAN_PASSWORD` set, and drop `-k`/use `http://` for a plain-HTTP dev server. Turning it OFF stops Claude prompt capture immediately; existing profiles stay until you delete them.
 
 ## The 🧠 button
 
-On a Claude session, press the brain button in the header (desktop) or the 🧠 key on the keyboard accessory bar (phones and tablets; it appears when the setting is on). Codeman assembles everything it already knows: your goals, your recent prompts (with your voice: length, tone, shorthand), the tail of the last assistant reply, recent tool activity, git state (branch, dirty files, pending changesets), how long you have been away and what happened meanwhile, sibling sessions in the same case, and any dialog the session is currently waiting on. A one-shot model call (opus by default, `readMyMindModel` to override) turns that into 1-3 suggestions; the top one lands in an editable field with its rationale, and the others render as tappable alternate rows: tap one to swap it into the field (edits you already made are kept on the row you leave).
+On a supported session, press the brain button in the desktop header or the 🧠 key on the phone/tablet keyboard accessory bar. Codeman combines your goals and recent prompts with the session's last assistant reply, tool activity, workspace signals, away context, sibling sessions, and any pending dialog. The first suggestion opens in an editable field; alternate suggestions are tappable rows.
 
-- **Send** submits it to the session (with Enter).
-- **Insert** drops it on the CLI composer *without* Enter, so you can edit it in the terminal before sending.
-- **Rethink** re-runs with everything shown (the field and the alternates) recorded as rejected. An optional steer note below the suggestions ("no, I meant the mobile bug") rides along as your own words, the highest-authority signal the predictor gets; it stays in the field across re-runs until you clear it or reopen the modal.
-- **Dismiss** closes; nothing happens.
+- **Send** submits it with Enter.
+- **Insert** puts it on the CLI composer without Enter so you can edit it first.
+- **Rethink** re-runs with the shown suggestions treated as rejected. Its optional steer note is your own highest-authority signal.
+- **Dismiss** closes the dialog.
 
-A prediction takes 5-90 seconds and costs real tokens; one runs per session at a time. If the session is sitting on a permission/question dialog, the suggestion is usually an answer to that dialog: that is intentional.
+A prediction takes 5–90 seconds and costs real tokens; only one runs per session at a time. A suggestion is always a proposal. Send and Insert require your explicit click, including when an agent called the API.
 
-**Security note**: the prediction reads observable content (assistant output, tool logs, git output) which a hostile repo could try to steer. The predictor is told user-stated intent outranks anything observed, and, more importantly, a suggestion is only ever *proposed*: your click is the boundary. No auto-send path exists, including for agents.
+## Context and capture
 
-## What gets captured, exactly
+Claude retains the original context path: its intent profile, Claude transcript tail, and transcript tool signals. Claude capture reads submitted user turns from the transcript, not keystrokes or terminal output. It skips tool results, local slash-command echoes, wrappers, interrupt markers, entries shorter than three characters, and consecutive duplicates; stored prompts are single-line, capped at 500 characters, with the newest 50 retained. Capture needs Claude hooks to reach the server, so a loopback Docker case needs `CODEMAN_DOCKER_BRIDGE_HOOKS=1` and remote-SSH Claude cases do not capture.
 
-Capture reads the Claude session transcript, not your keystrokes: when a user turn lands in the transcript, its text is folded into the case's profile. Filters applied on the way in:
+For local Codex, Read My Mind resolves only the active rollout demonstrably owned by the requesting session, then reads recent textual prompts, the last assistant response, and recent tool summaries on demand. It uses neither the newest same-directory rollout nor a foreign pane's rollout; ambiguity, missing identity, and unreadable rollout data fail closed rather than borrowing context. Rollout prompts are prediction inputs only and are **not** written into `intents.json`. Durable Codex prompt capture and proactive prediction remain deferred.
 
-- **Claude-mode sessions only.** Shell, OpenCode, Codex, Gemini, Antigravity, and Pi sessions are never captured (they have no transcript watcher).
-- Tool results, local slash-command echo (`/model` and friends), system wrappers, and interrupt markers are skipped.
-- Entries shorter than 3 characters are skipped (menu digits, Esc artifacts).
-- Consecutive duplicates collapse (auto-resume's "continue" spam counts once per run).
-- Each prompt is stored as one line, truncated to 500 characters; the history caps at 50 prompts FIFO.
+In both lanes, goals and user prompts outrank assistant text, tool logs, and workspace output, which are observations that could contain hostile instructions. The explicit human send/insert boundary is the final safeguard.
 
-Because the transcript path arrives via Claude Code hooks, capture needs hooks to reach the server, the same condition as hook-based idle detection. Docker cases against a loopback-only server need `CODEMAN_DOCKER_BRIDGE_HOOKS=1`; remote-SSH cases do not capture.
+## Provider identity, model, and recovery
 
-## What is never captured
+Codex prediction uses the session's effective Codex identity, so rollout discovery and the child stay in the same account/configuration lane. Private versioned recovery provenance retains only the restorable home and session-key state, never credentials. A restored legacy, unknown, or lost-key Codex session fails Read My Mind closed instead of silently switching accounts. Process-level provider credentials remain server-side and are not exposed through API responses or session state.
 
-- Anything while `readMyMindEnabled` is OFF (capture is not retroactive).
-- Terminal output, keystrokes, passwords typed into shells: only submitted Claude prompts are read.
-- Nothing leaves the machine beyond the model call you explicitly trigger, and profiles are never fed into `/api/search`.
+`readMyMindModel` is **Claude-only**. Codex uses the validated launch-time session model when one was configured; otherwise its child omits `--model` and uses the Codex CLI built-in default because user configuration is ignored. There is no Codex Read My Mind model setting. A later interactive Codex `/model` change is not currently observable by Codeman and is not mirrored into prediction.
 
-## Where it lives, and how to wipe it
+## Codex isolation and failure behavior
 
-Profiles live in `~/.codeman/intents.json`, written atomically at mode 0600 (captured prompts can contain secrets). The file is per Codeman instance. Keys derive from owner + the case's resolved working directory, so profiles survive `/clear`, respawn cycles, and session churn, and in multi-user mode two owners of the same directory get separate profiles.
+The local Codex child uses an ephemeral private working directory, not the case workspace. It ignores user configuration, rules, and global/project instructions; disables shell, web-search, and subagents; rejects approvals; uses a read-only command sandbox; and validates a schema-constrained final response again on the server. Its environment, output, and timeout are bounded, and private files are removed after success, error, or timeout. This does **not** claim that the CLI process itself is network-disabled.
 
-Forget one case: `DELETE /api/sessions/:id/intent` (below). Forget everything: stop the server and delete `~/.codeman/intents.json`.
+These required controls were tested with `codex-cli 0.147.0`. An older or incompatible CLI that rejects a required isolation option returns an update-required `502`; Codeman never retries with weaker controls. Other unavailable-CLI, authentication/configuration, timeout, empty-output, and invalid-contract failures return a safe `502` without prompt contents, provider values, host paths, or raw CLI diagnostics.
+
+## Where profiles live and how to wipe them
+
+Profiles live in `~/.codeman/intents.json`, atomically written at mode 0600 because captured prompts can contain secrets. The file is per Codeman instance. Keys derive from owner plus the case's resolved working directory, so profiles survive `/clear`, respawn cycles, and session churn; different owners have separate profiles.
+
+Forget one case with `DELETE /api/sessions/:id/intent`. To forget everything, stop the server and delete `~/.codeman/intents.json`.
 
 ## The API
 
-Four endpoints, session-scoped so ownership is enforced by the session itself (`/api/v1/` aliases work too; full spec in [`api-reference.md`](api-reference.md)):
+The four endpoints are session-scoped so ownership is enforced by the session (`/api/v1/` aliases work too; full contract in [`api-reference.md`](api-reference.md)):
 
 ```bash
 # Read the profile for a session's case
 curl -sk https://localhost:3000/api/sessions/$SID/intent | jq '.data.intent'
 
-# Record goals (REPLACES the text: read + merge if you want to append)
+# Record goals (REPLACES the text: read + merge to append)
 curl -sk -X PUT https://localhost:3000/api/sessions/$SID/intent \
   -H 'Content-Type: application/json' \
   -d '{"goals":"ship 1.17; then mobile polish"}'
@@ -74,35 +76,29 @@ curl -sk -X PUT https://localhost:3000/api/sessions/$SID/intent \
 # Forget the case
 curl -sk -X DELETE https://localhost:3000/api/sessions/$SID/intent
 
-# Predict the next prompt (claude-mode only; takes 5-90 s)
+# Predict for a Claude or local Codex session (5–90 s)
 curl -sk -X POST https://localhost:3000/api/sessions/$SID/readmymind \
   -H 'Content-Type: application/json' -d '{}' | jq '.data.suggestions'
 ```
 
-A case with nothing recorded answers an empty profile with `updatedAt: 0`; reads never persist anything. Goals cap at 8192 characters and the schema is strict, so unknown fields or over-long goals answer `400 INVALID_INPUT`. A session you do not own answers `404 NOT_FOUND`, indistinguishable from a nonexistent one. Predict answers `{ suggestions: [{ prompt, why, kind }], durationMs }` (`kind`: `continue` / `verify` / `redirect`), `409 CONFLICT` while one is already running, `400 INVALID_INPUT` on non-claude sessions, and `502 OPERATION_FAILED` when the model produced no usable JSON. The rethink flow passes `{"steer":"…","rejected":["…"]}`.
+The prediction body can carry only rethink state: `{"steer":"…","rejected":["…"]}`. It cannot choose a provider, model, environment, or rollout. The response remains `{ suggestions: [{ prompt, why, kind }], durationMs }`, where `kind` is `continue`, `verify`, or `redirect`. Unsupported modes return `400 INVALID_INPUT`, a concurrent request returns `409 CONFLICT`, and provider or output failures return `502 OPERATION_FAILED`.
 
-## For agents (the skill)
+## For agents
 
-The `codeman` agent skill documents the same verbs (SKILL.md §3 plus `reference/endpoints.md`), with the ground rules: read the profile to understand what the user wants, record goals the user actually stated, merge instead of blind-writing (PUT replaces), never delete a profile unprompted, and never send a predicted suggestion into a session unless the user asked. It is the user's memory, not the agent's.
-
-## What comes next
-
-Explicitly later: proactive predict-on-idle, auto-compaction of the prompt history into goals, non-Claude capture. See the phases section of [`readmymind-plan.md`](readmymind-plan.md).
+The `codeman` agent skill documents the same verbs. Agents should read the profile to understand user intent, record only goals the user actually stated, merge before PUT because it replaces, never delete a profile unprompted, and never send a suggestion unless the user explicitly asks. It is the user's memory, not the agent's.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
-| ------- | ----------- |
-| No 🧠 button in the header | `readMyMindEnabled` is OFF (App Settings → Header & Panels → Cross-session features), you are on a phone (there it is a key on the keyboard accessory bar instead, visible while typing), or the active session is not claude-mode |
-| Prediction feels generic | The profile is thin: record goals (PUT or ask your agent to), and let capture accumulate a few real prompts first |
-| "A prediction is already running" (409) | One per session at a time; wait for the current one (up to 90 s) |
-| Prediction fails (502) | The model returned no usable JSON, or the CLI could not start; retry. Check `readMyMindModel` if you overrode it |
-| Profile stays empty although I am prompting | `readMyMindEnabled` was OFF at the time (capture is not retroactive), the session is not claude-mode, or hooks are not reaching the server (Docker case on a loopback bind without `CODEMAN_DOCKER_BRIDGE_HOOKS=1`, or a remote-SSH case) |
-| Short answers I typed are missing | Entries under 3 characters are filtered by design (menu digits, Esc artifacts) |
-| My goals text vanished after an agent wrote to it | PUT replaces the whole text; the skill tells agents to read + merge, but a blind write wins. Re-state the goals; consider phrasing them in the session so capture keeps the evidence |
-| Two profiles for what I think is one case | Different owners in multi-user mode, or genuinely different directories; paths are realpath-resolved, so symlink spellings converge but distinct checkouts do not |
-| `400 INVALID_INPUT` on PUT | Goals over 8192 chars, or an extra field in the body (strict schema) |
+| Symptom                                          | Cause / fix                                                                                                                                                                                              |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No 🧠 control, or an unsupported-session warning | Enable `readMyMindEnabled`; only Claude and local Codex are supported. Remote/Docker Codex and the other modes cannot predict.                                                                           |
+| Prediction feels generic                         | Record goals and let Claude capture build history; a new Codex session may not yet have an owned rollout. Read My Mind will not borrow a similar-looking rollout.                                        |
+| `409 CONFLICT`                                   | One prediction per session is running; wait up to 90 seconds.                                                                                                                                            |
+| Codex asks to update                             | Its CLI rejected a required isolation control. Update Codex; Codeman will not weaken the invocation.                                                                                                     |
+| Codex `502`                                      | Codex may be unavailable, unauthenticated, misconfigured, timed out, or have returned an invalid response. Restart or recreate restored legacy/lost-key sessions rather than expecting account fallback. |
+| Claude profile stays empty                       | Capture was off, the session is not Claude, or Claude hooks cannot reach the server. Capture is not retroactive.                                                                                         |
+| Goals disappeared after an agent write           | PUT replaces the whole text. Re-state them and ask the agent to read and merge first.                                                                                                                    |
 
 ## Where the code lives
 
-`src/intent-store.ts` (store + pure helpers, singleton), the `transcript:user_prompt` event in `src/transcript-watcher.ts`, capture wiring in `src/web/server.ts` (`captureIntentPrompt`), context assembly in `src/readmymind-context.ts` (pure) + `src/readmymind-collectors.ts` (transcript tail + git IO), the predictor in `src/readmymind-predictor.ts`, routes in `src/web/routes/readmymind-routes.ts`, schemas in `src/web/schemas.ts`, frontend in `src/web/public/readmymind-ui.js`. Tests: `test/intent-store.test.ts`, `test/readmymind-context.test.ts`, `test/readmymind-collectors.test.ts`, `test/readmymind-predictor.test.ts`, `test/routes/readmymind-routes.test.ts`, and the capture cases in `test/transcript-watcher.test.ts`.
+`src/intent-store.ts` stores profiles; `src/transcript-watcher.ts` captures Claude prompts; `src/readmymind-context.ts` assembles context; `src/readmymind-collectors.ts` reads Claude signals; `src/codex-rollout-reader.ts` reads owned Codex rollout signals; `src/checkpoint-conversation-identity.ts` resolves rollout ownership; `src/readmymind-predictor.ts` dispatches the provider child; `src/web/routes/readmymind-routes.ts` owns the API policy; and `src/web/public/readmymind-ui.js` owns the UI.
