@@ -81,6 +81,38 @@ describe('normalizeOrMigrateOwnerTabLayout', () => {
     ]);
   });
 
+  it('treats an ownerless live record as authoritative single-user ownership', () => {
+    const result = normalizeOrMigrateOwnerTabLayout(
+      baseInput({
+        persistedSessions: [{ id: 'moved', owner: 'alice', createdAt: 1 }],
+        liveSessions: [{ id: 'moved', createdAt: 2 }],
+      })
+    );
+
+    expect(result.layout.ungrouped).toEqual([{ kind: 'session', id: 'moved' }]);
+  });
+
+  it('treats an absent live parentSessionId as an authoritative root', () => {
+    const result = normalizeOrMigrateOwnerTabLayout(
+      baseInput({
+        sessionOrder: ['child', 'former-parent'],
+        persistedSessions: [
+          { id: 'child', parentSessionId: 'former-parent', createdAt: 1 },
+          { id: 'former-parent', createdAt: 2 },
+        ],
+        liveSessions: [
+          { id: 'child', createdAt: 1 },
+          { id: 'former-parent', createdAt: 2 },
+        ],
+      })
+    );
+
+    expect(result.layout.ungrouped).toEqual([
+      { kind: 'session', id: 'child' },
+      { kind: 'session', id: 'former-parent' },
+    ]);
+  });
+
   it('marks migrated children manual when their parent is live and same-owner', () => {
     const result = normalizeOrMigrateOwnerTabLayout(
       baseInput({
