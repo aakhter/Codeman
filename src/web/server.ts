@@ -2168,7 +2168,6 @@ export class WebServer extends EventEmitter {
       inputCjkForm: process.env.INPUT_CJK_FORM?.toUpperCase() === 'ON',
       codemanCli,
       planUsage: getLatestPlanUsage(), // last-known plan-usage telemetry, for the header chip on fresh load
-      sessionOrder: this.store.getSessionOrder(), // global tab order, synced across devices (COD-131)
     };
 
     this.cachedLightState = { data: result, timestamp: now };
