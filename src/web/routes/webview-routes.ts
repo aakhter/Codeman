@@ -53,7 +53,8 @@ import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { canAccessOwned, getAuthUser, ownerFor, parseBody } from '../route-helpers.js';
 import { WebviewCreateSchema, WebviewProbeSchema, WebviewUpdateSchema } from '../schemas.js';
 import { SseEvent } from '../sse-events.js';
-import type { EventPort } from '../ports/index.js';
+import type { EventPort, TabLayoutPort } from '../ports/index.js';
+import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import {
   buildDownstreamResponseHeaders,
   buildProxyCorsHeaders,
@@ -98,14 +99,14 @@ function withWebviews<T>(fn: (list: Webview[]) => Promise<T> | T): Promise<T> {
   return next;
 }
 
-export function registerWebviewRoutes(app: FastifyInstance, ctx: EventPort): void {
+export function registerWebviewRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort): void {
   registerCrudRoutes(app, ctx);
   registerProxyRoutes(app);
 }
 
 // ───────────────────────────── CRUD ─────────────────────────────
 
-function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
+function registerCrudRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort): void {
   app.get('/api/webviews', async (req) => {
     const user = getAuthUser(req);
     const all = await readWebviews(configDir());
@@ -146,6 +147,7 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
     }
 
     ctx.broadcast(SseEvent.WebviewChanged, { action: 'created', id: created.id });
+    await ctx.tabLayouts.webviewCreated(ownerLayoutKey(created.owner));
     return { success: true, data: created };
   });
 
@@ -187,9 +189,10 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
       const index = list.findIndex((w) => w.id === id);
       if (index === -1) return 'not-found' as const;
       if (!canAccessOwned(user, list[index].owner)) return 'forbidden' as const;
+      const owner = list[index].owner;
       list.splice(index, 1);
       await writeWebviews(configDir(), list);
-      return 'deleted' as const;
+      return { status: 'deleted' as const, owner };
     });
 
     if (result === 'not-found') {
@@ -202,6 +205,7 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
     webviewCapabilities.revokeWebview(id);
     socketCounts.delete(id);
     ctx.broadcast(SseEvent.WebviewChanged, { action: 'deleted', id });
+    await ctx.tabLayouts.webviewDeleted(ownerLayoutKey(result.owner), id);
     return { success: true, data: { id } };
   });
 

@@ -922,7 +922,7 @@ export function registerSessionRoutes(
       parentSessionId: resolveParentSessionId(ctx, req, body.parentSessionId, owner),
     });
 
-    ctx.addSession(session);
+    await ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
@@ -2635,7 +2635,7 @@ export function registerSessionRoutes(
       allowedTools: runClaudeModeConfig.allowedTools,
       owner: runOwner,
     });
-    ctx.addSession(session);
+    await ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
@@ -3049,7 +3049,7 @@ export function registerSessionRoutes(
       }
     }
 
-    ctx.addSession(session);
+    await ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);

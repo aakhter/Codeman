@@ -5,7 +5,7 @@
  * the developer's real ~/.codeman/webviews.json.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyWebsocket from '@fastify/websocket';
@@ -21,12 +21,16 @@ let app: FastifyInstance;
 let tmpDir: string;
 let savedDataDir: string | undefined;
 const broadcasts: Array<{ event: string; data: unknown }> = [];
+const webviewCreated = vi.fn(async () => {});
+const webviewDeleted = vi.fn(async () => {});
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codeman-webviews-'));
   savedDataDir = process.env.CODEMAN_DATA_DIR;
   process.env.CODEMAN_DATA_DIR = tmpDir;
   broadcasts.length = 0;
+  webviewCreated.mockClear();
+  webviewDeleted.mockClear();
 
   app = Fastify({ logger: false });
   await app.register(fastifyCookie);
@@ -34,6 +38,7 @@ beforeEach(async () => {
   await app.register(fastifyWebsocket);
   registerWebviewRoutes(app, {
     broadcast: (event: string, data: unknown) => broadcasts.push({ event, data }),
+    tabLayouts: { webviewCreated, webviewDeleted },
   } as never);
   installRouteErrorHandler(app);
   await app.ready();
