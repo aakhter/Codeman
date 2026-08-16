@@ -389,11 +389,39 @@ function mapRef(input: TabLayout, target: TabRef, transform: (ref: TabRef) => Ta
 }
 
 export function setManualPlacement(input: TabLayout, target: TabRef, manual: boolean): TabLayout {
-  return mapRef(input, target, (ref) => (manual ? { ...ref, placement: 'manual' } : { kind: ref.kind, id: ref.id }));
+  if (!manual) {
+    throw new TabLayoutValidationError('manual placement can only be cleared through followParent');
+  }
+  return mapRef(input, target, (ref) => ({ ...ref, placement: 'manual' }));
 }
 
 export function followParent(input: TabLayout, target: TabRef, metadata: readonly TabRefMetadata[]): TabLayout {
-  return normalizeTabLayout(setManualPlacement(input, target, false), metadata);
+  const normalized = normalizeTabLayout(input, metadata);
+  if (target.kind !== 'session') {
+    throw new TabLayoutValidationError('only a session ref can follow a parent');
+  }
+
+  const valid = validMetadata(metadata);
+  const targetMetadata = valid.find((item) => item.kind === 'session' && item.id === target.id);
+  if (!targetMetadata?.parentSessionId) {
+    throw new TabLayoutValidationError(`session has no owner-valid parent: ${target.id}`);
+  }
+  const parentMetadata = valid.find((item) => item.kind === 'session' && item.id === targetMetadata.parentSessionId);
+  if (!parentMetadata) {
+    throw new TabLayoutValidationError(`session parent is not owner-valid: ${targetMetadata.parentSessionId}`);
+  }
+
+  const storedKeys = new Set(locations(normalized).map((item) => keyOf(item.ref)));
+  if (!storedKeys.has(keyOf(target))) {
+    throw new TabLayoutValidationError(`unknown ref: ${target.kind}:${target.id}`);
+  }
+  const parentRef: TabRef = { kind: 'session', id: targetMetadata.parentSessionId };
+  if (!storedKeys.has(keyOf(parentRef))) {
+    throw new TabLayoutValidationError(`session parent is not represented: ${targetMetadata.parentSessionId}`);
+  }
+
+  const cleared = mapRef(normalized, target, (ref) => ({ kind: ref.kind, id: ref.id }));
+  return normalizeTabLayout(cleared, metadata);
 }
 
 function descendantKeys(root: TabRef, layout: TabLayout, metadata: readonly TabRefMetadata[]): Set<string> {

@@ -242,12 +242,45 @@ describe('session lineage', () => {
     expect(value.ungrouped).toEqual([]);
   });
 
-  it('can explicitly set and clear manual placement', () => {
+  it('sets manual placement but rejects direct clearing outside followParent', () => {
     const input = layout([], [ref('a')]);
     expect(setManualPlacement(input, ref('a'), true).ungrouped[0]).toEqual({ ...ref('a'), placement: 'manual' });
-    expect(setManualPlacement(setManualPlacement(input, ref('a'), true), ref('a'), false).ungrouped[0]).toEqual(
-      ref('a')
+    expect(() => setManualPlacement(setManualPlacement(input, ref('a'), true), ref('a'), false)).toThrow(
+      /followParent/
     );
+  });
+
+  it('rejects stale follow-parent replay and keeps the child manual across later parent ID reuse', () => {
+    const materialized = layout([], [{ ...ref('child'), placement: 'manual' }]);
+    const staleMetadata = [session('child', 1, 'deleted-parent')];
+
+    expect(() => followParent(materialized, ref('child'), staleMetadata)).toThrow(/parent/);
+    expect(materialized.ungrouped).toEqual([{ ...ref('child'), placement: 'manual' }]);
+
+    const afterIdReuse = normalizeTabLayout(materialized, [
+      session('deleted-parent', 2),
+      session('child', 1, 'deleted-parent'),
+    ]);
+    expect(afterIdReuse.ungrouped).toEqual([{ ...ref('child'), placement: 'manual' }, ref('deleted-parent')]);
+  });
+
+  it('rejects follow-parent for roots and webviews', () => {
+    expect(() =>
+      followParent(layout([], [{ ...ref('root'), placement: 'manual' }]), ref('root'), [session('root', 0)])
+    ).toThrow(/parent/);
+    expect(() =>
+      followParent(layout([], [{ ...ref('dash', 'webview'), placement: 'manual' }]), ref('dash', 'webview'), [
+        webview('dash', 0),
+      ])
+    ).toThrow(/session/);
+  });
+
+  it.each([
+    { label: 'invalid', parent: { ...session('parent', 0), ownerValid: false } },
+    { label: 'invisible', parent: { ...session('parent', 0), visible: false } },
+  ])('rejects follow-parent when the parent is $label', ({ parent }) => {
+    const input = layout([], [ref('parent'), { ...ref('child'), placement: 'manual' }]);
+    expect(() => followParent(input, ref('child'), [parent, session('child', 1, 'parent')])).toThrow(/parent/);
   });
 
   it('breaks the repeated cycle edge deterministically at its current location', () => {
