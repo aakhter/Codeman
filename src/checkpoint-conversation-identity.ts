@@ -1,5 +1,6 @@
-import { basename, join } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
+import { basename, join, resolve } from 'node:path';
 import { LRUMap } from './utils/lru-map.js';
 
 const UUID_AT_END = /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
@@ -37,6 +38,18 @@ const rolloutInventoryCache = new Map<string, { expiresAt: number; files: CodexR
 const missingHistoryRolloutCache = new LRUMap<string, number>({ maxSize: 1024 });
 let rolloutTreeWalkCount = 0;
 let authoritativeDirectoryScanCount = 0;
+
+/** Stable filesystem identity for rollout ownership and cache boundaries. */
+export function canonicalizeCodexHome(codexHome: string): string {
+  const absolute = resolve(codexHome);
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    // Custom homes may not exist until Codex first starts. Keep a stable,
+    // absolute lexical identity without surfacing filesystem failures.
+    return absolute;
+  }
+}
 
 /** Invalidate best-effort viewer inventory when history or authoritative proof changes. */
 export function invalidateCodexConversationInventory(codexHome: string): void {
@@ -274,7 +287,7 @@ export async function findActiveCodexConversation(
 export async function findOwnedCodexConversation(
   options: CodexConversationIdentityOptions
 ): Promise<ActiveCodexConversation | undefined> {
-  return resolveCodexConversation(options, false);
+  return resolveCodexConversation({ ...options, codexHome: canonicalizeCodexHome(options.codexHome) }, false);
 }
 
 /**

@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  canonicalizeCodexHome,
   findActiveCodexConversation,
   findAuthoritativeCodexConversation,
   findCodexConversationId,
@@ -13,6 +14,42 @@ import {
 } from '../src/checkpoint-conversation-identity.js';
 
 describe('checkpoint conversation identity', () => {
+  it('canonicalizes lexical and symlink aliases while preserving missing custom homes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codeman-codex-home-alias-'));
+    const codexHome = join(root, 'actual-home');
+    const alias = join(root, 'linked-home');
+    await mkdir(codexHome);
+    await symlink(codexHome, alias, 'dir');
+
+    expect(canonicalizeCodexHome(`${codexHome}/./nested/..`)).toBe(codexHome);
+    expect(canonicalizeCodexHome(alias)).toBe(codexHome);
+    expect(canonicalizeCodexHome(join(root, 'missing', '..', 'custom-home'))).toBe(resolve(root, 'custom-home'));
+  });
+
+  it('shares strict rollout inventory across canonical CODEX_HOME aliases', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codeman-codex-home-inventory-alias-'));
+    const codexHome = join(root, 'actual-home');
+    const alias = join(root, 'linked-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    await symlink(codexHome, alias, 'dir');
+    const ownedId = '09090909-0909-4090-8090-090909090909';
+    await writeFile(
+      join(sessionsDir, `rollout-${ownedId}.jsonl`),
+      `${JSON.stringify({ type: 'session_meta', payload: { originator: 'codeman_pane-a' } })}\n`
+    );
+    resetCodexConversationIdentityDebugStats();
+
+    await expect(findOwnedCodexConversation({ codexHome, sessionId: 'pane-a' })).resolves.toMatchObject({
+      id: ownedId,
+    });
+    await expect(findOwnedCodexConversation({ codexHome: alias, sessionId: 'pane-a' })).resolves.toMatchObject({
+      id: ownedId,
+    });
+
+    expect(getCodexConversationIdentityDebugStats().rolloutTreeWalkCount).toBe(1);
+  });
+
   it('selects the rollout bound to this Codeman pane rather than another pane newest file', async () => {
     const codexHome = await mkdtemp(join(tmpdir(), 'codeman-codex-identity-'));
     const sessionsDir = join(codexHome, 'sessions', '2026', '08', '02');

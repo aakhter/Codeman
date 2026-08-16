@@ -130,7 +130,7 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
         }
         let rolloutPrompts: Parameters<typeof mergeReadMyMindPrompts>[1] = [];
         try {
-          const codexHome = resolveReadMyMindCodexHome(codexEnvironment);
+          const codexHome = codexIdentity.canonicalizeCodexHome(resolveReadMyMindCodexHome(codexEnvironment));
           const competingSubmitAts = [...ctx.sessions.values()]
             .filter(
               (other) =>
@@ -140,7 +140,12 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
                 !other.docker &&
                 Boolean(other.lastSubmitAt)
             )
-            .filter((other) => resolveReadMyMindCodexHome({ CODEX_HOME: other.getCodexHomeOverride() }) === codexHome)
+            .filter(
+              (other) =>
+                codexIdentity.canonicalizeCodexHome(
+                  resolveReadMyMindCodexHome({ CODEX_HOME: other.getCodexHomeOverride() })
+                ) === codexHome
+            )
             .map((other) => other.lastSubmitAt);
           const conversation = await codexIdentity.findOwnedCodexConversation({
             codexHome,

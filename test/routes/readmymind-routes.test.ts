@@ -220,8 +220,8 @@ describe('POST /api/sessions/:id/readmymind', () => {
     session.getCodexHomeOverride.mockReturnValue('/session/codex-home');
     const sibling = new MockSession('competing-pane');
     sibling.mode = 'codex';
-    sibling.lastSubmitAt = 12_000;
-    sibling.getCodexHomeOverride.mockReturnValue('/session/codex-home');
+    sibling.lastSubmitAt = 11_000;
+    sibling.getCodexHomeOverride.mockReturnValue('/session/./codex-home');
     harness.ctx.sessions.set(sibling.id, sibling);
     const differentHome = new MockSession('different-home-pane');
     differentHome.mode = 'codex';
@@ -260,7 +260,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
       resumeSessionId: 'resume-id',
       nativeResumeId: undefined,
       lastSubmitAt: 11_000,
-      competingSubmitAts: [12_000],
+      competingSubmitAts: [11_000],
     });
     expect(sibling.getCodexHomeOverride).toHaveBeenCalled();
     expect(differentHome.getCodexHomeOverride).toHaveBeenCalled();
