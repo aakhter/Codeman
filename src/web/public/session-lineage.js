@@ -209,7 +209,9 @@ Object.assign(CodemanApp.prototype, {
       // Resting radius; `lineage-dot-pulse` breathes it 3.5 → 4.5 while the child
       // works, so the two have to be changed together.
       dot.setAttribute('r', '3.5');
-      dot.setAttribute('class', 'lineage-line-dot' + working + proxied);
+      const dotWorking = edge.status === 'working' ? ' lineage-line-dot--working' : '';
+      const dotProxied = parentEndpoint.proxied || childEndpoint.proxied ? ' lineage-line-dot--proxied' : '';
+      dot.setAttribute('class', 'lineage-line-dot' + dotWorking + dotProxied);
       dot.setAttribute('data-child-tab', edge.childId);
       if (color) dot.style.setProperty('--lineage-color', color);
       svg.appendChild(dot);

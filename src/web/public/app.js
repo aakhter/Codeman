@@ -4904,12 +4904,13 @@ class CodemanApp {
     ) return;
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
-    const collapsedState = this._tabCollapseStorageFailed
-      ? { ids: [], ok: false }
-      : window.CodemanTabLayout.loadCollapsedGroupIds(
-          localStorage,
+    const storage = this._getTabCollapseStorage();
+    const collapsedState = storage
+      ? window.CodemanTabLayout.loadCollapsedGroupIds(
+          storage,
           layout.groups?.map((group) => group.id) || []
-        );
+        )
+      : { ids: [], ok: false };
     if (!collapsedState.ok) this._tabCollapseStorageFailed = true;
     this.collapsedTabGroupIds = new Set(collapsedState.ids);
     this.tabLayoutReadOnly = false;
@@ -4952,15 +4953,26 @@ class CodemanApp {
     return true;
   }
 
+  _getTabCollapseStorage() {
+    if (this._tabCollapseStorageFailed) return null;
+    try {
+      return window.localStorage;
+    } catch (_error) {
+      this._tabCollapseStorageFailed = true;
+      return null;
+    }
+  }
+
   toggleTabGroupCollapsed(groupId, forceCollapsed) {
     if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
     const next = new Set(this.collapsedTabGroupIds);
     const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
     if (shouldCollapse) next.add(groupId);
     else next.delete(groupId);
-    const saved = this._tabCollapseStorageFailed
-      ? { ids: [], ok: false }
-      : window.CodemanTabLayout.saveCollapsedGroupIds(localStorage, [...next]);
+    const storage = this._getTabCollapseStorage();
+    const saved = storage
+      ? window.CodemanTabLayout.saveCollapsedGroupIds(storage, [...next])
+      : { ids: [], ok: false };
     if (!saved.ok) this._tabCollapseStorageFailed = true;
     this.collapsedTabGroupIds = new Set(saved.ids);
     this._lastTabStructureKey = null;

@@ -7,8 +7,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
 let CodemanApp: { prototype: Record<string, any> };
+let localStorageDescriptor: PropertyDescriptor;
 
 beforeAll(() => {
+  localStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage')!;
   const read = (name: string) => readFileSync(join(PUBLIC, name), 'utf8');
   const source =
     'var MobileDetection = {}, KeyboardHandler = {}, SwipeHandler = {}, VoiceInput = {}, ' +
@@ -172,7 +174,10 @@ beforeEach(() => {
   localStorage.removeItem('codeman:tab-groups-collapsed');
 });
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  Object.defineProperty(window, 'localStorage', localStorageDescriptor);
+  vi.useRealTimers();
+});
 
 describe('COD-306 CodemanApp integration', () => {
   it('defers the rail render scheduler while first layout paint is pending', () => {
@@ -307,10 +312,45 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.collapsedTabGroupIds.size).toBe(0);
   });
 
+  it('adopts and renders grouped layout when acquiring localStorage throws', () => {
+    const app = makeApp();
+    const getter = vi.fn(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    Object.defineProperty(window, 'localStorage', { configurable: true, get: getter });
+
+    expect(() => app._applyTabLayout({ ...layout, version: 9 })).not.toThrow();
+    expect(app.tabLayoutVersion).toBe(9);
+    expect(app.tabLayoutReadOnly).toBe(false);
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(2);
+
+    expect(() => app._applyTabLayout({ ...layout, version: 10 })).not.toThrow();
+    expect(getter).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps toggle all-expanded and does not reacquire storage after getter failure', () => {
+    const app = makeApp();
+    const getter = vi.fn(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    Object.defineProperty(window, 'localStorage', { configurable: true, get: getter });
+
+    expect(() => app.toggleTabGroupCollapsed('group-x', true)).not.toThrow();
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(document.querySelector('[data-tab-group-header="group-x"]')?.getAttribute('aria-expanded')).toBe('true');
+
+    expect(() => app.toggleTabGroupCollapsed('group-x', true)).not.toThrow();
+    expect(getter).toHaveBeenCalledTimes(1);
+  });
+
   it('proxies a collapse-hidden lineage endpoint to the group header', () => {
     const app = makeApp();
     app.activeWebviewId = null;
     app.activeSessionId = 's3';
+    app.sessions.get('s3').status = 'working';
     app.sessions.get('s3').parentSessionId = 's2';
     app.collapsedTabGroupIds = new Set(['group-x']);
     app._lineageLinesEnabled = () => true;
@@ -329,7 +369,9 @@ describe('COD-306 CodemanApp integration', () => {
     const line = svg.querySelector('.lineage-line');
     expect(line?.classList.contains('lineage-line--proxied')).toBe(true);
     expect(line?.getAttribute('data-parent-tab')).toBe('s2');
-    expect(svg.querySelectorAll('.lineage-line-dot')).toHaveLength(1);
+    const dot = svg.querySelector('.lineage-line-dot');
+    expect(dot?.classList.contains('lineage-line-dot--proxied')).toBe(true);
+    expect(dot?.classList.contains('lineage-line-dot--working')).toBe(true);
   });
 
   it('suppresses lineage when both collapse-hidden endpoints share a header', () => {

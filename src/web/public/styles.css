@@ -10859,6 +10859,14 @@ kbd {
     drop-shadow(0 0 9px var(--lineage-color, var(--session-blue, #2b8fd9)));
 }
 
+.lineage-line-dot--proxied {
+  opacity: 0.46;
+}
+
+.lineage-line-dot--proxied.lineage-line-dot--working {
+  opacity: 0.62;
+}
+
 /* The child end marches while that worker is actually working, so the line
    itself carries the signal. Motion is opt-out-able at the OS level. */
 @media (prefers-reduced-motion: no-preference) {
@@ -10873,6 +10881,11 @@ kbd {
   .lineage-line-dot--working {
     opacity: 1;
     animation: lineage-dot-pulse 1.4s ease-in-out infinite;
+  }
+
+  .lineage-line-dot--proxied.lineage-line-dot--working {
+    opacity: 0.62;
+    animation: lineage-proxy-dot-pulse 1.4s ease-in-out infinite;
   }
 }
 
@@ -10900,6 +10913,17 @@ kbd {
   }
   50% {
     opacity: 1;
+    r: 4.5;
+  }
+}
+
+@keyframes lineage-proxy-dot-pulse {
+  0%, 100% {
+    opacity: 0.52;
+    r: 3.5;
+  }
+  50% {
+    opacity: 0.68;
     r: 4.5;
   }
 }

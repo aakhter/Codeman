@@ -299,4 +299,17 @@ describe('lineage line geometry', () => {
     expect(Math.abs(normalOffset) % 10).toBe(0);
     expect(proxiedOffset).not.toBe(normalOffset);
   });
+
+  it('matches emitted dot modifiers to dimmed proxy and motion-gated working selectors', () => {
+    expect(lineageJs).toContain('lineage-line-dot--working');
+    expect(lineageJs).toContain('lineage-line-dot--proxied');
+    expect(stylesCss).toMatch(/\.lineage-line-dot--proxied\s*\{[^}]*opacity:/s);
+    expect(stylesCss).toMatch(/\.lineage-line-dot--proxied\.lineage-line-dot--working\s*\{[^}]*opacity:/s);
+
+    const motion = stylesCss.match(/@media \(prefers-reduced-motion: no-preference\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
+    expect(motion).toMatch(/\.lineage-line-dot--working[\s\S]*animation:\s*lineage-dot-pulse/);
+    expect(motion).toMatch(
+      /\.lineage-line-dot--proxied\.lineage-line-dot--working[\s\S]*animation:\s*lineage-proxy-dot-pulse/
+    );
+  });
 });
