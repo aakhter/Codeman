@@ -457,8 +457,10 @@ selection is fixed by the authorized session, and Codex never falls back to Clau
 
 The predictor's rollout lookup accepts only a demonstrably owned rollout in the same canonical `CODEX_HOME` namespace.
 Same-working-directory or newest-file matches are not ownership proof; ambiguity, including equal history ties, fails
-closed. Recovery preserves private, versioned provider provenance without API keys, and restored legacy, unknown, or
-lost-key sessions fail closed rather than silently changing accounts. Only creating a fresh Codex session clears that fence.
+closed. Recovery preserves private, versioned provider provenance without API keys. A routine Codeman process restart reads
+only `CODEX_HOME`, `OPENAI_API_KEY`, and `CODEX_API_KEY` from the exact surviving local tmux session. Retained keys remain
+runtime-only; an empty successfully-read environment heals legacy default-auth sessions; unreadable/missing tmux identity
+still fails closed rather than silently changing accounts. Remote and Docker sessions never enter this recovery path.
 
 The `codex exec` child runs from a private ephemeral cwd outside the case workspace. It ignores user config, rules, and
 global/project instructions; disables shell, web-search, and subagents; rejects approvals; uses a read-only command sandbox;
