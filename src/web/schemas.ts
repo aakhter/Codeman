@@ -986,9 +986,10 @@ export const SettingsUpdateSchema = z
      */
     readMyMindEnabled: z.boolean().optional(),
     /**
-     * Read My Mind predictor model override. Empty/absent = the AI-checker
-     * default (opus: prediction quality is the product and it runs only on an
-     * explicit press). Shell-safety is validated again at spawn time.
+     * Claude Read My Mind predictor model override. Codex uses the model on
+     * its authorized session instead. Empty/absent = the AI-checker default
+     * (opus: prediction quality is the product and it runs only on an explicit
+     * press). Shell-safety is validated again at spawn time.
      */
     readMyMindModel: z.string().max(100).optional(),
     tunnelEnabled: z.boolean().optional(),

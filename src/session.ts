@@ -132,6 +132,7 @@ import {
   sanitizeAttachmentHistory,
   upsertAttachmentHistory as upsertAttachmentHistoryList,
 } from './session-attachment-history.js';
+import type { CodexProviderEnvironment } from './readmymind-predictor.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -1870,6 +1871,20 @@ export class Session extends EventEmitter {
       if (key.startsWith('CLAUDE_CODE_') || key === 'CLAUDE_CONFIG_DIR') safe[key] = value;
     }
     return Object.keys(safe).length > 0 ? safe : undefined;
+  }
+
+  /**
+   * Closed, runtime-only provider identity for an isolated Codex subprocess.
+   * Exact keys only: arbitrary session overrides must never cross this seam.
+   */
+  getCodexProviderEnvironment(): CodexProviderEnvironment {
+    const environment: CodexProviderEnvironment = {};
+    if (!this._envOverrides) return environment;
+    for (const key of ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const) {
+      const value = this._envOverrides[key];
+      if (value !== undefined) environment[key] = value;
+    }
+    return environment;
   }
 
   toDetailedState() {

@@ -77,3 +77,55 @@ describe('CLAUDE_CONFIG_DIR persistence', () => {
     });
   });
 });
+
+describe('Codex provider environment', () => {
+  it('returns only exact provider keys as a fresh closed copy', () => {
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      envOverrides: {
+        CODEX_HOME: '/tmp/session-codex-home',
+        OPENAI_API_KEY: 'openai-secret',
+        CODEX_API_KEY: 'codex-secret',
+        CODEX_UNRELATED: 'must-not-leak',
+        OPENCODE_API_KEY: 'also-must-not-leak',
+      },
+    });
+
+    const first = session.getCodexProviderEnvironment();
+    expect(first).toEqual({
+      CODEX_HOME: '/tmp/session-codex-home',
+      OPENAI_API_KEY: 'openai-secret',
+      CODEX_API_KEY: 'codex-secret',
+    });
+    first.CODEX_HOME = '/tmp/mutated';
+    expect(session.getCodexProviderEnvironment()).toEqual({
+      CODEX_HOME: '/tmp/session-codex-home',
+      OPENAI_API_KEY: 'openai-secret',
+      CODEX_API_KEY: 'codex-secret',
+    });
+  });
+
+  it('does not expose or persist Codex provider identity', () => {
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      envOverrides: {
+        CODEX_HOME: '/tmp/session-codex-home',
+        OPENAI_API_KEY: 'openai-secret',
+        CODEX_API_KEY: 'codex-secret',
+      },
+    });
+
+    for (const state of [session.toState(), session.toDetailedState()]) {
+      const serialized = JSON.stringify(state);
+      expect(serialized).not.toContain('CODEX_HOME');
+      expect(serialized).not.toContain('OPENAI_API_KEY');
+      expect(serialized).not.toContain('CODEX_API_KEY');
+      expect(serialized).not.toContain('session-codex-home');
+      expect(serialized).not.toContain('openai-secret');
+      expect(serialized).not.toContain('codex-secret');
+    }
+    expect(session.getEnvOverridesForPersist()).toBeUndefined();
+  });
+});

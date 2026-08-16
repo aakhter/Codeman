@@ -1823,10 +1823,9 @@ export class WebServer extends EventEmitter {
   }
 
   /**
-   * Read My Mind predictor model (docs/readmymind-plan.md): `readMyMindModel`
-   * setting, defaulting to the AI-checker opus model. Prediction quality is
-   * the product and runs only on an explicit press, so the cost profile is
-   * nothing like the idle checker's.
+   * Claude Read My Mind predictor model (docs/readmymind-plan.md):
+   * `readMyMindModel` setting, defaulting to the AI-checker opus model. Codex
+   * predictions use the authorized session's Codex model instead.
    */
   private async getReadMyMindModel(): Promise<string> {
     const settings = await this.readSettings();
