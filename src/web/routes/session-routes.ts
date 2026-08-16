@@ -43,11 +43,9 @@ import {
   QuickRunSchema,
   QuickStartSchema,
   InteractiveStartSchema,
-  SessionOrderUpdateSchema,
   SessionWaitQuerySchema,
   SessionWaitOutputQuerySchema,
 } from '../schemas.js';
-import { mergeSessionOrder } from '../../session-order.js';
 import {
   sessionWaits,
   resolveWaitSignals,
@@ -673,16 +671,10 @@ export function registerSessionRoutes(
     return (list as Array<{ owner?: string }>).filter((s) => canAccessOwned(user, s.owner));
   });
 
-  // ========== Session Tab Order (global sync, COD-131) ==========
+  // ========== Legacy Session Tab Order (migration source, read-only) ==========
 
-  app.put('/api/session-order', async (req): Promise<ApiResponse<{ order: string[] }>> => {
-    const { order } = parseBody(SessionOrderUpdateSchema, req.body, 'Invalid session order');
-    // Server is authoritative but never drops ids it knows about that the
-    // pushing device hadn't loaded yet — those fall to the end (mergeSessionOrder).
-    const merged = mergeSessionOrder(order, ctx.store.getSessionOrder());
-    ctx.store.setSessionOrder(merged);
-    ctx.broadcast(SseEvent.SessionOrderChanged, { order: merged });
-    return { success: true, data: { order: merged } };
+  app.put('/api/session-order', async (): Promise<ApiResponse<never>> => {
+    return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Session order is read-only; migrate to /api/tab-layout');
   });
 
   // ========== Session Creation ==========

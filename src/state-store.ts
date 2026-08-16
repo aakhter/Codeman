@@ -40,6 +40,7 @@ import {
 } from './types.js';
 import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
 import { dataPath, CODEMAN_INSTANCE } from './config/instance.js';
+import { validateTabLayout, type TabLayout } from './tab-layout.js';
 
 /** Debounce delay for batching state writes (ms) */
 const SAVE_DEBOUNCE_MS = 500;
@@ -280,6 +281,9 @@ export class StateStore {
     }
     if (this.state.sessionOrder) {
       parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
+    }
+    if (this.state.tabLayouts !== undefined) {
+      parts.push(`"tabLayouts":${JSON.stringify(this.state.tabLayouts)}`);
     }
 
     return `{${parts.join(',')}}`;
@@ -661,6 +665,18 @@ export class StateStore {
   /** Persists the global tab order (ordered sessionIds) and triggers a debounced save. COD-131. */
   setSessionOrder(order: string[]): void {
     this.state.sessionOrder = order;
+    this.save();
+  }
+
+  /** Returns an owner layout, or null before that owner has been migrated. */
+  getTabLayout(owner: string): TabLayout | null {
+    return this.state.tabLayouts?.[owner] ?? null;
+  }
+
+  /** Validates and atomically persists one owner layout. */
+  setTabLayout(owner: string, layout: TabLayout): void {
+    const validated = validateTabLayout(layout);
+    this.state.tabLayouts = { ...(this.state.tabLayouts ?? {}), [owner]: validated };
     this.save();
   }
 
