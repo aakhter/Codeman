@@ -47,6 +47,7 @@ export function createMockRouteContext(options?: {
       markRestorationSkipped: vi.fn(),
       assertDeletionReady: vi.fn(),
       runSessionDeletion: vi.fn(async (_removed, action) => action()),
+      runStaleSessionCleanup: vi.fn(async (_activeIds, action) => action()),
       reconcileAfterRestoration: vi.fn(async () => {}),
     },
     cleanupSession: vi.fn(async () => {}),

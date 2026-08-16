@@ -35,7 +35,7 @@ function createHarness(
     broadcast,
     now: () => '2026-08-16T12:00:00.000Z',
   });
-  return { service, store, broadcast, layouts, live };
+  return { service, store, broadcast, layouts, live, persisted };
 }
 
 const existing = (refs: TabLayout['ungrouped'], version = 7): TabLayout => ({
@@ -79,6 +79,79 @@ describe('TabLayoutService', () => {
 
     expect(h.layouts.alice.ungrouped).toEqual([]);
     expect(h.layouts.alice.version).toBe(8);
+  });
+
+  it('leaves stale records, layouts, versions, and events intact when bulk preparation fails', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'stale' }]) },
+      persisted: [{ id: 'stale', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+    const cleanup = vi.fn(() => {
+      delete h.persisted.stale;
+      return { count: 1, cleaned: [{ id: 'stale', owner: 'alice' }] };
+    });
+    h.store.getSessions
+      .mockImplementationOnce(() => h.persisted)
+      .mockImplementationOnce(() => {
+        throw new Error('malformed persisted state');
+      });
+
+    await expect(h.service.runStaleSessionCleanup(new Set(), cleanup)).rejects.toThrow('malformed persisted state');
+
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(h.persisted.stale).toBeDefined();
+    expect(h.layouts.alice).toEqual(existing([{ kind: 'session', id: 'stale' }]));
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('bulk-cleans multiple owners once each while preserving pinned stale records', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'alice-stale' },
+          { kind: 'session', id: 'alice-pinned' },
+        ]),
+        bob: existing([{ kind: 'session', id: 'bob-stale' }]),
+      },
+      persisted: [
+        { id: 'bob-stale', owner: 'bob', createdAt: 1 },
+        { id: 'alice-stale', owner: 'alice', createdAt: 2 },
+        { id: 'alice-pinned', owner: 'alice', createdAt: 3, pinned: true },
+      ],
+    });
+    h.service.markRestorationComplete();
+    const cleanup = vi.fn(() => {
+      delete h.persisted['alice-stale'];
+      delete h.persisted['bob-stale'];
+      return { count: 2 };
+    });
+
+    await expect(h.service.runStaleSessionCleanup(new Set(), cleanup)).resolves.toEqual({ count: 2 });
+
+    expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'alice-pinned' }]);
+    expect(h.layouts.bob.ungrouped).toEqual([]);
+    expect(h.layouts.alice.version).toBe(8);
+    expect(h.layouts.bob.version).toBe(8);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
+    expect(h.store.setTabLayout.mock.calls.map(([owner]) => owner)).toEqual(['alice', 'bob']);
+    expect(h.broadcast).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows skipped-mode stale cleanup without pruning or versioning layouts', async () => {
+    const h = createHarness({
+      layouts: { '@single': existing([{ kind: 'session', id: 'stale' }]) },
+      persisted: [{ id: 'stale', createdAt: 1 }],
+    });
+    h.service.markRestorationSkipped();
+    const cleanup = vi.fn(() => ({ count: 1 }));
+
+    await expect(h.service.runStaleSessionCleanup(new Set(), cleanup)).resolves.toEqual({ count: 1 });
+
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 
   it('repairs missing owner refs once while preserving unknown refs', async () => {

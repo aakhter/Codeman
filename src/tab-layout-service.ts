@@ -70,6 +70,12 @@ export class TabLayoutService {
     }
   }
 
+  /** Acquire multiple owner queues in stable order so overlapping bulk cleanups cannot deadlock. */
+  private async withOwners<T>(owners: readonly string[], task: () => Promise<T>, index = 0): Promise<T> {
+    if (index >= owners.length) return task();
+    return this.withOwner(owners[index], () => this.withOwners(owners, task, index + 1));
+  }
+
   markRestorationComplete(): void {
     this.restorationState = 'complete';
   }
@@ -149,15 +155,22 @@ export class TabLayoutService {
     return { persisted, live, webviews, metadata };
   }
 
-  private commit(owner: string, base: TabLayout, next: TabLayout): TabLayout {
-    const stored = {
+  private prepareCommit(base: TabLayout, next: TabLayout): TabLayout {
+    return validateTabLayout({
       ...next,
       version: base.version + 1,
       updatedAt: (this.deps.now ?? (() => new Date().toISOString()))(),
-    };
+    });
+  }
+
+  private commitPrepared(owner: string, stored: TabLayout): TabLayout {
     this.deps.store.setTabLayout(owner, stored);
     this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: stored.version });
     return stored;
+  }
+
+  private commit(owner: string, base: TabLayout, next: TabLayout): TabLayout {
+    return this.commitPrepared(owner, this.prepareCommit(base, next));
   }
 
   private async getUnlocked(owner: string): Promise<TabLayout> {
@@ -257,6 +270,43 @@ export class TabLayoutService {
       }
       const result = await action();
       if (current && next && !sameLayout(current, next)) this.commit(owner, current, next);
+      return result;
+    });
+  }
+
+  /**
+   * Prepare every affected owner layout before bulk stale-state deletion.
+   * The StateStore action remains synchronous in production, so the candidate
+   * snapshot cannot change between successful preparation and resource removal.
+   */
+  async runStaleSessionCleanup<T>(activeSessionIds: ReadonlySet<string>, action: () => T | Promise<T>): Promise<T> {
+    this.assertDeletionReady();
+    if (this.restorationState === 'skipped') return action();
+    const stale = Object.entries(this.deps.store.getSessions())
+      .filter(([id, record]) => !activeSessionIds.has(id) && record.pinned !== true)
+      .map(([id, record]) => ({ id, owner: record.owner }));
+    if (stale.length === 0) return action();
+
+    const byOwner = new Map<string, string[]>();
+    for (const item of stale) {
+      const owner = ownerOf(item);
+      const ids = byOwner.get(owner) ?? [];
+      ids.push(item.id);
+      byOwner.set(owner, ids);
+    }
+    const owners = [...byOwner.keys()].sort();
+    return this.withOwners(owners, async () => {
+      const prepared: Array<{ owner: string; stored: TabLayout }> = [];
+      for (const owner of owners) {
+        const current = this.deps.store.getTabLayout(owner);
+        if (!current) continue;
+        const { metadata } = await this.facts(owner);
+        const next = materializeOrphans(normalizeTabLayout(current, metadata), byOwner.get(owner) ?? [], metadata);
+        if (!sameLayout(current, next)) prepared.push({ owner, stored: this.prepareCommit(current, next) });
+      }
+
+      const result = await action();
+      for (const item of prepared) this.commitPrepared(item.owner, item.stored);
       return result;
     });
   }
