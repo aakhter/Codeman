@@ -123,6 +123,7 @@ import {
   findAuthoritativeCodexConversation,
   findRecentOwnedCodexConversationIds,
   invalidateCodexConversationInventory,
+  canonicalizeCodexHome,
 } from './checkpoint-conversation-identity.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
@@ -868,7 +869,9 @@ export class Session extends EventEmitter {
     // Legacy migration: pre-0.7.2 carried effort as the CLAUDE_CODE_EFFORT_LEVEL env var,
     // which hard-locks /effort switching. Extract it into _effort (--settings soft default)
     // and never export it as an env var again. Explicit config.effort wins over legacy.
-    const recoveredCodexHome = config.codexProviderIdentity?.codexHome;
+    const recoveredCodexHome = config.codexProviderIdentity?.codexHome
+      ? canonicalizeCodexHome(config.codexProviderIdentity.codexHome, config.workingDir)
+      : undefined;
     const combinedEnvOverrides: Record<string, string> = {
       ...(recoveredCodexHome ? { CODEX_HOME: recoveredCodexHome } : {}),
       ...(config.envOverrides ?? {}),
@@ -1897,14 +1900,14 @@ export class Session extends EventEmitter {
     if (!this._envOverrides) return environment;
     for (const key of ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const) {
       const value = this._envOverrides[key];
-      if (value !== undefined) environment[key] = value;
+      if (value) environment[key] = value;
     }
     return environment;
   }
 
   /** CODEX_HOME only; safe for comparing another session's rollout namespace. */
   getCodexHomeOverride(): string | undefined {
-    return this._envOverrides?.CODEX_HOME;
+    return this._envOverrides?.CODEX_HOME || undefined;
   }
 
   /** Whether recovery lost a session-scoped API credential that cannot safely fall back. */
@@ -1915,11 +1918,12 @@ export class Session extends EventEmitter {
   /** Secret-free, disk-only identity record. Never include this in SessionState serializers. */
   getCodexProviderIdentityForPersist(): CodexProviderIdentity | undefined {
     if (this.mode !== 'codex') return undefined;
-    const codexHome = this.getCodexHomeOverride();
+    const rawCodexHome = this.getCodexHomeOverride();
+    const codexHome = rawCodexHome ? canonicalizeCodexHome(rawCodexHome, this.workingDir) : undefined;
     const hasSessionKey =
       this._codexProviderCredentialsLost ||
-      this._envOverrides?.OPENAI_API_KEY !== undefined ||
-      this._envOverrides?.CODEX_API_KEY !== undefined;
+      Boolean(this._envOverrides?.OPENAI_API_KEY) ||
+      Boolean(this._envOverrides?.CODEX_API_KEY);
     return {
       version: 1,
       credentialSource: hasSessionKey ? 'session-key' : 'restorable',

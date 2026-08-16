@@ -116,6 +116,21 @@ describe('Codex provider environment', () => {
     });
   });
 
+  it('omits empty provider overrides so they cannot shadow ambient identity', () => {
+    const session = new Session({
+      workingDir: '/tmp/case',
+      mode: 'codex',
+      envOverrides: { CODEX_HOME: '', OPENAI_API_KEY: '', CODEX_API_KEY: '' },
+    });
+
+    expect(session.getCodexProviderEnvironment()).toEqual({});
+    expect(session.getCodexHomeOverride()).toBeUndefined();
+    expect(session.getCodexProviderIdentityForPersist()).toEqual({
+      version: 1,
+      credentialSource: 'restorable',
+    });
+  });
+
   it('does not expose or persist Codex provider identity', () => {
     const session = new Session({
       workingDir: '/tmp',
@@ -191,6 +206,31 @@ describe('Codex provider environment', () => {
     expect(processCredentialSession.getCodexProviderIdentityForPersist()).toEqual({
       version: 1,
       credentialSource: 'restorable',
+    });
+  });
+
+  it('persists and restores an effective absolute session CODEX_HOME', () => {
+    const active = new Session({
+      workingDir: '/tmp/cases/example',
+      mode: 'codex',
+      envOverrides: { CODEX_HOME: '../shared-codex' },
+    });
+
+    expect(active.getCodexProviderIdentityForPersist()).toEqual({
+      version: 1,
+      credentialSource: 'restorable',
+      codexHome: '/tmp/cases/shared-codex',
+    });
+    const restored = new Session({
+      workingDir: '/different/case-location',
+      mode: 'codex',
+      codexProviderIdentity: active.getCodexProviderIdentityForPersist(),
+    });
+    expect(restored.getCodexProviderEnvironment()).toEqual({ CODEX_HOME: '/tmp/cases/shared-codex' });
+    expect(restored.getCodexProviderIdentityForPersist()).toEqual({
+      version: 1,
+      credentialSource: 'restorable',
+      codexHome: '/tmp/cases/shared-codex',
     });
   });
 

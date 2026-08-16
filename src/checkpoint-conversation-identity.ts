@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { LRUMap } from './utils/lru-map.js';
 
@@ -40,8 +41,8 @@ let rolloutTreeWalkCount = 0;
 let authoritativeDirectoryScanCount = 0;
 
 /** Stable filesystem identity for rollout ownership and cache boundaries. */
-export function canonicalizeCodexHome(codexHome: string): string {
-  const absolute = resolve(codexHome);
+export function canonicalizeCodexHome(codexHome: string, workingDir = process.cwd()): string {
+  const absolute = resolve(workingDir, codexHome);
   try {
     return realpathSync.native(absolute);
   } catch {
@@ -49,6 +50,17 @@ export function canonicalizeCodexHome(codexHome: string): string {
     // absolute lexical identity without surfacing filesystem failures.
     return absolute;
   }
+}
+
+/** Match the interactive pane's CODEX_HOME selection and cwd interpretation. */
+export function resolveEffectiveCodexHome(
+  sessionCodexHome: string | undefined,
+  workingDir: string,
+  processEnvironment: Readonly<Record<string, string | undefined>> = process.env
+): string {
+  const configuredHome = sessionCodexHome || processEnvironment.CODEX_HOME;
+  const selectedHome = configuredHome || join(processEnvironment.HOME || tmpdir(), '.codex');
+  return canonicalizeCodexHome(selectedHome, workingDir);
 }
 
 /** Invalidate best-effort viewer inventory when history or authoritative proof changes. */

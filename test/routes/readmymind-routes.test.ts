@@ -186,16 +186,57 @@ describe('POST /api/sessions/:id/readmymind', () => {
 
   it('uses Codex home precedence without copying process credentials into the session environment', () => {
     expect(
-      resolveReadMyMindCodexHome(
-        { CODEX_HOME: '/session/home' },
-        { CODEX_HOME: '/process/home', HOME: '/process/user' }
-      )
+      resolveReadMyMindCodexHome({ CODEX_HOME: '/session/home' }, '/case/work', {
+        CODEX_HOME: '/process/home',
+        HOME: '/process/user',
+      })
     ).toBe('/session/home');
-    expect(resolveReadMyMindCodexHome({}, { CODEX_HOME: '/process/home', HOME: '/process/user' })).toBe(
+    expect(
+      resolveReadMyMindCodexHome({ CODEX_HOME: '' }, '/case/work', {
+        CODEX_HOME: 'relative-process-home',
+        HOME: '/process/user',
+      })
+    ).toBe('/case/work/relative-process-home');
+    expect(
+      resolveReadMyMindCodexHome({ CODEX_HOME: '../session-home' }, '/case/work', {
+        CODEX_HOME: '/process/home',
+        HOME: '/process/user',
+      })
+    ).toBe('/case/session-home');
+    expect(resolveReadMyMindCodexHome({}, '/case/work', { CODEX_HOME: '/process/home', HOME: '/process/user' })).toBe(
       '/process/home'
     );
-    expect(resolveReadMyMindCodexHome({}, { HOME: '/process/user' })).toBe('/process/user/.codex');
-    expect(resolveReadMyMindCodexHome({}, {})).toBe(join(tmpdir(), '.codex'));
+    expect(resolveReadMyMindCodexHome({}, '/case/work', { HOME: '/process/user' })).toBe('/process/user/.codex');
+    expect(resolveReadMyMindCodexHome({}, '/case/work', {})).toBe(join(tmpdir(), '.codex'));
+  });
+
+  it('passes the effective absolute process CODEX_HOME to the isolated child', async () => {
+    const savedCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = 'relative-process-home';
+    const predict = vi.spyOn(readMyMindPredictor, 'predict').mockResolvedValue(RESULT);
+    vi.spyOn(codexIdentity, 'findOwnedCodexConversation').mockResolvedValue(undefined);
+    const session = sessionUnderTest();
+    session.mode = 'codex';
+    session.workingDir = '/tmp/readmymind-process-home-case';
+    session.getCodexProviderEnvironment.mockReturnValue({});
+    session.getCodexHomeOverride.mockReturnValue(undefined);
+
+    try {
+      const res = await harness.app.inject({ method: 'POST', url: `/api/sessions/${SESSION_ID}/readmymind` });
+      expect(res.statusCode).toBe(200);
+      expect(predict).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: {
+            kind: 'codex',
+            model: undefined,
+            env: { CODEX_HOME: '/tmp/readmymind-process-home-case/relative-process-home' },
+          },
+        })
+      );
+    } finally {
+      if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = savedCodexHome;
+    }
   });
 
   it('passes pane identity inputs to the resolver and feeds owned rollout signals into context', async () => {
@@ -213,15 +254,16 @@ describe('POST /api/sessions/:id/readmymind', () => {
     });
     const session = sessionUnderTest();
     session.mode = 'codex';
-    session.workingDir = '/tmp/readmymind-owned-workdir';
+    session.workingDir = '/cases/a';
     session.codexConfig = { model: 'gpt-5.4', resumeSessionId: 'resume-id' };
     session.lastSubmitAt = 11_000;
-    session.getCodexProviderEnvironment.mockReturnValue({ CODEX_HOME: '/session/codex-home' });
-    session.getCodexHomeOverride.mockReturnValue('/session/codex-home');
+    session.getCodexProviderEnvironment.mockReturnValue({ CODEX_HOME: '../shared/.codex' });
+    session.getCodexHomeOverride.mockReturnValue('../shared/.codex');
     const sibling = new MockSession('competing-pane');
     sibling.mode = 'codex';
+    sibling.workingDir = '/cases/b';
     sibling.lastSubmitAt = 11_000;
-    sibling.getCodexHomeOverride.mockReturnValue('/session/./codex-home');
+    sibling.getCodexHomeOverride.mockReturnValue('../shared/.codex');
     harness.ctx.sessions.set(sibling.id, sibling);
     const differentHome = new MockSession('different-home-pane');
     differentHome.mode = 'codex';
@@ -254,7 +296,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
 
     expect(res.statusCode).toBe(200);
     expect(resolveCodex).toHaveBeenCalledWith({
-      codexHome: '/session/codex-home',
+      codexHome: '/cases/shared/.codex',
       sessionId: SESSION_ID,
       workingDir: session.workingDir,
       resumeSessionId: 'resume-id',
@@ -268,6 +310,11 @@ describe('POST /api/sessions/:id/readmymind', () => {
     expect(dockerSibling.getCodexHomeOverride).not.toHaveBeenCalled();
     expect(sibling.getCodexProviderEnvironment).not.toHaveBeenCalled();
     expect(differentHome.getCodexProviderEnvironment).not.toHaveBeenCalled();
+    expect(predict).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: expect.objectContaining({ env: { CODEX_HOME: '/cases/shared/.codex' } }),
+      })
+    );
     const prompt = predict.mock.calls[0][0].prompt;
     expect(prompt).toContain('OWNED_ASSISTANT_MARKER');
     expect(prompt).toContain('ROLLOUT_PROMPT_MARKER continued');

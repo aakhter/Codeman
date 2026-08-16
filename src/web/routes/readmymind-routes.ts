@@ -33,8 +33,6 @@
  * with a generic between the method and the path.
  */
 
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { FastifyInstance } from 'fastify';
 import { ApiErrorCode, createErrorResponse } from '../../types.js';
 import { IntentGoalsSchema, ReadMyMindPredictSchema } from '../schemas.js';
@@ -55,13 +53,10 @@ const predictionsInFlight = new Set<string>();
 /** Effective rollout root; provider credentials remain owned by the predictor. */
 export function resolveReadMyMindCodexHome(
   sessionEnvironment: Readonly<CodexProviderEnvironment>,
+  workingDir: string,
   processEnvironment: Readonly<Record<string, string | undefined>> = process.env
 ): string {
-  return (
-    sessionEnvironment.CODEX_HOME ||
-    processEnvironment.CODEX_HOME ||
-    join(processEnvironment.HOME || tmpdir(), '.codex')
-  );
+  return codexIdentity.resolveEffectiveCodexHome(sessionEnvironment.CODEX_HOME, workingDir, processEnvironment);
 }
 
 export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort & ConfigPort & InfraPort): void {
@@ -128,9 +123,10 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
             'Read My Mind cannot use this restored Codex session because its session credentials were not persisted; please recreate or restart the session.'
           );
         }
+        const codexHome = resolveReadMyMindCodexHome(codexEnvironment, session.workingDir);
+        codexEnvironment = { ...codexEnvironment, CODEX_HOME: codexHome };
         let rolloutPrompts: Parameters<typeof mergeReadMyMindPrompts>[1] = [];
         try {
-          const codexHome = codexIdentity.canonicalizeCodexHome(resolveReadMyMindCodexHome(codexEnvironment));
           const competingSubmitAts = [...ctx.sessions.values()]
             .filter(
               (other) =>
@@ -142,9 +138,7 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
             )
             .filter(
               (other) =>
-                codexIdentity.canonicalizeCodexHome(
-                  resolveReadMyMindCodexHome({ CODEX_HOME: other.getCodexHomeOverride() })
-                ) === codexHome
+                resolveReadMyMindCodexHome({ CODEX_HOME: other.getCodexHomeOverride() }, other.workingDir) === codexHome
             )
             .map((other) => other.lastSubmitAt);
           const conversation = await codexIdentity.findOwnedCodexConversation({

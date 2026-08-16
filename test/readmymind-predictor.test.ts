@@ -397,6 +397,26 @@ describe('Codex predictor invocation isolation', () => {
     ).toBe(true);
     expect(process.env.CODEX_HOME).toBe('/process/codex');
   });
+
+  it('does not let empty provider values shadow process credentials', async () => {
+    process.env.OPENAI_API_KEY = 'process-openai';
+    process.env.CODEX_API_KEY = 'process-codex';
+    const invocations = installChild(succeed);
+
+    await readMyMindPredictor.predict(
+      codexOptions({
+        provider: {
+          kind: 'codex',
+          env: { OPENAI_API_KEY: '', CODEX_API_KEY: '' },
+        },
+      })
+    );
+
+    expect(invocations[0].options.env).toMatchObject({
+      OPENAI_API_KEY: 'process-openai',
+      CODEX_API_KEY: 'process-codex',
+    });
+  });
 });
 
 describe('Codex predictor output and lifecycle', () => {

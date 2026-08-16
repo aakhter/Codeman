@@ -309,8 +309,8 @@ function buildCodexEnvironment(
 
   const providerKeys = ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const;
   for (const key of providerKeys) {
-    const value = providerEnv[key] !== undefined ? providerEnv[key] : process.env[key];
-    if (value !== undefined) env[key] = value;
+    const value = providerEnv[key] || process.env[key];
+    if (value) env[key] = value;
   }
   return env;
 }
