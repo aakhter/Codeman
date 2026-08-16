@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.18.6
+
+### Patch Changes
+
+- Document the owner-scoped tab-groups architecture and fix session-lineage rendering in the vertical tab rail by routing parent-child connectors through a reserved left gutter while preserving horizontal U-bridges.
+
 ## 1.18.5
 
 ### Patch Changes
