@@ -50,7 +50,7 @@ const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000$
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 export class TabLayoutService {
-  private restorationComplete = false;
+  private restorationState: 'pending' | 'complete' | 'failed' | 'skipped' = 'pending';
   private readonly ownerQueues = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: TabLayoutServiceDeps) {}
@@ -71,12 +71,25 @@ export class TabLayoutService {
   }
 
   markRestorationComplete(): void {
-    this.restorationComplete = true;
+    this.restorationState = 'complete';
+  }
+
+  markRestorationFailed(): void {
+    this.restorationState = 'failed';
+  }
+
+  markRestorationSkipped(): void {
+    this.restorationState = 'skipped';
+  }
+
+  assertDeletionReady(): void {
+    if (this.restorationState === 'complete' || this.restorationState === 'skipped') return;
+    throw new Error(`Tab layout restoration is ${this.restorationState}; destructive deletion is unavailable`);
   }
 
   /** Repair/migrate every owner visible after startup restoration. */
   async reconcileAfterRestoration(): Promise<void> {
-    if (!this.restorationComplete) return;
+    if (this.restorationState !== 'complete') return;
     const { persisted, live } = this.sessionRecords();
     const webviews = await this.deps.readWebviews();
     const owners = new Set<string>();
@@ -197,7 +210,7 @@ export class TabLayoutService {
   }
 
   async sessionsRemoved(removed: readonly RemovedTabLayoutSession[]): Promise<void> {
-    if (!this.restorationComplete || removed.length === 0) return;
+    if (this.restorationState !== 'complete' || removed.length === 0) return;
     const byOwner = new Map<string, string[]>();
     for (const item of removed) {
       const owner = ownerOf(item);
@@ -221,8 +234,36 @@ export class TabLayoutService {
     }
   }
 
+  /**
+   * Hold the owner mutation lock across an irreversible session deletion.
+   * All failure-prone normalization happens before `action`; the prepared layout
+   * commits only after the resource cleanup finishes.
+   */
+  async runSessionDeletion<T>(removed: readonly RemovedTabLayoutSession[], action: () => Promise<T>): Promise<T> {
+    this.assertDeletionReady();
+    if (this.restorationState === 'skipped' || removed.length === 0) return action();
+    const owners = new Set(removed.map(ownerOf));
+    if (owners.size !== 1) throw new Error('A session deletion transaction must contain exactly one owner');
+    const owner = owners.values().next().value as string;
+    const ids = removed.map((item) => item.id);
+    return this.withOwner(owner, async () => {
+      const current = this.deps.store.getTabLayout(owner);
+      let next: TabLayout | null = null;
+      if (current) {
+        const { metadata } = await this.facts(owner);
+        // Prepare while the soon-to-be-deleted sessions are still known, so
+        // direct children can be materialized before their parent ref is removed.
+        next = materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata);
+      }
+      const result = await action();
+      if (current && next && !sameLayout(current, next)) this.commit(owner, current, next);
+      return result;
+    });
+  }
+
   async webviewDeleted(owner: string, id: string): Promise<void> {
-    if (!this.restorationComplete) return;
+    this.assertDeletionReady();
+    if (this.restorationState === 'skipped') return;
     await this.withOwner(owner, async () => {
       const current = this.deps.store.getTabLayout(owner);
       if (!current) return;

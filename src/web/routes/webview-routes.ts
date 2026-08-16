@@ -203,10 +203,19 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort
       const index = list.findIndex((w) => w.id === id);
       if (index === -1) return 'not-found' as const;
       if (!canAccessOwned(user, list[index].owner)) return 'forbidden' as const;
-      const owner = list[index].owner;
+      const removed = list[index];
       list.splice(index, 1);
       await writeWebviews(configDir(), list);
-      return { status: 'deleted' as const, owner };
+      try {
+        await ctx.tabLayouts.webviewDeleted(ownerLayoutKey(removed.owner), id);
+      } catch (error) {
+        // Still inside withWebviews' mutex: restore the exact record at its
+        // original position without overwriting any concurrent mutation.
+        list.splice(index, 0, removed);
+        await writeWebviews(configDir(), list);
+        throw error;
+      }
+      return { status: 'deleted' as const, owner: removed.owner };
     });
 
     if (result === 'not-found') {
@@ -219,7 +228,6 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort
     webviewCapabilities.revokeWebview(id);
     socketCounts.delete(id);
     ctx.broadcast(SseEvent.WebviewChanged, { action: 'deleted', id });
-    await ctx.tabLayouts.webviewDeleted(ownerLayoutKey(result.owner), id);
     return { success: true, data: { id } };
   });
 

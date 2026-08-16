@@ -398,6 +398,7 @@ export class WebServer extends EventEmitter {
       readWebviews: () => readWebviews(getDataDir()),
       broadcast: this.broadcast.bind(this),
     });
+    if (this.testMode) this.tabLayouts.markRestorationSkipped();
 
     // Approvals Inbox → SSE. The singleton has no server reference; these
     // callbacks are its only way out. Broadcasts carry sessionId, so the
@@ -1210,8 +1211,19 @@ export class WebServer extends EventEmitter {
     }
   }
 
-  private async _doCleanupSession(sessionId: string, killMux: boolean, reason?: string): Promise<void> {
+  private async _doCleanupSession(
+    sessionId: string,
+    killMux: boolean,
+    reason?: string,
+    coordinateLayout = true
+  ): Promise<void> {
     const session = this.sessions.get(sessionId);
+    const pinned = session?.pinned === true || this.store.getSession(sessionId)?.pinned === true;
+    if (coordinateLayout && session && killMux && !pinned) {
+      return this.tabLayouts.runSessionDeletion([{ id: sessionId, owner: session.owner }], () =>
+        this._doCleanupSession(sessionId, killMux, reason, false)
+      );
+    }
     const lifecycleLog = getLifecycleLog();
     lifecycleLog.log({
       event: killMux ? 'deleted' : 'detached',
@@ -1357,10 +1369,7 @@ export class WebServer extends EventEmitter {
       // Only remove from state.json if we're also killing the mux session.
       // When killMux=false (server shutdown), preserve state for recovery.
       if (killMux) {
-        const result = this.store.demoteOrRemoveSession(sessionId);
-        if (result === 'removed') {
-          await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);
-        }
+        this.store.demoteOrRemoveSession(sessionId);
       }
     }
 
@@ -3035,7 +3044,10 @@ export class WebServer extends EventEmitter {
 
   /** Unlock destructive reconciliation only after mux restoration fully succeeds. */
   private async finalizeRestoredState(restored: boolean): Promise<void> {
-    if (!restored) return;
+    if (!restored) {
+      this.tabLayouts.markRestorationFailed();
+      return;
+    }
     this.tabLayouts.markRestorationComplete();
     await this.cleanupStaleSessions();
     await this.tabLayouts.reconcileAfterRestoration();
