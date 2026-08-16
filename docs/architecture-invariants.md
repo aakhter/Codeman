@@ -120,31 +120,12 @@ Implementation detail extracted from `CLAUDE.md` so that file stays small enough
 
 ### Read My Mind provider lanes and Codex isolation
 
-**Read My Mind is provider-lane strict.** The requesting session selects the predictor: Claude runs its existing one-shot
-`claude -p`; a supported **local** Codex session runs a separate ephemeral, noninteractive `codex exec` child. There is no
-cross-provider fallback. Remote-SSH/Docker Codex and all other modes are rejected before prediction, and the browser warns
-instead of opening the feature. Suggestions remain untrusted until the user explicitly clicks Send or Insert; neither the UI
-nor an agent gets an automatic-send path.
-
-**Codex context is ownership proof, not proximity.** Read My Mind resolves only the active rollout demonstrably owned by
-the session. It never substitutes the newest rollout, a same-cwd rollout, or another pane's history. History ties and other
-ambiguity fail closed. Competing sessions are considered only after their effective `CODEX_HOME` values are canonicalized,
-so distinct provider homes cannot influence one another. The selected rollout provides on-demand prompts, last assistant
-text, and tool summaries; it is not durable intent capture and does not mutate `intents.json`.
-
-**Codex identity and recovery remain private.** The session's effective `CODEX_HOME` is used for both rollout resolution
-and child launch. The private, versioned recovery record preserves only restorable home and session-key state, never an API
-key. Legacy, unknown, or lost-key restored sessions fail Read My Mind closed rather than falling back to a different
-account. Process-level `OPENAI_API_KEY` remains process-level provider configuration and is not serialized into public
-session state.
-
-**The Codex child is isolated but not asserted network-off.** It has an ephemeral private cwd outside the case workspace,
-ignored user config/rules/instructions, disabled shell/web/subagents, approvals set to never, a read-only command sandbox,
-a minimal environment, bounded output/time, and schema plus server-side validation. Required controls are pinned to
-`codex-cli 0.147.0`; an incompatible CLI returns an update-required 502 and is never retried with a weaker invocation.
-`readMyMindModel` remains Claude-only. Codex uses the validated launch-time session model or its built-in default, and
-interactive `/model` changes are not observable or mirrored. See `docs/readmymind.md` for operator-facing behavior and
-`docs/superpowers/specs/2026-08-16-cod-314-readmymind-codex-design.md` for the design record.
+**Read My Mind is provider-lane strict.** Claude uses one-shot `claude -p`; supported local Codex uses a separate
+ephemeral noninteractive invocation. There is no cross-provider fallback, and remote/Docker Codex plus all other modes are
+rejected before prediction. Codex conversation-history context must resolve to a strictly owned rollout: same-cwd/newest
+foreign rollouts and ambiguity fail closed, with competitors scoped by canonical provider-home identity. Codex rollout
+prompts are on-demand input, never durable intent capture. `readMyMindModel` is Claude-only. Detailed isolation, recovery,
+and UI/API send-boundary rules are canonical in [security architecture §6a](security-architecture.md#6a-read-my-mind-local-codex-predictor-cod-314).
 
 ### Attachments
 

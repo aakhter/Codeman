@@ -484,9 +484,12 @@ guide: [`readmymind.md`](readmymind.md).
   case's profile entirely.
 - `POST /api/v1/sessions/:id/readmymind` predicts the user's next prompt for a
   Claude session or a **local** Codex session. Claude uses its transcript
-  signals and one-shot Claude predictor; Codex uses only the requesting
-  session's strictly owned rollout and a separate ephemeral noninteractive
-  Codex predictor. There is no cross-provider fallback. Body is optional; the
+  signals and one-shot Claude predictor. Codex conversation-history signals
+  come only from the requesting session's strictly owned rollout; the assembled
+  context also includes case intent/goals, pending dialog, workspace, away,
+  sibling, and rethink signals. Its predictor is a separate ephemeral
+  noninteractive Codex invocation, not a new interactive tab. There is no
+  cross-provider fallback. Body is optional; the
   rethink flow passes `{ steer?, rejected? }` (strict schema: `steer` <= 2000
   chars, `rejected` up to 10 strings <= 1000 chars). It cannot select a
   provider, model, environment, or rollout. Answers
@@ -496,7 +499,8 @@ guide: [`readmymind.md`](readmymind.md).
   prediction in flight per session returns `409 CONFLICT`; provider,
   timeout, or output-contract failures return `502 OPERATION_FAILED`. Takes
   5-90 s and costs real tokens. Suggestions are only ever returned, never
-  sent: submitting one is the caller's explicit act.
+  sent. A separate input request can submit text, so API clients must obtain
+  explicit user authorization before doing so.
 
 All four enforce session ownership in multi-user mode; a foreign session id
 answers `404 NOT_FOUND` (no existence leak), and profiles of two owners of the

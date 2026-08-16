@@ -1,13 +1,13 @@
 # Read My Mind
 
-Codeman's per-case memory of what you are trying to accomplish, and the 🧠 button that turns it into a predicted next prompt. Each case has an **intent profile**: freeform `goals` written by you or your agent, plus durable Claude prompts captured while the feature is on. Codex prompts are read only on demand from the strictly owned rollout for prediction and are never persisted. Pressing 🧠 asks a short-lived predictor process for one to three suggestions; you can send, insert, edit, rethink, or dismiss them. Nothing is sent to a session automatically. Design and history: [`readmymind-plan.md`](readmymind-plan.md).
+Codeman's per-case memory of what you are trying to accomplish, and the 🧠 button that turns it into a predicted next prompt. Each case has an **intent profile**: freeform `goals` written by you or your agent, plus durable Claude prompts captured while the feature is on. Codex prompts are read only on demand from the strictly owned rollout for prediction and are never persisted. Pressing 🧠 asks a short-lived predictor process for one to three suggestions; you can send, insert, edit, rethink, or dismiss them. The browser UI never sends a suggestion automatically. Design and history: [`readmymind-plan.md`](readmymind-plan.md).
 
 ## What it supports
 
 Read My Mind supports **Claude sessions** and **local Codex sessions** only. Provider lanes are strict:
 
 - A Claude session runs one-shot `claude -p` with Claude context and the Claude-only `readMyMindModel` setting.
-- A local Codex session runs a separate ephemeral, noninteractive `codex exec` child using that session's provider identity and conversation rollout. It is a short-lived predictor process, not a new interactive Codeman tab or conversation.
+- A local Codex session runs a separate ephemeral, noninteractive `codex exec` child using that session's provider identity and conversation rollout. It is a short-lived model invocation that uses `--ephemeral`, leaves no persisted or resumable Codex rollout artifact, and is not a new interactive Codeman tab.
 
 There is no cross-provider fallback: a failed Codex prediction never starts Claude, and a failed Claude prediction never starts Codex. Remote-SSH and Docker Codex sessions, plus Shell, OpenCode, Gemini, Antigravity, and Pi, are unsupported. The UI warns before opening Read My Mind for an unsupported session; the global setting being on does not make every mode eligible. Claude's existing scope is unchanged.
 
@@ -32,7 +32,7 @@ On a supported session, press the brain button in the desktop header or the 🧠
 - **Rethink** re-runs with the shown suggestions treated as rejected. Its optional steer note is your own highest-authority signal.
 - **Dismiss** closes the dialog.
 
-A prediction takes 5–90 seconds and costs real tokens; only one runs per session at a time. A suggestion is always a proposal. Send and Insert require your explicit click, including when an agent called the API.
+A prediction takes 5–90 seconds and costs real tokens; only one runs per session at a time. In the browser UI, Send and Insert require your explicit click. The prediction API only returns suggestion text; an API client can separately call the input API, so the packaged agent policy requires explicit user authorization before it does.
 
 ## Context and capture
 
@@ -40,11 +40,11 @@ Claude retains the original context path: its intent profile, Claude transcript 
 
 For local Codex, Read My Mind resolves only the active rollout demonstrably owned by the requesting session, then reads recent textual prompts, the last assistant response, and recent tool summaries on demand. It uses neither the newest same-directory rollout nor a foreign pane's rollout; ambiguity, missing identity, and unreadable rollout data fail closed rather than borrowing context. Rollout prompts are prediction inputs only and are **not** written into `intents.json`. Durable Codex prompt capture and proactive prediction remain deferred.
 
-In both lanes, goals and user prompts outrank assistant text, tool logs, and workspace output, which are observations that could contain hostile instructions. The explicit human send/insert boundary is the final safeguard.
+In both lanes, goals and user prompts outrank assistant text, tool logs, and workspace output, which are observations that could contain hostile instructions. The browser's explicit Send/Insert click is the final UI safeguard; API clients remain subject to the explicit-user-authorization policy.
 
 ## Provider identity, model, and recovery
 
-Codex prediction uses the session's effective Codex identity, so rollout discovery and the child stay in the same account/configuration lane. Private versioned recovery provenance retains only the restorable home and session-key state, never credentials. A restored legacy, unknown, or lost-key Codex session fails Read My Mind closed instead of silently switching accounts. Process-level provider credentials remain server-side and are not exposed through API responses or session state.
+Codex prediction uses the session's effective Codex identity, so rollout discovery and the child stay in the same account/configuration lane. Private versioned recovery provenance retains only the restorable home and session-key state, never credentials. A restored legacy, unknown, or lost-key Codex session fails Read My Mind closed instead of silently switching accounts; create a fresh Codex session to clear that fence. Process-level provider credentials remain server-side and are not exposed through API responses or session state.
 
 `readMyMindModel` is **Claude-only**. Codex uses the validated launch-time session model when one was configured; otherwise its child omits `--model` and uses the Codex CLI built-in default because user configuration is ignored. There is no Codex Read My Mind model setting. A later interactive Codex `/model` change is not currently observable by Codeman and is not mirrored into prediction.
 
@@ -81,11 +81,11 @@ curl -sk -X POST https://localhost:3000/api/sessions/$SID/readmymind \
   -H 'Content-Type: application/json' -d '{}' | jq '.data.suggestions'
 ```
 
-The prediction body can carry only rethink state: `{"steer":"…","rejected":["…"]}`. It cannot choose a provider, model, environment, or rollout. The response remains `{ suggestions: [{ prompt, why, kind }], durationMs }`, where `kind` is `continue`, `verify`, or `redirect`. Unsupported modes return `400 INVALID_INPUT`, a concurrent request returns `409 CONFLICT`, and provider or output failures return `502 OPERATION_FAILED`.
+The prediction body can carry only rethink state: `{"steer":"…","rejected":["…"]}`. It cannot choose a provider, model, environment, or rollout. The response remains `{ suggestions: [{ prompt, why, kind }], durationMs }`, where `kind` is `continue`, `verify`, or `redirect`. It returns text only; it does not send it to the session. Unsupported modes return `400 INVALID_INPUT`, a concurrent request returns `409 CONFLICT`, and provider or output failures return `502 OPERATION_FAILED`.
 
 ## For agents
 
-The `codeman` agent skill documents the same verbs. Agents should read the profile to understand user intent, record only goals the user actually stated, merge before PUT because it replaces, never delete a profile unprompted, and never send a suggestion unless the user explicitly asks. It is the user's memory, not the agent's.
+The `codeman` agent skill documents the same verbs. Agents should read the profile to understand user intent, record only goals the user actually stated, merge before PUT because it replaces, never delete a profile unprompted, and obtain explicit user authorization before making a separate input request for a suggestion. It is the user's memory, not the agent's.
 
 ## Troubleshooting
 
@@ -95,7 +95,7 @@ The `codeman` agent skill documents the same verbs. Agents should read the profi
 | Prediction feels generic                         | Record goals and let Claude capture build history; a new Codex session may not yet have an owned rollout. Read My Mind will not borrow a similar-looking rollout.                                        |
 | `409 CONFLICT`                                   | One prediction per session is running; wait up to 90 seconds.                                                                                                                                            |
 | Codex asks to update                             | Its CLI rejected a required isolation control. Update Codex; Codeman will not weaken the invocation.                                                                                                     |
-| Codex `502`                                      | Codex may be unavailable, unauthenticated, misconfigured, timed out, or have returned an invalid response. Restart or recreate restored legacy/lost-key sessions rather than expecting account fallback. |
+| Codex `502`                                      | Codex may be unavailable, unauthenticated, misconfigured, timed out, or have returned an invalid response. For restored legacy/unknown/lost-key provenance, create a fresh Codex session rather than expecting account fallback. |
 | Claude profile stays empty                       | Capture was off, the session is not Claude, or Claude hooks cannot reach the server. Capture is not retroactive.                                                                                         |
 | Goals disappeared after an agent write           | PUT replaces the whole text. Re-state them and ask the agent to read and merge first.                                                                                                                    |
 

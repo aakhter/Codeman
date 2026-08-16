@@ -595,9 +595,9 @@ provider lane: Codex is a separate ephemeral predictor and never falls back to C
 Each suggestion is `{prompt, why, kind}` (`kind`: `continue` / `verify` / `redirect`).
 To re-run after a miss, pass `{"steer":"…","rejected":["…"]}` with the rejected prompt
 texts. A 409 means a prediction is already running for the session; a 400 means an
-unsupported mode (including remote/Docker Codex). ⚠️ Suggestions are **proposals for
-the user**: never send one into a session (yours or another's) unless the user
-explicitly asked you to act on it.
+unsupported mode (including remote/Docker Codex). ⚠️ The prediction endpoint returns
+suggestion text only. A separate input call can send it into a session (yours or
+another's), so never make that call unless the user explicitly authorized it.
 
 ### 5.13 Messaging claude workers
 

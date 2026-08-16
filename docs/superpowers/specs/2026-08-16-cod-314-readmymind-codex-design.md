@@ -259,9 +259,10 @@ the current predictor. Provider-specific copy is actionable but safe:
 | Provider exceeds 90 seconds                  | 502 timeout message                |
 | Final output is empty or violates the schema | 502 prediction-contract message    |
 
-The UI continues to render prediction text only through `value`/`textContent`. It locally warns and refuses to open for
-unsupported modes before the request. Send and Insert remain the only routes from a suggestion to the active terminal, and
-both require an explicit human click.
+The browser UI continues to render prediction text only through `value`/`textContent`. It locally warns and refuses to
+open for unsupported modes before the request. Browser Send and Insert remain the only UI routes from a suggestion to the
+active terminal, and both require an explicit human click. The prediction endpoint returns text only; a packaged agent
+must have explicit user authorization before it separately calls the input API.
 
 ## Security invariants
 
@@ -275,7 +276,8 @@ both require an explicit human click.
   arguments, and temporary files.
 - Rollout selection fails closed on ambiguity and never uses a newest-file shortcut.
 - Observed assistant, tool, workspace, and rollout content retains the existing lower trust tier in the prediction prompt.
-- Suggestions remain untrusted text until the user explicitly sends or inserts one.
+- Suggestions remain untrusted text: the browser requires an explicit Send/Insert click, and API clients require explicit
+  user authorization before a separate input request.
 - Temporary output is bounded, private, and removed on success, error, and timeout.
 
 ## Test plan
@@ -327,7 +329,7 @@ both require an explicit human click.
 
 - `openReadMyMind()` accepts Claude and Codex and still rejects unsupported modes.
 - Desktop and phone controls remain gated by `readMyMindEnabled`.
-- Suggestion rendering retains the no-`innerHTML` guard and explicit-click send boundary.
+- Suggestion rendering retains the no-`innerHTML` guard, browser explicit-click send boundary, and API explicit-user-authorization policy.
 - User and API docs describe provider lanes, local-Codex scope, Claude-only `readMyMindModel`, and provider-specific failure
   troubleshooting.
 
