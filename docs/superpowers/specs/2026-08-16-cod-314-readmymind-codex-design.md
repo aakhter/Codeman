@@ -49,14 +49,16 @@ Codex account when a session uses a custom `CODEX_HOME`.
 The pre-document review found six constraints that shape the implementation:
 
 1. **Provider choice and model choice are separate.** `readMyMindModel` contains a Claude model and must never be passed to
-   `codex exec`. A Codex prediction uses the active session's validated `codexConfig.model` when one exists; otherwise it
-   omits `--model` and uses the Codex CLI default.
-2. **Provider identity includes the session environment.** A Codex pane may use `CODEX_HOME`, `OPENAI_API_KEY`, or
-   `CODEX_API_KEY` overrides. Rollout discovery and the one-shot child must use the same restricted provider environment,
-   without exposing it through API state or logs.
-3. **A non-interactive Codex agent can still invoke tools.** The predictor must run in a fresh private temporary directory,
-   load no project instructions or user-configured tools, use a read-only sandbox, and receive an explicit prediction-only
-   prompt. It must never run in the case workspace.
+   `codex exec`. A Codex prediction uses the session's validated launch-time `codexConfig.model` when one exists; otherwise
+   it omits `--model` and uses the Codex CLI built-in default. Codeman cannot currently observe a model changed interactively
+   with `/model`, so this design does not claim to mirror that runtime change.
+2. **Provider identity includes the effective environment.** A Codex pane may have session-scoped `CODEX_HOME` or
+   `CODEX_API_KEY` values, while `OPENAI_API_KEY` may come from the Codeman process environment. Rollout discovery and the
+   one-shot child must use the same restricted provider identity without exposing it through API state or logs.
+3. **A non-interactive Codex agent can still invoke tools and load instructions.** The predictor must run in a fresh private
+   temporary directory, explicitly suppress global and project instructions, disable shell, web-search, and subagent tools,
+   reject approvals, use a read-only command sandbox, and receive an explicit prediction-only prompt. It must never run in
+   the case workspace.
 4. **`codex exec` should not create another conversation artifact.** Use `--ephemeral`; consume only the final response file,
    not progress JSONL or terminal rendering.
 5. **Rollout ownership is security-sensitive.** Read My Mind must call the existing `findActiveCodexConversation()` resolver
@@ -95,9 +97,10 @@ The parser preserves the response viewer's established rules:
 
 The shared parse result exposes the full user/assistant thread required by the response viewer. A second projection produces
 Read My Mind signals: the last assistant text, textual user prompts with timestamps, and up to ten recent tool summaries.
-Tool summaries recognize the Codex rollout's function/custom tool-call records, retain only a bounded name and safe argument
-summary, and do not treat tool output as user intent. Image-only inputs may remain visible in the response viewer but are not
-added to the prompt-style history used by Read My Mind.
+Tool summaries recognize the Codex rollout's function/custom tool-call records and reuse the existing collector's bounded,
+allowlisted detail keys (`file_path`, `command`, `pattern`, `path`, `url`, `query`, or `description`). They do not include tool
+output or treat it as user intent. Image-only inputs may remain visible in the response viewer but are not added to the
+prompt-style history used by Read My Mind.
 
 The response viewer continues to read the complete rollout because it renders expandable history. Read My Mind tail-reads a
 bounded region, currently 256 KiB, and drops the first partial line when the read begins mid-file. The active rollout path is
@@ -115,7 +118,8 @@ For a Codex session, the route:
    working directory, configured resume ID, last submit time, and competing Codex submit times.
 3. Reads the bounded Read My Mind signal projection from that rollout.
 4. Merges the rollout's recent textual user prompts with the case intent profile's existing prompt entries, orders them by
-   timestamp, removes exact duplicates at the join boundary, and retains the newest context-budget allowance.
+   timestamp, and retains the newest context-budget allowance. Repeated user prompts from different sources or turns remain
+   intact; only the shared rollout parser removes a legacy row proven to be the twin of a modern event row.
 5. Supplies the Codex last assistant response and tools to the existing pure `buildPredictionContext()` function.
 
 The rollout prompts are prediction inputs, not persisted mutations. This avoids surprising resurrection after the user uses
@@ -123,8 +127,8 @@ the existing Forget action and avoids inventing a cursor/tombstone migration in 
 capture remains an explicit later feature.
 
 If no owned rollout exists yet, prediction may still use goals, workspace signals, siblings, and away context; it does not
-fall back to another pane's rollout. The absence of a rollout is not itself a server error. A prediction with insufficient
-intent may return the model's normal empty/error outcome.
+fall back to another pane's rollout. The absence of a rollout is not itself a server error. If the remaining context cannot
+produce at least one valid suggestion, the existing prediction-contract error is returned without a provider fallback.
 
 ### 4. Provider-aware predictor dispatch
 
@@ -132,9 +136,15 @@ Keep the exported `readMyMindPredictor` singleton used by route tests, but chang
 provider discriminant:
 
 ```ts
+interface CodexProviderEnvironment {
+  CODEX_HOME?: string;
+  OPENAI_API_KEY?: string;
+  CODEX_API_KEY?: string;
+}
+
 type ReadMyMindProvider =
   | { kind: 'claude'; model: string }
-  | { kind: 'codex'; model?: string; env?: Record<string, string> };
+  | { kind: 'codex'; model?: string; env: Readonly<CodexProviderEnvironment> };
 ```
 
 The route constructs this value from the already-authorized session. Request bodies cannot choose the provider, model, or
@@ -146,10 +156,18 @@ detached tmux process, timeout, and cleanup path.
 The Codex branch uses `spawn()` with an argument array, never a shell command. Its conceptual invocation is:
 
 ```text
-codex exec
+codex
+  --ask-for-approval never
+  exec
   --ephemeral
   --ignore-user-config
   --ignore-rules
+  --strict-config
+  --disable shell_tool
+  --config project_doc_max_bytes=0
+  --config agents.enabled=false
+  --config tools.web_search=false
+  --config shell_environment_policy.inherit=none
   --sandbox read-only
   --skip-git-repo-check
   --color never
@@ -161,46 +179,74 @@ codex exec
 ```
 
 The assembled context is written to stdin. A dedicated mode-0700 directory contains the JSON schema and final-output file;
-files are mode 0600. The directory is outside the case workspace. `--ignore-user-config` prevents user-configured MCP
-servers, hooks, and other agent extensions from turning a prediction into an external side effect; Codex authentication still
-uses `CODEX_HOME`. `--ignore-rules` prevents project/user execution policy from changing this isolated invocation.
+files are mode 0600. The directory is outside the case workspace. `--ignore-user-config` prevents configuration-defined MCP
+servers, hooks, and extensions from being loaded while Codex authentication still uses `CODEX_HOME`. It does not suppress
+`AGENTS.md`; `project_doc_max_bytes=0` explicitly suppresses global and project instruction loading. `--ignore-rules` only
+suppresses execution-policy `.rules` files. The remaining overrides disable shell execution, web search, and subagents,
+reject approval requests, and prevent the model's subprocess environment policy from inheriting host variables. The
+read-only command sandbox is an additional boundary, not a claim that the CLI process itself has no network access.
 
 The final response is validated by the existing Zod parser even though Codex receives an output schema. Defense in depth is
 intentional: CLI output constraints do not replace server validation, one-line normalization, length limits, or the 1-3
 suggestion cap.
 
-The child has the existing 90-second ceiling. Timeout terminates the process group, escalates to a hard kill after a short
-grace period, and removes the private directory. Stdout and stderr are bounded; public errors identify
-the stage (unavailable CLI, authentication/configuration failure, timeout, empty output, invalid contract) but include neither
-prompt contents, provider environment values, host paths, nor raw CLI diagnostics. Detailed sanitized diagnostics may be
-logged server-side.
+The child has the existing 90-second ceiling and is spawned as its own process group. Timeout terminates that group, escalates
+to a hard kill after a short grace period, and removes the private directory. Stdout and stderr are capped at 256 KiB each
+while streaming, and the final-output file is monitored with a 64 KiB ceiling; crossing a cap terminates the process and
+returns a prediction-contract error. Public errors identify the stage (unavailable CLI, update required,
+authentication/configuration failure, timeout, empty output, invalid contract) but include neither prompt contents, provider
+environment values, host paths, nor raw CLI diagnostics. Detailed sanitized diagnostics may be logged server-side.
 
 ### 5. Configuration behavior
 
 `readMyMindModel` remains a Claude-only setting and retains its current default. Documentation and settings copy must say so.
 
-Codex uses `session.codexConfig.model` when present and valid under the existing model-name allowlist. When absent, the child
-omits `--model`. There is no `readMyMindCodexModel` in this change: the provider's active session choice is the least
-surprising default and avoids another global setting with ambiguous precedence.
+Codex uses the session's launch-time `session.codexConfig.model` when present and valid under the existing model-name
+validation. When absent, the child omits `--model`; because user configuration is ignored, the CLI uses its built-in default.
+There is no `readMyMindCodexModel` in this change. A model selected later with `/model` is not exposed in current Codeman
+session state and therefore cannot be mirrored reliably; documenting that limitation is preferable to implying runtime
+parity that the implementation cannot provide.
 
 The predictor builds a minimal child environment rather than forwarding the server's entire environment. It includes the
 augmented executable path, the small set of operating-system values required for the CLI to start, and the effective Codex
 provider identity. A narrow Session method returns `CODEX_HOME`, `OPENAI_API_KEY`, and `CODEX_API_KEY` if configured; global
-values for those keys remain the fallback. It does not return arbitrary environment overrides. Tests prove the method is not
-serialized by `toState()` or persisted through the existing safe persistence accessor.
+values for those keys remain the fallback. It does not return arbitrary environment overrides. The operating-system values
+are enumerated, not inherited wholesale, and `shell_environment_policy.inherit=none` prevents any model-launched subprocess
+from inheriting even that launcher environment. Tests prove the method is not serialized by `toState()` or persisted through
+the existing safe persistence accessor.
 
-### 6. Error and concurrency behavior
+### 6. Codex CLI compatibility
+
+The isolation controls in this design are required, not best-effort. They have been verified against the installed
+`codex-cli 0.147.0`, which is the documented tested minimum for this feature. Codeman does not add a global startup gate or
+reject older CLIs before Read My Mind is used.
+
+`--strict-config` makes an unrecognized configuration key fail instead of being silently ignored. If `codex exec` rejects a
+required option or configuration override, the Codex prediction fails safely with an actionable 502 message that says the
+installed Codex CLI must be updated. It must never retry after removing or weakening an isolation control. Unit tests pin
+the complete argument vector and map an unsupported-option diagnostic to this safe public error.
+
+The invocation and isolation assumptions were checked against OpenAI's official
+[developer command](https://learn.chatgpt.com/docs/developer-commands?surface=cli),
+[non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference), and
+[`AGENTS.md` loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md) documentation, plus the installed CLI's
+`codex --help`, `codex exec --help`, and feature list.
+
+### 7. Error and concurrency behavior
 
 The existing `predictionsInFlight` set remains keyed by Codeman session ID, so a second request for the same pane receives
 409 while either provider is running. Different sessions may predict concurrently.
 
-Errors retain the API envelope and 502 status used by the current predictor. Provider-specific copy is actionable but safe:
+The existing Claude error path remains unchanged. New Codex failure mapping retains the API envelope and 502 status used by
+the current predictor. Provider-specific copy is actionable but safe:
 
 | Condition                                    | Public behavior                    |
 | -------------------------------------------- | ---------------------------------- |
 | Unsupported mode or non-local Codex session  | 400 `INVALID_INPUT`                |
 | Prediction already running for this session  | 409 `CONFLICT`                     |
 | Codex binary cannot start                    | 502 provider-unavailable message   |
+| Codex rejects a required isolation control   | 502 update-required message        |
 | Codex authentication/configuration failure   | 502 provider-configuration message |
 | Provider exceeds 90 seconds                  | 502 timeout message                |
 | Final output is empty or violates the schema | 502 prediction-contract message    |
@@ -212,15 +258,16 @@ suggestion to the active terminal, and both require an explicit human click.
 
 - The requesting session determines the provider; client input cannot select or override it.
 - Codex prediction never runs in or adds a writable directory from the user workspace.
-- The Codex subprocess is ephemeral, network-disabled/read-only, and isolated from user/project instructions and configured
-  tools.
+- The Codex subprocess is ephemeral; its command sandbox is read-only, approvals are rejected, global/project instructions
+  are suppressed, and shell, web-search, and subagent tools are disabled.
 - The Codex subprocess receives a minimal environment, not the full Codeman server environment.
+- The Codex model's subprocess environment policy inherits no launcher variables.
 - Provider secrets remain server-side environment values and are absent from logs, API state, persisted state, command-line
   arguments, and temporary files.
 - Rollout selection fails closed on ambiguity and never uses a newest-file shortcut.
 - Observed assistant, tool, workspace, and rollout content retains the existing lower trust tier in the prediction prompt.
 - Suggestions remain untrusted text until the user explicitly sends or inserts one.
-- Temporary output is bounded, private, and removed on success, error, timeout, and cancellation.
+- Temporary output is bounded, private, and removed on success, error, and timeout.
 
 ## Test plan
 
@@ -238,22 +285,29 @@ suggestion to the active terminal, and both require an explicit human click.
 
 - Dispatch Claude and Codex from the explicit provider discriminant.
 - Prove a Codex request never invokes the Claude runner and vice versa.
-- Pin the Codex argument vector: ephemeral, isolated temp cwd, read-only sandbox, ignored config/rules, schema file, output file,
-  stdin prompt, and optional validated model.
+- Pin the complete Codex argument vector: ephemeral, isolated temp cwd, read-only command sandbox, ignored config/rules,
+  suppressed instructions, disabled shell/web/subagents, rejected approvals, schema file, output file, stdin prompt, and
+  optional validated launch-time model.
 - Prove the prompt and provider secrets do not appear in command arguments.
-- Propagate only the three allowed Codex environment keys.
+- Propagate only the enumerated operating-system values and three allowed Codex identity keys; prove no arbitrary server or
+  session environment variable is forwarded.
+- Prove session-scoped `CODEX_HOME`/`CODEX_API_KEY` precedence and process-level identity fallback without exposing arbitrary
+  `CODEX_*` overrides.
+- Map rejection of any required isolation option to the safe update-required failure without a weaker retry.
 - Accept valid schema-constrained output and apply the shared Zod normalization.
 - Reject malformed, empty, oversized, and wrong-contract output.
+- Terminate safely when stdout, stderr, or the final-output file crosses its byte cap.
 - Terminate and clean up on timeout and spawn failure.
 
 ### Routes and context
 
 - Claude route behavior and model lookup remain unchanged.
 - Local Codex mode is accepted and calls the predictor with `kind: 'codex'`.
-- Codex uses its session model or omits the model; it never calls `getReadMyMindModel()`.
+- Codex uses its launch-time session model or omits the model; it never calls `getReadMyMindModel()`.
 - The owned-rollout resolver receives the effective session `CODEX_HOME` and identity inputs.
 - Codex rollout prompts, assistant text, and tools appear in the assembled context.
-- Intent-profile prompts and rollout prompts merge in timestamp order without a duplicate join entry.
+- Intent-profile prompts and rollout prompts merge in timestamp order while preserving intentional repeated prompts across
+  different sources or turns.
 - A missing owned rollout does not select a sibling rollout.
 - Remote/Docker Codex and all unsupported modes receive 400.
 - Same-session concurrent requests retain the 409 guard.
