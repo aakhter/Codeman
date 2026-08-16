@@ -420,7 +420,7 @@ export class CronService {
         checkpointEnabled,
         claudeSessionStartHookReady,
       });
-      this.deps.addSession(session);
+      await this.deps.addSession(session);
       this.store.incrementSessionsCreated();
       this.deps.persistSessionState(session);
       await this.deps.setupSessionListeners(session);

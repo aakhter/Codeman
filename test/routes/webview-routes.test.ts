@@ -16,6 +16,8 @@ import { registerWebviewRoutes } from '../../src/web/routes/webview-routes.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { webviewCapabilities } from '../../src/webview-capabilities.js';
 import { capabilityFromProxyPath } from '../../src/web/webview-proxy.js';
+import { TabLayoutService } from '../../src/tab-layout-service.js';
+import type { TabLayout } from '../../src/tab-layout.js';
 
 let app: FastifyInstance;
 let tmpDir: string;
@@ -93,6 +95,57 @@ describe('POST /api/webviews', () => {
       expect(res.statusCode, url).toBe(400);
       expect(res.json().errorCode).toBe('INVALID_INPUT');
     }
+  });
+
+  it('rolls back webview persistence and emits nothing when layout capacity rejects insertion', async () => {
+    const refs = Array.from({ length: 512 }, (_, index) => ({ kind: 'session' as const, id: `s-${index}` }));
+    const original: TabLayout = {
+      version: 9,
+      groups: [],
+      ungrouped: refs,
+      updatedAt: '2026-08-16T00:00:00.000Z',
+    };
+    let stored = original;
+    const live = new Map(refs.map((ref, index) => [ref.id, { id: ref.id, createdAt: index }]));
+    const atomicBroadcast = vi.fn();
+    const service = new TabLayoutService({
+      store: {
+        getTabLayout: () => stored,
+        setTabLayout: (_owner, layout) => {
+          stored = layout;
+        },
+        getSessions: () => ({}),
+        getSessionOrder: () => [],
+      } as never,
+      sessions: live,
+      readWebviews: async () =>
+        (await import('../../src/webview-store.js')).readWebviews(tmpDir) as Promise<
+          Array<{ id: string; owner?: string }>
+        >,
+      broadcast: atomicBroadcast,
+    });
+    const atomicApp = Fastify({ logger: false });
+    await atomicApp.register(fastifyCookie);
+    await atomicApp.register(fastifyWebsocket);
+    registerWebviewRoutes(atomicApp, {
+      broadcast: atomicBroadcast,
+      tabLayouts: service,
+    } as never);
+    installRouteErrorHandler(atomicApp);
+    await atomicApp.ready();
+
+    const response = await atomicApp.inject({
+      method: 'POST',
+      url: '/api/webviews',
+      payload: { name: 'overflow', url: 'https://example.test/' },
+    });
+    const list = (await atomicApp.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews;
+
+    expect(response.statusCode).toBe(500);
+    expect(list).toEqual([]);
+    expect(stored).toEqual(original);
+    expect(atomicBroadcast).not.toHaveBeenCalled();
+    await atomicApp.close();
   });
 
   it('rejects URLs carrying embedded credentials', async () => {
