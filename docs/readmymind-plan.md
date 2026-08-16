@@ -123,7 +123,7 @@ Agent use cases this unlocks: a lead session records intentions as the user stat
 - `test/intent-store.test.ts`: key derivation, caps/FIFO, consecutive-dupe skip, tag/tool_result filtering fixtures, 0600 mode, multi-user key separation.
 - `test/readmymind-context.test.ts`: fixture scenarios pinning the assembled prompt: pending-dialog-first ordering, tail-keeping truncation of the assistant turn, budget drop order (siblings before workspace signals), remote-case git skip, trust-tier framing present, rejected suggestions included only on rethink.
 - `test/readmymind-predictor.test.ts`: strict JSON parse, provider dispatch, fixed Codex isolation arguments, bounded output/timeout, update-required failure, and no weaker retry.
-- `test/routes/readmymind-routes.test.ts` (`app.inject`): CRUD round-trip, Claude/local-Codex provider selection, owned-rollout context, 409 while in flight, unsupported-mode 400, ownership 404, and safe predictor-failure handling. Browser Send/Insert behavior is covered separately by the UI tests.
+- `test/routes/readmymind-routes.test.ts` (`app.inject`): CRUD round-trip, Claude/local-Codex provider selection, owned-rollout context, 409 while in flight, unsupported-mode 400, ownership 404, and safe predictor-failure handling. `test/readmymind-phone-key.test.ts` guards phone-key mode gating, safe rendering without `innerHTML`, rethink wiring, and primary Send markup.
 - Transcript capture: extend the transcript-watcher fixtures with user-turn entries.
 
 ## Phases

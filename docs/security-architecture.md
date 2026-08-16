@@ -27,7 +27,7 @@ an explicit, guided opt‑in.
 4. [Recommended remote‑access setups](#4-recommended-remoteaccess-setups)
 5. [File‑serving hardening](#5-fileserving-hardening)
 6. [tmux launch hardening](#6-tmux-launch-hardening-cod31)
-6a. [Read My Mind local Codex predictor](#6a-read-my-mind-local-codex-predictor-cod-314)
+   - [Read My Mind local Codex predictor](#6a-read-my-mind-local-codex-predictor-cod-314)
 7. [Supply‑chain & build‑asset hardening](#7-supplychain--buildasset-hardening-cod28)
 8. [Multi‑instance isolation](#8-multiinstance-isolation)
 9. [Transport security headers](#9-transport-security-headers)
