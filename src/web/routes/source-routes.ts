@@ -137,13 +137,13 @@ async function writeLocalSourceFile(sourcesDir: string, diskName: string, bytes:
 export function registerSourceRoutes(app: FastifyInstance, ctx: SessionPort): void {
   app.get('/api/sessions/:id/sources', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     return { success: true, data: { sources: session.sources } };
   });
 
   app.post('/api/sessions/:id/sources', async (req) => {
     const { id } = req.params as { id: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const body = parseBody(SessionSourceAddSchema, req.body);
 
     const source = {
@@ -169,14 +169,16 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: SessionPort): vo
 
     const { id } = req.params as { id: string };
 
+    // Ownership first, then the rate limit (COD-294) — mirrors the attachment upload
+    // route. A foreign caller must not be able to drain the owner's token bucket.
+    const session = findSessionOrFail(ctx, id, req);
+
     // Rate limit per (IP, sessionId): 20/min. Defends against disk-fill DoS.
     if (!consumeSourceUploadToken(`${req.ip}:${id}`)) {
       reply.code(429);
       reply.header('Retry-After', '60');
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
     }
-
-    const session = findSessionOrFail(ctx, id);
 
     if (!req.isMultipart()) {
       reply.code(400);
@@ -309,7 +311,7 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: SessionPort): vo
 
   app.delete('/api/sessions/:id/sources/:sourceId', async (req) => {
     const { id, sourceId } = req.params as { id: string; sourceId: string };
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     session.removeSource(sourceId);
     ctx.persistSessionState(session);
     return { success: true };
