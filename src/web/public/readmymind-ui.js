@@ -26,7 +26,7 @@
  * @dependency app.js (CodemanApp class, this.sessions, this.activeSessionId, showToast)
  * @dependency mobile-handlers.js (MobileDetection.isTouchDevice, focus policy)
  * @dependency settings-ui.js (loadAppSettingsFromStorage)
- * @dependency api-client.js at runtime (this._apiJson; loads later but is only called after init)
+ * @dependency api-client.js at runtime (this._api/this._apiJson; loads later but is only called after init)
  * @loadorder 11.3, after panels-ui.js, before ultracode-panel.js
  */
 

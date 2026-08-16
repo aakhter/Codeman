@@ -19,6 +19,39 @@ function loadPrototype(document: object = {}): Record<string, (...args: unknown[
   return context.__prototype as Record<string, (...args: unknown[]) => unknown>;
 }
 
+function createModalHarness() {
+  const loading = { style: { display: '' } };
+  const result = { style: { display: '' } };
+  const error = {
+    style: { display: 'none' },
+    textContent: 'No suggestion this time. Add a steer note and Rethink to try again.',
+    dataset: {} as Record<string, string>,
+  };
+  const steer = { value: '' };
+  const steerRow = { style: { display: '' } };
+  const rethink = { disabled: false };
+  const modal = {
+    querySelector(selector: string) {
+      return new Map([
+        ['.readmymind-loading', loading],
+        ['.readmymind-result', result],
+        ['.readmymind-error', error],
+      ]).get(selector);
+    },
+  };
+  const document = {
+    getElementById(id: string) {
+      return new Map([
+        ['readMyMindModal', modal],
+        ['readMyMindSteer', steer],
+        ['readMyMindSteerRow', steerRow],
+        ['readMyMindRethink', rethink],
+      ]).get(id);
+    },
+  };
+  return { document, error };
+}
+
 describe('Read My Mind API errors', () => {
   it('preserves a structured non-2xx API error for the modal', async () => {
     const prototype = loadPrototype();
@@ -69,33 +102,7 @@ describe('Read My Mind API errors', () => {
   });
 
   it('renders a request error with textContent and restores the generic empty-state copy', () => {
-    const loading = { style: { display: '' } };
-    const result = { style: { display: '' } };
-    const error = {
-      style: { display: 'none' },
-      textContent: 'No suggestion this time. Add a steer note and Rethink to try again.',
-      dataset: {} as Record<string, string>,
-    };
-    const steerRow = { style: { display: '' } };
-    const rethink = { disabled: false };
-    const modal = {
-      querySelector(selector: string) {
-        return new Map([
-          ['.readmymind-loading', loading],
-          ['.readmymind-result', result],
-          ['.readmymind-error', error],
-        ]).get(selector);
-      },
-    };
-    const document = {
-      getElementById(id: string) {
-        return new Map([
-          ['readMyMindModal', modal],
-          ['readMyMindSteerRow', steerRow],
-          ['readMyMindRethink', rethink],
-        ]).get(id);
-      },
-    };
+    const { document, error } = createModalHarness();
     const prototype = loadPrototype(document);
     const app = { _rmm: { errorMessage: 'Recreate this restored Codex session.' } };
 
@@ -105,6 +112,36 @@ describe('Read My Mind API errors', () => {
 
     app._rmm.errorMessage = '';
     prototype._rmmSetPhase.call(app, 'loading');
+    expect(error.textContent).toBe('No suggestion this time. Add a steer note and Rethink to try again.');
+  });
+
+  it('wires prediction failures to the exact modal error and clears them for a later empty success', async () => {
+    const { document, error } = createModalHarness();
+    const prototype = loadPrototype(document);
+    const recoveryError =
+      'Read My Mind cannot use this restored Codex session because its session credentials were not persisted; please recreate or restart the session.';
+    const _readMyMindRequest = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: recoveryError })
+      .mockResolvedValueOnce({ ok: true, data: { suggestions: [] } });
+    const _apiJson = vi.fn();
+    const app = {
+      _rmm: { sessionId: 'session-1', suggestions: [], selected: 0, rejected: [], busy: false, errorMessage: '' },
+      _readMyMindRequest,
+      _apiJson,
+      _rmmSetPhase: prototype._rmmSetPhase,
+    };
+
+    await prototype._readMyMindPredict.call(app);
+
+    expect(_readMyMindRequest).toHaveBeenCalledWith('/api/sessions/session-1/readmymind', {});
+    expect(_apiJson).not.toHaveBeenCalled();
+    expect(app._rmm.errorMessage).toBe(recoveryError);
+    expect(error.textContent).toBe(recoveryError);
+
+    await prototype._readMyMindPredict.call(app);
+
+    expect(app._rmm.errorMessage).toBe('');
     expect(error.textContent).toBe('No suggestion this time. Add a steer note and Rethink to try again.');
   });
 });
