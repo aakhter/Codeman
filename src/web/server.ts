@@ -2020,12 +2020,13 @@ export class WebServer extends EventEmitter {
    */
   private async cleanupStaleSessions(): Promise<number> {
     const activeSessionIds = new Set(this.sessions.keys());
-    const result = this.store.cleanupStaleSessions(activeSessionIds);
+    const result = await this.tabLayouts.runStaleSessionCleanup(activeSessionIds, () =>
+      this.store.cleanupStaleSessions(activeSessionIds)
+    );
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {
       lifecycleLog.log({ event: 'stale_cleaned', sessionId: s.id, name: s.name });
     }
-    await this.tabLayouts.sessionsRemoved(result.cleaned);
     return result.count;
   }
 

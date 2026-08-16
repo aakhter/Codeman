@@ -453,14 +453,14 @@ export function registerSystemRoutes(
   // ========== State & Lifecycle ==========
 
   app.post('/api/cleanup-state', async () => {
-    ctx.tabLayouts.assertDeletionReady();
     const activeSessionIds = new Set(ctx.sessions.keys());
-    const result = ctx.store.cleanupStaleSessions(activeSessionIds);
+    const result = await ctx.tabLayouts.runStaleSessionCleanup(activeSessionIds, () =>
+      ctx.store.cleanupStaleSessions(activeSessionIds)
+    );
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {
       lifecycleLog.log({ event: 'stale_cleaned', sessionId: s.id, name: s.name });
     }
-    await ctx.tabLayouts.sessionsRemoved(result.cleaned);
     return { cleanedSessions: result.count };
   });
 
