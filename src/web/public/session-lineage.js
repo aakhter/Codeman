@@ -142,6 +142,10 @@ Object.assign(CodemanApp.prototype, {
     const strip = document.getElementById('sessionTabs');
     if (!strip) return;
     const stripRect = strip.getBoundingClientRect();
+    // COD-311: the geometry helper must know the axis explicitly. Inferring it
+    // from coincident X centers is exactly what produced a line through labels.
+    const orientation =
+      document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
     for (const edge of edges) {
       for (const id of [edge.parentId, edge.childId]) {
         const key = 'tab:' + id;
@@ -157,7 +161,13 @@ Object.assign(CodemanApp.prototype, {
       const childRect = rects.get('tab:' + edge.childId);
       if (!parentRect || !childRect) continue;
 
-      const geom = compute({ parent: parentRect, child: childRect, strip: stripRect, depth: edge.depth });
+      const geom = compute({
+        parent: parentRect,
+        child: childRect,
+        strip: stripRect,
+        depth: edge.depth,
+        orientation,
+      });
       if (!geom) continue; // scrolled out of the strip, or a degenerate rect
 
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -192,8 +202,8 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * The strip scrolls (desktop `overflow-x: auto` and every wrapped layout), and a
-   * scroll moves both endpoints without firing any render, so the arcs would slide off
+   * The strip scrolls horizontally in the header and vertically in the rail. Either
+   * axis moves both endpoints without firing a render, so the paths would slide off
    * their tabs. Passive listener, and the redraw is the normal coalesced one.
    *
    * Installed once; the guard also keeps a re-init from stacking listeners.
