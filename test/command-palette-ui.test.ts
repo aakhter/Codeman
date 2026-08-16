@@ -124,6 +124,18 @@ describe('Command-K session palette', () => {
     expect(app.buildCommandPaletteItems().filter((item: any) => item.type === 'session')).toEqual([]);
   });
 
+  it('refreshes only while the command palette modal is active', () => {
+    const { app, elements } = loadPaletteHarness();
+    app.renderCommandPalette = vi.fn();
+
+    app._refreshCommandPaletteIfOpen();
+    expect(app.renderCommandPalette).not.toHaveBeenCalled();
+
+    elements.commandPaletteModal.classList.add('active');
+    app._refreshCommandPaletteIfOpen();
+    expect(app.renderCommandPalette).toHaveBeenCalledOnce();
+  });
+
   it('recognizes Cmd/Ctrl-K outside text-entry contexts only', () => {
     const { app } = loadPaletteHarness();
 

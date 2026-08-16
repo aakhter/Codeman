@@ -4781,6 +4781,10 @@ class CodemanApp {
         this.activeSessionId !== tabRestoreSnapshot.activeSessionId ||
         this.activeWebviewId !== tabRestoreSnapshot.activeWebviewId
       ) return;
+      // A webview that was already active before this reconnect remains the
+      // exclusive foreground identity. Its background session (if any) is state,
+      // not a request to switch the user away from the webview.
+      if (tabRestoreSnapshot.activeWebviewId) return;
       this.activeSessionId = null;
       this.updateFileBrowserHeaderButton?.();
       if (this.sessionOrder.length > 0) {
@@ -5535,6 +5539,7 @@ class CodemanApp {
     this._applyTabEntrances?.();
     this._refreshMobileOverviewIfVisible?.();
     this._refreshHomeSessionsIfVisible?.();
+    this._refreshCommandPaletteIfOpen?.();
   }
 
   // Set up arrow key navigation for session tabs (accessibility)

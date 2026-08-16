@@ -789,6 +789,12 @@ Object.assign(CodemanApp.prototype, {
       .join('');
   },
 
+  _refreshCommandPaletteIfOpen() {
+    const modal = document.getElementById('commandPaletteModal');
+    if (!modal?.classList.contains('active')) return;
+    this.renderCommandPalette();
+  },
+
   moveCommandPaletteSelection(delta) {
     const items = this.commandPaletteItems || this.buildCommandPaletteItems(document.getElementById('commandPaletteSearch')?.value || '');
     if (!items.length) return;

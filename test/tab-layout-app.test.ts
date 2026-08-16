@@ -139,6 +139,21 @@ function makeInitApp() {
   return app;
 }
 
+function openPendingPalette(app: Record<string, any>, query = 'o') {
+  document.body.insertAdjacentHTML(
+    'beforeend',
+    '<div id="commandPaletteModal"><input id="commandPaletteSearch"><div id="commandPaletteList"></div></div>'
+  );
+  app.cases = [];
+  app.closeMobileHeaderUtilities = vi.fn();
+  app._commandPaletteWired = false;
+  app.openCommandPalette();
+  const search = document.getElementById('commandPaletteSearch') as HTMLInputElement;
+  search.value = query;
+  app.renderCommandPalette();
+  return search;
+}
+
 const initData = {
   sessions: [
     { id: 's1', name: 'One', status: 'idle' },
@@ -452,10 +467,101 @@ describe('COD-306 CodemanApp integration', () => {
     request.resolve(layout);
     await request.promise;
     await vi.waitFor(() => expect(app.sessionOrder).toEqual(['s2', 's1', 's3']));
+    await Promise.resolve();
 
     expect(app.activeSessionId).toBe('s1');
     expect(app.activeWebviewId).toBe('w1');
     expect(app.selectSession).not.toHaveBeenCalled();
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('preserves an existing active webview and its background session after reconnect success', async () => {
+    const app = makeInitApp();
+    const request = deferred<any>();
+    app._tabLayoutFirstPaintPending = false;
+    app.activeSessionId = 's1';
+    app.activeWebviewId = 'w1';
+    app._fetchTabLayout = () => request.promise;
+
+    app.handleInit(initData);
+    request.resolve(layout);
+    await request.promise;
+    await vi.waitFor(() => expect(app.sessionOrder).toEqual(['s2', 's1', 's3']));
+    await Promise.resolve();
+
+    expect(app.activeSessionId).toBe('s1');
+    expect(app.activeWebviewId).toBe('w1');
+    expect(app.selectSession).not.toHaveBeenCalled();
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('preserves an existing active webview without a background session after reconnect fallback', async () => {
+    vi.useFakeTimers();
+    const app = makeInitApp();
+    const request = deferred<any>();
+    app._tabLayoutFirstPaintPending = false;
+    app.activeSessionId = null;
+    app.activeWebviewId = 'w1';
+    app._fetchTabLayout = () => request.promise;
+
+    app.handleInit(initData);
+    request.reject(new Error('offline'));
+    await request.promise.catch(() => undefined);
+    await Promise.resolve();
+
+    expect(app.tabLayoutReadOnly).toBe(true);
+    expect(app.activeSessionId).toBeNull();
+    expect(app.activeWebviewId).toBe('w1');
+    expect(app.selectSession).not.toHaveBeenCalled();
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('refreshes an open pending command palette after authoritative layout adoption', async () => {
+    const app = makeApp();
+    const request = deferred<any>();
+    app._tabLayoutFirstPaintPending = true;
+    app.sessionOrder = [];
+    app._fetchTabLayout = () => request.promise;
+    app._tabLayoutCoordinator = null;
+    const search = openPendingPalette(app);
+    const load = app._loadTabLayout();
+
+    expect(app.commandPaletteItems.filter((item: any) => item.type === 'session')).toEqual([]);
+    request.resolve(layout);
+    await load;
+
+    expect(search.value).toBe('o');
+    expect(
+      app.commandPaletteItems.filter((item: any) => item.type === 'session').map((item: any) => item.sessionId)
+    ).toEqual(['s2', 's1']);
+    expect(
+      [...document.querySelectorAll('#commandPaletteList .command-palette-title')].map((el) => el.textContent)
+    ).toEqual(['Two', 'One', 'New session', 'Browse all sessions…']);
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('refreshes an open pending command palette after read-only fallback adoption', async () => {
+    vi.useFakeTimers();
+    const app = makeApp();
+    const request = deferred<any>();
+    app._tabLayoutFirstPaintPending = true;
+    app.sessionOrder = [];
+    app._fetchTabLayout = () => request.promise;
+    app._tabLayoutCoordinator = null;
+    const search = openPendingPalette(app);
+    const load = app._loadTabLayout();
+
+    expect(app.commandPaletteItems.filter((item: any) => item.type === 'session')).toEqual([]);
+    request.reject(new Error('offline'));
+    await load;
+
+    expect(search.value).toBe('o');
+    expect(
+      app.commandPaletteItems.filter((item: any) => item.type === 'session').map((item: any) => item.sessionId)
+    ).toEqual(['s1', 's2']);
+    expect(
+      [...document.querySelectorAll('#commandPaletteList .command-palette-title')].map((el) => el.textContent)
+    ).toEqual(['One', 'Two', 'New session', 'Browse all sessions…']);
     app._tabLayoutCoordinator.dispose();
   });
 
