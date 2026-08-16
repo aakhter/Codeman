@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.18.7
+
+### Patch Changes
+
+- Enable Read My Mind predictions for local Codex sessions with strict provider isolation, owned rollout recovery, bounded context capture, and secret-free provenance. Harden tab-group layout ownership, persistence, restoration, stale cleanup, and remote-session metadata handling.
+
 ## 1.18.6
 
 ### Patch Changes
