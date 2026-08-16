@@ -34,10 +34,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { z } from 'zod';
 import { isValidModelName, isValidMuxName } from './ai-checker-base.js';
-import { getAugmentedPath } from './utils/index.js';
+import { getAugmentedPath, resolveCodexDir } from './utils/index.js';
 import { getErrorMessage } from './types.js';
 
 // ========== Contract ==========
@@ -279,8 +279,15 @@ async function runClaudePrediction(options: PredictOptions & { provider: { kind:
   });
 }
 
-function buildCodexEnvironment(providerEnv: Readonly<CodexProviderEnvironment>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { PATH: getAugmentedPath() };
+function buildCodexEnvironment(
+  providerEnv: Readonly<CodexProviderEnvironment>,
+  codexDir: string | null
+): NodeJS.ProcessEnv {
+  const inheritedPath = process.env.PATH ?? '';
+  const pathEntries = inheritedPath ? inheritedPath.split(delimiter) : [];
+  const launcherPath =
+    codexDir && !pathEntries.includes(codexDir) ? [codexDir, ...pathEntries].join(delimiter) : inheritedPath;
+  const env: NodeJS.ProcessEnv = { PATH: launcherPath };
   const runtimeKeys = [
     'HOME',
     'TMPDIR',
@@ -371,6 +378,8 @@ async function runCodexPrediction(
   if (provider.model !== undefined && !isValidModelName(provider.model)) {
     throw new Error(`Invalid model name: ${String(provider.model).substring(0, 50)}`);
   }
+  const codexDir = resolveCodexDir();
+  const codexExecutable = codexDir ? join(codexDir, 'codex') : 'codex';
 
   let privateDir: string;
   try {
@@ -425,10 +434,10 @@ async function runCodexPrediction(
   const startTime = Date.now();
   let child: ChildProcess;
   try {
-    child = childSpawn('codex', args, {
+    child = childSpawn(codexExecutable, args, {
       cwd: privateDir,
       detached: true,
-      env: buildCodexEnvironment(provider.env),
+      env: buildCodexEnvironment(provider.env, codexDir),
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });

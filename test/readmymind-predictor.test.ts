@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { PassThrough } from 'node:stream';
+import { delimiter, join } from 'node:path';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -35,9 +36,15 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/utils/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/index.js')>();
+  return { ...actual, resolveCodexDir: vi.fn(() => null) };
+});
+
 import { execSync, spawn } from 'node:child_process';
 import { parsePredictionOutput } from '../src/readmymind-predictor.js';
 import { readMyMindPredictor } from '../src/readmymind-predictor.js';
+import { resolveCodexDir } from '../src/utils/index.js';
 
 const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 
@@ -126,6 +133,7 @@ const execSyncMock = vi.mocked(execSync);
 const chmodSyncMock = vi.mocked(chmodSync);
 const mkdtempSyncMock = vi.mocked(mkdtempSync);
 const rmSyncMock = vi.mocked(rmSync);
+const resolveCodexDirMock = vi.mocked(resolveCodexDir);
 let processKill: ReturnType<typeof vi.spyOn>;
 let originalEnv: NodeJS.ProcessEnv;
 let nextPid = 41_000;
@@ -197,6 +205,8 @@ beforeEach(() => {
   chmodSyncMock.mockClear();
   mkdtempSyncMock.mockClear();
   rmSyncMock.mockClear();
+  resolveCodexDirMock.mockReset();
+  resolveCodexDirMock.mockReturnValue(null);
   processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
 });
 
@@ -221,6 +231,7 @@ describe('readMyMindPredictor provider dispatch', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0][0]).toBe('tmux');
+    expect(resolveCodexDirMock).not.toHaveBeenCalled();
   });
 
   it('keeps Codex on the direct spawn path and never invokes tmux', async () => {
@@ -231,6 +242,22 @@ describe('readMyMindPredictor provider dispatch', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0][0]).toBe('codex');
     expect(execSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('spawns the resolver-discovered Codex binary and prepends its directory to PATH', async () => {
+    const codexDir = join('/fallback', 'codex', 'bin');
+    process.env.PATH = ['/usr/local/sbin', '/usr/bin'].join(delimiter);
+    resolveCodexDirMock.mockReturnValueOnce(codexDir);
+    const invocations = installChild(succeed);
+
+    await readMyMindPredictor.predict(codexOptions());
+
+    expect(invocations[0].command).toBe(join(codexDir, 'codex'));
+    expect(String(invocations[0].options.env?.PATH).split(delimiter)).toEqual([
+      codexDir,
+      '/usr/local/sbin',
+      '/usr/bin',
+    ]);
   });
 });
 
@@ -451,12 +478,16 @@ describe('Codex predictor output and lifecycle', () => {
 
   it('cleans up when spawn throws synchronously', async () => {
     let cwd = '';
-    spawnMock.mockImplementationOnce((_command, _args, options = {}) => {
+    let command = '';
+    resolveCodexDirMock.mockReturnValueOnce(null);
+    spawnMock.mockImplementationOnce((spawnCommand, _args, options = {}) => {
+      command = spawnCommand;
       cwd = String(options.cwd);
       throw Object.assign(new Error('spawn ENOENT /secret/path'), { code: 'ENOENT' });
     });
 
     await expect(readMyMindPredictor.predict(codexOptions())).rejects.toThrow(/Codex CLI is unavailable/i);
+    expect(command).toBe('codex');
     expect(existsSync(cwd)).toBe(false);
   });
 
