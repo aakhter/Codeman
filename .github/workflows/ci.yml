@@ -37,6 +37,11 @@ jobs:
       - name: Public asset integrity check
         run: npm run check:public-assets
 
+      # Guards the test job below: a browser-driven test left out of the CI
+      # exclude list has no chromium to launch and takes the whole suite down.
+      - name: Browser-test exclusion check
+        run: npm run check:browser-excludes
+
       - name: Format check
         run: npm run format:check
 
