@@ -58,9 +58,12 @@ vi.mock('../src/session.js', () => {
     _started = false;
     _stopped = false;
     _parked = false;
+    mode = 'claude';
     checkpointEnabled: boolean | undefined;
     resumeSessionId: string | undefined = undefined;
-    codexProviderIdentityForPersist: { CODEX_HOME?: string; credentialsLost?: true } | undefined;
+    codexProviderIdentityForPersist:
+      | { version: 1; credentialSource: 'restorable' | 'session-key'; codexHome?: string }
+      | undefined;
 
     constructor(options: { workingDir: string; checkpointEnabled?: boolean }) {
       super();
@@ -99,7 +102,10 @@ vi.mock('../src/session.js', () => {
     }
 
     getCodexProviderIdentityForPersist() {
-      return this.codexProviderIdentityForPersist;
+      return (
+        this.codexProviderIdentityForPersist ??
+        (this.mode === 'codex' ? { version: 1 as const, credentialSource: 'restorable' as const } : undefined)
+      );
     }
 
     getAttachmentHistoryForPersist() {
@@ -304,20 +310,17 @@ describe('SessionManager', () => {
       );
     });
 
-    it('persists private Codex provenance but strips it from stored-session callers', async () => {
+    it('persists explicit v1 provenance for a live Codex session without env overrides and strips it from callers', async () => {
       const session = await manager.createSession('/tmp/test');
-      session.codexProviderIdentityForPersist = {
-        CODEX_HOME: '/tmp/alternate-codex-home',
-        credentialsLost: true,
-      };
+      session.mode = 'codex';
 
       await manager.parkSession(session.id);
 
       expect(mockState.store.state.sessions[session.id]).toEqual(
         expect.objectContaining({
           __codexProviderIdentity: {
-            CODEX_HOME: '/tmp/alternate-codex-home',
-            credentialsLost: true,
+            version: 1,
+            credentialSource: 'restorable',
           },
         })
       );

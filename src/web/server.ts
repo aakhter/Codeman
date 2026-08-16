@@ -143,10 +143,16 @@ export function resolveRestoredSessionName(
   return '';
 }
 
-/** Read the private, secret-free provider provenance from one persisted row. */
-export function resolveRestoredCodexProviderIdentity(savedState: unknown): CodexProviderIdentity | undefined {
-  if (!savedState || typeof savedState !== 'object') return undefined;
-  return parseCodexProviderIdentity((savedState as { __codexProviderIdentity?: unknown }).__codexProviderIdentity);
+/** Read recognized Codex recovery provenance; null explicitly fences absent/unsafe restored state. */
+export function resolveRestoredCodexProviderIdentity(
+  mode: SessionMode,
+  savedState: unknown
+): CodexProviderIdentity | null | undefined {
+  if (mode !== 'codex') return undefined;
+  if (!savedState || typeof savedState !== 'object') return null;
+  return (
+    parseCodexProviderIdentity((savedState as { __codexProviderIdentity?: unknown }).__codexProviderIdentity) ?? null
+  );
 }
 
 /** Heal or conservatively fence authoritative Claude identity hooks on mux restore. */
@@ -2759,7 +2765,7 @@ export class WebServer extends EventEmitter {
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
             const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
-            const savedCodexProviderIdentity = resolveRestoredCodexProviderIdentity(savedState);
+            const savedCodexProviderIdentity = resolveRestoredCodexProviderIdentity(muxSession.mode, savedState);
             // Prefer the private (externalPath-bearing) history; fall back to the
             // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =

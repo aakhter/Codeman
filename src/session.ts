@@ -739,7 +739,7 @@ export class Session extends EventEmitter {
       /** Extra env vars exported to the CLI at spawn time (no disk persistence) */
       envOverrides?: Record<string, string>;
       /** Private, secret-free Codex provider provenance restored from state.json. */
-      codexProviderIdentity?: CodexProviderIdentity;
+      codexProviderIdentity?: CodexProviderIdentity | null;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
       effort?: EffortLevel;
       /** Opt Claude/non-codex sessions into COLORTERM=truecolor (COD-75 app setting; default off). */
@@ -868,7 +868,7 @@ export class Session extends EventEmitter {
     // Legacy migration: pre-0.7.2 carried effort as the CLAUDE_CODE_EFFORT_LEVEL env var,
     // which hard-locks /effort switching. Extract it into _effort (--settings soft default)
     // and never export it as an env var again. Explicit config.effort wins over legacy.
-    const recoveredCodexHome = config.codexProviderIdentity?.CODEX_HOME;
+    const recoveredCodexHome = config.codexProviderIdentity?.codexHome;
     const combinedEnvOverrides: Record<string, string> = {
       ...(recoveredCodexHome ? { CODEX_HOME: recoveredCodexHome } : {}),
       ...(config.envOverrides ?? {}),
@@ -881,7 +881,8 @@ export class Session extends EventEmitter {
       }
     }
     this._codexProviderCredentialsLost =
-      config.codexProviderIdentity?.credentialsLost === true &&
+      this.mode === 'codex' &&
+      (config.codexProviderIdentity === null || config.codexProviderIdentity?.credentialSource === 'session-key') &&
       !combinedEnvOverrides.OPENAI_API_KEY &&
       !combinedEnvOverrides.CODEX_API_KEY;
     if (config.effort && isEffortLevel(config.effort)) {
@@ -1913,17 +1914,17 @@ export class Session extends EventEmitter {
 
   /** Secret-free, disk-only identity record. Never include this in SessionState serializers. */
   getCodexProviderIdentityForPersist(): CodexProviderIdentity | undefined {
-    const identity: CodexProviderIdentity = {};
+    if (this.mode !== 'codex') return undefined;
     const codexHome = this.getCodexHomeOverride();
-    if (codexHome) identity.CODEX_HOME = codexHome;
-    if (
+    const hasSessionKey =
       this._codexProviderCredentialsLost ||
       this._envOverrides?.OPENAI_API_KEY !== undefined ||
-      this._envOverrides?.CODEX_API_KEY !== undefined
-    ) {
-      identity.credentialsLost = true;
-    }
-    return Object.keys(identity).length > 0 ? identity : undefined;
+      this._envOverrides?.CODEX_API_KEY !== undefined;
+    return {
+      version: 1,
+      credentialSource: hasSessionKey ? 'session-key' : 'restorable',
+      ...(codexHome ? { codexHome } : {}),
+    };
   }
 
   toDetailedState() {

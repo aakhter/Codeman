@@ -1,16 +1,22 @@
 /** Private, secret-free recovery provenance for a session's Codex provider. */
 export interface CodexProviderIdentity {
-  CODEX_HOME?: string;
-  /** Session-scoped credentials existed but their values were intentionally not persisted. */
-  credentialsLost?: true;
+  version: 1;
+  /** Whether recovery can reuse ambient auth or intentionally lost a session-scoped key. */
+  credentialSource: 'restorable' | 'session-key';
+  codexHome?: string;
 }
 
-/** Read only the closed private record; ignore unknown keys and malformed rows. */
+/** Read only a recognized closed record; legacy or malformed provenance is unsafe. */
 export function parseCodexProviderIdentity(value: unknown): CodexProviderIdentity | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  const identity: CodexProviderIdentity = {};
-  if (typeof raw.CODEX_HOME === 'string' && raw.CODEX_HOME) identity.CODEX_HOME = raw.CODEX_HOME;
-  if (raw.credentialsLost === true) identity.credentialsLost = true;
-  return Object.keys(identity).length > 0 ? identity : undefined;
+  if (raw.version !== 1 || (raw.credentialSource !== 'restorable' && raw.credentialSource !== 'session-key')) {
+    return undefined;
+  }
+  if ('codexHome' in raw && (typeof raw.codexHome !== 'string' || !raw.codexHome)) return undefined;
+  return {
+    version: 1,
+    credentialSource: raw.credentialSource,
+    ...(typeof raw.codexHome === 'string' ? { codexHome: raw.codexHome } : {}),
+  };
 }
