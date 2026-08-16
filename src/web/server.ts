@@ -2390,27 +2390,25 @@ export class WebServer extends EventEmitter {
     // This prevents race conditions where clients connect before state is ready
     // CRITICAL: Skip in test mode to prevent tests from picking up user sessions
     if (!this.testMode) {
-      await this.restoreMuxSessions();
-      this.tabLayouts.markRestorationComplete();
+      const restored = await this.restoreMuxSessions();
+      await this.finalizeRestoredState(restored);
 
       // Instance-scoped reaper: after restore, `docker rm -f` managed containers of
       // THIS instance whose case is gone from docker-cases.json (best-effort, never
       // touches another instance's containers). Runs after restore so containers
       // still referenced by a restored session are preserved.
-      void import('../docker-hosts.js')
-        .then(({ reapOrphanedDockerContainers }) => reapOrphanedDockerContainers(getDataDir(), CODEMAN_INSTANCE))
-        .then((reaped) => {
-          if (reaped.length > 0)
-            console.log(`[Docker] reaped ${reaped.length} orphaned container(s): ${reaped.join(', ')}`);
-        })
-        .catch(() => {
-          /* best-effort — daemon may be absent */
-        });
+      if (restored) {
+        void import('../docker-hosts.js')
+          .then(({ reapOrphanedDockerContainers }) => reapOrphanedDockerContainers(getDataDir(), CODEMAN_INSTANCE))
+          .then((reaped) => {
+            if (reaped.length > 0)
+              console.log(`[Docker] reaped ${reaped.length} orphaned container(s): ${reaped.join(', ')}`);
+          })
+          .catch(() => {
+            /* best-effort — daemon may be absent */
+          });
+      }
     }
-
-    // Clean up stale sessions from state file that don't have active mux sessions
-    await this.cleanupStaleSessions();
-    await this.tabLayouts.reconcileAfterRestoration();
 
     // Bound disk use under heavy paste-image traffic: delete `paste-*` files
     // older than 7 days from each live session's .claude-images/ hourly.
@@ -2647,7 +2645,7 @@ export class WebServer extends EventEmitter {
     return false;
   }
 
-  private async restoreMuxSessions(): Promise<void> {
+  private async restoreMuxSessions(): Promise<boolean> {
     try {
       // Reconcile mux sessions to find which ones are still alive (also discovers unknown ones)
       const { alive, dead, discovered } = await this.mux.reconcileSessions();
@@ -2926,9 +2924,19 @@ export class WebServer extends EventEmitter {
       if (dead.length > 0) {
         console.log(`[Server] Cleaned up ${dead.length} dead mux session(s)`);
       }
+      return true;
     } catch (err) {
       console.error('[Server] Failed to restore mux sessions:', err);
+      return false;
     }
+  }
+
+  /** Unlock destructive reconciliation only after mux restoration fully succeeds. */
+  private async finalizeRestoredState(restored: boolean): Promise<void> {
+    if (!restored) return;
+    this.tabLayouts.markRestorationComplete();
+    await this.cleanupStaleSessions();
+    await this.tabLayouts.reconcileAfterRestoration();
   }
 
   /**

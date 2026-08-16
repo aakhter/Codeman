@@ -146,8 +146,22 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort
         .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, `Webview limit reached (max ${MAX_WEBVIEWS})`));
     }
 
+    try {
+      await ctx.tabLayouts.webviewCreated(ownerLayoutKey(created.owner));
+    } catch (error) {
+      // The saved webview and its layout ref are one logical creation. If the
+      // layout rejects the new ref (for example at MAX_TAB_REFS), roll back the
+      // already-written JSON record and publish neither creation event.
+      await withWebviews(async (list) => {
+        const index = list.findIndex((webview) => webview.id === created.id);
+        if (index >= 0) {
+          list.splice(index, 1);
+          await writeWebviews(configDir(), list);
+        }
+      });
+      throw error;
+    }
     ctx.broadcast(SseEvent.WebviewChanged, { action: 'created', id: created.id });
-    await ctx.tabLayouts.webviewCreated(ownerLayoutKey(created.owner));
     return { success: true, data: created };
   });
 
