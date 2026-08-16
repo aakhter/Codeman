@@ -61,6 +61,72 @@ describe('trusted attachment roots', () => {
     expect(SettingsUpdateSchema.safeParse({ trustedAttachmentRoots: [trustedRoot] }).success).toBe(false);
   });
 
+  // COD-295: a trusted root is a DEDICATED enclave. Accepting `/`, the home
+  // directory, or any ancestor of the managed workspace/data trees would make
+  // "trusted" mean the whole filesystem, since uploads land in the root and
+  // everything under it becomes servable.
+  describe('dedicated-enclave validation (COD-295)', () => {
+    it('rejects the filesystem root, the home directory and their kin', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = ['/', os.homedir(), trustedRoot].join(',');
+
+      await expect(getTrustedAttachmentRoots()).resolves.toEqual([trustedRoot]);
+      expect(warn.mock.calls.flat().join(' ')).toContain('not a dedicated directory');
+    });
+
+    it('rejects an ancestor of the managed data, cases and user-space trees', async () => {
+      const home = await fs.realpath(os.homedir());
+      const managed = [join(home, '.codeman'), join(home, 'codeman-cases'), join(home, 'codeman-users')];
+      for (const dir of managed) await fs.mkdir(dir, { recursive: true });
+      // The parent of all three is the home directory, so use the trees themselves
+      // plus a real ancestor that is not home to prove ancestry (not just equality)
+      // is what is rejected.
+      const ancestor = await fs.realpath(join(home, '..'));
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = [...managed, ancestor, trustedRoot].join(',');
+
+      await expect(getTrustedAttachmentRoots()).resolves.toEqual([trustedRoot]);
+      expect(warn.mock.calls.flat().join(' ')).toContain('not a dedicated directory');
+    });
+
+    it('accepts a dedicated directory inside the managed trees', async () => {
+      const enclave = join(await fs.realpath(os.homedir()), '.codeman', 'shared-attachments');
+      await fs.mkdir(enclave, { recursive: true });
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = enclave;
+
+      await expect(getTrustedAttachmentRoots()).resolves.toEqual([enclave]);
+    });
+
+    it('accepts a canonical root written with a trailing separator', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = `${trustedRoot}/`;
+
+      await expect(getTrustedAttachmentRoots()).resolves.toEqual([trustedRoot]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('still rejects a symlinked alias once trailing separators are normalized', async () => {
+      const alias = join(tempDir, 'alias-slash');
+      await fs.symlink(trustedRoot, alias);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = `${alias}/`;
+
+      await expect(getTrustedAttachmentRoots()).resolves.toEqual([]);
+      expect(warn.mock.calls.flat().join(' ')).toContain('already be canonical');
+    });
+
+    it('keeps every diagnostic free of the configured path', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = [os.homedir(), join(tempDir, 'missing')].join(',');
+
+      await getTrustedAttachmentRoots();
+      const logged = warn.mock.calls.flat().join(' ');
+      expect(logged).not.toContain(tempDir);
+      expect(logged).not.toContain(os.homedir());
+    });
+  });
+
   it('creates a missing workspace upload directory non-recursively', async () => {
     await expect(ensureLocalUploadDirectory(workspace, admin)).resolves.toEqual({
       kind: 'workspace',

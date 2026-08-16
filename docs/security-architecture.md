@@ -366,6 +366,37 @@ Two registration paths, with **different trust**:
   file outside the session's own workspace. Cross‑workspace attach must go through
   the explicit POST path above.
 
+### Trusted attachment roots (`CODEMAN_TRUSTED_ATTACHMENT_ROOTS`)
+
+Uploads normally land in `<workspace>/.codeman-attachments`. An **admin** may
+instead make that path a **symlink** to a shared directory, but only if the
+symlink's target is on this exact allowlist — an operator knob for a shared
+document enclave, and the one case where uploaded bytes leave the workspace.
+
+- **Env‑only, and deliberately so.** It is not in `SettingsUpdateSchema`, so the
+  browser cannot add a root; a compromised session cannot widen it. Parsed **once
+  at startup** (memoized), so a change requires a restart.
+- **Exact‑root, fail‑closed matching.** The symlink's resolved target must equal a
+  listed root — not live under one. The check is repeated on every upload and
+  delete, so repointing the symlink afterwards fails closed.
+- **Each entry must survive validation, or it is dropped** (with a warning that
+  deliberately carries the entry's *index*, never the path, so a log does not leak
+  filesystem layout). An entry must be absolute; canonical (a symlinked alias is
+  refused — a trailing `/` is normalized rather than refused, COD‑295); a real
+  directory; not blocked by attachment policy (§ blocklist above); and a
+  **dedicated enclave**.
+- **The dedicated‑enclave rule (COD‑295).** `/`, `$HOME`, and any ancestor of
+  `~/.codeman`, `~/codeman-cases` or `~/codeman-users` are refused. Uploads land
+  *in* the root and everything under it becomes servable, so accepting a broad
+  ancestor would quietly turn "trusted root" into "the whole filesystem" and
+  defeat the exact‑root allowlist. A directory *inside* a managed tree
+  (`~/.codeman/shared-attachments`) is fine; the tree itself is not.
+- A bad entry is never a startup failure — it is dropped, and with no valid roots
+  the symlink form is simply unavailable.
+
+Implementation: `isDedicatedAttachmentEnclave` / `parseTrustedAttachmentRoots` /
+`resolveLocalUploadDirectory` in `src/config/attachment-guard.ts`.
+
 ### SSE log‑tail route — intentional extra read roots
 
 The live file‑tail SSE route (`FileStreamManager`, used to stream a growing log
@@ -536,6 +567,7 @@ A saved dashboard URL renders as a tab, served through Codeman's own origin at `
 | `CODEMAN_GESTURE=1`                                                         | Make the gesture overlay available (widens CSP)                                                                                                                  |
 | `CODEMAN_DOCKER_BRIDGE_HOOKS=1`                                             | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
 | `CODEMAN_DOCKER_BRIDGE_HOST`                                                | Override the bridge gateway IP the hooks listener binds (default: auto‑detect)                                                                                   |
+| `CODEMAN_TRUSTED_ATTACHMENT_ROOTS`                                          | Comma‑separated **exact** directories an admin may point a `.codeman-attachments` symlink at. Env‑only (never browser‑settable), read once at startup — see below |
 
 **Audit log:** session lifecycle and server start are recorded in
 `~/.codeman/session-lifecycle.jsonl`.
