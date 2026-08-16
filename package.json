@@ -31,6 +31,7 @@
     "format": "prettier --write 'src/**/*.ts' 'src/web/public/**/*.{js,css,html,json}'",
     "format:check": "prettier --check 'src/**/*.ts' 'src/web/public/**/*.{js,css,html,json}'",
     "check:public-assets": "node scripts/check-public-assets.mjs",
+    "check:browser-excludes": "node scripts/check-browser-test-excludes.mjs",
     "capture:subagents": "node scripts/capture-subagent-screenshots.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only && node scripts/check-lockfile-sync.mjs",

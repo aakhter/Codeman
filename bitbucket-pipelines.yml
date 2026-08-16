@@ -63,6 +63,10 @@ definitions:
           - npm run lint
           - npm run check:frontend-syntax
           - npm run check:public-assets
+          # Load-bearing HERE in particular: this step skips the browser download
+          # above, so a browser-driven test that escaped the CI exclude list would
+          # fail on launch and take `test:ci` down with it.
+          - npm run check:browser-excludes
           - npm run format:check
 
           # Server boot smoke test — mirrors the GitHub workflow's step. Deliberately

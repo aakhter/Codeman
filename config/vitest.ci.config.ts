@@ -50,6 +50,10 @@ export default defineConfig({
       'test/terminal-copy-shortcut.test.ts', // browser (Playwright)
       'test/spreadsheet-preview.browser.test.ts', // browser (Playwright + chromium)
       'test/codex-predictive-echo.test.ts', // browser (Playwright) + real codex binary
+      // Same omission as the COD-293 case above, recurring one commit later (COD-299).
+      // Hand-maintained lists do not stay in sync with new files, so this is now
+      // enforced by `npm run check:browser-excludes` rather than by remembering.
+      'test/tab-rail-resize.browser.test.ts', // browser (Playwright + chromium)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,
