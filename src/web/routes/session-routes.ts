@@ -2420,7 +2420,10 @@ export function registerSessionRoutes(
       return empty;
     }
 
-    const parsed = parseCodexRollout(content.split('\n'));
+    const parsed = parseCodexRollout(content.split('\n'), {
+      includeMessages: full,
+      includeSignals: false,
+    });
 
     // The response viewer has always exposed expandable context when a rollout
     // has a non-empty assistant reply; retain that lightweight capability flag.

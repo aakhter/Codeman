@@ -33,6 +33,12 @@ export interface CodexRolloutParseResult {
   signals: CodexRolloutSignals;
 }
 
+/** Select only the projections a caller needs while sharing one parser. */
+export interface CodexRolloutParseOptions {
+  includeMessages?: boolean;
+  includeSignals?: boolean;
+}
+
 interface RolloutPayload {
   type?: unknown;
   role?: unknown;
@@ -49,11 +55,6 @@ interface RolloutEntry {
   timestamp?: unknown;
   type?: unknown;
   payload?: RolloutPayload;
-}
-
-interface ParsedMessage extends CodexRolloutMessage {
-  legacyUser?: boolean;
-  textForPrompt?: string;
 }
 
 /** Excludes Codex-injected context from user-turn projections. */
@@ -102,11 +103,18 @@ function toolInput(value: unknown): Record<string, unknown> | undefined {
  * signals. It is pure so fixture tests can cover modern, legacy, and partial
  * rollout records without selecting a rollout file.
  */
-export function parseCodexRollout(lines: Iterable<string>): CodexRolloutParseResult {
+export function parseCodexRollout(
+  lines: Iterable<string>,
+  { includeMessages = true, includeSignals = true }: CodexRolloutParseOptions = {}
+): CodexRolloutParseResult {
   let lastAssistantText = '';
   let lastAssistantTimestamp = '';
-  const messages: ParsedMessage[] = [];
-  const eventUserTexts = new Map<string, number>();
+  const messages: CodexRolloutMessage[] = [];
+  const recentPrompts: Array<{ text: string; timestamp?: string }> = [];
+  // A legacy user row may only be the twin of a preceding modern event in the
+  // same turn. Clearing this map at assistant/new-user boundaries prevents a
+  // later event with identical text from deleting older legacy history.
+  const pendingModernUserTexts = new Map<string, number>();
   const tools: PredictionToolCall[] = [];
 
   for (const line of lines) {
@@ -124,21 +132,24 @@ export function parseCodexRollout(lines: Iterable<string>): CodexRolloutParseRes
     if (entry.type === 'event_msg' && payload.type === 'user_message') {
       const prompt = typeof payload.message === 'string' ? payload.message.trim() : '';
       if (prompt && isCodexInjectedContext(prompt)) continue;
-      if (prompt) eventUserTexts.set(prompt, (eventUserTexts.get(prompt) || 0) + 1);
+      pendingModernUserTexts.clear();
+      if (prompt) pendingModernUserTexts.set(prompt, 1);
       const imageCount =
         (Array.isArray(payload.images) ? payload.images.length : 0) +
         (Array.isArray(payload.local_images) ? payload.local_images.length : 0);
       const text =
         imageCount > 0 ? (prompt ? `${prompt}\n\n*[image ×${imageCount}]*` : `*[image ×${imageCount}]*`) : prompt;
-      if (text) messages.push({ role: 'user', text, timestamp, textForPrompt: prompt || undefined });
+      if (text && includeMessages) messages.push({ role: 'user', text, timestamp });
+      if (prompt && includeSignals) recentPrompts.push({ text: prompt, timestamp });
       continue;
     }
 
     if (entry.type !== 'response_item') continue;
     if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
-      if (typeof payload.name === 'string' && payload.name) {
+      if (includeSignals && typeof payload.name === 'string' && payload.name) {
         const input = toolInput(payload.arguments) ?? toolInput(payload.input);
         tools.push({ name: payload.name, detail: summarizeReadMyMindToolInput(input) });
+        if (tools.length > MAX_CODEX_ROLLOUT_TOOLS) tools.shift();
       }
       continue;
     }
@@ -147,35 +158,33 @@ export function parseCodexRollout(lines: Iterable<string>): CodexRolloutParseRes
     if (payload.role === 'assistant') {
       const text = extractCodexBlockText(payload.content, ['output_text', 'text']);
       if (!text) continue;
+      pendingModernUserTexts.clear();
       lastAssistantText = text;
       lastAssistantTimestamp = timestamp ?? '';
-      messages.push({ role: 'assistant', text, timestamp });
+      if (includeMessages) messages.push({ role: 'assistant', text, timestamp });
     } else if (payload.role === 'user') {
       const text = extractCodexBlockText(payload.content, ['input_text', 'text']).trim();
-      if (text && !isCodexInjectedContext(text)) {
-        messages.push({ role: 'user', text, timestamp, legacyUser: true, textForPrompt: text });
+      if (!text || isCodexInjectedContext(text)) continue;
+      const matchingModernTurns = pendingModernUserTexts.get(text) || 0;
+      if (matchingModernTurns > 0) {
+        if (matchingModernTurns === 1) pendingModernUserTexts.delete(text);
+        else pendingModernUserTexts.set(text, matchingModernTurns - 1);
+        continue;
       }
+      if (includeMessages) messages.push({ role: 'user', text, timestamp });
+      if (includeSignals) recentPrompts.push({ text, timestamp });
     }
   }
-
-  const thread = messages.filter((message) => {
-    if (!message.legacyUser) return true;
-    const matchingModernTurns = eventUserTexts.get(message.textForPrompt ?? '') || 0;
-    if (matchingModernTurns === 0) return true;
-    eventUserTexts.set(message.textForPrompt ?? '', matchingModernTurns - 1);
-    return false;
-  });
 
   return {
     lastAssistantText,
     lastAssistantTimestamp,
-    messages: thread.map(({ role, text, timestamp }) => ({ role, text, timestamp })),
+    messages,
     signals: {
-      lastAssistantText: lastAssistantText ? lastAssistantText.slice(0, MAX_READMYMIND_ASSISTANT_CHARS) : null,
-      recentPrompts: thread
-        .filter((message) => message.role === 'user' && Boolean(message.textForPrompt))
-        .map((message) => ({ text: message.textForPrompt!, timestamp: message.timestamp })),
-      recentTools: tools.slice(-MAX_CODEX_ROLLOUT_TOOLS),
+      lastAssistantText:
+        includeSignals && lastAssistantText ? lastAssistantText.slice(0, MAX_READMYMIND_ASSISTANT_CHARS) : null,
+      recentPrompts,
+      recentTools: tools,
     },
   };
 }
@@ -194,11 +203,17 @@ export async function readCodexRolloutSignals(rolloutPath: string): Promise<Code
     if (length <= 0) return { lastAssistantText: null, recentPrompts: [], recentTools: [] };
 
     handle = await open(rolloutPath, 'r');
+    let startsMidRecord = false;
+    if (offset > 0) {
+      const precedingByte = Buffer.alloc(1);
+      const { bytesRead } = await handle.read(precedingByte, 0, 1, offset - 1);
+      startsMidRecord = bytesRead === 1 && precedingByte[0] !== 0x0a;
+    }
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, offset);
     const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
-    if (offset > 0) lines.shift();
-    return parseCodexRollout(lines).signals;
+    if (startsMidRecord) lines.shift();
+    return parseCodexRollout(lines, { includeMessages: false }).signals;
   } catch {
     return null;
   } finally {

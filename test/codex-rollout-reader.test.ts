@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CODEX_ROLLOUT_TAIL_BYTES, parseCodexRollout, readCodexRolloutSignals } from '../src/codex-rollout-reader.js';
@@ -49,6 +49,21 @@ describe('parseCodexRollout', () => {
       { text: 'legacy prompt', timestamp: '2026-08-16T10:00:00.000Z' },
       { text: 'repeated real prompt', timestamp: '2026-08-16T10:01:00.000Z' },
       { text: 'repeated real prompt', timestamp: '2026-08-16T10:02:00.000Z' },
+    ]);
+  });
+
+  it('does not let a later modern turn consume an earlier legacy-only prompt with identical text', () => {
+    const parsed = parseCodexRollout([
+      legacyUser('same', '2026-08-16T10:00:00.000Z'),
+      assistant('legacy answer', '2026-08-16T10:00:01.000Z'),
+      eventUser('same', '2026-08-16T10:01:00.000Z'),
+      legacyUser('same', '2026-08-16T10:01:01.000Z'),
+    ]);
+
+    expect(parsed.messages).toEqual([
+      { role: 'user', text: 'same', timestamp: '2026-08-16T10:00:00.000Z' },
+      { role: 'assistant', text: 'legacy answer', timestamp: '2026-08-16T10:00:01.000Z' },
+      { role: 'user', text: 'same', timestamp: '2026-08-16T10:01:00.000Z' },
     ]);
   });
 
@@ -119,20 +134,56 @@ describe('parseCodexRollout', () => {
 
     expect(parsed.signals.lastAssistantText).toHaveLength(MAX_READMYMIND_ASSISTANT_CHARS);
   });
+
+  it('can retain only the last assistant response without building viewer or Read My Mind projections', () => {
+    const parsed = parseCodexRollout(
+      [eventUser('ignored prompt'), legacyUser('ignored prompt'), assistant('last answer')],
+      { includeMessages: false, includeSignals: false }
+    );
+
+    expect(parsed).toEqual({
+      lastAssistantText: 'last answer',
+      lastAssistantTimestamp: '2026-08-16T10:00:00.000Z',
+      messages: [],
+      signals: { lastAssistantText: null, recentPrompts: [], recentTools: [] },
+    });
+  });
 });
 
 describe('readCodexRolloutSignals', () => {
   it('reads only the final bounded tail and drops its first partial JSONL row', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'codex-rollout-reader-'));
     const path = join(dir, 'resolved-rollout.jsonl');
-    const tooOld = eventUser('old prompt') + '\n';
-    const filler = 'x'.repeat(CODEX_ROLLOUT_TAIL_BYTES - tooOld.length + 10);
-    writeFileSync(path, tooOld + filler + '\n' + eventUser('tail prompt') + '\n' + assistant('tail answer') + '\n');
+    try {
+      const tooOld = eventUser('old prompt') + '\n';
+      const filler = 'x'.repeat(CODEX_ROLLOUT_TAIL_BYTES - tooOld.length + 10);
+      writeFileSync(path, tooOld + filler + '\n' + eventUser('tail prompt') + '\n' + assistant('tail answer') + '\n');
 
-    await expect(readCodexRolloutSignals(path)).resolves.toEqual({
-      lastAssistantText: 'tail answer',
-      recentPrompts: [{ text: 'tail prompt', timestamp: '2026-08-16T10:00:00.000Z' }],
-      recentTools: [],
-    });
+      await expect(readCodexRolloutSignals(path)).resolves.toEqual({
+        lastAssistantText: 'tail answer',
+        recentPrompts: [{ text: 'tail prompt', timestamp: '2026-08-16T10:00:00.000Z' }],
+        recentTools: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retains the first buffered record when the tail starts exactly after a newline', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-rollout-reader-'));
+    const path = join(dir, 'resolved-rollout.jsonl');
+    try {
+      const tailRecords = eventUser('first tail prompt') + '\n' + assistant('tail answer') + '\n';
+      const boundedTail = tailRecords + '\n'.repeat(CODEX_ROLLOUT_TAIL_BYTES - tailRecords.length);
+      writeFileSync(path, 'old row that must not be parsed\n' + boundedTail);
+
+      await expect(readCodexRolloutSignals(path)).resolves.toEqual({
+        lastAssistantText: 'tail answer',
+        recentPrompts: [{ text: 'first tail prompt', timestamp: '2026-08-16T10:00:00.000Z' }],
+        recentTools: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
