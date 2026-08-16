@@ -268,6 +268,31 @@ describe('COD-306 CodemanApp integration', () => {
     expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
   });
 
+  it('selects a hidden previous session without expanding and renumbers visible badges', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's1';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._fullRenderSessionTabs();
+    expect([...document.querySelectorAll<HTMLElement>('.session-tab')].map((tab) => tab.dataset.id)).toEqual([
+      's1',
+      's3',
+    ]);
+
+    app.selectSession = vi.fn((id: string) => {
+      app.activeSessionId = id;
+      app.activeWebviewId = null;
+      app._renderSessionTabsImmediate();
+    });
+    app.prevSession();
+
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+    const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(tabs.map((tab) => tab.dataset.id)).toEqual(['s2', 's3']);
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
+  });
+
   it('expands every group when persisting collapse fails', () => {
     const app = makeApp();
     const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {

@@ -277,4 +277,26 @@ describe('lineage line geometry', () => {
   it('ships a visibly dimmed dotted proxy treatment', () => {
     expect(stylesCss).toMatch(/\.connection-line\.lineage-line--proxied\s*\{[^}]*stroke-dasharray:[^}]*opacity:/s);
   });
+
+  it('loops proxied working dashes continuously without changing normal working motion', () => {
+    const proxiedWorking = stylesCss.match(
+      /\.connection-line\.lineage-line--proxied\.lineage-line--working\s*\{([^}]*)\}/s
+    )?.[1];
+    const normalWorking = stylesCss.match(/\.connection-line\.lineage-line--working\s*\{([^}]*)\}/s)?.[1];
+    const motion = stylesCss.match(/@media \(prefers-reduced-motion: no-preference\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
+    const proxiedOffset = Number(
+      stylesCss.match(/@keyframes lineage-proxy-flow\s*\{[\s\S]*?stroke-dashoffset:\s*(-?\d+)/)?.[1]
+    );
+    const normalOffset = Number(
+      stylesCss.match(/@keyframes lineage-flow\s*\{[\s\S]*?stroke-dashoffset:\s*(-?\d+)/)?.[1]
+    );
+
+    expect(proxiedWorking).toMatch(/opacity:\s*0\.\d+/);
+    expect(normalWorking).toMatch(/opacity:\s*0\.95/);
+    expect(motion).toMatch(/\.lineage-line--working[\s\S]*animation:\s*lineage-flow/);
+    expect(motion).toMatch(/\.lineage-line--proxied\.lineage-line--working[\s\S]*animation:\s*lineage-proxy-flow/);
+    expect(Math.abs(proxiedOffset) % 9).toBe(0);
+    expect(Math.abs(normalOffset) % 10).toBe(0);
+    expect(proxiedOffset).not.toBe(normalOffset);
+  });
 });

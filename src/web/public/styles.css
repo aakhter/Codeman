@@ -10840,6 +10840,13 @@ kbd {
   opacity: 0.46;
 }
 
+/* A working proxy stays intentionally quieter than a normal working edge while
+   remaining brighter than a resting proxy. Keep this explicit: equal-specificity
+   class order must not choose the signal strength accidentally. */
+.connection-line.lineage-line--proxied.lineage-line--working {
+  opacity: 0.62;
+}
+
 .connection-line.lineage-line:hover {
   opacity: 1;
   stroke-width: 3;
@@ -10859,6 +10866,10 @@ kbd {
     animation: lineage-flow 1.1s linear infinite;
   }
 
+  .connection-line.lineage-line--proxied.lineage-line--working {
+    animation: lineage-proxy-flow 1.1s linear infinite;
+  }
+
   .lineage-line-dot--working {
     opacity: 1;
     animation: lineage-dot-pulse 1.4s ease-in-out infinite;
@@ -10872,6 +10883,13 @@ kbd {
 @keyframes lineage-flow {
   to {
     stroke-dashoffset: -20;
+  }
+}
+
+/* Two complete 9px proxy dash cycles (2 + 7) avoid a jump at the loop seam. */
+@keyframes lineage-proxy-flow {
+  to {
+    stroke-dashoffset: -18;
   }
 }
 

@@ -198,16 +198,19 @@
     }
     let index = 0;
     return sections
-      .map((section) => {
+      .map((section, sectionIndex) => {
         const name = section.id === null ? 'Ungrouped' : section.name;
         const content = (Array.isArray(section.refs) ? section.refs : [])
           .map((ref) => renderRef(ref, index++))
           .join('');
+        const headerId = section.id === null ? '' : `tab-group-header-${sectionIndex}`;
         const header =
           section.id === null
             ? `<div class="tab-layout-group-name">${escapeHtml(name)}</div>`
-            : `<button type="button" class="tab-layout-group-name tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id)}" aria-expanded="${section.collapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)"><span class="tab-layout-group-chevron" aria-hidden="true"></span><span>${escapeHtml(name)}</span></button>`;
-        return `<section class="tab-layout-group" data-tab-group-id="${escapeHtml(section.id || '')}" role="group" aria-label="${escapeHtml(name)}">${header}<div class="tab-layout-group-refs">${content}</div></section>`;
+            : `<button type="button" id="${escapeHtml(headerId)}" class="tab-layout-group-name tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id)}" data-i18n-skip aria-expanded="${section.collapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)"><span class="tab-layout-group-chevron" aria-hidden="true"></span><span>${escapeHtml(name)}</span></button>`;
+        const label =
+          section.id === null ? `aria-label="${escapeHtml(name)}"` : `aria-labelledby="${escapeHtml(headerId)}"`;
+        return `<section class="tab-layout-group" data-tab-group-id="${escapeHtml(section.id || '')}" role="group" ${label}>${header}<div class="tab-layout-group-refs">${content}</div></section>`;
       })
       .join('');
   }
