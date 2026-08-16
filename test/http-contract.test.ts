@@ -45,6 +45,13 @@ describe('Stable HTTP contract (live server)', () => {
     expect(['aicodeman', 'codeman']).toContain(body.data.codemanCli.name);
   });
 
+  it('does not expose global or owner tab ordering in shared light state', async () => {
+    const res = await fetch(`${base}/api/status`);
+    const body = await res.json();
+    expect(body.data).not.toHaveProperty('sessionOrder');
+    expect(body.data).not.toHaveProperty('tabLayouts');
+  });
+
   it('serves the same envelope on the /api/v1 alias', async () => {
     const res = await fetch(`${base}/api/v1/status`);
     expect(res.status).toBe(200);
