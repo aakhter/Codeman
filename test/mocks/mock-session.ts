@@ -38,6 +38,10 @@ export class MockSession extends EventEmitter {
   codexConfig?: { model?: string; resumeSessionId?: string };
   /** Closed provider identity projection used by local Codex Read My Mind. */
   getCodexProviderEnvironment = vi.fn<() => CodexProviderEnvironment>(() => ({}));
+  /** Narrow home-only projection used to scope competing Codex submit times. */
+  getCodexHomeOverride = vi.fn<() => string | undefined>(() => undefined);
+  /** Recovery fence when session-scoped credentials could not be persisted. */
+  hasLostCodexProviderCredentials = vi.fn(() => false);
   codexLastSubmitAt?: number;
   isWorking: boolean = false;
   private _activeChildProcesses: { pid: number; command: string }[] = [];

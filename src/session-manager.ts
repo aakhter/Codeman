@@ -291,17 +291,16 @@ export class SessionManager extends EventEmitter {
   }
 
   private updateSessionState(session: Session): void {
-    // envOverrides is intentionally NOT on SessionState (API safety). For disk
-    // persistence we augment the stored object with __envOverrides so reboot
-    // recovery can restore them without leaking through any API serializer.
-    // The key uses the reserved `__` prefix so it is visibly "internal" to any
-    // future reader of state.json.
+    // Private recovery fields are intentionally NOT on SessionState. The
+    // reserved `__` records go to disk but are stripped by getStoredSessions().
     const state = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
+    const codexProviderIdentity = session.getCodexProviderIdentityForPersist();
     const attachmentHistory = session.getAttachmentHistoryForPersist();
     const toStore = {
       ...state,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
+      ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
     };
     this.store.setSession(session.id, toStore as SessionState);
@@ -309,7 +308,21 @@ export class SessionManager extends EventEmitter {
 
   /** Gets all sessions from persistent storage (including stopped). */
   getStoredSessions(): Record<string, SessionState> {
-    return this.store.getSessions();
+    return Object.fromEntries(
+      Object.entries(this.store.getSessions()).map(([id, stored]) => {
+        const {
+          __envOverrides: _envOverrides,
+          __codexProviderIdentity: _codexProviderIdentity,
+          __attachmentHistory: _attachmentHistory,
+          ...publicState
+        } = stored as SessionState & {
+          __envOverrides?: unknown;
+          __codexProviderIdentity?: unknown;
+          __attachmentHistory?: unknown;
+        };
+        return [id, publicState];
+      })
+    );
   }
 
   /**

@@ -74,8 +74,9 @@ describe('read my mind phone key + alternates (static guards)', () => {
     expect(ui).toMatch(/\.textContent = suggestion\.prompt/);
   });
 
-  it('opens for Claude and Codex (and legacy missing mode) but rejects every other mode', () => {
+  it('opens for Claude, local Codex, and legacy missing mode but rejects remote/docker Codex and other modes', () => {
     expect(ui).toMatch(/\['claude', 'codex'\]\.includes\(session\.mode\)/);
+    expect(ui).toMatch(/session\.mode === 'codex' && \(session\.remote \|\| session\.docker\)/);
     expect(ui).toContain('Read My Mind supports Claude and local Codex sessions');
     expect(ui).not.toContain('works on Claude sessions only');
   });

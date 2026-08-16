@@ -47,6 +47,7 @@ import { verifyClaudeSessionStartHookCapability } from '../hooks-config.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
+import { parseCodexProviderIdentity, type CodexProviderIdentity } from '../codex-provider-identity.js';
 import type {
   ClaudeMode,
   SessionAttachmentHistoryItem,
@@ -140,6 +141,12 @@ export function resolveRestoredSessionName(
   if (savedStateName) return savedStateName;
   if (muxSessionName && muxSessionName !== muxName) return muxSessionName;
   return '';
+}
+
+/** Read the private, secret-free provider provenance from one persisted row. */
+export function resolveRestoredCodexProviderIdentity(savedState: unknown): CodexProviderIdentity | undefined {
+  if (!savedState || typeof savedState !== 'object') return undefined;
+  return parseCodexProviderIdentity((savedState as { __codexProviderIdentity?: unknown }).__codexProviderIdentity);
 }
 
 /** Heal or conservatively fence authoritative Claude identity hooks on mux restore. */
@@ -1136,16 +1143,17 @@ export class WebServer extends EventEmitter {
 
   /** Persists full session state including respawn config to state.json */
   private _persistSessionStateNow(session: Session): void {
-    // See session-manager.updateSessionState: __envOverrides is an internal disk-only
-    // field kept off SessionState to avoid leaking via API broadcasts.
+    // Private recovery records stay off SessionState and API broadcasts.
     const base = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
+    const codexProviderIdentity = session.getCodexProviderIdentityForPersist();
     // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
     // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
     const state = {
       ...base,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
+      ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
     } as SessionState;
     const controller = this.respawnControllers.get(session.id);
@@ -2751,6 +2759,7 @@ export class WebServer extends EventEmitter {
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
             const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
+            const savedCodexProviderIdentity = resolveRestoredCodexProviderIdentity(savedState);
             // Prefer the private (externalPath-bearing) history; fall back to the
             // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =
@@ -2779,6 +2788,7 @@ export class WebServer extends EventEmitter {
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
               piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
               envOverrides: savedEnvOverrides,
+              codexProviderIdentity: savedCodexProviderIdentity,
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
               checkpointState: savedState?.checkpoint,

@@ -6,6 +6,7 @@ import {
   findActiveCodexConversation,
   findAuthoritativeCodexConversation,
   findCodexConversationId,
+  findOwnedCodexConversation,
   findRecentOwnedCodexConversationIds,
   getCodexConversationIdentityDebugStats,
   resetCodexConversationIdentityDebugStats,
@@ -33,6 +34,68 @@ describe('checkpoint conversation identity', () => {
   it('fails closed when no rollout is bound to this pane', async () => {
     const codexHome = await mkdtemp(join(tmpdir(), 'codeman-codex-identity-'));
     await expect(findCodexConversationId({ codexHome, sessionId: 'missing' })).resolves.toBeUndefined();
+  });
+
+  it('keeps legacy cwd fallback for the response viewer but rejects it for strict ownership', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'codeman-codex-legacy-cwd-'));
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const legacyId = '10101010-1010-4010-8010-101010101010';
+    await writeFile(
+      join(sessionsDir, `rollout-${legacyId}.jsonl`),
+      `${JSON.stringify({ type: 'session_meta', payload: { cwd: '/work/shared' } })}\n`
+    );
+    const options = { codexHome, sessionId: 'pane-a', workingDir: '/work/shared' };
+
+    await expect(findActiveCodexConversation(options)).resolves.toMatchObject({ id: legacyId });
+    await expect(findOwnedCodexConversation(options)).resolves.toBeUndefined();
+    await expect(findCodexConversationId(options)).resolves.toBeUndefined();
+  });
+
+  it('rejects an equal-distance competing submit instead of claiming its history pin', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'codeman-codex-history-tie-'));
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const historyId = '20202020-2020-4020-8020-202020202020';
+    await writeFile(join(sessionsDir, `rollout-${historyId}.jsonl`), `${JSON.stringify({ type: 'session_meta' })}\n`);
+    await writeFile(join(codexHome, 'history.jsonl'), `${JSON.stringify({ session_id: historyId, ts: 10 })}\n`);
+
+    await expect(
+      findOwnedCodexConversation({
+        codexHome,
+        sessionId: 'pane-a',
+        lastSubmitAt: 9_000,
+        competingSubmitAts: [11_000],
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it('accepts exact originator, configured resume, and native resume ownership', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'codeman-codex-strict-owned-'));
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const originatorId = '30303030-3030-4030-8030-303030303030';
+    const configuredId = '40404040-4040-4040-8040-404040404040';
+    const nativeId = '50505050-5050-4050-8050-505050505050';
+    await writeFile(
+      join(sessionsDir, `rollout-${originatorId}.jsonl`),
+      `${JSON.stringify({ type: 'session_meta', payload: { originator: 'codeman_pane-a' } })}\n`
+    );
+    await writeFile(
+      join(sessionsDir, `rollout-${configuredId}.jsonl`),
+      `${JSON.stringify({ type: 'session_meta' })}\n`
+    );
+    await writeFile(join(sessionsDir, `rollout-${nativeId}.jsonl`), `${JSON.stringify({ type: 'session_meta' })}\n`);
+
+    await expect(findOwnedCodexConversation({ codexHome, sessionId: 'pane-a' })).resolves.toMatchObject({
+      id: originatorId,
+    });
+    await expect(
+      findOwnedCodexConversation({ codexHome, sessionId: 'pane-b', resumeSessionId: configuredId })
+    ).resolves.toMatchObject({ id: configuredId });
+    await expect(
+      findOwnedCodexConversation({ codexHome, sessionId: 'pane-c', nativeResumeId: nativeId })
+    ).resolves.toMatchObject({ id: nativeId });
   });
 
   it('prefers actual TUI history selection over newer originator and configured resume rollouts', async () => {

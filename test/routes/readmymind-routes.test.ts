@@ -128,7 +128,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
 
   it('returns the stubbed suggestions and feeds user signals into the prompt', async () => {
     const predict = vi.spyOn(readMyMindPredictor, 'predict').mockResolvedValue(RESULT);
-    const resolveCodex = vi.spyOn(codexIdentity, 'findActiveCodexConversation');
+    const resolveCodex = vi.spyOn(codexIdentity, 'findOwnedCodexConversation');
     const readCodex = vi.spyOn(codexRolloutReader, 'readCodexRolloutSignals');
     const codexEnvironment = vi.spyOn(sessionUnderTest(), 'getCodexProviderEnvironment');
     await harness.app.inject({
@@ -158,7 +158,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
 
   it('accepts local Codex with its session-selected model and closed provider environment', async () => {
     const predict = vi.spyOn(readMyMindPredictor, 'predict').mockResolvedValue(RESULT);
-    vi.spyOn(codexIdentity, 'findActiveCodexConversation').mockResolvedValue(undefined);
+    vi.spyOn(codexIdentity, 'findOwnedCodexConversation').mockResolvedValue(undefined);
     const session = sessionUnderTest();
     session.mode = 'codex';
     session.codexConfig = { model: 'gpt-5.4', resumeSessionId: 'resume-id' };
@@ -166,6 +166,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
       CODEX_HOME: '/tmp/codex-home',
       OPENAI_API_KEY: 'session-key',
     });
+    session.getCodexHomeOverride.mockReturnValue('/tmp/codex-home');
 
     const res = await harness.app.inject({ method: 'POST', url: `/api/sessions/${SESSION_ID}/readmymind` });
 
@@ -200,7 +201,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
   it('passes pane identity inputs to the resolver and feeds owned rollout signals into context', async () => {
     const predict = vi.spyOn(readMyMindPredictor, 'predict').mockResolvedValue(RESULT);
     const resolveCodex = vi
-      .spyOn(codexIdentity, 'findActiveCodexConversation')
+      .spyOn(codexIdentity, 'findOwnedCodexConversation')
       .mockResolvedValue({ id: 'owned-rollout', path: '/resolved/owned.jsonl' });
     vi.spyOn(codexRolloutReader, 'readCodexRolloutSignals').mockResolvedValue({
       lastAssistantText: 'OWNED_ASSISTANT_MARKER',
@@ -216,10 +217,29 @@ describe('POST /api/sessions/:id/readmymind', () => {
     session.codexConfig = { model: 'gpt-5.4', resumeSessionId: 'resume-id' };
     session.lastSubmitAt = 11_000;
     session.getCodexProviderEnvironment.mockReturnValue({ CODEX_HOME: '/session/codex-home' });
+    session.getCodexHomeOverride.mockReturnValue('/session/codex-home');
     const sibling = new MockSession('competing-pane');
     sibling.mode = 'codex';
     sibling.lastSubmitAt = 12_000;
+    sibling.getCodexHomeOverride.mockReturnValue('/session/codex-home');
     harness.ctx.sessions.set(sibling.id, sibling);
+    const differentHome = new MockSession('different-home-pane');
+    differentHome.mode = 'codex';
+    differentHome.lastSubmitAt = 13_000;
+    differentHome.getCodexHomeOverride.mockReturnValue('/different/codex-home');
+    harness.ctx.sessions.set(differentHome.id, differentHome);
+    const remoteSibling = new MockSession('remote-pane');
+    remoteSibling.mode = 'codex';
+    remoteSibling.lastSubmitAt = 14_000;
+    remoteSibling.remote = { hostId: 'remote', label: 'remote', host: 'example.test', remotePath: '/work' };
+    remoteSibling.getCodexHomeOverride.mockReturnValue('/session/codex-home');
+    harness.ctx.sessions.set(remoteSibling.id, remoteSibling);
+    const dockerSibling = new MockSession('docker-pane') as MockSession & { docker?: { containerName: string } };
+    dockerSibling.mode = 'codex';
+    dockerSibling.lastSubmitAt = 15_000;
+    dockerSibling.docker = { containerName: 'codex-container' };
+    dockerSibling.getCodexHomeOverride.mockReturnValue('/session/codex-home');
+    harness.ctx.sessions.set(dockerSibling.id, dockerSibling);
     const before = Date.parse('2026-08-16T13:59:59.000Z');
     const after = Date.parse('2026-08-16T14:00:01.000Z');
     harness.ctx.runSummaryTrackers.set(SESSION_ID, {
@@ -238,9 +258,16 @@ describe('POST /api/sessions/:id/readmymind', () => {
       sessionId: SESSION_ID,
       workingDir: session.workingDir,
       resumeSessionId: 'resume-id',
+      nativeResumeId: undefined,
       lastSubmitAt: 11_000,
       competingSubmitAts: [12_000],
     });
+    expect(sibling.getCodexHomeOverride).toHaveBeenCalled();
+    expect(differentHome.getCodexHomeOverride).toHaveBeenCalled();
+    expect(remoteSibling.getCodexHomeOverride).not.toHaveBeenCalled();
+    expect(dockerSibling.getCodexHomeOverride).not.toHaveBeenCalled();
+    expect(sibling.getCodexProviderEnvironment).not.toHaveBeenCalled();
+    expect(differentHome.getCodexProviderEnvironment).not.toHaveBeenCalled();
     const prompt = predict.mock.calls[0][0].prompt;
     expect(prompt).toContain('OWNED_ASSISTANT_MARKER');
     expect(prompt).toContain('ROLLOUT_PROMPT_MARKER continued');
@@ -282,6 +309,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
     const session = sessionUnderTest();
     session.mode = 'codex';
     session.getCodexProviderEnvironment.mockReturnValue({ CODEX_HOME: codexHome });
+    session.getCodexHomeOverride.mockReturnValue(codexHome);
     try {
       const res = await harness.app.inject({ method: 'POST', url: `/api/sessions/${SESSION_ID}/readmymind` });
       expect(res.statusCode).toBe(200);
@@ -294,7 +322,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
 
   it('continues safely with no rollout signals when resolution or reading fails', async () => {
     const predict = vi.spyOn(readMyMindPredictor, 'predict').mockResolvedValue(RESULT);
-    vi.spyOn(codexIdentity, 'findActiveCodexConversation').mockRejectedValue(new Error('ambiguous rollout'));
+    vi.spyOn(codexIdentity, 'findOwnedCodexConversation').mockRejectedValue(new Error('ambiguous rollout'));
     const session = sessionUnderTest();
     session.mode = 'codex';
     session.getCodexProviderEnvironment.mockReturnValue({ CODEX_HOME: '/missing/codex-home' });
@@ -359,7 +387,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
   });
 
   it('502s a predictor failure with the clean error message', async () => {
-    const resolveCodex = vi.spyOn(codexIdentity, 'findActiveCodexConversation');
+    const resolveCodex = vi.spyOn(codexIdentity, 'findOwnedCodexConversation');
     const codexEnvironment = vi.spyOn(sessionUnderTest(), 'getCodexProviderEnvironment');
     vi.spyOn(readMyMindPredictor, 'predict').mockRejectedValue(new Error('Predictor returned malformed JSON'));
     const res = await harness.app.inject({ method: 'POST', url: `/api/sessions/${SESSION_ID}/readmymind` });
@@ -375,7 +403,7 @@ describe('POST /api/sessions/:id/readmymind', () => {
   });
 
   it('preserves a Codex provider failure without consulting or falling back to Claude', async () => {
-    vi.spyOn(codexIdentity, 'findActiveCodexConversation').mockResolvedValue(undefined);
+    vi.spyOn(codexIdentity, 'findOwnedCodexConversation').mockResolvedValue(undefined);
     vi.spyOn(readMyMindPredictor, 'predict').mockRejectedValue(
       new Error('Codex prediction failed; check Codex authentication or configuration.')
     );
@@ -392,6 +420,23 @@ describe('POST /api/sessions/:id/readmymind', () => {
     vi.mocked(readMyMindPredictor.predict).mockResolvedValue(RESULT);
     const retry = await harness.app.inject({ method: 'POST', url: `/api/sessions/${SESSION_ID}/readmymind` });
     expect(retry.statusCode).toBe(200);
+    expect(harness.ctx.getReadMyMindModel).not.toHaveBeenCalled();
+  });
+
+  it('fails restored sessions with lost scoped credentials before rollout or process fallback', async () => {
+    const resolveCodex = vi.spyOn(codexIdentity, 'findOwnedCodexConversation');
+    const predict = vi.spyOn(readMyMindPredictor, 'predict').mockResolvedValue(RESULT);
+    const session = sessionUnderTest();
+    session.mode = 'codex';
+    session.hasLostCodexProviderCredentials.mockReturnValue(true);
+    session.getCodexProviderEnvironment.mockReturnValue({ CODEX_HOME: '/restored/codex-home' });
+
+    const res = await harness.app.inject({ method: 'POST', url: `/api/sessions/${SESSION_ID}/readmymind` });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toContain('recreate or restart');
+    expect(resolveCodex).not.toHaveBeenCalled();
+    expect(predict).not.toHaveBeenCalled();
     expect(harness.ctx.getReadMyMindModel).not.toHaveBeenCalled();
   });
 
@@ -443,7 +488,7 @@ describe('multi-user scoping', () => {
     const scoped = await createRouteTestHarness(registerReadMyMindRoutes, {
       authUser: { username: 'bob', role: 'user' },
     });
-    const resolveCodex = vi.spyOn(codexIdentity, 'findActiveCodexConversation');
+    const resolveCodex = vi.spyOn(codexIdentity, 'findOwnedCodexConversation');
     try {
       const session = scoped.ctx.sessions.get(SESSION_ID)!;
       session.owner = 'alice';

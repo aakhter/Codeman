@@ -123,17 +123,33 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
         recentTools = transcript?.recentTools;
       } else {
         codexEnvironment = session.getCodexProviderEnvironment();
+        if (session.hasLostCodexProviderCredentials()) {
+          throw new Error(
+            'Read My Mind cannot use this restored Codex session because its session credentials were not persisted; please recreate or restart the session.'
+          );
+        }
         let rolloutPrompts: Parameters<typeof mergeReadMyMindPrompts>[1] = [];
         try {
-          const conversation = await codexIdentity.findActiveCodexConversation({
-            codexHome: resolveReadMyMindCodexHome(codexEnvironment),
+          const codexHome = resolveReadMyMindCodexHome(codexEnvironment);
+          const competingSubmitAts = [...ctx.sessions.values()]
+            .filter(
+              (other) =>
+                other.id !== id &&
+                other.mode === 'codex' &&
+                !other.remote &&
+                !other.docker &&
+                Boolean(other.lastSubmitAt)
+            )
+            .filter((other) => resolveReadMyMindCodexHome({ CODEX_HOME: other.getCodexHomeOverride() }) === codexHome)
+            .map((other) => other.lastSubmitAt);
+          const conversation = await codexIdentity.findOwnedCodexConversation({
+            codexHome,
             sessionId: id,
             workingDir: session.workingDir,
             resumeSessionId: session.codexConfig?.resumeSessionId,
+            nativeResumeId: session.nativeResumeId ?? undefined,
             lastSubmitAt: session.lastSubmitAt,
-            competingSubmitAts: [...ctx.sessions.values()]
-              .filter((other) => other.id !== id && other.mode === 'codex' && other.lastSubmitAt)
-              .map((other) => other.lastSubmitAt),
+            competingSubmitAts,
           });
           const rollout = conversation ? await codexRolloutReader.readCodexRolloutSignals(conversation.path) : null;
           if (rollout) {

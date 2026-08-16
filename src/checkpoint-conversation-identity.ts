@@ -8,6 +8,7 @@ export interface CodexConversationIdentityOptions {
   codexHome: string;
   sessionId: string;
   resumeSessionId?: string;
+  nativeResumeId?: string;
   workingDir?: string;
   lastSubmitAt?: number;
   competingSubmitAts?: number[];
@@ -29,7 +30,7 @@ interface CodexRolloutFile {
 const rolloutMetaCache = new LRUMap<string, Pick<CodexRolloutFile, 'cwd' | 'originator'>>({ maxSize: 4096 });
 const historyPinCache = new LRUMap<
   string,
-  { submitAt: number; id: string; historyMtimeMs: number; historySize: number }
+  { submitAt: number; competingKey: string; id: string; historyMtimeMs: number; historySize: number }
 >({ maxSize: 1024 });
 const ROLLOUT_INVENTORY_TTL_MS = 10_000;
 const rolloutInventoryCache = new Map<string, { expiresAt: number; files: CodexRolloutFile[] }>();
@@ -166,8 +167,10 @@ async function resolveCodexThreadFromHistory(options: CodexConversationIdentityO
   const info = await stat(historyPath).catch(() => undefined);
   if (!info?.size) return undefined;
   const cached = historyPinCache.get(cacheKey);
+  const competingKey = [...(options.competingSubmitAts ?? [])].sort((a, b) => a - b).join(',');
   if (
     cached?.submitAt === options.lastSubmitAt &&
+    cached.competingKey === competingKey &&
     cached.historyMtimeMs === info.mtimeMs &&
     cached.historySize === info.size
   ) {
@@ -189,6 +192,7 @@ async function resolveCodexThreadFromHistory(options: CodexConversationIdentityO
   }
 
   let best: { id: string; distance: number } | undefined;
+  let ambiguous = false;
   for (const line of history.split('\n')) {
     try {
       const row = JSON.parse(line) as { session_id?: string; ts?: number };
@@ -196,26 +200,32 @@ async function resolveCodexThreadFromHistory(options: CodexConversationIdentityO
       const timestamp = row.ts * 1000;
       const distance = Math.abs(timestamp - options.lastSubmitAt);
       if (distance > 15_000) continue;
-      if ((options.competingSubmitAts ?? []).some((time) => Math.abs(timestamp - time) < distance)) continue;
-      if (!best || distance < best.distance) best = { id: row.session_id, distance };
+      if ((options.competingSubmitAts ?? []).some((time) => Math.abs(timestamp - time) <= distance)) continue;
+      if (!best || distance < best.distance) {
+        best = { id: row.session_id, distance };
+        ambiguous = false;
+      } else if (distance === best.distance && row.session_id !== best.id) {
+        ambiguous = true;
+      }
     } catch {
       // The first tail row or final row may be incomplete.
     }
   }
-  if (best) {
+  if (best && !ambiguous) {
     historyPinCache.set(cacheKey, {
       submitAt: options.lastSubmitAt,
+      competingKey,
       id: best.id,
       historyMtimeMs: info.mtimeMs,
       historySize: info.size,
     });
   }
-  return best?.id;
+  return ambiguous ? undefined : best?.id;
 }
 
-/** Complete active-rollout resolver shared by checkpoint and response viewer. */
-export async function findActiveCodexConversation(
-  options: CodexConversationIdentityOptions
+async function resolveCodexConversation(
+  options: CodexConversationIdentityOptions,
+  allowLegacyCwd: boolean
 ): Promise<ActiveCodexConversation | undefined> {
   const historyId = await resolveCodexThreadFromHistory(options);
   let files = await listCodexRollouts(options.codexHome);
@@ -238,13 +248,33 @@ export async function findActiveCodexConversation(
   if (owned?.id) return { id: owned.id, path: owned.path };
   const resumed = options.resumeSessionId ? files.find((file) => file.id === options.resumeSessionId) : undefined;
   if (resumed?.id) return { id: resumed.id, path: resumed.path };
-  const legacy = options.workingDir
-    ? files.find(
-        (file) =>
-          file.cwd?.toLowerCase() === options.workingDir!.toLowerCase() && !file.originator?.startsWith('codeman_')
-      )
-    : undefined;
+  const nativeResume = options.nativeResumeId ? files.find((file) => file.id === options.nativeResumeId) : undefined;
+  if (nativeResume?.id) return { id: nativeResume.id, path: nativeResume.path };
+  const legacy =
+    allowLegacyCwd && options.workingDir
+      ? files.find(
+          (file) =>
+            file.cwd?.toLowerCase() === options.workingDir!.toLowerCase() && !file.originator?.startsWith('codeman_')
+        )
+      : undefined;
   return legacy?.id ? { id: legacy.id, path: legacy.path } : undefined;
+}
+
+/** Complete active-rollout resolver shared by checkpoint and response viewer. */
+export async function findActiveCodexConversation(
+  options: CodexConversationIdentityOptions
+): Promise<ActiveCodexConversation | undefined> {
+  return resolveCodexConversation(options, true);
+}
+
+/**
+ * Strict resolver for contexts that may reach another model. Unlike the
+ * response viewer, it never treats a matching cwd as ownership proof.
+ */
+export async function findOwnedCodexConversation(
+  options: CodexConversationIdentityOptions
+): Promise<ActiveCodexConversation | undefined> {
+  return resolveCodexConversation(options, false);
 }
 
 /**
@@ -282,7 +312,7 @@ export async function findRecentOwnedCodexConversationIds(
 export async function findCodexConversationFile(
   options: CodexConversationIdentityOptions
 ): Promise<string | undefined> {
-  return (await findActiveCodexConversation(options))?.path;
+  return (await findOwnedCodexConversation(options))?.path;
 }
 
 export async function findCodexConversationId(options: CodexConversationIdentityOptions): Promise<string | undefined> {

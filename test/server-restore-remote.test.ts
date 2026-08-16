@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   refreshRestoredClaudeHookCapability,
+  resolveRestoredCodexProviderIdentity,
   resolveRestoredSessionName,
   resolveRestoredSessionRemote,
 } from '../src/web/server.js';
@@ -52,6 +53,19 @@ describe('server mux restore remote metadata', () => {
 
     await expect(refreshRestoredClaudeHookCapability('claude', workingDir, undefined)).resolves.toBe(true);
     expect(await readFile(settingsPath, 'utf8')).toContain('session_start');
+  });
+
+  it('reads only the private Codex provider provenance needed by Session recovery', () => {
+    expect(
+      resolveRestoredCodexProviderIdentity({
+        __codexProviderIdentity: {
+          CODEX_HOME: '/tmp/alternate-codex-home',
+          credentialsLost: true,
+          OPENAI_API_KEY: 'must-not-be-restored',
+        },
+      })
+    ).toEqual({ CODEX_HOME: '/tmp/alternate-codex-home', credentialsLost: true });
+    expect(resolveRestoredCodexProviderIdentity({ __codexProviderIdentity: 'invalid' })).toBeUndefined();
   });
 });
 

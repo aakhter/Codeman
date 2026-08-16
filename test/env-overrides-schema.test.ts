@@ -61,6 +61,16 @@ describe('envOverrides exact-key allowlist', () => {
       ).toThrow();
     }
   });
+
+  it('keeps OPENAI_API_KEY process-level while allowing CODEX_API_KEY through CODEX_*', () => {
+    expect(() =>
+      CreateSessionSchema.parse({ workingDir: '/tmp', mode: 'codex', envOverrides: { OPENAI_API_KEY: 'secret' } })
+    ).toThrow();
+    expect(
+      CreateSessionSchema.parse({ workingDir: '/tmp', mode: 'codex', envOverrides: { CODEX_API_KEY: 'secret' } })
+        .envOverrides
+    ).toEqual({ CODEX_API_KEY: 'secret' });
+  });
 });
 
 describe('CLAUDE_CONFIG_DIR persistence', () => {
@@ -127,5 +137,53 @@ describe('Codex provider environment', () => {
       expect(serialized).not.toContain('codex-secret');
     }
     expect(session.getEnvOverridesForPersist()).toBeUndefined();
+  });
+
+  it('persists only Codex provider provenance and restores lost-credential state', () => {
+    const active = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      envOverrides: {
+        CODEX_HOME: '/tmp/alternate-codex-home',
+        OPENAI_API_KEY: 'openai-secret',
+        CODEX_API_KEY: 'codex-secret',
+      },
+    });
+    expect(active.getCodexProviderIdentityForPersist()).toEqual({
+      CODEX_HOME: '/tmp/alternate-codex-home',
+      credentialsLost: true,
+    });
+    expect(JSON.stringify(active.getCodexProviderIdentityForPersist())).not.toContain('secret');
+
+    const restored = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      codexProviderIdentity: active.getCodexProviderIdentityForPersist(),
+    });
+    expect(restored.getCodexProviderEnvironment()).toEqual({ CODEX_HOME: '/tmp/alternate-codex-home' });
+    expect(restored.getCodexHomeOverride()).toBe('/tmp/alternate-codex-home');
+    expect(restored.hasLostCodexProviderCredentials()).toBe(true);
+    expect(restored.getCodexProviderIdentityForPersist()).toEqual({
+      CODEX_HOME: '/tmp/alternate-codex-home',
+      credentialsLost: true,
+    });
+    expect(JSON.stringify(restored.toState())).not.toContain('alternate-codex-home');
+    expect(JSON.stringify(restored.toDetailedState())).not.toContain('credentialsLost');
+
+    const homeOnly = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      envOverrides: { CODEX_HOME: '/tmp/process-credential-home' },
+    });
+    const restoredHomeOnly = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      codexProviderIdentity: homeOnly.getCodexProviderIdentityForPersist(),
+    });
+    expect(restoredHomeOnly.getCodexProviderEnvironment()).toEqual({ CODEX_HOME: '/tmp/process-credential-home' });
+    expect(restoredHomeOnly.hasLostCodexProviderCredentials()).toBe(false);
+
+    const processCredentialSession = new Session({ workingDir: '/tmp', mode: 'codex' });
+    expect(processCredentialSession.hasLostCodexProviderCredentials()).toBe(false);
   });
 });
