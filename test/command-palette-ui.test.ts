@@ -116,6 +116,14 @@ function loadPaletteHarness(overrides: Record<string, any> = {}) {
 }
 
 describe('Command-K session palette', () => {
+  it('does not expose Map-order sessions while the owner tab layout is pending', () => {
+    const { app } = loadPaletteHarness();
+    app._tabLayoutFirstPaintPending = true;
+    app.sessionOrder = [];
+
+    expect(app.buildCommandPaletteItems().filter((item: any) => item.type === 'session')).toEqual([]);
+  });
+
   it('recognizes Cmd/Ctrl-K outside text-entry contexts only', () => {
     const { app } = loadPaletteHarness();
 

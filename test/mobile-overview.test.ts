@@ -65,6 +65,17 @@ function session(over: Record<string, any>) {
 }
 
 describe('mobile overview model', () => {
+  it('does not expose Map-order live sessions while the owner tab layout is pending', () => {
+    const app = loadOverviewApp();
+    const model = app.buildMobileOverviewModel({
+      sessions: [session({ id: 'legacy-first' }), session({ id: 'owner-first' })],
+      sessionOrder: [],
+      layoutPending: true,
+    });
+
+    expect(model).toMatchObject({ needsYou: [], current: [], sessionCount: 0 });
+  });
+
   it('routes a session with a pending permission prompt into NEEDS YOU, not idle', () => {
     const app = loadOverviewApp();
     const model = app.buildMobileOverviewModel({

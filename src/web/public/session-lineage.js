@@ -74,6 +74,7 @@ Object.assign(CodemanApp.prototype, {
    */
   _collectLineageEdges() {
     const edges = [];
+    if (this._tabLayoutFirstPaintPending) return edges;
     if (!this.sessions || this.sessions.size < 2) return edges;
     const order = this.sessionOrder && this.sessionOrder.length ? this.sessionOrder : [...this.sessions.keys()];
     const seenPerParent = new Map();

@@ -79,6 +79,17 @@ function sessionMap(list: Array<Record<string, any>>) {
 }
 
 describe('home sessions column: model', () => {
+  it('does not expose Map-order rows while the owner tab layout is pending', () => {
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap([{ id: 'legacy-first' }, { id: 'owner-first' }]),
+      sessionOrder: [],
+      cases: CASES,
+      _tabLayoutFirstPaintPending: true,
+    });
+
+    expect(app.buildHomeSessionRows()).toEqual([]);
+  });
+
   it('lists rows in TAB order, not by urgency, so the number badges match Alt+1..9', () => {
     // The phone overview would hoist 'needy' to the top; this surface must not,
     // because its badges are the Alt+N indices.

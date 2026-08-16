@@ -168,6 +168,7 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Array<object>} row descriptors, ready to render
    */
   buildHomeSessionRows() {
+    if (this._tabLayoutFirstPaintPending) return [];
     const cases = Array.isArray(this.cases) ? this.cases : [];
     const order = Array.isArray(this.sessionOrder) ? this.sessionOrder : [];
     const ids = order.filter((id) => this.sessions?.has(id));
@@ -205,6 +206,12 @@ Object.assign(CodemanApp.prototype, {
   renderHomeSessions() {
     const el = document.getElementById('homeSessions');
     if (!el) return;
+
+    if (this._tabLayoutFirstPaintPending) {
+      el.replaceChildren();
+      this._stopHomeSessionsClock();
+      return;
+    }
 
     const rows = this.buildHomeSessionRows();
     const webviews = (this.webviewOrder || []).map((id) => this.webviews?.get(id)).filter(Boolean);

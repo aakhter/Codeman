@@ -678,10 +678,12 @@ Object.assign(CodemanApp.prototype, {
 
   buildCommandPaletteItems(query = '') {
     const needle = query.trim().toLowerCase();
-    const orderedIds = [
-      ...(Array.isArray(this.sessionOrder) ? this.sessionOrder : []),
-      ...Array.from(this.sessions?.keys?.() || []).filter((id) => !this.sessionOrder?.includes?.(id)),
-    ];
+    const orderedIds = this._tabLayoutFirstPaintPending
+      ? []
+      : [
+          ...(Array.isArray(this.sessionOrder) ? this.sessionOrder : []),
+          ...Array.from(this.sessions?.keys?.() || []).filter((id) => !this.sessionOrder?.includes?.(id)),
+        ];
     const seen = new Set();
     const sessionItems = [];
 

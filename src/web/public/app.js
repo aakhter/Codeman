@@ -1979,7 +1979,7 @@ class CodemanApp {
     this.sessions.set(data.id, data);
     this.updateAttachmentHistoryCountFromSession?.(data);
     // Add new session to end of tab order
-    if (!this.sessionOrder.includes(data.id)) {
+    if (!this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
       this.sessionOrder.push(data.id);
       this.saveSessionOrder();
     }
@@ -4659,6 +4659,11 @@ class CodemanApp {
     // Sync sessionOrder with current sessions (preserve order, add new, remove stale)
     this.syncSessionOrder();
     this._legacySessionOrder = [...this.sessionOrder];
+    const tabRestoreSnapshot = {
+      selectGeneration: this._selectGeneration,
+      activeSessionId: this.activeSessionId,
+      activeWebviewId: this.activeWebviewId,
+    };
     // During the first owner-layout read there must be no interval where
     // compatibility consumers can observe or select the legacy ordering. On a
     // reconnect, retain the last adopted projection until the fresh read lands.
@@ -4766,17 +4771,21 @@ class CodemanApp {
       return;
     }
 
-    const previousActiveId = this.activeSessionId;
     // Restore only after this generation's owner-layout read has adopted either
     // the authoritative projection or the read-only fallback. The generation
     // guard prevents an older init/load pair selecting after a reconnect wins.
     void tabLayoutLoad.then(() => {
       if (gen !== this._initGeneration) return;
+      if (
+        this._selectGeneration !== tabRestoreSnapshot.selectGeneration ||
+        this.activeSessionId !== tabRestoreSnapshot.activeSessionId ||
+        this.activeWebviewId !== tabRestoreSnapshot.activeWebviewId
+      ) return;
       this.activeSessionId = null;
       this.updateFileBrowserHeaderButton?.();
       if (this.sessionOrder.length > 0) {
         // Priority: current active > localStorage > first projected session
-        let restoreId = previousActiveId;
+        let restoreId = tabRestoreSnapshot.activeSessionId;
         if (!restoreId || !this.sessions.has(restoreId)) {
           try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
         }

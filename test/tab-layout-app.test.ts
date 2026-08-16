@@ -167,6 +167,25 @@ describe('COD-306 CodemanApp integration', () => {
     expect(document.querySelectorAll('.session-tab')).toHaveLength(0);
   });
 
+  it('does not append Map-order session creations while first layout paint is pending', () => {
+    const app = makeApp();
+    app.sessions = new Map();
+    app.sessionOrder = [];
+    app._tabLayoutFirstPaintPending = true;
+    app.updateAttachmentHistoryCountFromSession = vi.fn();
+    app.saveSessionOrder = vi.fn();
+    app.renderSessionTabs = vi.fn();
+    app.updateCost = vi.fn();
+    app.renderMuxSessions = vi.fn();
+    app.startSystemStatsPolling = vi.fn();
+
+    app._onSessionCreated({ id: 'created-during-load', status: 'idle' });
+
+    expect(app.sessions.has('created-during-load')).toBe(true);
+    expect(app.sessionOrder).toEqual([]);
+    expect(app.saveSessionOrder).not.toHaveBeenCalled();
+  });
+
   it('renders escaped vertical groups, interleaved badges, exclusive active identity, and no duplicate DOM', () => {
     const app = makeApp();
     app._fullRenderSessionTabs();
@@ -348,10 +367,12 @@ describe('COD-306 CodemanApp integration', () => {
     app._fetchTabLayout = () => request.promise;
 
     app.handleInit(initData);
+    app.sessions.get('s1').parentSessionId = 's2';
     expect(app.selectSession).not.toHaveBeenCalled();
     expect(app.sessionOrder).toEqual([]);
     expect(app._activateVisibleTabNumber(1)).toBe(false);
     expect(app.selectSession).not.toHaveBeenCalled();
+    expect(app._collectLineageEdges()).toEqual([]);
 
     request.resolve({
       ...layout,
@@ -366,6 +387,75 @@ describe('COD-306 CodemanApp integration', () => {
 
     expect(app.sessionOrder).toEqual(['s3', 's2', 's1']);
     expect(app.selectSession).toHaveBeenCalledWith('s3');
+    app.cases = [];
+    app.pendingHooks = new Map();
+    app._buildCommandPaletteNewSessionItem = () => ({ id: 'new', type: 'new-session' });
+    expect(
+      app
+        .buildCommandPaletteItems()
+        .filter((item: any) => item.type === 'session')
+        .map((item: any) => item.sessionId)
+    ).toEqual(['s3', 's2', 's1']);
+    expect(app.buildHomeSessionRows().map((row: any) => row.id)).toEqual(['s3', 's2', 's1']);
+    expect(
+      app
+        .buildMobileOverviewModel({
+          sessions: app.sessions,
+          cases: [],
+          sessionOrder: app.sessionOrder,
+          layoutPending: app._tabLayoutFirstPaintPending,
+        })
+        .current.map((row: any) => row.id)
+    ).toEqual(['s3', 's2', 's1']);
+    expect(app._collectLineageEdges().map((edge: any) => edge.childId)).toEqual(['s1']);
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('does not steal a session selected while reconnect layout loading is delayed', async () => {
+    const app = makeInitApp();
+    const request = deferred<any>();
+    app._tabLayoutFirstPaintPending = false;
+    app.activeSessionId = 's1';
+    app._selectGeneration = 4;
+    app._fetchTabLayout = () => request.promise;
+    app.selectSession.mockImplementation((id: string) => {
+      app._selectGeneration++;
+      app.activeSessionId = id;
+      app.activeWebviewId = null;
+    });
+
+    app.handleInit(initData);
+    app.selectSession('s2');
+    request.resolve(layout);
+    await request.promise;
+    await vi.waitFor(() => expect(app.sessionOrder).toEqual(['s2', 's1', 's3']));
+
+    expect(app.activeSessionId).toBe('s2');
+    expect(app.selectSession).toHaveBeenCalledTimes(1);
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('does not steal a webview activated while reconnect layout loading is delayed', async () => {
+    const app = makeInitApp();
+    const request = deferred<any>();
+    app._tabLayoutFirstPaintPending = false;
+    app.activeSessionId = 's1';
+    app._selectGeneration = 4;
+    app._fetchTabLayout = () => request.promise;
+    app.openWebview = vi.fn((id: string) => {
+      app.activeWebviewId = id;
+    });
+
+    app.handleInit(initData);
+    app.openWebview('w1');
+    request.resolve(layout);
+    await request.promise;
+    await vi.waitFor(() => expect(app.sessionOrder).toEqual(['s2', 's1', 's3']));
+
+    expect(app.activeSessionId).toBe('s1');
+    expect(app.activeWebviewId).toBe('w1');
+    expect(app.selectSession).not.toHaveBeenCalled();
     app._tabLayoutCoordinator.dispose();
   });
 
@@ -374,6 +464,8 @@ describe('COD-306 CodemanApp integration', () => {
     const app = makeInitApp();
     const request = deferred<any>();
     app._fetchTabLayout = () => request.promise;
+    app._refreshHomeSessionsIfVisible = vi.fn();
+    app._refreshMobileOverviewIfVisible = vi.fn();
 
     app.handleInit(initData);
     expect(app.selectSession).not.toHaveBeenCalled();
@@ -384,6 +476,28 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.tabLayoutReadOnly).toBe(true);
     expect(app.selectSession).toHaveBeenCalledOnce();
     expect(app.selectSession).toHaveBeenCalledWith('s1');
+    app.cases = [];
+    app.pendingHooks = new Map();
+    app._buildCommandPaletteNewSessionItem = () => ({ id: 'new', type: 'new-session' });
+    expect(
+      app
+        .buildCommandPaletteItems()
+        .filter((item: any) => item.type === 'session')
+        .map((item: any) => item.sessionId)
+    ).toEqual(['s1', 's2', 's3']);
+    expect(app.buildHomeSessionRows().map((row: any) => row.id)).toEqual(['s1', 's2', 's3']);
+    expect(
+      app
+        .buildMobileOverviewModel({
+          sessions: app.sessions,
+          cases: [],
+          sessionOrder: app.sessionOrder,
+          layoutPending: app._tabLayoutFirstPaintPending,
+        })
+        .current.map((row: any) => row.id)
+    ).toEqual(['s1', 's2', 's3']);
+    expect(app._refreshHomeSessionsIfVisible).toHaveBeenCalledOnce();
+    expect(app._refreshMobileOverviewIfVisible).toHaveBeenCalledOnce();
     app._tabLayoutCoordinator.dispose();
   });
 

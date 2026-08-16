@@ -162,6 +162,7 @@ Object.assign(CodemanApp.prototype, {
    * @param {Map<string, object>|Array} input.sessions live sessions (this.sessions)
    * @param {Array} input.cases case list (this.cases)
    * @param {Array<string>} [input.sessionOrder] the user's tab order, used as the tiebreak
+   * @param {boolean} [input.layoutPending] suppress live rows until owner ordering is ready
    * @param {Map<string, Set<string>>} [input.pendingHooks] this.pendingHooks
    * @param {Array} [input.history] unified session items (GET /api/sessions/unified)
    * @returns {{needsYou: Array, current: Array, past: Array, sessionCount: number}}
@@ -170,7 +171,7 @@ Object.assign(CodemanApp.prototype, {
     const cases = Array.isArray(input && input.cases) ? input.cases : [];
     const order = Array.isArray(input && input.sessionOrder) ? input.sessionOrder : [];
     const pendingHooks = (input && input.pendingHooks) || new Map();
-    const raw = (input && input.sessions) || [];
+    const raw = input?.layoutPending ? [] : (input && input.sessions) || [];
     const sessions = typeof raw.values === 'function' ? Array.from(raw.values()) : Array.from(raw);
 
     const rows = sessions.map((session) => {
@@ -397,6 +398,7 @@ Object.assign(CodemanApp.prototype, {
       sessions: this.sessions,
       cases: this.cases,
       sessionOrder: this.sessionOrder,
+      layoutPending: this._tabLayoutFirstPaintPending,
       pendingHooks: this.pendingHooks,
       history: this._mobileOverviewHistory,
     });
