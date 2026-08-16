@@ -130,6 +130,7 @@ import {
   parseExternalCliTranscript,
 } from '../response-viewer-transcript.js';
 import { findActiveCodexConversation } from '../../checkpoint-conversation-identity.js';
+import { parseCodexRollout } from '../../codex-rollout-reader.js';
 // LRUMap is deliberately NOT in the utils barrel — import the module directly.
 import { LRUMap } from '../../utils/lru-map.js';
 import {
@@ -2238,18 +2239,6 @@ export function registerSessionRoutes(
     }
   });
 
-  function isCodexInjectedContext(text: string): boolean {
-    return (
-      /^# AGENTS\.md instructions\b/i.test(text) ||
-      /^<environment_context\b/i.test(text) ||
-      /^<turn_aborted\b/i.test(text) ||
-      /^<codex_internal_context\b/i.test(text) ||
-      /^<recommended_plugins\b/i.test(text) ||
-      /^<user_instructions\b/i.test(text) ||
-      /^# Options\b/i.test(text)
-    );
-  }
-
   // ── Codex response-viewer support ───────────────────────────────────────────────────────
   // The exact same full resolver backs checkpoint generation observation and
   // response viewing: history pin, originator, configured resume, then legacy cwd.
@@ -2404,29 +2393,8 @@ export function registerSessionRoutes(
     }
   }
 
-  function extractCodexBlockText(content: unknown, kinds: string[]): string {
-    if (typeof content === 'string') return content;
-    if (!Array.isArray(content)) return '';
-    return content
-      .filter(
-        (b): b is { type: string; text: string } =>
-          !!b &&
-          typeof b === 'object' &&
-          kinds.includes((b as { type?: string }).type || '') &&
-          typeof (b as { text?: string }).text === 'string'
-      )
-      .map((b) => b.text)
-      .join('\n\n');
-  }
-
-  // Single pass over a Codex rollout: track the last assistant message (for the
-  // default eye view) and, when `full`, the whole user/assistant thread.
-  //
-  // User turns come from event_msg/user_message when available: codex emits one
-  // per REAL user input, and injected context (AGENTS.md, environment_context,
-  // compaction summaries, …) never appears there — so no filtering heuristics.
-  // response_item user rows duplicate those inputs mixed with the injections;
-  // they are kept only as a fallback for old rollouts without event_msg rows.
+  // Rollout identity remains above in `findActiveCodexFile()`; parsing itself is
+  // shared with Read My Mind so viewer behavior cannot drift from its signals.
   async function readCodexLastResponse(
     session: {
       id: string;
@@ -2452,91 +2420,16 @@ export function registerSessionRoutes(
       return empty;
     }
 
-    let lastText = '';
-    let lastTimestamp = '';
-    const messages: Array<{ role: string; text: string; timestamp?: string; legacyUser?: boolean }> = [];
-    // Multiset of event-sourced user texts: a real input appears BOTH as an
-    // event_msg and as a response_item row, so each event text cancels exactly
-    // one legacy twin. Legacy rows without an event twin (turns written by an
-    // older codex appending to the same rollout) survive — a file-wide boolean
-    // would wrongly drop them.
-    const eventUserTexts = new Map<string, number>();
+    const parsed = parseCodexRollout(content.split('\n'));
 
-    for (const line of content.split('\n')) {
-      if (!line) continue;
-      let entry: {
-        timestamp?: string;
-        type?: string;
-        payload?: {
-          type?: string;
-          role?: string;
-          content?: unknown;
-          message?: unknown;
-          images?: unknown;
-          local_images?: unknown;
-        };
-      };
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (full && entry.type === 'event_msg' && entry.payload?.type === 'user_message') {
-        let text = typeof entry.payload.message === 'string' ? entry.payload.message.trim() : '';
-        if (text && isCodexInjectedContext(text)) continue;
-        if (text) eventUserTexts.set(text, (eventUserTexts.get(text) || 0) + 1);
-        // Image-only (or image+text) inputs: the text field alone would make
-        // the turn vanish, so surface a placeholder.
-        const imageCount =
-          (Array.isArray(entry.payload.images) ? entry.payload.images.length : 0) +
-          (Array.isArray(entry.payload.local_images) ? entry.payload.local_images.length : 0);
-        if (imageCount > 0) text = text ? `${text}\n\n*[image ×${imageCount}]*` : `*[image ×${imageCount}]*`;
-        if (text) messages.push({ role: 'user', text, timestamp: entry.timestamp });
-        continue;
-      }
-      if (entry.type !== 'response_item' || entry.payload?.type !== 'message') continue;
-      const role = entry.payload?.role;
-      if (role === 'assistant') {
-        const text = extractCodexBlockText(entry.payload?.content, ['output_text', 'text']);
-        if (text) {
-          lastText = text;
-          lastTimestamp = entry.timestamp || '';
-          if (full) messages.push({ role: 'assistant', text, timestamp: entry.timestamp });
-        }
-      } else if (role === 'user' && full) {
-        const text = extractCodexBlockText(entry.payload?.content, ['input_text', 'text']).trim();
-        // Drop Codex's injected context turns (AGENTS.md, environment_context, …)
-        // so the thread shows real user prompts only.
-        if (text && !isCodexInjectedContext(text)) {
-          messages.push({ role: 'user', text, timestamp: entry.timestamp, legacyUser: true });
-        }
-      }
-    }
-
-    const thread = messages
-      .filter((m) => {
-        if (!m.legacyUser) return true;
-        const n = eventUserTexts.get(m.text) || 0;
-        if (n > 0) {
-          eventUserTexts.set(m.text, n - 1);
-          return false; // duplicate of an event_msg row already in the thread
-        }
-        return true;
-      })
-      .map(({ role, text, timestamp }) => ({ role, text, timestamp }));
-
-    // Brief callers (full=false) never build `thread`, so the capability flag
-    // can't be derived from it directly — but an assistant message is only
-    // ever pushed into `thread` when `full` is true AND its text is non-empty
-    // (see the `role === 'assistant'` branch above), so `lastText` truthy is
-    // exactly the condition under which a `?context=full` read would come back
-    // with expandable history. Cheap: no extra pass over the rollout needed.
+    // The response viewer has always exposed expandable context when a rollout
+    // has a non-empty assistant reply; retain that lightweight capability flag.
     if (full) {
-      return { text: lastText, timestamp: lastTimestamp, messages: thread };
+      return { text: parsed.lastAssistantText, timestamp: parsed.lastAssistantTimestamp, messages: parsed.messages };
     }
-    return lastText
-      ? { text: lastText, timestamp: lastTimestamp, hasContext: true }
-      : { text: lastText, timestamp: lastTimestamp };
+    return parsed.lastAssistantText
+      ? { text: parsed.lastAssistantText, timestamp: parsed.lastAssistantTimestamp, hasContext: true }
+      : { text: parsed.lastAssistantText, timestamp: parsed.lastAssistantTimestamp };
   }
 
   // ========== Get Terminal Buffer ==========
