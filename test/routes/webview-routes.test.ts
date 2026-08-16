@@ -200,6 +200,19 @@ describe('DELETE /api/webviews/:id', () => {
     expect(webviewCapabilities.resolve(cap)).toBeUndefined();
   });
 
+  it('keeps the exact saved record and emits nothing when layout deletion fails', async () => {
+    const created = (await create({ name: 'Keep me', url: 'https://keep.example/' })).json().data;
+    broadcasts.length = 0;
+    webviewDeleted.mockRejectedValueOnce(new Error('tab layout restoration failed'));
+
+    const response = await app.inject({ method: 'DELETE', url: `/api/webviews/${created.id}` });
+    const list = (await app.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews;
+
+    expect(response.statusCode).toBe(500);
+    expect(list).toEqual([created]);
+    expect(broadcasts).toEqual([]);
+  });
+
   it('404s an unknown id', async () => {
     expect((await app.inject({ method: 'DELETE', url: '/api/webviews/nope' })).statusCode).toBe(404);
   });

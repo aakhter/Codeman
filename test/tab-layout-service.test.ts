@@ -46,6 +46,41 @@ const existing = (refs: TabLayout['ungrouped'], version = 7): TabLayout => ({
 });
 
 describe('TabLayoutService', () => {
+  it('guards destructive transactions by restoration state while allowing skipped test mode', async () => {
+    const h = createHarness({ layouts: { '@single': existing([{ kind: 'session', id: 'mine' }]) } });
+    const action = vi.fn(async () => 'removed');
+
+    await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).rejects.toThrow(/restoration.*pending/i);
+    expect(action).not.toHaveBeenCalled();
+
+    h.service.markRestorationFailed();
+    await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).rejects.toThrow(/restoration.*failed/i);
+    expect(action).not.toHaveBeenCalled();
+
+    h.service.markRestorationSkipped();
+    await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).resolves.toBe('removed');
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('prepares and commits a complete-state session deletion around the resource action', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+    const action = vi.fn(async () => {
+      expect(h.store.setTabLayout).not.toHaveBeenCalled();
+      h.live.delete('mine');
+      return 'removed';
+    });
+
+    await expect(h.service.runSessionDeletion([{ id: 'mine', owner: 'alice' }], action)).resolves.toBe('removed');
+
+    expect(h.layouts.alice.ungrouped).toEqual([]);
+    expect(h.layouts.alice.version).toBe(8);
+  });
+
   it('repairs missing owner refs once while preserving unknown refs', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'unknown' }]) },
@@ -187,6 +222,7 @@ describe('TabLayoutService', () => {
 
   it('does not prune or bump when restoration was skipped', async () => {
     const h = createHarness({ layouts: { '@single': existing([{ kind: 'session', id: 'gone' }]) } });
+    h.service.markRestorationSkipped();
     await h.service.sessionsRemoved([{ id: 'gone' }]);
     await h.service.webviewDeleted('@single', 'also-gone');
     expect(h.store.setTabLayout).not.toHaveBeenCalled();

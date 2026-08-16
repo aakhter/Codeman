@@ -46,6 +46,31 @@ describe('Session Cleanup', () => {
   }, 60000);
 
   describe('Session Deletion', () => {
+    it('rejects before stopping the session when layout deletion preparation fails', async () => {
+      const createRes = await fetch(`${baseUrl}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workingDir: testWorkingDir }),
+      });
+      const created = await createRes.json();
+      const id = created.data.session.id;
+      createdSessions.push(id);
+      const internals = server as unknown as {
+        tabLayouts: { runSessionDeletion: (...args: unknown[]) => Promise<unknown> };
+      };
+      const original = internals.tabLayouts.runSessionDeletion;
+      internals.tabLayouts.runSessionDeletion = vi.fn(async () => {
+        throw new Error('layout prune unavailable');
+      });
+
+      const deleteRes = await fetch(`${baseUrl}/api/sessions/${id}`, { method: 'DELETE' });
+      const getRes = await fetch(`${baseUrl}/api/sessions/${id}`);
+
+      expect(deleteRes.status).toBe(500);
+      expect(getRes.status).toBe(200);
+      internals.tabLayouts.runSessionDeletion = original;
+    });
+
     it('should properly stop and cleanup interactive session', async () => {
       const caseName = `cleanup-test-${Date.now()}`;
       createdCases.push(caseName);
