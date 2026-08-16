@@ -541,6 +541,7 @@ class CodemanApp {
     this._tabLayoutManaged = true;
     this._tabLayoutFirstPaintPending = true;
     this._tabLayoutCoordinator = null;
+    this._tabLayoutPagehideHandler = null;
     this._lastTabStructureKey = null;
     this._legacySessionOrder = [];
     this.draggedTabId = null; // Currently dragged tab session ID
@@ -4658,7 +4659,15 @@ class CodemanApp {
     // Sync sessionOrder with current sessions (preserve order, add new, remove stale)
     this.syncSessionOrder();
     this._legacySessionOrder = [...this.sessionOrder];
-    this._loadTabLayout();
+    // During the first owner-layout read there must be no interval where
+    // compatibility consumers can observe or select the legacy ordering. On a
+    // reconnect, retain the last adopted projection until the fresh read lands.
+    if (this._tabLayoutFirstPaintPending) {
+      this.sessionOrder = [];
+    } else if (this.tabLayout) {
+      this._refreshTabProjection();
+    }
+    const tabLayoutLoad = Promise.resolve(this._loadTabLayout()).catch(() => false);
 
     if (data.respawnStatus) {
       this.respawnStatus = data.respawnStatus;
@@ -4748,10 +4757,6 @@ class CodemanApp {
       this.seedWorkflowRuns(data.workflowRuns);
     }
 
-    // Restore previously active session (survives page reload + SSE reconnect)
-    // Must always re-select because handleInit clears terminal state above.
-    // Reset activeSessionId so selectSession doesn't early-return.
-    // Guard: skip if a newer handleInit has already started (race between loadState + SSE init).
     if (gen !== this._initGeneration) return;
 
     // Solo (detached) window: always show exactly the target session, ignoring
@@ -4762,20 +4767,26 @@ class CodemanApp {
     }
 
     const previousActiveId = this.activeSessionId;
-    this.activeSessionId = null;
-    this.updateFileBrowserHeaderButton?.();
-    if (this.sessionOrder.length > 0) {
-      // Priority: current active > localStorage > first session
-      let restoreId = previousActiveId;
-      if (!restoreId || !this.sessions.has(restoreId)) {
-        try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
+    // Restore only after this generation's owner-layout read has adopted either
+    // the authoritative projection or the read-only fallback. The generation
+    // guard prevents an older init/load pair selecting after a reconnect wins.
+    void tabLayoutLoad.then(() => {
+      if (gen !== this._initGeneration) return;
+      this.activeSessionId = null;
+      this.updateFileBrowserHeaderButton?.();
+      if (this.sessionOrder.length > 0) {
+        // Priority: current active > localStorage > first projected session
+        let restoreId = previousActiveId;
+        if (!restoreId || !this.sessions.has(restoreId)) {
+          try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
+        }
+        if (restoreId && this.sessions.has(restoreId)) {
+          this.selectSession(restoreId);
+        } else {
+          this.selectSession(this.sessionOrder[0]);
+        }
       }
-      if (restoreId && this.sessions.has(restoreId)) {
-        this.selectSession(restoreId);
-      } else {
-        this.selectSession(this.sessionOrder[0]);
-      }
-    }
+    });
   }
 
   async loadState() {
@@ -4797,7 +4808,17 @@ class CodemanApp {
       scheduleRetry: (retry) => setTimeout(retry, 2000),
       cancelRetry: (timer) => clearTimeout(timer),
     });
-    window.addEventListener('pagehide', () => this._tabLayoutCoordinator?.dispose(), { once: true });
+    if (!this._tabLayoutPagehideHandler) {
+      this._tabLayoutPagehideHandler = (event) => {
+        // A persisted pagehide enters BFCache; this same page instance resumes
+        // on Back and must keep its coordinator usable for SSE-driven refetches.
+        if (event.persisted) return;
+        this._tabLayoutCoordinator?.dispose();
+        window.removeEventListener('pagehide', this._tabLayoutPagehideHandler);
+        this._tabLayoutPagehideHandler = null;
+      };
+      window.addEventListener('pagehide', this._tabLayoutPagehideHandler);
+    }
     return this._tabLayoutCoordinator;
   }
 
@@ -4845,6 +4866,13 @@ class CodemanApp {
   }
 
   _refreshTabProjection() {
+    if (this._tabLayoutFirstPaintPending) {
+      const pending = { sessionOrder: [], visibleRefs: [], sections: [] };
+      this.sessionOrder = pending.sessionOrder;
+      this._visibleTabRefs = pending.visibleRefs;
+      this._tabLayoutSections = pending.sections;
+      return pending;
+    }
     const projection = this._projectTabLayout();
     this.sessionOrder = projection.sessionOrder;
     this._visibleTabRefs = projection.visibleRefs;

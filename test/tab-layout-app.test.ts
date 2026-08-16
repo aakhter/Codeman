@@ -98,6 +98,57 @@ function makeApp() {
   return app;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeInitApp() {
+  const app = makeApp();
+  app._initGeneration = 0;
+  app._clearTimer = vi.fn();
+  app._updateCjkInputState = vi.fn();
+  app._applyCodemanCliHints = vi.fn();
+  app._resetAllAppState = vi.fn(() => app.sessions.clear());
+  app.updateAttachmentHistoryCountFromSession = vi.fn();
+  app.updateCost = vi.fn();
+  app.renderSessionTabs = vi.fn();
+  app.seedApprovals = vi.fn();
+  app.startSystemStatsPolling = vi.fn();
+  app.stopSystemStatsPolling = vi.fn();
+  app.cleanupAllFloatingWindows = vi.fn();
+  app.updateFileBrowserHeaderButton = vi.fn();
+  app.selectSession = vi.fn();
+  app.syncSessionOrder = vi.fn(() => {
+    app.sessionOrder = ['s1', 's2', 's3'];
+  });
+  app.isSoloWindow = false;
+  app.activeSessionId = null;
+  app.activeWebviewId = null;
+  app._tabLayoutFirstPaintPending = true;
+  app._tabLayoutCoordinator = null;
+  app.ralphClosedSessions = new Set();
+  app.ralphStates = new Map();
+  (globalThis as any).VoiceInput.cleanup = vi.fn();
+  localStorage.removeItem('codeman-active-session');
+  return app;
+}
+
+const initData = {
+  sessions: [
+    { id: 's1', name: 'One', status: 'idle' },
+    { id: 's2', name: 'Two', status: 'idle' },
+    { id: 's3', name: 'Three', status: 'idle' },
+  ],
+  sessionOrder: ['s1', 's2', 's3'],
+  scheduledRuns: [],
+};
+
 beforeEach(() => {
   document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
   document.body.innerHTML = '';
@@ -289,5 +340,124 @@ describe('COD-306 CodemanApp integration', () => {
     app._onTabLayoutChanged();
     expect(app._loadTabLayout).toHaveBeenCalledOnce();
     app._tabLayoutCoordinator.dispose();
+  });
+
+  it('waits for the authoritative initial layout before selecting its first session', async () => {
+    const app = makeInitApp();
+    const request = deferred<any>();
+    app._fetchTabLayout = () => request.promise;
+
+    app.handleInit(initData);
+    expect(app.selectSession).not.toHaveBeenCalled();
+    expect(app.sessionOrder).toEqual([]);
+    expect(app._activateVisibleTabNumber(1)).toBe(false);
+    expect(app.selectSession).not.toHaveBeenCalled();
+
+    request.resolve({
+      ...layout,
+      groups: [{ id: 'authoritative', name: 'Owner', refs: [{ kind: 'session', id: 's3' }] }],
+      ungrouped: [
+        { kind: 'session', id: 's2' },
+        { kind: 'session', id: 's1' },
+      ],
+    });
+    await request.promise;
+    await vi.waitFor(() => expect(app.selectSession).toHaveBeenCalledOnce());
+
+    expect(app.sessionOrder).toEqual(['s3', 's2', 's1']);
+    expect(app.selectSession).toHaveBeenCalledWith('s3');
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('selects the legacy-first session only after the initial layout GET fails', async () => {
+    vi.useFakeTimers();
+    const app = makeInitApp();
+    const request = deferred<any>();
+    app._fetchTabLayout = () => request.promise;
+
+    app.handleInit(initData);
+    expect(app.selectSession).not.toHaveBeenCalled();
+    request.reject(new Error('offline'));
+    await request.promise.catch(() => undefined);
+    await Promise.resolve();
+
+    expect(app.tabLayoutReadOnly).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledOnce();
+    expect(app.selectSession).toHaveBeenCalledWith('s1');
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('does not let an overlapping stale init select a session', async () => {
+    const app = makeInitApp();
+    const requests = [deferred<any>(), deferred<any>()];
+    app._fetchTabLayout = vi.fn().mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+
+    app.handleInit(initData);
+    app.handleInit(initData);
+    requests[0].resolve(layout);
+    await requests[0].promise;
+    await Promise.resolve();
+    expect(app.selectSession).not.toHaveBeenCalled();
+
+    requests[1].resolve({
+      ...layout,
+      version: 9,
+      groups: [{ id: 'newest', name: 'Newest', refs: [{ kind: 'session', id: 's2' }] }],
+      ungrouped: [
+        { kind: 'session', id: 's1' },
+        { kind: 'session', id: 's3' },
+      ],
+    });
+    await requests[1].promise;
+    await vi.waitFor(() => expect(app.selectSession).toHaveBeenCalledOnce());
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('keeps the layout coordinator live across BFCache pagehide', async () => {
+    const app = makeApp();
+    app._fetchTabLayout = vi.fn(async () => layout);
+    app._tabLayoutCoordinator = null;
+    app._ensureTabLayoutCoordinator();
+    const pagehide = new Event('pagehide');
+    Object.defineProperty(pagehide, 'persisted', { value: true });
+    window.dispatchEvent(pagehide);
+
+    expect(await app._loadTabLayout()).toBe(true);
+    expect(app._fetchTabLayout).toHaveBeenCalledOnce();
+
+    window.dispatchEvent(new Event('pagehide'));
+  });
+
+  it('disposes and cancels retries on an ordinary pagehide', async () => {
+    vi.useFakeTimers();
+    const app = makeApp();
+    app._fetchTabLayout = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    app._tabLayoutCoordinator = null;
+
+    await app._loadTabLayout();
+    expect(app._fetchTabLayout).toHaveBeenCalledOnce();
+    window.dispatchEvent(new Event('pagehide'));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(app._fetchTabLayout).toHaveBeenCalledOnce();
+    expect(await app._loadTabLayout()).toBe(false);
+  });
+
+  it('invalidates an in-flight layout generation on an ordinary pagehide', async () => {
+    const app = makeApp();
+    const request = deferred<any>();
+    app._fetchTabLayout = () => request.promise;
+    app._applyTabLayout = vi.fn();
+    app._tabLayoutCoordinator = null;
+
+    const load = app._loadTabLayout();
+    window.dispatchEvent(new Event('pagehide'));
+    request.resolve(layout);
+
+    expect(await load).toBe(false);
+    expect(app._applyTabLayout).not.toHaveBeenCalled();
   });
 });
