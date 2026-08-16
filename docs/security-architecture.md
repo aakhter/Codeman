@@ -309,12 +309,12 @@ escapes the session working directory (`..`, absolute paths, and symlinks that
 resolve outside). The realpath‑before‑check ordering closes the validation‑time
 TOCTOU window.
 
-| Route                  | Cap   | Notes                                                                                                                                                                                                                                                                                                    |
-| ---------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `file-content`         | 10 MB | text preview                                                                                                                                                                                                                                                                                             |
-| `file-raw`             | —     | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses**; streamed, `Range`-aware (206 slices come from the same validated path). No app‑level cap: COD‑18 replaced the whole‑file `readFile` with `createReadStream`, which is what the cap existed to bound, and it is workspace‑scoped |
-| attachment `…/:id/raw` | 50 MB | 413 past the cap, checked before the range. Capped because an attacker‑influenceable registry id resolves to an arbitrary host file                                                                                                                                                                      |
-| `POST /api/download`   | 50 MB | forced `attachment`; sensitive‑path blocklist                                                                                                                                                                                                                                                            |
+| Route                    | Cap   | Notes                                                                                                                                                                        |
+| ------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `file-content`           | 10 MB | text preview                                                                                                                                                                 |
+| `file-raw`               | —     | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses**; streamed, `Range`-aware (206 slices come from the same validated path). No app‑level cap: COD‑18 replaced the whole‑file `readFile` with `createReadStream`, which is what the cap existed to bound, and it is workspace‑scoped |
+| attachment `…/:id/raw`   | 50 MB | 413 past the cap, checked before the range. Capped because an attacker‑influenceable registry id resolves to an arbitrary host file                                          |
+| `POST /api/download`     | 50 MB | forced `attachment`; sensitive‑path blocklist                                                                                                                                |
 
 ### SVG / content‑type XSS
 
@@ -380,16 +380,16 @@ document enclave, and the one case where uploaded bytes leave the workspace.
   listed root — not live under one. The check is repeated on every upload and
   delete, so repointing the symlink afterwards fails closed.
 - **Each entry must survive validation, or it is dropped** (with a warning that
-  deliberately carries the entry's _index_, never the path, so a log does not leak
+  deliberately carries the entry's *index*, never the path, so a log does not leak
   filesystem layout). An entry must be absolute; canonical (a symlinked alias is
   refused — a trailing `/` is normalized rather than refused, COD‑295); a real
   directory; not blocked by attachment policy (§ blocklist above); and a
   **dedicated enclave**.
 - **The dedicated‑enclave rule (COD‑295).** `/`, `$HOME`, and any ancestor of
   `~/.codeman`, `~/codeman-cases` or `~/codeman-users` are refused. Uploads land
-  _in_ the root and everything under it becomes servable, so accepting a broad
+  *in* the root and everything under it becomes servable, so accepting a broad
   ancestor would quietly turn "trusted root" into "the whole filesystem" and
-  defeat the exact‑root allowlist. A directory _inside_ a managed tree
+  defeat the exact‑root allowlist. A directory *inside* a managed tree
   (`~/.codeman/shared-attachments`) is fine; the tree itself is not.
 - A bad entry is never a startup failure — it is dropped, and with no valid roots
   the symlink form is simply unavailable.
@@ -573,17 +573,17 @@ A saved dashboard URL renders as a tab, served through Codeman's own origin at `
 
 ## 11. Quick reference
 
-| Env / flag                                                                  | Effect                                                                                                                                                            |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CODEMAN_PASSWORD` (+ `CODEMAN_USERNAME`)                                   | Enable HTTP Basic auth                                                                                                                                            |
-| `--host` / `CODEMAN_HOST`                                                   | Bind host (default `127.0.0.1`)                                                                                                                                   |
-| `CODEMAN_ALLOWED_HOSTS`                                                     | Extra `Host`/`Origin` allowlist entries for reverse proxies (comma‑separated; exact host, or leading‑dot `.suffix` for subdomains) — see §3                       |
-| `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledge an unauthenticated non‑loopback bind (downgrades the warning)                                                                                         |
-| `--https`                                                                   | Enable TLS (adds HSTS)                                                                                                                                            |
-| `CODEMAN_INSTANCE`                                                          | Scope tmux socket + data dir for isolation                                                                                                                        |
-| `CODEMAN_GESTURE=1`                                                         | Make the gesture overlay available (widens CSP)                                                                                                                   |
-| `CODEMAN_DOCKER_BRIDGE_HOOKS=1`                                             | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10  |
-| `CODEMAN_DOCKER_BRIDGE_HOST`                                                | Override the bridge gateway IP the hooks listener binds (default: auto‑detect)                                                                                    |
+| Env / flag                                                                  | Effect                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODEMAN_PASSWORD` (+ `CODEMAN_USERNAME`)                                   | Enable HTTP Basic auth                                                                                                                                           |
+| `--host` / `CODEMAN_HOST`                                                   | Bind host (default `127.0.0.1`)                                                                                                                                  |
+| `CODEMAN_ALLOWED_HOSTS`                                                     | Extra `Host`/`Origin` allowlist entries for reverse proxies (comma‑separated; exact host, or leading‑dot `.suffix` for subdomains) — see §3                      |
+| `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledge an unauthenticated non‑loopback bind (downgrades the warning)                                                                                        |
+| `--https`                                                                   | Enable TLS (adds HSTS)                                                                                                                                           |
+| `CODEMAN_INSTANCE`                                                          | Scope tmux socket + data dir for isolation                                                                                                                       |
+| `CODEMAN_GESTURE=1`                                                         | Make the gesture overlay available (widens CSP)                                                                                                                  |
+| `CODEMAN_DOCKER_BRIDGE_HOOKS=1`                                             | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
+| `CODEMAN_DOCKER_BRIDGE_HOST`                                                | Override the bridge gateway IP the hooks listener binds (default: auto‑detect)                                                                                   |
 | `CODEMAN_TRUSTED_ATTACHMENT_ROOTS`                                          | Comma‑separated **exact** directories an admin may point a `.codeman-attachments` symlink at. Env‑only (never browser‑settable), read once at startup — see below |
 
 **Audit log:** session lifecycle and server start are recorded in

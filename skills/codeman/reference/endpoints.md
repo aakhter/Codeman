@@ -60,10 +60,10 @@ everything, including the user's browser through a tunnel (tunneled traffic arri
    password containing the escaped characters recovers wrong and auth fails with no
    hint that the value was mangled:
 
-   | Where                                           | install.sh escapes                                        | You must unescape                     |
-   | ----------------------------------------------- | --------------------------------------------------------- | ------------------------------------- |
-   | systemd unit `Environment="CODEMAN_PASSWORD=…"` | `sed 's/[\\"]/\\&/g'` (backslash-escapes `"` and `\`)     | `sed 's/\\\(["\\]\)/\1/g'`            |
-   | launchd plist `<string>…</string>`              | `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;` (in that order) | `&lt;`, `&gt;`, then **`&amp;` LAST** |
+   | Where | install.sh escapes | You must unescape |
+   |-------|--------------------|-------------------|
+   | systemd unit `Environment="CODEMAN_PASSWORD=…"` | `sed 's/[\\"]/\\&/g'` (backslash-escapes `"` and `\`) | `sed 's/\\\(["\\]\)/\1/g'` |
+   | launchd plist `<string>…</string>` | `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;` (in that order) | `&lt;`, `&gt;`, then **`&amp;` LAST** |
 
    The `&amp;` ordering is not cosmetic: unescaping `&amp;` first turns a stored
    `&amp;lt;` back into `<`, silently corrupting any password containing `&`.
@@ -107,20 +107,20 @@ never include it in a report.
 Every JSON response: `{"success":true,"data":…}` or
 `{"success":false,"error":"…","errorCode":"…"}`. Branch on `errorCode`:
 
-| `errorCode`                   | HTTP | Meaning                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `INVALID_INPUT`               | 400  | malformed request; the message names the bad field                                                                                                                                                                                                                                                                                                                                                         |
-| `UNAUTHORIZED`                | 401  | auth required or failed (send `-u user:password`). ⚠️ The 401 body is plain text, NOT this envelope, see [Auth and credentials](#auth-and-credentials)                                                                                                                                                                                                                                                     |
-| `FORBIDDEN`                   | 403  | authenticated but not permitted: an admin-only route in multi-user mode, a `workingDir`/case path outside your own workspace, or a shell session without the can-bypass-permissions grant. ⚠️ **Not** what an ownership miss on a session returns: a session you do not own answers 404 `NOT_FOUND`, identically to one that does not exist (deliberate, it leaks no existence)                            |
-| `NOT_FOUND`                   | 404  | no such session, or one this caller does not own. Also quick-start's answer for an unknown remote or docker host                                                                                                                                                                                                                                                                                           |
-| `SESSION_BUSY`                | 409  | on a **wait**: this session's waiter cap (16, combined signal+output) is full. On **quick-start**: a session cap is full, so clean up before starting more. Two different caps can raise it: the global 50 (`MAX_CONCURRENT_SESSIONS`), and in multi-user mode the per-user cap, which defaults to half of that, **25** (`maxSessionsPerUser()`, `config/multiuser.ts:59-63`). The message tells you which |
-| `CONFLICT` / `ALREADY_EXISTS` | 409  | conflicts with current state                                                                                                                                                                                                                                                                                                                                                                               |
-| `OPERATION_FAILED`            | 422  | well-formed but could not be completed                                                                                                                                                                                                                                                                                                                                                                     |
-| `RATE_LIMITED`                | 429  | per-owner or process-wide waiter pool is full; back off, switching sessions will not help                                                                                                                                                                                                                                                                                                                  |
-| `INTERNAL_ERROR`              | 500  | server bug                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `errorCode` | HTTP | Meaning |
+|-------------|------|---------|
+| `INVALID_INPUT` | 400 | malformed request; the message names the bad field |
+| `UNAUTHORIZED` | 401 | auth required or failed (send `-u user:password`). ⚠️ The 401 body is plain text, NOT this envelope, see [Auth and credentials](#auth-and-credentials) |
+| `FORBIDDEN` | 403 | authenticated but not permitted: an admin-only route in multi-user mode, a `workingDir`/case path outside your own workspace, or a shell session without the can-bypass-permissions grant. ⚠️ **Not** what an ownership miss on a session returns: a session you do not own answers 404 `NOT_FOUND`, identically to one that does not exist (deliberate, it leaks no existence) |
+| `NOT_FOUND` | 404 | no such session, or one this caller does not own. Also quick-start's answer for an unknown remote or docker host |
+| `SESSION_BUSY` | 409 | on a **wait**: this session's waiter cap (16, combined signal+output) is full. On **quick-start**: a session cap is full, so clean up before starting more. Two different caps can raise it: the global 50 (`MAX_CONCURRENT_SESSIONS`), and in multi-user mode the per-user cap, which defaults to half of that, **25** (`maxSessionsPerUser()`, `config/multiuser.ts:59-63`). The message tells you which |
+| `CONFLICT` / `ALREADY_EXISTS` | 409 | conflicts with current state |
+| `OPERATION_FAILED` | 422 | well-formed but could not be completed |
+| `RATE_LIMITED` | 429 | per-owner or process-wide waiter pool is full; back off, switching sessions will not help |
+| `INTERNAL_ERROR` | 500 | server bug |
 
 `SESSION_BUSY` vs `RATE_LIMITED` on the wait endpoints is deliberate: the first means
-"too many waiters on _this_ session", the second means the _pool_ is full.
+"too many waiters on *this* session", the second means the *pool* is full.
 
 ⚠️ **The guards that run before any handler answer in PLAIN TEXT, not this envelope**,
 so `jq` reports a parse error and `.errorCode` is simply absent. All of them:
@@ -234,7 +234,7 @@ minutes, never retry the credential.
 `signal:"stop"`.
 
 **It means** usually nothing is wrong. `text` is read from the transcript file, which is
-flushed slightly _after_ the `stop` hook fires, so a read taken the instant the wait
+flushed slightly *after* the `stop` hook fires, so a read taken the instant the wait
 returns is too early (verified live: empty on the first call, full prose seconds later).
 It is also `""` before the worker's first completed turn, and permanently `""` for
 `shell`, `opencode`, `gemini`, `antigravity` and `pi`, which write no Claude transcript.
@@ -269,25 +269,25 @@ than into an existing checkout.
 
 ### Sessions
 
-| Task                                                                                            | Call                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| list sessions (metadata only, ~1.5 KB each, safe to poll)                                       | `GET /api/v1/sessions`                                                                                                                                                                                                                                                                                                                    |
-| one session (has `.data.pid`, `null` until the PTY spawns)                                      | `GET /api/v1/sessions/:id`, ⚠️ **neither a liveness nor a busy check**, see below                                                                                                                                                                                                                                                         |
-| unified list incl. history                                                                      | `GET /api/v1/sessions/unified` → `.data.sessions[]` (NOT `.data[]`), and it folds in transcript history from the whole machine, never use it to verify cleanup; `GET /api/v1/sessions` is the cleanup check                                                                                                                               |
-| start case + session in one call                                                                | `POST /api/v1/quick-start`                                                                                                                                                                                                                                                                                                                |
-| create a session in an arbitrary directory (no case, **no PTY**, id at `.data.session.id`)      | `POST /api/v1/sessions`, then `POST /api/v1/sessions/:id/interactive` or `.../shell` to start it, see [Starting a worker](#starting-a-worker)                                                                                                                                                                                             |
-| send input                                                                                      | `POST /api/v1/sessions/:id/input`                                                                                                                                                                                                                                                                                                         |
-| **read a worker's answer** (claude/codex)                                                       | `GET /api/v1/sessions/:id/last-response` → `.data.{text,timestamp}`, clean transcript text, no TUI noise. ⚠️ **Poll it**, see [symptom 7](#7-last-response-returns-an-empty-string-right-after-stop)                                                                                                                                      |
-| read terminal (tail is in **BYTES**, raw ANSI)                                                  | `GET /api/v1/sessions/:id/terminal?tail=3000` → `.data.terminalBuffer`, for _diagnosis_ (unsubmitted prompt?), not for reading answers                                                                                                                                                                                                    |
-| full tmux scrollback (context bomb; post-mortems only)                                          | `GET /api/v1/sessions/:id/terminal?full=1`                                                                                                                                                                                                                                                                                                |
-| background agents, one session                                                                  | `GET /api/v1/sessions/:id/subagents`                                                                                                                                                                                                                                                                                                      |
-| background agents, global list                                                                  | `GET /api/v1/subagents` (admin-only in multi-user mode)                                                                                                                                                                                                                                                                                   |
-| the case's intent profile (Read My Mind: user goals + recent real prompts)                      | `GET /api/v1/sessions/:id/intent` → `.data.intent.{goals,recentPrompts}` (empty with `updatedAt: 0` until something is recorded)                                                                                                                                                                                                          |
-| replace the user-goals text on the case's intent profile                                        | `PUT /api/v1/sessions/:id/intent` body `{"goals":"…"}` (≤ 8192 chars, strict schema; REPLACES the text, read + merge first)                                                                                                                                                                                                               |
-| forget the case's intent profile (only when the user asks)                                      | `DELETE /api/v1/sessions/:id/intent` → `.data.deleted`                                                                                                                                                                                                                                                                                    |
+| Task | Call |
+|------|------|
+| list sessions (metadata only, ~1.5 KB each, safe to poll) | `GET /api/v1/sessions` |
+| one session (has `.data.pid`, `null` until the PTY spawns) | `GET /api/v1/sessions/:id`, ⚠️ **neither a liveness nor a busy check**, see below |
+| unified list incl. history | `GET /api/v1/sessions/unified` → `.data.sessions[]` (NOT `.data[]`), and it folds in transcript history from the whole machine, never use it to verify cleanup; `GET /api/v1/sessions` is the cleanup check |
+| start case + session in one call | `POST /api/v1/quick-start` |
+| create a session in an arbitrary directory (no case, **no PTY**, id at `.data.session.id`) | `POST /api/v1/sessions`, then `POST /api/v1/sessions/:id/interactive` or `.../shell` to start it, see [Starting a worker](#starting-a-worker) |
+| send input | `POST /api/v1/sessions/:id/input` |
+| **read a worker's answer** (claude/codex) | `GET /api/v1/sessions/:id/last-response` → `.data.{text,timestamp}`, clean transcript text, no TUI noise. ⚠️ **Poll it**, see [symptom 7](#7-last-response-returns-an-empty-string-right-after-stop) |
+| read terminal (tail is in **BYTES**, raw ANSI) | `GET /api/v1/sessions/:id/terminal?tail=3000` → `.data.terminalBuffer`, for *diagnosis* (unsubmitted prompt?), not for reading answers |
+| full tmux scrollback (context bomb; post-mortems only) | `GET /api/v1/sessions/:id/terminal?full=1` |
+| background agents, one session | `GET /api/v1/sessions/:id/subagents` |
+| background agents, global list | `GET /api/v1/subagents` (admin-only in multi-user mode) |
+| the case's intent profile (Read My Mind: user goals + durable Claude prompt history) | `GET /api/v1/sessions/:id/intent` → `.data.intent.{goals,recentPrompts}` (empty with `updatedAt: 0` until something is recorded; Codex rollout prompts are read on demand for prediction and are never persisted) |
+| replace the user-goals text on the case's intent profile | `PUT /api/v1/sessions/:id/intent` body `{"goals":"…"}` (≤ 8192 chars, strict schema; REPLACES the text, read + merge first) |
+| forget the case's intent profile (only when the user asks) | `DELETE /api/v1/sessions/:id/intent` → `.data.deleted` |
 | predict the user's next prompt (Read My Mind; Claude or local Codex, 5-90 s, costs real tokens) | `POST /api/v1/sessions/:id/readmymind` body `{}` (rethink: `{"steer":"…","rejected":["…"]}`) → `.data.suggestions[].{prompt,why,kind}`. The session fixes provider/model/environment; suggestions are PROPOSALS, never send one unless the user asked. 409 = one already running; 400 = unsupported mode (including remote/Docker Codex). |
-| server status / version                                                                         | `GET /api/v1/status` → `.data.version`                                                                                                                                                                                                                                                                                                    |
-| delete one session (yours only, via `delete_session`)                                           | `DELETE /api/v1/sessions/:id`, never call it bare; the fail-closed helper in SKILL.md is the only self-protection that exists. Answers `{"success":true,"data":{}}`: an **empty** body is the success signal, there is nothing to read back                                                                                               |
+| server status / version | `GET /api/v1/status` → `.data.version` |
+| delete one session (yours only, via `delete_session`) | `DELETE /api/v1/sessions/:id`, never call it bare; the fail-closed helper in SKILL.md is the only self-protection that exists. Answers `{"success":true,"data":{}}`: an **empty** body is the success signal, there is nothing to read back |
 
 `DELETE /api/v1/sessions/:id` takes one undocumented query parameter, `killMux`, and
 it defaults to `true` (anything other than the exact string `false` means kill). With
@@ -334,7 +334,7 @@ ESC=$(printf '\033')
 
 `POST /api/v1/quick-start` body (all optional):
 `{"caseName":"worker-1","mode":"claude","sessionName":"w9-worker","effort":"high"}`
-, `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi`; response is
+,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi`; response is
 `.data.{sessionId, caseName, casePath}`. Creates the case directory (a real directory
 on the user's disk) if missing, do not retry it in a loop, and remember the name.
 
@@ -399,7 +399,7 @@ callers send no body at all.
   a dialog), send `{"input":"\r"}`.
 - `input` is capped at **65536** characters. ⚠️ **Two caps disagree and the smaller one
   is the real one**: the Zod schema allows 100000 (`schemas.ts:1035`), so a 65537-to-100000
-  character body passes validation and _then_ 400s at the route against
+  character body passes validation and *then* 400s at the route against
   `MAX_INPUT_LENGTH` = `64 * 1024` (`session-routes.ts:1158`, `config/terminal-limits.ts:12`).
   The error message says "bytes" but the check counts JS string length, so it is really
   characters. Either way **nothing is typed** on rejection; it is not a truncation.
@@ -414,8 +414,8 @@ callers send no body at all.
 You do not have to delete a worker that is off in the weeds. Esc interrupts the current
 turn and leaves the conversation intact.
 
-| Task                                | Call                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Task | Call |
+|------|------|
 | interrupt the current turn (claude) | `POST /api/v1/sessions/:id/input` with `{"input":"\u001b","useMux":true,"clientId":"…","seq":N}` |
 
 `\u001b` is the JSON escape for the ESC byte (`\x1b` is **not** valid JSON and the body
@@ -429,7 +429,7 @@ this way (`approval-routes.ts:43`).
 - ⚠️ **`POST /api/sessions/:id/send-key` is NOT this endpoint.** Its allowlist is
   exactly `S-Enter` and `C-Enter`, both mapping to hex `0a`
   (`session-routes.ts:1490-1499`); anything else is a 400 `INVALID_INPUT: Key not
-allowed`. There is no named `Escape` key.
+  allowed`. There is no named `Escape` key.
 - ⚠️ **One Esc does not always land** (observed, not guaranteed by this API: what Esc
   does after it reaches the pane is claude's own behavior, not Codeman's). An
   interrupted claude may need a second one, so
@@ -443,10 +443,10 @@ allowed`. There is no named `Escape` key.
 Two reads that answer "is this worker actually doing something" without parsing a
 screen.
 
-| Task                                               | Call                                                                                                                                                                                                                     |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Task | Call |
+|------|------|
 | what bash commands the worker is running right now | `GET /api/v1/sessions/:id/active-tools` → `.data.tools[]`, each `{id, command, filePaths, timeout?, startedAt, status, sessionId}` (`types/tools.ts:30-45`); `timeout` is optional, present only when claude printed one |
-| a timeline of what has happened in this session    | `GET /api/v1/sessions/:id/run-summary` → **`.summary`**                                                                                                                                                                  |
+| a timeline of what has happened in this session | `GET /api/v1/sessions/:id/run-summary` → **`.summary`** |
 
 Quirks that will bite you:
 
@@ -480,7 +480,7 @@ Quirks that will bite you:
   `details:"In state for N+ minutes"` (`run-summary.ts:37`, `:394-405`). ⚠️ Two limits:
   it is latched **per state**, not per session (`stateStuckWarned` is reset to `false` on
   every state change, `run-summary.ts:152`), so it fires at most once per state but can
-  fire repeatedly across a session, and its presence is not proof of a _current_ stall;
+  fire repeatedly across a session, and its presence is not proof of a *current* stall;
   and the "state" it watches is the
   **respawn state machine's**, fed only by `RespawnController` transitions
   (`respawn-event-wiring.ts:58`), so a plain worker with no respawn attached records no
@@ -488,13 +488,13 @@ Quirks that will bite you:
 
 ### Usage limits
 
-| Task                                   | Call                                                                                                    |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Task | Call |
+|------|------|
 | arm auto-resume on a usage-limit pause | `POST /api/v1/sessions/:id/auto-resume` body `{"enabled":true}` → `.data.autoResume.{enabled,resumeAt}` |
 
 When a claude worker hits a subscription usage limit it stops mid-run and every wait on
 it times out. The tell is `.data.limitPaused:true`, which rides along on every wait
-result: a timeout is then _expected_, so do not retry hard and do not kill the worker.
+result: a timeout is then *expected*, so do not retry hard and do not kill the worker.
 Arming auto-resume makes Codeman parse the reset time out of the worker's own message
 and send Esc + `continue` about two minutes after reset, keeping the conversation.
 
@@ -513,9 +513,9 @@ and send Esc + `continue` about two minutes after reset, keeping the conversatio
 One SSE stream carries every session's lifecycle and hook events, so you can watch a
 whole fleet on one connection instead of polling each worker.
 
-| Param      | Notes                                                                                                                                                                                     |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sessions` | comma list of ids. Filters **only** `session:terminal` batches                                                                                                                            |
+| Param | Notes |
+|-------|-------|
+| `sessions` | comma list of ids. Filters **only** `session:terminal` batches |
 | `clientId` | any 8-64 char token matching `/^[A-Za-z0-9_-]{8,64}$/` (`server.ts:180`), a uuid being merely one; lets you change the filter later via `POST /api/events/subscribe` without reconnecting |
 
 **The trick: `?sessions=<bogus>` gives you a quiet stream.** The filter is applied in
@@ -542,7 +542,7 @@ timeout 120 "${CURL[@]}" -N "$API/api/events?sessions=none" \
 - ⚠️ **It is edge-triggered between calls.** Anything that fires while you are not
   connected is gone; there is no replay and no cursor. So the stream is **the watcher**
   and latched `wait-output` markers are **the ledger**: use the stream to notice
-  something happening across many sessions, and a marker (or send-and-wait) to _prove_
+  something happening across many sessions, and a marker (or send-and-wait) to *prove*
   a specific turn finished. Never let a fleet's correctness depend on having been
   connected at the right moment.
 
@@ -552,11 +552,11 @@ When a claude worker stops on a permission prompt or a question, the Approvals I
 holds it as a structured item. Reading that is strictly better than ANSI-stripping the
 dialog off `terminal?tail=` and guessing which digit to type.
 
-| Task                            | Call                                                                                                              |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| list prompts waiting on a human | `GET /api/v1/approvals` → `.data.approvals[]`                                                                     |
-| answer one                      | `POST /api/v1/approvals/:id/answer` body `{"action":"approve"\|"deny"\|"option"\|"text", "option":N, "text":"…"}` |
-| drop one without keystrokes     | `POST /api/v1/approvals/:id/dismiss`                                                                              |
+| Task | Call |
+|------|------|
+| list prompts waiting on a human | `GET /api/v1/approvals` → `.data.approvals[]` |
+| answer one | `POST /api/v1/approvals/:id/answer` body `{"action":"approve"\|"deny"\|"option"\|"text", "option":N, "text":"…"}` |
+| drop one without keystrokes | `POST /api/v1/approvals/:id/dismiss` |
 
 An item is `{id, sessionId, sessionName, kind, createdAt, toolName?, toolSummary?,
 message?, cwd?, context?, options?}`. `kind` is `permission` | `question` | `idle`;
@@ -600,30 +600,30 @@ Three bounded long-polls. Shared semantics:
 - All three nest the result under `.data.wait`, same shape, so one helper parses all.
 - `.data.status` (post-wait `SessionStatus`) and `.data.limitPaused` ride along.
   `limitPaused:true` means the session is paused on a usage limit and will emit
-  nothing until reset, a timeout is then _expected_; do not retry hard, and do not
+  nothing until reset, a timeout is then *expected*; do not retry hard, and do not
   kill the worker. The remedy is [auto-resume](#usage-limits).
 
 #### Signals by mode
 
-| Signal    | Meaning                                                                     | Available for |
-| --------- | --------------------------------------------------------------------------- | ------------- |
-| `idle`    | output stabilized + prompt detected, heuristic, can flap mid-turn           | every mode    |
-| `working` | session started producing output                                            | every mode    |
-| `stop`    | Claude Code `stop` hook, the definitive end-of-turn                         | `claude` only |
+| Signal | Meaning | Available for |
+|--------|---------|---------------|
+| `idle` | output stabilized + prompt detected, heuristic, can flap mid-turn | every mode |
+| `working` | session started producing output | every mode |
+| `stop` | Claude Code `stop` hook, the definitive end-of-turn | `claude` only |
 | `blocked` | `permission_prompt` / `elicitation_dialog` hook, the worker needs an answer | `claude` only |
-| `exit`    | PTY exited or session deleted                                               | every mode    |
+| `exit` | PTY exited or session deleted | every mode |
 
 ⚠️ **`claude` mode is necessary for `stop`/`blocked`, not sufficient. The real
 precondition is that the session's working directory has a Codeman hooks block**, and
 whether it does depends on who created the directory:
 
-| The worker's directory                                                                                 | Hooks             | `stop` / `blocked` | Synchronize with           |
-| ------------------------------------------------------------------------------------------------------ | ----------------- | ------------------ | -------------------------- |
-| Codeman created it (`quick-start` with a NEW `caseName`, `POST /api/cases`, clone, docker quickcreate) | written at create | fire               | send-and-wait on `stop`    |
-| Codeman never created it (a linked case pointing at your own checkout, a raw `workingDir`)             | none written      | never fire         | `wait-output` markers only |
+| The worker's directory | Hooks | `stop` / `blocked` | Synchronize with |
+|------------------------|-------|--------------------|------------------|
+| Codeman created it (`quick-start` with a NEW `caseName`, `POST /api/cases`, clone, docker quickcreate) | written at create | fire | send-and-wait on `stop` |
+| Codeman never created it (a linked case pointing at your own checkout, a raw `workingDir`) | none written | never fire | `wait-output` markers only |
 
 ⚠️ **Docker cases are the one exception.** For a docker case, quick-start writes hooks
-whenever `.claude/settings.local.json` is _missing_ (`session-routes.ts:2836-2845`:
+whenever `.claude/settings.local.json` is *missing* (`session-routes.ts:2836-2845`:
 absent means write, present means refresh), regardless of who created that host
 directory. There the discriminator really is "does the settings file exist". No
 downstream advice changes, since docker quickcreate is already on the create side.
@@ -641,14 +641,14 @@ grep for `/api/hook-event` in `<casePath>/.claude/settings.local.json`.
 directory that already exists takes the else-if branch and calls
 `refreshStaleCodemanHooks()`, which returns immediately when there is no
 `settings.local.json` and again when the hooks it finds are not ours
-(`hooks-config.ts:706-731`); it never _adds_ a hooks block. `POST /api/cases/link` is
+(`hooks-config.ts:706-731`); it never *adds* a hooks block. `POST /api/cases/link` is
 not on that list at all: it only records a name-to-path entry. See
 [symptom 8](#8-send-and-wait-resolves-instantly-with-signalidle-and-the-answer-is-last-turns).
 
 Default `until` set: `stop,idle,exit`. On non-claude modes the server silently drops
-`stop`/`blocked` from the _default_ set (echoed back as `wait.until`, e.g.
-`["idle","exit"]` on shell); requesting them _explicitly_ there is a 400 naming the
-mode. ⚠️ That 400 is about **mode**, so a hooks-less _claude_ session accepts
+`stop`/`blocked` from the *default* set (echoed back as `wait.until`, e.g.
+`["idle","exit"]` on shell); requesting them *explicitly* there is a 400 naming the
+mode. ⚠️ That 400 is about **mode**, so a hooks-less *claude* session accepts
 `until=stop` happily and then never resolves it. ⚠️ On hook-less modes the lifecycle
 signals are also **coarse in practice**: a
 short shell command produced **no** `idle` transition within 60 s (verified live), so
@@ -670,11 +670,11 @@ worker that finishes before its gather is unobservable (see recipes.md Flow 4).
 
 #### `GET /api/v1/sessions/:id/wait`
 
-| Param     | Default          | Notes                                                                                                      |
-| --------- | ---------------- | ---------------------------------------------------------------------------------------------------------- |
-| `until`   | `stop,idle,exit` | comma list; unknown token → 400 naming it                                                                  |
-| `timeout` | 60000            | ms, positive integer only (0/negative/fractional = 400); clamped, applied value echoed as `wait.timeoutMs` |
-| `fresh`   | `0`              | `1` requires an actual _transition_, ignoring the state at call time                                       |
+| Param | Default | Notes |
+|-------|---------|-------|
+| `until` | `stop,idle,exit` | comma list; unknown token → 400 naming it |
+| `timeout` | 60000 | ms, positive integer only (0/negative/fractional = 400); clamped, applied value echoed as `wait.timeoutMs` |
+| `fresh` | `0` | `1` requires an actual *transition*, ignoring the state at call time |
 
 ⚠️ A session whose PTY has not spawned (`pid:null`) or has exited counts as `exit`
 **right now**: with the default set the call answers immediately
@@ -684,12 +684,12 @@ SKILL.md, not this endpoint.
 
 #### `GET /api/v1/sessions/:id/wait-output`
 
-| Param     | Default  | Notes                                                                                                                  |
-| --------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `match`   | required | literal substring, 1–200 chars, ANSI-stripped; chunk-straddling matches found; **no regex**, a `regex=` param is a 400 |
-| `nocase`  | `0`      | case-insensitive compare; snippet keeps original casing                                                                |
-| `from`    | `now`    | `buffer` scans the tail (~256 KB) of existing output first                                                             |
-| `timeout` | 60000    | same clamp, same positive-integer rule                                                                                 |
+| Param | Default | Notes |
+|-------|---------|-------|
+| `match` | required | literal substring, 1–200 chars, ANSI-stripped; chunk-straddling matches found; **no regex**, a `regex=` param is a 400 |
+| `nocase` | `0` | case-insensitive compare; snippet keeps original casing |
+| `from` | `now` | `buffer` scans the tail (~256 KB) of existing output first |
+| `timeout` | 60000 | same clamp, same positive-integer rule |
 
 Four traps, all observed live:
 
@@ -701,7 +701,7 @@ Four traps, all observed live:
    before the request registered timed out at full length. After sending a command,
    always wait with `from=buffer`.
 3. **`from=now` can also match too much**: tmux repaints old screen content as
-   ordinary output on attach/resize/redraw, so a _generic_ marker (`BUILD OK`)
+   ordinary output on attach/resize/redraw, so a *generic* marker (`BUILD OK`)
    matches stale text. Unique-per-call markers (`DONE_$RANDOM`) make both `from`
    modes safe.
 4. **TUI output can be space-less in the stream.** Full-screen TUIs (claude, codex,
@@ -720,10 +720,10 @@ blank runs collapsed, the snippet is often all you need to read).
 
 #### `POST /api/v1/sessions/:id/input` with `wait`
 
-| Field         | Notes                                                                                                 |
-| ------------- | ----------------------------------------------------------------------------------------------------- |
-| `wait`        | `true` (default signal set) or the same comma grammar as `until`; absent = historical fire-and-forget |
-| `waitTimeout` | ms, same clamp; a JSON number, positive integer (`"60000"` is a 400)                                  |
+| Field | Notes |
+|-------|-------|
+| `wait` | `true` (default signal set) or the same comma grammar as `until`; absent = historical fire-and-forget |
+| `waitTimeout` | ms, same clamp; a JSON number, positive integer (`"60000"` is a 400) |
 
 Registers the waiter **before** typing, which closes the race where send-then-wait
 sees the previous turn's idle state and returns instantly. Response adds `delivered`
@@ -731,7 +731,7 @@ and `duplicate` beside the standard `wait` object; both are absent on the
 fire-and-forget path ([symptom 2](#2-datadelivered-is-null)).
 
 A **tagged duplicate** (same `clientId`+`seq` already applied) does not retype but
-still honors `wait`, answering from the session's _current_ state instead of
+still honors `wait`, answering from the session's *current* state instead of
 requiring a new transition (`delivered:false, duplicate:true`, verified: ~20 ms,
 command ran exactly once). That is what makes the resend-identical-request loop in
 SKILL.md correct: iteration 1 delivers and needs a transition; later iterations
@@ -764,22 +764,22 @@ Every number the server will enforce on an orchestrating agent. All are
 env-overridable by the operator, so treat them as defaults and read back what the
 response echoes.
 
-| Cap                              | Default                                       | Where it bites                                                                                                                   |
-| -------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `input` length                   | **65536** characters                          | 400 `INVALID_INPUT` at the route; the Zod schema's 100000 is the wrong number to plan against, and nothing is typed on rejection |
-| `clientId` length                | 128 characters                                | same 400                                                                                                                         |
-| concurrent waiters, one session  | 16 (signal + output combined)                 | 409 `SESSION_BUSY` on a wait. Reuse one wait per worker                                                                          |
-| concurrent waiters, one owner    | 48 (multi-user only; no owner = no cap)       | 429 `RATE_LIMITED`                                                                                                               |
-| concurrent waiters, process-wide | 128                                           | 429 `RATE_LIMITED`; switching sessions does not help, back off                                                                   |
-| wait timeout                     | clamped to `[1000, 600000]` ms, default 60000 | positive integers only; anything else is a 400, not a clamp                                                                      |
-| `match` string                   | 1–200 characters, literal only                | 400; `regex=` is rejected outright                                                                                               |
-| `from=buffer` scan window        | 256 KB tail of the terminal buffer            | a marker older than that tail is invisible even with `from=buffer`                                                               |
-| wait-output snippet context      | 80 characters either side                     | `wait.snippet` is bounded, not the whole line                                                                                    |
-| sessions, process-wide           | 50 (`MAX_CONCURRENT_SESSIONS`)                | 409 `SESSION_BUSY` on quick-start                                                                                                |
-| sessions, per user               | 25 in multi-user mode (half the global cap)   | the same 409, with a different message                                                                                           |
-| SSE clients, process-wide        | 100 (`MAX_SSE_CLIENTS`)                       | plain-text `503 Too many SSE connections`; shared with every browser tab                                                         |
-| active bash tools tracked        | 20 per session                                | oldest entries drop off `active-tools`                                                                                           |
-| auth failures per IP             | 10, decaying over 15 min                      | plain-text 429 with `Retry-After`; locks out the login path, so never loop a bad credential                                      |
+| Cap | Default | Where it bites |
+|-----|---------|----------------|
+| `input` length | **65536** characters | 400 `INVALID_INPUT` at the route; the Zod schema's 100000 is the wrong number to plan against, and nothing is typed on rejection |
+| `clientId` length | 128 characters | same 400 |
+| concurrent waiters, one session | 16 (signal + output combined) | 409 `SESSION_BUSY` on a wait. Reuse one wait per worker |
+| concurrent waiters, one owner | 48 (multi-user only; no owner = no cap) | 429 `RATE_LIMITED` |
+| concurrent waiters, process-wide | 128 | 429 `RATE_LIMITED`; switching sessions does not help, back off |
+| wait timeout | clamped to `[1000, 600000]` ms, default 60000 | positive integers only; anything else is a 400, not a clamp |
+| `match` string | 1–200 characters, literal only | 400; `regex=` is rejected outright |
+| `from=buffer` scan window | 256 KB tail of the terminal buffer | a marker older than that tail is invisible even with `from=buffer` |
+| wait-output snippet context | 80 characters either side | `wait.snippet` is bounded, not the whole line |
+| sessions, process-wide | 50 (`MAX_CONCURRENT_SESSIONS`) | 409 `SESSION_BUSY` on quick-start |
+| sessions, per user | 25 in multi-user mode (half the global cap) | the same 409, with a different message |
+| SSE clients, process-wide | 100 (`MAX_SSE_CLIENTS`) | plain-text `503 Too many SSE connections`; shared with every browser tab |
+| active bash tools tracked | 20 per session | oldest entries drop off `active-tools` |
+| auth failures per IP | 10, decaying over 15 min | plain-text 429 with `Retry-After`; locks out the login path, so never loop a bad credential |
 
 Case creation is **uncapped**, which is the one place restraint has to come from you:
 every `quick-start` with a new `caseName` creates a real directory on the user's disk.
@@ -789,20 +789,20 @@ every `quick-start` with a new `caseName` creates a real directory on the user's
 Response-shape surprises are in the [symptom gallery](#symptom-gallery). This table is
 for environment and setup problems.
 
-| Symptom                                                               | Cause / fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| every curl fails with a certificate error                             | you dropped `-k`; `CODEMAN_API_URL` is HTTPS with a self-signed cert                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `GET .../sessions/$CODEMAN_SESSION_ID` 404s                           | Docker case: the env id is truncated to 8 chars; find yourself with `startswith($SELF)`, and always self-compare by prefix, in both directions                                                                                                                                                                                                                                                                                                                                                                                               |
-| `CODEMAN_MUX` unset but you seem to be in a session                   | remote-SSH case: the env vars are not exported there. Fail closed, refuse to act                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| connection refused from inside a container                            | a loopback-bound server is unreachable from a container, and `CODEMAN_DOCKER_BRIDGE_HOOKS=1` does **not** fix that: it opens a hooks-only listener, so hook events start flowing but `/api/v1/*` stays refused. Driving the API from inside a Docker case needs a reachable bind (an operator decision); report it, don't retry                                                                                                                                                                                                              |
-| wait routes 404 on a valid session id                                 | read the `.error` text: a `Route ...` prefix means the server predates the wait endpoints (< 1.13.0; a dev build can serve them while reporting an older version, so probe, never version-compare), poll `terminal?tail=` and say so. `Session ... not found` means your id is wrong, not the server                                                                                                                                                                                                                                         |
-| wait on `stop` never resolves                                         | non-claude mode, or hooks not reaching the server (Docker/remote), or a case created by Codeman < 1.13.0 against an `--https` install (its hook curls lacked `-k` and TLS-failed silently; a 1.13.0+ server rewrites them the next time a session starts in that case). Use markers or `idle,exit`                                                                                                                                                                                                                                           |
-| new claude worker ignores its first prompt                            | it was showing the first-run trust dialog and Codeman's auto-accept did not fire (it is bounded by a 90 s window and an attempt cap); use the readiness recipe in SKILL.md, wait for `shift+tab` first, accept the dialog only as the bounded fallback                                                                                                                                                                                                                                                                                       |
+| Symptom | Cause / fix |
+|---------|-------------|
+| every curl fails with a certificate error | you dropped `-k`; `CODEMAN_API_URL` is HTTPS with a self-signed cert |
+| `GET .../sessions/$CODEMAN_SESSION_ID` 404s | Docker case: the env id is truncated to 8 chars; find yourself with `startswith($SELF)`, and always self-compare by prefix, in both directions |
+| `CODEMAN_MUX` unset but you seem to be in a session | remote-SSH case: the env vars are not exported there. Fail closed, refuse to act |
+| connection refused from inside a container | a loopback-bound server is unreachable from a container, and `CODEMAN_DOCKER_BRIDGE_HOOKS=1` does **not** fix that: it opens a hooks-only listener, so hook events start flowing but `/api/v1/*` stays refused. Driving the API from inside a Docker case needs a reachable bind (an operator decision); report it, don't retry |
+| wait routes 404 on a valid session id | read the `.error` text: a `Route ...` prefix means the server predates the wait endpoints (< 1.13.0; a dev build can serve them while reporting an older version, so probe, never version-compare), poll `terminal?tail=` and say so. `Session ... not found` means your id is wrong, not the server |
+| wait on `stop` never resolves | non-claude mode, or hooks not reaching the server (Docker/remote), or a case created by Codeman < 1.13.0 against an `--https` install (its hook curls lacked `-k` and TLS-failed silently; a 1.13.0+ server rewrites them the next time a session starts in that case). Use markers or `idle,exit` |
+| new claude worker ignores its first prompt | it was showing the first-run trust dialog and Codeman's auto-accept did not fire (it is bounded by a 90 s window and an attempt cap); use the readiness recipe in SKILL.md, wait for `shift+tab` first, accept the dialog only as the bounded fallback |
 | readiness burns its whole budget, then the worker answers fine anyway | you matched `bypass`, which is the statusline of ONE permission mode. Codeman spawns `--dangerously-skip-permissions` by default, but the server's `claudeMode` setting also has `auto` (`auto mode on`), `allowedTools` and `normal` (both `don't ask on`), and the effective per-session value is not exposed on `GET /api/v1/sessions/:id`. Match **`shift+tab`** instead: every mode's status bar ends `(shift+tab to cycle)` (measured per mode against claude-cli 2.1.226). Expect `blocked` signals mid-turn on the non-default modes |
-| ANSI escapes survive the strip pipeline                               | `sed -e 's/\x1b…'` on macOS: `\x1b` is GNU-only, BSD sed matches nothing and strips nothing. Use the `ESC=$(printf '\033')` form above                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `wait-output` times out although the pane shows the text              | multi-word match against a TUI screen; the stream has no spaces there, match one token                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| 409 `SESSION_BUSY` on a wait                                          | too many concurrent waiters on that session (cap 16 combined); reuse one wait per worker                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| 429 `RATE_LIMITED` on a wait                                          | global/owner waiter pool full; back off, do not switch sessions                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ready claude worker missing from `ListAgents`                         | cross-session messaging is off for that end: CLI < 2.1.224, the feature flag not (yet) on (observed: two 2.1.226 sessions on one box, only one with an inbox socket), a telemetry-disabling env var, a Docker/remote case, or a non-claude mode. Not an error: drive it over the HTTP recipes. See `reference/messaging.md`                                                                                                                                                                                                                  |
-| `SendMessage` says "not an agent in this conversation"                | first contact with a peer needs the ref: re-send with the exact `name [ref]` string from the `ListAgents` row, or from that error's own suggestion                                                                                                                                                                                                                                                                                                                                                                                           |
-| message sent, worker never acts, no reply, no `stop`                  | the message was held (permission-class mismatch: a non-default `claudeMode` spawns prompting-class workers, and the approval dialog expires unattended after ~5 min) or refused (`crossSessionInbound`). Run the bounded backstop, then deliver once over HTTP input. See `reference/messaging.md`                                                                                                                                                                                                                                           |
+| ANSI escapes survive the strip pipeline | `sed -e 's/\x1b…'` on macOS: `\x1b` is GNU-only, BSD sed matches nothing and strips nothing. Use the `ESC=$(printf '\033')` form above |
+| `wait-output` times out although the pane shows the text | multi-word match against a TUI screen; the stream has no spaces there, match one token |
+| 409 `SESSION_BUSY` on a wait | too many concurrent waiters on that session (cap 16 combined); reuse one wait per worker |
+| 429 `RATE_LIMITED` on a wait | global/owner waiter pool full; back off, do not switch sessions |
+| ready claude worker missing from `ListAgents` | cross-session messaging is off for that end: CLI < 2.1.224, the feature flag not (yet) on (observed: two 2.1.226 sessions on one box, only one with an inbox socket), a telemetry-disabling env var, a Docker/remote case, or a non-claude mode. Not an error: drive it over the HTTP recipes. See `reference/messaging.md` |
+| `SendMessage` says "not an agent in this conversation" | first contact with a peer needs the ref: re-send with the exact `name [ref]` string from the `ListAgents` row, or from that error's own suggestion |
+| message sent, worker never acts, no reply, no `stop` | the message was held (permission-class mismatch: a non-default `claudeMode` spawns prompting-class workers, and the approval dialog expires unattended after ~5 min) or refused (`crossSessionInbound`). Run the bounded backstop, then deliver once over HTTP input. See `reference/messaging.md` |

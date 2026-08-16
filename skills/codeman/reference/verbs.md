@@ -19,6 +19,7 @@ All of these assume the §0 preamble has been sourced in the same Bash call. Cla
 tagged "verified live" were measured against a running server; the rest are read from
 source and say so. Where a claim is neither, it is not made.
 
+
 ### 5.1 Where to spawn
 
 **This is the decision that most often produces careful, correct-looking work in the
@@ -26,11 +27,11 @@ wrong directory.** `quick-start` with a new `caseName` does not find your repo: 
 **creates** `~/codeman-cases/<caseName>`, an empty scratch directory with a generated
 `CLAUDE.md`, and puts the worker there.
 
-| Where the work is                                        | Call                                                                                                            | Hooks, and therefore signals                                                                                                |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| a fresh scratch dir (throwaway experiments)              | `POST /api/v1/quick-start {"caseName":"scratch-1","mode":"claude"}` with a **new** case name                    | Codeman creates the directory and **writes hooks**: `stop` and `blocked` fire, send-and-wait is trustworthy                 |
-| a linked case (a real repo in the linked-cases registry) | same call with the linked name                                                                                  | **no hooks**, unless that repo already carries a Codeman hooks block from some earlier path. Check before relying on `stop` |
-| any other absolute path, e.g. a git worktree you made    | `POST /api/v1/sessions {"workingDir":"/abs/path","mode":"claude"}` then `POST /api/v1/sessions/:id/interactive` | **no hooks**: no `stop`, no `blocked`, synchronize with markers ([§5.5](#55-markers-for-hook-less-workers))                 |
+| Where the work is | Call | Hooks, and therefore signals |
+|-------------------|------|------------------------------|
+| a fresh scratch dir (throwaway experiments) | `POST /api/v1/quick-start {"caseName":"scratch-1","mode":"claude"}` with a **new** case name | Codeman creates the directory and **writes hooks**: `stop` and `blocked` fire, send-and-wait is trustworthy |
+| a linked case (a real repo in the linked-cases registry) | same call with the linked name | **no hooks**, unless that repo already carries a Codeman hooks block from some earlier path. Check before relying on `stop` |
+| any other absolute path, e.g. a git worktree you made | `POST /api/v1/sessions {"workingDir":"/abs/path","mode":"claude"}` then `POST /api/v1/sessions/:id/interactive` | **no hooks**: no `stop`, no `blocked`, synchronize with markers ([§5.5](#55-markers-for-hook-less-workers)) |
 
 Read `.data.casePath` back from the `quick-start` response and check it is where you
 meant. `caseName` accepts letters, digits, `-` and `_` only, and it resolves through
@@ -54,7 +55,7 @@ absent means they never will.
 
 ⚠️ **The hook-less failure is silent, and it is the worst one in this skill.**
 `"wait":true` is still **accepted** on a hook-less claude session: the 400 you may be
-expecting is about session _mode_, not about hooks. With no `stop` to resolve on, the
+expecting is about session *mode*, not about hooks. With no `stop` to resolve on, the
 default signal set falls back to the heuristic `idle`, which flaps mid-turn, so
 send-and-wait returns "finished" while the worker is still working, and the
 `last-response` you read next hands you the **previous** turn's text. No error is
@@ -158,12 +159,12 @@ the dialog is answered.
 ⚠️ **Match `shift+tab`, never `bypass`.** `bypass permissions on` is only the DEFAULT
 permission mode's statusline. Measured against claude-cli 2.1.226, one pane per mode:
 
-| how Codeman spawned it                     | statusline reads        | `shift+tab` | `bypass` |
-| ------------------------------------------ | ----------------------- | ----------- | -------- |
-| `--dangerously-skip-permissions` (default) | `bypass permissions on` | yes         | yes      |
-| `--permission-mode auto`                   | `auto mode on`          | yes         | no       |
-| `--allowedTools …`                         | `don't ask on`          | yes         | no       |
-| neither (`normal`)                         | `don't ask on`          | yes         | no       |
+| how Codeman spawned it | statusline reads | `shift+tab` | `bypass` |
+|------------------------|------------------|-------------|----------|
+| `--dangerously-skip-permissions` (default) | `bypass permissions on` | yes | yes |
+| `--permission-mode auto` | `auto mode on` | yes | no |
+| `--allowedTools …` | `don't ask on` | yes | no |
+| neither (`normal`) | `don't ask on` | yes | no |
 
 Every mode ends its status bar with `(shift+tab to cycle)`, so `shift+tab` is the one
 token that means "the composer is up" regardless of mode, and it is space-free, which
@@ -244,7 +245,7 @@ turn as finished while it is still running, with no error anywhere. Check hooks 
 ([§5.1](#51-where-to-spawn)); where they are absent, use markers
 ([§5.5](#55-markers-for-hook-less-workers)).
 
-It registers the waiter _before_ typing,
+It registers the waiter *before* typing,
 closing the race where a separate wait sees the previous turn's idle state. Loop by
 resending the **identical** request: the repeat is a tagged duplicate (same
 `clientId`+`seq`) that does not retype but answers from the session's current state.
@@ -308,7 +309,7 @@ SEQ=$((SEQ+1)); jq '.data.wait.signal, .data.status' <<<"$R"
 
 1. `wait.signal != null` means done. `stop` is definitive; `idle` is heuristic.
    **Unless** it arrived as `duplicate:true` + `immediate:true`, which only says the
-   session is idle _now_ and must be confirmed from the terminal (above).
+   session is idle *now* and must be confirmed from the terminal (above).
 2. `wait.timedOut` means loop again (bounded).
 3. `wait.ended` requires reading `delivered` before you conclude anything. ⚠️ **A live
    session returns `ended:true` too.** When the write did not land, the server rewrites
@@ -349,7 +350,7 @@ printf '%s\n' "$TXT"
 turn.** `last-response` returns whatever the transcript last flushed, so it is only as
 correct as your end-of-turn signal: pair it with a `stop` signal or a marker, never
 with a bare `idle` ([§5.1](#51-where-to-spawn)). ⚠️ **Poll it, do not read it once.** `text` is written
-from the transcript file, which is flushed slightly _after_ the `stop` hook fires, so a
+from the transcript file, which is flushed slightly *after* the `stop` hook fires, so a
 single read taken the instant send-and-wait returns comes back `""` even though the
 turn finished (verified live: empty on the first call, full text seconds later). `text`
 is also `""` before the worker's first completed turn, and always `""` for modes with
@@ -371,7 +372,7 @@ ESC=$(printf '\033')
 with cursor moves, so the stripped buffer is largely one long line: `tail -30` has
 almost nothing to split on and you get a wall of repaint noise with the answer buried
 in it (verified live, side by side with `last-response` returning the exact prose).
-The terminal buffer is for _diagnosis_ (is my prompt sitting unsubmitted?), not for
+The terminal buffer is for *diagnosis* (is my prompt sitting unsubmitted?), not for
 reading answers. Avoid `?full=1` (entire tmux scrollback, a context bomb) unless doing
 a post-mortem.
 
@@ -409,7 +410,7 @@ never fire). Plain command output keeps real spaces.
 
 **Alive.** `GET .../wait?until=exit&timeout=1000` answers immediately
 (`signal:"exit"`, `immediate:true`) if the PTY is gone, including a worker that exited
-_inside_ its pane, which `GET .../sessions/:id` keeps reporting as `status:"idle"`
+*inside* its pane, which `GET .../sessions/:id` keeps reporting as `status:"idle"`
 with a pid (that pid is the local tmux attach client, not the worker). The wait routes
 are the only liveness check. A worker dying while a wait is parked resolves it within
 ~3 s; a session deleted mid-wait resolves in ~1 s.
@@ -474,7 +475,7 @@ that half is the CLI's behavior, not something this API guarantees.
 ### 5.8 Usage limits
 
 When a subscription limit halts a worker, the wait endpoints ride along with
-`limitPaused:true`. A timeout is then _expected_: the worker will emit nothing until
+`limitPaused:true`. A timeout is then *expected*: the worker will emit nothing until
 reset. Do not retry hard, and do not kill it.
 
 ```bash
@@ -546,7 +547,7 @@ send-and-wait (which registers before typing) or with `wait-output` markers, whi
 
 The worked shapes are in [recipes.md](recipes.md): Flow 3 (fan out N shell
 workers and gather as each finishes), Flow 4 (the same for claude workers, where the
-send _is_ the wait), and Flow 5 (a worker that blocks on a permission prompt).
+send *is* the wait), and Flow 5 (a worker that blocks on a permission prompt).
 
 ### 5.11 List and find yourself
 
@@ -563,10 +564,12 @@ characters, so an exact compare finds nothing and
 
 ### 5.12 Read My Mind
 
-Each case has an intent profile: user-stated goals plus the user's recent real prompts
-(captured server-side while the opt-in `readMyMindEnabled` setting is on). Read it to
-ground your work in what the user actually wants; write it when the user states an
-intention worth remembering ("the goal is shipping 1.17"):
+Each case has an intent profile: user-stated goals plus durable Claude prompt history
+(captured server-side while the opt-in `readMyMindEnabled` setting is on). Codex recent
+prompts are read only from the strictly owned active rollout on demand for prediction;
+they are never persisted to `intents.json`. Read the profile to ground your work in
+what the user actually wants; write it when the user states an intention worth
+remembering ("the goal is shipping 1.17"):
 
 ```bash
 "${CURL[@]}" "$API/api/v1/sessions/$SELF/intent" | jq '.data.intent'
@@ -579,10 +582,10 @@ Never write goals the user did not state, and never delete the profile
 (`DELETE .../intent`) unless the user asks: it is their memory, not yours. Older
 servers 404 these routes; treat that as "feature absent", not an error.
 
-The same profile feeds a one-shot predictor for Claude and local Codex sessions (5-90 s
-and real tokens, so call it only when asked or when genuinely deciding what the user
-wants next). The session fixes the provider lane: Codex is a separate ephemeral
-predictor and never falls back to Claude:
+The profile, and for Codex its on-demand strictly owned rollout signals, feed a one-shot
+predictor for Claude and local Codex sessions (5-90 s and real tokens, so call it only
+when asked or when genuinely deciding what the user wants next). The session fixes the
+provider lane: Codex is a separate ephemeral predictor and never falls back to Claude:
 
 ```bash
 "${CURL[@]}" -X POST -H 'Content-Type: application/json' -d '{}' \
@@ -628,7 +631,7 @@ The shape, each step verified live (probes, failure modes and safety detail in
 3. `SendMessage` the task; first contact must use the `name [ref]` form copied from
    the listing (a bare name errors asking for the ref). End the task with a reply
    instruction: "when done, reply to the sender of this message with one line:
-   RESULT\_<token>: <summary>".
+   RESULT_<token>: <summary>".
 4. The reply arrives on its own, latched (unlike the edge-triggered HTTP signals).
    Backstop, bounded: `wait until=stop,exit` plus a `last-response` poll (a
    message-initiated turn fires the normal `stop` hook, verified live); if neither

@@ -1,6 +1,6 @@
 # Read My Mind
 
-Codeman's per-case memory of what you are trying to accomplish, and the 🧠 button that turns it into a predicted next prompt. Each case has an **intent profile**: freeform `goals` written by you or your agent, plus the Claude prompts captured while the feature is on. Pressing 🧠 asks a short-lived predictor process for one to three suggestions; you can send, insert, edit, rethink, or dismiss them. Nothing is sent to a session automatically. Design and history: [`readmymind-plan.md`](readmymind-plan.md).
+Codeman's per-case memory of what you are trying to accomplish, and the 🧠 button that turns it into a predicted next prompt. Each case has an **intent profile**: freeform `goals` written by you or your agent, plus durable Claude prompts captured while the feature is on. Codex prompts are read only on demand from the strictly owned rollout for prediction and are never persisted. Pressing 🧠 asks a short-lived predictor process for one to three suggestions; you can send, insert, edit, rethink, or dismiss them. Nothing is sent to a session automatically. Design and history: [`readmymind-plan.md`](readmymind-plan.md).
 
 ## What it supports
 
