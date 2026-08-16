@@ -142,11 +142,11 @@ describe('COD-306 structure and activation policy', () => {
       [...vertical.window.document.querySelectorAll('.tab-layout-group-name')].map((el) => el.textContent)
     ).toEqual(['<Core & Ops>', 'Later', 'Ungrouped']);
     expect(vertical.window.document.querySelectorAll('img')).toHaveLength(0);
-    expect(vertical.window.document.querySelectorAll('button')).toHaveLength(projection.visibleRefs.length);
+    expect(vertical.window.document.querySelectorAll('button[data-kind]')).toHaveLength(projection.visibleRefs.length);
 
     const flat = new JSDOM(`<main>${h.renderProjection(projection, 'horizontal', renderRef, escape)}</main>`);
     expect(flat.window.document.querySelectorAll('.tab-layout-group')).toHaveLength(0);
-    expect(flat.window.document.querySelectorAll('button')).toHaveLength(projection.visibleRefs.length);
+    expect(flat.window.document.querySelectorAll('button[data-kind]')).toHaveLength(projection.visibleRefs.length);
   });
 
   it('renders a sectionless fallback flat even when the device orientation is vertical', () => {
@@ -215,6 +215,72 @@ describe('COD-306 structure and activation policy', () => {
     const order = ['s1', 'hidden', 's3'];
     expect(h.adjacentSession(order, 's1', 1)).toBe('hidden');
     expect(h.adjacentSession(order, 's1', -1)).toBe('s3');
+  });
+});
+
+describe('COD-305 local collapse policy', () => {
+  function storage(initial: string | null = null) {
+    let value = initial;
+    return {
+      getItem: vi.fn(() => value),
+      setItem: vi.fn((_key: string, next: string) => {
+        value = next;
+      }),
+    };
+  }
+
+  it('round-trips collapsed group IDs across a browser restart', () => {
+    const h = loadHelper();
+    const local = storage();
+    expect(h.saveCollapsedGroupIds(local, ['g2', 'g1'])).toEqual({ ids: ['g2', 'g1'], ok: true });
+    expect(h.loadCollapsedGroupIds(local, ['g1', 'g2'])).toEqual({ ids: ['g2', 'g1'], ok: true });
+    expect(local.setItem).toHaveBeenCalledWith('codeman:tab-groups-collapsed', '["g2","g1"]');
+  });
+
+  it('garbage-collects stale group IDs during layout adoption', () => {
+    const h = loadHelper();
+    const local = storage('["gone","g1"]');
+    expect(h.loadCollapsedGroupIds(local, ['g1', 'g2'])).toEqual({ ids: ['g1'], ok: true });
+    expect(local.setItem).toHaveBeenLastCalledWith('codeman:tab-groups-collapsed', '["g1"]');
+  });
+
+  it('falls back to all-expanded after either a read or write failure', () => {
+    const h = loadHelper();
+    const readFailure = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: vi.fn(),
+    };
+    const writeFailure = {
+      getItem: () => '["g1"]',
+      setItem: () => {
+        throw new Error('quota');
+      },
+    };
+    expect(h.loadCollapsedGroupIds(readFailure, ['g1'])).toEqual({ ids: [], ok: false });
+    expect(h.saveCollapsedGroupIds(writeFailure, ['g1'])).toEqual({ ids: [], ok: false });
+  });
+
+  it('renders stable clickable group headers with collapse state', () => {
+    const h = loadHelper();
+    const projection = h.project(layout(), {
+      liveSessionIds: ['s1', 's2', 's3', 's4'],
+      openWebviewIds: ['w1', 'w2'],
+      collapsedGroupIds: ['g1'],
+      orientation: 'vertical',
+    });
+    const html = h.renderProjection(
+      projection,
+      'vertical',
+      (ref: Ref) => `<span data-id="${ref.id}"></span>`,
+      (value: string) => value
+    );
+    const dom = new JSDOM(`<main>${html}</main>`);
+    const header = dom.window.document.querySelector('[data-tab-group-header="g1"]');
+    expect(header?.getAttribute('aria-expanded')).toBe('false');
+    expect(header?.getAttribute('data-tab-group-header')).toBe('g1');
+    expect(header?.tagName).toBe('BUTTON');
   });
 });
 

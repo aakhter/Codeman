@@ -78,6 +78,7 @@ function makeApp() {
   app.tabLayoutVersion = layout.version;
   app.tabLayoutReadOnly = false;
   app.collapsedTabGroupIds = new Set();
+  app._tabCollapseStorageFailed = false;
   app._legacySessionOrder = ['s1', 's2', 's3'];
   app._tabLayoutFirstPaintPending = false;
   app._lastTabStructureKey = null;
@@ -165,8 +166,10 @@ const initData = {
 };
 
 beforeEach(() => {
+  (globalThis as any).CSS = { escape: (value: string) => value };
   document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
   document.body.innerHTML = '';
+  localStorage.removeItem('codeman:tab-groups-collapsed');
 });
 
 afterEach(() => vi.useRealTimers());
@@ -225,6 +228,99 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.selectSession).toHaveBeenCalledWith('s2');
     expect(app._activateVisibleTabNumber(2)).toBe(true);
     expect(app.openWebview).toHaveBeenCalledWith('w1');
+  });
+
+  it('collapses from the header, persists locally, and redraws geometry', () => {
+    const app = makeApp();
+    app.updateConnectionLines = vi.fn();
+    app._fullRenderSessionTabs();
+    const header = document.querySelector<HTMLElement>('[data-tab-group-header="group-x"]')!;
+    app.toggleTabGroupCollapsed(header.dataset.tabGroupHeader);
+
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+    expect(localStorage.getItem('codeman:tab-groups-collapsed')).toBe('["group-x"]');
+    expect(document.querySelector('[data-tab-group-header="group-x"]')?.getAttribute('aria-expanded')).toBe('false');
+    expect(app.updateConnectionLines).toHaveBeenCalled();
+  });
+
+  it('selects a hidden next session without expanding and swaps the lone shown member', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._fullRenderSessionTabs();
+    expect([...document.querySelectorAll<HTMLElement>('.session-tab')].map((tab) => tab.dataset.id)).toEqual([
+      's2',
+      's3',
+    ]);
+
+    app.selectSession = vi.fn((id: string) => {
+      app.activeSessionId = id;
+      app.activeWebviewId = null;
+      app._renderSessionTabsImmediate();
+    });
+    app.nextSession();
+
+    expect(app.selectSession).toHaveBeenCalledWith('s1');
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+    const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(tabs.map((tab) => tab.dataset.id)).toEqual(['s1', 's3']);
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
+  });
+
+  it('expands every group when persisting collapse fails', () => {
+    const app = makeApp();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota');
+    });
+    app.toggleTabGroupCollapsed('group-x', true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    setItem.mockRestore();
+
+    app._applyTabLayout(layout);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+  });
+
+  it('proxies a collapse-hidden lineage endpoint to the group header', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's3';
+    app.sessions.get('s3').parentSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._lineageLinesEnabled = () => true;
+    app._fullRenderSessionTabs();
+
+    const strip = document.getElementById('sessionTabs') as HTMLElement;
+    const header = document.querySelector<HTMLElement>('[data-tab-group-header="group-x"]')!;
+    const child = document.querySelector<HTMLElement>('[data-id="s3"]')!;
+    strip.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 320 }) as DOMRect;
+    header.getBoundingClientRect = () => ({ left: 32, top: 20, width: 260, height: 36 }) as DOMRect;
+    child.getBoundingClientRect = () => ({ left: 32, top: 180, width: 260, height: 40 }) as DOMRect;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+
+    app._appendLineageConnectionLines(svg, new Map());
+
+    const line = svg.querySelector('.lineage-line');
+    expect(line?.classList.contains('lineage-line--proxied')).toBe(true);
+    expect(line?.getAttribute('data-parent-tab')).toBe('s2');
+    expect(svg.querySelectorAll('.lineage-line-dot')).toHaveLength(1);
+  });
+
+  it('suppresses lineage when both collapse-hidden endpoints share a header', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's3';
+    app.sessions.get('s1').parentSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._lineageLinesEnabled = () => true;
+    app._fullRenderSessionTabs();
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+
+    app._appendLineageConnectionLines(svg, new Map());
+
+    expect(svg.querySelectorAll('.lineage-line')).toHaveLength(0);
+    expect(app._lineageEdgeCount).toBe(0);
   });
 
   it('invalidates structural DOM when orientation changes', () => {

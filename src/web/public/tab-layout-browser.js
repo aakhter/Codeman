@@ -14,6 +14,33 @@
     ref && (ref.kind === 'session' || ref.kind === 'webview') && typeof ref.id === 'string' && ref.id.length > 0;
   const asIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []);
   const stableIds = (value) => [...new Set(asIds(value))];
+  const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
+
+  function loadCollapsedGroupIds(storage, validGroupIds) {
+    try {
+      const raw = storage.getItem(COLLAPSED_STORAGE_KEY);
+      const parsed = raw === null ? [] : JSON.parse(raw);
+      if (!Array.isArray(parsed)) throw new Error('Invalid collapsed tab groups');
+      const loaded = stableIds(parsed);
+      if (validGroupIds === undefined) return { ids: loaded, ok: true };
+      const valid = new Set(stableIds(validGroupIds));
+      const kept = loaded.filter((id) => valid.has(id));
+      if (kept.length !== loaded.length) storage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(kept));
+      return { ids: kept, ok: true };
+    } catch (_error) {
+      return { ids: [], ok: false };
+    }
+  }
+
+  function saveCollapsedGroupIds(storage, groupIds) {
+    const ids = stableIds(groupIds);
+    try {
+      storage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(ids));
+      return { ids, ok: true };
+    } catch (_error) {
+      return { ids: [], ok: false };
+    }
+  }
 
   function normalizedLayout(value) {
     if (!value || typeof value !== 'object') throw new Error('Invalid tab layout');
@@ -54,9 +81,10 @@
     const ownerSessions = [];
     const visibleRefs = [];
     const sections = [];
+    const hiddenTabGroupByRef = {};
 
     const renderable = (ref) => (ref.kind === 'session' ? liveSessionIds.has(ref.id) : openWebviewIds.has(ref.id));
-    const addVisible = (ref, sectionRefs, isCollapsed, stored = true) => {
+    const addVisible = (ref, sectionRefs, isCollapsed, groupId = null, stored = true) => {
       const key = refKey(ref);
       if (stored) {
         if (processedStoredKeys.has(key)) return;
@@ -65,7 +93,10 @@
         return;
       }
       if (!renderable(ref) || seen.has(key)) return;
-      if (orientation === 'vertical' && isCollapsed && key !== highlighted) return;
+      if (orientation === 'vertical' && isCollapsed && key !== highlighted) {
+        if (groupId) hiddenTabGroupByRef[key] = groupId;
+        return;
+      }
       seen.add(key);
       const copy = { kind: ref.kind, id: ref.id };
       visibleRefs.push(copy);
@@ -99,19 +130,20 @@
 
     for (const group of layout.groups) {
       const refs = [];
-      for (const ref of group.refs) addVisible(ref, refs, collapsed.has(group.id));
-      if (orientation === 'vertical') sections.push({ id: group.id, name: group.name, refs });
+      const isCollapsed = collapsed.has(group.id);
+      for (const ref of group.refs) addVisible(ref, refs, isCollapsed, group.id);
+      if (orientation === 'vertical') sections.push({ id: group.id, name: group.name, refs, collapsed: isCollapsed });
     }
     const ungroupedRefs = [];
-    for (const ref of layout.ungrouped) addVisible(ref, ungroupedRefs, false);
+    for (const ref of layout.ungrouped) addVisible(ref, ungroupedRefs, false, null);
 
     // A newly opened local webview or live session may predate server
     // reconciliation. Append omissions deterministically without moving saved refs.
-    for (const id of ownerSessions) addVisible({ kind: 'session', id }, ungroupedRefs, false, false);
-    for (const id of openWebviewIds) addVisible({ kind: 'webview', id }, ungroupedRefs, false, false);
-    if (orientation === 'vertical') sections.push({ id: null, name: '', refs: ungroupedRefs });
+    for (const id of ownerSessions) addVisible({ kind: 'session', id }, ungroupedRefs, false, null, false);
+    for (const id of openWebviewIds) addVisible({ kind: 'webview', id }, ungroupedRefs, false, null, false);
+    if (orientation === 'vertical') sections.push({ id: null, name: '', refs: ungroupedRefs, collapsed: false });
 
-    return { sessionOrder: ownerSessions, visibleRefs, sections };
+    return { sessionOrder: ownerSessions, visibleRefs, sections, hiddenTabGroupByRef };
   }
 
   function projectFallback(options = {}) {
@@ -171,7 +203,11 @@
         const content = (Array.isArray(section.refs) ? section.refs : [])
           .map((ref) => renderRef(ref, index++))
           .join('');
-        return `<section class="tab-layout-group" data-tab-group-id="${escapeHtml(section.id || '')}" role="group" aria-label="${escapeHtml(name)}"><div class="tab-layout-group-name">${escapeHtml(name)}</div><div class="tab-layout-group-refs">${content}</div></section>`;
+        const header =
+          section.id === null
+            ? `<div class="tab-layout-group-name">${escapeHtml(name)}</div>`
+            : `<button type="button" class="tab-layout-group-name tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id)}" aria-expanded="${section.collapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)"><span class="tab-layout-group-chevron" aria-hidden="true"></span><span>${escapeHtml(name)}</span></button>`;
+        return `<section class="tab-layout-group" data-tab-group-id="${escapeHtml(section.id || '')}" role="group" aria-label="${escapeHtml(name)}">${header}<div class="tab-layout-group-refs">${content}</div></section>`;
       })
       .join('');
   }
@@ -220,5 +256,7 @@
     adjacentSession,
     renderProjection,
     createLoadCoordinator,
+    loadCollapsedGroupIds,
+    saveCollapsedGroupIds,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -263,4 +263,18 @@ describe('lineage line geometry', () => {
     expect(verticalRailBlock).toContain('--lineage-vertical-gutter');
     expect(verticalRailBlock).toContain('padding-left');
   });
+
+  it('resolves collapse-hidden endpoints through stable group header hooks', () => {
+    expect(lineageJs).toContain('data-tab-group-header');
+    expect(lineageJs).toContain('_hiddenTabGroupByRef');
+    expect(lineageJs).toContain('lineage-line--proxied');
+  });
+
+  it('suppresses a lineage edge when both hidden endpoints proxy to the same header', () => {
+    expect(lineageJs).toMatch(/parentEndpoint\.key\s*===\s*childEndpoint\.key/);
+  });
+
+  it('ships a visibly dimmed dotted proxy treatment', () => {
+    expect(stylesCss).toMatch(/\.connection-line\.lineage-line--proxied\s*\{[^}]*stroke-dasharray:[^}]*opacity:/s);
+  });
 });

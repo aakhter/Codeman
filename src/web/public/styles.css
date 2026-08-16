@@ -675,6 +675,31 @@ html[data-tab-orientation='vertical'] .tab-layout-group-name {
   text-transform: uppercase;
 }
 
+html[data-tab-orientation='vertical'] .tab-layout-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-toggle:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.tab-layout-group-chevron::before {
+  content: '\25BE';
+  display: inline-block;
+}
+
+.tab-layout-group-toggle[aria-expanded='false'] .tab-layout-group-chevron::before {
+  content: '\25B8';
+}
+
 html[data-tab-orientation='vertical'] .tab-layout-group-refs {
   display: flex;
   flex-direction: column;
@@ -10808,6 +10833,11 @@ kbd {
    left every worker's arc at the resting 0.72 for anyone who turns motion off. */
 .connection-line.lineage-line--working {
   opacity: 0.95;
+}
+
+.connection-line.lineage-line--proxied {
+  stroke-dasharray: 2 7;
+  opacity: 0.46;
 }
 
 .connection-line.lineage-line:hover {

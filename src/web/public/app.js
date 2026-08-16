@@ -537,6 +537,7 @@ class CodemanApp {
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;
     this.collapsedTabGroupIds = new Set();
+    this._tabCollapseStorageFailed = false;
     this._visibleTabRefs = [];
     this._tabLayoutManaged = true;
     this._tabLayoutFirstPaintPending = true;
@@ -4880,16 +4881,18 @@ class CodemanApp {
 
   _refreshTabProjection() {
     if (this._tabLayoutFirstPaintPending) {
-      const pending = { sessionOrder: [], visibleRefs: [], sections: [] };
+      const pending = { sessionOrder: [], visibleRefs: [], sections: [], hiddenTabGroupByRef: {} };
       this.sessionOrder = pending.sessionOrder;
       this._visibleTabRefs = pending.visibleRefs;
       this._tabLayoutSections = pending.sections;
+      this._hiddenTabGroupByRef = new Map();
       return pending;
     }
     const projection = this._projectTabLayout();
     this.sessionOrder = projection.sessionOrder;
     this._visibleTabRefs = projection.visibleRefs;
     this._tabLayoutSections = projection.sections;
+    this._hiddenTabGroupByRef = new Map(Object.entries(projection.hiddenTabGroupByRef || {}));
     return projection;
   }
 
@@ -4901,6 +4904,14 @@ class CodemanApp {
     ) return;
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
+    const collapsedState = this._tabCollapseStorageFailed
+      ? { ids: [], ok: false }
+      : window.CodemanTabLayout.loadCollapsedGroupIds(
+          localStorage,
+          layout.groups?.map((group) => group.id) || []
+        );
+    if (!collapsedState.ok) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(collapsedState.ids);
     this.tabLayoutReadOnly = false;
     this._tabLayoutFirstPaintPending = false;
     this._lastTabStructureKey = null;
@@ -4939,6 +4950,22 @@ class CodemanApp {
     else if (ref?.kind === 'webview') this.openWebview(ref.id);
     else return false;
     return true;
+  }
+
+  toggleTabGroupCollapsed(groupId, forceCollapsed) {
+    if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
+    const next = new Set(this.collapsedTabGroupIds);
+    const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
+    if (shouldCollapse) next.add(groupId);
+    else next.delete(groupId);
+    const saved = this._tabCollapseStorageFailed
+      ? { ids: [], ok: false }
+      : window.CodemanTabLayout.saveCollapsedGroupIds(localStorage, [...next]);
+    if (!saved.ok) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(saved.ids);
+    this._lastTabStructureKey = null;
+    this._fullRenderSessionTabs();
+    return this.collapsedTabGroupIds.has(groupId) === shouldCollapse;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -5150,7 +5177,7 @@ class CodemanApp {
 
         // Inject tab-number badge if missing (added after initial render)
         if (!tab.querySelector('.tab-number')) {
-          const idx = this.sessionOrder.indexOf(id);
+          const idx = projection.visibleRefs.findIndex((ref) => ref.kind === 'session' && ref.id === id);
           if (idx >= 0 && idx < 9) {
             const numSpan = document.createElement('span');
             numSpan.className = 'tab-number';
