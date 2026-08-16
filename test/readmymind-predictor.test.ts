@@ -6,7 +6,16 @@
  * boundary, so lifecycle, isolation, and output handling stay deterministic.
  */
 import { EventEmitter } from 'node:events';
-import { existsSync, lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { PassThrough } from 'node:stream';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,9 +25,21 @@ vi.mock('node:child_process', async (importOriginal) => {
   return { ...actual, execSync: vi.fn(), spawn: vi.fn() };
 });
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    chmodSync: vi.fn(actual.chmodSync),
+    mkdtempSync: vi.fn(actual.mkdtempSync),
+    rmSync: vi.fn(actual.rmSync),
+  };
+});
+
 import { execSync, spawn } from 'node:child_process';
 import { parsePredictionOutput } from '../src/readmymind-predictor.js';
 import { readMyMindPredictor } from '../src/readmymind-predictor.js';
+
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 
 const VALID = JSON.stringify({
   suggestions: [
@@ -102,6 +123,9 @@ interface Invocation {
 
 const spawnMock = vi.mocked(spawn);
 const execSyncMock = vi.mocked(execSync);
+const chmodSyncMock = vi.mocked(chmodSync);
+const mkdtempSyncMock = vi.mocked(mkdtempSync);
+const rmSyncMock = vi.mocked(rmSync);
 let processKill: ReturnType<typeof vi.spyOn>;
 let originalEnv: NodeJS.ProcessEnv;
 let nextPid = 41_000;
@@ -170,6 +194,9 @@ beforeEach(() => {
   originalEnv = { ...process.env };
   spawnMock.mockReset();
   execSyncMock.mockReset();
+  chmodSyncMock.mockClear();
+  mkdtempSyncMock.mockClear();
+  rmSyncMock.mockClear();
   processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
 });
 
@@ -381,7 +408,12 @@ describe('Codex predictor output and lifecycle', () => {
   it.each([
     ['error: unexpected argument --ignore-rules', /must be updated/i],
     ['strict config rejected unknown field agents.enabled', /must be updated/i],
+    ['error: unknown feature: shell_tool', /must be updated/i],
+    ['error: unsupported feature shell_tool', /must be updated/i],
+    ["error: invalid value 'workspace-write' for '--sandbox <SANDBOX>'", /must be updated/i],
+    ["error: invalid value 'true' for 'tools.web_search'", /must be updated/i],
     ['configuration error: authentication required; token=secret', /authentication or configuration/i],
+    ['authentication failed: unknown key id', /authentication or configuration/i],
   ])('classifies nonzero exits without exposing stderr and never retries', async (stderr, expected) => {
     let cwd = '';
     installChild(
@@ -426,6 +458,78 @@ describe('Codex predictor output and lifecycle', () => {
 
     await expect(readMyMindPredictor.predict(codexOptions())).rejects.toThrow(/Codex CLI is unavailable/i);
     expect(existsSync(cwd)).toBe(false);
+  });
+
+  it('sanitizes a path-bearing private-directory creation error', async () => {
+    mkdtempSyncMock.mockImplementationOnce(() => {
+      throw new Error('EACCES creating /secret/server/tmp/codeman-rmm-codex-123');
+    });
+
+    const prediction = readMyMindPredictor.predict(codexOptions());
+    await expect(prediction).rejects.toThrow('Codex prediction could not create its private workspace.');
+    await expect(prediction).rejects.not.toThrow(/\/secret\/server/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps setup errors sanitized when best-effort removal also fails', async () => {
+    let privateDir = '';
+    mkdtempSyncMock.mockImplementationOnce((prefix) => {
+      privateDir = actualFs.mkdtempSync(prefix);
+      return privateDir;
+    });
+    chmodSyncMock.mockImplementationOnce(() => {
+      throw new Error(`chmod failed for ${privateDir}`);
+    });
+    rmSyncMock.mockImplementationOnce(() => {
+      throw new Error(`rm failed for ${privateDir}`);
+    });
+
+    try {
+      const prediction = readMyMindPredictor.predict(codexOptions());
+      await expect(prediction).rejects.toThrow('Codex prediction could not create its private workspace.');
+      await expect(prediction).rejects.not.toThrow(privateDir);
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      actualFs.rmSync(privateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves unavailable-binary classification when best-effort removal fails', async () => {
+    let privateDir = '';
+    spawnMock.mockImplementationOnce((_command, _args, options = {}) => {
+      privateDir = String(options.cwd);
+      throw Object.assign(new Error(`spawn ENOENT from ${privateDir}`), { code: 'ENOENT' });
+    });
+    rmSyncMock.mockImplementationOnce(() => {
+      throw new Error(`rm failed for ${privateDir}`);
+    });
+
+    try {
+      const prediction = readMyMindPredictor.predict(codexOptions());
+      await expect(prediction).rejects.toThrow('Codex CLI is unavailable; install Codex and restart Codeman.');
+      await expect(prediction).rejects.not.toThrow(privateDir);
+    } finally {
+      actualFs.rmSync(privateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not turn successful prediction into an error when final cleanup fails', async () => {
+    let privateDir = '';
+    installChild(succeed, (invocation) => {
+      privateDir = String(invocation.options.cwd);
+    });
+    rmSyncMock.mockImplementationOnce(() => {
+      throw new Error(`rm failed for ${privateDir}`);
+    });
+
+    try {
+      await expect(readMyMindPredictor.predict(codexOptions())).resolves.toMatchObject({
+        suggestions: expect.any(Array),
+      });
+      expect(rmSyncMock).toHaveBeenCalledTimes(1);
+    } finally {
+      actualFs.rmSync(privateDir, { recursive: true, force: true });
+    }
   });
 
   it.each(['stdout', 'stderr'] as const)(
@@ -484,6 +588,46 @@ describe('Codex predictor output and lifecycle', () => {
     await expect(readMyMindPredictor.predict(codexOptions({ timeoutMs: 5 }))).rejects.toThrow(/timed out after 5ms/i);
     expect(processKill).toHaveBeenCalledWith(-childPid, 'SIGTERM');
     expect(processKill).toHaveBeenCalledWith(-childPid, 'SIGKILL');
+    expect(existsSync(cwd)).toBe(false);
+  });
+
+  it('still escalates and settles once when the leader closes during abort grace', async () => {
+    vi.useFakeTimers();
+    let childPid = 0;
+    let cwd = '';
+    installChild(
+      (invocation) => {
+        childPid = invocation.child.pid;
+        invocation.child.stdout.write(Buffer.alloc(256 * 1024 + 1, 'x'));
+        invocation.child.emit('close', null, 'SIGTERM');
+      },
+      (invocation) => {
+        cwd = String(invocation.options.cwd);
+      }
+    );
+
+    let settlements = 0;
+    const observed = readMyMindPredictor.predict(codexOptions()).then(
+      () => {
+        settlements += 1;
+        return new Error('unexpected resolution');
+      },
+      (error: unknown) => {
+        settlements += 1;
+        return error;
+      }
+    );
+    await vi.advanceTimersByTimeAsync(249);
+    expect(processKill).toHaveBeenCalledWith(-childPid, 'SIGTERM');
+    expect(processKill).not.toHaveBeenCalledWith(-childPid, 'SIGKILL');
+    expect(settlements).toBe(0);
+    expect(existsSync(cwd)).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await observed).toEqual(expect.objectContaining({ message: expect.stringMatching(/output limit/i) }));
+    expect(processKill).toHaveBeenCalledWith(-childPid, 'SIGKILL');
+    expect(settlements).toBe(1);
+    expect(rmSyncMock).toHaveBeenCalledTimes(1);
     expect(existsSync(cwd)).toBe(false);
   });
 });

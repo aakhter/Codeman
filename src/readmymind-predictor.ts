@@ -316,7 +316,10 @@ function classifyCodexExit(stderr: string): Error {
   const rejectsRequiredIsolation =
     /(?:unexpected|unknown|unrecognized|unsupported|invalid)\s+(?:argument|option|flag)/i.test(stderr) ||
     /(?:unknown|unrecognized|unsupported|invalid)\s+(?:configuration|config)\s+(?:key|field|option)/i.test(stderr) ||
-    /(?:unknown|unrecognized|unsupported)\s+(?:field|key)\b/i.test(stderr) ||
+    /(?:unknown|unrecognized|unsupported)\s+feature(?::|\s)+[^\n]*\bshell_tool\b/i.test(stderr) ||
+    /(?:invalid value|invalid type)[^\n]*(?:--(?:ask-for-approval|color|disable|sandbox)|project_doc_max_bytes|agents\.enabled|tools\.web_search|shell_environment_policy\.inherit)/i.test(
+      stderr
+    ) ||
     /strict[-_ ]config[^\n]*(?:unknown|unrecognized|unsupported|invalid)/i.test(stderr);
   if (rejectsRequiredIsolation) {
     return new Error('The installed Codex CLI must be updated before Read My Mind can run safely.');
@@ -330,6 +333,14 @@ function terminateProcessGroup(child: ChildProcess, signal: NodeJS.Signals): voi
     process.kill(-child.pid, signal);
   } catch {
     // The detached group has already exited.
+  }
+}
+
+function removePrivateDir(privateDir: string): void {
+  try {
+    rmSync(privateDir, { recursive: true, force: true });
+  } catch {
+    // Cleanup must never replace the sanitized provider error.
   }
 }
 
@@ -361,7 +372,12 @@ async function runCodexPrediction(
     throw new Error(`Invalid model name: ${String(provider.model).substring(0, 50)}`);
   }
 
-  const privateDir = mkdtempSync(join(tmpdir(), 'codeman-rmm-codex-'));
+  let privateDir: string;
+  try {
+    privateDir = mkdtempSync(join(tmpdir(), 'codeman-rmm-codex-'));
+  } catch {
+    throw new Error('Codex prediction could not create its private workspace.');
+  }
   const schemaFile = join(privateDir, 'schema.json');
   const outputFile = join(privateDir, 'output.json');
   try {
@@ -369,7 +385,7 @@ async function runCodexPrediction(
     writeFileSync(schemaFile, JSON.stringify(CODEX_OUTPUT_SCHEMA), { mode: 0o600 });
     writeFileSync(outputFile, '', { mode: 0o600 });
   } catch {
-    rmSync(privateDir, { recursive: true, force: true });
+    removePrivateDir(privateDir);
     throw new Error('Codex prediction could not create its private workspace.');
   }
 
@@ -417,7 +433,7 @@ async function runCodexPrediction(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (error) {
-    rmSync(privateDir, { recursive: true, force: true });
+    removePrivateDir(privateDir);
     if (isMissingExecutableError(error)) {
       throw new Error('Codex CLI is unavailable; install Codex and restart Codeman.');
     }
@@ -427,7 +443,6 @@ async function runCodexPrediction(
   return new Promise<PredictionResult>((resolve, reject) => {
     let settled = false;
     let aborting = false;
-    let abortError: Error | null = null;
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const stderrChunks: Buffer[] = [];
@@ -447,11 +462,7 @@ async function runCodexPrediction(
       child.stdin?.removeListener('error', onStdinError);
       child.stdout?.removeListener('data', onStdout);
       child.stderr?.removeListener('data', onStderr);
-      try {
-        rmSync(privateDir, { recursive: true, force: true });
-      } catch {
-        // Best-effort cleanup, matching the existing Claude runner.
-      }
+      removePrivateDir(privateDir);
     };
 
     const finish = (error: Error | null, result?: PredictionResult): void => {
@@ -465,7 +476,6 @@ async function runCodexPrediction(
     const abort = (error: Error): void => {
       if (settled || aborting) return;
       aborting = true;
-      abortError = error;
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (outputPollTimer) clearInterval(outputPollTimer);
       timeoutTimer = null;
@@ -499,6 +509,7 @@ async function runCodexPrediction(
     }
 
     function onError(error: Error): void {
+      if (aborting) return;
       if (isMissingExecutableError(error)) {
         finish(new Error('Codex CLI is unavailable; install Codex and restart Codeman.'));
       } else {
@@ -509,7 +520,6 @@ async function runCodexPrediction(
     function onClose(code: number | null): void {
       if (settled) return;
       if (aborting) {
-        finish(abortError ?? new Error('Codex prediction failed.'));
         return;
       }
       if (code !== 0) {
