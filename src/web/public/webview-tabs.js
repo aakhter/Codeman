@@ -36,6 +36,8 @@ Object.assign(CodemanApp.prototype, {
     this._webviewInitRetryTimer = this._webviewInitRetryTimer || null;
     this._webviewInitRetryScheduled = this._webviewInitRetryScheduled === true;
     this._webviewListRefreshGeneration = this._webviewListRefreshGeneration || 0;
+    this._webviewListAppliedGeneration = this._webviewListAppliedGeneration || 0;
+    this._webviewDeletedIds = this._webviewDeletedIds || new Set();
 
     const acquired = await this.refreshWebviews();
     if (!acquired) this._scheduleWebviewInitRetry();
@@ -77,8 +79,14 @@ Object.assign(CodemanApp.prototype, {
       return false;
     }
     if (!data || !Array.isArray(data.webviews)) return false;
-    if (generation !== this._webviewListRefreshGeneration) return false;
-    this.webviews = new Map((data.webviews || []).map((w) => [w.id, w]));
+    // Order successful applications, not request starts: a valid earlier response
+    // may recover state while a newer overlapping request is still pending or
+    // fails. A newer success still wins, and deletion tombstones filter even a
+    // response whose request began before the trusted deletion event.
+    if (generation < (this._webviewListAppliedGeneration || 0)) return false;
+    this._webviewListAppliedGeneration = generation;
+    const deletedIds = this._webviewDeletedIds || new Set();
+    this.webviews = new Map(data.webviews.filter((w) => !deletedIds.has(w.id)).map((w) => [w.id, w]));
     if (typeof data.maxLiveFrames === 'number') this._webviewMaxFrames = data.maxLiveFrames;
     this.renderWebviewMenuItems();
     if (!this._webviewOpenStateLoaded) {
@@ -95,8 +103,15 @@ Object.assign(CodemanApp.prototype, {
   /** SSE: the saved list changed (possibly on another device). */
   async _onWebviewChanged(data) {
     const deletedId = data?.action === 'deleted' && data.id ? data.id : null;
+    if (deletedId) {
+      this._webviewDeletedIds = this._webviewDeletedIds || new Set();
+      this._webviewDeletedIds.add(deletedId);
+    }
     const deletionSnapshot = deletedId
       ? (this._refreshTabProjection?.()?.completeRefs || []).map((ref) => ({ kind: ref.kind, id: ref.id }))
+      : null;
+    const deletionNavigation = deletedId
+      ? { generation: this._webviewNavigationGeneration || 0, id: this._webviewNavigationId || null }
       : null;
     const acquired = await this.refreshWebviews();
     if (deletedId) {
@@ -105,7 +120,10 @@ Object.assign(CodemanApp.prototype, {
       // active fallback because a successful read already omits this ref.
       this.webviews?.delete(deletedId);
       this.renderWebviewMenuItems();
-      this._removeWebviewTab(deletedId, deletionSnapshot);
+      const allowFallback =
+        (this._webviewNavigationGeneration || 0) === deletionNavigation.generation &&
+        (this._webviewNavigationId || null) === deletionNavigation.id;
+      this._removeWebviewTab(deletedId, deletionSnapshot, allowFallback);
     } else if (!acquired) {
       return;
     }
@@ -406,7 +424,7 @@ Object.assign(CodemanApp.prototype, {
     this.renderSessionTabs();
   },
 
-  _removeWebviewTab(id, completeSnapshot) {
+  _removeWebviewTab(id, completeSnapshot, allowFallback = true) {
     const before = completeSnapshot === undefined ? this._refreshTabProjection?.()?.completeRefs : completeSnapshot;
     const completeBefore = Array.isArray(before) ? before : [];
     this._cancelPendingWebviewOpen(id);
@@ -421,6 +439,7 @@ Object.assign(CodemanApp.prototype, {
     if (this.activeWebviewId === id) {
       this.activeWebviewId = null;
       this._hideWebviewLayer();
+      if (!allowFallback) return;
       const targetIndex = completeBefore.findIndex((ref) => ref.kind === 'webview' && ref.id === id);
       const isRenderable = (ref) =>
         ref.kind === 'session'
@@ -629,6 +648,8 @@ Object.assign(CodemanApp.prototype, {
       this.showToast?.('Could not delete URL', 'error');
       return false;
     }
+    this._webviewDeletedIds = this._webviewDeletedIds || new Set();
+    this._webviewDeletedIds.add(id);
     this._removeWebviewTab(id);
     this.webviews.delete(id);
     this.renderWebviewMenuItems();

@@ -160,6 +160,40 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(cancel).toHaveBeenCalledWith(7);
   });
 
+  it('adopts an overlapping SSE success when the newer bounded retry fails', async () => {
+    const { win, app } = boot({ 'codeman-webview-open': '["w2"]' });
+    const sse = deferred<any>();
+    const retryRequest = deferred<any>();
+    app._apiJson = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockReturnValueOnce(sse.promise)
+      .mockReturnValueOnce(retryRequest.promise);
+    const load = vi.spyOn(app, '_loadWebviewOpenState');
+    let retry: (() => Promise<void>) | undefined;
+    vi.spyOn(win, 'setTimeout').mockImplementation(((handler: TimerHandler) => {
+      retry = handler as () => Promise<void>;
+      return 1;
+    }) as typeof win.setTimeout);
+
+    await app.initWebviews();
+    const sseRefresh = app._onWebviewChanged({ action: 'updated', id: 'w2', owner: '@single' });
+    const retryRefresh = retry!();
+    sse.resolve({
+      webviews: [
+        { id: 'w1', name: 'One', url: 'https://one.example/' },
+        { id: 'w2', name: 'Two', url: 'https://two.example/' },
+      ],
+    });
+    await sseRefresh;
+    retryRequest.resolve(null);
+    await retryRefresh;
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(app.webviewOrder).toEqual(['w2']);
+    expect(win.localStorage.getItem('codeman-webview-open')).toBe('["w2"]');
+  });
+
   it('migrates the legacy array once as a filtered, deduplicated open set', async () => {
     const { win, app } = boot({
       'codeman-webview-order': JSON.stringify(['w2', null, 'w1', 'w2', 'unknown', 7]),
@@ -349,6 +383,40 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(app.webviewOrder).toEqual([]);
   });
 
+  it('does not let an in-flight list resurrect a locally deleted webview before SSE arrives', async () => {
+    const { win, app } = boot({ 'codeman-webview-open': '["w1"]' });
+    await app.initWebviews();
+    const stale = deferred<any>();
+    app._apiJson = vi.fn(() => stale.promise);
+    app._apiDelete = vi.fn(async () => ({ ok: true }));
+    win.confirm = vi.fn(() => true);
+
+    const olderRefresh = app.refreshWebviews();
+    await app._confirmAndDeleteWebview('w1');
+    stale.resolve({ webviews: [{ id: 'w1', name: 'One', url: 'https://one.example/' }] });
+    await olderRefresh;
+
+    expect(app.webviews.has('w1')).toBe(false);
+    expect(app.webviewOrder).toEqual([]);
+  });
+
+  it('keeps the newest successful ordinary list when an older success resolves later', async () => {
+    const { app } = boot();
+    await app.initWebviews();
+    const older = deferred<any>();
+    const newer = deferred<any>();
+    app._apiJson = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+
+    const olderRefresh = app.refreshWebviews();
+    const newerRefresh = app.refreshWebviews();
+    newer.resolve({ webviews: [{ id: 'w2', name: 'New', url: 'https://new.example/' }] });
+    await newerRefresh;
+    older.resolve({ webviews: [{ id: 'w1', name: 'Old', url: 'https://old.example/' }] });
+    await olderRefresh;
+
+    expect([...app.webviews.keys()]).toEqual(['w2']);
+  });
+
   it('treats duplicate remote deletion events as idempotent local cleanup', async () => {
     const { win, app } = boot({ 'codeman-webview-open': '["w1"]' });
     await app.initWebviews();
@@ -437,6 +505,60 @@ describe('COD-310 device-local saved-webview openness', () => {
 
     expect(app.openWebview).not.toHaveBeenCalled();
     expect(app.selectSession).toHaveBeenCalledWith('s1');
+  });
+
+  it('does not let delayed remote-deletion fallback cancel a newer webview navigation', async () => {
+    const { win, app } = boot({ 'codeman-webview-open': '["w1"]' });
+    await app.initWebviews();
+    app.activeWebviewId = 'w1';
+    win.document.querySelector('.main')!.classList.add('webview-active');
+    const frame = win.document.createElement('div');
+    frame.className = 'webview-frame active';
+    frame.dataset.webviewId = 'w1';
+    win.document.getElementById('webviewLayer')!.appendChild(frame);
+    const deletionRefresh = deferred<any>();
+    const openW2 = deferred<any>();
+    app._apiJson = vi.fn((path: string) => (path === '/api/webviews' ? deletionRefresh.promise : openW2.promise));
+    app._refreshTabProjection = () => ({ completeRefs: sharedLayout.groups[0].refs });
+    app.selectSession = vi.fn((id: string) => {
+      app._cancelPendingWebviewNavigation();
+      app.activeSessionId = id;
+    });
+
+    const deleting = app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
+    const opening = app.openWebview('w2');
+    deletionRefresh.resolve({ webviews: [{ id: 'w2', name: 'Two', url: 'https://two.example/' }] });
+    await deleting;
+    openW2.resolve({ webview: app.webviews.get('w2'), embedUrl: '/webview/w2/' });
+    await opening;
+
+    expect(app.webviews.has('w1')).toBe(false);
+    expect(win.document.querySelector('.webview-frame[data-webview-id="w1"]')).toBeNull();
+    expect(app.selectSession).not.toHaveBeenCalled();
+    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/w2/', app.webviews.get('w2'));
+    expect(app.activeWebviewId).toBe('w2');
+    expect(app.webviewOrder).toEqual(['w2']);
+  });
+
+  it('does not run delayed remote-deletion fallback after a newer session intent', async () => {
+    const { win, app } = boot({ 'codeman-webview-open': '["w1"]' });
+    await app.initWebviews();
+    app.activeWebviewId = 'w1';
+    win.document.querySelector('.main')!.classList.add('webview-active');
+    const deletionRefresh = deferred<any>();
+    app._apiJson = vi.fn(() => deletionRefresh.promise);
+    app._refreshTabProjection = () => ({ completeRefs: sharedLayout.groups[0].refs });
+    app.selectSession = vi.fn();
+
+    const deleting = app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
+    app._cancelPendingWebviewNavigation();
+    app.activeSessionId = 's1';
+    deletionRefresh.resolve({ webviews: [{ id: 'w2', name: 'Two', url: 'https://two.example/' }] });
+    await deleting;
+
+    expect(app.selectSession).not.toHaveBeenCalled();
+    expect(app.activeWebviewId).toBeNull();
+    expect(app.activeSessionId).toBe('s1');
   });
 
   it('keeps the latest A/B navigation active when responses complete in reverse order', async () => {
