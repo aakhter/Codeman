@@ -4,7 +4,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import Fastify from 'fastify';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TabLayoutService } from '../src/tab-layout-service.js';
+import { installRouteErrorHandler } from '../src/web/route-error-handler.js';
+import { registerTabLayoutRoutes } from '../src/web/routes/tab-layout-routes.js';
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
 const HELPER_SOURCE = readFileSync(join(PUBLIC, 'tab-layout-browser.js'), 'utf8');
@@ -155,6 +159,56 @@ describe('COD-309 browser child-placement intents', () => {
     expect(() =>
       h.applyOperation(initial, { type: 'followParent', ref: { kind: 'session', id: 'missing' }, metadata })
     ).toThrow(/unknown ref/);
+  });
+
+  it('removes a fully committed mixed prefix while retaining its queued Follow-parent suffix', () => {
+    const h = loadHelper();
+    const initial = layout();
+    const operations = [
+      { type: 'createGroup', id: 'temporary', name: 'Temporary' },
+      { type: 'deleteGroup', groupId: 'temporary' },
+      { type: 'reorderGroup', groupId: 'g2', index: 0 },
+      {
+        type: 'moveRef',
+        ref: { kind: 'session', id: 'other' },
+        groupId: 'g1',
+        index: 2,
+        metadata,
+      },
+      { type: 'followParent', ref: { kind: 'session', id: 'child' }, metadata },
+    ];
+    const committedPrefix = operations
+      .slice(0, 4)
+      .reduce((candidate, operation) => h.applyOperation(candidate, operation), initial);
+
+    expect(h.operationsAfterAppliedPrefix(initial, operations, { ...committedPrefix, version: 9 })).toEqual([
+      operations[4],
+    ]);
+  });
+
+  it('removes only the committed part of a mixed prefix before its queued Follow-parent suffix', () => {
+    const h = loadHelper();
+    const initial = layout();
+    const operations = [
+      { type: 'createGroup', id: 'new', name: 'New' },
+      { type: 'deleteGroup', groupId: 'g2' },
+      { type: 'reorderGroup', groupId: 'new', index: 0 },
+      {
+        type: 'moveRef',
+        ref: { kind: 'session', id: 'parent' },
+        groupId: 'new',
+        index: 0,
+        metadata,
+      },
+      { type: 'followParent', ref: { kind: 'session', id: 'child' }, metadata },
+    ];
+    const partiallyCommitted = operations
+      .slice(0, 2)
+      .reduce((candidate, operation) => h.applyOperation(candidate, operation), initial);
+
+    expect(h.operationsAfterAppliedPrefix(initial, operations, { ...partiallyCommitted, version: 8 })).toEqual(
+      operations.slice(2)
+    );
   });
 });
 
@@ -363,6 +417,55 @@ describe('COD-307 optimistic write coordinator', () => {
     expect(coordinator.getLayout().version).toBe(9);
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'remote')).toBeTruthy();
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
+  });
+
+  it('does not let a late PUT response overwrite placements adopted with a newer GET/SSE layout', async () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    let resolvePut!: (response: unknown) => void;
+    const delayedPut = new Promise((resolve) => {
+      resolvePut = resolve;
+    });
+    app._apiPut = vi.fn(() => delayedPut);
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Local edit' });
+    const writing = coordinator.flush();
+    await Promise.resolve();
+    expect(app._apiPut).toHaveBeenCalledOnce();
+
+    const external = {
+      ...layout(8),
+      groups: layout(8).groups.map((group) => (group.id === 'g1' ? { ...group, name: 'Newer server' } : group)),
+    };
+    const newerPlacement = {
+      kind: 'session',
+      id: 'child',
+      state: 'dangling',
+      parentId: 'missing-parent',
+      canFollow: false,
+    };
+    app._applyTabLayout(external, [newerPlacement]);
+
+    resolvePut({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          layout: { ...layout(5), groups: [] },
+          placements: [{ kind: 'session', id: 'child', state: 'manual', parentId: 'parent', canFollow: true }],
+        },
+      }),
+    });
+    await writing;
+
+    expect(app.tabLayoutVersion).toBe(8);
+    expect(app.tabLayout.groups.find((group: any) => group.id === 'g1').name).toBe('Local edit');
+    expect(app._tabRefPlacementState({ kind: 'session', id: 'child' }).state).toBe('dangling');
+    const badge = document.querySelector<HTMLElement>('[data-id="child"] .tab-placement-state')!;
+    expect(badge.textContent).toBe('Parent unavailable');
+    expect(
+      app._tabRefPlacementActions({ kind: 'session', id: 'child' }).map((action: any) => action.label)
+    ).not.toContain('Follow parent again');
   });
 
   it('snapshots both an in-flight batch and operations queued behind it for reload recovery', async () => {
@@ -988,11 +1091,71 @@ function pointerEvent(type: string, values: Record<string, unknown>) {
 }
 
 describe('COD-307 delegated pointer behavior', () => {
-  it('previews and commits a nested subtree through the real edit coordinator/write path', async () => {
+  it('previews a nested pointer move and commits it through the authenticated route and authoritative service', async () => {
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
+    const serverLayout: Layout = {
+      ...layout(),
+      groups: layout().groups.map((group) =>
+        group.id === 'g1'
+          ? {
+              ...group,
+              refs: [...group.refs, { kind: 'session' as const, id: 'grandchild' }],
+            }
+          : group
+      ),
+    };
+    const layouts: Record<string, Layout> = { alice: serverLayout };
+    const sessions = {
+      parent: { id: 'parent', owner: 'alice', createdAt: 1 },
+      child: { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+      grandchild: { id: 'grandchild', owner: 'alice', createdAt: 3, parentSessionId: 'child' },
+      other: { id: 'other', owner: 'alice', createdAt: 4 },
+      foreign: { id: 'foreign', owner: 'bob', createdAt: 5 },
+    };
+    const store = {
+      getTabLayout: (owner: string) => layouts[owner] ?? null,
+      setTabLayout: (owner: string, next: Layout) => {
+        layouts[owner] = next;
+      },
+      getSessions: () => sessions,
+      getSessionOrder: () => ['parent', 'child', 'grandchild', 'other'],
+    };
+    const service = new TabLayoutService({
+      store: store as never,
+      sessions: new Map(),
+      readWebviews: async () => [{ id: 'web', owner: 'alice' }],
+      broadcast: vi.fn(),
+      now: () => '2026-08-16T12:00:00.000Z',
+    });
+    const server = Fastify({ logger: false });
+    server.addHook('onRequest', async (request) => {
+      (request as unknown as { authUser: { username: string; role: 'user' } }).authUser = {
+        username: 'alice',
+        role: 'user',
+      };
+    });
+    registerTabLayoutRoutes(server, { tabLayouts: service });
+    installRouteErrorHandler(server);
+    await server.ready();
+    const initialSnapshot = await service.getSnapshot('alice');
+
     const app = makeInteractionApp();
     app.sessions.set('grandchild', { id: 'grandchild', name: 'Grandchild', parentSessionId: 'child' });
-    app.tabLayout.groups[0].refs.push({ kind: 'session', id: 'grandchild' });
-    enableRealSemanticEditing(app);
+    app.tabLayout = initialSnapshot.layout;
+    app.tabLayoutVersion = initialSnapshot.layout.version;
+    app._tabPlacementStates = new Map(
+      initialSnapshot.placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
+    );
+    const wirePayloads: unknown[] = [];
+    app._apiPut = async (path: string, payload: unknown) => {
+      wirePayloads.push(payload);
+      const response = await server.inject({ method: 'PUT', url: path, payload });
+      return {
+        ok: response.statusCode >= 200 && response.statusCode < 300,
+        status: response.statusCode,
+        json: async () => response.json(),
+      };
+    };
     app._fullRenderSessionTabs();
     const container = document.getElementById('sessionTabs') as HTMLElement & {
       setPointerCapture: ReturnType<typeof vi.fn>;
@@ -1014,12 +1177,38 @@ describe('COD-307 delegated pointer behavior', () => {
     );
     await app._tabLayoutEditCoordinator.flush();
 
-    expect(app._putTabLayout).toHaveBeenCalledWith(
-      expect.objectContaining({
-        operations: [expect.objectContaining({ type: 'moveRef', ref: { kind: 'session', id: 'parent' } })],
-      })
-    );
+    expect(wirePayloads).toEqual([
+      {
+        baseVersion: initialSnapshot.layout.version,
+        operations: [{ type: 'moveRef', ref: { kind: 'session', id: 'parent' }, groupId: 'g2', index: 1 }],
+      },
+    ]);
+    expect(layouts.alice.version).toBe(initialSnapshot.layout.version + 1);
+    expect(layouts.alice.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'parent', 'child', 'grandchild']);
     expect(app.tabLayout.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'parent', 'child', 'grandchild']);
+
+    const stale = await server.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: {
+        baseVersion: initialSnapshot.layout.version,
+        operations: [{ type: 'moveRef', ref: { kind: 'session', id: 'foreign' }, groupId: null, index: 0 }],
+      },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().data.layout.version).toBe(initialSnapshot.layout.version + 1);
+    const crossOwner = await server.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: {
+        baseVersion: layouts.alice.version,
+        operations: [{ type: 'moveRef', ref: { kind: 'session', id: 'foreign' }, groupId: null, index: 0 }],
+      },
+    });
+    expect(crossOwner.statusCode).toBe(400);
+    expect(layouts.alice.ungrouped.some((ref) => ref.id === 'foreign')).toBe(false);
+    await server.close();
+    vi.unstubAllEnvs();
   });
 
   it('installs once and commits one semantic drop after the movement threshold', () => {

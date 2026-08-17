@@ -220,11 +220,14 @@
 
   function operationsAfterAppliedPrefix(baseLayout, operationsInput, currentLayout) {
     const operations = Array.isArray(operationsInput) ? operationsInput : [];
-    if (operations.some((operation) => operation?.type === 'followParent')) return operations;
     const currentKey = layoutContentKey(currentLayout);
     let candidate = normalizedLayout(baseLayout);
     let appliedCount = layoutContentKey(candidate) === currentKey ? 0 : -1;
     for (let index = 0; index < operations.length; index++) {
+      // Follow-parent is a server-authoritative lineage operation. The browser
+      // can still recover the content-derived prefix before it, but must resend
+      // the Follow intent itself (which is idempotent once inherited).
+      if (operations[index]?.type === 'followParent') break;
       candidate = applyOperation(candidate, operations[index]);
       if (layoutContentKey(candidate) === currentKey) appliedCount = index + 1;
     }
@@ -448,13 +451,13 @@
 
     const replay = (base, operations) =>
       operations.reduce((current, operation) => applyOperation(current, operation), base);
-    const stopAndAdopt = (layout) => {
+    const stopAndAdopt = (layout, placements) => {
       if (timer !== null) cancel(timer);
       timer = null;
       pending = [];
       authoritative = normalizedLayout(layout);
       optimistic = normalizedLayout(authoritative);
-      apply(optimistic, { authoritative: true });
+      apply(optimistic, { authoritative: true, placements });
     };
     const flush = async () => {
       timer = null;
@@ -479,32 +482,40 @@
           if (remaining.length === 0) {
             authoritative = base;
             optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
-            apply(optimistic, { authoritative: true });
+            apply(optimistic, {
+              authoritative: true,
+              placements: response.placements,
+              committedOperations: batch,
+            });
             return;
           }
           try {
             desired = replay(base, remaining);
           } catch (_error) {
-            stopAndAdopt(base);
+            stopAndAdopt(base, response.placements);
             report('Tab layout changed; your edit could not be reapplied.');
             return;
           }
           response = await options.put({ baseVersion: base.version, layout: desired, operations: remaining });
           if (requestGeneration !== generation) return;
           if (!response.ok && response.status === 409 && response.layout) {
-            stopAndAdopt(response.layout);
+            stopAndAdopt(response.layout, response.placements);
             report('Tab layout changed again; server layout restored.');
             return;
           }
         }
         if (!response.ok || !response.layout) {
-          stopAndAdopt(response.layout || base);
+          stopAndAdopt(response.layout || base, response.placements);
           report('Could not save tab layout.');
           return;
         }
         authoritative = normalizedLayout(response.layout);
         optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
-        apply(optimistic, { authoritative: true });
+        apply(optimistic, {
+          authoritative: true,
+          placements: response.placements,
+          committedOperations: batch,
+        });
       } catch (_error) {
         stopAndAdopt(authoritative);
         report('Could not save tab layout.');
@@ -549,7 +560,7 @@
         });
         return true;
       },
-      adoptExternal(layout) {
+      adoptExternal(layout, meta = {}) {
         const next = normalizedLayout(layout);
         if (next.version < authoritative.version) return false;
         generation++;
@@ -565,7 +576,7 @@
           optimistic = normalizedLayout(next);
           report('Tab layout changed; your pending edit was discarded.');
         }
-        apply(optimistic, { authoritative: true, external: true });
+        apply(optimistic, { authoritative: true, external: true, placements: meta.placements });
         if (pending.length) queue();
         return true;
       },

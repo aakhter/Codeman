@@ -252,6 +252,41 @@ describe('TabLayoutService', () => {
     ]);
   });
 
+  it('accepts a recovered Follow-parent intent idempotently after it is already inherited', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: {
+          ...existing([]),
+          groups: [
+            {
+              id: 'g',
+              name: 'Work',
+              refs: [
+                { kind: 'session', id: 'parent' },
+                { kind: 'session', id: 'child' },
+              ],
+            },
+          ],
+        },
+      },
+      live: [
+        { id: 'parent', owner: 'alice', createdAt: 1 },
+        { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+      ],
+    });
+
+    const result = await h.service.putOperations(
+      'alice',
+      [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
+      7
+    );
+
+    expect(result.status).toBe('updated');
+    expect(result.layout.version).toBe(7);
+    expect(result.placements.find((placement) => placement.id === 'child')?.state).toBe('inherited');
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+  });
+
   it('repairs missing refs before applying semantic intent and rejects duplicate edits atomically', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'parent' }]) },

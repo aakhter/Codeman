@@ -526,12 +526,13 @@ describe('COD-306 CodemanApp integration', () => {
     app._tabLayoutCoordinator = null;
     const first = app._loadTabLayout();
     const second = app._loadTabLayout();
-    pending[1]({ ...layout, version: 10 });
+    const placements = [{ kind: 'session', id: 's1', state: 'manual', parentId: 's2', canFollow: true }];
+    pending[1]({ layout: { ...layout, version: 10 }, placements });
     await second;
-    pending[0]({ ...layout, version: 9 });
+    pending[0]({ layout: { ...layout, version: 9 }, placements: [] });
     await first;
     expect(app._applyTabLayout).toHaveBeenCalledTimes(1);
-    expect(app._applyTabLayout).toHaveBeenCalledWith({ ...layout, version: 10 });
+    expect(app._applyTabLayout).toHaveBeenCalledWith({ ...layout, version: 10 }, placements);
 
     app._loadTabLayout = vi.fn();
     app._onTabLayoutChanged();

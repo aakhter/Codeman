@@ -4824,10 +4824,7 @@ class CodemanApp {
     this._tabLayoutCoordinator = window.CodemanTabLayout.createLoadCoordinator({
       fetchLayout: () => this._fetchTabLayout(),
       applyLayout: (snapshot) => {
-        this._tabPlacementStates = new Map(
-          (snapshot.placements || []).map((placement) => [`${placement.kind}:${placement.id}`, placement])
-        );
-        this._applyTabLayout(snapshot.layout || snapshot);
+        this._applyTabLayout(snapshot.layout || snapshot, snapshot.placements);
       },
       applyFallback: () => this._applyTabLayoutFallback(),
       scheduleRetry: (retry) => setTimeout(retry, 2000),
@@ -4975,17 +4972,8 @@ class CodemanApp {
       ok: response.ok,
       status: response.status,
       layout: body?.data?.layout || null,
+      placements: body?.data?.placements || null,
     };
-    if (body?.data?.placements) {
-      this._tabPlacementStates = new Map(
-        body.data.placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
-      );
-    }
-    if (response.ok) {
-      for (const operation of wireOperations) {
-        if (operation?.type === 'followParent') this._tabPendingFollowRefs.delete(`${operation.ref.kind}:${operation.ref.id}`);
-      }
-    }
     return result;
   }
 
@@ -5062,7 +5050,7 @@ class CodemanApp {
       debounceMs: 180,
       put: (request) => this._putTabLayout(request),
       putKeepalive: (request) => this._putTabLayoutKeepalive(request),
-      applyLayout: (layout) => this._adoptTabLayoutForEdit(layout),
+      applyLayout: (layout, meta) => this._adoptTabLayoutForEdit(layout, meta),
       reportError: (message) => {
         this._tabPendingFollowRefs.clear();
         this._lastTabStructureKey = null;
@@ -5080,7 +5068,17 @@ class CodemanApp {
     return this._tabLayoutEditCoordinator;
   }
 
-  _adoptTabLayoutForEdit(layout) {
+  _adoptTabLayoutForEdit(layout, meta = {}) {
+    if (Array.isArray(meta.placements)) {
+      this._tabPlacementStates = new Map(
+        meta.placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
+      );
+    }
+    for (const operation of meta.committedOperations || []) {
+      if (operation?.type === 'followParent') {
+        this._tabPendingFollowRefs.delete(`${operation.ref.kind}:${operation.ref.id}`);
+      }
+    }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
     this.tabLayoutReadOnly = false;
@@ -5343,15 +5341,20 @@ class CodemanApp {
     return projection;
   }
 
-  _applyTabLayout(layout) {
+  _applyTabLayout(layout, placements) {
     if (
       this.tabLayoutVersion !== null &&
       Number.isSafeInteger(layout?.version) &&
       layout.version < this.tabLayoutVersion
     ) return;
     if (this._tabLayoutEditCoordinator) {
-      this._tabLayoutEditCoordinator.adoptExternal(layout);
+      this._tabLayoutEditCoordinator.adoptExternal(layout, { placements });
       return;
+    }
+    if (Array.isArray(placements)) {
+      this._tabPlacementStates = new Map(
+        placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
+      );
     }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
