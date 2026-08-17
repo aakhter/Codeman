@@ -102,7 +102,7 @@ Object.assign(CodemanApp.prototype, {
             <span class="tab-name">${escapeHtml(webview.name)}</span>
           </span>
         </span>
-        <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span></span>
+        <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag aria-label="Move ${escapeHtml(webview.name)} web tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
       </div>`;
   },
 
@@ -120,11 +120,16 @@ Object.assign(CodemanApp.prototype, {
     const container = this.$('sessionTabs');
     if (!container) return;
     for (const tab of container.querySelectorAll('.session-tab[data-webview-id]')) {
-      tab.classList.toggle('active', tab.dataset.webviewId === this.activeWebviewId);
+      const active = tab.dataset.webviewId === this.activeWebviewId;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
     }
     if (this.activeWebviewId) {
       // A web tab is active, so no session tab may also look active.
-      for (const tab of container.querySelectorAll('.session-tab[data-id]')) tab.classList.remove('active');
+      for (const tab of container.querySelectorAll('.session-tab[data-id]')) {
+        tab.classList.remove('active');
+        tab.setAttribute('aria-selected', 'false');
+      }
     }
   },
 

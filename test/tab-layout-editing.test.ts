@@ -1,0 +1,743 @@
+// @vitest-environment jsdom
+/** @fileoverview COD-307 accessible tab-layout editing, persistence, and pointer contracts. */
+
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import vm from 'node:vm';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const PUBLIC = join(process.cwd(), 'src/web/public');
+const HELPER_SOURCE = readFileSync(join(PUBLIC, 'tab-layout-browser.js'), 'utf8');
+const APP_SOURCE = readFileSync(join(PUBLIC, 'app.js'), 'utf8');
+let CodemanApp: { prototype: Record<string, any> };
+
+beforeAll(() => {
+  const constants = readFileSync(join(PUBLIC, 'constants.js'), 'utf8');
+  const webviews = readFileSync(join(PUBLIC, 'webview-tabs.js'), 'utf8');
+  const source =
+    'var MobileDetection = { isTouchDevice: () => false }, KeyboardHandler = {}, SwipeHandler = {}, VoiceInput = {}, ' +
+    'DeepgramProvider = {}, NotificationManager = function(){};\n' +
+    constants +
+    '\n' +
+    HELPER_SOURCE +
+    '\n' +
+    APP_SOURCE +
+    '\n' +
+    webviews +
+    '\n;globalThis.__Cod307App = CodemanApp;';
+  const interval = window.setInterval;
+  const raf = window.requestAnimationFrame;
+  window.setInterval = (() => 0) as typeof window.setInterval;
+  window.requestAnimationFrame = (() => 0) as typeof window.requestAnimationFrame;
+  (0, eval)(source);
+  window.setInterval = interval;
+  window.requestAnimationFrame = raf;
+  CodemanApp = (globalThis as any).__Cod307App;
+});
+
+type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual' };
+type Layout = {
+  version: number;
+  updatedAt: string;
+  groups: Array<{ id: string; name: string; refs: Ref[] }>;
+  ungrouped: Ref[];
+};
+
+function layout(version = 4): Layout {
+  return {
+    version,
+    updatedAt: '2026-08-16T00:00:00.000Z',
+    groups: [
+      {
+        id: 'g1',
+        name: 'Core <&>',
+        refs: [
+          { kind: 'session', id: 'parent' },
+          { kind: 'session', id: 'child' },
+        ],
+      },
+      { id: 'g2', name: 'Ops', refs: [{ kind: 'session', id: 'other' }] },
+    ],
+    ungrouped: [{ kind: 'webview', id: 'web' }],
+  };
+}
+
+function loadHelper() {
+  const context = vm.createContext({ window: {}, globalThis: {}, setTimeout, clearTimeout });
+  vm.runInContext(HELPER_SOURCE, context, { filename: 'tab-layout-browser.js' });
+  return (context.window as any).CodemanTabLayout;
+}
+
+describe('COD-307 browser semantic mirror', () => {
+  it('creates, renames, deletes, and reorders groups without mutating input', () => {
+    const h = loadHelper();
+    const initial = layout();
+    const created = h.applyOperation(initial, { type: 'createGroup', id: 'g3', name: 'New', index: 1 });
+    const renamed = h.applyOperation(created, { type: 'renameGroup', groupId: 'g3', name: 'Renamed' });
+    const reordered = h.applyOperation(renamed, { type: 'reorderGroup', groupId: 'g3', index: 0 });
+    const deleted = h.applyOperation(reordered, { type: 'deleteGroup', groupId: 'g1' });
+
+    expect(initial.groups.map((group) => group.id)).toEqual(['g1', 'g2']);
+    expect(reordered.groups.map((group) => group.id)).toEqual(['g3', 'g1', 'g2']);
+    expect(reordered.groups[0].name).toBe('Renamed');
+    expect(deleted.ungrouped.map((ref) => ref.id)).toEqual(['web', 'parent', 'child']);
+  });
+
+  it('moves a parent as one contiguous inherited subtree and marks an independently moved child manual', () => {
+    const h = loadHelper();
+    const metadata = [
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'child', parentSessionId: 'parent' },
+      { kind: 'session', id: 'other' },
+      { kind: 'webview', id: 'web' },
+    ];
+    const movedParent = h.applyOperation(layout(), {
+      type: 'moveRef',
+      ref: { kind: 'session', id: 'parent' },
+      groupId: 'g2',
+      index: 1,
+      metadata,
+    });
+    expect(movedParent.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'parent', 'child']);
+    expect(
+      h
+        .previewOperation(layout(), {
+          type: 'moveRef',
+          ref: { kind: 'session', id: 'parent' },
+          groupId: 'g2',
+          index: 1,
+          metadata,
+        })
+        .refs.map((ref: Ref) => ref.id)
+    ).toEqual(['parent', 'child']);
+
+    const movedChild = h.applyOperation(layout(), {
+      type: 'moveRef',
+      ref: { kind: 'session', id: 'child' },
+      groupId: null,
+      index: 0,
+      metadata,
+    });
+    expect(movedChild.ungrouped[0]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
+  });
+});
+
+describe('COD-307 optimistic write coordinator', () => {
+  beforeEach(() => vi.useFakeTimers());
+
+  it('coalesces a deterministic semantic burst and adopts the successful PUT version', async () => {
+    const h = loadHelper();
+    const adopted: Layout[] = [];
+    const put = vi.fn(async ({ baseVersion, layout: next }: any) => ({
+      ok: true,
+      status: 200,
+      layout: { ...next, version: baseVersion + 1 },
+    }));
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: (next: Layout) => adopted.push(next),
+      put,
+      debounceMs: 100,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Platform' });
+    coordinator.enqueue({ type: 'reorderGroup', groupId: 'g2', index: 0 });
+    expect(adopted.at(-1)?.groups.map((group) => group.id)).toEqual(['g2', 'g1']);
+    expect(put).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls[0][0].baseVersion).toBe(4);
+    expect(coordinator.getLayout().version).toBe(5);
+  });
+
+  it('rebases the same pending semantic operations once after 409 and retries once', async () => {
+    const h = loadHelper();
+    const server = { ...layout(8), groups: [...layout(8).groups, { id: 'remote', name: 'Remote', refs: [] }] };
+    const put = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 409, layout: server })
+      .mockImplementationOnce(async ({ layout: next }: any) => ({
+        ok: true,
+        status: 200,
+        layout: { ...next, version: 9 },
+      }));
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: vi.fn(),
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Local' });
+    await vi.runAllTimersAsync();
+
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls[1][0].baseVersion).toBe(8);
+    expect(coordinator.getLayout().groups.find((group: any) => group.id === 'remote')).toBeTruthy();
+    expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
+  });
+
+  it('adopts a 409 layout that already contains the complete semantic burst without replaying moves', async () => {
+    const h = loadHelper();
+    const initial = {
+      ...layout(),
+      groups: ['a', 'b', 'c', 'd'].map((id) => ({ id, name: id, refs: [] })),
+    };
+    const operations = [
+      { type: 'reorderGroup', groupId: 'a', index: 1 },
+      { type: 'reorderGroup', groupId: 'b', index: 2 },
+    ];
+    const committed = operations.reduce((candidate, operation) => h.applyOperation(candidate, operation), initial);
+    const put = vi.fn(async () => ({ ok: false, status: 409, layout: { ...committed, version: 5 } }));
+    const coordinator = h.createEditCoordinator({
+      initialLayout: initial,
+      applyLayout: vi.fn(),
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    for (const operation of operations) coordinator.enqueue(operation);
+    await vi.runAllTimersAsync();
+
+    expect(put).toHaveBeenCalledOnce();
+    expect(coordinator.getLayout().groups.map((group: any) => group.id)).toEqual(['a', 'c', 'b', 'd']);
+  });
+
+  it('stops after a second conflict, adopts server state, and ignores stale success/SSE adoption', async () => {
+    const h = loadHelper();
+    const second = { ...layout(10), groups: [{ id: 'server', name: 'Server', refs: [] }] };
+    const error = vi.fn();
+    const put = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 409, layout: layout(9) })
+      .mockResolvedValueOnce({ ok: false, status: 409, layout: second });
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: vi.fn(),
+      reportError: error,
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Local' });
+    await vi.runAllTimersAsync();
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(coordinator.getLayout()).toEqual(second);
+    expect(error).toHaveBeenCalledOnce();
+    expect(coordinator.adoptExternal(layout(8))).toBe(false);
+    expect(coordinator.getLayout()).toEqual(second);
+  });
+
+  it('rebases an in-flight semantic batch over newer SSE state and cannot resurrect a stale success', async () => {
+    const h = loadHelper();
+    let resolveFirst!: (value: unknown) => void;
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const put = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockImplementationOnce(async ({ baseVersion, layout: next }: any) => ({
+        ok: true,
+        status: 200,
+        layout: { ...next, version: baseVersion + 1 },
+      }));
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: vi.fn(),
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Local' });
+    await vi.advanceTimersByTimeAsync(0);
+    const external = { ...layout(8), groups: [...layout(8).groups, { id: 'remote', name: 'Remote', refs: [] }] };
+    expect(coordinator.adoptExternal(external)).toBe(true);
+    expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
+    resolveFirst({ ok: true, status: 200, layout: { ...layout(5), groups: [] } });
+    await first;
+    await vi.runAllTimersAsync();
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls[1][0].baseVersion).toBe(8);
+    expect(coordinator.getLayout().version).toBe(9);
+    expect(coordinator.getLayout().groups.find((group: any) => group.id === 'remote')).toBeTruthy();
+    expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
+  });
+
+  it('snapshots both an in-flight batch and operations queued behind it for reload recovery', async () => {
+    const h = loadHelper();
+    const never = new Promise(() => {});
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: vi.fn(),
+      put: vi.fn(() => never),
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'First' });
+    await vi.advanceTimersByTimeAsync(0);
+    coordinator.enqueue({ type: 'reorderGroup', groupId: 'g2', index: 0 });
+    expect(coordinator.pendingOperations().map((operation: any) => operation.type)).toEqual([
+      'renameGroup',
+      'reorderGroup',
+    ]);
+  });
+
+  it('snapshots the rebased authoritative state while the conflict retry is in flight', async () => {
+    const h = loadHelper();
+    const remote = {
+      ...layout(8),
+      groups: [...layout(8).groups, { id: 'remote', name: 'Remote', refs: [] }],
+    };
+    const never = new Promise(() => {});
+    const put = vi.fn().mockResolvedValueOnce({ ok: false, status: 409, layout: remote }).mockReturnValueOnce(never);
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: vi.fn(),
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Local' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(coordinator.recoverySnapshot().baseLayout.version).toBe(8);
+    expect(coordinator.recoverySnapshot().baseLayout.groups.at(-1).id).toBe('remote');
+  });
+});
+
+describe('COD-307 accessible rendering and pointer wiring', () => {
+  it('renders one vertical tree, named headers and members as treeitems, groups, explicit zones, and escaped names', () => {
+    const h = loadHelper();
+    const projection = h.project(layout(), {
+      liveSessionIds: ['parent', 'child', 'other'],
+      openWebviewIds: ['web'],
+      collapsedGroupIds: ['g2'],
+      activeSessionId: 'parent',
+      orientation: 'vertical',
+    });
+    const html = h.renderProjection(
+      projection,
+      'vertical',
+      (ref: Ref) => `<div class="session-tab" data-id="${ref.id}" aria-selected="${ref.id === 'parent'}"></div>`,
+      (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    );
+    document.body.innerHTML = `<div id="sessionTabs">${html}</div>`;
+    const container = document.getElementById('sessionTabs')!;
+    expect(container.querySelectorAll('[role="tree"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[role="treeitem"]')).toHaveLength(6);
+    expect(container.querySelectorAll('[role="group"]')).toHaveLength(3);
+    expect(container.querySelectorAll('.tab-layout-drop-zone').length).toBeGreaterThan(8);
+    expect(
+      [...container.querySelectorAll('.tab-layout-drop-zone')].every(
+        (zone) => zone.getAttribute('role') === 'presentation'
+      )
+    ).toBe(true);
+    expect(container.querySelector('.tab-layout-create-group')?.parentElement?.getAttribute('role')).not.toBe('tree');
+    expect(container.innerHTML).toContain('Core &lt;&amp;&gt;');
+    expect(container.innerHTML).not.toContain('Core <&>');
+    expect(container.querySelector('[data-tab-group-header="g2"]')?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[data-id="other"]')).toBeNull();
+    expect(container.querySelector('[data-tab-group-id=""] [data-tab-group-header]')).toBeNull();
+  });
+
+  it('uses complete stored indices for drop zones when visible refs omit unopened or collapsed members', () => {
+    const h = loadHelper();
+    const indexed = layout();
+    indexed.groups[0].refs = [
+      { kind: 'webview', id: 'closed' },
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'child' },
+    ];
+    const projection = h.project(indexed, {
+      liveSessionIds: ['parent', 'child'],
+      openWebviewIds: [],
+      activeSessionId: 'parent',
+      orientation: 'vertical',
+    });
+    const html = h.renderProjection(
+      projection,
+      'vertical',
+      (ref: Ref) => `<div class="session-tab" data-id="${ref.id}" role="tab" tabindex="0"></div>`,
+      (value: string) => value
+    );
+    document.body.innerHTML = html;
+    const zones = [...document.querySelectorAll<HTMLElement>('[data-tab-drop-group="g1"]')];
+    expect(zones.map((zone) => zone.dataset.tabDropIndex)).toEqual(['1', '2', '3']);
+  });
+
+  it('has one delegated pointer-event system and no HTML5 managed drag system', () => {
+    expect(APP_SOURCE).toContain("container.addEventListener('pointerdown'");
+    expect(APP_SOURCE).toContain("container.addEventListener('pointermove'");
+    expect(APP_SOURCE).toContain("container.addEventListener('pointerup'");
+    expect(APP_SOURCE).toContain("container.addEventListener('pointercancel'");
+    expect(APP_SOURCE).toContain('setPointerCapture');
+    expect(APP_SOURCE).not.toContain("tab.addEventListener('dragstart'");
+    expect(APP_SOURCE).not.toContain("tab.setAttribute('draggable', 'true')");
+  });
+});
+
+function makeInteractionApp() {
+  (globalThis as any).CSS ||= { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '\\$&') };
+  const app = Object.create(CodemanApp.prototype) as Record<string, any>;
+  document.documentElement.setAttribute('data-tab-orientation', 'vertical');
+  document.body.innerHTML = '<div id="sessionTabs"></div>';
+  app.$ = (id: string) => document.getElementById(id);
+  app.sessions = new Map([
+    ['parent', { id: 'parent', name: 'Parent' }],
+    ['child', { id: 'child', name: 'Child', parentSessionId: 'parent' }],
+    ['other', { id: 'other', name: 'Other' }],
+  ]);
+  app.webviews = new Map([['web', { id: 'web', name: 'Web', url: 'https://example.test' }]]);
+  app.webviewOrder = ['web'];
+  app.activeSessionId = 'parent';
+  app.activeWebviewId = null;
+  app.tabLayout = layout();
+  app.tabLayoutVersion = 4;
+  app.tabLayoutReadOnly = false;
+  app.collapsedTabGroupIds = new Set();
+  app._tabCollapseStorageFailed = false;
+  app._legacySessionOrder = [];
+  app._tabLayoutFirstPaintPending = false;
+  app._lastTabStructureKey = null;
+  app._inlineRenameActive = false;
+  app._tabLayoutManaged = true;
+  app._tabPointerHandlersBound = false;
+  app._tabFocusIdentity = null;
+  app.detachedSessions = new Set();
+  app.tabAlerts = new Map();
+  app.terminalLoadStates = new Map();
+  app.minimizedSubagents = new Map();
+  app.hasTabDetachOverride = () => false;
+  app.renderSubagentTabBadge = () => '';
+  app.cancelHideSubagentDropdown = () => {};
+  app.updateTabOverflowMode = () => {};
+  app.updateConnectionLines = () => {};
+  app._applyTabEntrances = () => {};
+  app._scrollActiveTabIntoView = () => {};
+  app.selectSession = vi.fn();
+  app.openWebview = vi.fn();
+  app.showToast = vi.fn();
+  return app;
+}
+
+describe('COD-307 roving tree and focus restoration', () => {
+  it('keeps exactly one vertical treeitem tabbable and implements Up/Down/Home/End', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs')!;
+    const items = [...container.querySelectorAll<HTMLElement>('[role="treeitem"]')];
+    expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
+    expect(container.querySelectorAll('[tabindex="0"]')).toHaveLength(1);
+    expect([...container.querySelectorAll<HTMLButtonElement>('button')].every((button) => button.tabIndex === -1)).toBe(
+      true
+    );
+    items[0].focus();
+    items[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement).toBe(items[1]);
+    items[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(document.activeElement).toBe(items.at(-1));
+    items.at(-1)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    expect(document.activeElement).toBe(items[0]);
+    items[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    expect(document.activeElement).toBe(items.at(-1));
+  });
+
+  it('collapses/expands/enters named groups with Left/Right and activates with Enter/Space', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    let header = document.querySelector<HTMLElement>('.tab-layout-group-header')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(app.collapsedTabGroupIds.has('g1')).toBe(true);
+    expect(document.querySelector('[data-id="child"]')).toBeNull();
+
+    header = document.querySelector<HTMLElement>('.tab-layout-group-header')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(app.collapsedTabGroupIds.has('g1')).toBe(false);
+    header = document.querySelector<HTMLElement>('.tab-layout-group-header')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect((document.activeElement as HTMLElement).dataset.id).toBe('parent');
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(document.activeElement).toBe(header);
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(app.collapsedTabGroupIds.has('g1')).toBe(true);
+  });
+
+  it('retains exclusive aria-selected and restores identity across orientation rerenders', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    expect(document.querySelectorAll('[aria-selected="true"]')).toHaveLength(1);
+    const parent = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    parent.focus();
+    document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
+    app._fullRenderSessionTabs();
+    expect(document.getElementById('sessionTabs')?.getAttribute('role')).toBe('tablist');
+    expect(document.activeElement).toBe(document.querySelector('[data-id="parent"]'));
+    expect(document.querySelectorAll('.session-tab[tabindex="0"]')).toHaveLength(1);
+  });
+
+  it('exposes keyboard equivalents for create, rename, delete, group reorder, and ref move menus', () => {
+    const app = makeInteractionApp();
+    app.createTabGroup = vi.fn();
+    app.startTabGroupRename = vi.fn();
+    app.deleteTabGroup = vi.fn();
+    app.editTabLayout = vi.fn();
+    app.openTabGroupMenu = vi.fn();
+    app.openTabRefMoveMenu = vi.fn();
+    app._fullRenderSessionTabs();
+    const header = document.querySelector<HTMLElement>('.tab-layout-group-header')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'Insert', bubbles: true }));
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }));
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', ctrlKey: true, bubbles: true }));
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
+    expect(app.createTabGroup).toHaveBeenCalledOnce();
+    expect(app.startTabGroupRename).toHaveBeenCalledWith('g1');
+    expect(app.deleteTabGroup).toHaveBeenCalledWith('g1');
+    expect(app.editTabLayout).toHaveBeenCalledWith({ type: 'reorderGroup', groupId: 'g1', index: 1 }, 'group:g1');
+    expect(app.openTabGroupMenu).toHaveBeenCalledWith(expect.anything(), 'g1');
+
+    const tab = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    tab.focus();
+    tab.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
+    expect(app.openTabRefMoveMenu).toHaveBeenCalledWith(expect.anything(), { kind: 'session', id: 'parent' });
+  });
+
+  it('keeps horizontal Left/Right/Home/End navigation and Enter activation flat', () => {
+    const app = makeInteractionApp();
+    document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
+    app._fullRenderSessionTabs();
+    const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab[role="tab"]')];
+    tabs[0].focus();
+    tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.activeElement).toBe(tabs[1]);
+    tabs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(document.activeElement).toBe(tabs.at(-1));
+    tabs.at(-1)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    expect(document.activeElement).toBe(tabs[0]);
+    tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(document.activeElement).toBe(tabs.at(-1));
+    tabs[0].focus();
+    tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(app.selectSession).toHaveBeenCalledWith('parent');
+  });
+
+  it('preserves a group rename input through debounced and authoritative render attempts', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    expect(app.startTabGroupRename('g1')).toBe(true);
+    const input = document.querySelector<HTMLInputElement>('.tab-layout-group-rename-input')!;
+    input.value = 'Still typing';
+    app.renderSessionTabs();
+    app._fullRenderSessionTabs();
+    app._applyTabLayout({
+      ...layout(5),
+      groups: [{ ...layout(5).groups[0], name: 'Server name' }, layout(5).groups[1]],
+    });
+    expect(document.body.contains(input)).toBe(true);
+    expect(input.value).toBe('Still typing');
+    expect(app._inlineRenameActive).toBe(true);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.querySelector('.tab-layout-group-label')?.textContent).toBe('Server name');
+  });
+
+  it('does not let inline-edit keystrokes bubble into tree navigation or commands', () => {
+    const app = makeInteractionApp();
+    app.deleteTabGroup = vi.fn();
+    app._fullRenderSessionTabs();
+    app.startTabGroupRename('g1');
+    const input = document.querySelector<HTMLInputElement>('.tab-layout-group-rename-input')!;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(app.deleteTabGroup).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(input);
+    expect(app.collapsedTabGroupIds.has('g1')).toBe(false);
+  });
+
+  it('adjusts forward group drops to post-removal reorder indices', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups.push({ id: 'g3', name: 'Three', refs: [] });
+    expect(app._adjustGroupReorderIndex('g1', 2)).toBe(1);
+    expect(app._adjustGroupReorderIndex('g3', 0)).toBe(0);
+  });
+});
+
+function pointerEvent(type: string, values: Record<string, unknown>) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    clientX: Number(values.clientX),
+    clientY: Number(values.clientY),
+  });
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(event, key, { value });
+  return event;
+}
+
+describe('COD-307 delegated pointer behavior', () => {
+  it('installs once and commits one semantic drop after the movement threshold', () => {
+    const app = makeInteractionApp();
+    app.editTabLayout = vi.fn(() => true);
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    app.setupTabDragHandlers();
+    app.setupTabDragHandlers();
+    const tab = container.querySelector<HTMLElement>('[data-id="parent"]')!;
+    const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"][data-tab-drop-index="1"]')!;
+    (document as any).elementFromPoint = vi.fn(() => zone);
+
+    tab.dispatchEvent(pointerEvent('pointerdown', { pointerId: 7, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 7, pointerType: 'mouse', clientX: 3, clientY: 3 })
+    );
+    expect(zone.classList.contains('tab-layout-drop-active')).toBe(false);
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 7, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+    expect(zone.classList.contains('tab-layout-drop-active')).toBe(true);
+    container.dispatchEvent(
+      pointerEvent('pointerup', { pointerId: 7, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+
+    expect(app.editTabLayout).toHaveBeenCalledTimes(1);
+    expect(app.editTabLayout.mock.calls[0][0]).toMatchObject({
+      type: 'moveRef',
+      ref: { kind: 'session', id: 'parent' },
+      groupId: 'g2',
+      index: 1,
+    });
+    expect(app._tabPointerDrag).toBeNull();
+    expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
+  });
+
+  it('supports touch intent and fully cleans up on pointercancel without committing', () => {
+    const app = makeInteractionApp();
+    app.editTabLayout = vi.fn(() => true);
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const tab = container.querySelector<HTMLElement>('[data-id="parent"]')!;
+    const handle = tab.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"]')!;
+    (document as any).elementFromPoint = vi.fn(() => zone);
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 8, pointerType: 'touch', clientX: 0, clientY: 0 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 8, pointerType: 'touch', clientX: 12, clientY: 12 })
+    );
+    expect(container.querySelectorAll('.tab-layout-drag-block').length).toBeGreaterThan(1);
+    container.dispatchEvent(
+      pointerEvent('pointercancel', { pointerId: 8, pointerType: 'touch', clientX: 12, clientY: 12 })
+    );
+    expect(app.editTabLayout).not.toHaveBeenCalled();
+    expect(app._tabPointerDrag).toBeNull();
+    expect(container.querySelector('.tab-layout-drag-block')).toBeNull();
+  });
+
+  it('cleans up after lost pointer capture and ships touch arbitration for vertical ref dragging', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const tab = container.querySelector<HTMLElement>('[data-id="parent"]')!;
+    const handle = tab.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 9, pointerType: 'touch', clientX: 0, clientY: 0 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 9, pointerType: 'touch', clientX: 12, clientY: 12 })
+    );
+    container.dispatchEvent(
+      pointerEvent('lostpointercapture', { pointerId: 9, pointerType: 'touch', clientX: 12, clientY: 12 })
+    );
+    expect(app._tabPointerDrag).toBeNull();
+    expect(container.querySelector('.tab-layout-drag-block')).toBeNull();
+    const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
+    expect(css).toMatch(/vertical[^}]*session-tab[^}]*\{[^}]*touch-action:\s*pan-y/s);
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*touch-action:\s*none/s);
+  });
+});
+
+describe('COD-307 page lifecycle persistence', () => {
+  it('sends the latest optimistic layout through keepalive on ordinary pagehide only', () => {
+    const h = loadHelper();
+    const keepalive = vi.fn();
+    const coordinator = h.createEditCoordinator({
+      initialLayout: layout(),
+      applyLayout: vi.fn(),
+      put: vi.fn(),
+      putKeepalive: keepalive,
+      debounceMs: 180,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Leaving' });
+    coordinator.flushKeepalive();
+    expect(keepalive).toHaveBeenCalledWith({
+      baseVersion: 4,
+      layout: expect.objectContaining({
+        groups: expect.arrayContaining([expect.objectContaining({ name: 'Leaving' })]),
+      }),
+    });
+  });
+
+  it('flushes edits on ordinary pagehide but preserves BFCache state', () => {
+    const app = makeInteractionApp();
+    app._tabLayoutCoordinator = null;
+    app._tabLayoutPagehideHandler = null;
+    app._fetchTabLayout = vi.fn(async () => layout());
+    app._tabLayoutEditCoordinator = { flushKeepalive: vi.fn(), hasPending: () => true };
+    app._ensureTabLayoutCoordinator();
+    const persisted = new Event('pagehide');
+    Object.defineProperty(persisted, 'persisted', { value: true });
+    window.dispatchEvent(persisted);
+    expect(app._tabLayoutEditCoordinator.flushKeepalive).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event('pagehide'));
+    expect(app._tabLayoutEditCoordinator.flushKeepalive).toHaveBeenCalledOnce();
+  });
+
+  it('restores persisted semantic operations through a fresh authoritative layout load', () => {
+    const base = layout();
+    sessionStorage.setItem(
+      'codeman:tab-layout-pending-operations',
+      JSON.stringify({
+        baseLayout: base,
+        operations: [
+          { type: 'reorderGroup', groupId: 'g2', index: 0 },
+          { type: 'renameGroup', groupId: 'g1', name: 'Recovered' },
+        ],
+      })
+    );
+    const app = makeInteractionApp();
+    const enqueue = vi.fn();
+    app.tabLayout = null;
+    app.tabLayoutVersion = null;
+    app._tabLayoutEditCoordinator = null;
+    app._ensureTabLayoutEditCoordinator = vi.fn(() => ({ enqueue }));
+    const prefixCommitted = (window as any).CodemanTabLayout.applyOperation(base, {
+      type: 'reorderGroup',
+      groupId: 'g2',
+      index: 0,
+    });
+    app._applyTabLayout({ ...prefixCommitted, version: 5 });
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue).toHaveBeenCalledWith({ type: 'renameGroup', groupId: 'g1', name: 'Recovered' });
+    expect(sessionStorage.getItem('codeman:tab-layout-pending-operations')).toBeNull();
+  });
+});

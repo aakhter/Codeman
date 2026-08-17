@@ -542,10 +542,14 @@ class CodemanApp {
     this._tabLayoutManaged = true;
     this._tabLayoutFirstPaintPending = true;
     this._tabLayoutCoordinator = null;
+    this._tabLayoutEditCoordinator = null;
+    this._tabLayoutSsePending = false;
     this._tabLayoutPagehideHandler = null;
     this._lastTabStructureKey = null;
+    this._tabFocusIdentity = null;
+    this._tabPointerDrag = null;
+    this._tabPointerHandlersBound = false;
     this._legacySessionOrder = [];
-    this.draggedTabId = null; // Currently dragged tab session ID
     this.cases = [];
     this.currentRun = null;
     this.totalTokens = 0;
@@ -4827,6 +4831,8 @@ class CodemanApp {
         // A persisted pagehide enters BFCache; this same page instance resumes
         // on Back and must keep its coordinator usable for SSE-driven refetches.
         if (event.persisted) return;
+        this._persistPendingTabLayoutOperations();
+        this._tabLayoutEditCoordinator?.flushKeepalive();
         this._tabLayoutCoordinator?.dispose();
         window.removeEventListener('pagehide', this._tabLayoutPagehideHandler);
         this._tabLayoutPagehideHandler = null;
@@ -4853,7 +4859,292 @@ class CodemanApp {
   }
 
   _onTabLayoutChanged() {
+    // A pending semantic edit owns its optimistic projection. A refetch may
+    // update its authoritative base, but must not paint stale server state over it.
+    if (this._tabLayoutEditCoordinator?.hasPending()) {
+      this._tabLayoutSsePending = true;
+      return;
+    }
     this._loadTabLayout();
+  }
+
+  _tabLayoutMetadata() {
+    const metadata = [];
+    for (const session of this.sessions.values()) {
+      metadata.push({
+        kind: 'session',
+        id: session.id,
+        ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
+      });
+    }
+    for (const id of this.webviews?.keys?.() || []) metadata.push({ kind: 'webview', id });
+    return metadata;
+  }
+
+  async _putTabLayout({ baseVersion, layout }) {
+    const response = await this._apiPut('/api/tab-layout', { baseVersion, layout });
+    if (!response) return { ok: false, status: 0, layout: null };
+    let body = null;
+    try { body = await response.json(); } catch {}
+    return {
+      ok: response.ok,
+      status: response.status,
+      layout: body?.data?.layout || null,
+    };
+  }
+
+  _putTabLayoutKeepalive({ baseVersion, layout }) {
+    try {
+      void fetch('/api/tab-layout', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseVersion, layout }),
+        keepalive: true,
+      }).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _persistPendingTabLayoutOperations() {
+    const coordinator = this._tabLayoutEditCoordinator;
+    const operations = coordinator?.pendingOperations?.() || [];
+    if (!operations.length) return false;
+    try {
+      const snapshot = coordinator.recoverySnapshot?.() || { baseLayout: this.tabLayout, operations };
+      sessionStorage.setItem('codeman:tab-layout-pending-operations', JSON.stringify(snapshot));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _restorePendingTabLayoutOperations() {
+    let snapshot;
+    try {
+      const raw = sessionStorage.getItem('codeman:tab-layout-pending-operations');
+      if (!raw) return false;
+      sessionStorage.removeItem('codeman:tab-layout-pending-operations');
+      snapshot = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    const storedOperations = Array.isArray(snapshot) ? snapshot : snapshot?.operations;
+    if (!Array.isArray(storedOperations) || !storedOperations.length) return false;
+    try {
+      const operations = snapshot?.baseLayout
+        ? window.CodemanTabLayout.operationsAfterAppliedPrefix(
+            snapshot.baseLayout,
+            storedOperations,
+            this.tabLayout
+          )
+        : storedOperations;
+      if (!operations.length) return false;
+      const restored = operations.map((operation) =>
+        operation?.type === 'moveRef' ? { ...operation, metadata: this._tabLayoutMetadata() } : operation
+      );
+      restored.reduce(
+        (candidate, operation) => window.CodemanTabLayout.applyOperation(candidate, operation),
+        this.tabLayout
+      );
+      const coordinator = this._ensureTabLayoutEditCoordinator();
+      for (const operation of restored) coordinator.enqueue(operation);
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not restore pending tab layout edits.', 'error');
+      return false;
+    }
+  }
+
+  _ensureTabLayoutEditCoordinator() {
+    if (this._tabLayoutEditCoordinator || !this.tabLayout) return this._tabLayoutEditCoordinator;
+    this._tabLayoutEditCoordinator = window.CodemanTabLayout.createEditCoordinator({
+      initialLayout: this.tabLayout,
+      debounceMs: 180,
+      put: (request) => this._putTabLayout(request),
+      putKeepalive: (request) => this._putTabLayoutKeepalive(request),
+      applyLayout: (layout) => this._adoptTabLayoutForEdit(layout),
+      reportError: (message) => this.showToast?.(message, 'error'),
+      onSettled: () => {
+        if (!this._tabLayoutSsePending) return;
+        this._tabLayoutSsePending = false;
+        this._loadTabLayout();
+      },
+      schedule: (fn, delay) => setTimeout(fn, delay),
+      cancel: (timer) => clearTimeout(timer),
+    });
+    return this._tabLayoutEditCoordinator;
+  }
+
+  _adoptTabLayoutForEdit(layout) {
+    this.tabLayout = layout;
+    this.tabLayoutVersion = layout.version;
+    this.tabLayoutReadOnly = false;
+    this._lastTabStructureKey = null;
+    this._refreshTabProjection();
+    this._fullRenderSessionTabs();
+  }
+
+  editTabLayout(operation, focusIdentity) {
+    if (this.tabLayoutReadOnly || !this.tabLayout) {
+      this.showToast?.('Tab layout is temporarily read-only.', 'error');
+      return false;
+    }
+    try {
+      this._tabFocusIdentity = focusIdentity || this._focusedTabLayoutIdentity();
+      this._ensureTabLayoutEditCoordinator().enqueue(operation);
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not edit tab layout.', 'error');
+      return false;
+    }
+  }
+
+  createTabGroup() {
+    if (this.tabLayoutReadOnly) return false;
+    const name = window.prompt?.('Group name');
+    if (!name?.trim()) return false;
+    const id = globalThis.crypto?.randomUUID?.() || `group-${Date.now().toString(36)}`;
+    return this.editTabLayout({ type: 'createGroup', id, name: name.trim() }, `group:${id}`);
+  }
+
+  startTabGroupRename(groupId) {
+    if (this._inlineRenameActive || this.tabLayoutReadOnly) return false;
+    const header = [...(this.$('sessionTabs')?.querySelectorAll('[data-tab-group-header]') || [])]
+      .find((candidate) => candidate.dataset.tabGroupHeader === groupId);
+    const label = header?.querySelector('.tab-layout-group-label');
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    if (!label || !group) return false;
+    this._inlineRenameActive = true;
+    const input = document.createElement('input');
+    input.className = 'tab-layout-group-rename-input';
+    input.value = group.name;
+    input.maxLength = 60;
+    label.replaceChildren(input);
+    let settled = false;
+    const finish = (commit) => {
+      if (settled) return;
+      settled = true;
+      const name = input.value.trim();
+      this._inlineRenameActive = false;
+      if (commit && name && name !== group.name) {
+        if (!this.editTabLayout({ type: 'renameGroup', groupId, name }, `group:${groupId}`)) {
+          this._fullRenderSessionTabs();
+        }
+      } else {
+        this._tabFocusIdentity = `group:${groupId}`;
+        this._fullRenderSessionTabs();
+      }
+    };
+    input.addEventListener('keydown', (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+      else if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.focus();
+    input.select();
+    return true;
+  }
+
+  deleteTabGroup(groupId) {
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    if (!group || !window.confirm?.(`Delete group “${group.name}”? Its tabs will move to Ungrouped.`)) return false;
+    const index = this.tabLayout.groups.findIndex((candidate) => candidate.id === groupId);
+    const next = this.tabLayout.groups[index + 1] || this.tabLayout.groups[index - 1];
+    return this.editTabLayout(
+      { type: 'deleteGroup', groupId },
+      next ? `group:${next.id}` : 'group:ungrouped'
+    );
+  }
+
+  openTabGroupMenu(event, groupId) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    document.querySelector('.tab-layout-group-action-menu')?.remove();
+    const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
+    if (groupIndex < 0) return;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-layout-group-action-menu';
+    menu.setAttribute('role', 'menu');
+    const actions = [
+      ['Rename group', () => this.startTabGroupRename(groupId)],
+      ['Move group earlier', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) }, `group:${groupId}`)],
+      ['Move group later', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1) }, `group:${groupId}`)],
+      ['Delete group', () => this.deleteTabGroup(groupId)],
+    ];
+    for (const [label, run] of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.textContent = label;
+      button.addEventListener('click', () => { menu.remove(); run(); });
+      menu.appendChild(button);
+    }
+    document.body.appendChild(menu);
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
+    menu.addEventListener('keydown', (keyEvent) => {
+      const buttons = [...menu.querySelectorAll('button')];
+      const current = buttons.indexOf(document.activeElement);
+      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
+      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+        keyEvent.preventDefault();
+        buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      }
+    });
+    menu.querySelector('button')?.focus();
+  }
+
+  moveTabRefToGroup(ref, groupId, index) {
+    return this.editTabLayout({
+      type: 'moveRef', ref, groupId, index, metadata: this._tabLayoutMetadata(),
+    }, `${ref.kind}:${ref.id}`);
+  }
+
+  openTabRefMoveMenu(event, ref) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    document.querySelector('.tab-layout-ref-move-menu')?.remove();
+    const location = this._refLocation(ref);
+    if (!location) return;
+    const currentRefs = location.groupId === null
+      ? this.tabLayout.ungrouped
+      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs || [];
+    const destinations = [
+      ...(location.index > 0 ? [['Move earlier', location.groupId, location.index - 1]] : []),
+      ...(location.index < currentRefs.length - 1 ? [['Move later', location.groupId, location.index + 1]] : []),
+      ['Move to Ungrouped', null, this.tabLayout.ungrouped.length],
+      ...this.tabLayout.groups.map((group) => [`Move to ${group.name}`, group.id, group.refs.length]),
+    ];
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-layout-ref-move-menu';
+    menu.setAttribute('role', 'menu');
+    for (const [label, groupId, index] of destinations) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.textContent = label;
+      button.addEventListener('click', () => {
+        menu.remove();
+        this.moveTabRefToGroup(ref, groupId, index);
+      });
+      menu.appendChild(button);
+    }
+    document.body.appendChild(menu);
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
+    menu.addEventListener('keydown', (keyEvent) => {
+      const buttons = [...menu.querySelectorAll('button')];
+      const current = buttons.indexOf(document.activeElement);
+      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
+      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+        keyEvent.preventDefault();
+        buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      }
+    });
+    menu.querySelector('button')?.focus();
   }
 
   _tabOrientation() {
@@ -4902,6 +5193,10 @@ class CodemanApp {
       Number.isSafeInteger(layout?.version) &&
       layout.version < this.tabLayoutVersion
     ) return;
+    if (this._tabLayoutEditCoordinator) {
+      this._tabLayoutEditCoordinator.adoptExternal(layout);
+      return;
+    }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
     const storage = this._getTabCollapseStorage();
@@ -4917,6 +5212,7 @@ class CodemanApp {
     this._tabLayoutFirstPaintPending = false;
     this._lastTabStructureKey = null;
     this._refreshTabProjection();
+    if (this._restorePendingTabLayoutOperations()) return;
     this._fullRenderSessionTabs();
   }
 
@@ -5015,9 +5311,15 @@ class CodemanApp {
     for (const tab of tabs) {
       if (tab.dataset.id === sessionId) {
         tab.classList.add('active');
+        tab.setAttribute('aria-selected', 'true');
       } else {
         tab.classList.remove('active');
+        tab.setAttribute('aria-selected', 'false');
       }
+    }
+    for (const tab of container.querySelectorAll('.session-tab[data-webview-id]')) {
+      tab.classList.remove('active');
+      tab.setAttribute('aria-selected', 'false');
     }
     // #257: selection used to stop at the class toggle. On phones/tablets the
     // strip scrolls horizontally, so a tab selected from the palette, a swipe,
@@ -5444,6 +5746,7 @@ class CodemanApp {
     // right-hand tabs kept getting yanked back to the first one. Remember
     // where the strip was; the browser clamps the restore to the new content.
     const prevScrollLeft = container.scrollLeft;
+    const focusIdentity = this._tabFocusIdentity || this._focusedTabLayoutIdentity();
     const prevActiveTabIdentity = this._lastRenderedActiveTabIdentity;
     const isFirstRender = !container.querySelector('.session-tab');
 
@@ -5527,7 +5830,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
+          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
       _tabIdx++;
     }
@@ -5539,6 +5842,8 @@ class CodemanApp {
       () => parts[renderedIndex++] || '',
       escapeHtml
     );
+    container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
+    container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
     this._lastTabStructureKey = structureKey;
 
     // Put the strip back where the user left it, then reveal the active tab
@@ -5562,6 +5867,8 @@ class CodemanApp {
 
     // Set up keyboard navigation for tabs
     this.setupTabKeyboardNavigation(container);
+    this._restoreTabLayoutFocus(focusIdentity);
+    this._tabFocusIdentity = null;
 
     this.updateTabOverflowMode();
 
@@ -5589,44 +5896,155 @@ class CodemanApp {
     }
 
     this._tabKeydownHandler = (e) => {
-      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter', ' '].includes(e.key)) return;
-
-      const tabs = [...container.querySelectorAll('.session-tab')];
-      const currentIndex = tabs.indexOf(document.activeElement);
-
-      // Enter or Space activates the tab
-      if ((e.key === 'Enter' || e.key === ' ') && currentIndex >= 0) {
-        e.preventDefault();
-        const sessionId = tabs[currentIndex].dataset.id;
-        this.selectSession(sessionId);
-        return;
-      }
-
+      if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+      const vertical = this._tabOrientation() === 'vertical';
+      const items = vertical
+        ? [...container.querySelectorAll('[role="treeitem"]')]
+        : [...container.querySelectorAll('.session-tab[role="tab"]')];
+      const active = document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]');
+      const currentIndex = items.indexOf(active);
       if (currentIndex < 0) return;
 
-      let newIndex;
-      switch (e.key) {
-        case 'ArrowLeft':
-          newIndex = currentIndex > 0 ? currentIndex - 1 : tabs.length - 1;
-          break;
-        case 'ArrowRight':
-          newIndex = currentIndex < tabs.length - 1 ? currentIndex + 1 : 0;
-          break;
-        case 'Home':
-          newIndex = 0;
-          break;
-        case 'End':
-          newIndex = tabs.length - 1;
-          break;
-        default:
-          return;
+      const focusAt = (index) => {
+        if (index < 0 || index >= items.length) return;
+        for (const item of items) item.tabIndex = -1;
+        items[index].tabIndex = 0;
+        items[index].focus();
+        this._tabFocusIdentity = this._tabLayoutIdentity(items[index]);
+      };
+      const activate = () => {
+        const current = items[currentIndex];
+        const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+        if (currentGroupId) {
+          this.toggleTabGroupCollapsed(currentGroupId);
+        } else if (current.dataset.id) {
+          this.selectSession(current.dataset.id);
+        } else if (current.dataset.webviewId) {
+          this.openWebview(current.dataset.webviewId);
+        }
+      };
+      const current = items[currentIndex];
+      const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      if (vertical && e.key === 'Insert') {
+        e.preventDefault();
+        this.createTabGroup();
+        return;
       }
-
-      e.preventDefault();
-      tabs[newIndex]?.focus();
+      if (vertical && currentGroupId && e.key === 'F2') {
+        e.preventDefault();
+        this.startTabGroupRename(currentGroupId);
+        return;
+      }
+      if (vertical && currentGroupId && e.key === 'Delete') {
+        e.preventDefault();
+        this.deleteTabGroup(currentGroupId);
+        return;
+      }
+      if (vertical && currentGroupId && e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault();
+        const groupIndex = this.tabLayout.groups.findIndex((group) => group.id === currentGroupId);
+        const index = Math.max(0, Math.min(this.tabLayout.groups.length - 1, groupIndex + (e.key === 'ArrowUp' ? -1 : 1)));
+        this.editTabLayout({ type: 'reorderGroup', groupId: currentGroupId, index }, `group:${currentGroupId}`);
+        return;
+      }
+      if (vertical && e.shiftKey && e.key === 'F10') {
+        e.preventDefault();
+        const syntheticEvent = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
+        if (currentGroupId) this.openTabGroupMenu(syntheticEvent, currentGroupId);
+        else {
+          const ref = current.dataset.webviewId
+            ? { kind: 'webview', id: current.dataset.webviewId }
+            : current.dataset.id
+              ? { kind: 'session', id: current.dataset.id }
+              : null;
+          if (ref) this.openTabRefMoveMenu(syntheticEvent, ref);
+        }
+        return;
+      }
+      if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        focusAt(e.key === 'Home' ? 0 : items.length - 1);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        activate();
+        return;
+      }
+      if (!vertical && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault();
+        focusAt((currentIndex + (e.key === 'ArrowLeft' ? -1 : 1) + items.length) % items.length);
+        return;
+      }
+      if (vertical && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault();
+        focusAt((currentIndex + (e.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length);
+        return;
+      }
+      if (!vertical || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+      const groupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      if (groupId) {
+        const expanded = current.getAttribute('aria-expanded') === 'true';
+        if (e.key === 'ArrowLeft' && expanded) {
+          e.preventDefault();
+          this._tabFocusIdentity = `group:${groupId}`;
+          this.toggleTabGroupCollapsed(groupId, true);
+        } else if (e.key === 'ArrowRight' && !expanded) {
+          e.preventDefault();
+          this._tabFocusIdentity = `group:${groupId}`;
+          this.toggleTabGroupCollapsed(groupId, false);
+        } else if (e.key === 'ArrowRight' && expanded) {
+          const child = current.closest('.tab-layout-group')?.querySelector('[role="group"] [role="treeitem"]');
+          if (child) {
+            e.preventDefault();
+            focusAt(items.indexOf(child));
+          }
+        }
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        const header = current.closest('.tab-layout-group')?.querySelector('[data-tab-group-header]')
+          ?.closest('[role="treeitem"]');
+        if (header) {
+          e.preventDefault();
+          focusAt(items.indexOf(header));
+        }
+      }
     };
 
     container.addEventListener('keydown', this._tabKeydownHandler);
+  }
+
+  _tabLayoutIdentity(element) {
+    if (!element) return null;
+    const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+    if (groupId) return `group:${groupId}`;
+    if (element.dataset?.id) return `session:${element.dataset.id}`;
+    if (element.dataset?.webviewId) return `webview:${element.dataset.webviewId}`;
+    if (element.classList?.contains('tab-layout-ungrouped-header')) return 'group:ungrouped';
+    return null;
+  }
+
+  _focusedTabLayoutIdentity() {
+    return this._tabLayoutIdentity(document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]'));
+  }
+
+  _restoreTabLayoutFocus(identity) {
+    const container = this.$('sessionTabs');
+    if (!container) return;
+    const items = this._tabOrientation() === 'vertical'
+      ? [...container.querySelectorAll('[role="treeitem"]')]
+      : [...container.querySelectorAll('.session-tab[role="tab"]')];
+    if (!items.length) return;
+    let target = items.find((item) => this._tabLayoutIdentity(item) === identity);
+    if (!target && identity?.startsWith('session:')) {
+      const sessionId = identity.slice('session:'.length);
+      const hiddenGroup = this._hiddenTabGroupByRef?.get(`session:${sessionId}`);
+      target = items.find((item) => this._tabLayoutIdentity(item) === `group:${hiddenGroup}`);
+    }
+    target ||= items.find((item) => item.getAttribute('aria-selected') === 'true') || items[0];
+    for (const item of items) item.tabIndex = item === target ? 0 : -1;
+    if (identity && document.activeElement !== target) target.focus?.();
   }
 
   handleSessionTabClick(event, sessionId) {
@@ -5673,11 +6091,10 @@ class CodemanApp {
     }
   }
 
-  // Legacy entry point retained for old callers. Owner layout is now the sole
-  // ordering authority; COD-307 will replace this with layout-aware editing.
+  // Legacy entry point retained for old callers. Owner layout semantic edits
+  // are the sole ordering authority.
   saveSessionOrder() {
-    // COD-306: the owner layout is the sole authority. COD-307 will provide
-    // layout-aware editing; session-only persistence must not race it.
+    // Session-only persistence must not race the owner layout coordinator.
     return;
   }
 
@@ -5700,113 +6117,175 @@ class CodemanApp {
     }
   }
 
-  // Set up drag-and-drop handlers on tab elements
+  // One delegated Pointer Events system serves mouse, pen, and touch. The
+  // container survives structural renders, so listeners are installed once.
   setupTabDragHandlers() {
     const container = this.$('sessionTabs');
-    if (this._tabLayoutManaged) {
-      container.querySelectorAll('.session-tab[draggable]').forEach((tab) => tab.removeAttribute('draggable'));
-      return;
-    }
-    const tabs = container.querySelectorAll('.session-tab[data-id]');
-
-    tabs.forEach(tab => {
-      tab.setAttribute('draggable', 'true');
-
-      tab.addEventListener('dragstart', (e) => {
-        this.draggedTabId = tab.dataset.id;
-        tab.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', tab.dataset.id);
-      });
-
-      tab.addEventListener('dragend', () => {
-        tab.classList.remove('dragging');
-        this.draggedTabId = null;
-        // Remove all drag-over indicators
-        container.querySelectorAll('.session-tab').forEach(t => {
-          t.classList.remove('drag-over-left', 'drag-over-right');
-        });
-      });
-
-      tab.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        if (!this.draggedTabId || this.draggedTabId === tab.dataset.id) return;
-
-        e.dataTransfer.dropEffect = 'move';
-
-        // Determine drop position based on mouse position
-        const rect = tab.getBoundingClientRect();
-        const midpoint = rect.left + rect.width / 2;
-        const isLeftHalf = e.clientX < midpoint;
-
-        // Update visual indicator
-        tab.classList.toggle('drag-over-left', isLeftHalf);
-        tab.classList.toggle('drag-over-right', !isLeftHalf);
-      });
-
-      tab.addEventListener('dragleave', () => {
-        tab.classList.remove('drag-over-left', 'drag-over-right');
-      });
-
-      tab.addEventListener('drop', (e) => {
-        e.preventDefault();
-        tab.classList.remove('drag-over-left', 'drag-over-right');
-
-        if (!this.draggedTabId || this.draggedTabId === tab.dataset.id) return;
-
-        const targetId = tab.dataset.id;
-        const draggedId = this.draggedTabId;
-
-        // Determine insertion position
-        const rect = tab.getBoundingClientRect();
-        const midpoint = rect.left + rect.width / 2;
-        const insertBefore = e.clientX < midpoint;
-
-        // Reorder sessionOrder array
-        const fromIndex = this.sessionOrder.indexOf(draggedId);
-        let toIndex = this.sessionOrder.indexOf(targetId);
-
-        if (fromIndex === -1 || toIndex === -1) return;
-
-        // Remove dragged item
-        this.sessionOrder.splice(fromIndex, 1);
-
-        // Recalculate target index after removal
-        toIndex = this.sessionOrder.indexOf(targetId);
-        if (toIndex === -1) return;
-
-        // Insert at correct position
-        if (insertBefore) {
-          this.sessionOrder.splice(toIndex, 0, draggedId);
-        } else {
-          this.sessionOrder.splice(toIndex + 1, 0, draggedId);
+    if (!container || this._tabPointerHandlersBound) return;
+    this._tabPointerHandlersBound = true;
+    const cleanup = () => this._cancelTabPointerDrag();
+    container.addEventListener('pointerdown', (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      const handle = event.target.closest?.('[data-tab-group-drag]');
+      const refHandle = event.target.closest?.('[data-tab-ref-drag]');
+      const tab = event.target.closest?.('.session-tab');
+      if (event.pointerType === 'touch' && !handle && !refHandle) return;
+      if (!handle && !refHandle && (!tab || event.target.closest?.('button, input, select, textarea, a, .tab-actions'))) return;
+      const ref = tab
+        ? tab.dataset.webviewId
+          ? { kind: 'webview', id: tab.dataset.webviewId }
+          : { kind: 'session', id: tab.dataset.id }
+        : null;
+      this._tabPointerDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        source: handle ? { type: 'group', groupId: handle.dataset.tabGroupDrag } : { type: 'ref', ref },
+        origin: handle || refHandle || tab,
+        zone: null,
+      };
+      try { container.setPointerCapture(event.pointerId); } catch {}
+    });
+    container.addEventListener('pointermove', (event) => {
+      const drag = this._tabPointerDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+      if (!drag.active) {
+        drag.active = true;
+        drag.origin.classList.add('tab-layout-dragging');
+        if (drag.source.type === 'ref') {
+          const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
+            type: 'moveRef', ref: drag.source.ref, groupId: null, index: 0, metadata: this._tabLayoutMetadata(),
+          });
+          for (const ref of preview.refs) {
+            const selector = ref.kind === 'session'
+              ? `.session-tab[data-id="${CSS.escape(ref.id)}"]`
+              : `.session-tab[data-webview-id="${CSS.escape(ref.id)}"]`;
+            container.querySelector(selector)?.classList.add('tab-layout-drag-block');
+          }
         }
-
-        // Save and re-render
-        this.saveSessionOrder();
-        this._fullRenderSessionTabs();
-      });
+      }
+      event.preventDefault();
+      const hit = document.elementFromPoint?.(event.clientX, event.clientY);
+      const zone = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
+      if (drag.zone === zone) return;
+      drag.zone?.classList?.remove('tab-layout-drop-active');
+      drag.zone = zone;
+      drag.zone?.classList?.add('tab-layout-drop-active');
+    });
+    container.addEventListener('pointerup', (event) => this._finishTabPointerDrag(event));
+    container.addEventListener('pointercancel', cleanup);
+    container.addEventListener('lostpointercapture', cleanup);
+    window.addEventListener('pagehide', cleanup);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') cleanup();
     });
   }
 
+  _cancelTabPointerDrag() {
+    this.$('sessionTabs')?.querySelectorAll(
+      '.tab-layout-dragging, .tab-layout-drag-block, .tab-layout-drop-active'
+    ).forEach((element) => element.classList.remove(
+      'tab-layout-dragging', 'tab-layout-drag-block', 'tab-layout-drop-active'
+    ));
+    this._tabPointerDrag = null;
+  }
+
+  _refLocation(ref) {
+    for (const group of this.tabLayout?.groups || []) {
+      const index = group.refs.findIndex((candidate) => candidate.kind === ref.kind && candidate.id === ref.id);
+      if (index >= 0) return { groupId: group.id, index };
+    }
+    const index = this.tabLayout?.ungrouped?.findIndex(
+      (candidate) => candidate.kind === ref.kind && candidate.id === ref.id
+    );
+    return index >= 0 ? { groupId: null, index } : null;
+  }
+
+  _adjustPointerMoveDestination(ref, destination) {
+    const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
+      type: 'moveRef', ref, ...destination, metadata: this._tabLayoutMetadata(),
+    });
+    let removedBefore = 0;
+    for (const moved of preview.refs) {
+      const location = this._refLocation(moved);
+      if (location?.groupId === destination.groupId && location.index < destination.index) removedBefore++;
+    }
+    return { ...destination, index: Math.max(0, destination.index - removedBefore) };
+  }
+
+  _adjustGroupReorderIndex(groupId, destinationIndex) {
+    const sourceIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
+    return sourceIndex >= 0 && sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex;
+  }
+
+  _finishTabPointerDrag(event) {
+    const drag = this._tabPointerDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const zone = drag.zone;
+    if (drag.active && zone) {
+      if (drag.source.type === 'group') {
+        const beforeId = zone.dataset.tabDropBeforeGroup;
+        if (beforeId !== undefined) {
+          const beforeIndex = beforeId
+            ? this.tabLayout.groups.findIndex((group) => group.id === beforeId)
+            : this.tabLayout.groups.length;
+          const index = this._adjustGroupReorderIndex(drag.source.groupId, beforeIndex);
+          this.editTabLayout(
+            { type: 'reorderGroup', groupId: drag.source.groupId, index: Math.max(0, index) },
+            `group:${drag.source.groupId}`
+          );
+        }
+      } else {
+        let destination = null;
+        if (zone.classList.contains('tab-layout-drop-zone') && zone.dataset.tabDropGroup !== undefined) {
+          destination = { groupId: zone.dataset.tabDropGroup || null, index: Number(zone.dataset.tabDropIndex) };
+        } else if (zone.classList.contains('session-tab')) {
+          const target = zone.dataset.webviewId
+            ? { kind: 'webview', id: zone.dataset.webviewId }
+            : { kind: 'session', id: zone.dataset.id };
+          const targetLocation = this._refLocation(target);
+          if (targetLocation) {
+            const rect = zone.getBoundingClientRect();
+            const after = this._tabOrientation() === 'vertical'
+              ? event.clientY >= rect.top + rect.height / 2
+              : event.clientX >= rect.left + rect.width / 2;
+            destination = { ...targetLocation, index: targetLocation.index + (after ? 1 : 0) };
+          }
+        }
+        if (destination) {
+          destination = this._adjustPointerMoveDestination(drag.source.ref, destination);
+          this.editTabLayout({
+            type: 'moveRef', ref: drag.source.ref, ...destination, metadata: this._tabLayoutMetadata(),
+          }, `${drag.source.ref.kind}:${drag.source.ref.id}`);
+        }
+      }
+    }
+    this._cancelTabPointerDrag();
+  }
+
   moveActiveTabLeft() {
-    if (this._tabLayoutManaged) return;
     if (!this.activeSessionId) return;
-    const idx = this.sessionOrder.indexOf(this.activeSessionId);
-    if (idx <= 0) return;
-    [this.sessionOrder[idx - 1], this.sessionOrder[idx]] = [this.sessionOrder[idx], this.sessionOrder[idx - 1]];
-    this.saveSessionOrder();
-    this._fullRenderSessionTabs();
+    const ref = { kind: 'session', id: this.activeSessionId };
+    const location = this._refLocation(ref);
+    if (!location || location.index <= 0) return;
+    this.editTabLayout({
+      type: 'moveRef', ref, ...location, index: location.index - 1, metadata: this._tabLayoutMetadata(),
+    });
   }
 
   moveActiveTabRight() {
-    if (this._tabLayoutManaged) return;
     if (!this.activeSessionId) return;
-    const idx = this.sessionOrder.indexOf(this.activeSessionId);
-    if (idx === -1 || idx >= this.sessionOrder.length - 1) return;
-    [this.sessionOrder[idx], this.sessionOrder[idx + 1]] = [this.sessionOrder[idx + 1], this.sessionOrder[idx]];
-    this.saveSessionOrder();
-    this._fullRenderSessionTabs();
+    const ref = { kind: 'session', id: this.activeSessionId };
+    const location = this._refLocation(ref);
+    const refs = location?.groupId === null
+      ? this.tabLayout?.ungrouped
+      : this.tabLayout?.groups?.find((group) => group.id === location?.groupId)?.refs;
+    if (!location || !refs || location.index >= refs.length - 1) return;
+    this.editTabLayout({
+      type: 'moveRef', ref, ...location, index: location.index + 1, metadata: this._tabLayoutMetadata(),
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════

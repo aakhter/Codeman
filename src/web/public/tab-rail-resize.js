@@ -275,8 +275,46 @@ Object.assign(CodemanApp.prototype, {
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-label', 'Session actions');
     const settings = this.loadAppSettingsFromStorage();
+    const ref = { kind: 'session', id: sessionId };
+    const location = this._refLocation?.(ref);
+    const placementActions =
+      this.tabLayout && location
+        ? [
+            ...(location.index > 0
+              ? [
+                  {
+                    label: 'Move earlier',
+                    run: () => this.moveTabRefToGroup(ref, location.groupId, location.index - 1),
+                  },
+                ]
+              : []),
+            ...(() => {
+              const refs =
+                location.groupId === null
+                  ? this.tabLayout.ungrouped
+                  : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs || [];
+              return location.index < refs.length - 1
+                ? [
+                    {
+                      label: 'Move later',
+                      run: () => this.moveTabRefToGroup(ref, location.groupId, location.index + 1),
+                    },
+                  ]
+                : [];
+            })(),
+            {
+              label: 'Move to Ungrouped',
+              run: () => this.moveTabRefToGroup(ref, null, this.tabLayout.ungrouped.length),
+            },
+            ...this.tabLayout.groups.map((group) => ({
+              label: `Move to ${group.name}`,
+              run: () => this.moveTabRefToGroup(ref, group.id, group.refs.length),
+            })),
+          ]
+        : [];
     const actions = [
       { label: 'Session options', run: () => this.openSessionOptions(sessionId) },
+      ...placementActions,
       ...(settings.showTabDetachButton || this.detachedSessions?.has(sessionId)
         ? [{ label: 'Open in a new window', run: () => this.detachSession(sessionId) }]
         : []),
