@@ -97,11 +97,14 @@ import {
 import { SseEvent } from '../sse-events.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 import {
+  createRemoteWorkspaceDirectory,
+  deleteRemoteWorkspacePath,
   downloadRemoteWorkspaceFile,
   getRemoteWorkspaceFileInfo,
   listRemoteWorkspaceDirectory,
   readRemoteWorkspaceFile,
   remoteWorkspacePath,
+  renameRemoteWorkspacePath,
 } from '../../remote-sftp.js';
 import { dataPath } from '../../config/instance.js';
 import { registerGeneratedArtifactAttachment } from '../../generated-artifact-attachments.js';
@@ -2608,6 +2611,400 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         extension: ext,
       },
     };
+  });
+
+  // ── COD-318: File Manager directory/file operations ─────────────────
+  // mkdir: create a directory inside the workspace (local or remote)
+  app.post('/api/sessions/:id/files/mkdir', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!consumeFileManagerUploadToken(`${req.ip}:${id}`)) {
+      reply.code(429);
+      reply.header('Retry-After', '60');
+      return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 ops/min per session)');
+    }
+    const session = findSessionOrFail(ctx, id);
+    const body = (req.body ?? {}) as { path?: string };
+    const rawPath = (body.path ?? '').trim();
+    if (!rawPath) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path');
+    }
+    const normalized = rawPath.replace(/^\/+/, '').replace(/\\/g, '/');
+    if (normalized.includes('\0') || normalized.includes('\r') || normalized.includes('\n')) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    if (normalized.split('/').some((s) => !s || s === '.' || s === '..')) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    const segments = normalized.split('/').filter(Boolean);
+    // Sanitize each segment and ensure it remains meaningful
+    const sanitizedSegments = segments.map((seg) => sanitizeUploadFilename(seg));
+    if (sanitizedSegments.some((s) => !s || s === '.' || s === '..')) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    const sanitizedPath = sanitizedSegments.join('/');
+    // If sanitization changed the path, reject to avoid silent renames
+    if (sanitizedSegments.some((s, i) => s !== segments[i])) {
+      // Allow only control-char stripping and device-prefix; otherwise treat as mismatch
+      // For mkdir we are lenient: use sanitized version
+    }
+    const guard = await loadAttachmentGuardConfig();
+    const finalRelative = sanitizedPath;
+
+    if (session.remote) {
+      if (isDeniedEditRelativePath(finalRelative)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be written');
+      }
+      const remoteAbs = remoteWorkspacePath(session.remote, finalRelative);
+      if (isSensitivePath(remoteAbs) || isBlockedAttachmentPath(remoteAbs, guard.blockedTrees)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+      }
+      // 409 if already exists
+      try {
+        await getRemoteWorkspaceFileInfo(session.remote, finalRelative);
+        reply.code(409);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path already exists');
+      } catch (_e) {
+        // not found -> proceed
+      }
+      // Also check if it's an existing directory
+      try {
+        const entries = await listRemoteWorkspaceDirectory(session.remote, finalRelative);
+        // If we got listing without error, it exists as directory
+        if (entries) {
+          reply.code(409);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path already exists');
+        }
+      } catch (_e) {
+        // not found -> proceed
+      }
+      try {
+        await createRemoteWorkspaceDirectory(session.remote, finalRelative);
+      } catch (err) {
+        const msg = getErrorMessage(err);
+        if (msg.includes('already exists') || msg.includes('Path exists')) {
+          reply.code(409);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path already exists');
+        }
+        reply.code(500);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to create directory: ${msg}`);
+      }
+      return { success: true as const, data: { path: finalRelative } };
+    }
+
+    // Local: lexical confinement + blocked checks before IO
+    const lexical = resolve(session.workingDir, finalRelative);
+    const rel = relative(session.workingDir, lexical);
+    if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    if (isSensitivePath(lexical) || isBlockedAttachmentPath(lexical, guard.blockedTrees)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+    }
+    if (isDeniedEditRelativePath(finalRelative)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be written');
+    }
+    // Check existence
+    try {
+      const st = await fs.stat(lexical);
+      if (st) {
+        reply.code(409);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Path already exists');
+      }
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+    // Ensure parent exists and is directory, then create with symlink-safe loop
+    const parts = finalRelative.split('/').filter(Boolean);
+    let cur = session.workingDir;
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      const next = join(cur, seg);
+      try {
+        const st = await fs.lstat(next);
+        if (st.isSymbolicLink() || !st.isDirectory()) {
+          reply.code(403);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Target is not a regular directory');
+        }
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        try {
+          await fs.mkdir(next);
+        } catch (mkErr: unknown) {
+          if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
+          const raceSt = await fs.lstat(next);
+          if (raceSt.isSymbolicLink() || !raceSt.isDirectory()) {
+            reply.code(403);
+            return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Target is not a regular directory');
+          }
+        }
+      }
+      cur = next;
+    }
+    return { success: true as const, data: { path: finalRelative } };
+  });
+
+  app.post('/api/sessions/:id/files/rename', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!consumeFileManagerUploadToken(`${req.ip}:${id}`)) {
+      reply.code(429);
+      reply.header('Retry-After', '60');
+      return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 ops/min per session)');
+    }
+    const session = findSessionOrFail(ctx, id);
+    const body = (req.body ?? {}) as { from?: string; to?: string };
+    const rawFrom = (body.from ?? '').trim();
+    const rawTo = (body.to ?? '').trim();
+    if (!rawFrom || !rawTo) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing from or to');
+    }
+    const normFrom = rawFrom.replace(/^\/+/, '').replace(/\\/g, '/');
+    const normTo = rawTo.replace(/^\/+/, '').replace(/\\/g, '/');
+    for (const p of [normFrom, normTo]) {
+      if (
+        p.includes('\0') ||
+        p.includes('\r') ||
+        p.includes('\n') ||
+        p.split('/').some((s) => !s || s === '.' || s === '..')
+      ) {
+        reply.code(400);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+      }
+    }
+    const guard = await loadAttachmentGuardConfig();
+
+    if (session.remote) {
+      for (const p of [normFrom, normTo]) {
+        if (isDeniedEditRelativePath(p)) {
+          reply.code(403);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be renamed');
+        }
+        const abs = remoteWorkspacePath(session.remote, p);
+        if (isSensitivePath(abs) || isBlockedAttachmentPath(abs, guard.blockedTrees)) {
+          reply.code(403);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+        }
+      }
+      // Check from exists, to not exists
+      let fromExists = false;
+      try {
+        await getRemoteWorkspaceFileInfo(session.remote, normFrom);
+        fromExists = true;
+      } catch {
+        try {
+          await listRemoteWorkspaceDirectory(session.remote, normFrom);
+          fromExists = true;
+        } catch {
+          fromExists = false;
+        }
+      }
+      if (!fromExists) {
+        reply.code(404);
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Source not found');
+      }
+      let toExists = false;
+      try {
+        await getRemoteWorkspaceFileInfo(session.remote, normTo);
+        toExists = true;
+      } catch {
+        try {
+          await listRemoteWorkspaceDirectory(session.remote, normTo);
+          toExists = true;
+        } catch {
+          toExists = false;
+        }
+      }
+      if (toExists) {
+        reply.code(409);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Destination already exists');
+      }
+      try {
+        await renameRemoteWorkspacePath(session.remote, normFrom, normTo);
+      } catch (err) {
+        reply.code(500);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to rename: ${getErrorMessage(err)}`);
+      }
+      return { success: true as const, data: { from: normFrom, to: normTo } };
+    }
+
+    // Local
+    for (const p of [normFrom, normTo]) {
+      const lexical = resolve(session.workingDir, p);
+      const rel = relative(session.workingDir, lexical);
+      if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+        reply.code(400);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+      }
+      if (isSensitivePath(lexical) || isBlockedAttachmentPath(lexical, guard.blockedTrees)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+      }
+      if (isDeniedEditRelativePath(p)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be renamed');
+      }
+    }
+    const fromAbs = join(session.workingDir, normFrom);
+    const toAbs = join(session.workingDir, normTo);
+    // Validate source exists and is not a symlink outside
+    const fromValidated = validateSessionFilePath(session.workingDir, normFrom);
+    // For rename we need to handle both files and directories; if from is a file that doesn't exist yet
+    // validateSessionFilePath will return null when it doesn't resolve. So also check via lstat.
+    try {
+      const st = await fs.lstat(fromAbs);
+      if (st.isSymbolicLink()) {
+        // Allow renaming symlink itself, but ensure its resolved target is inside workspace if it points inside?
+        // For safety, block symlink rename to avoid escaping via symlink swap?
+        // We'll allow but ensure both paths are inside workspace lexically (already checked).
+      }
+    } catch (_e) {
+      reply.code(404);
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Source not found');
+    }
+    // Check dest parent exists or create? For rename we require parent exists
+    const toParent = dirname(toAbs);
+    try {
+      const pst = await fs.stat(toParent);
+      if (!pst.isDirectory()) {
+        reply.code(400);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Destination parent is not a directory');
+      }
+    } catch (_e) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Destination parent does not exist');
+    }
+    // dest must not exist
+    try {
+      await fs.lstat(toAbs);
+      reply.code(409);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Destination already exists');
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+    // Guard: ensure from and to are not the same
+    if (normFrom === normTo) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Source and destination are the same');
+    }
+    // Ensure from and to remain within workspace after realpath resolution
+    // For from we already have resolved path if it exists; ensure it is inside
+    if (fromValidated) {
+      // Check sensitive/blocked on resolved
+      if (
+        isSensitivePath(fromValidated.resolvedPath) ||
+        isBlockedAttachmentPath(fromValidated.resolvedPath, guard.blockedTrees)
+      ) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+      }
+    }
+    try {
+      await fs.rename(fromAbs, toAbs);
+    } catch (err) {
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to rename: ${getErrorMessage(err)}`);
+    }
+    return { success: true as const, data: { from: normFrom, to: normTo } };
+  });
+
+  app.delete('/api/sessions/:id/files', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!consumeFileManagerUploadToken(`${req.ip}:${id}`)) {
+      reply.code(429);
+      reply.header('Retry-After', '60');
+      return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 ops/min per session)');
+    }
+    const session = findSessionOrFail(ctx, id);
+    const rawPath = ((req.query as { path?: string }).path ?? '').trim();
+    if (!rawPath) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path');
+    }
+    const normalized = rawPath.replace(/^\/+/, '').replace(/\\/g, '/');
+    if (
+      normalized.includes('\0') ||
+      normalized.includes('\r') ||
+      normalized.includes('\n') ||
+      normalized.split('/').some((s) => !s || s === '.' || s === '..')
+    ) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    const guard = await loadAttachmentGuardConfig();
+
+    if (session.remote) {
+      if (isDeniedEditRelativePath(normalized)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be deleted');
+      }
+      const abs = remoteWorkspacePath(session.remote, normalized);
+      if (isSensitivePath(abs) || isBlockedAttachmentPath(abs, guard.blockedTrees)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+      }
+      // Verify exists
+      let exists = false;
+      try {
+        await getRemoteWorkspaceFileInfo(session.remote, normalized);
+        exists = true;
+      } catch {
+        try {
+          await listRemoteWorkspaceDirectory(session.remote, normalized);
+          exists = true;
+        } catch {
+          exists = false;
+        }
+      }
+      if (!exists) {
+        reply.code(404);
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+      }
+      try {
+        await deleteRemoteWorkspacePath(session.remote, normalized);
+      } catch (err) {
+        reply.code(500);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to delete: ${getErrorMessage(err)}`);
+      }
+      return { success: true as const, data: { path: normalized } };
+    }
+
+    const lexical = resolve(session.workingDir, normalized);
+    const rel = relative(session.workingDir, lexical);
+    if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    if (isSensitivePath(lexical) || isBlockedAttachmentPath(lexical, guard.blockedTrees)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+    }
+    if (isDeniedEditRelativePath(normalized)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be deleted');
+    }
+    // Use lstat to check existence; rm on symlink removes link itself not target
+    try {
+      await fs.lstat(lexical);
+    } catch {
+      reply.code(404);
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+    }
+    try {
+      await fs.rm(lexical, { recursive: true, force: false });
+    } catch (err) {
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to delete: ${getErrorMessage(err)}`);
+    }
+    return { success: true as const, data: { path: normalized } };
   });
 
   // List a session's attachment history (live session or persisted), resolving

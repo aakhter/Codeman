@@ -292,3 +292,107 @@ export async function readRemoteWorkspaceFile(
     });
   });
 }
+
+export async function createRemoteWorkspaceDirectory(
+  remote: SessionRemote,
+  relativePath: string,
+  options: RemoteSftpOptions = {}
+): Promise<void> {
+  if (!relativePath || relativePath === '.' || relativePath === '/') throw new Error('Missing directory path');
+  const remotePath = remoteWorkspacePath(remote, relativePath);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const command = `if [ -L ${shellescape(remotePath)} ]; then echo "Target is a symlink" >&2; exit 73; fi; if [ -e ${shellescape(remotePath)} ]; then if [ ! -d ${shellescape(remotePath)} ]; then echo "Path exists and is not a directory" >&2; exit 17; fi; exit 0; fi; mkdir -p -- ${shellescape(remotePath)}`;
+  const args = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), command];
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const stderr = createCappedStderrCollector();
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn();
+    };
+    const timeout = setTimeout(() => {
+      finish(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`Remote mkdir timed out connecting to ${remote.host}`));
+      });
+    }, timeoutMs);
+    child.stderr.on('data', (c: Buffer) => {
+      if (!stderr.append(c)) {
+        finish(() => {
+          child.kill('SIGTERM');
+          reject(new Error(`Remote mkdir stderr exceeded limit`));
+        });
+      }
+    });
+    child.on('error', (e) => finish(() => reject(e)));
+    child.on('close', (code) => {
+      if (code === 0) finish(() => resolve());
+      else {
+        const msg = stderr.text();
+        finish(() => reject(new Error(msg || `Remote mkdir failed with exit code ${code ?? 'unknown'}`)));
+      }
+    });
+  });
+}
+
+export async function renameRemoteWorkspacePath(
+  remote: SessionRemote,
+  fromRelative: string,
+  toRelative: string,
+  options: RemoteSftpOptions = {}
+): Promise<void> {
+  const fromPath = remoteWorkspacePath(remote, fromRelative);
+  const toPath = remoteWorkspacePath(remote, toRelative);
+  const batch = `rename ${quoteSftpPath(fromPath)} ${quoteSftpPath(toPath)}\n`;
+  await runSftpBatch(remote, batch, options);
+}
+
+export async function deleteRemoteWorkspacePath(
+  remote: SessionRemote,
+  relativePath: string,
+  options: RemoteSftpOptions = {}
+): Promise<void> {
+  if (!relativePath || relativePath === '.' || relativePath === '/') throw new Error('Invalid path');
+  const remotePath = remoteWorkspacePath(remote, relativePath);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Use ssh rm -rf: removes file or directory tree, without following symlink target.
+  // Guard: refuse to operate on a symlink that points outside? rm -rf on symlink removes link itself, safe.
+  const command = `rm -rf -- ${shellescape(remotePath)}`;
+  const args = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), command];
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const stderr = createCappedStderrCollector();
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn();
+    };
+    const timeout = setTimeout(() => {
+      finish(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`Remote delete timed out connecting to ${remote.host}`));
+      });
+    }, timeoutMs);
+    child.stderr.on('data', (c: Buffer) => {
+      if (!stderr.append(c)) {
+        finish(() => {
+          child.kill('SIGTERM');
+          reject(new Error(`Remote delete stderr exceeded limit`));
+        });
+      }
+    });
+    child.on('error', (e) => finish(() => reject(e)));
+    child.on('close', (code) => {
+      if (code === 0) finish(() => resolve());
+      else {
+        const msg = stderr.text();
+        finish(() => reject(new Error(msg || `Remote delete failed with exit code ${code ?? 'unknown'}`)));
+      }
+    });
+  });
+}
