@@ -159,11 +159,13 @@ describe('TabLayoutService', () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'unknown' }]) },
       live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+      webviews: [{ id: 'dashboard', owner: 'alice' }],
     });
     const first = await h.service.get('alice');
     expect(first.ungrouped).toEqual([
       { kind: 'session', id: 'unknown' },
       { kind: 'session', id: 'mine' },
+      { kind: 'webview', id: 'dashboard' },
     ]);
     expect(first.version).toBe(8);
     await h.service.get('alice');
@@ -595,5 +597,16 @@ describe('TabLayoutService', () => {
     await h.service.webviewDeleted('alice', 'gone-web');
     expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'pinned' }]);
     expect(h.layouts.alice.version).toBe(8);
+
+    const stale = await h.service.put(
+      'alice',
+      existing([
+        { kind: 'session', id: 'pinned' },
+        { kind: 'webview', id: 'gone-web' },
+      ]),
+      7
+    );
+    expect(stale).toEqual({ status: 'conflict', layout: h.layouts.alice });
+    expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'pinned' }]);
   });
 });

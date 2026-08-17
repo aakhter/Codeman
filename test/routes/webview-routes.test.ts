@@ -18,6 +18,7 @@ import { webviewCapabilities } from '../../src/webview-capabilities.js';
 import { capabilityFromProxyPath } from '../../src/web/webview-proxy.js';
 import { TabLayoutService } from '../../src/tab-layout-service.js';
 import type { TabLayout } from '../../src/tab-layout.js';
+import { MAX_WEBVIEWS } from '../../src/config/webview-limits.js';
 
 let app: FastifyInstance;
 let tmpDir: string;
@@ -87,6 +88,18 @@ describe('POST /api/webviews', () => {
     const list = (await app.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews;
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe('G');
+  });
+
+  it('accepts exactly the configured per-owner limit and rejects the next save', async () => {
+    for (let index = 0; index < MAX_WEBVIEWS; index++) {
+      const response = await create({ name: `view-${index}`, url: `https://view-${index}.example/` });
+      expect(response.statusCode, `webview ${index + 1}`).toBe(200);
+    }
+
+    const overflow = await create({ name: 'overflow', url: 'https://overflow.example/' });
+    expect(overflow.statusCode).toBe(400);
+    expect(overflow.json().error).toContain(`max ${MAX_WEBVIEWS}`);
+    expect((await app.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews).toHaveLength(MAX_WEBVIEWS);
   });
 
   it('rejects URLs that are not plain http(s)', async () => {

@@ -32,15 +32,9 @@ Object.assign(CodemanApp.prototype, {
 
     await this.refreshWebviews();
 
-    // Restore the previously open web tabs (per device: which dashboards you keep
-    // open is a workspace-layout choice, not something to sync across machines).
-    let saved = [];
-    try {
-      saved = JSON.parse(localStorage.getItem('codeman-webview-order') || '[]');
-    } catch {
-      saved = [];
-    }
-    this.webviewOrder = saved.filter((id) => this.webviews.has(id));
+    // Restore the device-local OPEN SET. The server tab layout is the only source
+    // of placement/order; this compatibility array must never seed that layout.
+    this._loadWebviewOpenState();
     this.renderSessionTabs();
   },
 
@@ -60,12 +54,74 @@ Object.assign(CodemanApp.prototype, {
     this.renderSessionTabs();
   },
 
-  _persistWebviewOrder() {
+  _normalizeWebviewOpenIds(value) {
+    if (!Array.isArray(value)) return [];
+    const requested = new Set(value.filter((id) => typeof id === 'string'));
+    // Canonicalize membership against the authoritative saved-list snapshot so
+    // neither legacy order nor close/open chronology survives as index authority.
+    return [...(this.webviews?.keys() || [])].filter((id) => requested.has(id));
+  },
+
+  /** Migrate legacy local ordering once, retaining only set membership. */
+  _loadWebviewOpenState() {
+    const current = this._normalizeWebviewOpenIds(this.webviewOrder);
+    let storage;
+    let stored;
     try {
-      localStorage.setItem('codeman-webview-order', JSON.stringify(this.webviewOrder || []));
+      storage = localStorage;
+      stored = storage.getItem('codeman-webview-open');
     } catch {
-      /* private mode / quota, order is a convenience, never fatal */
+      this.webviewOrder = current;
+      return;
     }
+
+    if (stored !== null) {
+      let parsed;
+      try {
+        parsed = JSON.parse(stored);
+      } catch {
+        parsed = [];
+      }
+      this.webviewOrder = this._normalizeWebviewOpenIds(parsed);
+      const normalized = JSON.stringify(this.webviewOrder);
+      if (stored !== normalized) {
+        try {
+          storage.setItem('codeman-webview-open', normalized);
+        } catch {
+          /* normalized openness remains usable in memory */
+        }
+      }
+      return;
+    }
+
+    let legacy;
+    try {
+      legacy = JSON.parse(storage.getItem('codeman-webview-order') || '[]');
+    } catch {
+      legacy = [];
+    }
+    this.webviewOrder = this._normalizeWebviewOpenIds(legacy);
+    try {
+      // Even [] is a migration marker: a stale legacy value must never be
+      // reimported after the user has closed every dashboard.
+      storage.setItem('codeman-webview-open', JSON.stringify(this.webviewOrder));
+    } catch {
+      /* migrated openness remains usable in memory */
+    }
+  },
+
+  _persistWebviewOpenState() {
+    this.webviewOrder = this._normalizeWebviewOpenIds(this.webviewOrder);
+    try {
+      localStorage.setItem('codeman-webview-open', JSON.stringify(this.webviewOrder));
+    } catch {
+      /* private mode / quota: openness remains usable in memory */
+    }
+  },
+
+  /** Compatibility name; the value is set-like openness, never tab order. */
+  _persistWebviewOrder() {
+    this._persistWebviewOpenState();
   },
 
   // ── Tab strip ─────────────────────────────────────────────────────────────
