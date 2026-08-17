@@ -672,7 +672,6 @@ html[data-tab-orientation='vertical'] .tab-layout-group-name {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 html[data-tab-orientation='vertical'] .tab-layout-tree {
@@ -765,9 +764,11 @@ html[data-tab-orientation='vertical'] .session-tab[role='treeitem']:focus-visibl
 
 html[data-tab-orientation='vertical'] .tab-layout-group-toggle {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: auto;
+  padding: 8px 0 2px 8px;
   border: 0;
   background: transparent;
   text-align: left;

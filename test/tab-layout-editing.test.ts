@@ -335,7 +335,10 @@ describe('COD-307 accessible rendering and pointer wiring', () => {
     const container = document.getElementById('sessionTabs')!;
     expect(container.querySelectorAll('[role="tree"]')).toHaveLength(1);
     expect(container.querySelectorAll('[role="treeitem"]')).toHaveLength(6);
-    expect(container.querySelectorAll('[role="group"]')).toHaveLength(3);
+    expect(container.querySelectorAll('[role="group"]')).toHaveLength(2);
+    expect(container.querySelector('[data-tab-group-id="g2"] .tab-layout-group-refs')?.getAttribute('role')).toBe(
+      'presentation'
+    );
     expect(container.querySelectorAll('.tab-layout-drop-zone').length).toBeGreaterThan(8);
     expect(
       [...container.querySelectorAll('.tab-layout-drop-zone')].every(
@@ -348,6 +351,52 @@ describe('COD-307 accessible rendering and pointer wiring', () => {
     expect(container.querySelector('[data-tab-group-header="g2"]')?.getAttribute('aria-expanded')).toBe('false');
     expect(container.querySelector('[data-id="other"]')).toBeNull();
     expect(container.querySelector('[data-tab-group-id=""] [data-tab-group-header]')).toBeNull();
+  });
+
+  it('renders the editable name outside the collapse button and preserves user-entered case', () => {
+    const h = loadHelper();
+    const html = h.renderProjection(
+      h.project(layout(), {
+        liveSessionIds: ['parent', 'child', 'other'],
+        openWebviewIds: ['web'],
+        orientation: 'vertical',
+      }),
+      'vertical',
+      (ref: Ref) => `<div class="session-tab" data-id="${ref.id}" role="tab"></div>`,
+      (value: string) => value
+    );
+    document.body.innerHTML = html;
+    const header = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-header')!;
+    const label = header.querySelector<HTMLElement>('.tab-layout-group-label')!;
+    const toggle = header.querySelector<HTMLButtonElement>('.tab-layout-group-toggle')!;
+    expect(toggle.contains(label)).toBe(false);
+    expect(label.tagName).toBe('SPAN');
+    expect(toggle.getAttribute('aria-label')).toContain('Core <&>');
+    const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
+    expect(css).not.toMatch(/\.tab-layout-group-name\s*\{[^}]*text-transform:\s*uppercase/s);
+  });
+
+  it('exposes a highlighted collapsed member as a sibling treeitem rather than an owned expanded child', () => {
+    const h = loadHelper();
+    const html = h.renderProjection(
+      h.project(layout(), {
+        liveSessionIds: ['parent', 'child', 'other'],
+        openWebviewIds: ['web'],
+        collapsedGroupIds: ['g1'],
+        activeSessionId: 'parent',
+        orientation: 'vertical',
+      }),
+      'vertical',
+      (ref: Ref) => `<div class="session-tab" data-id="${ref.id}" role="tab"></div>`,
+      (value: string) => value
+    );
+    document.body.innerHTML = html;
+    const active = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    expect(active).not.toBeNull();
+    expect(active.getAttribute('role')).toBe('treeitem');
+    expect(active.closest('[role="group"]')).toBeNull();
+    expect(active.closest('[data-tab-highlighted-exception="g1"]')).not.toBeNull();
+    expect(document.querySelector('[data-tab-group-header="g1"]')?.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('uses complete stored indices for drop zones when visible refs omit unopened or collapsed members', () => {
@@ -537,9 +586,15 @@ describe('COD-307 roving tree and focus restoration', () => {
 
   it('preserves a group rename input through debounced and authoritative render attempts', () => {
     const app = makeInteractionApp();
+    app.toggleTabGroupCollapsed = vi.fn();
+    (window as any).app = app;
     app._fullRenderSessionTabs();
     expect(app.startTabGroupRename('g1')).toBe(true);
     const input = document.querySelector<HTMLInputElement>('.tab-layout-group-rename-input')!;
+    expect(input.closest('button')).toBeNull();
+    expect(input.getAttribute('aria-label')).toBe('Rename Core <&> group');
+    input.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(app.toggleTabGroupCollapsed).not.toHaveBeenCalled();
     input.value = 'Still typing';
     app.renderSessionTabs();
     app._fullRenderSessionTabs();

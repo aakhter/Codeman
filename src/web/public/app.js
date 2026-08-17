@@ -5011,14 +5011,16 @@ class CodemanApp {
 
   startTabGroupRename(groupId) {
     if (this._inlineRenameActive || this.tabLayoutReadOnly) return false;
-    const header = [...(this.$('sessionTabs')?.querySelectorAll('[data-tab-group-header]') || [])]
-      .find((candidate) => candidate.dataset.tabGroupHeader === groupId);
+    const header = [...(this.$('sessionTabs')?.querySelectorAll('.tab-layout-group-header') || [])].find(
+      (candidate) => candidate.querySelector('[data-tab-group-header]')?.dataset.tabGroupHeader === groupId
+    );
     const label = header?.querySelector('.tab-layout-group-label');
     const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
     if (!label || !group) return false;
     this._inlineRenameActive = true;
     const input = document.createElement('input');
     input.className = 'tab-layout-group-rename-input';
+    input.setAttribute('aria-label', `Rename ${group.name} group`);
     input.value = group.name;
     input.maxLength = 60;
     label.replaceChildren(input);
