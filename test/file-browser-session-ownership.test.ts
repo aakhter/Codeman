@@ -173,11 +173,14 @@ describe('COD-231 file-browser session ownership', () => {
 
     host.renderFileBrowserTree();
     const clickHandler = item.addEventListener.mock.calls.find(([event]) => event === 'click')?.[1] as
-      | (() => void)
+      | ((event: unknown) => void)
       | undefined;
     expect(clickHandler).toBeTypeOf('function');
 
-    clickHandler?.();
+    // A real listener always receives an event, and since COD-318 the handler
+    // reads target.closest() to ignore clicks on the row's rename/delete/
+    // download buttons. Row body = a target that matches none of them.
+    clickHandler?.({ target: { closest: () => null } });
 
     expect(host.openFilePreview).toHaveBeenCalledWith(path, 'tree-owner-session');
     expect(host.openFilePreview).not.toHaveBeenCalledWith(path, 'new-active-session');

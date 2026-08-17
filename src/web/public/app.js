@@ -734,6 +734,11 @@ class CodemanApp {
     // Tracks pending hook events that need resolution (permission_prompt, elicitation_dialog, idle_prompt)
     this.pendingHooks = new Map();
 
+    // Sessions THIS tab is closing right now. closeSession() owns the follow-up
+    // selection, so _onSessionDeleted must not race its own delete's SSE
+    // broadcast to the welcome screen. Set<sessionId>, cleared in a finally.
+    this._closingSessions = new Set();
+
     // Approvals Inbox: Map<approvalId, ApprovalItem> (methods in approvals-ui.js)
     this.approvals = new Map();
 
@@ -1689,9 +1694,10 @@ class CodemanApp {
     document.body.classList.add('solo-mode');
     const session = this.sessions.get(this.soloSessionId);
     if (!session) { this._showSoloSessionGone(); return; }
-    // Force re-select (handleInit cleared terminal state above).
+    // Force re-select (handleInit cleared terminal state above). `auto`: the
+    // window is opening its own target, which is not a human checking on it.
     this.activeSessionId = null;
-    this.selectSession(this.soloSessionId);
+    this.selectSession(this.soloSessionId, { auto: true });
     const name = this.getSessionName(session) || 'Session';
     const titleEl = document.getElementById('soloSessionTitle');
     if (titleEl) { titleEl.textContent = name; titleEl.style.display = ''; }
@@ -2090,7 +2096,13 @@ class CodemanApp {
     // Dashboard: a detached session ended → clear its detached state/timers.
     if (this.detachedSessions.has(data.id)) this._redock(data.id);
     this._cleanupSessionData(data.id);
-    if (this.activeSessionId === data.id) {
+    // ⚠️ Skip the whole active-session handoff while THIS tab is closing that
+    // session: closeSession() owns the follow-up selection and moves you to the
+    // next tab, so acting here would race it and flash the welcome screen (or
+    // strand you on it) for a close the user initiated right here. A delete from
+    // anywhere else still lands on the home screen, which is the honest answer
+    // when the thing you were looking at was taken away.
+    if (this.activeSessionId === data.id && !this._closingSessions.has(data.id)) {
       this.activeSessionId = null;
       try { localStorage.removeItem('codeman-active-session'); } catch {}
       this.terminal.clear();
@@ -4933,10 +4945,13 @@ class CodemanApp {
         if (!restoreId || !this.sessions.has(restoreId)) {
           try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
         }
+        // `auto`: the app is restoring a session on load, not a human opening
+        // one, so a pending idle alert on that tab stays armed until it is
+        // actually tapped (see the userInitiated note in selectSession).
         if (restoreId && this.sessions.has(restoreId)) {
-          this.selectSession(restoreId);
+          this.selectSession(restoreId, { auto: true });
         } else {
-          this.selectSession(this.sessionOrder[0]);
+          this.selectSession(this.sessionOrder[0], { auto: true });
         }
       }
     });
@@ -7413,13 +7428,23 @@ class CodemanApp {
     }
     const forceReload = options?.forceReload === true;
     this.closeMobileHeaderUtilities?.();
+    // ⚠️ `auto: true` marks a selection the APP made rather than the human:
+    // the boot restore, a solo window opening its target, the fallback after
+    // the active session is deleted. Those must NOT spend a pending idle alert
+    // (the yellow survives until a real tap), because "the app put this on
+    // screen" is not "I checked it". The DEFAULT is user-initiated, so a call
+    // site nobody tagged fails toward acknowledging rather than toward an
+    // alert that can never be cleared.
+    const userInitiated = options?.auto !== true;
+    // `!activeWebviewId`: with a dashboard foregrounded, re-selecting the
+    // session behind it is a real switch, not a no-op, so it must not early-return.
     if (this.activeSessionId === sessionId && !this.activeWebviewId && !forceReload) {
-      // Clicking the tab you are already on is still "I checked it". The alert
+      // Tapping the tab you are already on is still "I checked it". The alert
       // can be armed on the ACTIVE tab (a live idle_prompt fires regardless of
       // which tab is showing, and so does the reload seed), and every other
       // clear path runs on the switch this early return skips, leaving a
-      // yellow tab that no click could clear.
-      this.markIdleAlertSeen(sessionId);
+      // yellow tab that no tap could clear.
+      if (userInitiated) this.markIdleAlertSeen(sessionId);
       return;
     }
     if (this.activeSessionId === sessionId && forceReload) {
@@ -7489,8 +7514,9 @@ class CodemanApp {
     this.playTerminalEntrance?.(sessionId);
     // Clear idle hooks on view, but keep action hooks until user interacts.
     // Also acknowledged server-side, so the yellow does not come back on the
-    // next reload and the user's other devices clear it too.
-    this.markIdleAlertSeen(sessionId);
+    // next reload and the user's other devices clear it too. Skipped for an
+    // `auto` selection (see userInitiated above).
+    if (userInitiated) this.markIdleAlertSeen(sessionId);
     // Instant active-class toggle (no 100ms debounce), then schedule full render for badges/status
     this._updateActiveTabImmediate(sessionId);
     // Handheld: the session drawer overlays the terminal, so slide it away now
@@ -7986,19 +8012,34 @@ class CodemanApp {
   }
 
   async closeSession(sessionId, killMux = true) {
+    // ⚠️ Captured BEFORE the await, and the delete is announced to
+    // _onSessionDeleted through _closingSessions. The `session_deleted` SSE
+    // broadcast for THIS delete routinely lands while the request is still in
+    // flight, and that handler nulls activeSessionId and shows the welcome
+    // screen. Re-reading the field after the await therefore made the fallback
+    // below a coin flip: closing the tab you were on either moved you to the
+    // next session or dumped you on the home screen, depending on which path
+    // won the race (both outcomes measured on one build, 2026-08-17).
+    const wasActive = this.activeSessionId === sessionId;
+    this._closingSessions.add(sessionId);
     try {
       await this._apiDelete(`/api/sessions/${sessionId}?killMux=${killMux}`);
       this._cleanupSessionData(sessionId);
 
-      if (this.activeSessionId === sessionId) {
+      if (wasActive) {
         this.activeSessionId = null;
         try { localStorage.removeItem('codeman-active-session'); } catch {}
         // COD-285: reset terminal background to the skin's slate when no session is active
         try { this.syncTerminalBackground?.(); } catch {}
-        // Select another session or show welcome (use sessionOrder for consistent ordering)
-        if (this.sessionOrder.length > 0 && this.sessions.size > 0) {
-          const nextSessionId = this.sessionOrder[0];
-          this.selectSession(nextSessionId);
+        // Next tab in the user's own order, skipping ids the cleanup has not
+        // caught up with yet: sessionOrder can transiently hold a dead id
+        // (delete racing the order sync), which is the same reason Alt+N
+        // indexes a live-filtered list rather than sessionOrder directly.
+        const nextSessionId = this.sessionOrder.find((id) => id !== sessionId && this.sessions.has(id));
+        if (nextSessionId) {
+          // `auto`: this tab was chosen by the app because the previous one
+          // went away, so it must not spend that session's idle alert.
+          this.selectSession(nextSessionId, { auto: true });
         } else {
           this.terminal.clear();
           this.showWelcome();
@@ -8015,6 +8056,8 @@ class CodemanApp {
       }
     } catch (err) {
       this.showToast('Failed to close session', 'error');
+    } finally {
+      this._closingSessions.delete(sessionId);
     }
   }
 

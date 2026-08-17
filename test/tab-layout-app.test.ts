@@ -585,7 +585,11 @@ describe('COD-306 CodemanApp integration', () => {
     await vi.waitFor(() => expect(app.selectSession).toHaveBeenCalledOnce());
 
     expect(app.sessionOrder).toEqual(['s3', 's2', 's1']);
-    expect(app.selectSession).toHaveBeenCalledWith('s3');
+    // `{ auto: true }`: the BOOT RESTORE is an app-made selection, so it must
+    // not spend that session's pending idle alert (upstream 1.19.4). Pinned
+    // explicitly rather than loosened — restore silently becoming user-initiated
+    // is exactly the regression that flag exists to prevent.
+    expect(app.selectSession).toHaveBeenCalledWith('s3', { auto: true });
     app.cases = [];
     app.pendingHooks = new Map();
     app._buildCommandPaletteNewSessionItem = () => ({ id: 'new', type: 'new-session' });
@@ -765,7 +769,11 @@ describe('COD-306 CodemanApp integration', () => {
 
     expect(app.tabLayoutReadOnly).toBe(true);
     expect(app.selectSession).toHaveBeenCalledOnce();
-    expect(app.selectSession).toHaveBeenCalledWith('s1');
+    // `{ auto: true }`: the BOOT RESTORE is an app-made selection, so it must
+    // not spend that session's pending idle alert (upstream 1.19.4). Pinned
+    // explicitly rather than loosened — restore silently becoming user-initiated
+    // is exactly the regression that flag exists to prevent.
+    expect(app.selectSession).toHaveBeenCalledWith('s1', { auto: true });
     app.cases = [];
     app.pendingHooks = new Map();
     app._buildCommandPaletteNewSessionItem = () => ({ id: 'new', type: 'new-session' });
@@ -814,7 +822,11 @@ describe('COD-306 CodemanApp integration', () => {
     });
     await requests[1].promise;
     await vi.waitFor(() => expect(app.selectSession).toHaveBeenCalledOnce());
-    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    // `{ auto: true }`: the BOOT RESTORE is an app-made selection, so it must
+    // not spend that session's pending idle alert (upstream 1.19.4). Pinned
+    // explicitly rather than loosened — restore silently becoming user-initiated
+    // is exactly the regression that flag exists to prevent.
+    expect(app.selectSession).toHaveBeenCalledWith('s2', { auto: true });
     app._tabLayoutCoordinator.dispose();
   });
 

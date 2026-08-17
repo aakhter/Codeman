@@ -9,6 +9,25 @@
   **Upload (COD-317):** `POST /api/sessions/:id/files/upload?path=<relativeDir>` writes any file to the workspace with CSRF (`Origin/Referer==Host` or `X-Codeman-CSRF`), per-`(IP,session)` token bucket (20/min), `sanitizeUploadFilename`, `validateSessionFilePath` confinement, `isSensitivePath`/`isBlockedAttachmentPath`/`.git` guards, symlink-safe `lstat` + `O_EXCL|O_NOFOLLOW` and non-recursive `mkdir` loop, `409` on exists, 50 MB cap via `@fastify/multipart`; remote writes via `writeRemoteFileBytes` (`umask 077`, atomic `mv -n`, 15 s timeout). Header `⬆ Upload` handles multi-file (10/batch, concurrency 3, progress toasts, order-preserving) and drag-drop onto a folder now targets that folder; both now respect the **current folder** (last expanded) and show `· in <dir>` in the status bar.
 
   **Mkdir / Rename / Delete (COD-318):** `POST /api/sessions/:id/files/mkdir {path}`, `POST /api/sessions/:id/files/rename {from,to}`, `DELETE /api/sessions/:id/files?path=` share the same guards plus recursive `fs.rm` for local deletes and `mkdir -p`/`SFTP rename`/`rm -rf` for remote via new `remote-sftp.ts` helpers (`createRemoteWorkspaceDirectory`, `renameRemoteWorkspacePath`, `deleteRemoteWorkspacePath`). Header `＋ New folder` creates in the current folder (e.g. `src/utils` when that is expanded) and auto-expands it; per-row `✎ Rename` (prompt for new base, moves expanded/current state) and `🗑 Delete` (confirm, recursive for non-empty dirs) appear on hover. All operations refresh the tree and keep `fileBrowserCurrentDir`/`ExpandedDirs` consistent.
+## 1.19.5
+
+### Patch Changes
+
+- Closing the session you are looking at now always moves you to the next tab.
+
+  The delete request and its own `session_deleted` broadcast raced each other: the close path selected the next tab, while the broadcast handler cleared the active session and showed the home screen, and whichever ran first decided what you saw. On one build, closing a tab either switched sessions or dumped you on the welcome screen depending on timing. The close now owns that handoff from beginning to end, and the broadcast handler stays out of the way for a close started in that tab. A session deleted from somewhere else still returns you to the home screen, which is the honest answer when what you were looking at was taken away.
+
+  The next tab is also picked from sessions that still exist, so a stale entry in the tab order can no longer name a tab that is already gone.
+
+## 1.19.4
+
+### Patch Changes
+
+- Only a human opening a session clears its yellow "waiting for input" tab alert.
+
+  1.19.2 made that clear durable and cross-device, which also meant the app itself could spend it: restoring your last session on page load, a popped-out window opening its target, and the fallback to another tab after you close the active one all counted as "I checked it", so a yellow tab could clear itself before you ever saw it. Those three app-driven selections are now marked and skip the acknowledgement, so the alert survives until you actually open the session.
+
+  Everything a human does still clears it, on every surface: tapping a tab, tapping a row on the phone home screen, the keyboard tab shortcuts, and submitting a prompt into the session. The flag defaults to user-initiated, so a selection path nobody marked keeps acknowledging rather than leaving an alert nothing can clear.
 
 ## 1.19.3
 
