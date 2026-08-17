@@ -32,17 +32,44 @@ Object.assign(CodemanApp.prototype, {
     this._webviewNavigationGeneration = this._webviewNavigationGeneration || 0;
     this._webviewNavigationId = this._webviewNavigationId || null;
     this._webviewOpenGenerations = this._webviewOpenGenerations || new Map();
+    this._webviewOpenStateLoaded = this._webviewOpenStateLoaded === true;
+    this._webviewInitRetryTimer = this._webviewInitRetryTimer || null;
+    this._webviewInitRetryScheduled = this._webviewInitRetryScheduled === true;
+    this._webviewListRefreshGeneration = this._webviewListRefreshGeneration || 0;
 
     const acquired = await this.refreshWebviews();
-    if (!acquired) return;
+    if (!acquired) this._scheduleWebviewInitRetry();
+  },
 
-    // Restore the device-local OPEN SET. The server tab layout is the only source
-    // of placement/order; this compatibility array must never seed that layout.
-    this._loadWebviewOpenState();
-    this.renderSessionTabs();
+  /** One bounded recovery read for a transient failure during the sole shipping init call. */
+  _scheduleWebviewInitRetry() {
+    if (this._webviewOpenStateLoaded || this._webviewInitRetryScheduled || this._webviewInitRetryTimer !== null) return;
+    this._webviewInitRetryScheduled = true;
+    this._webviewInitRetryTimer = setTimeout(async () => {
+      this._webviewInitRetryTimer = null;
+      await this.refreshWebviews();
+    }, 2000);
+    if (!this._webviewInitPagehideHandler) {
+      this._webviewInitPagehideHandler = (event) => {
+        if (event.persisted) return;
+        this._clearWebviewInitRetry();
+      };
+      window.addEventListener('pagehide', this._webviewInitPagehideHandler);
+    }
+  },
+
+  _clearWebviewInitRetry() {
+    if (this._webviewInitRetryTimer !== null) clearTimeout(this._webviewInitRetryTimer);
+    this._webviewInitRetryTimer = null;
+    if (this._webviewInitPagehideHandler) {
+      window.removeEventListener('pagehide', this._webviewInitPagehideHandler);
+      this._webviewInitPagehideHandler = null;
+    }
   },
 
   async refreshWebviews() {
+    const generation = (this._webviewListRefreshGeneration || 0) + 1;
+    this._webviewListRefreshGeneration = generation;
     let data;
     try {
       data = await this._apiJson('/api/webviews');
@@ -50,17 +77,38 @@ Object.assign(CodemanApp.prototype, {
       return false;
     }
     if (!data || !Array.isArray(data.webviews)) return false;
+    if (generation !== this._webviewListRefreshGeneration) return false;
     this.webviews = new Map((data.webviews || []).map((w) => [w.id, w]));
     if (typeof data.maxLiveFrames === 'number') this._webviewMaxFrames = data.maxLiveFrames;
     this.renderWebviewMenuItems();
+    if (!this._webviewOpenStateLoaded) {
+      // Restore the device-local OPEN SET only after the authoritative saved list
+      // exists. Any later successful retry or SSE refresh may be the first success.
+      this._loadWebviewOpenState();
+      this._webviewOpenStateLoaded = true;
+      this._clearWebviewInitRetry();
+      this.renderSessionTabs();
+    }
     return true;
   },
 
   /** SSE: the saved list changed (possibly on another device). */
   async _onWebviewChanged(data) {
-    if (!(await this.refreshWebviews())) return;
-    // A dashboard deleted elsewhere must not linger as a dead tab here.
-    if (data && data.action === 'deleted' && data.id) this._removeWebviewTab(data.id);
+    const deletedId = data?.action === 'deleted' && data.id ? data.id : null;
+    const deletionSnapshot = deletedId
+      ? (this._refreshTabProjection?.()?.completeRefs || []).map((ref) => ({ kind: ref.kind, id: ref.id }))
+      : null;
+    const acquired = await this.refreshWebviews();
+    if (deletedId) {
+      // Owner-routed deletion is authoritative even if the follow-up list read
+      // fails. Remove every local identity and use the pre-refresh ordering for
+      // active fallback because a successful read already omits this ref.
+      this.webviews?.delete(deletedId);
+      this.renderWebviewMenuItems();
+      this._removeWebviewTab(deletedId, deletionSnapshot);
+    } else if (!acquired) {
+      return;
+    }
     this.renderSessionTabs();
   },
 
@@ -358,9 +406,9 @@ Object.assign(CodemanApp.prototype, {
     this.renderSessionTabs();
   },
 
-  _removeWebviewTab(id) {
-    const before = this._refreshTabProjection?.();
-    const completeBefore = Array.isArray(before?.completeRefs) ? before.completeRefs : [];
+  _removeWebviewTab(id, completeSnapshot) {
+    const before = completeSnapshot === undefined ? this._refreshTabProjection?.()?.completeRefs : completeSnapshot;
+    const completeBefore = Array.isArray(before) ? before : [];
     this._cancelPendingWebviewOpen(id);
     this.webviewOrder = (this.webviewOrder || []).filter((x) => x !== id);
     this._webviewFrameLru = (this._webviewFrameLru || []).filter((x) => x !== id);
@@ -375,7 +423,9 @@ Object.assign(CodemanApp.prototype, {
       this._hideWebviewLayer();
       const targetIndex = completeBefore.findIndex((ref) => ref.kind === 'webview' && ref.id === id);
       const isRenderable = (ref) =>
-        ref.kind === 'session' ? this.sessions?.has(ref.id) : this.webviewOrder.includes(ref.id);
+        ref.kind === 'session'
+          ? this.sessions?.has(ref.id)
+          : this.webviewOrder.includes(ref.id) && this.webviews?.has(ref.id);
       const next =
         completeBefore.slice(targetIndex + 1).find(isRenderable) ||
         completeBefore.slice(0, Math.max(0, targetIndex)).reverse().find(isRenderable);
