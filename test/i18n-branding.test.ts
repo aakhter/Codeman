@@ -13,6 +13,7 @@ import { SettingsUpdateSchema } from '../src/web/schemas.js';
 import { WebServer } from '../src/web/server.js';
 
 const i18nSource = readFileSync(new URL('../src/web/public/i18n.js', import.meta.url), 'utf8');
+const tabLayoutSource = readFileSync(new URL('../src/web/public/tab-layout-browser.js', import.meta.url), 'utf8');
 const indexSource = readFileSync(new URL('../src/web/public/index.html', import.meta.url), 'utf8');
 const settingsSource = readFileSync(new URL('../src/web/public/settings-ui.js', import.meta.url), 'utf8');
 
@@ -25,6 +26,7 @@ function makeDom(body = '<span class="logo">Codeman</span><button title="App Set
     }
   );
   vm.runInContext(i18nSource, dom.getInternalVMContext(), { filename: 'i18n.js' });
+  vm.runInContext(tabLayoutSource, dom.getInternalVMContext(), { filename: 'tab-layout-browser.js' });
   return dom;
 }
 
@@ -88,6 +90,37 @@ describe('custom display name and browser localization', () => {
     expect(window.document.querySelector('.logo')?.textContent).toBe('Workbench');
     expect(dynamicButton.textContent).toBe('Settings saved');
     expect(window.document.title).toBe('Workbench:test-host');
+    dom.window.close();
+  });
+
+  it('preserves a translatable user group name inserted by the shipping renderer', async () => {
+    const dom = makeDom('<div id="tabs"></div>');
+    const { window } = dom;
+    window.CodemanI18n.start();
+    window.CodemanI18n.configure({ language: 'zh-CN' });
+    const projection = {
+      visibleRefs: [],
+      sections: [
+        { id: 'user-group', name: 'Browser', refs: [], collapsed: false },
+        { id: null, name: '', refs: [], collapsed: false },
+      ],
+    };
+    window.document.getElementById('tabs')!.innerHTML = window.CodemanTabLayout.renderProjection(
+      projection,
+      'vertical',
+      () => '',
+      (value: string) => value
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    const named = window.document.querySelector<HTMLElement>('[data-tab-group-id="user-group"]')!;
+    const ungrouped = window.document.querySelector<HTMLElement>('[data-tab-group-id=""]')!;
+    const namedHeader = named.querySelector<HTMLElement>('.tab-layout-group-name')!;
+    expect(namedHeader.textContent).toBe('Browser');
+    expect(namedHeader.hasAttribute('data-i18n-skip')).toBe(true);
+    expect(named.getAttribute('aria-labelledby')).toBe(namedHeader.id);
+    expect(named.hasAttribute('data-i18n-skip')).toBe(false);
+    expect(ungrouped.hasAttribute('data-i18n-skip')).toBe(false);
     dom.window.close();
   });
 

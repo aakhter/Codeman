@@ -547,14 +547,21 @@ class CodemanApp {
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;
     this.collapsedTabGroupIds = new Set();
+    this._tabCollapseStorageFailed = false;
     this._visibleTabRefs = [];
     this._tabLayoutManaged = true;
     this._tabLayoutFirstPaintPending = true;
     this._tabLayoutCoordinator = null;
+    this._tabLayoutEditCoordinator = null;
+    this._tabLayoutSsePending = false;
+    this._tabPlacementStates = new Map();
+    this._tabPendingFollowRefs = new Set();
     this._tabLayoutPagehideHandler = null;
     this._lastTabStructureKey = null;
+    this._tabFocusIdentity = null;
+    this._tabPointerDrag = null;
+    this._tabPointerHandlersBound = false;
     this._legacySessionOrder = [];
-    this.draggedTabId = null; // Currently dragged tab session ID
     this.cases = [];
     this.currentRun = null;
     this.totalTokens = 0;
@@ -4935,7 +4942,9 @@ class CodemanApp {
     if (this._tabLayoutCoordinator) return this._tabLayoutCoordinator;
     this._tabLayoutCoordinator = window.CodemanTabLayout.createLoadCoordinator({
       fetchLayout: () => this._fetchTabLayout(),
-      applyLayout: (layout) => this._applyTabLayout(layout),
+      applyLayout: (snapshot) => {
+        this._applyTabLayout(snapshot.layout || snapshot, snapshot.placements);
+      },
       applyFallback: () => this._applyTabLayoutFallback(),
       scheduleRetry: (retry) => setTimeout(retry, 2000),
       cancelRetry: (timer) => clearTimeout(timer),
@@ -4945,6 +4954,8 @@ class CodemanApp {
         // A persisted pagehide enters BFCache; this same page instance resumes
         // on Back and must keep its coordinator usable for SSE-driven refetches.
         if (event.persisted) return;
+        this._persistPendingTabLayoutOperations();
+        this._tabLayoutEditCoordinator?.flushKeepalive();
         this._tabLayoutCoordinator?.dispose();
         window.removeEventListener('pagehide', this._tabLayoutPagehideHandler);
         this._tabLayoutPagehideHandler = null;
@@ -4960,7 +4971,7 @@ class CodemanApp {
     try {
       const data = await this._apiJson('/api/tab-layout', { signal: controller.signal });
       if (!data?.layout) throw new Error('Tab layout unavailable');
-      return data.layout;
+      return data;
     } finally {
       clearTimeout(timeout);
     }
@@ -4971,7 +4982,458 @@ class CodemanApp {
   }
 
   _onTabLayoutChanged() {
+    // A pending semantic edit owns its optimistic projection. A refetch may
+    // update its authoritative base, but must not paint stale server state over it.
+    if (this._tabLayoutEditCoordinator?.hasPending()) {
+      this._tabLayoutSsePending = true;
+      return;
+    }
     this._loadTabLayout();
+  }
+
+  _tabLayoutMetadata() {
+    const metadata = [];
+    const currentUser = window.__codemanUser;
+    for (const session of this.sessions.values()) {
+      metadata.push({
+        kind: 'session',
+        id: session.id,
+        ownerValid:
+          !currentUser?.multiUser ||
+          (typeof session.owner === 'string' && session.owner.length > 0 && session.owner === currentUser.username),
+        ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
+      });
+    }
+    for (const id of this.webviews?.keys?.() || []) metadata.push({ kind: 'webview', id });
+    return metadata;
+  }
+
+  _tabRefPlacementState(ref) {
+    if (!this.tabLayout) return null;
+    const key = `${ref.kind}:${ref.id}`;
+    const authoritative = this._tabPlacementStates?.get(key) || null;
+    if (this._tabPendingFollowRefs?.has(key) && authoritative) {
+      return { ...authoritative, state: 'following', canFollow: false };
+    }
+    const stored = this._refLocation(ref);
+    const storedRef =
+      stored?.groupId === null
+        ? this.tabLayout.ungrouped[stored.index]
+        : this.tabLayout.groups.find((group) => group.id === stored?.groupId)?.refs[stored?.index];
+    if (storedRef?.placement === 'manual' && authoritative?.state === 'inherited') {
+      return { ...authoritative, state: 'manual', canFollow: true };
+    }
+    return authoritative;
+  }
+
+  _tabPlacementPresentation(ref) {
+    const placement = this._tabRefPlacementState(ref);
+    if (!placement) return null;
+    const parent = this.sessions.get(placement.parentId);
+    const parentName = parent ? this.getSessionName(parent) : placement.parentId;
+    if (placement.state === 'inherited') {
+      return { ...placement, short: 'Follows parent', description: `Follows parent ${parentName}` };
+    }
+    if (placement.state === 'manual') {
+      return { ...placement, short: 'Manual', description: `Placed manually; can follow ${parentName}` };
+    }
+    if (placement.state === 'cycle') {
+      return { ...placement, short: 'Parent cycle', description: 'Parent cycle; placed independently' };
+    }
+    if (placement.state === 'following') {
+      return { ...placement, short: 'Following parent', description: `Following parent ${parentName}…` };
+    }
+    return { ...placement, short: 'Parent unavailable', description: 'Parent unavailable; placed independently' };
+  }
+
+  _tabRefPlacementActions(ref) {
+    const placement = this._tabPlacementPresentation(ref);
+    if (!placement) return [];
+    return [
+      { label: placement.description, disabled: true },
+      ...(placement.canFollow
+        ? [
+            {
+              label: 'Follow parent again',
+              run: () =>
+                this.editTabLayout({ type: 'followParent', ref }, `${ref.kind}:${ref.id}`),
+            },
+          ]
+        : []),
+    ];
+  }
+
+  _syncTabPlacementAccessibility(tab, ref, name, tabTooltip) {
+    const placement = this._tabPlacementPresentation(ref);
+    const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
+    const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
+    if (tab.getAttribute('aria-label') !== accessibleName) tab.setAttribute('aria-label', accessibleName);
+    if (tab.title !== completeTooltip) tab.title = completeTooltip;
+    const badge = tab.querySelector('.tab-placement-state');
+    if (!placement || !badge) return;
+    badge.className = `tab-placement-state tab-placement-state--${placement.state}`;
+    badge.textContent = placement.short;
+    badge.setAttribute('aria-label', placement.description);
+    badge.title = placement.description;
+  }
+
+  _tabLayoutWireOperations(operations) {
+    return (operations || []).map(({ metadata: _metadata, ...operation }) => operation);
+  }
+
+  async _putTabLayout({ baseVersion, layout, operations, recoveryBaseLayout }) {
+    const wireOperations = this._tabLayoutWireOperations(operations);
+    const response = await this._apiPut('/api/tab-layout', {
+      baseVersion,
+      operations: wireOperations,
+      ...(recoveryBaseLayout ? { recoveryBaseLayout } : {}),
+    });
+    if (!response) return { ok: false, status: 0, layout: null };
+    let body = null;
+    try { body = await response.json(); } catch {}
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      layout: body?.data?.layout || null,
+      placements: body?.data?.placements || null,
+      appliedOperationCount: body?.data?.appliedOperationCount,
+    };
+    return result;
+  }
+
+  _putTabLayoutKeepalive({ baseVersion, operations, recoveryBaseLayout }) {
+    try {
+      void fetch('/api/tab-layout', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseVersion,
+          operations: this._tabLayoutWireOperations(operations),
+          ...(recoveryBaseLayout ? { recoveryBaseLayout } : {}),
+        }),
+        keepalive: true,
+      }).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _persistPendingTabLayoutOperations() {
+    const coordinator = this._tabLayoutEditCoordinator;
+    const operations = coordinator?.pendingOperations?.() || [];
+    if (!operations.length) return false;
+    try {
+      const snapshot = coordinator.recoverySnapshot?.() || { baseLayout: this.tabLayout, operations };
+      sessionStorage.setItem('codeman:tab-layout-pending-operations', JSON.stringify(snapshot));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _restorePendingTabLayoutOperations() {
+    let snapshot;
+    try {
+      const raw = sessionStorage.getItem('codeman:tab-layout-pending-operations');
+      if (!raw) return false;
+      sessionStorage.removeItem('codeman:tab-layout-pending-operations');
+      snapshot = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    const storedOperations = Array.isArray(snapshot) ? snapshot : snapshot?.operations;
+    if (!Array.isArray(storedOperations) || !storedOperations.length) return false;
+    try {
+      const requiresAuthoritativeRecovery =
+        snapshot?.baseLayout && storedOperations.some((operation) => operation?.type === 'followParent');
+      const operations = snapshot?.baseLayout
+        ? requiresAuthoritativeRecovery
+          ? storedOperations
+          : window.CodemanTabLayout.operationsAfterAppliedPrefix(
+            snapshot.baseLayout,
+            storedOperations,
+            this.tabLayout
+          )
+        : storedOperations;
+      if (!operations.length) return false;
+      const restored = operations.map((operation) =>
+        operation?.type === 'moveRef' || operation?.type === 'followParent'
+          ? { ...operation, metadata: this._tabLayoutMetadata() }
+          : operation
+      );
+      const coordinator = this._ensureTabLayoutEditCoordinator();
+      if (requiresAuthoritativeRecovery) {
+        return coordinator.restoreOperations(snapshot.baseLayout, restored);
+      }
+      restored.reduce(
+        (candidate, operation) => window.CodemanTabLayout.applyOperation(candidate, operation),
+        this.tabLayout
+      );
+      for (const operation of restored) coordinator.enqueue(operation);
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not restore pending tab layout edits.', 'error');
+      return false;
+    }
+  }
+
+  _ensureTabLayoutEditCoordinator() {
+    if (this._tabLayoutEditCoordinator || !this.tabLayout) return this._tabLayoutEditCoordinator;
+    this._tabLayoutEditCoordinator = window.CodemanTabLayout.createEditCoordinator({
+      initialLayout: this.tabLayout,
+      debounceMs: 180,
+      put: (request) => this._putTabLayout(request),
+      putKeepalive: (request) => this._putTabLayoutKeepalive(request),
+      applyLayout: (layout, meta) => this._adoptTabLayoutForEdit(layout, meta),
+      reportError: (message) => {
+        this._tabPendingFollowRefs.clear();
+        this._lastTabStructureKey = null;
+        this._fullRenderSessionTabs();
+        this.showToast?.(message, 'error');
+      },
+      onSettled: () => {
+        if (!this._tabLayoutSsePending) return;
+        this._tabLayoutSsePending = false;
+        this._loadTabLayout();
+      },
+      schedule: (fn, delay) => setTimeout(fn, delay),
+      cancel: (timer) => clearTimeout(timer),
+    });
+    return this._tabLayoutEditCoordinator;
+  }
+
+  _adoptTabLayoutForEdit(layout, meta = {}) {
+    if (Array.isArray(meta.placements)) {
+      this._tabPlacementStates = new Map(
+        meta.placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
+      );
+    }
+    for (const operation of meta.committedOperations || []) {
+      if (operation?.type === 'followParent') {
+        this._tabPendingFollowRefs.delete(`${operation.ref.kind}:${operation.ref.id}`);
+      }
+    }
+    this.tabLayout = layout;
+    this.tabLayoutVersion = layout.version;
+    this.tabLayoutReadOnly = false;
+    this._lastTabStructureKey = null;
+    this._refreshTabProjection();
+    this._fullRenderSessionTabs();
+  }
+
+  editTabLayout(operation, focusIdentity) {
+    if (this.tabLayoutReadOnly || !this.tabLayout) {
+      this.showToast?.('Tab layout is temporarily read-only.', 'error');
+      return false;
+    }
+    try {
+      if (operation?.type === 'followParent') {
+        this._tabPendingFollowRefs.add(`${operation.ref.kind}:${operation.ref.id}`);
+      }
+      this._tabFocusIdentity = focusIdentity || this._focusedTabLayoutIdentity();
+      this._ensureTabLayoutEditCoordinator().enqueue(operation);
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not edit tab layout.', 'error');
+      return false;
+    }
+  }
+
+  createTabGroup() {
+    if (this.tabLayoutReadOnly) return false;
+    const name = window.prompt?.('Group name');
+    if (!name?.trim()) return false;
+    const id = globalThis.crypto?.randomUUID?.() || `group-${Date.now().toString(36)}`;
+    return this.editTabLayout({ type: 'createGroup', id, name: name.trim() }, `group:${id}`);
+  }
+
+  startTabGroupRename(groupId) {
+    if (this._inlineRenameActive || this.tabLayoutReadOnly) return false;
+    const header = [...(this.$('sessionTabs')?.querySelectorAll('.tab-layout-group-header') || [])].find(
+      (candidate) => candidate.querySelector('[data-tab-group-header]')?.dataset.tabGroupHeader === groupId
+    );
+    const label = header?.querySelector('.tab-layout-group-label');
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    if (!label || !group) return false;
+    this._inlineRenameActive = true;
+    const input = document.createElement('input');
+    input.className = 'tab-layout-group-rename-input';
+    input.setAttribute('aria-label', `Rename ${group.name} group`);
+    input.value = group.name;
+    input.maxLength = 60;
+    label.replaceChildren(input);
+    let settled = false;
+    const finish = (commit) => {
+      if (settled) return;
+      settled = true;
+      const name = input.value.trim();
+      this._inlineRenameActive = false;
+      if (commit && name && name !== group.name) {
+        if (!this.editTabLayout({ type: 'renameGroup', groupId, name }, `group:${groupId}`)) {
+          this._fullRenderSessionTabs();
+        }
+      } else {
+        this._tabFocusIdentity = `group:${groupId}`;
+        this._fullRenderSessionTabs();
+      }
+    };
+    input.addEventListener('keydown', (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+      else if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.focus();
+    input.select();
+    return true;
+  }
+
+  deleteTabGroup(groupId) {
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    if (!group || !window.confirm?.(`Delete group “${group.name}”? Its tabs will move to Ungrouped.`)) return false;
+    const index = this.tabLayout.groups.findIndex((candidate) => candidate.id === groupId);
+    const next = this.tabLayout.groups[index + 1] || this.tabLayout.groups[index - 1];
+    return this.editTabLayout(
+      { type: 'deleteGroup', groupId },
+      next ? `group:${next.id}` : 'group:ungrouped'
+    );
+  }
+
+  openTabGroupMenu(event, groupId) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    document.querySelector('.tab-layout-group-action-menu')?.remove();
+    const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
+    if (groupIndex < 0) return;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-layout-group-action-menu';
+    menu.setAttribute('role', 'menu');
+    const actions = [
+      ['Rename group', () => this.startTabGroupRename(groupId)],
+      ['Move group earlier', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) }, `group:${groupId}`)],
+      ['Move group later', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1) }, `group:${groupId}`)],
+      ['Delete group', () => this.deleteTabGroup(groupId)],
+    ];
+    for (const [label, run] of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.textContent = label;
+      button.addEventListener('click', () => { menu.remove(); run(); });
+      menu.appendChild(button);
+    }
+    document.body.appendChild(menu);
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
+    menu.addEventListener('keydown', (keyEvent) => {
+      const buttons = [...menu.querySelectorAll('button')];
+      const current = buttons.indexOf(document.activeElement);
+      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
+      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+        keyEvent.preventDefault();
+        buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      }
+    });
+    menu.querySelector('button')?.focus();
+  }
+
+  moveTabRefToGroup(ref, groupId, index) {
+    return this.editTabLayout(this._tabRefMoveOperation(ref, { groupId, index }), `${ref.kind}:${ref.id}`);
+  }
+
+  _tabRefMoveActions(ref) {
+    const location = this._refLocation(ref);
+    if (!location || !this.tabLayout) return [];
+    const refs = location.groupId === null
+      ? this.tabLayout.ungrouped
+      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs || [];
+    const metadata = this._tabLayoutMetadata();
+    const key = (candidate) => `${candidate.kind}:${candidate.id}`;
+    const movedKeys = new Set(
+      window.CodemanTabLayout.previewOperation(this.tabLayout, {
+        type: 'moveRef', ref, groupId: location.groupId, index: location.index, metadata,
+      }).refs.map(key)
+    );
+    const movedIndices = refs
+      .map((candidate, index) => (movedKeys.has(key(candidate)) ? index : -1))
+      .filter((index) => index >= 0);
+    const sourceStart = movedIndices.length ? Math.min(...movedIndices) : location.index;
+    const sourceEnd = movedIndices.length ? Math.max(...movedIndices) + 1 : location.index + 1;
+    const blocks = [];
+    for (let start = 0; start < refs.length;) {
+      const blockKeys = new Set(
+        window.CodemanTabLayout.previewOperation(this.tabLayout, {
+          type: 'moveRef', ref: refs[start], groupId: location.groupId, index: start, metadata,
+        }).refs.map(key)
+      );
+      let end = start + 1;
+      while (end < refs.length && blockKeys.has(key(refs[end]))) end++;
+      blocks.push({ start, end });
+      start = end;
+    }
+    const previous = blocks.find((block) => block.end === sourceStart);
+    const next = blocks.find((block) => block.start === sourceEnd);
+    return [
+      ...(sourceStart > 0
+        ? [{ label: 'Move earlier', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
+        : []),
+      ...(sourceEnd < refs.length
+        ? [{ label: 'Move later', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
+        : []),
+      { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
+      ...this.tabLayout.groups.map((group) => ({
+        label: `Move to ${group.name}`,
+        groupId: group.id,
+        index: group.refs.length,
+      })),
+    ];
+  }
+
+  openTabRefMoveMenu(event, ref) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    document.querySelector('.tab-layout-ref-move-menu')?.remove();
+    const actions = [
+      ...this._tabRefPlacementActions(ref),
+      ...this._tabRefMoveActions(ref).map(({ label, groupId, index }) => ({
+        label,
+        run: () => this.moveTabRefToGroup(ref, groupId, index),
+      })),
+    ];
+    if (!actions.length) return;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-layout-ref-move-menu';
+    menu.setAttribute('role', 'menu');
+    for (const { label, run, disabled } of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.textContent = label;
+      if (disabled) {
+        button.setAttribute('aria-disabled', 'true');
+        button.classList.add('tab-placement-summary');
+      }
+      button.addEventListener('click', () => {
+        if (disabled) return;
+        menu.remove();
+        run();
+      });
+      menu.appendChild(button);
+    }
+    document.body.appendChild(menu);
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
+    menu.addEventListener('keydown', (keyEvent) => {
+      const buttons = [...menu.querySelectorAll('button')];
+      const current = buttons.indexOf(document.activeElement);
+      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
+      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+        keyEvent.preventDefault();
+        buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      }
+    });
+    menu.querySelector('button')?.focus();
   }
 
   _tabOrientation() {
@@ -4999,31 +5461,54 @@ class CodemanApp {
 
   _refreshTabProjection() {
     if (this._tabLayoutFirstPaintPending) {
-      const pending = { sessionOrder: [], visibleRefs: [], sections: [] };
+      const pending = { sessionOrder: [], completeRefs: [], visibleRefs: [], sections: [], hiddenTabGroupByRef: {} };
       this.sessionOrder = pending.sessionOrder;
+      this._completeTabRefs = pending.completeRefs;
       this._visibleTabRefs = pending.visibleRefs;
       this._tabLayoutSections = pending.sections;
+      this._hiddenTabGroupByRef = new Map();
       return pending;
     }
     const projection = this._projectTabLayout();
     this.sessionOrder = projection.sessionOrder;
+    this._completeTabRefs = projection.completeRefs;
     this._visibleTabRefs = projection.visibleRefs;
     this._tabLayoutSections = projection.sections;
+    this._hiddenTabGroupByRef = new Map(Object.entries(projection.hiddenTabGroupByRef || {}));
     return projection;
   }
 
-  _applyTabLayout(layout) {
+  _applyTabLayout(layout, placements) {
     if (
       this.tabLayoutVersion !== null &&
       Number.isSafeInteger(layout?.version) &&
       layout.version < this.tabLayoutVersion
     ) return;
+    if (this._tabLayoutEditCoordinator) {
+      this._tabLayoutEditCoordinator.adoptExternal(layout, { placements });
+      return;
+    }
+    if (Array.isArray(placements)) {
+      this._tabPlacementStates = new Map(
+        placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
+      );
+    }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
+    const storage = this._getTabCollapseStorage();
+    const collapsedState = storage
+      ? window.CodemanTabLayout.loadCollapsedGroupIds(
+          storage,
+          layout.groups?.map((group) => group.id) || []
+        )
+      : { ids: [], ok: false };
+    if (!collapsedState.ok) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(collapsedState.ids);
     this.tabLayoutReadOnly = false;
     this._tabLayoutFirstPaintPending = false;
     this._lastTabStructureKey = null;
     this._refreshTabProjection();
+    if (this._restorePendingTabLayoutOperations()) return;
     this._fullRenderSessionTabs();
   }
 
@@ -5040,6 +5525,10 @@ class CodemanApp {
   }
 
   _tabStructureKey(projection) {
+    const placementStates = projection.visibleRefs.map((ref) => {
+      const placement = this._tabRefPlacementState(ref);
+      return placement ? `${ref.kind}:${ref.id}:${placement.state}:${placement.parentId}` : `${ref.kind}:${ref.id}:root`;
+    });
     return window.CodemanTabLayout.structureKey({
       version: this.tabLayoutVersion,
       collapsedGroupIds: [...this.collapsedTabGroupIds],
@@ -5048,6 +5537,7 @@ class CodemanApp {
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
       visibleRefs: projection.visibleRefs,
+      placementStates,
     });
   }
 
@@ -5058,6 +5548,33 @@ class CodemanApp {
     else if (ref?.kind === 'webview') this.openWebview(ref.id);
     else return false;
     return true;
+  }
+
+  _getTabCollapseStorage() {
+    if (this._tabCollapseStorageFailed) return null;
+    try {
+      return window.localStorage;
+    } catch (_error) {
+      this._tabCollapseStorageFailed = true;
+      return null;
+    }
+  }
+
+  toggleTabGroupCollapsed(groupId, forceCollapsed) {
+    if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
+    const next = new Set(this.collapsedTabGroupIds);
+    const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
+    if (shouldCollapse) next.add(groupId);
+    else next.delete(groupId);
+    const storage = this._getTabCollapseStorage();
+    const saved = storage
+      ? window.CodemanTabLayout.saveCollapsedGroupIds(storage, [...next])
+      : { ids: [], ok: false };
+    if (!saved.ok) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(saved.ids);
+    this._lastTabStructureKey = null;
+    this._fullRenderSessionTabs();
+    return this.collapsedTabGroupIds.has(groupId) === shouldCollapse;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -5366,9 +5883,15 @@ class CodemanApp {
     for (const tab of tabs) {
       if (tab.dataset.id === sessionId) {
         tab.classList.add('active');
+        tab.setAttribute('aria-selected', 'true');
       } else {
         tab.classList.remove('active');
+        tab.setAttribute('aria-selected', 'false');
       }
+    }
+    for (const tab of container.querySelectorAll('.session-tab[data-webview-id]')) {
+      tab.classList.remove('active');
+      tab.setAttribute('aria-selected', 'false');
     }
     // #257: selection used to stop at the class toggle. On phones/tablets the
     // strip scrolls horizontally, so a tab selected from the palette, a swipe,
@@ -5589,7 +6112,7 @@ class CodemanApp {
 
         // Inject tab-number badge if missing (added after initial render)
         if (!tab.querySelector('.tab-number')) {
-          const idx = this.sessionOrder.indexOf(id);
+          const idx = projection.visibleRefs.findIndex((ref) => ref.kind === 'session' && ref.id === id);
           if (idx >= 0 && idx < 9) {
             const numSpan = document.createElement('span');
             numSpan.className = 'tab-number';
@@ -5622,12 +6145,10 @@ class CodemanApp {
             }
             nameEl.dataset.fullName = name;
           }
-          const accessibleName = `${name} session`;
           const tooltip = session.workingDir && session.workingDir !== name
             ? `${name}\n${session.workingDir}`
             : name;
-          if (tab.getAttribute('aria-label') !== accessibleName) tab.setAttribute('aria-label', accessibleName);
-          if (tab.title !== tooltip) tab.title = tooltip;
+          this._syncTabPlacementAccessibility(tab, { kind: 'session', id }, name, tooltip);
         }
 
         // Update task badge
@@ -5868,6 +6389,7 @@ class CodemanApp {
     // Sidebar layout scrolls the same container VERTICALLY, so it needs the
     // same protection on the other axis.
     const prevScrollTop = container.scrollTop;
+    const focusIdentity = this._tabFocusIdentity || this._focusedTabLayoutIdentity();
     const prevActiveTabIdentity = this._lastRenderedActiveTabIdentity;
     const isFirstRender = !container.querySelector('.session-tab');
 
@@ -5934,8 +6456,14 @@ class CodemanApp {
       const tabTooltip = session.workingDir && session.workingDir !== name
         ? `${name}\n${session.workingDir}`
         : name;
+      const placement = this._tabPlacementPresentation({ kind: 'session', id });
+      const placementBadge = placement
+        ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" title="${escapeHtml(placement.description)}" aria-label="${escapeHtml(placement.description)}">${escapeHtml(placement.short)}</span>`
+        : '';
+      const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
+      const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
@@ -5946,12 +6474,13 @@ class CodemanApp {
               <span class="tab-name" data-session-id="${escapeHtml(id)}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
+            ${placementBadge}
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
           </span>
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
+          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
       _tabIdx++;
     }
@@ -5963,6 +6492,8 @@ class CodemanApp {
       () => parts[renderedIndex++] || '',
       escapeHtml
     );
+    container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
+    container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
     this._lastTabStructureKey = structureKey;
 
     // Put the strip back where the user left it, then reveal the active tab
@@ -5987,6 +6518,8 @@ class CodemanApp {
 
     // Set up keyboard navigation for tabs
     this.setupTabKeyboardNavigation(container);
+    this._restoreTabLayoutFocus(focusIdentity);
+    this._tabFocusIdentity = null;
 
     this.updateTabOverflowMode();
 
@@ -6018,50 +6551,158 @@ class CodemanApp {
     }
 
     this._tabKeydownHandler = (e) => {
-      // Up/Down are aliases of Left/Right, not replacements: the strip stays
-      // arrow-key navigable exactly as before, the vertical sidebar just gains
-      // the axis a user reaches for there.
-      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' '].includes(e.key)) return;
-
-      // Rows hidden by the sidebar filter must not be steppable.
-      const tabs = [...container.querySelectorAll('.session-tab:not(.tab-filtered-out)')];
-      const currentIndex = tabs.indexOf(document.activeElement);
-
-      // Enter or Space activates the tab
-      if ((e.key === 'Enter' || e.key === ' ') && currentIndex >= 0) {
-        e.preventDefault();
-        const sessionId = tabs[currentIndex].dataset.id;
-        this.selectSession(sessionId);
-        return;
-      }
-
+      if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+      const vertical = this._tabOrientation() === 'vertical';
+      // Rows hidden by the sidebar filter must not be steppable — arrowing onto
+      // an invisible row leaves focus nowhere and Enter then selects a session
+      // the user cannot see.
+      const items = vertical
+        ? [...container.querySelectorAll('[role="treeitem"]:not(.tab-filtered-out)')]
+        : [...container.querySelectorAll('.session-tab[role="tab"]:not(.tab-filtered-out)')];
+      const active = document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]');
+      const currentIndex = items.indexOf(active);
       if (currentIndex < 0) return;
 
-      let newIndex;
-      switch (e.key) {
-        case 'ArrowLeft':
-        case 'ArrowUp':
-          newIndex = currentIndex > 0 ? currentIndex - 1 : tabs.length - 1;
-          break;
-        case 'ArrowRight':
-        case 'ArrowDown':
-          newIndex = currentIndex < tabs.length - 1 ? currentIndex + 1 : 0;
-          break;
-        case 'Home':
-          newIndex = 0;
-          break;
-        case 'End':
-          newIndex = tabs.length - 1;
-          break;
-        default:
-          return;
+      const focusAt = (index) => {
+        if (index < 0 || index >= items.length) return;
+        for (const item of items) item.tabIndex = -1;
+        items[index].tabIndex = 0;
+        items[index].focus();
+        this._tabFocusIdentity = this._tabLayoutIdentity(items[index]);
+      };
+      const activate = () => {
+        const current = items[currentIndex];
+        const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+        if (currentGroupId) {
+          this.toggleTabGroupCollapsed(currentGroupId);
+        } else if (current.dataset.id) {
+          this.selectSession(current.dataset.id);
+        } else if (current.dataset.webviewId) {
+          this.openWebview(current.dataset.webviewId);
+        }
+      };
+      const current = items[currentIndex];
+      const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      if (vertical && e.key === 'Insert') {
+        e.preventDefault();
+        this.createTabGroup();
+        return;
       }
-
-      e.preventDefault();
-      tabs[newIndex]?.focus();
+      if (vertical && currentGroupId && e.key === 'F2') {
+        e.preventDefault();
+        this.startTabGroupRename(currentGroupId);
+        return;
+      }
+      if (vertical && currentGroupId && e.key === 'Delete') {
+        e.preventDefault();
+        this.deleteTabGroup(currentGroupId);
+        return;
+      }
+      if (vertical && currentGroupId && e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault();
+        const groupIndex = this.tabLayout.groups.findIndex((group) => group.id === currentGroupId);
+        const index = Math.max(0, Math.min(this.tabLayout.groups.length - 1, groupIndex + (e.key === 'ArrowUp' ? -1 : 1)));
+        this.editTabLayout({ type: 'reorderGroup', groupId: currentGroupId, index }, `group:${currentGroupId}`);
+        return;
+      }
+      if (vertical && e.shiftKey && e.key === 'F10') {
+        e.preventDefault();
+        const syntheticEvent = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
+        if (currentGroupId) this.openTabGroupMenu(syntheticEvent, currentGroupId);
+        else {
+          const ref = current.dataset.webviewId
+            ? { kind: 'webview', id: current.dataset.webviewId }
+            : current.dataset.id
+              ? { kind: 'session', id: current.dataset.id }
+              : null;
+          if (ref) this.openTabRefMoveMenu(syntheticEvent, ref);
+        }
+        return;
+      }
+      if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        focusAt(e.key === 'Home' ? 0 : items.length - 1);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        activate();
+        return;
+      }
+      if (!vertical && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault();
+        focusAt((currentIndex + (e.key === 'ArrowLeft' ? -1 : 1) + items.length) % items.length);
+        return;
+      }
+      if (vertical && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault();
+        focusAt((currentIndex + (e.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length);
+        return;
+      }
+      if (!vertical || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+      const groupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      if (groupId) {
+        const expanded = current.getAttribute('aria-expanded') === 'true';
+        if (e.key === 'ArrowLeft' && expanded) {
+          e.preventDefault();
+          this._tabFocusIdentity = `group:${groupId}`;
+          this.toggleTabGroupCollapsed(groupId, true);
+        } else if (e.key === 'ArrowRight' && !expanded) {
+          e.preventDefault();
+          this._tabFocusIdentity = `group:${groupId}`;
+          this.toggleTabGroupCollapsed(groupId, false);
+        } else if (e.key === 'ArrowRight' && expanded) {
+          const child = current.closest('.tab-layout-group')?.querySelector('[role="group"] [role="treeitem"]');
+          if (child) {
+            e.preventDefault();
+            focusAt(items.indexOf(child));
+          }
+        }
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        const header = current.closest('.tab-layout-group')?.querySelector('[data-tab-group-header]')
+          ?.closest('[role="treeitem"]');
+        if (header) {
+          e.preventDefault();
+          focusAt(items.indexOf(header));
+        }
+      }
     };
 
     container.addEventListener('keydown', this._tabKeydownHandler);
+  }
+
+  _tabLayoutIdentity(element) {
+    if (!element) return null;
+    const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+    if (groupId) return `group:${groupId}`;
+    if (element.dataset?.id) return `session:${element.dataset.id}`;
+    if (element.dataset?.webviewId) return `webview:${element.dataset.webviewId}`;
+    if (element.classList?.contains('tab-layout-ungrouped-header')) return 'group:ungrouped';
+    return null;
+  }
+
+  _focusedTabLayoutIdentity() {
+    return this._tabLayoutIdentity(document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]'));
+  }
+
+  _restoreTabLayoutFocus(identity) {
+    const container = this.$('sessionTabs');
+    if (!container) return;
+    const items = this._tabOrientation() === 'vertical'
+      ? [...container.querySelectorAll('[role="treeitem"]')]
+      : [...container.querySelectorAll('.session-tab[role="tab"]')];
+    if (!items.length) return;
+    let target = items.find((item) => this._tabLayoutIdentity(item) === identity);
+    if (!target && identity?.startsWith('session:')) {
+      const sessionId = identity.slice('session:'.length);
+      const hiddenGroup = this._hiddenTabGroupByRef?.get(`session:${sessionId}`);
+      target = items.find((item) => this._tabLayoutIdentity(item) === `group:${hiddenGroup}`);
+    }
+    target ||= items.find((item) => item.getAttribute('aria-selected') === 'true') || items[0];
+    for (const item of items) item.tabIndex = item === target ? 0 : -1;
+    if (identity && document.activeElement !== target) target.focus?.();
   }
 
   handleSessionTabClick(event, sessionId) {
@@ -6108,11 +6749,10 @@ class CodemanApp {
     }
   }
 
-  // Legacy entry point retained for old callers. Owner layout is now the sole
-  // ordering authority; COD-307 will replace this with layout-aware editing.
+  // Legacy entry point retained for old callers. Owner layout semantic edits
+  // are the sole ordering authority.
   saveSessionOrder() {
-    // COD-306: the owner layout is the sole authority. COD-307 will provide
-    // layout-aware editing; session-only persistence must not race it.
+    // Session-only persistence must not race the owner layout coordinator.
     return;
   }
 
@@ -6135,119 +6775,180 @@ class CodemanApp {
     }
   }
 
-  // Set up drag-and-drop handlers on tab elements
+  // One delegated Pointer Events system serves mouse, pen, and touch. The
+  // container survives structural renders, so listeners are installed once.
   setupTabDragHandlers() {
     const container = this.$('sessionTabs');
-    if (this._tabLayoutManaged) {
-      container.querySelectorAll('.session-tab[draggable]').forEach((tab) => tab.removeAttribute('draggable'));
-      return;
-    }
-    const tabs = container.querySelectorAll('.session-tab[data-id]');
-
-    tabs.forEach(tab => {
-      tab.setAttribute('draggable', 'true');
-
-      tab.addEventListener('dragstart', (e) => {
-        this.draggedTabId = tab.dataset.id;
-        tab.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', tab.dataset.id);
-      });
-
-      tab.addEventListener('dragend', () => {
-        tab.classList.remove('dragging');
-        this.draggedTabId = null;
-        // Remove all drag-over indicators
-        container.querySelectorAll('.session-tab').forEach(t => {
-          t.classList.remove('drag-over-left', 'drag-over-right');
-        });
-      });
-
-      tab.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        if (!this.draggedTabId || this.draggedTabId === tab.dataset.id) return;
-
-        e.dataTransfer.dropEffect = 'move';
-
-        // Determine drop position based on mouse position. Read the layout here,
-        // inside the handler — these listeners survive a layout flip between
-        // renders, so capturing the axis at bind time would go stale.
-        // drag-over-left/-right keep their names and now read as before/after;
-        // the sidebar CSS just draws them as top/bottom edges.
-        const rect = tab.getBoundingClientRect();
-        const insertBefore = this.isSessionSidebarActive()
-          ? e.clientY < rect.top + rect.height / 2
-          : e.clientX < rect.left + rect.width / 2;
-
-        // Update visual indicator
-        tab.classList.toggle('drag-over-left', insertBefore);
-        tab.classList.toggle('drag-over-right', !insertBefore);
-      });
-
-      tab.addEventListener('dragleave', () => {
-        tab.classList.remove('drag-over-left', 'drag-over-right');
-      });
-
-      tab.addEventListener('drop', (e) => {
-        e.preventDefault();
-        tab.classList.remove('drag-over-left', 'drag-over-right');
-
-        if (!this.draggedTabId || this.draggedTabId === tab.dataset.id) return;
-
-        const targetId = tab.dataset.id;
-        const draggedId = this.draggedTabId;
-
-        // Determine insertion position (same axis rule as the dragover handler)
-        const rect = tab.getBoundingClientRect();
-        const insertBefore = this.isSessionSidebarActive()
-          ? e.clientY < rect.top + rect.height / 2
-          : e.clientX < rect.left + rect.width / 2;
-
-        // Reorder sessionOrder array
-        const fromIndex = this.sessionOrder.indexOf(draggedId);
-        let toIndex = this.sessionOrder.indexOf(targetId);
-
-        if (fromIndex === -1 || toIndex === -1) return;
-
-        // Remove dragged item
-        this.sessionOrder.splice(fromIndex, 1);
-
-        // Recalculate target index after removal
-        toIndex = this.sessionOrder.indexOf(targetId);
-        if (toIndex === -1) return;
-
-        // Insert at correct position
-        if (insertBefore) {
-          this.sessionOrder.splice(toIndex, 0, draggedId);
-        } else {
-          this.sessionOrder.splice(toIndex + 1, 0, draggedId);
+    if (!container || this._tabPointerHandlersBound) return;
+    this._tabPointerHandlersBound = true;
+    const cleanup = () => this._cancelTabPointerDrag();
+    container.addEventListener('pointerdown', (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      const handle = event.target.closest?.('[data-tab-group-drag]');
+      const refHandle = event.target.closest?.('[data-tab-ref-drag]');
+      const tab = event.target.closest?.('.session-tab');
+      if (event.pointerType === 'touch' && !handle && !refHandle) return;
+      if (!handle && !refHandle && (!tab || event.target.closest?.('button, input, select, textarea, a, .tab-actions'))) return;
+      const ref = tab
+        ? tab.dataset.webviewId
+          ? { kind: 'webview', id: tab.dataset.webviewId }
+          : { kind: 'session', id: tab.dataset.id }
+        : null;
+      this._tabPointerDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        source: handle ? { type: 'group', groupId: handle.dataset.tabGroupDrag } : { type: 'ref', ref },
+        origin: handle || refHandle || tab,
+        zone: null,
+      };
+      try { container.setPointerCapture(event.pointerId); } catch {}
+    });
+    container.addEventListener('pointermove', (event) => {
+      const drag = this._tabPointerDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+      if (!drag.active) {
+        drag.active = true;
+        drag.origin.classList.add('tab-layout-dragging');
+        if (drag.source.type === 'ref') {
+          const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
+            type: 'moveRef', ref: drag.source.ref, groupId: null, index: 0, metadata: this._tabLayoutMetadata(),
+          });
+          for (const ref of preview.refs) {
+            const selector = ref.kind === 'session'
+              ? `.session-tab[data-id="${CSS.escape(ref.id)}"]`
+              : `.session-tab[data-webview-id="${CSS.escape(ref.id)}"]`;
+            container.querySelector(selector)?.classList.add('tab-layout-drag-block');
+          }
         }
-
-        // Save and re-render
-        this.saveSessionOrder();
-        this._fullRenderSessionTabs();
-      });
+      }
+      event.preventDefault();
+      const hit = document.elementFromPoint?.(event.clientX, event.clientY);
+      const zone = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
+      if (drag.zone === zone) return;
+      drag.zone?.classList?.remove('tab-layout-drop-active');
+      drag.zone = zone;
+      drag.zone?.classList?.add('tab-layout-drop-active');
+    });
+    container.addEventListener('pointerup', (event) => this._finishTabPointerDrag(event));
+    container.addEventListener('pointercancel', cleanup);
+    container.addEventListener('lostpointercapture', cleanup);
+    window.addEventListener('pagehide', cleanup);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') cleanup();
     });
   }
 
+  _cancelTabPointerDrag() {
+    this.$('sessionTabs')?.querySelectorAll(
+      '.tab-layout-dragging, .tab-layout-drag-block, .tab-layout-drop-active'
+    ).forEach((element) => element.classList.remove(
+      'tab-layout-dragging', 'tab-layout-drag-block', 'tab-layout-drop-active'
+    ));
+    this._tabPointerDrag = null;
+  }
+
+  _refLocation(ref) {
+    for (const group of this.tabLayout?.groups || []) {
+      const index = group.refs.findIndex((candidate) => candidate.kind === ref.kind && candidate.id === ref.id);
+      if (index >= 0) return { groupId: group.id, index };
+    }
+    const index = this.tabLayout?.ungrouped?.findIndex(
+      (candidate) => candidate.kind === ref.kind && candidate.id === ref.id
+    );
+    return index >= 0 ? { groupId: null, index } : null;
+  }
+
+  _adjustTabRefMoveDestination(ref, destination) {
+    const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
+      type: 'moveRef', ref, ...destination, metadata: this._tabLayoutMetadata(),
+    });
+    let removedBefore = 0;
+    for (const moved of preview.refs) {
+      const location = this._refLocation(moved);
+      if (location?.groupId === destination.groupId && location.index < destination.index) removedBefore++;
+    }
+    return { ...destination, index: Math.max(0, destination.index - removedBefore) };
+  }
+
+  _tabRefMoveOperation(ref, destination) {
+    return {
+      type: 'moveRef',
+      ref,
+      ...this._adjustTabRefMoveDestination(ref, destination),
+      metadata: this._tabLayoutMetadata(),
+    };
+  }
+
+  _adjustGroupReorderIndex(groupId, destinationIndex) {
+    const sourceIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
+    return sourceIndex >= 0 && sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex;
+  }
+
+  _finishTabPointerDrag(event) {
+    const drag = this._tabPointerDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const zone = drag.zone;
+    if (drag.active && zone) {
+      if (drag.source.type === 'group') {
+        const beforeId = zone.dataset.tabDropBeforeGroup;
+        if (beforeId !== undefined) {
+          const beforeIndex = beforeId
+            ? this.tabLayout.groups.findIndex((group) => group.id === beforeId)
+            : this.tabLayout.groups.length;
+          const index = this._adjustGroupReorderIndex(drag.source.groupId, beforeIndex);
+          this.editTabLayout(
+            { type: 'reorderGroup', groupId: drag.source.groupId, index: Math.max(0, index) },
+            `group:${drag.source.groupId}`
+          );
+        }
+      } else {
+        let destination = null;
+        if (zone.classList.contains('tab-layout-drop-zone') && zone.dataset.tabDropGroup !== undefined) {
+          destination = { groupId: zone.dataset.tabDropGroup || null, index: Number(zone.dataset.tabDropIndex) };
+        } else if (zone.classList.contains('session-tab')) {
+          const target = zone.dataset.webviewId
+            ? { kind: 'webview', id: zone.dataset.webviewId }
+            : { kind: 'session', id: zone.dataset.id };
+          const targetLocation = this._refLocation(target);
+          if (targetLocation) {
+            // Which axis decides before/after has to follow the layout that is
+            // actually on screen, and there are TWO vertical ones: the COD-286
+            // rail (data-tab-orientation) and the upstream sidebar. Read both
+            // here, inside the handler — this listener survives a layout flip.
+            const rect = zone.getBoundingClientRect();
+            const stacked = this._tabOrientation() === 'vertical' || this.isSessionSidebarActive?.() === true;
+            const after = stacked
+              ? event.clientY >= rect.top + rect.height / 2
+              : event.clientX >= rect.left + rect.width / 2;
+            destination = { ...targetLocation, index: targetLocation.index + (after ? 1 : 0) };
+          }
+        }
+        if (destination) {
+          this.editTabLayout(
+            this._tabRefMoveOperation(drag.source.ref, destination),
+            `${drag.source.ref.kind}:${drag.source.ref.id}`
+          );
+        }
+      }
+    }
+    this._cancelTabPointerDrag();
+  }
+
   moveActiveTabLeft() {
-    if (this._tabLayoutManaged) return;
     if (!this.activeSessionId) return;
-    const idx = this.sessionOrder.indexOf(this.activeSessionId);
-    if (idx <= 0) return;
-    [this.sessionOrder[idx - 1], this.sessionOrder[idx]] = [this.sessionOrder[idx], this.sessionOrder[idx - 1]];
-    this.saveSessionOrder();
-    this._fullRenderSessionTabs();
+    const ref = { kind: 'session', id: this.activeSessionId };
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move earlier');
+    if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
   moveActiveTabRight() {
-    if (this._tabLayoutManaged) return;
     if (!this.activeSessionId) return;
-    const idx = this.sessionOrder.indexOf(this.activeSessionId);
-    if (idx === -1 || idx >= this.sessionOrder.length - 1) return;
-    [this.sessionOrder[idx], this.sessionOrder[idx + 1]] = [this.sessionOrder[idx + 1], this.sessionOrder[idx]];
-    this.saveSessionOrder();
-    this._fullRenderSessionTabs();
+    const ref = { kind: 'session', id: this.activeSessionId };
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move later');
+    if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -6644,6 +7345,10 @@ class CodemanApp {
   }
 
   async selectSession(sessionId, options = {}) {
+    // A session choice supersedes any webview response still in flight. The
+    // request may finish and leave that dashboard open in the background, but
+    // it must not mount or steal the active surface after this intent.
+    this._cancelPendingWebviewNavigation?.();
     // If this session is popped out into its own window, raise that window
     // instead of showing it inline (focus-on-click for detached tabs). If we
     // owned a now-closed window, _raiseDetached re-docks and returns false so

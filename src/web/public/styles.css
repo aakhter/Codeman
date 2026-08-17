@@ -675,7 +675,121 @@ html[data-tab-orientation='vertical'] .tab-layout-group-name {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  text-transform: uppercase;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-header,
+html[data-tab-orientation='vertical'] .tab-layout-ungrouped-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  outline: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-header:focus-visible,
+html[data-tab-orientation='vertical'] .tab-layout-ungrouped-header:focus-visible,
+html[data-tab-orientation='vertical'] .session-tab[role='treeitem']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tab-layout-group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-layout-group-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.tab-layout-group-toggle,
+.tab-layout-group-drag-handle,
+.tab-layout-group-menu,
+.tab-layout-create-group {
+  border: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.tab-layout-group-drag-handle {
+  cursor: grab;
+  touch-action: none;
+}
+
+.tab-ref-drag-handle {
+  display: none;
+  flex: 0 0 auto;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+
+.tab-layout-create-group {
+  padding: 7px 8px;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+}
+
+.tab-layout-drop-zone {
+  min-height: 4px;
+  border-radius: 3px;
+}
+
+.tab-layout-drop-active {
+  min-height: 8px;
+  background: var(--accent);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.tab-layout-dragging,
+.tab-layout-drag-block {
+  opacity: 0.48;
+}
+
+.tab-layout-group-rename-input {
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  background: var(--control-bg);
+  border: 1px solid var(--accent);
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  padding: 8px 0 2px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-group-toggle:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.tab-layout-group-chevron::before {
+  content: '\25BE';
+  display: inline-block;
+}
+
+.tab-layout-group-toggle[aria-expanded='false'] .tab-layout-group-chevron::before {
+  content: '\25B8';
 }
 
 html[data-tab-orientation='vertical'] .tab-layout-group-refs {
@@ -689,6 +803,17 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab {
   width: 100%;
   max-width: none;
   justify-content: flex-start;
+  touch-action: pan-y;
+}
+
+html[data-tab-orientation='vertical'] .tab-ref-drag-handle {
+  display: inline-flex;
+}
+
+@media (pointer: coarse) {
+  .tab-ref-drag-handle {
+    display: inline-flex;
+  }
 }
 
 /* The name block is the only part that may shrink; the status dot, badges and
@@ -2358,6 +2483,28 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
 }
 .session-tab.detached .tab-detached-badge {
   display: inline-flex;
+}
+
+.session-tab .tab-placement-state {
+  display: none;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-state {
+  display: block;
+}
+
+.session-tab .tab-placement-state--dangling,
+.session-tab .tab-placement-state--cycle {
+  color: var(--warning, #f59e0b);
 }
 
 /* ===== Tab action icons: active tab only =================================
@@ -10816,6 +10963,18 @@ kbd {
   opacity: 0.95;
 }
 
+.connection-line.lineage-line--proxied {
+  stroke-dasharray: 2 7;
+  opacity: 0.46;
+}
+
+/* A working proxy stays intentionally quieter than a normal working edge while
+   remaining brighter than a resting proxy. Keep this explicit: equal-specificity
+   class order must not choose the signal strength accidentally. */
+.connection-line.lineage-line--proxied.lineage-line--working {
+  opacity: 0.62;
+}
+
 .connection-line.lineage-line:hover {
   opacity: 1;
   stroke-width: 3;
@@ -10828,6 +10987,14 @@ kbd {
     drop-shadow(0 0 9px var(--lineage-color, var(--session-blue, #2b8fd9)));
 }
 
+.lineage-line-dot--proxied {
+  opacity: 0.46;
+}
+
+.lineage-line-dot--proxied.lineage-line-dot--working {
+  opacity: 0.62;
+}
+
 /* The child end marches while that worker is actually working, so the line
    itself carries the signal. Motion is opt-out-able at the OS level. */
 @media (prefers-reduced-motion: no-preference) {
@@ -10835,9 +11002,18 @@ kbd {
     animation: lineage-flow 1.1s linear infinite;
   }
 
+  .connection-line.lineage-line--proxied.lineage-line--working {
+    animation: lineage-proxy-flow 1.1s linear infinite;
+  }
+
   .lineage-line-dot--working {
     opacity: 1;
     animation: lineage-dot-pulse 1.4s ease-in-out infinite;
+  }
+
+  .lineage-line-dot--proxied.lineage-line-dot--working {
+    opacity: 0.62;
+    animation: lineage-proxy-dot-pulse 1.4s ease-in-out infinite;
   }
 }
 
@@ -10851,6 +11027,13 @@ kbd {
   }
 }
 
+/* Two complete 9px proxy dash cycles (2 + 7) avoid a jump at the loop seam. */
+@keyframes lineage-proxy-flow {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+
 @keyframes lineage-dot-pulse {
   0%, 100% {
     opacity: 0.75;
@@ -10858,6 +11041,17 @@ kbd {
   }
   50% {
     opacity: 1;
+    r: 4.5;
+  }
+}
+
+@keyframes lineage-proxy-dot-pulse {
+  0%, 100% {
+    opacity: 0.52;
+    r: 3.5;
+  }
+  50% {
+    opacity: 0.68;
     r: 4.5;
   }
 }

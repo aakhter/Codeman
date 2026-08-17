@@ -111,7 +111,7 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
     expect(railResizeJs).toContain("addEventListener('lostpointercapture'");
     expect(railResizeJs).toContain('_tabRailResizeWatchdog');
     expect(terminalUiJs).toMatch(/if \(this\._tabRailResizeOwnsObserver\) return/);
-    expect(buildJs).toContain("run('minify tab-rail-resize.js'");
+    expect(buildJs).toMatch(/run\(\s*'minify tab-rail-resize\.js'/);
     expect(buildJs).toMatch(/HASHABLE[\s\S]{0,800}'tab-rail-resize\.js'/);
   });
 

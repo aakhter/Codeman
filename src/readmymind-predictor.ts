@@ -39,6 +39,8 @@ import { z } from 'zod';
 import { isValidModelName, isValidMuxName } from './ai-checker-base.js';
 import { getAugmentedPath, resolveCodexDir } from './utils/index.js';
 import { getErrorMessage } from './types.js';
+import type { CodexProviderEnvironment } from './codex-provider-identity.js';
+export type { CodexProviderEnvironment } from './codex-provider-identity.js';
 
 // ========== Contract ==========
 
@@ -160,12 +162,6 @@ export interface PredictOptions {
   /** Explicit provider selected from the authorized server-side session. */
   provider: ReadMyMindProvider;
   timeoutMs?: number;
-}
-
-export interface CodexProviderEnvironment {
-  CODEX_HOME?: string;
-  OPENAI_API_KEY?: string;
-  CODEX_API_KEY?: string;
 }
 
 export type ReadMyMindProvider =

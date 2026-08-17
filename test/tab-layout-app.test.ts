@@ -7,8 +7,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
 let CodemanApp: { prototype: Record<string, any> };
+let localStorageDescriptor: PropertyDescriptor;
 
 beforeAll(() => {
+  localStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage')!;
   const read = (name: string) => readFileSync(join(PUBLIC, name), 'utf8');
   const source =
     'var MobileDetection = {}, KeyboardHandler = {}, SwipeHandler = {}, VoiceInput = {}, ' +
@@ -78,6 +80,7 @@ function makeApp() {
   app.tabLayoutVersion = layout.version;
   app.tabLayoutReadOnly = false;
   app.collapsedTabGroupIds = new Set();
+  app._tabCollapseStorageFailed = false;
   app._legacySessionOrder = ['s1', 's2', 's3'];
   app._tabLayoutFirstPaintPending = false;
   app._lastTabStructureKey = null;
@@ -165,13 +168,38 @@ const initData = {
 };
 
 beforeEach(() => {
+  (globalThis as any).CSS = { escape: (value: string) => value };
   document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
   document.body.innerHTML = '';
+  localStorage.removeItem('codeman:tab-groups-collapsed');
 });
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  Object.defineProperty(window, 'localStorage', localStorageDescriptor);
+  vi.useRealTimers();
+});
 
 describe('COD-306 CodemanApp integration', () => {
+  it('keeps a session selection authoritative over a pending webview response', async () => {
+    const app = makeApp();
+    const pending = deferred<any>();
+    app.activeSessionId = 's1';
+    app.activeWebviewId = null;
+    app.webviewOrder = [];
+    app._apiJson = vi.fn(() => pending.promise);
+    app._mountWebviewFrame = vi.fn();
+    app.renderSessionTabs = vi.fn();
+
+    const opening = app.openWebview('w1');
+    await app.selectSession('s1');
+    pending.resolve({ webview: app.webviews.get('w1'), embedUrl: '/webview/a/' });
+    await opening;
+
+    expect(app.activeSessionId).toBe('s1');
+    expect(app.activeWebviewId).toBeNull();
+    expect(app._mountWebviewFrame).not.toHaveBeenCalled();
+  });
+
   it('defers the rail render scheduler while first layout paint is pending', () => {
     const app = makeApp();
     app._tabLayoutFirstPaintPending = true;
@@ -225,6 +253,161 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.selectSession).toHaveBeenCalledWith('s2');
     expect(app._activateVisibleTabNumber(2)).toBe(true);
     expect(app.openWebview).toHaveBeenCalledWith('w1');
+  });
+
+  it('collapses from the header, persists locally, and redraws geometry', () => {
+    const app = makeApp();
+    app.updateConnectionLines = vi.fn();
+    app._fullRenderSessionTabs();
+    const header = document.querySelector<HTMLElement>('[data-tab-group-header="group-x"]')!;
+    app.toggleTabGroupCollapsed(header.dataset.tabGroupHeader);
+
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+    expect(localStorage.getItem('codeman:tab-groups-collapsed')).toBe('["group-x"]');
+    expect(document.querySelector('[data-tab-group-header="group-x"]')?.getAttribute('aria-expanded')).toBe('false');
+    expect(app.updateConnectionLines).toHaveBeenCalled();
+  });
+
+  it('selects a hidden next session without expanding and swaps the lone shown member', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._fullRenderSessionTabs();
+    expect([...document.querySelectorAll<HTMLElement>('.session-tab')].map((tab) => tab.dataset.id)).toEqual([
+      's2',
+      's3',
+    ]);
+
+    app.selectSession = vi.fn((id: string) => {
+      app.activeSessionId = id;
+      app.activeWebviewId = null;
+      app._renderSessionTabsImmediate();
+    });
+    app.nextSession();
+
+    expect(app.selectSession).toHaveBeenCalledWith('s1');
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+    const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(tabs.map((tab) => tab.dataset.id)).toEqual(['s1', 's3']);
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
+  });
+
+  it('selects a hidden previous session without expanding and renumbers visible badges', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's1';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._fullRenderSessionTabs();
+    expect([...document.querySelectorAll<HTMLElement>('.session-tab')].map((tab) => tab.dataset.id)).toEqual([
+      's1',
+      's3',
+    ]);
+
+    app.selectSession = vi.fn((id: string) => {
+      app.activeSessionId = id;
+      app.activeWebviewId = null;
+      app._renderSessionTabsImmediate();
+    });
+    app.prevSession();
+
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+    const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(tabs.map((tab) => tab.dataset.id)).toEqual(['s2', 's3']);
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
+  });
+
+  it('expands every group when persisting collapse fails', () => {
+    const app = makeApp();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota');
+    });
+    app.toggleTabGroupCollapsed('group-x', true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    setItem.mockRestore();
+
+    app._applyTabLayout(layout);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+  });
+
+  it('adopts and renders grouped layout when acquiring localStorage throws', () => {
+    const app = makeApp();
+    const getter = vi.fn(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    Object.defineProperty(window, 'localStorage', { configurable: true, get: getter });
+
+    expect(() => app._applyTabLayout({ ...layout, version: 9 })).not.toThrow();
+    expect(app.tabLayoutVersion).toBe(9);
+    expect(app.tabLayoutReadOnly).toBe(false);
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(2);
+
+    expect(() => app._applyTabLayout({ ...layout, version: 10 })).not.toThrow();
+    expect(getter).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps toggle all-expanded and does not reacquire storage after getter failure', () => {
+    const app = makeApp();
+    const getter = vi.fn(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    Object.defineProperty(window, 'localStorage', { configurable: true, get: getter });
+
+    expect(() => app.toggleTabGroupCollapsed('group-x', true)).not.toThrow();
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(document.querySelector('[data-tab-group-header="group-x"]')?.getAttribute('aria-expanded')).toBe('true');
+
+    expect(() => app.toggleTabGroupCollapsed('group-x', true)).not.toThrow();
+    expect(getter).toHaveBeenCalledTimes(1);
+  });
+
+  it('proxies a collapse-hidden lineage endpoint to the group header', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's3';
+    app.sessions.get('s3').status = 'working';
+    app.sessions.get('s3').parentSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._lineageLinesEnabled = () => true;
+    app._fullRenderSessionTabs();
+
+    const strip = document.getElementById('sessionTabs') as HTMLElement;
+    const header = document.querySelector<HTMLElement>('[data-tab-group-header="group-x"]')!;
+    const child = document.querySelector<HTMLElement>('[data-id="s3"]')!;
+    strip.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 320 }) as DOMRect;
+    header.getBoundingClientRect = () => ({ left: 32, top: 20, width: 260, height: 36 }) as DOMRect;
+    child.getBoundingClientRect = () => ({ left: 32, top: 180, width: 260, height: 40 }) as DOMRect;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+
+    app._appendLineageConnectionLines(svg, new Map());
+
+    const line = svg.querySelector('.lineage-line');
+    expect(line?.classList.contains('lineage-line--proxied')).toBe(true);
+    expect(line?.getAttribute('data-parent-tab')).toBe('s2');
+    const dot = svg.querySelector('.lineage-line-dot');
+    expect(dot?.classList.contains('lineage-line-dot--proxied')).toBe(true);
+    expect(dot?.classList.contains('lineage-line-dot--working')).toBe(true);
+  });
+
+  it('suppresses lineage when both collapse-hidden endpoints share a header', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.activeSessionId = 's3';
+    app.sessions.get('s1').parentSessionId = 's2';
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._lineageLinesEnabled = () => true;
+    app._fullRenderSessionTabs();
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+
+    app._appendLineageConnectionLines(svg, new Map());
+
+    expect(svg.querySelectorAll('.lineage-line')).toHaveLength(0);
+    expect(app._lineageEdgeCount).toBe(0);
   });
 
   it('invalidates structural DOM when orientation changes', () => {
@@ -363,12 +546,13 @@ describe('COD-306 CodemanApp integration', () => {
     app._tabLayoutCoordinator = null;
     const first = app._loadTabLayout();
     const second = app._loadTabLayout();
-    pending[1]({ ...layout, version: 10 });
+    const placements = [{ kind: 'session', id: 's1', state: 'manual', parentId: 's2', canFollow: true }];
+    pending[1]({ layout: { ...layout, version: 10 }, placements });
     await second;
-    pending[0]({ ...layout, version: 9 });
+    pending[0]({ layout: { ...layout, version: 9 }, placements: [] });
     await first;
     expect(app._applyTabLayout).toHaveBeenCalledTimes(1);
-    expect(app._applyTabLayout).toHaveBeenCalledWith({ ...layout, version: 10 });
+    expect(app._applyTabLayout).toHaveBeenCalledWith({ ...layout, version: 10 }, placements);
 
     app._loadTabLayout = vi.fn();
     app._onTabLayoutChanged();

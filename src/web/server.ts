@@ -47,10 +47,15 @@ import { verifyClaudeSessionStartHookCapability } from '../hooks-config.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
-import { parseCodexProviderIdentity, type CodexProviderIdentity } from '../codex-provider-identity.js';
+import {
+  parseCodexProviderIdentity,
+  type CodexProviderEnvironment,
+  type CodexProviderIdentity,
+} from '../codex-provider-identity.js';
 import type {
   ClaudeMode,
   SessionAttachmentHistoryItem,
+  SessionDocker,
   SessionMode,
   SessionRemote,
   SessionState,
@@ -94,6 +99,7 @@ import { PushSubscriptionStore } from '../push-store.js';
 import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
 import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
+import { deriveWebviewSseHint } from './webview-sse.js';
 import {
   type SessionListenerRefs,
   createSessionListeners,
@@ -157,6 +163,54 @@ export function resolveRestoredCodexProviderIdentity(
   return (
     parseCodexProviderIdentity((savedState as { __codexProviderIdentity?: unknown }).__codexProviderIdentity) ?? null
   );
+}
+
+export function resolveRestoredCodexProviderRecovery(
+  mode: SessionMode,
+  savedState: unknown,
+  liveEnvironment: CodexProviderEnvironment | null
+): { identity: CodexProviderIdentity | null | undefined; environment: CodexProviderEnvironment | undefined } {
+  const savedIdentity = resolveRestoredCodexProviderIdentity(mode, savedState);
+  if (mode !== 'codex') return { identity: undefined, environment: undefined };
+  if (liveEnvironment === null) return { identity: savedIdentity, environment: undefined };
+
+  const environment: CodexProviderEnvironment = {};
+  for (const key of ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const) {
+    const value = liveEnvironment[key];
+    if (typeof value === 'string' && value) environment[key] = value;
+  }
+  const hasSessionKey = Boolean(environment.OPENAI_API_KEY || environment.CODEX_API_KEY);
+  const codexHome = environment.CODEX_HOME;
+  return {
+    identity: {
+      version: 1,
+      credentialSource: hasSessionKey ? 'session-key' : 'restorable',
+      ...(codexHome ? { codexHome } : {}),
+    },
+    environment,
+  };
+}
+
+export function stripRestoredCodexProviderOverrides(
+  mode: SessionMode,
+  value: unknown
+): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const safe: Record<string, string> = {};
+  for (const [key, candidate] of Object.entries(value)) {
+    if (typeof candidate !== 'string') continue;
+    if (mode === 'codex' && (key === 'CODEX_HOME' || key === 'OPENAI_API_KEY' || key === 'CODEX_API_KEY')) continue;
+    safe[key] = candidate;
+  }
+  return Object.keys(safe).length > 0 ? safe : undefined;
+}
+
+export function shouldRecoverCodexProviderEnvironment(
+  mode: SessionMode,
+  remote: SessionRemote | undefined,
+  docker: SessionDocker | undefined
+): boolean {
+  return mode === 'codex' && !remote && !docker;
 }
 
 /** Heal or conservatively fence authoritative Claude identity hooks on mux restore. */
@@ -2278,6 +2332,12 @@ export class WebServer extends EventEmitter {
     if (event.startsWith('tab:')) {
       return deriveTabLayoutSseHint(data);
     }
+    // Saved-webview invalidations carry only the trusted affected owner and
+    // resource identity. Admin edits of foreign records route to that resource
+    // owner (plus admins), never to the requesting admin's personal workspace.
+    if (event.startsWith('webview:')) {
+      return deriveWebviewSseHint(data);
+    }
     // Session-scoped families: resolve the owner from the payload's session id.
     const SESSION_PREFIXES = [
       'session:',
@@ -2804,6 +2864,7 @@ export class WebServer extends EventEmitter {
             // would silently un-downgrade a non-granted user's restored session.
             const recoveredOwner = muxSession.owner ?? savedState?.owner;
             const recoveredRemote = resolveRestoredSessionRemote(savedState?.remote, muxSession.remote);
+            const recoveredDocker = muxSession.docker ?? savedState?.docker;
             // Claude watches project settings and reloads hook edits in a running
             // session. Heal local/bind-mounted restored cases before exposing
             // fresh-thread checkpoint capability. Remote settings are not locally
@@ -2822,8 +2883,22 @@ export class WebServer extends EventEmitter {
             // session-manager (see updateSessionState). Cast to read the non-public field.
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
-            const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
-            const savedCodexProviderIdentity = resolveRestoredCodexProviderIdentity(muxSession.mode, savedState);
+            const savedEnvOverrides = stripRestoredCodexProviderOverrides(
+              muxSession.mode,
+              (savedState as { __envOverrides?: unknown })?.__envOverrides
+            );
+            const liveCodexProviderEnvironment = shouldRecoverCodexProviderEnvironment(
+              muxSession.mode,
+              recoveredRemote,
+              recoveredDocker
+            )
+              ? ((await this.mux.getCodexProviderEnvironment?.(muxSession.muxName)) ?? null)
+              : null;
+            const codexProviderRecovery = resolveRestoredCodexProviderRecovery(
+              muxSession.mode,
+              savedState,
+              liveCodexProviderEnvironment
+            );
             // Prefer the private (externalPath-bearing) history; fall back to the
             // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =
@@ -2851,8 +2926,11 @@ export class WebServer extends EventEmitter {
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
               piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
-              envOverrides: savedEnvOverrides,
-              codexProviderIdentity: savedCodexProviderIdentity,
+              envOverrides: {
+                ...savedEnvOverrides,
+                ...codexProviderRecovery.environment,
+              },
+              codexProviderIdentity: codexProviderRecovery.identity,
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
               checkpointState: savedState?.checkpoint,
@@ -2873,7 +2951,7 @@ export class WebServer extends EventEmitter {
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
               // (Remote SSH metadata is recovered above via resolveRestoredSessionRemote.)
-              docker: muxSession.docker ?? savedState?.docker,
+              docker: recoveredDocker,
               owner: recoveredOwner,
               // Tab lineage survives a restart. It is only decoration, so a parent
               // that did NOT come back is harmless: the frontend draws an edge only

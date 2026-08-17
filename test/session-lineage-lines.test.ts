@@ -263,4 +263,53 @@ describe('lineage line geometry', () => {
     expect(verticalRailBlock).toContain('--lineage-vertical-gutter');
     expect(verticalRailBlock).toContain('padding-left');
   });
+
+  it('resolves collapse-hidden endpoints through stable group header hooks', () => {
+    expect(lineageJs).toContain('data-tab-group-header');
+    expect(lineageJs).toContain('_hiddenTabGroupByRef');
+    expect(lineageJs).toContain('lineage-line--proxied');
+  });
+
+  it('suppresses a lineage edge when both hidden endpoints proxy to the same header', () => {
+    expect(lineageJs).toMatch(/parentEndpoint\.key\s*===\s*childEndpoint\.key/);
+  });
+
+  it('ships a visibly dimmed dotted proxy treatment', () => {
+    expect(stylesCss).toMatch(/\.connection-line\.lineage-line--proxied\s*\{[^}]*stroke-dasharray:[^}]*opacity:/s);
+  });
+
+  it('loops proxied working dashes continuously without changing normal working motion', () => {
+    const proxiedWorking = stylesCss.match(
+      /\.connection-line\.lineage-line--proxied\.lineage-line--working\s*\{([^}]*)\}/s
+    )?.[1];
+    const normalWorking = stylesCss.match(/\.connection-line\.lineage-line--working\s*\{([^}]*)\}/s)?.[1];
+    const motion = stylesCss.match(/@media \(prefers-reduced-motion: no-preference\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
+    const proxiedOffset = Number(
+      stylesCss.match(/@keyframes lineage-proxy-flow\s*\{[\s\S]*?stroke-dashoffset:\s*(-?\d+)/)?.[1]
+    );
+    const normalOffset = Number(
+      stylesCss.match(/@keyframes lineage-flow\s*\{[\s\S]*?stroke-dashoffset:\s*(-?\d+)/)?.[1]
+    );
+
+    expect(proxiedWorking).toMatch(/opacity:\s*0\.\d+/);
+    expect(normalWorking).toMatch(/opacity:\s*0\.95/);
+    expect(motion).toMatch(/\.lineage-line--working[\s\S]*animation:\s*lineage-flow/);
+    expect(motion).toMatch(/\.lineage-line--proxied\.lineage-line--working[\s\S]*animation:\s*lineage-proxy-flow/);
+    expect(Math.abs(proxiedOffset) % 9).toBe(0);
+    expect(Math.abs(normalOffset) % 10).toBe(0);
+    expect(proxiedOffset).not.toBe(normalOffset);
+  });
+
+  it('matches emitted dot modifiers to dimmed proxy and motion-gated working selectors', () => {
+    expect(lineageJs).toContain('lineage-line-dot--working');
+    expect(lineageJs).toContain('lineage-line-dot--proxied');
+    expect(stylesCss).toMatch(/\.lineage-line-dot--proxied\s*\{[^}]*opacity:/s);
+    expect(stylesCss).toMatch(/\.lineage-line-dot--proxied\.lineage-line-dot--working\s*\{[^}]*opacity:/s);
+
+    const motion = stylesCss.match(/@media \(prefers-reduced-motion: no-preference\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
+    expect(motion).toMatch(/\.lineage-line-dot--working[\s\S]*animation:\s*lineage-dot-pulse/);
+    expect(motion).toMatch(
+      /\.lineage-line-dot--proxied\.lineage-line-dot--working[\s\S]*animation:\s*lineage-proxy-dot-pulse/
+    );
+  });
 });

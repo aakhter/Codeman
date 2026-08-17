@@ -6,6 +6,13 @@ export interface CodexProviderIdentity {
   codexHome?: string;
 }
 
+/** Closed provider environment allowed to cross from a Codex session into its isolated predictor. */
+export interface CodexProviderEnvironment {
+  CODEX_HOME?: string;
+  OPENAI_API_KEY?: string;
+  CODEX_API_KEY?: string;
+}
+
 /** Read only a recognized closed record; legacy or malformed provenance is unsafe. */
 export function parseCodexProviderIdentity(value: unknown): CodexProviderIdentity | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;

@@ -7,7 +7,10 @@
  * list a phone gets on its home screen (mobile-overview.js), turned vertical:
  * one row per live tab.
  *
- * Rows are ordered by `CodemanSessionOrder` (constants.js), the same comparator
+ * The rail lists every locally renderable TAB, sessions and saved web tabs
+ * interleaved in the authoritative layout order (COD-310). Web tabs hold those
+ * slots — position is their only meaning — while the SESSION rows are ordered
+ * among themselves by `CodemanSessionOrder` (constants.js), the same comparator
  * the phone overview uses: blocked on you first, then running longest-first,
  * then quiet most-recently-quiet first. The number badge stays the tab-strip
  * index (Alt+1..9), so it is deliberately NOT sequential down a sorted rail:
@@ -44,7 +47,8 @@
  * @dependency constants.js (CodemanSessionOrder, the shared row comparator)
  * @dependency mobile-overview.js (_mobileOverviewState, _mobileOverviewCaseFor, shouldUseMobileOverview)
  * @dependency ralph-panel.js (formatRelativeTime — the app's one relative-time formatter)
- * @dependency webview-tabs.js (this.webviews, this.webviewOrder, openWebview)
+ * @dependency tab-layout-browser.js/app.js (complete locally renderable ref projection)
+ * @dependency webview-tabs.js (this.webviews, openWebview)
  * @dependency mobile-handlers.js (MobileDetection)
  * @loadorder 12.56 of 16, after mobile-overview.js, before entrance-animations.js
  */
@@ -172,61 +176,108 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   /**
-   * One row per live session, in overview order: whatever is blocked on you
-   * first, then whatever is running (longest turn first), then the quiet ones
-   * most-recently-quiet first. The comparator is `CodemanSessionOrder`
-   * (constants.js), shared with the phone overview, and state classification is
-   * `_mobileOverviewState()` (mobile-overview.js), so the two home screens can
-   * neither disagree about what "working" means nor about what sorts first.
+   * Complete locally renderable refs in authoritative order. Collapse is absent
+   * here because Home is a complete tab list, not the visible vertical tree.
+   */
+  _homeTabRefs() {
+    if (this._tabLayoutFirstPaintPending) return [];
+    const projected = Array.isArray(this._completeTabRefs)
+      ? this._completeTabRefs
+      : this._refreshTabProjection?.()?.completeRefs;
+    if (Array.isArray(projected)) return projected;
+
+    // Safe legacy fallback while the authoritative layout is unavailable.
+    const sessions = Array.isArray(this.sessionOrder) ? [...this.sessionOrder] : [];
+    for (const id of this.sessions?.keys() || []) if (!sessions.includes(id)) sessions.push(id);
+    return [
+      ...sessions.filter((id) => this.sessions?.has(id)).map((id) => ({ kind: 'session', id })),
+      ...(this.webviewOrder || []).filter((id) => this.webviews?.has(id)).map((id) => ({ kind: 'webview', id })),
+    ];
+  },
+
+  /**
+   * One descriptor per locally renderable tab, in authoritative interleaved
+   * order, with the SESSION rows re-ordered among themselves by urgency.
    *
-   * `orderIndex` stays the position in the TAB STRIP, because that is what the
-   * number badge means (Alt+1..9). Once the rows are sorted those badges no
+   * Two rules meet here and neither gives way. Web tabs occupy their authoritative
+   * slots because they have no activity state to sort by and their position IS
+   * their meaning (COD-310). Sessions are ordered by `CodemanSessionOrder`
+   * (constants.js) — blocked on you first, then running longest-turn-first, then
+   * quiet most-recently-quiet first — the same comparator the phone overview uses,
+   * so the two home screens cannot disagree about what sorts first.
+   *
+   * `index` stays the position in the TAB STRIP either way, because that is what
+   * the number badge means (Alt+1..9). Once sessions are sorted those badges no
    * longer run 1,2,3 down the rail: the badge answers "which key selects this",
    * not "how far down the list is it".
+   */
+  buildHomeTabRows() {
+    const cases = Array.isArray(this.cases) ? this.cases : [];
+    const rows = this._homeTabRefs()
+      .map((ref, index) => {
+        if (ref.kind === 'webview') {
+          const webview = this.webviews?.get(ref.id);
+          return webview ? { kind: 'webview', id: ref.id, index, webview } : null;
+        }
+        const session = this.sessions?.get(ref.id);
+        if (!session) return null;
+        const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
+        const state = this._mobileOverviewState(session, this.pendingHooks?.get(ref.id));
+        const mode = session.mode || 'claude';
+        return {
+          kind: 'session',
+          id: ref.id,
+          index,
+          // The comparator and the number badge read the same value under two
+          // names; `orderIndex` is the one CodemanSessionOrder and the phone
+          // overview already speak.
+          orderIndex: index,
+          name: this.getSessionName ? this.getSessionName(session) : session.name || ref.id.slice(0, 8),
+          mode,
+          modeBadge: HOME_SESSIONS_MODE_BADGE[mode] || '',
+          caseName: matched ? matched.name : '',
+          dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
+          state,
+          pill: HOME_SESSIONS_PILL_LABEL[state] || state,
+          // Epoch ms, straight off the session payload; formatting happens at
+          // render time so the clock below can redo it without a re-render.
+          createdAt: Number(session.createdAt) || 0,
+          lastActivityAt: Number(session.lastActivityAt) || 0,
+          // The running group is ordered by the pane's last Enter, since a
+          // working pane's last-activity stamp is always "now".
+          lastSubmitAt: Number(session.lastSubmitAt) || 0,
+          // "how long has it been like this", resolved by the phone overview's
+          // helper so both home screens label the same stamp with the same word.
+          since: this._mobileOverviewSince?.(state, session),
+        };
+      })
+      .filter(Boolean);
+
+    return this._sortHomeSessionRowsInPlace(rows);
+  },
+
+  /**
+   * Sort the SESSION rows among themselves, leaving every web tab in its slot.
    *
+   * Guarded like every other constants.js consumer: a stale cached constants.js
+   * (iOS Safari serves old JS after a deploy) must degrade to authoritative
+   * order, not TypeError the whole home screen away.
+   */
+  _sortHomeSessionRowsInPlace(rows) {
+    if (!window.CodemanSessionOrder) return rows;
+    const sessionRows = rows.filter((row) => row.kind === 'session');
+    if (sessionRows.length < 2) return rows;
+    const sorted = window.CodemanSessionOrder.sort(sessionRows);
+    let next = 0;
+    return rows.map((row) => (row.kind === 'session' ? sorted[next++] : row));
+  },
+
+  /**
+   * One row per live session, in the order the rail paints them.
    * @returns {Array<object>} row descriptors, ready to render
    */
   buildHomeSessionRows() {
-    if (this._tabLayoutFirstPaintPending) return [];
-    const cases = Array.isArray(this.cases) ? this.cases : [];
-    const order = Array.isArray(this.sessionOrder) ? this.sessionOrder : [];
-    const ids = order.filter((id) => this.sessions?.has(id));
-    // A session created before the order list caught up would otherwise be
-    // invisible here while its tab already exists.
-    for (const id of this.sessions?.keys() || []) if (!ids.includes(id)) ids.push(id);
-
-    const rows = ids.map((id, orderIndex) => {
-      const session = this.sessions.get(id);
-      const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
-      const state = this._mobileOverviewState(session, this.pendingHooks?.get(id));
-      const mode = session.mode || 'claude';
-      return {
-        id,
-        orderIndex,
-        name: this.getSessionName ? this.getSessionName(session) : session.name || id.slice(0, 8),
-        mode,
-        modeBadge: HOME_SESSIONS_MODE_BADGE[mode] || '',
-        caseName: matched ? matched.name : '',
-        dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
-        state,
-        pill: HOME_SESSIONS_PILL_LABEL[state] || state,
-        // Epoch ms, straight off the session payload; formatting happens at
-        // render time so the clock below can redo it without a re-render.
-        createdAt: Number(session.createdAt) || 0,
-        lastActivityAt: Number(session.lastActivityAt) || 0,
-        // The running group is ordered by the pane's last Enter, since a
-        // working pane's last-activity stamp is always "now".
-        lastSubmitAt: Number(session.lastSubmitAt) || 0,
-        // "how long has it been like this", resolved by the phone overview's
-        // helper so both home screens label the same stamp with the same word.
-        since: this._mobileOverviewSince(state, session),
-      };
-    });
-
-    // Guarded like every other constants.js consumer: a stale cached
-    // constants.js (iOS Safari serves old JS after a deploy) must degrade to
-    // tab order, not TypeError the whole home screen away.
-    return window.CodemanSessionOrder ? window.CodemanSessionOrder.sort(rows) : rows;
+    return this.buildHomeTabRows().filter((row) => row.kind === 'session');
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -243,12 +294,11 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
 
-    const rows = this.buildHomeSessionRows();
-    const webviews = (this.webviewOrder || []).map((id) => this.webviews?.get(id)).filter(Boolean);
+    const rows = this.buildHomeTabRows();
 
     // Nothing open means nothing to list: an empty framed box next to a
     // first-run welcome screen is noise, not information.
-    if (!rows.length && !webviews.length) {
+    if (!rows.length) {
       el.hidden = true;
       el.replaceChildren();
       this._stopHomeSessionsClock();
@@ -257,12 +307,17 @@ Object.assign(CodemanApp.prototype, {
     el.hidden = false;
 
     el.replaceChildren();
-    el.appendChild(this._buildHomeSessionsHeader(rows.length + webviews.length));
+    el.appendChild(this._buildHomeSessionsHeader(rows.length));
 
     const list = document.createElement('div');
     list.className = 'home-sessions-list';
-    for (const row of rows) list.appendChild(this._buildHomeSessionRow(row));
-    for (const webview of webviews) list.appendChild(this._buildHomeSessionsWebviewRow(webview));
+    for (const row of rows) {
+      list.appendChild(
+        row.kind === 'webview'
+          ? this._buildHomeSessionsWebviewRow(row.webview, row.index)
+          : this._buildHomeSessionRow(row)
+      );
+    }
     el.appendChild(list);
 
     this._startHomeSessionsClock();
@@ -459,14 +514,22 @@ Object.assign(CodemanApp.prototype, {
     return item;
   },
 
-  /** A saved dashboard, listed after the sessions exactly as in the tab strip. */
-  _buildHomeSessionsWebviewRow(webview) {
+  /** A saved dashboard at its authoritative interleaved position. */
+  _buildHomeSessionsWebviewRow(webview, index) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'home-sessions-row home-sessions-row--web';
     item.dataset.hsAction = 'webview';
     item.dataset.hsWebview = webview.id;
     item.title = webview.url || webview.name;
+
+    if (index < 9) {
+      const number = document.createElement('span');
+      number.className = 'home-sessions-number';
+      number.setAttribute('data-i18n-skip', '');
+      number.textContent = String(index + 1);
+      item.appendChild(number);
+    }
 
     const dot = document.createElement('span');
     dot.className = 'home-sessions-dot home-sessions-dot--web';
