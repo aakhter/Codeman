@@ -725,13 +725,31 @@ html[data-tab-orientation='vertical'] .session-tab[role='treeitem']:focus-visibl
 }
 
 .tab-ref-drag-handle {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
   border: 0;
+  border-radius: 3px;
   color: var(--text-muted);
   background: transparent;
   cursor: grab;
   touch-action: none;
+}
+
+.tab-ref-drag-handle:hover,
+.tab-ref-drag-handle:focus-visible {
+  color: var(--text);
+  background: var(--control-bg-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tab-ref-drag-handle:active {
+  cursor: grabbing;
 }
 
 .tab-layout-create-group {
@@ -804,16 +822,6 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab {
   max-width: none;
   justify-content: flex-start;
   touch-action: pan-y;
-}
-
-html[data-tab-orientation='vertical'] .tab-ref-drag-handle {
-  display: inline-flex;
-}
-
-@media (pointer: coarse) {
-  .tab-ref-drag-handle {
-    display: inline-flex;
-  }
 }
 
 /* The name block is the only part that may shrink; the status dot, badges and
@@ -1744,7 +1752,7 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
   line-height: 1;
   color: var(--text-muted);
   overflow: hidden;
-  cursor: default;
+  cursor: pointer;
   border-radius: 3px;
   pointer-events: none;
   transition: opacity 0.05s ease-out;

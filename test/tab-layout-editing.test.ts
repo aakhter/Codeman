@@ -715,6 +715,7 @@ function makeInteractionApp() {
   app._inlineRenameActive = false;
   app._tabLayoutManaged = true;
   app._tabPointerHandlersBound = false;
+  app._tabPointerDrag = null;
   app._tabPendingFollowRefs = new Set();
   app._tabPlacementStates = new Map([
     ['session:child', { kind: 'session', id: 'child', state: 'inherited', parentId: 'parent', canFollow: false }],
@@ -765,6 +766,188 @@ function clickMenuItem(label: string) {
   expect(button, `menu item ${label}`).toBeTruthy();
   button!.click();
 }
+
+function openGroupMenu(app: Record<string, any>, trigger: HTMLElement, groupId = 'g1') {
+  app.openTabGroupMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, groupId);
+}
+
+describe('COD-315 dismissible group menu', () => {
+  it('dismisses on an outside tab pointerdown without suppressing activation or running an action', () => {
+    const app = makeInteractionApp();
+    app.startTabGroupRename = vi.fn();
+    app.editTabLayout = vi.fn();
+    app.deleteTabGroup = vi.fn();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const tab = document.querySelector<HTMLElement>('[data-id="other"]')!;
+    const bubbled = vi.fn();
+    tab.removeAttribute('onclick');
+    tab.addEventListener('click', (event) => app.handleSessionTabClick(event, 'other'));
+    document.addEventListener('pointerdown', bubbled, { once: true });
+
+    openGroupMenu(app, trigger);
+    const pointerdown = new Event('pointerdown', { bubbles: true, cancelable: true });
+    tab.dispatchEvent(pointerdown);
+    tab.click();
+
+    expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+    expect(pointerdown.defaultPrevented).toBe(false);
+    expect(bubbled).toHaveBeenCalledOnce();
+    expect(app.selectSession).toHaveBeenCalledWith('other');
+    expect(app.startTabGroupRename).not.toHaveBeenCalled();
+    expect(app.editTabLayout).not.toHaveBeenCalled();
+    expect(app.deleteTabGroup).not.toHaveBeenCalled();
+  });
+
+  it('dismisses on document Escape after focus moves and restores the trigger', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const displaced = document.createElement('button');
+    document.body.appendChild(displaced);
+    openGroupMenu(app, trigger);
+    displaced.focus();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+
+    expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('consumes Escape before the shipping listener can close unrelated UI', () => {
+    const app = makeInteractionApp();
+    app._maybeCloseResponseViewerOnEscape = vi.fn(() => false);
+    app.closeAllPanels = vi.fn();
+    app.closeHelp = vi.fn();
+    app.closeShortcutOverlay = vi.fn();
+    app.closeSessionManager = vi.fn();
+    app.closeCommandPalette = vi.fn();
+    app.getShortcutRegistry = vi.fn(() => []);
+    app.setupColorPicker = vi.fn();
+    app._scheduleTerminalRepaint = vi.fn();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const displaced = document.createElement('button');
+    document.body.appendChild(displaced);
+    const documentAddSpy = vi.spyOn(document, 'addEventListener').mockImplementation(() => {});
+    const windowAddSpy = vi.spyOn(window, 'addEventListener').mockImplementation(() => {});
+    app.setupEventListeners();
+    const shippingKeydown = documentAddSpy.mock.calls.find(([type]) => type === 'keydown')?.[1] as EventListener;
+    documentAddSpy.mockRestore();
+    windowAddSpy.mockRestore();
+    document.addEventListener('keydown', shippingKeydown, true);
+
+    try {
+      openGroupMenu(app, trigger);
+      displaced.focus();
+      const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      displaced.dispatchEvent(escape);
+
+      expect(escape.defaultPrevented).toBe(true);
+      expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(app.closeAllPanels).not.toHaveBeenCalled();
+      expect(app.closeHelp).not.toHaveBeenCalled();
+      expect(app.closeShortcutOverlay).not.toHaveBeenCalled();
+      expect(app.closeSessionManager).not.toHaveBeenCalled();
+      expect(app.closeCommandPalette).not.toHaveBeenCalled();
+    } finally {
+      app.closeTabGroupMenu?.();
+      document.removeEventListener('keydown', shippingKeydown, true);
+    }
+  });
+
+  it('toggles from the same trigger, replaces from another trigger, and manages ARIA state', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const first = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const second = document.querySelector<HTMLElement>('[data-tab-group-id="g2"] .tab-layout-group-menu')!;
+    expect(first.getAttribute('aria-haspopup')).toBe('menu');
+    expect(first.getAttribute('aria-expanded')).toBe('false');
+
+    openGroupMenu(app, first);
+    expect(first.getAttribute('aria-expanded')).toBe('true');
+    first.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    expect(document.querySelectorAll('.tab-layout-group-action-menu')).toHaveLength(1);
+    openGroupMenu(app, first);
+    expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+    expect(first.getAttribute('aria-expanded')).toBe('false');
+
+    openGroupMenu(app, first);
+    openGroupMenu(app, second, 'g2');
+    expect(document.querySelectorAll('.tab-layout-group-action-menu')).toHaveLength(1);
+    expect(first.getAttribute('aria-expanded')).toBe('false');
+    expect(second.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement?.textContent).toBe('Rename group');
+    app.closeTabGroupMenu();
+  });
+
+  it('preserves wrapping arrow navigation and runs the chosen action exactly once', () => {
+    const app = makeInteractionApp();
+    app.startTabGroupRename = vi.fn();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    openGroupMenu(app, trigger);
+    const items = [...document.querySelectorAll<HTMLButtonElement>('.tab-layout-group-action-menu [role="menuitem"]')];
+
+    items[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    expect(document.activeElement).toBe(items.at(-1));
+    items.at(-1)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement).toBe(items[0]);
+    items[0].click();
+
+    expect(app.startTabGroupRename).toHaveBeenCalledOnce();
+    expect(app.startTabGroupRename).toHaveBeenCalledWith('g1');
+    expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('pairs transient document listeners across repeated open and close cycles', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    const removeSpy = vi.spyOn(document, 'removeEventListener');
+    try {
+      openGroupMenu(app, trigger);
+      app.closeTabGroupMenu();
+      openGroupMenu(app, trigger);
+      app.closeTabGroupMenu();
+
+      const additions = addSpy.mock.calls.filter(([type]) => type === 'pointerdown' || type === 'keydown');
+      const removals = removeSpy.mock.calls.filter(([type]) => type === 'pointerdown' || type === 'keydown');
+      expect(additions).toHaveLength(4);
+      expect(removals).toHaveLength(4);
+      expect(removals.map(([type, listener, options]) => [type, listener, options])).toEqual(
+        additions.map(([type, listener, options]) => [type, listener, options])
+      );
+    } finally {
+      app.closeTabGroupMenu?.();
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+  });
+
+  it('closes the menu and listeners before a full tab-tree rerender disconnects its trigger', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const removeSpy = vi.spyOn(document, 'removeEventListener');
+    try {
+      openGroupMenu(app, trigger);
+      app._fullRenderSessionTabs();
+
+      expect(trigger.isConnected).toBe(false);
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+      expect(removeSpy.mock.calls.filter(([type]) => type === 'pointerdown' || type === 'keydown')).toHaveLength(2);
+    } finally {
+      app.closeTabGroupMenu?.();
+      removeSpy.mockRestore();
+    }
+  });
+});
 
 describe('COD-307 subtree-aware move destinations', () => {
   it('moves to the current group end through the real ref menu without a semantic error', () => {
@@ -1070,7 +1253,7 @@ describe('COD-307 roving tree and focus restoration', () => {
     expect(app.openTabRefMoveMenu).toHaveBeenCalledWith(expect.anything(), { kind: 'session', id: 'parent' });
   });
 
-  it('keeps horizontal Left/Right/Home/End navigation and Enter activation flat', () => {
+  it('keeps horizontal navigation flat and activates session/webview tabs with Enter or Space', () => {
     const app = makeInteractionApp();
     document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
     app._fullRenderSessionTabs();
@@ -1087,6 +1270,15 @@ describe('COD-307 roving tree and focus restoration', () => {
     tabs[0].focus();
     tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect(app.selectSession).toHaveBeenCalledWith('parent');
+    tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(app.selectSession).toHaveBeenCalledTimes(2);
+
+    const webview = tabs.find((tab) => tab.dataset.webviewId === 'web')!;
+    webview.focus();
+    webview.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    webview.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(app.openWebview).toHaveBeenNthCalledWith(1, 'web');
+    expect(app.openWebview).toHaveBeenNthCalledWith(2, 'web');
   });
 
   it('preserves a group rename input through debounced and authoritative render attempts', () => {
@@ -1221,7 +1413,10 @@ describe('COD-307 delegated pointer behavior', () => {
     const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"][data-tab-drop-index="1"]')!;
     (document as any).elementFromPoint = vi.fn(() => zone);
 
-    parent.dispatchEvent(pointerEvent('pointerdown', { pointerId: 71, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    const parentHandle = parent.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    parentHandle.dispatchEvent(
+      pointerEvent('pointerdown', { pointerId: 71, pointerType: 'mouse', clientX: 1, clientY: 1 })
+    );
     container.dispatchEvent(
       pointerEvent('pointermove', { pointerId: 71, pointerType: 'mouse', clientX: 20, clientY: 20 })
     );
@@ -1282,7 +1477,8 @@ describe('COD-307 delegated pointer behavior', () => {
     const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"][data-tab-drop-index="1"]')!;
     (document as any).elementFromPoint = vi.fn(() => zone);
 
-    tab.dispatchEvent(pointerEvent('pointerdown', { pointerId: 7, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    const handle = tab.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 7, pointerType: 'mouse', clientX: 1, clientY: 1 }));
     container.dispatchEvent(
       pointerEvent('pointermove', { pointerId: 7, pointerType: 'mouse', clientX: 3, clientY: 3 })
     );
@@ -1304,6 +1500,55 @@ describe('COD-307 delegated pointer behavior', () => {
     });
     expect(app._tabPointerDrag).toBeNull();
     expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
+  });
+
+  it('starts reference dragging only from the dedicated handle', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const tab = container.querySelector<HTMLElement>('[data-id="parent"]')!;
+
+    for (const target of [tab, tab.querySelector('.tab-status')!, tab.querySelector('.tab-name')!]) {
+      target.dispatchEvent(
+        pointerEvent('pointerdown', { pointerId: 17, pointerType: 'mouse', clientX: 1, clientY: 1 })
+      );
+      expect(app._tabPointerDrag).toBeNull();
+      expect(container.setPointerCapture).not.toHaveBeenCalled();
+    }
+    tab.dispatchEvent(pointerEvent('pointerdown', { pointerId: 19, pointerType: 'touch', clientX: 1, clientY: 1 }));
+    expect(app._tabPointerDrag).toBeNull();
+    expect(container.setPointerCapture).not.toHaveBeenCalled();
+
+    const handle = tab.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 18, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    expect(app._tabPointerDrag?.source).toMatchObject({
+      type: 'ref',
+      ref: { kind: 'session', id: 'parent' },
+    });
+    expect(container.setPointerCapture).toHaveBeenCalledWith(18);
+  });
+
+  it('keeps the drag handle and tab actions separate from row activation', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const tab = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    const handlers = new Map(
+      ['.tab-ref-drag-handle', '.tab-gear', '.tab-detach', '.tab-close', '.tab-more'].map((selector) => [
+        selector,
+        tab.querySelector<HTMLElement>(selector)!.getAttribute('onclick'),
+      ])
+    );
+
+    for (const handler of handlers.values()) expect(handler).toContain('event.stopPropagation()');
+    expect(handlers.get('.tab-ref-drag-handle')).toContain('event.preventDefault()');
+    expect(tab.querySelector<HTMLElement>('.tab-ref-drag-handle')!.tabIndex).toBe(-1);
+    expect(handlers.get('.tab-gear')).toContain('app.openSessionOptions');
+    expect(handlers.get('.tab-detach')).toContain('app.detachSession');
+    expect(handlers.get('.tab-close')).toContain('app.requestCloseSession');
+    expect(handlers.get('.tab-more')).toContain('app.openTabRailActionMenu');
   });
 
   it('supports touch intent and fully cleans up on pointercancel without committing', () => {
@@ -1351,7 +1596,12 @@ describe('COD-307 delegated pointer behavior', () => {
     expect(container.querySelector('.tab-layout-drag-block')).toBeNull();
     const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
     expect(css).toMatch(/vertical[^}]*session-tab[^}]*\{[^}]*touch-action:\s*pan-y/s);
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*display:\s*inline-flex/s);
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*cursor:\s*grab/s);
     expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*touch-action:\s*none/s);
+    expect(css).toMatch(/\.session-tab\s*\{[^}]*cursor:\s*pointer/s);
+    expect(css).toMatch(/\.session-tab:hover\s*\{[^}]*background:/s);
+    expect(css).toMatch(/\.session-tab \.tab-close\s*\{[^}]*cursor:\s*pointer/s);
   });
 });
 

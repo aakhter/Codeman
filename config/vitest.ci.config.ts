@@ -54,6 +54,8 @@ export default defineConfig({
       // Hand-maintained lists do not stay in sync with new files, so this is now
       // enforced by `npm run check:browser-excludes` rather than by remembering.
       'test/tab-rail-resize.browser.test.ts', // browser (Playwright + chromium)
+      'test/tab-group-menu.browser.test.ts', // browser (Playwright + chromium)
+      'test/tab-activation.browser.test.ts', // browser (Playwright + chromium)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,

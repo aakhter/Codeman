@@ -1352,8 +1352,12 @@ class CodemanApp {
         return;
       }
 
-      // Escape - close panels and modals (different logic: no preventDefault, no return)
+      // Escape - let the active group menu consume the key before closing unrelated UI.
       if (e.key === 'Escape') {
+        if (this._tabGroupMenu?.isConnected && this._tabGroupMenuKeydown) {
+          this._tabGroupMenuKeydown(e);
+          return;
+        }
         // The View Response overlay is a top-level layer: close it first and
         // consume the key so ESC never reaches xterm/the CLI (where it has its own
         // cancel semantics), then restore terminal focus. Explicit close (not a
@@ -5309,10 +5313,33 @@ class CodemanApp {
     );
   }
 
+  closeTabGroupMenu(options = {}) {
+    const menu = this._tabGroupMenu;
+    const trigger = this._tabGroupMenuTrigger;
+    menu?.remove();
+    if (this._tabGroupMenuOutside) {
+      document.removeEventListener('pointerdown', this._tabGroupMenuOutside, true);
+      this._tabGroupMenuOutside = null;
+    }
+    if (this._tabGroupMenuKeydown) {
+      document.removeEventListener('keydown', this._tabGroupMenuKeydown, true);
+      this._tabGroupMenuKeydown = null;
+    }
+    if (trigger?.classList?.contains('tab-layout-group-menu')) trigger.setAttribute('aria-expanded', 'false');
+    this._tabGroupMenu = null;
+    this._tabGroupMenuTrigger = null;
+    if (options.restoreFocus) trigger?.focus?.();
+  }
+
   openTabGroupMenu(event, groupId) {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-    document.querySelector('.tab-layout-group-action-menu')?.remove();
+    const trigger = event?.currentTarget;
+    if (this._tabGroupMenu?.isConnected && this._tabGroupMenuTrigger === trigger) {
+      this.closeTabGroupMenu();
+      return;
+    }
+    this.closeTabGroupMenu();
     const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
     if (groupIndex < 0) return;
     const menu = document.createElement('div');
@@ -5329,17 +5356,34 @@ class CodemanApp {
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
       button.textContent = label;
-      button.addEventListener('click', () => { menu.remove(); run(); });
+      button.addEventListener('click', () => {
+        this.closeTabGroupMenu();
+        run();
+      });
       menu.appendChild(button);
     }
     document.body.appendChild(menu);
-    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    const rect = trigger?.getBoundingClientRect?.();
     if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
+    this._tabGroupMenu = menu;
+    this._tabGroupMenuTrigger = trigger;
+    if (trigger?.classList?.contains('tab-layout-group-menu')) trigger.setAttribute('aria-expanded', 'true');
+    this._tabGroupMenuOutside = (pointerEvent) => {
+      if (menu.contains(pointerEvent.target) || trigger?.contains?.(pointerEvent.target)) return;
+      this.closeTabGroupMenu();
+    };
+    this._tabGroupMenuKeydown = (keyEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault();
+      keyEvent.stopImmediatePropagation();
+      this.closeTabGroupMenu({ restoreFocus: true });
+    };
+    document.addEventListener('pointerdown', this._tabGroupMenuOutside, true);
+    document.addEventListener('keydown', this._tabGroupMenuKeydown, true);
     menu.addEventListener('keydown', (keyEvent) => {
       const buttons = [...menu.querySelectorAll('button')];
       const current = buttons.indexOf(document.activeElement);
-      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
-      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+      if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
         keyEvent.preventDefault();
         buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
       }
@@ -6372,6 +6416,7 @@ class CodemanApp {
 
   _fullRenderSessionTabs() {
     if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
+    this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
     const projection = this._refreshTabProjection();
     const structureKey = this._tabStructureKey(projection);
@@ -6489,7 +6534,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
+          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
       _tabIdx++;
     }
@@ -6784,8 +6829,9 @@ class CodemanApp {
     }
   }
 
-  // One delegated Pointer Events system serves mouse, pen, and touch. The
-  // container survives structural renders, so listeners are installed once.
+  // One delegated Pointer Events system serves mouse, pen, and touch from the
+  // explicit ref/group drag handles. The container survives structural renders,
+  // so listeners are installed once without intercepting ordinary tab clicks.
   setupTabDragHandlers() {
     const container = this.$('sessionTabs');
     if (!container || this._tabPointerHandlersBound) return;
@@ -6796,8 +6842,7 @@ class CodemanApp {
       const handle = event.target.closest?.('[data-tab-group-drag]');
       const refHandle = event.target.closest?.('[data-tab-ref-drag]');
       const tab = event.target.closest?.('.session-tab');
-      if (event.pointerType === 'touch' && !handle && !refHandle) return;
-      if (!handle && !refHandle && (!tab || event.target.closest?.('button, input, select, textarea, a, .tab-actions'))) return;
+      if (!handle && !refHandle) return;
       const ref = tab
         ? tab.dataset.webviewId
           ? { kind: 'webview', id: tab.dataset.webviewId }
