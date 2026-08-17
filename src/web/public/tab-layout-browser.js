@@ -218,16 +218,24 @@
     return JSON.stringify({ groups: layout.groups, ungrouped: layout.ungrouped });
   }
 
-  function operationsAfterAppliedPrefix(baseLayout, operationsInput, currentLayout) {
+  function operationsAfterAppliedPrefix(baseLayout, operationsInput, currentLayout, authoritativeAppliedCount) {
     const operations = Array.isArray(operationsInput) ? operationsInput : [];
+    if (
+      Number.isSafeInteger(authoritativeAppliedCount) &&
+      authoritativeAppliedCount >= 0 &&
+      authoritativeAppliedCount <= operations.length
+    ) {
+      return operations.slice(authoritativeAppliedCount);
+    }
     const currentKey = layoutContentKey(currentLayout);
     let candidate = normalizedLayout(baseLayout);
     let appliedCount = layoutContentKey(candidate) === currentKey ? 0 : -1;
     for (let index = 0; index < operations.length; index++) {
-      // Follow-parent is a server-authoritative lineage operation. The browser
-      // can still recover the content-derived prefix before it, but must resend
-      // the Follow intent itself (which is idempotent once inherited).
-      if (operations[index]?.type === 'followParent') break;
+      // Follow-parent is a server-authoritative lineage operation. Skip its
+      // derivation but keep scanning ordinary suffix operations. Shipping
+      // responses provide the exact authoritative prefix count when Follow
+      // changed structure; this fallback remains useful with older responses.
+      if (operations[index]?.type === 'followParent') continue;
       candidate = applyOperation(candidate, operations[index]);
       if (layoutContentKey(candidate) === currentKey) appliedCount = index + 1;
     }
@@ -439,8 +447,10 @@
     let authoritative = normalizedLayout(options.initialLayout);
     let optimistic = normalizedLayout(authoritative);
     let pending = [];
+    let pendingRecoveryBase = null;
     let inFlight = null;
     let inFlightBase = null;
+    let inFlightRecoveryBase = null;
     let timer = null;
     let writing = false;
     let generation = 0;
@@ -455,6 +465,7 @@
       if (timer !== null) cancel(timer);
       timer = null;
       pending = [];
+      pendingRecoveryBase = null;
       authoritative = normalizedLayout(layout);
       optimistic = normalizedLayout(authoritative);
       apply(optimistic, { authoritative: true, placements });
@@ -465,20 +476,35 @@
       writing = true;
       const batch = pending;
       pending = [];
+      const recoveryBase = pendingRecoveryBase;
+      pendingRecoveryBase = null;
       inFlight = batch;
       const requestGeneration = ++generation;
       let base = normalizedLayout(authoritative);
-      inFlightBase = base;
+      const requestBase = recoveryBase ? normalizedLayout(recoveryBase) : base;
+      inFlightBase = requestBase;
+      inFlightRecoveryBase = recoveryBase ? requestBase : null;
       let desired;
       try {
-        desired = replay(base, batch);
-        let response = await options.put({ baseVersion: base.version, layout: desired, operations: batch });
+        desired = recoveryBase ? normalizedLayout(optimistic) : replay(base, batch);
+        let response = await options.put({
+          baseVersion: requestBase.version,
+          layout: desired,
+          operations: batch,
+          recoveryBaseLayout: requestBase,
+        });
         if (requestGeneration !== generation) return;
         if (!response.ok && response.status === 409 && response.layout) {
-          const remaining = operationsAfterAppliedPrefix(base, batch, response.layout);
+          const remaining = operationsAfterAppliedPrefix(
+            requestBase,
+            batch,
+            response.layout,
+            response.appliedOperationCount
+          );
           base = normalizedLayout(response.layout);
           inFlight = remaining;
           inFlightBase = base;
+          inFlightRecoveryBase = null;
           if (remaining.length === 0) {
             authoritative = base;
             optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
@@ -496,7 +522,12 @@
             report('Tab layout changed; your edit could not be reapplied.');
             return;
           }
-          response = await options.put({ baseVersion: base.version, layout: desired, operations: remaining });
+          response = await options.put({
+            baseVersion: base.version,
+            layout: desired,
+            operations: remaining,
+            recoveryBaseLayout: base,
+          });
           if (requestGeneration !== generation) return;
           if (!response.ok && response.status === 409 && response.layout) {
             stopAndAdopt(response.layout, response.placements);
@@ -523,6 +554,7 @@
         if (requestGeneration === generation) {
           inFlight = null;
           inFlightBase = null;
+          inFlightRecoveryBase = null;
           writing = false;
           if (pending.length) queue();
           else options.onSettled?.();
@@ -541,22 +573,32 @@
         queue();
         return normalizedLayout(optimistic);
       },
+      restoreOperations(baseLayout, operationsInput) {
+        const operations = Array.isArray(operationsInput) ? operationsInput : [];
+        if (!operations.length) return false;
+        pendingRecoveryBase = normalizedLayout(baseLayout);
+        pending.push(...operations);
+        queue();
+        return true;
+      },
       flush,
       getLayout: () => normalizedLayout(optimistic),
       hasPending: () => writing || pending.length > 0,
       pendingOperations: () => JSON.parse(JSON.stringify([...(inFlight || []), ...pending])),
       recoverySnapshot: () => ({
-        baseLayout: normalizedLayout(inFlightBase || authoritative),
+        baseLayout: normalizedLayout(inFlightBase || pendingRecoveryBase || authoritative),
         operations: JSON.parse(JSON.stringify([...(inFlight || []), ...pending])),
       }),
       flushKeepalive() {
         if (!options.putKeepalive || (!writing && pending.length === 0)) return false;
         if (timer !== null) cancel(timer);
         timer = null;
+        const recoveryBase = inFlightRecoveryBase || pendingRecoveryBase;
         options.putKeepalive({
-          baseVersion: authoritative.version,
+          baseVersion: (recoveryBase || authoritative).version,
           layout: normalizedLayout(optimistic),
           operations: JSON.parse(JSON.stringify([...(inFlight || []), ...pending])),
+          ...(recoveryBase ? { recoveryBaseLayout: normalizedLayout(recoveryBase) } : {}),
         });
         return true;
       },
@@ -564,13 +606,21 @@
         const next = normalizedLayout(layout);
         if (next.version < authoritative.version) return false;
         generation++;
-        if (inFlight?.length) pending = [...inFlight, ...pending];
+        if (inFlight?.length) {
+          pending = [...inFlight, ...pending];
+          pendingRecoveryBase = inFlightRecoveryBase;
+        }
         inFlight = null;
         inFlightBase = null;
+        inFlightRecoveryBase = null;
         writing = false;
         authoritative = next;
         try {
-          optimistic = pending.length ? replay(next, pending) : normalizedLayout(next);
+          optimistic = pendingRecoveryBase
+            ? normalizedLayout(next)
+            : pending.length
+              ? replay(next, pending)
+              : normalizedLayout(next);
         } catch (_error) {
           pending = [];
           optimistic = normalizedLayout(next);
@@ -585,7 +635,9 @@
         if (timer !== null) cancel(timer);
         timer = null;
         pending = [];
+        pendingRecoveryBase = null;
         inFlight = null;
+        inFlightRecoveryBase = null;
         writing = false;
       },
     };

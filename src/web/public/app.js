@@ -4962,9 +4962,13 @@ class CodemanApp {
     return (operations || []).map(({ metadata: _metadata, ...operation }) => operation);
   }
 
-  async _putTabLayout({ baseVersion, layout, operations }) {
+  async _putTabLayout({ baseVersion, layout, operations, recoveryBaseLayout }) {
     const wireOperations = this._tabLayoutWireOperations(operations);
-    const response = await this._apiPut('/api/tab-layout', { baseVersion, operations: wireOperations });
+    const response = await this._apiPut('/api/tab-layout', {
+      baseVersion,
+      operations: wireOperations,
+      ...(recoveryBaseLayout ? { recoveryBaseLayout } : {}),
+    });
     if (!response) return { ok: false, status: 0, layout: null };
     let body = null;
     try { body = await response.json(); } catch {}
@@ -4973,16 +4977,21 @@ class CodemanApp {
       status: response.status,
       layout: body?.data?.layout || null,
       placements: body?.data?.placements || null,
+      appliedOperationCount: body?.data?.appliedOperationCount,
     };
     return result;
   }
 
-  _putTabLayoutKeepalive({ baseVersion, operations }) {
+  _putTabLayoutKeepalive({ baseVersion, operations, recoveryBaseLayout }) {
     try {
       void fetch('/api/tab-layout', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseVersion, operations: this._tabLayoutWireOperations(operations) }),
+        body: JSON.stringify({
+          baseVersion,
+          operations: this._tabLayoutWireOperations(operations),
+          ...(recoveryBaseLayout ? { recoveryBaseLayout } : {}),
+        }),
         keepalive: true,
       }).catch(() => {});
       return true;
@@ -5017,8 +5026,12 @@ class CodemanApp {
     const storedOperations = Array.isArray(snapshot) ? snapshot : snapshot?.operations;
     if (!Array.isArray(storedOperations) || !storedOperations.length) return false;
     try {
+      const requiresAuthoritativeRecovery =
+        snapshot?.baseLayout && storedOperations.some((operation) => operation?.type === 'followParent');
       const operations = snapshot?.baseLayout
-        ? window.CodemanTabLayout.operationsAfterAppliedPrefix(
+        ? requiresAuthoritativeRecovery
+          ? storedOperations
+          : window.CodemanTabLayout.operationsAfterAppliedPrefix(
             snapshot.baseLayout,
             storedOperations,
             this.tabLayout
@@ -5030,11 +5043,14 @@ class CodemanApp {
           ? { ...operation, metadata: this._tabLayoutMetadata() }
           : operation
       );
+      const coordinator = this._ensureTabLayoutEditCoordinator();
+      if (requiresAuthoritativeRecovery) {
+        return coordinator.restoreOperations(snapshot.baseLayout, restored);
+      }
       restored.reduce(
         (candidate, operation) => window.CodemanTabLayout.applyOperation(candidate, operation),
         this.tabLayout
       );
-      const coordinator = this._ensureTabLayoutEditCoordinator();
       for (const operation of restored) coordinator.enqueue(operation);
       return true;
     } catch (error) {

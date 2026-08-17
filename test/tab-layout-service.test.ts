@@ -287,6 +287,42 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['beginning', 1],
+    ['middle', 2],
+    ['end', 3],
+  ])('authoritatively recognizes a committed prefix with Follow parent at the %s', async (_position, prefixLength) => {
+    const base: TabLayout = {
+      ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),
+      groups: [{ id: 'g', name: 'Work', refs: [{ kind: 'session', id: 'parent' }] }],
+    };
+    const h = createHarness({
+      layouts: { alice: base },
+      live: [
+        { id: 'parent', owner: 'alice', createdAt: 1 },
+        { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+      ],
+    });
+    const ordinary = [
+      { type: 'createGroup' as const, id: 'new', name: 'New' },
+      { type: 'renameGroup' as const, groupId: 'new', name: 'Renamed' },
+    ];
+    const follow = { type: 'followParent' as const, ref: { kind: 'session' as const, id: 'child' } };
+    const operations =
+      prefixLength === 1
+        ? [follow, ...ordinary]
+        : prefixLength === 2
+          ? [ordinary[0], follow, ordinary[1]]
+          : [...ordinary, follow];
+
+    const committed = await h.service.putOperations('alice', operations.slice(0, prefixLength), 7);
+    expect(committed.status).toBe('updated');
+    const recovery = await h.service.putOperations('alice', operations, 7, base);
+
+    expect(recovery.status).toBe('conflict');
+    expect(recovery.appliedOperationCount).toBe(prefixLength);
+  });
+
   it('repairs missing refs before applying semantic intent and rejects duplicate edits atomically', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'parent' }]) },

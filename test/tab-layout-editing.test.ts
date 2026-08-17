@@ -210,6 +210,23 @@ describe('COD-309 browser child-placement intents', () => {
       operations.slice(2)
     );
   });
+
+  it.each([
+    ['beginning', 1],
+    ['middle', 2],
+    ['end', 3],
+  ])('uses the authoritative applied count when Follow parent is at the %s of a batch', (_position, count) => {
+    const h = loadHelper();
+    const ordinary = [
+      { type: 'createGroup', id: 'new', name: 'New' },
+      { type: 'renameGroup', groupId: 'new', name: 'Renamed' },
+    ];
+    const follow = { type: 'followParent', ref: { kind: 'session', id: 'child' }, metadata };
+    const operations =
+      count === 1 ? [follow, ...ordinary] : count === 2 ? [ordinary[0], follow, ordinary[1]] : [...ordinary, follow];
+
+    expect(h.operationsAfterAppliedPrefix(layout(), operations, layout(9), count)).toEqual(operations.slice(count));
+  });
 });
 
 describe('COD-307 optimistic write coordinator', () => {
@@ -1181,6 +1198,7 @@ describe('COD-307 delegated pointer behavior', () => {
       {
         baseVersion: initialSnapshot.layout.version,
         operations: [{ type: 'moveRef', ref: { kind: 'session', id: 'parent' }, groupId: 'g2', index: 1 }],
+        recoveryBaseLayout: initialSnapshot.layout,
       },
     ]);
     expect(layouts.alice.version).toBe(initialSnapshot.layout.version + 1);
@@ -1364,5 +1382,78 @@ describe('COD-307 page lifecycle persistence', () => {
     expect(enqueue).toHaveBeenCalledOnce();
     expect(enqueue).toHaveBeenCalledWith({ type: 'renameGroup', groupId: 'g1', name: 'Recovered' });
     expect(sessionStorage.getItem('codeman:tab-layout-pending-operations')).toBeNull();
+  });
+
+  it('recovers persisted ordinary operations after an authoritatively applied middle Follow-parent prefix', async () => {
+    const base = layout();
+    base.groups[0].refs = [{ kind: 'session', id: 'parent' }];
+    base.ungrouped.unshift({ kind: 'session', id: 'child', placement: 'manual' });
+    const operations = [
+      { type: 'createGroup', id: 'new', name: 'New' },
+      { type: 'followParent', ref: { kind: 'session', id: 'child' } },
+      { type: 'renameGroup', groupId: 'new', name: 'Recovered' },
+    ];
+    sessionStorage.setItem('codeman:tab-layout-pending-operations', JSON.stringify({ baseLayout: base, operations }));
+    const current = {
+      ...base,
+      version: 8,
+      groups: [
+        {
+          ...base.groups[0],
+          refs: [
+            { kind: 'session', id: 'parent' },
+            { kind: 'session', id: 'child' },
+          ],
+        },
+        ...base.groups.slice(1),
+        { id: 'new', name: 'New', refs: [] },
+      ],
+      ungrouped: base.ungrouped.filter((ref) => ref.id !== 'child'),
+    };
+    const app = makeInteractionApp();
+    app.tabLayout = null;
+    app.tabLayoutVersion = null;
+    app._tabLayoutEditCoordinator = null;
+    app._putTabLayout = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        layout: current,
+        placements: [{ kind: 'session', id: 'child', state: 'inherited', parentId: 'parent', canFollow: false }],
+        appliedOperationCount: 2,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        layout: {
+          ...current,
+          version: 9,
+          groups: current.groups.map((group) => (group.id === 'new' ? { ...group, name: 'Recovered' } : group)),
+        },
+        placements: [{ kind: 'session', id: 'child', state: 'inherited', parentId: 'parent', canFollow: false }],
+      });
+
+    app._applyTabLayout(current);
+    expect(app._tabLayoutEditCoordinator).toBeTruthy();
+    await app._tabLayoutEditCoordinator.flush();
+
+    expect(app._putTabLayout).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        baseVersion: 4,
+        operations: [operations[0], expect.objectContaining(operations[1]), operations[2]],
+        recoveryBaseLayout: base,
+      })
+    );
+    expect(app._putTabLayout).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        baseVersion: 8,
+        operations: [{ type: 'renameGroup', groupId: 'new', name: 'Recovered' }],
+      })
+    );
+    expect(app.tabLayout.groups.find((group) => group.id === 'new')?.name).toBe('Recovered');
+    expect(app.showToast).not.toHaveBeenCalled();
   });
 });

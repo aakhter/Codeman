@@ -46,7 +46,9 @@ interface TabLayoutServiceDeps {
   now?: () => string;
 }
 
-export type TabLayoutPutResult = { status: 'updated'; layout: TabLayout } | { status: 'conflict'; layout: TabLayout };
+export type TabLayoutPutResult =
+  | { status: 'updated'; layout: TabLayout }
+  | { status: 'conflict'; layout: TabLayout; appliedOperationCount?: number };
 
 export type TabLayoutSemanticOperation =
   | { type: 'createGroup'; id: string; name: string; index?: number }
@@ -70,6 +72,9 @@ export interface RemovedTabLayoutSession {
 const ownerOf = (record: { owner?: string }): string => record.owner ?? SINGLE_USER_LAYOUT_OWNER;
 const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000${ref.id}`;
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
+const sameContent = (a: TabLayout, b: TabLayout): boolean =>
+  JSON.stringify({ groups: a.groups, ungrouped: a.ungrouped }) ===
+  JSON.stringify({ groups: b.groups, ungrouped: b.ungrouped });
 const validOperationRef = (value: unknown): value is TabRef =>
   value !== null &&
   typeof value === 'object' &&
@@ -235,19 +240,16 @@ export class TabLayoutService {
   async putOperations(
     owner: string,
     operations: readonly TabLayoutSemanticOperation[],
-    baseVersion: number
+    baseVersion: number,
+    recoveryBaseLayout?: unknown
   ): Promise<TabLayoutPutResult & { placements: ReturnType<typeof describeTabPlacements> }> {
     return this.withOwner(owner, async () => {
       const current = await this.getUnlocked(owner);
       const { metadata } = await this.facts(owner);
-      if (baseVersion !== current.version) {
-        return { status: 'conflict', layout: current, placements: describeTabPlacements(current, metadata) };
-      }
       if (!Array.isArray(operations) || operations.length === 0 || operations.length > 64) {
         throw new TabLayoutValidationError('operations must contain 1–64 semantic edits');
       }
-      let next = current;
-      for (const operation of operations) {
+      const applyOperation = (input: TabLayout, operation: TabLayoutSemanticOperation): TabLayout => {
         if (!operation || typeof operation !== 'object')
           throw new TabLayoutValidationError('invalid tab layout operation');
         if (
@@ -260,37 +262,53 @@ export class TabLayoutService {
         }
         switch (operation.type) {
           case 'createGroup':
-            next = createGroup(next, { id: operation.id, name: operation.name, index: operation.index });
-            break;
+            return createGroup(input, { id: operation.id, name: operation.name, index: operation.index });
           case 'renameGroup':
-            next = renameGroup(next, operation.groupId, operation.name);
-            break;
+            return renameGroup(input, operation.groupId, operation.name);
           case 'deleteGroup':
-            next = deleteGroup(next, operation.groupId);
-            break;
+            return deleteGroup(input, operation.groupId);
           case 'reorderGroup':
-            next = reorderGroup(next, operation.groupId, operation.index);
-            break;
+            return reorderGroup(input, operation.groupId, operation.index);
           case 'moveRef':
-            next = moveRef(next, operation.ref, { groupId: operation.groupId, index: operation.index }, metadata);
-            break;
+            return moveRef(input, operation.ref, { groupId: operation.groupId, index: operation.index }, metadata);
           case 'setManualPlacement':
-            next = setManualPlacement(next, operation.ref, operation.manual);
-            break;
+            return setManualPlacement(input, operation.ref, operation.manual);
           case 'followParent': {
-            const followState = describeTabPlacements(next, metadata).find(
+            const followState = describeTabPlacements(input, metadata).find(
               (placement) => placement.kind === operation.ref.kind && placement.id === operation.ref.id
             )?.state;
             if (followState !== 'manual' && followState !== 'inherited') {
               throw new TabLayoutValidationError('session is not eligible to follow an owner-valid parent');
             }
-            next = followParent(next, operation.ref, metadata);
-            break;
+            return followParent(input, operation.ref, metadata);
           }
           default:
             throw new TabLayoutValidationError('unknown tab layout operation');
         }
+      };
+      if (baseVersion !== current.version) {
+        let appliedOperationCount: number | undefined;
+        if (recoveryBaseLayout !== undefined) {
+          let candidate = validateTabLayout(recoveryBaseLayout);
+          if (candidate.version !== baseVersion) {
+            throw new TabLayoutValidationError('recovery base version must match baseVersion');
+          }
+          candidate = normalizeTabLayout(candidate, metadata);
+          if (sameContent(candidate, current)) appliedOperationCount = 0;
+          for (let index = 0; index < operations.length; index++) {
+            candidate = normalizeTabLayout(applyOperation(candidate, operations[index]), metadata);
+            if (sameContent(candidate, current)) appliedOperationCount = index + 1;
+          }
+        }
+        return {
+          status: 'conflict',
+          layout: current,
+          placements: describeTabPlacements(current, metadata),
+          ...(appliedOperationCount === undefined ? {} : { appliedOperationCount }),
+        };
       }
+      let next = current;
+      for (const operation of operations) next = applyOperation(next, operation);
       next = normalizeTabLayout(next, metadata);
       if (sameLayout(current, next)) {
         return { status: 'updated', layout: current, placements: describeTabPlacements(current, metadata) };

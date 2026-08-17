@@ -101,6 +101,32 @@ describe('tab layout routes', () => {
     await app.close();
   });
 
+  it('forwards a recovery base and returns the authoritative applied-prefix count on conflict', async () => {
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
+    const { app, service } = await harness('alice');
+    const operations = [
+      { type: 'createGroup', id: 'new', name: 'New' },
+      { type: 'followParent', ref: { kind: 'session', id: 'child' } },
+      { type: 'renameGroup', groupId: 'new', name: 'Recovered' },
+    ];
+    service.putOperations.mockResolvedValueOnce({
+      status: 'conflict',
+      layout: layout(8),
+      placements: [],
+      appliedOperationCount: 2,
+    });
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: { baseVersion: 3, operations, recoveryBaseLayout: layout(3) },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(service.putOperations).toHaveBeenCalledWith('alice', operations, 3, layout(3));
+    expect(response.json().data.appliedOperationCount).toBe(2);
+    await app.close();
+  });
+
   it('has an explicit conservative body limit', async () => {
     const { app } = await harness();
     const response = await app.inject({

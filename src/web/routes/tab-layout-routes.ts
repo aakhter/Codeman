@@ -12,16 +12,25 @@ function parseWriteBody(
   body: unknown
 ):
   | { baseVersion: number; layout: unknown; operations?: never }
-  | { baseVersion: number; operations: unknown[]; layout?: never } {
+  | { baseVersion: number; operations: unknown[]; recoveryBaseLayout?: unknown; layout?: never } {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new TabLayoutValidationError('body must be an object');
   }
-  const input = body as { baseVersion?: unknown; layout?: unknown; operations?: unknown };
+  const input = body as {
+    baseVersion?: unknown;
+    layout?: unknown;
+    operations?: unknown;
+    recoveryBaseLayout?: unknown;
+  };
   if (!Number.isSafeInteger(input.baseVersion) || (input.baseVersion as number) < 0) {
     throw new TabLayoutValidationError('baseVersion must be a non-negative safe integer');
   }
   if (Array.isArray(input.operations) && input.layout === undefined) {
-    return { baseVersion: input.baseVersion as number, operations: input.operations };
+    return {
+      baseVersion: input.baseVersion as number,
+      operations: input.operations,
+      ...(input.recoveryBaseLayout === undefined ? {} : { recoveryBaseLayout: input.recoveryBaseLayout }),
+    };
   }
   if (input.layout !== undefined && input.operations === undefined) {
     return { baseVersion: input.baseVersion as number, layout: input.layout };
@@ -41,12 +50,23 @@ export function registerTabLayoutRoutes(app: FastifyInstance, ctx: TabLayoutPort
       const parsed = parseWriteBody(req.body);
       const owner = ownerLayoutKey(ownerFor(req));
       const result = parsed.operations
-        ? await ctx.tabLayouts.putOperations(owner, parsed.operations as never, parsed.baseVersion)
+        ? parsed.recoveryBaseLayout === undefined
+          ? await ctx.tabLayouts.putOperations(owner, parsed.operations as never, parsed.baseVersion)
+          : await ctx.tabLayouts.putOperations(
+              owner,
+              parsed.operations as never,
+              parsed.baseVersion,
+              parsed.recoveryBaseLayout
+            )
         : await ctx.tabLayouts.put(owner, parsed.layout, parsed.baseVersion);
       if (result.status === 'conflict') {
         return reply.code(409).send({
           ...createErrorResponse(ApiErrorCode.CONFLICT, 'Tab layout version conflict'),
-          data: { layout: result.layout, ...('placements' in result ? { placements: result.placements } : {}) },
+          data: {
+            layout: result.layout,
+            ...('placements' in result ? { placements: result.placements } : {}),
+            ...('appliedOperationCount' in result ? { appliedOperationCount: result.appliedOperationCount } : {}),
+          },
         });
       }
       return {
