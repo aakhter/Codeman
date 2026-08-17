@@ -1544,6 +1544,7 @@ describe('COD-307 delegated pointer behavior', () => {
 
     for (const handler of handlers.values()) expect(handler).toContain('event.stopPropagation()');
     expect(handlers.get('.tab-ref-drag-handle')).toContain('event.preventDefault()');
+    expect(tab.querySelector<HTMLElement>('.tab-ref-drag-handle')!.tabIndex).toBe(-1);
     expect(handlers.get('.tab-gear')).toContain('app.openSessionOptions');
     expect(handlers.get('.tab-detach')).toContain('app.detachSession');
     expect(handlers.get('.tab-close')).toContain('app.requestCloseSession');

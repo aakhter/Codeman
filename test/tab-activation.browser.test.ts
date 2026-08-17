@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
 const publicDir = resolve(import.meta.dirname, '../src/web/public');
 const styles = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
@@ -17,18 +17,18 @@ const webviews = readFileSync(resolve(publicDir, 'webview-tabs.js'), 'utf8');
 describe('COD-316 full-row tab activation in Chromium', () => {
   let browser: Browser;
   let page: Page;
+  let touchContext: BrowserContext;
+  let touchPage: Page;
 
-  beforeAll(async () => {
-    browser = await chromium.launch({ headless: true });
-    page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    await page.setContent(`
+  async function setupApp(targetPage: Page) {
+    await targetPage.setContent(`
       <!doctype html>
       <html data-tab-orientation="horizontal">
         <head><style>${styles}</style></head>
         <body><div class="session-tabs" id="sessionTabs"></div></body>
       </html>
     `);
-    await page.addScriptTag({
+    await targetPage.addScriptTag({
       content:
         'var MobileDetection = { isTouchDevice: () => false }, KeyboardHandler = {}, SwipeHandler = {}, ' +
         'VoiceInput = {}, DeepgramProvider = {}, NotificationManager = function(){}, KeyboardAccessoryBar = function(){}, ' +
@@ -40,8 +40,8 @@ describe('COD-316 full-row tab activation in Chromium', () => {
         appSource +
         '\nwindow.CodemanApp = CodemanApp; window.__setCod316App = value => { app = value; };',
     });
-    await page.addScriptTag({ content: webviews });
-    await page.evaluate(() => {
+    await targetPage.addScriptTag({ content: webviews });
+    await targetPage.evaluate(() => {
       const controller = Object.create((window as any).CodemanApp.prototype);
       controller.$ = (id: string) => document.getElementById(id);
       controller.sessions = new Map([['session', { id: 'session', name: 'Session', status: 'idle' }]]);
@@ -109,24 +109,71 @@ describe('COD-316 full-row tab activation in Chromium', () => {
       };
       controller._fullRenderSessionTabs();
       (window as any).__setCod316App(controller);
+      (window as any).__cod316Controller = controller;
     });
+  }
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    touchContext = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+    touchPage = await touchContext.newPage();
+    await setupApp(page);
+    await setupApp(touchPage);
   });
 
   afterAll(async () => {
+    await touchContext.close();
     await browser.close();
   });
 
-  async function expectActivation(selector: string, expected: string) {
-    await page.evaluate(() => ((window as any).__activation = null));
-    await page.locator(selector).click();
-    expect(await page.evaluate(() => (window as any).__activation)).toBe(expected);
+  async function renderLayout(targetPage: Page, orientation: 'horizontal' | 'vertical', grouped = false) {
+    await targetPage.evaluate(
+      ({ nextOrientation, nextGrouped }) => {
+        document.documentElement.setAttribute('data-tab-orientation', nextOrientation);
+        const controller = (window as any).__cod316Controller;
+        controller.tabLayout = {
+          version: controller.tabLayout.version + 1,
+          updatedAt: '2026-08-17T00:00:00.000Z',
+          groups: nextGrouped
+            ? [
+                {
+                  id: 'group',
+                  name: 'Group',
+                  refs: [
+                    { kind: 'session', id: 'session' },
+                    { kind: 'webview', id: 'web' },
+                  ],
+                },
+              ]
+            : [],
+          ungrouped: nextGrouped
+            ? []
+            : [
+                { kind: 'session', id: 'session' },
+                { kind: 'webview', id: 'web' },
+              ],
+        };
+        controller._lastTabStructureKey = null;
+        controller._fullRenderSessionTabs();
+      },
+      { nextOrientation: orientation, nextGrouped: grouped }
+    );
+  }
+
+  async function expectActivation(targetPage: Page, selector: string, expected: string, touch = false) {
+    await targetPage.evaluate(() => ((window as any).__activation = null));
+    if (touch) await targetPage.locator(selector).tap();
+    else await targetPage.locator(selector).click();
+    expect(await targetPage.evaluate(() => (window as any).__activation)).toBe(expected);
   }
 
   it('activates session and webview tabs from status, icon, name, and row padding', async () => {
-    await expectActivation('[data-id="session"] .tab-status', 'session:session');
-    await expectActivation('[data-id="session"] .tab-name', 'session:session');
-    await expectActivation('[data-webview-id="web"] .tab-web-icon', 'webview:web');
-    await expectActivation('[data-webview-id="web"] .tab-name', 'webview:web');
+    await renderLayout(page, 'horizontal');
+    await expectActivation(page, '[data-id="session"] .tab-status', 'session:session');
+    await expectActivation(page, '[data-id="session"] .tab-name', 'session:session');
+    await expectActivation(page, '[data-webview-id="web"] .tab-web-icon', 'webview:web');
+    await expectActivation(page, '[data-webview-id="web"] .tab-name', 'webview:web');
 
     for (const [selector, expected] of [
       ['[data-id="session"]', 'session:session'],
@@ -140,13 +187,34 @@ describe('COD-316 full-row tab activation in Chromium', () => {
     }
   });
 
+  it('activates rows from a genuinely rendered vertical grouped projection', async () => {
+    await renderLayout(page, 'vertical', true);
+    expect(await page.locator('.tab-layout-tree[role="tree"] [data-tab-group-id="group"]').count()).toBe(1);
+    expect(await page.locator('.session-tab[role="treeitem"]').count()).toBe(2);
+
+    await expectActivation(page, '[data-id="session"] .tab-status', 'session:session');
+    await expectActivation(page, '[data-id="session"] .tab-name', 'session:session');
+    await expectActivation(page, '[data-webview-id="web"] .tab-web-icon', 'webview:web');
+    await expectActivation(page, '[data-webview-id="web"] .tab-name', 'webview:web');
+
+    const box = await page.locator('[data-id="session"]').boundingBox();
+    expect(box).not.toBeNull();
+    await page.evaluate(() => ((window as any).__activation = null));
+    await page.mouse.click(box!.x + 2, box!.y + box!.height / 2);
+    expect(await page.evaluate(() => (window as any).__activation)).toBe('session:session');
+  });
+
   it('keeps drag handles separate and visible in horizontal and vertical desktop layouts', async () => {
+    await renderLayout(page, 'horizontal');
     const handles = page.locator('.tab-ref-drag-handle');
     expect(await handles.count()).toBe(2);
     expect(await handles.first().isVisible()).toBe(true);
     expect(await handles.first().evaluate((element) => getComputedStyle(element).cursor)).toBe('grab');
+    expect(
+      await handles.evaluateAll((elements) => elements.map((element) => (element as HTMLElement).tabIndex))
+    ).toEqual([-1, -1]);
 
-    await page.evaluate(() => document.documentElement.setAttribute('data-tab-orientation', 'vertical'));
+    await renderLayout(page, 'vertical', true);
     expect(await handles.first().isVisible()).toBe(true);
     await page.evaluate(() => ((window as any).__activation = null));
     await handles.first().click();
@@ -156,7 +224,7 @@ describe('COD-316 full-row tab activation in Chromium', () => {
   });
 
   it('retains full-row hover and pointer feedback while action controls remain separate', async () => {
-    await page.evaluate(() => document.documentElement.setAttribute('data-tab-orientation', 'horizontal'));
+    await renderLayout(page, 'horizontal');
     const session = page.locator('[data-id="session"]');
     await session.locator('.tab-name').hover();
     expect(await session.evaluate((element) => getComputedStyle(element).cursor)).toBe('pointer');
@@ -219,5 +287,38 @@ describe('COD-316 full-row tab activation in Chromium', () => {
         document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
       });
     }
+  });
+
+  it('activates session/webview rows from real touchscreen taps while handles and controls stay separate', async () => {
+    await renderLayout(touchPage, 'horizontal');
+    await expectActivation(touchPage, '[data-id="session"] .tab-name', 'session:session', true);
+    await expectActivation(touchPage, '[data-webview-id="web"] .tab-web-icon', 'webview:web', true);
+
+    for (const handle of await touchPage.locator('.tab-ref-drag-handle').all()) {
+      await touchPage.evaluate(() => ((window as any).__activation = null));
+      await handle.tap();
+      expect(await touchPage.evaluate(() => (window as any).__activation)).toBeNull();
+    }
+
+    const session = touchPage.locator('[data-id="session"]');
+    await session.evaluate((element) => element.classList.add('active', 'tab-show-detach'));
+    await touchPage.evaluate(() => {
+      (window as any).__activation = null;
+      (window as any).__action = null;
+    });
+    await session.locator('.tab-gear').tap();
+    expect(await touchPage.evaluate(() => (window as any).__action)).toBe('settings');
+    expect(await touchPage.evaluate(() => (window as any).__activation)).toBeNull();
+
+    await session.evaluate((element) => element.classList.remove('active'));
+    const webview = touchPage.locator('[data-webview-id="web"]');
+    await webview.evaluate((element) => element.classList.add('active'));
+    await touchPage.evaluate(() => {
+      (window as any).__activation = null;
+      (window as any).__action = null;
+    });
+    await webview.locator('.tab-close').tap();
+    expect(await touchPage.evaluate(() => (window as any).__action)).toBe('web-close');
+    expect(await touchPage.evaluate(() => (window as any).__activation)).toBeNull();
   });
 });

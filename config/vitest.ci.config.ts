@@ -55,6 +55,7 @@ export default defineConfig({
       // enforced by `npm run check:browser-excludes` rather than by remembering.
       'test/tab-rail-resize.browser.test.ts', // browser (Playwright + chromium)
       'test/tab-group-menu.browser.test.ts', // browser (Playwright + chromium)
+      'test/tab-activation.browser.test.ts', // browser (Playwright + chromium)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,
