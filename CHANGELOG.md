@@ -1,5 +1,193 @@
 # aicodeman
 
+## 1.18.6
+
+### Patch Changes
+
+- Document the owner-scoped tab-groups architecture and fix session-lineage rendering in the vertical tab rail by routing parent-child connectors through a reserved left gutter while preserving horizontal U-bridges.
+
+## 1.18.5
+
+### Patch Changes
+
+- Harden attachment access by enforcing session ownership across tail, download, and source routes; requiring trusted
+  attachment roots to be dedicated enclaves; aligning upload and raw-download size limits; and avoiding directory
+  creation during read and delete operations. Add Bitbucket `local` branch CI and the implementation-review checkpoint
+  contract. Make the optional vertical session rail resizable, and hide the redundant homepage Open Tabs rail while
+  vertical tabs are active while retaining its horizontal layout behavior.
+
+## 1.18.4
+
+### Patch Changes
+
+- Faster agent-skill workers, retuned multi-color lineage arcs, a per-tab pop-out option, reliable tab alerts, and the community launch.
+  - Agent skill: SKILL.md now forbids the standalone preamble check and the pre-spawn reconnaissance turns that were costing whole model turns; the same two-worker spawn measured at 28.6s end to end now runs 20.2s cold and 12.8s warm, with the spawn machinery itself unchanged.
+  - Session lineage lines: arcs now hang from the tab strip's bottom edge (dip cap 104px to 64px, no stacked row offsets), fixing the deep bow on wrapped tab strips and keeping same-row arcs off the second row's tab labels; each spawned worker's arc gets its own color (skin blue first, then matrix green, pink, violet, red, turquoise, orange), assigned per child and stable across re-renders.
+  - Session Options > Session: new "Pop-out button on this tab" per-tab override on top of the general App Settings toggle (per-device).
+  - Tab alerts: pending permission/question alerts now survive page reloads regardless of the Approvals Inbox setting (the alert state machine seeds from the server-side approval store on every load), stay visible on the selected tab until the prompt is actually resolved (the alert paints on a ::before overlay the active tab's styling cannot bury), and render as a steady red/yellow ring with glow and a colored status dot instead of a blink that spent half of every cycle looking like a normal tab. The README carries a live capture of the new alerts.
+  - Community launch: README Community section, .github/CONTRIBUTING.md (dev setup, test safety, great first contributions, PR expectations), and GitHub Discussions.
+  - docs: worker warm-pool design sketch with the measured baselines.
+
+## 1.18.3
+
+### Patch Changes
+
+- Fix skill-spawned workers losing their lineage arcs and spawning slowly: a stale user-level agent skill copy (`~/.claude/skills/codeman`, written once by `codeman skill install`) shadowed the fresh per-case injections, so agents ran old recipes (serial spawns with pid polls, no `X-Codeman-Parent-Session` header). Session create now refreshes a marker-owned user-level copy (refresh-only, never installs, foreign/symlink copies untouched) and pre-seeds the skill's preamble into `${XDG_CACHE_HOME:-~/.cache}/codeman-agent-<id>.sh` (0600, local claude sessions only), single-sourced from the new `skills/codeman/preamble.sh` and pinned byte-identical to the SKILL.md heredoc by test. The skill's bootstrap is now a two-line loader with the full block as fallback, cutting measured prompt-to-workers-spawned time from 35s to 10.6s; `spawn_worker` also sends `parentSessionId` in the request body as defense in depth, and the preamble stamp is bumped to 1.18.3 so pre-fix cached preambles self-heal.
+
+## 1.18.2
+
+### Patch Changes
+
+- Draw session lineage lines in blue for contrast. The violet arcs sat close to the
+  terminal's own dim foreground, so they lost contrast exactly where they cross text;
+  the colour now comes from each skin's own `--session-blue` token, and the layer is
+  separated from subagent lines by shape, weight and dash pattern rather than hue.
+- f18097c: Make the `codeman` agent skill spawn workers fast instead of deliberating first.
+
+  Measured against a live server, the API does the whole job (spawn two claude workers,
+  task them, read both answers) in about 10 seconds, so the delay users saw was
+  agent-side: the skill taught serial spawning, made the happy path something to
+  reassemble from five sections on every run, and cost ~16k tokens of mostly failure
+  modes before the first call.
+  - The §0 preamble now defines the verbs instead of describing them: `spawn_worker`,
+    `spawn_workers` (concurrent), `sendwait` and `last_text`. §1 composes them into the
+    whole job in one Bash call, and says to stop reading there.
+  - Dropped two ceremonies the measurements retired: the pid-poll loop (`wait-output`
+    already blocks on the composer) and the agent-driven hooks check, which is now folded
+    into `spawn_worker` itself as a single local grep of the resolved `casePath`, so a
+    name that resolves to a linked case or a hook-less pre-existing directory is refused
+    instead of silently running the job there. Linked cases and raw paths still require
+    the by-hand check, where its absence silently breaks send-and-wait.
+  - The bootstrap's write condition now greps the version stamp, so a stale or truncated
+    preamble file self-heals instead of failing and asking you to `rm` it by hand.
+  - `sendwait` picks a fresh `seq` per call (a fixed default made every second prompt to
+    the same worker a silently-swallowed duplicate) and self-heals stranded delivery: an
+    Ink repaint occasionally eats the Enter, leaving the prompt typed but unsubmitted
+    (observed live), so a timed-out first wait sends one bare `\r` and re-waits by
+    resending the identical frame as a tagged duplicate.
+  - §5 moved to `reference/verbs.md`, leaving an index. SKILL.md is the only part paid on
+    every load and drops from ~16.4k to roughly 9k tokens (~35KB); section numbers and
+    anchors are unchanged, so existing `§5.x` references still resolve.
+
+## 1.18.1
+
+### Patch Changes
+
+- Terminal history and scroll position fixes, a seekable file-viewer video player, and clearer session lineage lines.
+
+  **Terminal scroll position (#259).** Three paths dragged the terminal to the bottom while the user was reading scrollback. Opening or closing the mobile keyboard forced it unconditionally; scroll intent is now captured before the keyboard reflow and restored afterwards. Live writes preserved the viewport only inside a 1500ms window, so a user who scrolled up and then actually read for longer was dragged along by the next repaint; that is now based on position rather than recency. The backpressure refresh, which is server-triggered and so has no gesture to blame, now holds the reader's place too.
+
+  **Terminal history loss (#259 follow-on).** The backpressure refresh rebuilt the terminal from a 1MB tail, which measured as an 869-row buffer coming back with 158 rows: the routine meant to repair the display was discarding most of the scrollback every time SSE backpressure cleared. It now restores full history, falling back to the tail only when the capture would shrink the buffer, so repaint-mode panes are unaffected. It also bails if the user switches tabs mid-fetch, which would otherwise paint one session's history into another's terminal.
+
+  **History truncation is now visible and recoverable (#258).** Truncation was reported by a grey line written into the terminal, which scrolled away with the output it described and read the same whether the rest was one click away or gone forever. `GET /api/sessions/:id/terminal` now reports `truncationReason` (`tail` for an intentional partial replay whose remainder is still retained, `capped` for the byte ceiling) plus `retainedBytes`, and the browser shows a dismissible banner outside terminal output with three honest states: recoverable, which offers a Load full history button, at-ceiling, and exhausted. The button bypasses the scroll cooldown but not the downgrade guard, so it cannot destroy history on a repaint-mode pane.
+
+  **File viewer video (#284).** Closing the preview left the video playing with audible audio and no visible player, since hiding the overlay does not stop a media element and detaching one does not either. Media is now paused, unsourced and reloaded on close and on re-open, which also aborts the in-flight download. The scrub bar was inert because raw file bodies were served as a single `200` with no `Accept-Ranges`, so Chrome reported `video.seekable` as `[0, 0]` and Safari refused to start the media at all. Raw bodies are now streamed and range-aware (`Accept-Ranges` on every response, `206` with `Content-Range` for a range request, `416` past EOF, malformed specs ignored per RFC 9110), with pure, unit-tested parsing in `src/web/http-range.ts`. The attachments raw route gets the same treatment.
+
+  **Session lineage lines (#285).** The arcs joining a tab to the workers it spawned were tuned for two adjacent tabs and flattened into a straight thread across the terminal at the 800-1500px spans they are actually used at, drew a flat overprinted line inside the row gap on a wrapped strip, and were too faint to see at 1:1. Every pair now uses one U-bridge shape anchored on both tabs' bottom edges, with a deeper span-scaled dip and heavier, higher-contrast strokes.
+
+  **Docs.** The pi run mode is now listed in the mode lists that the sixth-backend sweep missed.
+
+## 1.18.0
+
+### Minor Changes
+
+- Heal a stalled SSE stream with a heartbeat and a client-side staleness watchdog, and make a tab rename apply immediately.
+
+  An `EventSource` that stops delivering does not always error. A proxy that idle-closed the connection, a laptop resumed from sleep, a tailnet reconnect: `onerror` never fires, the header dot stays green, and every SSE-driven surface (tab status dots, sessions created on another device, renames) freezes until the user reloads. Nothing on the client tracked stream liveness at all.
+  - **`sse:heartbeat` is a new named event** under a new Transport category in the registry (155 constants now, both the backend list and the frontend `SSE_EVENTS` copy updated). The server already wrote a keepalive every 15s, but as an SSE `:keepalive` **comment**, and comments are invisible to `EventSource` by spec, so there was nothing a client could observe. `cleanupDeadClients()` now writes the named frame (`{"t":<epoch ms>}`) instead; interval, tunnel padding and dead-socket eviction are unchanged, and the write stays per-client rather than going through `broadcast()` because the frame carries no session data and so needs no multi-user owner routing.
+  - **Client watchdog.** `computeSseStale()` in `constants.js` is a pure policy beside `computeConnectionLossUi`: stale only when the transport believes it is `connected`, the device is online, and no frame has arrived for 45s (three missed heartbeats). That `connected`-only guard doubles as the loop breaker, since a forced reconnect leaves the state immediately and the watchdog cannot re-fire while one is in flight. The liveness stamp is applied inside `addListener` itself so every registered listener feeds it from one place instead of three that can drift, and the heartbeat's own listener is a deliberate no-op that exists only to be registered (`EventSource` drops named events nobody listens for). A 5s watchdog forces `connectSSE()`, `visibilitychange` to visible checks too (a background tab's timers are throttled, and a wake is exactly when a stream comes back zombie), and the forced reconnect logs one diagnostic line so a middlebox that strips or delays heartbeats does not present as an undebuggable "silently reconnects every 45s".
+  - **Renaming a tab appeared to do nothing** until a full page reload. The `PUT` always succeeded; what was broken is how the tab strip learned the result. `finishRename()` re-renders from the client-side `app.sessions` map and nothing wrote the new name into it, so the rename depended on the `session:updated` SSE frame to carry its own write back, which is precisely what a quiet stream never delivers. `_applyLocalSessionName()` now writes the confirmed name locally and refreshes cached subagent parent names. A rejected rename also used to read as success and silently drop the edit, because `_apiPut` turns a network error into a null Response so the old `try`/`catch` could never fire; a failure now restores the old label and toasts.
+
+  Tests: `test/sse-staleness.test.ts` (node VM over `constants.js`, threshold boundaries and every not-stale guard), `test/sse-heartbeat.test.ts` (drives `cleanupDeadClients()` with fake replies: named frame not a comment, parseable payload, padding only with a tunnel, dead clients still evicted), and `test/inline-rename.test.ts` (the name applies with no SSE frame dispatched, and a 500 leaves the map untouched).
+
+  Event names are part of the stable `/api/v1` contract, so this is a minor bump.
+
+- c5b5963: Add Pi (pi.dev) as a sixth CLI run mode (#206).
+
+  `SessionMode` gains `'pi'`, a first-class backend alongside Claude Code, OpenCode, Codex, Gemini and Antigravity: its own PTY, tmux session, rose tab identity, welcome button, run-mode entry, cron `agentType`, Docker and remote-SSH command defaults, and clone-repo Brain option.
+  - **New resolver** `src/utils/pi-cli-resolver.ts`. Unlike the sibling resolvers it sanity-probes `pi --version` and requires semver-shaped output, because `pi` is a short generic name that a stray binary on `$PATH` can shadow; the rejected path is logged. `GET /api/pi/status` returns `{ available, path, version }` so a misresolution is diagnosable.
+  - **`PiConfig`** maps to `--model` (accepts `provider/id` and a `:thinking` suffix), `--provider`, `--thinking`, `--session`/`-c`, and the tri-state `--approve` / `--no-approve`. Every value is regex-allowlisted and dropped on failure. `--api-key` is deliberately never wired: it would put a provider secret on the spawn command line.
+  - **No bypass flag.** Pi has no permission prompts and no sandbox, so there is no `--dangerously-skip-permissions` analog. Its privilege-shaped knob is `approveProjectTrust`, which makes pi load and execute repo-local `.pi/extensions` TypeScript and install missing project packages. `clampExternalCliBypassForOwner()` therefore puts pi in the **materialize** branch: a non-granted multi-user owner gets `--no-approve` even when no config was sent, because pi's own default is an interactive prompt the session user could answer themselves. The same materialization applies to cron-fired jobs (`clampCronExternalCliConfigs`), which carry no per-CLI config and would otherwise launch on pi's own default. Both helpers had no test coverage at all; they now do, for every CLI.
+  - **Env allowlist gains only the `PI_*` prefix.** Pi's ~34 provider key vars share no prefix and `ALLOWED_ENV_PREFIXES` is one global list with no mode context, so admitting them would widen the allowlist for every mode at once. Users authenticate via pi's `/login` or the server process's own environment.
+  - **Pi stays out of `isAltScreenStripMode()`.** Its default TUI renders into the main screen with terminal-owned scrollback and is mouse-aware, so it consumes `\x1b[3J` and the mouse DECSETs that the full strip removes, unlike an Ink TUI repainting in place. Note what exclusion does NOT do: pi is tmux-backed, so it still falls through to the narrow `isMuxAltScreenOnlyStripMode()` strip and its alt-screen toggles are dropped either way. Pi's runtime-switchable fullscreen TUI therefore paints into the main buffer, exactly like vim inside a tmux `shell` session.
+  - **Docker**: pi installs in its own `--ignore-scripts` step so that flag cannot affect the other four CLIs, and its credentials are seeded per-file (`auth.json`, `settings.json`, `trust.json`, `models.json`, `models-store.json`) rather than whole-dir, since `~/.pi/agent` also holds sessions, extensions and installed package trees.
+  - **Local echo**: pi lands on the buffer overlay. Verified that codex's per-keystroke starvation does not reproduce: pi's slash picker re-filters on the whole composer content, so a one-shot flush behaves identically to per-keystroke typing.
+  - **Mode-list parity**: pi is excluded from the Ralph tracker auto-enable on `POST /api/sessions/:id/interactive` (like every other external CLI, whose output the tracker never parses), carries a `REMOTE_CLI_BIN` entry so a remote-SSH pi session reports its CLI version, and gets its own badge in the desktop home rail instead of rendering like Claude. The packaged agent skill's mode enumerations list pi too, and it now documents the per-CLI availability probes (`GET /api/<mode>/status`) that agents should check before spawning a worker on a backend the server may not have installed. Both are pinned by a new guard that derives the mode set from the Zod schema instead of restating it.
+  - **`codeman doctor` and the run mode agree about pi.** The registry entry resolved a bare `which pi` while `pi-cli-resolver` demanded semver output, so the Dependencies panel could report an installed Pi CLI that sessions refuse to launch. Both now share one exported regex, and the registry's new `requireVersionMatch` reports a non-semver `pi` as missing rather than installed. Only pi sets it; every other tool keeps its existing behaviour.
+  - Installer detection, docs (`docs/pi-integration.md`), READMEs, and the architecture invariants are updated. Tests: `test/pi-mode.test.ts` and `test/routes/external-cli-bypass-clamp.test.ts`, plus extensions to the run-mode, mobile-overview, render-index-html, system-routes and local-echo suites.
+
+## 1.17.0
+
+### Minor Changes
+
+- Agent skill rework, session lineage lines, and a sharper endpoint drift guard.
+
+  **The packaged agent skill is rewritten around learning it, not just being correct** (`skills/codeman/`, ~2000 lines changed across four files). It previously opened with about fifty lines of credential archaeology before a single working call, and interleaved every recipe with the rationale for its own warnings.
+  - `SKILL.md` is restructured into: a 12-line "Hello, worker" that runs as written, a verb table an agent can act correctly from without reading anything else, a ten-line rules digest, the safety rules, the recipes, and setup/credentials last.
+  - **The preamble is no longer re-pasted.** A bootstrap writes it once to a `$HOME`-derived 0600 file and later calls source it and check a version stamp. Shell state does not survive between tool calls, but the filesystem does. The stamp is the last line written, so a truncated file leaves it unset and the guard aborts instead of running a half-written preamble.
+  - **New: where to spawn.** The only documented spawn used to create a scratch case, so "spin up workers on this repo" led an agent to do correct-looking work in the wrong directory. The rule is now explicit: hooks (and therefore `stop`/`blocked`) exist only where Codeman created the directory, so a linked case or a raw `workingDir` must synchronize on output markers. `wait:true` is still accepted there and silently degrades to a heuristic `idle`, which is documented as its own trap.
+  - **New verbs**: interrupt a runaway worker with ESC instead of deleting it, `active-tools` and `run-summary` as structured liveness signals, `auto-resume` for usage limits, the workspace as a high-bandwidth channel, and `GET /api/events` as a fleet watcher.
+  - `reference/messaging.md` gains a fleet protocol for Claude Code cross-session messaging: peer refs are injected and never discovered (a worker calling `ListAgents` sees the user's real sessions), every message costs a billed turn in both sessions, plus review pairs, mid-task questions, relay chains, mixed fleets, and their failure modes.
+  - `reference/recipes.md` is renumbered to a flat Flow 1-7 and gains Flow 7, one whole job start to finish: worktree fleet, tasks, gather, a review pass, report, cleanup.
+  - `reference/endpoints.md` gains an auth section, a symptom gallery keyed on what you actually see in the JSON, and a consolidated limits table.
+  - **Corrections found by auditing the old text against source**: the input cap is 65536 characters and not 100000 (65537-100000 passes Zod then 400s at the route); `wait.ended` is returned by a _live_ session whose write did not land, so "the session is gone" was wrong recovery advice and `delivered:false` is the discriminator; `DELETE /api/subagents` clears the map rather than killing anything; the trust-dialog auto-accept reads the rendered pane, not the output stream; `claudeMode` is readable globally though not per session; `run-summary` is envelope-wrapped (`.data.summary`); `active-tools` is not empty for `shell` mode; and a session does inherit the server's `CODEMAN_PASSWORD`.
+
+  **Session lineage lines** (`sessionLineageLines`, per-device, desktop default on). A create request may name the session that spawned it, as a `parentSessionId` body field on `POST /api/sessions` and `POST /api/quick-start`, or as an `X-Codeman-Parent-Session` header, and the web UI draws an arc from the parent's tab to each child's. The skill's preamble sets the header once, so every spawn recipe carries it. The value is **resolved rather than trusted**: exact id or a unique prefix of at least eight characters (ids reach agents truncated), it must be a live session the caller can see with the same owner, and anything unresolvable is dropped rather than returning a 400, so a cosmetic field can never fail a worker spawn. It confers no permission and no lifecycle meaning. Rendering is an additional layer on the existing connection-line pass, sharing one batched reflow; desktop only, because the mobile header would bury the overlay.
+
+  **The endpoint drift guard now covers routes it silently could not see.** `test/agent-skill-endpoints-doc.test.ts` matched only bare `app.<method>('path')` registrations under `src/web/routes/`, so routes registered on the server itself (`/api/events`, `/api/events/subscribe`) and any registered with Fastify generics (the approvals routes) were unverifiable. It now scans `server.ts` too and tolerates generics, taking it from about 200 to 216 recognized routes.
+
+## 1.16.6
+
+### Patch Changes
+
+- Phone home screen now shows session ages, plus three mobile input fixes.
+
+  **Phone overview: started / how long stamps.** Every live session row on the "C" home screen carries a third line: when the session first started, and how long it has been in the state it is in ("started 3d ago · idle 12m"). Idle, waiting, error and ended states measure from the pane's last output, which for a Claude pane sitting at its composer is exactly when the turn ended; a WORKING session measures from its last Enter instead, because a running pane repaints about once a second and would otherwise report every turn as 0m. A 20s clock rewrites the values in place rather than re-rendering, so no row's blink or pulse restarts.
+
+  **Fix: a recovered session was restamped as new on every restart.** Boot recovery never passed `createdAt`, so each server start reset it to `Date.now()` and a week-old pane reported "created 2m ago" (and sorted as the newest thing in the unified session list). It now comes from the tmux session's own birth time, which mux-sessions.json already carried. The desktop home rail's "created" stamp is fixed by the same change.
+
+  **Fix: a selection dialog locked the on-screen keyboard out of the terminal (regression in 1.16.5).** The check that decides whether a tap belongs to the TUI scanned the whole viewport for a numbered menu, so while a Claude question or permission dialog was on screen EVERY tap in the terminal counted as actionable and blurred the input. The keyboard could not be opened at all until the dialog was answered, which left tapping an option, the one gesture that commits an answer, as the only interaction a phone had. The menu test is now row-local: the dialog's own rows still report the tap and keep the keyboard down, while the question title, the transcript and blank space summon the keyboard so a digit can be typed at the dialog instead of aimed at it.
+
+  **Fix: the accessory bar's arrow keys bypassed the local-echo overlay.** On a phone the text you type is buffered in the browser and has never reached the PTY, so an arrow tapped on the bar arrived at a composer the CLI still considered empty: Up recalled a history entry into it while the overlay went on painting the draft over the same row and still believed it was pending, and the next Enter submitted the two mixed together. The four arrows now flush the draft first and hand the session to plain PTY echo, the same contract a nav key typed on a hardware keyboard has had since #218. The CLI stashes the flushed draft, so Down brings it back. Tab now shares that one flush helper instead of its own copy.
+
+## 1.16.5
+
+### Patch Changes
+
+- Mobile keyboard dismissal, and a tidier Save/Close pair in the phone settings sheet.
+
+  **The on-screen keyboard can finally be closed from inside the app.** The terminal
+  keeps focus on a hidden textarea and nothing ever released it, so once the keyboard
+  was up it covered roughly half the screen with no way out but the OS back gesture.
+  Two gestures now dismiss it:
+  - **A tap outside the terminal** (header, tab strip, empty page chrome). Deliberately
+    narrow: it only fires while the terminal input actually holds focus, never inside
+    the terminal (tap classification owns that decision), and never on a control, since
+    anything focusable is about to take focus itself and the keyboard accessory bar
+    exists to be used _while_ the keyboard is open. A scroll ends in `touchend` too, so
+    finger travel is tracked from `touchstart` and only a near-stationary gesture counts
+    as a tap, sharing the terminal's own 8px threshold so both agree on tap-vs-scroll.
+    Scrolling to read something mid-compose no longer drops the composer.
+  - **A second tap on inert transcript content.** Every terminal tap used to re-focus,
+    which left the accessory bar's chevron as the only way out. Scoped to inert rows on
+    purpose: the prompt row keeps focus-then-position, so a second tap there still
+    places the caret, and actionable rows (readbacks, `esc to interrupt` status rows,
+    menu selections) still blur as before.
+
+  **Settings sheet header on phones.** Below 860px Save moves into the header, which
+  left the two ways out of the sheet as a fat accent pill beside a bare glyph. Save and
+  Close now share a recessed tray with matching 36px pill geometry, reading as one
+  44px cluster the height of the phone header. Tray colors come from skin tokens, so
+  the light skins keep their look, and the tray stays off the sheets that carry a lone
+  close button.
+
+  Also fixes a test that could never have caught a regression: the case asserting that
+  tapping a control does _not_ dismiss the keyboard was picking a button from the
+  hidden welcome overlay, whose rect still measures while the hit-test lands on the
+  terminal underneath, so it passed for the wrong reason and stayed green even with the
+  exemption deleted. All four guards in the dismiss handler are now individually
+  pinned.
+
 ## 1.16.4
 
 ### Patch Changes

@@ -15,6 +15,7 @@ export interface ExternalAttachmentHistoryInput {
   mtimeMs?: number;
   timestamp?: number;
   generatedArtifactBoundary?: string;
+  uploadProvenance?: 'codeman-upload';
 }
 
 export function normalizeAttachmentExtension(extensionOrPath: string): string {
@@ -53,8 +54,13 @@ export function upsertAttachmentHistory(
   history: readonly SessionAttachmentHistoryItem[],
   item: SessionAttachmentHistoryItem
 ): SessionAttachmentHistoryItem[] {
-  const nextKey = historyKey(item);
-  return [item, ...history.filter((existing) => historyKey(existing) !== nextKey)].slice(0, ATTACHMENT_HISTORY_LIMIT);
+  const normalized = { ...item } as SessionAttachmentHistoryItem & { uploadProvenance?: unknown };
+  if (normalized.uploadProvenance !== 'codeman-upload') delete normalized.uploadProvenance;
+  const nextKey = historyKey(normalized);
+  return [normalized, ...history.filter((existing) => historyKey(existing) !== nextKey)].slice(
+    0,
+    ATTACHMENT_HISTORY_LIMIT
+  );
 }
 
 export function buildDetectedAttachmentHistoryItem(event: AttachmentDetectedEvent): SessionAttachmentHistoryItem {
@@ -90,5 +96,6 @@ export function buildExternalAttachmentHistoryItem(
     source: 'external',
     externalPath: input.externalPath,
     ...(input.generatedArtifactBoundary ? { generatedArtifactBoundary: input.generatedArtifactBoundary } : {}),
+    ...(input.uploadProvenance ? { uploadProvenance: input.uploadProvenance } : {}),
   };
 }

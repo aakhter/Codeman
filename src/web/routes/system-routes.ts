@@ -50,7 +50,7 @@ import {
 import { SseEvent } from '../sse-events.js';
 import { getInstallInfo, checkForUpdate, startUpdate, getUpdateStatusForApi } from '../self-update.js';
 import { getRepositoryStatus } from '../repo-status.js';
-import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort } from '../ports/index.js';
+import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort, TabLayoutPort } from '../ports/index.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
 import { AUTH_SESSION_TTL_MS } from '../../config/auth-config.js';
@@ -133,7 +133,7 @@ export function resolveSpanUrl(hostHeader: string | undefined, fallbackPort = '3
 
 export function registerSystemRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort
 ): void {
   const windowStatesPath = dataPath('subagent-window-states.json');
   const parentMapPath = dataPath('subagent-parents.json');
@@ -380,7 +380,7 @@ export function registerSystemRoutes(
   app.get('/api/system/repo-status', async () => getRepositoryStatus());
 
   // ═══════════════════════════════════════════════════════════════
-  // CLI Integrations (Claude, OpenCode, Codex, Gemini, Antigravity)
+  // CLI Integrations (Claude, OpenCode, Codex, Gemini, Antigravity, Pi)
   // ═══════════════════════════════════════════════════════════════
 
   // ========== Claude ==========
@@ -432,6 +432,21 @@ export function registerSystemRoutes(
     };
   });
 
+  // ========== Pi ==========
+
+  // Carries `version` on top of the sibling shape: `pi` is a short, generic binary
+  // name, so the resolver sanity-probes `pi --version` and rejects anything that
+  // is not the coding agent. Surfacing path + version makes a misresolution
+  // diagnosable from the UI instead of presenting as "the mode just doesn't work".
+  app.get('/api/pi/status', async () => {
+    const { isPiAvailable, resolvePiDir, getPiCliVersion } = await import('../../utils/pi-cli-resolver.js');
+    return {
+      available: isPiAvailable(),
+      path: resolvePiDir(),
+      version: getPiCliVersion(),
+    };
+  });
+
   // Legacy alias kept so an older cached frontend keeps working after the
   // agy -> antigravity rename (session-ui.js still probes /api/agy/status).
   app.get('/api/agy/status', async () => {
@@ -468,7 +483,9 @@ export function registerSystemRoutes(
   // ========== State & Lifecycle ===
   app.post('/api/cleanup-state', async () => {
     const activeSessionIds = new Set(ctx.sessions.keys());
-    const result = ctx.store.cleanupStaleSessions(activeSessionIds);
+    const result = await ctx.tabLayouts.runStaleSessionCleanup(activeSessionIds, () =>
+      ctx.store.cleanupStaleSessions(activeSessionIds)
+    );
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {
       lifecycleLog.log({ event: 'stale_cleaned', sessionId: s.id, name: s.name });

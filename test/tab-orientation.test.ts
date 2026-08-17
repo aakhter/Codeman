@@ -86,7 +86,7 @@ describe('vertical tab rail wiring (COD-286)', () => {
 
   it('re-fits the terminal when the orientation changes', () => {
     // Slice from the DEFINITION, not the earlier call site.
-    const defStart = settingsJs.indexOf('applyTabOrientation() {');
+    const defStart = settingsJs.indexOf('applyTabOrientation(options = {}) {');
     expect(defStart).toBeGreaterThan(-1);
     const applyBlock = settingsJs.slice(defStart, defStart + 2500);
     expect(applyBlock).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);
@@ -95,6 +95,13 @@ describe('vertical tab rail wiring (COD-286)', () => {
   it('is applied on load alongside the other tab settings', () => {
     expect(appJs).toContain('applyTabOrientation');
     expect(settingsJs).toContain('this.applyTabOrientation');
+  });
+
+  it('re-evaluates the home screen after a settings-driven orientation change', () => {
+    const applyCall = settingsJs.indexOf('this.applyTabOrientation({ settleRailWidth: true })');
+    expect(applyCall).toBeGreaterThan(-1);
+    const saveTail = settingsJs.slice(applyCall, applyCall + 1800);
+    expect(saveTail).toMatch(/if \(!this\.activeSessionId\) this\.showWelcome\(\)/);
   });
 
   it('skips the horizontal auto-wrap machinery while vertical', () => {

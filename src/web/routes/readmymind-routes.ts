@@ -20,11 +20,12 @@
  * Predict gathers every signal Codeman already has (intent profile, pending
  * approval dialog, transcript tail, git state, run-summary events, sibling
  * sessions), assembles a budgeted prompt via the pure
- * `buildPredictionContext()`, and runs the one-shot predictor. Claude-mode
- * only (400: capture and transcripts exist for nothing else), one prediction
- * in flight per session (409 CONFLICT), and suggestions are only ever
- * RETURNED, never sent: the human click in the modal is the boundary, which
- * is also the prompt-injection mitigation for observed content.
+ * `buildPredictionContext()`, and runs the one-shot predictor. Claude and
+ * local Codex sessions are supported, with provider-specific conversation
+ * collectors; one prediction is in flight per session (409 CONFLICT), and
+ * suggestions are only ever RETURNED, never sent: the human click in the modal
+ * is the boundary, which is also the prompt-injection mitigation for observed
+ * content.
  *
  * Registrations use the bare `app.<method>('path', ...)` + `req.params as`
  * shape (session-routes style): these endpoints are documented in the agent
@@ -38,14 +39,25 @@ import { IntentGoalsSchema, ReadMyMindPredictSchema } from '../schemas.js';
 import { parseBody, findSessionOrFail } from '../route-helpers.js';
 import { intentStore } from '../../intent-store.js';
 import { approvalInbox } from '../approval-inbox.js';
-import { hooksAvailableForMode } from '../session-wait-registry.js';
 import { buildPredictionContext, type PredictionContextInputs } from '../../readmymind-context.js';
 import { collectWorkspaceSignals, readTranscriptSignals } from '../../readmymind-collectors.js';
-import { readMyMindPredictor } from '../../readmymind-predictor.js';
+import { readMyMindPredictor, type CodexProviderEnvironment } from '../../readmymind-predictor.js';
+import { mergeReadMyMindPrompts } from '../../readmymind-prompt-merge.js';
+import * as codexIdentity from '../../checkpoint-conversation-identity.js';
+import * as codexRolloutReader from '../../codex-rollout-reader.js';
 import type { ConfigPort, InfraPort, SessionPort } from '../ports/index.js';
 
 /** One prediction in flight per session; a second POST while running is a 409. */
 const predictionsInFlight = new Set<string>();
+
+/** Effective rollout root; provider credentials remain owned by the predictor. */
+export function resolveReadMyMindCodexHome(
+  sessionEnvironment: Readonly<CodexProviderEnvironment>,
+  workingDir: string,
+  processEnvironment: Readonly<Record<string, string | undefined>> = process.env
+): string {
+  return codexIdentity.resolveEffectiveCodexHome(sessionEnvironment.CODEX_HOME, workingDir, processEnvironment);
+}
 
 export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort & ConfigPort & InfraPort): void {
   app.get('/api/sessions/:id/intent', async (req) => {
@@ -72,9 +84,14 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
     const body = parseBody(ReadMyMindPredictSchema, req.body ?? {});
     const session = findSessionOrFail(ctx, id, req);
 
-    if (!hooksAvailableForMode(session.mode)) {
+    const isClaude = session.mode === 'claude';
+    const isLocalCodex = session.mode === 'codex' && !session.remote && !session.docker;
+    if (!isClaude && !isLocalCodex) {
       reply.code(400);
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Read My Mind predicts claude-mode sessions only');
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'Read My Mind supports Claude and local Codex sessions only'
+      );
     }
     if (predictionsInFlight.has(id)) {
       reply.code(409);
@@ -85,13 +102,71 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
     try {
       const profile = intentStore.getProfile(session.owner, session.workingDir);
       const pending = approvalInbox.getForSession(id);
-      const transcriptPath = ctx.getTranscriptPath(id);
-      const transcript = transcriptPath ? await readTranscriptSignals(transcriptPath) : null;
+      let lastAssistantText: string | undefined;
+      let recentTools: PredictionContextInputs['recentTools'];
+      let recentPrompts: PredictionContextInputs['recentPrompts'] = profile.recentPrompts.map((prompt) => ({
+        ts: prompt.ts,
+        text: prompt.text,
+      }));
+      let lastPromptTs: number | undefined = profile.recentPrompts[profile.recentPrompts.length - 1]?.ts;
+      let codexEnvironment: CodexProviderEnvironment | undefined;
+
+      if (isClaude) {
+        const transcriptPath = ctx.getTranscriptPath(id);
+        const transcript = transcriptPath ? await readTranscriptSignals(transcriptPath) : null;
+        lastAssistantText = transcript?.lastAssistantText ?? undefined;
+        recentTools = transcript?.recentTools;
+      } else {
+        codexEnvironment = session.getCodexProviderEnvironment();
+        if (session.hasLostCodexProviderCredentials()) {
+          throw new Error(
+            'Read My Mind cannot use this restored Codex session because its session credentials were not persisted; please recreate or restart the session.'
+          );
+        }
+        const codexHome = resolveReadMyMindCodexHome(codexEnvironment, session.workingDir);
+        codexEnvironment = { ...codexEnvironment, CODEX_HOME: codexHome };
+        let rolloutPrompts: Parameters<typeof mergeReadMyMindPrompts>[1] = [];
+        try {
+          const competingSubmitAts = [...ctx.sessions.values()]
+            .filter(
+              (other) =>
+                other.id !== id &&
+                other.mode === 'codex' &&
+                !other.remote &&
+                !other.docker &&
+                Boolean(other.lastSubmitAt)
+            )
+            .filter(
+              (other) =>
+                resolveReadMyMindCodexHome({ CODEX_HOME: other.getCodexHomeOverride() }, other.workingDir) === codexHome
+            )
+            .map((other) => other.lastSubmitAt);
+          const conversation = await codexIdentity.findOwnedCodexConversation({
+            codexHome,
+            sessionId: id,
+            workingDir: session.workingDir,
+            resumeSessionId: session.codexConfig?.resumeSessionId,
+            nativeResumeId: session.nativeResumeId ?? undefined,
+            lastSubmitAt: session.lastSubmitAt,
+            competingSubmitAts,
+          });
+          const rollout = conversation ? await codexRolloutReader.readCodexRolloutSignals(conversation.path) : null;
+          if (rollout) {
+            lastAssistantText = rollout.lastAssistantText ?? undefined;
+            recentTools = rollout.recentTools;
+            rolloutPrompts = rollout.recentPrompts;
+          }
+        } catch {
+          // Missing, ambiguous, or unreadable rollout identity fails closed.
+        }
+        const merged = mergeReadMyMindPrompts(recentPrompts, rolloutPrompts);
+        recentPrompts = merged.recentPrompts;
+        lastPromptTs = merged.latestValidTimestamp;
+      }
       // Remote-SSH cases skip git: workingDir is not local. Docker cases are
       // fine (the workspace is bind-mounted at the same host path).
       const workspace = session.remote ? null : await collectWorkspaceSignals(session.workingDir);
 
-      const lastPromptTs = profile.recentPrompts[profile.recentPrompts.length - 1]?.ts;
       const tracker = ctx.runSummaryTrackers.get(id);
       const awayEvents = (tracker?.getRecentEvents(15) ?? [])
         .filter((ev) => lastPromptTs === undefined || ev.timestamp >= lastPromptTs)
@@ -112,9 +187,9 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
             }
           : undefined,
         goals: profile.goals,
-        lastAssistantText: transcript?.lastAssistantText ?? undefined,
-        recentPrompts: profile.recentPrompts.map((p) => ({ ts: p.ts, text: p.text })),
-        recentTools: transcript?.recentTools,
+        lastAssistantText,
+        recentPrompts,
+        recentTools,
         workspace: workspace ?? undefined,
         awaySinceMs: lastPromptTs !== undefined ? Date.now() - lastPromptTs : undefined,
         awayEvents,
@@ -124,8 +199,18 @@ export function registerReadMyMindRoutes(app: FastifyInstance, ctx: SessionPort 
       };
 
       const { prompt } = buildPredictionContext(inputs);
-      const model = await ctx.getReadMyMindModel();
-      const result = await readMyMindPredictor.predict({ sessionId: id, prompt, model });
+      const provider = isClaude
+        ? { kind: 'claude' as const, model: await ctx.getReadMyMindModel() }
+        : {
+            kind: 'codex' as const,
+            model: session.codexConfig?.model,
+            env: codexEnvironment ?? {},
+          };
+      const result = await readMyMindPredictor.predict({
+        sessionId: id,
+        prompt,
+        provider,
+      });
       return { success: true, data: { suggestions: result.suggestions, durationMs: result.durationMs } };
     } catch (err) {
       reply.code(502);

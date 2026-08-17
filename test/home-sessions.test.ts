@@ -29,6 +29,9 @@ function fakeElement(): any {
       el.children.push(child);
       return child;
     },
+    replaceChildren(...children: any[]) {
+      el.children = children;
+    },
   };
   return el;
 }
@@ -39,18 +42,28 @@ function fakeElement(): any {
  * same context — which is also the point: if that reuse ever breaks, these
  * tests stop loading rather than quietly testing a divergent copy.
  */
-function loadHomeSessionsApp(overrides: Record<string, any> = {}, innerWidth = 1512) {
+function loadHomeSessionsApp(
+  overrides: Record<string, any> = {},
+  innerWidth = 1512,
+  tabOrientation = 'horizontal',
+  elements: Record<string, any> = {}
+) {
   const CodemanApp = function CodemanApp(this: any) {};
   const context = vm.createContext({
     CodemanApp,
     console,
     window: { innerWidth },
     document: {
-      getElementById: () => null,
+      documentElement: {
+        getAttribute: (name: string) => (name === 'data-tab-orientation' ? tabOrientation : null),
+      },
+      getElementById: (id: string) => elements[id] || null,
       createElement: () => fakeElement(),
       createElementNS: () => fakeElement(),
     },
     MobileDetection: { getDeviceType: () => (innerWidth < 430 ? 'mobile' : 'desktop') },
+    setInterval: () => 1,
+    clearInterval: () => {},
   });
   for (const file of ['mobile-overview.js', 'home-sessions.js']) {
     vm.runInContext(readFileSync(resolve(PUBLIC, file), 'utf8'), context, { filename: file });
@@ -76,6 +89,51 @@ function sessionMap(list: Array<Record<string, any>>) {
 }
 
 describe('home sessions column: model', () => {
+  it('renders actual Home rows and badges in complete authoritative interleaved order', () => {
+    const home = fakeElement();
+    const app = loadHomeSessionsApp(
+      {
+        sessions: sessionMap([{ id: 's1', name: 'Session' }]),
+        sessionOrder: ['s1'],
+        webviews: new Map([
+          ['w1', { id: 'w1', name: 'One', url: 'https://one.example/' }],
+          ['w2', { id: 'w2', name: 'Two', url: 'https://two.example/' }],
+        ]),
+        webviewOrder: ['w2', 'w1'],
+        cases: CASES,
+        pendingHooks: new Map(),
+        _tabLayoutFirstPaintPending: false,
+        _refreshTabProjection: () => ({
+          completeRefs: [
+            { kind: 'webview', id: 'w1' },
+            { kind: 'session', id: 's1' },
+            { kind: 'webview', id: 'w2' },
+          ],
+        }),
+      },
+      1512,
+      'horizontal',
+      { homeSessions: home }
+    );
+
+    app.renderHomeSessions();
+
+    const rows = home.children[1].children;
+    expect(rows.map((row: any) => row.dataset.hsWebview || row.dataset.hsSession)).toEqual(['w1', 's1', 'w2']);
+    expect(rows.map((row: any) => row.children[0].textContent)).toEqual(['1', '2', '3']);
+  });
+
+  it('does not expose Map-order rows while the owner tab layout is pending', () => {
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap([{ id: 'legacy-first' }, { id: 'owner-first' }]),
+      sessionOrder: [],
+      cases: CASES,
+      _tabLayoutFirstPaintPending: true,
+    });
+
+    expect(app.buildHomeSessionRows()).toEqual([]);
+  });
+
   it('lists rows in TAB order, not by urgency, so the number badges match Alt+1..9', () => {
     // The phone overview would hoist 'needy' to the top; this surface must not,
     // because its badges are the Alt+N indices.
@@ -143,12 +201,37 @@ describe('home sessions column: model', () => {
     });
     expect(plain.buildHomeSessionRows()[0].modeBadge).toBe('');
   });
+
+  it('badges every non-claude backend, so a new run mode cannot read as claude here', () => {
+    // The badge map is a per-mode lookup with a '' fallback, so a mode missing from it
+    // is indistinguishable from claude in this rail while the tab strip badges it fine.
+    for (const [mode, badge] of [
+      ['shell', 'sh'],
+      ['opencode', 'oc'],
+      ['codex', 'cx'],
+      ['gemini', 'gm'],
+      ['antigravity', 'ag'],
+      ['pi', 'pi'],
+    ] as const) {
+      const app = loadHomeSessionsApp({
+        sessions: sessionMap([{ id: 'a', mode }]),
+        sessionOrder: ['a'],
+        cases: CASES,
+      });
+      expect(app.buildHomeSessionRows()[0].modeBadge).toBe(badge);
+    }
+  });
 });
 
 describe('home sessions column: gate', () => {
   it('renders on a wide desktop', () => {
     const app = loadHomeSessionsApp({}, 1512);
     expect(app.shouldShowHomeSessions()).toBe(true);
+  });
+
+  it('yields to the persistent rail when the effective tab orientation is vertical', () => {
+    expect(loadHomeSessionsApp({}, 1512, 'vertical').shouldShowHomeSessions()).toBe(false);
+    expect(loadHomeSessionsApp({}, 1512, 'horizontal').shouldShowHomeSessions()).toBe(true);
   });
 
   it('stays out of a window too narrow to hold it beside the centered content', () => {
@@ -189,6 +272,12 @@ describe('home sessions column: wiring', () => {
     // .home-sessions is display:flex, which defeats the `hidden` attribute — the
     // module's only visibility lever — unless this rule exists.
     expect(css).toMatch(/\.home-sessions\[hidden\]\s*\{\s*display:\s*none;/);
+  });
+
+  it('has a CSS backstop that suppresses the homepage rail in vertical mode', () => {
+    expect(css).toMatch(
+      /html\[data-tab-orientation='vertical'\]\s+\.home-sessions\s*\{\s*display:\s*none\s*!important;/
+    );
   });
 
   it('reuses the tab-load spinner rather than declaring a second one', () => {

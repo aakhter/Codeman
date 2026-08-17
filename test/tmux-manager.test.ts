@@ -19,6 +19,8 @@ import {
   isUsableWorkingDir,
   parsePaneList,
   parsePaneRecords,
+  parseTmuxCodexProviderEnvironment,
+  readTmuxCodexProviderEnvironment,
   resolveActivePaneTarget,
   resolveTmuxPaneTarget,
 } from '../src/tmux-manager.js';
@@ -114,6 +116,54 @@ describe('TmuxManager (unit)', () => {
   describe('backend', () => {
     it('should report tmux as backend', () => {
       expect(manager.backend).toBe('tmux');
+    });
+  });
+
+  describe('Codex provider environment recovery', () => {
+    it('reads only the closed Codex provider allowlist', () => {
+      expect(
+        parseTmuxCodexProviderEnvironment(
+          [
+            'CODEX_HOME=/tmp/codex-home',
+            'OPENAI_API_KEY=openai-secret',
+            'CODEX_API_KEY=codex=secret',
+            'ANTHROPIC_API_KEY=must-not-cross',
+            'PATH=/usr/bin',
+          ].join('\n')
+        )
+      ).toEqual({
+        CODEX_HOME: '/tmp/codex-home',
+        OPENAI_API_KEY: 'openai-secret',
+        CODEX_API_KEY: 'codex=secret',
+      });
+    });
+
+    it('treats unset and empty provider variables as absent', () => {
+      expect(
+        parseTmuxCodexProviderEnvironment(
+          ['-CODEX_HOME', 'OPENAI_API_KEY=', '-CODEX_API_KEY', 'MALFORMED', '=value'].join('\n')
+        )
+      ).toEqual({});
+    });
+
+    it('uses exact argv for a tracked session and distinguishes an empty successful read', async () => {
+      const execute = vi.fn().mockResolvedValue({ stdout: 'PATH=/usr/bin\n', stderr: '' });
+
+      await expect(readTmuxCodexProviderEnvironment('codeman', 'codeman-abc12345', true, execute)).resolves.toEqual({});
+      expect(execute).toHaveBeenCalledWith('tmux', ['-L', 'codeman', 'show-environment', '-t', 'codeman-abc12345']);
+    });
+
+    it('rejects unsafe or untracked targets without executing tmux', async () => {
+      const execute = vi.fn();
+
+      await expect(readTmuxCodexProviderEnvironment('codeman', 'unsafe;name', true, execute)).resolves.toBeNull();
+      await expect(readTmuxCodexProviderEnvironment('codeman', 'codeman-abc12345', false, execute)).resolves.toBeNull();
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('maps a tmux execution failure to unreadable rather than ambient authentication', async () => {
+      const execute = vi.fn().mockRejectedValue(new Error('tmux unavailable'));
+      await expect(readTmuxCodexProviderEnvironment('codeman', 'codeman-abc12345', true, execute)).resolves.toBeNull();
     });
   });
 

@@ -1,0 +1,135 @@
+# Bitbucket Pipelines — CI for the downstream `local` working branch (COD-293).
+#
+# WHY THIS FILE EXISTS
+# We develop and deploy from `local`, which is pushed to bitbucket. GitHub Actions
+# (.github/workflows/ci.yml) only fires on the GitHub repos and only for master/main,
+# so every downstream-only commit used to land with no automated gate at all. That is
+# how 11 `@vitest-environment jsdom` files sat broken with 157 assertions that had
+# never executed on any machine (fixed in 6e1199a5).
+#
+# WHY NOT extend .github/workflows/ci.yml to cover a `fork` push instead: that file is
+# shared with upstream (Ark0N/Codeman), so a downstream-only trigger change becomes a
+# permanent merge-conflict site. This file is downstream-only and upstream never touches it.
+#
+# Bitbucket requires this filename at the repo ROOT — it is one of the tool-mandated
+# root files the "keep the repo root short" rule in CLAUDE.md explicitly allows for.
+#
+# ⚠ THIS RUNS ONLY IF PIPELINES IS ENABLED for the repo (Repository settings →
+# Pipelines → Settings → Enable Pipelines). It is inert until then.
+#
+# ⚠ MINUTES ARE METERED (free tier: 50 build-minutes/month; a full run here is
+# ~12-15 min). Three deliberate cost choices below:
+#   1. ONE sequential step, not parallel steps. Parallel is faster in wall-clock but
+#      each parallel step pays its own clone + `npm ci`, so it costs MORE minutes.
+#   2. The npm DOWNLOAD cache (~/.npm) is cached — not node_modules. `npm ci` stays a
+#      clean install (which is the whole point: the jsdom breakage reproduced on a
+#      clean install), it just doesn't re-download the tarballs every run.
+#   3. Browser downloads are skipped on install. `npm run test:ci` uses
+#      config/vitest.ci.config.ts, which excludes every browser-driven suite, so a
+#      browser would be downloaded and never used. Concretely that is puppeteer's
+#      Chrome (it has a `postinstall: node install.mjs`); playwright 1.60 ships no
+#      postinstall at all today, so its var is pre-emptive rather than load-bearing.
+# If minutes get tight, drop the `branches:` trigger and run the `full-gate` custom
+# pipeline manually instead.
+
+image: node:22
+
+definitions:
+  caches:
+    # NOT node_modules — see cost note 2 above.
+    npm-download-cache: ~/.npm
+
+  steps:
+    - step: &full-gate
+        name: Full gate (lockfile, typecheck, lint, format, boot smoke, tests)
+        caches:
+          - npm-download-cache
+        # A hung run must not silently eat the monthly minute budget.
+        max-time: 30
+        script:
+          # tmux: needed by the boot smoke test (the server spawns sessions through it).
+          # python3/make/g++: node-pty ships no Linux prebuild, so it compiles here.
+          - apt-get update -qq
+          - apt-get install -y --no-install-recommends tmux python3 make g++
+
+          # The skip vars are set inline rather than exported on a previous line: each
+          # Bitbucket script item is its own command, so an `export` is not guaranteed
+          # to reach this one. `npm ci` passes its environment down to the postinstall
+          # scripts that would otherwise fetch the browsers.
+          - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PUPPETEER_SKIP_DOWNLOAD=1 npm ci
+
+          - npm run check:lockfile
+          - npm run typecheck
+          - npm run lint
+          - npm run check:frontend-syntax
+          - npm run check:public-assets
+          # Load-bearing HERE in particular: this step skips the browser download
+          # above, so a browser-driven test that escaped the CI exclude list would
+          # fail on launch and take `test:ci` down with it.
+          - npm run check:browser-excludes
+          - npm run format:check
+
+          # Server boot smoke test — mirrors the GitHub workflow's step. Deliberately
+          # duplicated rather than extracted to a shared script, because extracting it
+          # would mean editing the upstream-shared workflow file (see header).
+          #
+          # ⚠ REWRITTEN vs the GitHub version, and the difference is load-bearing: the
+          # GitHub step signals success with `exit 0` and cleans up with `trap ... EXIT`.
+          # Both are safe there because a `run:` block is its own script. Bitbucket
+          # executes the items of one `script:` list in a SHARED shell, so an `exit 0`
+          # here would end the entire step SUCCESSFULLY and silently skip `test:ci`
+          # below — a green build that never ran the tests, i.e. exactly the class of
+          # hole COD-293 exists to close. A `trap ... EXIT` would likewise stay armed
+          # for the rest of the build. So: no `exit`, no `trap`, explicit cleanup, and
+          # failure signalled by ending on a false command.
+          - |
+            set -u
+            npx tsx src/index.ts web --port 3151 > /tmp/boot.log 2>&1 &
+            SERVER_PID=$!
+            booted=0
+            for i in $(seq 1 30); do
+              if curl -fsS http://localhost:3151/api/status -o /dev/null; then
+                echo "Server booted in ${i}s"
+                booted=1
+                break
+              fi
+              if ! kill -0 $SERVER_PID 2>/dev/null; then
+                echo "Server exited before becoming ready. Logs:"
+                cat /tmp/boot.log
+                break
+              fi
+              sleep 1
+            done
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+            if [ "$booted" -ne 1 ]; then
+              echo "Server did not respond on /api/status within 30s. Logs:"
+              cat /tmp/boot.log
+              false
+            fi
+
+          # Excludes the browser-driven mobile suite and the perf benchmarks; see
+          # config/vitest.ci.config.ts. Safe in CI: TmuxManager no-ops every shell
+          # command under VITEST (test/setup.ts).
+          #
+          # A test file that collects ZERO tests is already a hard failure here —
+          # measured against vitest 4.1.8, both an environment-setup death and a
+          # silently empty file report `Test Files 1 failed` and exit 1. The `(0 test)`
+          # line reads green to a human eye, but the exit code does not.
+          - npm run test:ci
+
+          # Layers 1-3 of the predictive-echo suites. Depends on the root `npm ci`
+          # above — workspaces hoist this package's vitest into the root node_modules,
+          # so do NOT add a separate install here.
+          - cd packages/xterm-zerolag-input && npx vitest run
+
+pipelines:
+  branches:
+    local:
+      - step: *full-gate
+
+  # Manual escape hatch: run the same gate on any branch from the Pipelines UI,
+  # and the fallback if the automatic `local` trigger is turned off to save minutes.
+  custom:
+    full-gate:
+      - step: *full-gate

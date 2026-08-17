@@ -359,7 +359,7 @@ describe('Virtual Keyboard', () => {
           bottomRestores++;
         };
 
-        KeyboardHandler._scheduleViewportSettle({ scrollToBottom: true });
+        KeyboardHandler._scheduleViewportSettle({ restoreScroll: true });
         await new Promise((resolve) => setTimeout(resolve, 30));
         KeyboardHandler._scheduleViewportSettle();
         await new Promise((resolve) => setTimeout(resolve, 30));
@@ -454,7 +454,7 @@ describe('Virtual Keyboard', () => {
 
         // A real transition arms the work; a following wiggle defers it but the
         // settle still fires exactly once.
-        KeyboardHandler._scheduleViewportSettle({ scrollToBottom: true });
+        KeyboardHandler._scheduleViewportSettle({ restoreScroll: true });
         await new Promise((resolve) => setTimeout(resolve, 30));
         KeyboardHandler._deferViewportSettle();
         await new Promise((resolve) => setTimeout(resolve, KeyboardHandler.VIEWPORT_SETTLE_MS + 80));
@@ -631,6 +631,122 @@ describe('Virtual Keyboard', () => {
       expect(styles?.height).toBe('1px');
       expect(styles?.opacity).toBe('0');
       expect(Number(styles?.zIndex)).toBeGreaterThanOrEqual(0);
+    });
+
+    it('dismisses the on-screen keyboard when a tap lands outside the terminal', async () => {
+      // The terminal holds focus on a hidden textarea and nothing released it,
+      // so once the keyboard was up every tap on the header or page chrome left
+      // it up — covering half a phone screen with no in-app way to close it.
+      //
+      // Driven as a real dispatched gesture: the handler is bound to touchend on
+      // document, and calling the internal helper would bypass the routing this
+      // test exists to check.
+      const result = await page.evaluate(async () => {
+        const sampleX = (rect: DOMRect) => Math.max(2, rect.left + Math.min(6, rect.width / 2));
+        const sampleY = (rect: DOMRect) => Math.max(2, rect.top + Math.min(6, rect.height / 2));
+        const tap = async (el: Element, travel = 0, point?: { x: number; y: number }) => {
+          const rect = el.getBoundingClientRect();
+          const x = point ? point.x : sampleX(rect);
+          const y = point ? point.y : sampleY(rect);
+          const target = document.elementFromPoint(x, y) || el;
+          const at = (cy: number) => new Touch({ identifier: 21, target, clientX: x, clientY: cy });
+          target.dispatchEvent(
+            new TouchEvent('touchstart', {
+              touches: [at(y)],
+              targetTouches: [at(y)],
+              changedTouches: [at(y)],
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+          for (const step of travel ? [travel / 3, (travel * 2) / 3, travel] : []) {
+            target.dispatchEvent(
+              new TouchEvent('touchmove', {
+                touches: [at(y + step)],
+                targetTouches: [at(y + step)],
+                changedTouches: [at(y + step)],
+                bubbles: true,
+                cancelable: true,
+              })
+            );
+            await new Promise((resolve) => setTimeout(resolve, 15));
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          target.dispatchEvent(
+            new TouchEvent('touchend', {
+              touches: [],
+              changedTouches: [at(y + travel)],
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          return document.activeElement?.className ?? '';
+        };
+
+        app.hideWelcome();
+        app.terminal.reset();
+        await new Promise<void>((resolve) => app.terminal.write('transcript\r\n\r\n> ', resolve));
+
+        // Inert page chrome: the keyboard must close.
+        app._focusMobileTerminalInput();
+        const focusedBefore = document.activeElement?.className ?? '';
+        const afterOutside = await tap(document.querySelector('.logo, .header-brand, header') ?? document.body);
+
+        // A real control: it takes focus itself, so we must NOT interfere.
+        app._focusMobileTerminalInput();
+        const button = Array.from(document.querySelectorAll('button:not([disabled])')).find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          if (rect.width <= 8 || rect.height <= 8) return false;
+          // A rect is not enough. The welcome overlay is hidden by hideWelcome()
+          // above but its buttons still MEASURE, so a rect-only pick sampled a
+          // point the terminal actually owns — elementFromPoint returned
+          // .xterm-screen and this case tapped the terminal instead of a
+          // control, passing for the wrong reason. Require the sampled point to
+          // really resolve to this button.
+          const hit = document.elementFromPoint(sampleX(rect), sampleY(rect));
+          return !!hit && candidate.contains(hit);
+        });
+        const afterButton = button ? await tap(button) : 'no-visible-button';
+
+        // Inside the terminal, tap classification owns the decision, so this
+        // handler must keep its hands off. Aimed at the PROMPT row: that is the
+        // one in-terminal tap whose outcome belongs to nobody else, since an
+        // inert transcript row is claimed by the in-terminal dismiss toggle
+        // (`toggles the keyboard shut on a second inert Claude transcript tap`)
+        // and asserting focus there would be asserting that toggle's behaviour
+        // rather than this exemption. The guard still bites: the container's own
+        // touchend listener runs first and refocuses, so a missing
+        // #terminalContainer exemption would blur right back over it.
+        app._focusMobileTerminalInput();
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const screenRect = screen?.getBoundingClientRect();
+        const promptPoint =
+          screenRect && cell?.width && cell?.height
+            ? {
+                x: screenRect.left + cell.width * 2,
+                y: screenRect.top + cell.height * (app.terminal.buffer.active.cursorY + 0.5),
+              }
+            : undefined;
+        const afterTerminal = await tap(document.querySelector('#terminalContainer')!, 0, promptPoint);
+
+        // A SCROLL also ends in touchend. Scrolling to read something while
+        // composing must not close the keyboard and drop the composer.
+        app._focusMobileTerminalInput();
+        const afterScroll = await tap(document.querySelector('.logo, .header-brand, header') ?? document.body, 120);
+
+        return { focusedBefore, afterOutside, afterButton, afterTerminal, afterScroll };
+      });
+
+      expect(result.focusedBefore).toContain('xterm-helper-textarea');
+      // Red on master: the textarea keeps focus and the keyboard stays up.
+      expect(result.afterOutside).not.toContain('xterm-helper-textarea');
+      expect(result.afterButton).not.toBe('no-visible-button');
+      expect(result.afterButton).toContain('xterm-helper-textarea');
+      expect(result.afterTerminal).toContain('xterm-helper-textarea');
+      // A scroll ends in touchend too, and must NOT close the keyboard.
+      expect(result.afterScroll).toContain('xterm-helper-textarea');
     });
 
     it('routes CJK textarea typing through local echo on Enter', async () => {
@@ -899,7 +1015,7 @@ describe('Virtual Keyboard', () => {
       expect(state.sentInputs[0]).toMatch(/^\x1b\[<0;\d+;1M\x1b\[<0;\d+;1m$/);
     });
 
-    it('keeps the hidden keyboard input focused after an inert Claude transcript tap', async () => {
+    it('toggles the keyboard shut on a second inert Claude transcript tap', async () => {
       const point = await page.evaluate(async () => {
         window.__sentInputs = [];
         app.activeSessionId = 'mobile-claude-transcript-tap-test';
@@ -950,8 +1066,12 @@ describe('Virtual Keyboard', () => {
 
       await page.touchscreen.tap(point!.x, point!.y);
 
+      // The setup above leaves the terminal focused, so this tap is the SECOND
+      // one on an inert row — the case that now closes the keyboard. Previously
+      // it re-focused, which left the accessory bar's chevron as the only way to
+      // dismiss. The prompt row is unaffected and still positions the caret.
       const activeClass = await page.evaluate(() => document.activeElement?.className);
-      expect(activeClass).toContain('xterm-helper-textarea');
+      expect(activeClass).not.toContain('xterm-helper-textarea');
     });
 
     it('prevents Claude subagent status taps from opening the hidden keyboard input', async () => {

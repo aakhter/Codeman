@@ -4,11 +4,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   refreshRestoredClaudeHookCapability,
+  resolveRestoredCodexProviderRecovery,
+  resolveRestoredCodexProviderIdentity,
   resolveRestoredSessionName,
   resolveRestoredSessionRemote,
+  stripRestoredCodexProviderOverrides,
+  shouldRecoverCodexProviderEnvironment,
 } from '../src/web/server.js';
 import { generateHooksConfig } from '../src/hooks-config.js';
-import type { SessionRemote } from '../src/types.js';
+import { Session } from '../src/session.js';
+import type { SessionDocker, SessionRemote } from '../src/types.js';
 
 describe('server mux restore remote metadata', () => {
   const muxRemote: SessionRemote = {
@@ -52,6 +57,161 @@ describe('server mux restore remote metadata', () => {
 
     await expect(refreshRestoredClaudeHookCapability('claude', workingDir, undefined)).resolves.toBe(true);
     expect(await readFile(settingsPath, 'utf8')).toContain('session_start');
+  });
+
+  it('reads only the private Codex provider provenance needed by Session recovery', () => {
+    expect(
+      resolveRestoredCodexProviderIdentity('codex', {
+        __codexProviderIdentity: {
+          version: 1,
+          credentialSource: 'session-key',
+          codexHome: '/tmp/alternate-codex-home',
+          OPENAI_API_KEY: 'must-not-be-restored',
+        },
+      })
+    ).toEqual({ version: 1, credentialSource: 'session-key', codexHome: '/tmp/alternate-codex-home' });
+    expect(resolveRestoredCodexProviderIdentity('claude', undefined)).toBeUndefined();
+  });
+
+  it('distinguishes explicit restorable provenance from missing, legacy, and unknown Codex recovery state', () => {
+    const explicit = resolveRestoredCodexProviderIdentity('codex', {
+      __codexProviderIdentity: { version: 1, credentialSource: 'restorable', codexHome: '/tmp/auth-file-home' },
+    });
+    expect(explicit).toEqual({ version: 1, credentialSource: 'restorable', codexHome: '/tmp/auth-file-home' });
+    expect(
+      new Session({
+        workingDir: '/tmp',
+        mode: 'codex',
+        codexProviderIdentity: explicit,
+      }).hasLostCodexProviderCredentials()
+    ).toBe(false);
+
+    for (const savedState of [
+      undefined,
+      {},
+      { __codexProviderIdentity: { CODEX_HOME: '/tmp/legacy-home', credentialsLost: false } },
+      { __codexProviderIdentity: { version: 2, credentialSource: 'restorable' } },
+      { __codexProviderIdentity: { version: 1, credentialSource: 'unknown' } },
+    ]) {
+      const unavailable = resolveRestoredCodexProviderIdentity('codex', savedState);
+      expect(unavailable).toBeNull();
+      expect(
+        new Session({
+          workingDir: '/tmp',
+          mode: 'codex',
+          codexProviderIdentity: unavailable,
+        }).hasLostCodexProviderCredentials()
+      ).toBe(true);
+    }
+  });
+
+  it('heals legacy and fenced Codex sessions after reading an empty live provider environment', () => {
+    for (const savedState of [
+      undefined,
+      {},
+      { __codexProviderIdentity: { version: 1, credentialSource: 'session-key' } },
+    ]) {
+      expect(resolveRestoredCodexProviderRecovery('codex', savedState, {})).toEqual({
+        identity: { version: 1, credentialSource: 'restorable' },
+        environment: {},
+      });
+    }
+  });
+
+  it('restores exact live Codex provider keys in memory while keeping secret-free provenance', () => {
+    const recovery = resolveRestoredCodexProviderRecovery(
+      'codex',
+      { __codexProviderIdentity: { version: 1, credentialSource: 'session-key' } },
+      {
+        CODEX_HOME: '/tmp/live-codex-home',
+        OPENAI_API_KEY: 'live-openai-secret',
+        CODEX_API_KEY: 'live-codex-secret',
+      }
+    );
+
+    expect(recovery).toEqual({
+      identity: { version: 1, credentialSource: 'session-key', codexHome: '/tmp/live-codex-home' },
+      environment: {
+        CODEX_HOME: '/tmp/live-codex-home',
+        OPENAI_API_KEY: 'live-openai-secret',
+        CODEX_API_KEY: 'live-codex-secret',
+      },
+    });
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'codex',
+      codexProviderIdentity: recovery.identity,
+      envOverrides: recovery.environment,
+    });
+    expect(session.hasLostCodexProviderCredentials()).toBe(false);
+    expect(session.getCodexProviderEnvironment()).toEqual(recovery.environment);
+    expect(JSON.stringify(session.toState())).not.toContain('live-openai-secret');
+    expect(JSON.stringify(session.getCodexProviderIdentityForPersist())).not.toContain('live-openai-secret');
+  });
+
+  it('treats a successful live read as authoritative over a stale saved Codex home', () => {
+    expect(
+      resolveRestoredCodexProviderRecovery(
+        'codex',
+        {
+          __codexProviderIdentity: {
+            version: 1,
+            credentialSource: 'restorable',
+            codexHome: '/tmp/stale-saved-home',
+          },
+        },
+        {}
+      )
+    ).toEqual({
+      identity: { version: 1, credentialSource: 'restorable' },
+      environment: {},
+    });
+  });
+
+  it('strips disk-only Codex provider overrides before merging live recovery data', () => {
+    expect(
+      stripRestoredCodexProviderOverrides('codex', {
+        CODEX_HOME: '/tmp/stale-home',
+        OPENAI_API_KEY: 'stale-openai-secret',
+        CODEX_API_KEY: 'stale-codex-secret',
+        CLAUDE_CONFIG_DIR: '/tmp/keep-this-unrelated-setting',
+      })
+    ).toEqual({ CLAUDE_CONFIG_DIR: '/tmp/keep-this-unrelated-setting' });
+    expect(stripRestoredCodexProviderOverrides('codex', { OPENAI_API_KEY: 'only-value' })).toBeUndefined();
+    expect(stripRestoredCodexProviderOverrides('claude', { OPENAI_API_KEY: 'leave-non-codex-alone' })).toEqual({
+      OPENAI_API_KEY: 'leave-non-codex-alone',
+    });
+  });
+
+  it('does not heal when the live tmux provider environment could not be read', () => {
+    expect(resolveRestoredCodexProviderRecovery('codex', undefined, null)).toEqual({
+      identity: null,
+      environment: undefined,
+    });
+    expect(
+      resolveRestoredCodexProviderRecovery(
+        'codex',
+        { __codexProviderIdentity: { version: 1, credentialSource: 'session-key' } },
+        null
+      )
+    ).toEqual({
+      identity: { version: 1, credentialSource: 'session-key' },
+      environment: undefined,
+    });
+  });
+
+  it('ignores live recovery data for non-Codex modes', () => {
+    expect(resolveRestoredCodexProviderRecovery('claude', undefined, { OPENAI_API_KEY: 'secret' })).toEqual({
+      identity: undefined,
+      environment: undefined,
+    });
+  });
+
+  it('allows provider recovery only for local non-container Codex sessions', () => {
+    expect(shouldRecoverCodexProviderEnvironment('codex', undefined, undefined)).toBe(true);
+    expect(shouldRecoverCodexProviderEnvironment('claude', undefined, undefined)).toBe(false);
+    expect(shouldRecoverCodexProviderEnvironment('codex', muxRemote, undefined)).toBe(false);
+    expect(shouldRecoverCodexProviderEnvironment('codex', undefined, {} as SessionDocker)).toBe(false);
   });
 });
 

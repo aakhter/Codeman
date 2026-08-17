@@ -195,9 +195,43 @@ describe('POST /api/sessions/:id/attachments/upload — remote branch (COD-241)'
     // History appended + persisted + attachment:detected broadcast.
     expect(harness.ctx._session.upsertAttachmentHistory).toHaveBeenCalledTimes(1);
     expect(harness.ctx.persistSessionState).toHaveBeenCalled();
+    expect(harness.ctx._session.getAttachmentHistoryForPersist()?.[0].uploadProvenance).toBeUndefined();
     const detected = harness.ctx.broadcast.mock.calls.filter((c) => c[0] === 'attachment:detected');
     expect(detected.length).toBe(1);
     expect(detected[0][1].attachmentId).toBe(body.data.attachmentId);
+
+    attachmentRegistry.clearSession(harness.ctx._sessionId);
+    const history = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+    });
+    expect(history.statusCode).toBe(200);
+    expect(JSON.parse(history.body).data.items[0]).toMatchObject({ missing: false });
+  });
+
+  // COD-296 control: the remote branch returns before the local upload-directory
+  // resolve, so a remote upload must leave no `.codeman-attachments/` behind in
+  // the local case dir. This passed before COD-296 too — it pins the upload half
+  // of "remote sessions never attempt local attachment-directory creation"; the
+  // half that was actually broken (DELETE / history) is covered in
+  // attachment-directory-side-effects.test.ts.
+  it('creates no local attachment directory for a remote upload', async () => {
+    const localWorkdir = await fs.mkdtemp(join(tmpdir(), 'codeman-remote-upload-ws-'));
+    harness.ctx._session.workingDir = localWorkdir;
+    mockSsh(0);
+    try {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(BOUNDARY, 'Remote.pdf', 'application/pdf', PDF_BYTES),
+      });
+
+      expect(res.statusCode).toBe(200);
+      await expect(fs.lstat(join(localWorkdir, '.codeman-attachments'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fs.rm(localWorkdir, { recursive: true, force: true });
+    }
   });
 
   it('502: ssh transfer failure returns a specific remote-transfer error and does NOT register', async () => {

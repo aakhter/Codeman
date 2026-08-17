@@ -27,6 +27,7 @@ an explicit, guided opt‑in.
 4. [Recommended remote‑access setups](#4-recommended-remoteaccess-setups)
 5. [File‑serving hardening](#5-fileserving-hardening)
 6. [tmux launch hardening](#6-tmux-launch-hardening-cod31)
+   - [Read My Mind local Codex predictor](#6a-read-my-mind-local-codex-predictor-cod-314)
 7. [Supply‑chain & build‑asset hardening](#7-supplychain--buildasset-hardening-cod28)
 8. [Multi‑instance isolation](#8-multiinstance-isolation)
 9. [Transport security headers](#9-transport-security-headers)
@@ -309,11 +310,12 @@ escapes the session working directory (`..`, absolute paths, and symlinks that
 resolve outside). The realpath‑before‑check ordering closes the validation‑time
 TOCTOU window.
 
-| Route                | Cap   | Notes                                                                   |
-| -------------------- | ----- | ----------------------------------------------------------------------- |
-| `file-content`       | 10 MB | text preview                                                            |
-| `file-raw`           | 50 MB | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses** |
-| `POST /api/download` | 50 MB | forced `attachment`; sensitive‑path blocklist                           |
+| Route                    | Cap   | Notes                                                                                                                                                                        |
+| ------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `file-content`           | 10 MB | text preview                                                                                                                                                                 |
+| `file-raw`               | —     | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses**; streamed, `Range`-aware (206 slices come from the same validated path). No app‑level cap: COD‑18 replaced the whole‑file `readFile` with `createReadStream`, which is what the cap existed to bound, and it is workspace‑scoped |
+| attachment `…/:id/raw`   | 50 MB | 413 past the cap, checked before the range. Capped because an attacker‑influenceable registry id resolves to an arbitrary host file                                          |
+| `POST /api/download`     | 50 MB | forced `attachment`; sensitive‑path blocklist                                                                                                                                |
 
 ### SVG / content‑type XSS
 
@@ -365,6 +367,37 @@ Two registration paths, with **different trust**:
   file outside the session's own workspace. Cross‑workspace attach must go through
   the explicit POST path above.
 
+### Trusted attachment roots (`CODEMAN_TRUSTED_ATTACHMENT_ROOTS`)
+
+Uploads normally land in `<workspace>/.codeman-attachments`. An **admin** may
+instead make that path a **symlink** to a shared directory, but only if the
+symlink's target is on this exact allowlist — an operator knob for a shared
+document enclave, and the one case where uploaded bytes leave the workspace.
+
+- **Env‑only, and deliberately so.** It is not in `SettingsUpdateSchema`, so the
+  browser cannot add a root; a compromised session cannot widen it. Parsed **once
+  at startup** (memoized), so a change requires a restart.
+- **Exact‑root, fail‑closed matching.** The symlink's resolved target must equal a
+  listed root — not live under one. The check is repeated on every upload and
+  delete, so repointing the symlink afterwards fails closed.
+- **Each entry must survive validation, or it is dropped** (with a warning that
+  deliberately carries the entry's *index*, never the path, so a log does not leak
+  filesystem layout). An entry must be absolute; canonical (a symlinked alias is
+  refused — a trailing `/` is normalized rather than refused, COD‑295); a real
+  directory; not blocked by attachment policy (§ blocklist above); and a
+  **dedicated enclave**.
+- **The dedicated‑enclave rule (COD‑295).** `/`, `$HOME`, and any ancestor of
+  `~/.codeman`, `~/codeman-cases` or `~/codeman-users` are refused. Uploads land
+  *in* the root and everything under it becomes servable, so accepting a broad
+  ancestor would quietly turn "trusted root" into "the whole filesystem" and
+  defeat the exact‑root allowlist. A directory *inside* a managed tree
+  (`~/.codeman/shared-attachments`) is fine; the tree itself is not.
+- A bad entry is never a startup failure — it is dropped, and with no valid roots
+  the symlink form is simply unavailable.
+
+Implementation: `isDedicatedAttachmentEnclave` / `parseTrustedAttachmentRoots` /
+`resolveLocalUploadDirectory` in `src/config/attachment-guard.ts`.
+
 ### SSE log‑tail route — intentional extra read roots
 
 The live file‑tail SSE route (`FileStreamManager`, used to stream a growing log
@@ -414,6 +447,27 @@ transient mount blip at launch poisons tmux's long‑lived cwd and crashes
   preserved.
 
 ---
+
+## 6a. Read My Mind local Codex predictor (COD-314)
+
+Read My Mind may invoke an explicit, short-lived local Codex predictor for a local Codex session. It is a noninteractive
+`codex exec --ephemeral` model invocation, not a new interactive terminal or Codeman tab, and it leaves no persisted or
+resumable Codex rollout artifact. The requester cannot choose its provider, model, environment, or rollout; provider
+selection is fixed by the authorized session, and Codex never falls back to Claude.
+
+The predictor's rollout lookup accepts only a demonstrably owned rollout in the same canonical `CODEX_HOME` namespace.
+Same-working-directory or newest-file matches are not ownership proof; ambiguity, including equal history ties, fails
+closed. Recovery preserves private, versioned provider provenance without API keys. A routine Codeman process restart reads
+only `CODEX_HOME`, `OPENAI_API_KEY`, and `CODEX_API_KEY` from the exact surviving local tmux session. Retained keys remain
+runtime-only; an empty successfully-read environment heals legacy default-auth sessions; unreadable/missing tmux identity
+still fails closed rather than silently changing accounts. Remote and Docker sessions never enter this recovery path.
+
+The `codex exec` child runs from a private ephemeral cwd outside the case workspace. It ignores user config, rules, and
+global/project instructions; disables shell, web-search, and subagents; rejects approvals; uses a read-only command sandbox;
+and has schema validation plus bounded environment, output, and timeout controls. These constraints do not state that the
+CLI process is network-disabled. An incompatible CLI returns an update-required failure rather than receiving a weakened
+retry. The browser UI requires an explicit Send or Insert click; the prediction API returns text only, and packaged-agent
+policy requires explicit user authorization before a client separately calls the input API.
 
 ## 7. Supply‑chain & build‑asset hardening (COD‑28)
 
@@ -489,7 +543,7 @@ production layout (`~/.codeman`, `-L codeman`, port 3000).
 Docker cases (1.4.0) run a session inside a per‑case container instead of on the host. The security posture:
 
 - **Hardened create flags, always** — `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit` (fork‑bomb guard), `--memory` == `--memory-swap` (a real OOM cap), `--init`, and non‑root: `--user <hostUid>:0` on Linux (host uid → workspace files stay host‑owned; GID 0 keeps `$HOME` writable), `--userns=keep-id` on rootless Podman. **Never** `--privileged`, and **never** the docker socket — the pure builder in `docker-hosts.ts` cannot emit them and the schema cannot represent them.
-- **Credentials never enter an image** — the convenient default bind‑mounts host cred dirs (`~/.claude`, `~/.codex`, `~/.gemini` — which also carries Antigravity's `antigravity-cli/` state — and `~/.config/{gcloud,opencode}`) read‑write. Bind mounts are physically excluded from `docker commit`, so exported images are secret‑free. API‑key CLIs get their key as an exec‑time NAME‑ONLY `--env OPENAI_API_KEY` (no `=value`, no `ps` leak, never committed); a create‑time `-e` for a secret is never used. The **sealed** profile (`mountCredentials:false` + `network:none`) drops the host mounts; full‑image export is then refused (an in‑container login would ride the committed layer) unless a pre‑commit scrub is opted into.
+- **Credentials never enter an image** — the convenient default bind‑mounts host cred dirs (`~/.claude`, `~/.codex`, `~/.gemini` — which also carries Antigravity's `antigravity-cli/` state — `~/.config/{gcloud,opencode}`, and five seeded files from `~/.pi/agent`) read‑write. Bind mounts are physically excluded from `docker commit`, so exported images are secret‑free. API‑key CLIs get their key as an exec‑time NAME‑ONLY `--env OPENAI_API_KEY` (no `=value`, no `ps` leak, never committed); a create‑time `-e` for a secret is never used. The **sealed** profile (`mountCredentials:false` + `network:none`) drops the host mounts; full‑image export is then refused (an in‑container login would ride the committed layer) unless a pre‑commit scrub is opted into.
 - **Blast radius — accept it explicitly** — the convenient profile mounts an arbitrary host workspace RW plus the host credential dirs RW into a network‑enabled container, so container‑run agent code can read/modify those host trees and reach the network at once. Still a net improvement over today's on‑host `--dangerously-skip-permissions` execution; use the sealed profile for genuinely untrusted work.
 - **Import is untrusted‑bundle‑safe** — `/api/docker-cases/import` validates the manifest + per‑member SHA‑256 before extraction, rejects absolute / `..` tar members (traversal guard), and re‑tags the loaded image into a quarantined namespace so it can never overwrite `codeman/agent:base` or a pre‑existing tag.
 - **Host guard & the bridge‑hooks listener** — in‑container hook callbacks carry `Host: host.docker.internal` / `host.containers.internal`; both are on the always‑on host‑header allowlist (`DOCKER_HOST_GATEWAY_ALIASES`) and resolve to the host only from inside a container netns, so they are not a browser DNS‑rebinding surface. On a loopback‑only server, in‑container hooks are opt‑in via `CODEMAN_DOCKER_BRIDGE_HOOKS=1`, which binds a SECOND listener on the docker bridge gateway serving **only** the hook endpoints (every other path → `403`) into the same hook‑secret‑gated pipeline. The bridge is host‑internal (containers + host), not the LAN, so it does not widen network exposure; the hook secret is bind‑mounted read‑only and referenced by path.
@@ -535,6 +589,7 @@ A saved dashboard URL renders as a tab, served through Codeman's own origin at `
 | `CODEMAN_GESTURE=1`                                                         | Make the gesture overlay available (widens CSP)                                                                                                                  |
 | `CODEMAN_DOCKER_BRIDGE_HOOKS=1`                                             | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
 | `CODEMAN_DOCKER_BRIDGE_HOST`                                                | Override the bridge gateway IP the hooks listener binds (default: auto‑detect)                                                                                   |
+| `CODEMAN_TRUSTED_ATTACHMENT_ROOTS`                                          | Comma‑separated **exact** directories an admin may point a `.codeman-attachments` symlink at. Env‑only (never browser‑settable), read once at startup — see below |
 
 **Audit log:** session lifecycle and server start are recorded in
 `~/.codeman/session-lifecycle.jsonl`.

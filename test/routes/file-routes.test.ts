@@ -38,7 +38,9 @@ vi.mock('node:child_process', () => ({
   }),
 }));
 
-// Mock realpathSync for symlink resolution
+// Mock realpathSync for symlink resolution, plus createReadStream: file-raw
+// STREAMS its body (range support), so an unmocked read would hit the real
+// filesystem and fail with ENOENT rather than serving the fixture bytes.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
@@ -90,6 +92,7 @@ describe('file-routes', () => {
     mockedRealpathSync.mockImplementation((p: string) => p as never);
     mockedReaddir.mockResolvedValue([] as never);
     mockedReadFile.mockResolvedValue('file content' as never);
+    mockedCreateReadStream.mockImplementation(() => Readable.from([Buffer.from('file content')]) as never);
     // Default stat
     mockedStat.mockImplementation(async (path) => {
       const pathText = String(path);

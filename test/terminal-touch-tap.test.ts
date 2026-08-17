@@ -212,6 +212,37 @@ describe('terminal touch tap mouse guard', () => {
     expect(app._classifyMobileTerminalTap(9, 49)).toBe('content');
   });
 
+  it('keeps the keyboard reachable while a selection dialog is on screen', () => {
+    // The lock this pins: a visible dialog used to make EVERY row of the
+    // terminal "actionable" (both menu tests scanned the whole viewport), so
+    // every tap blurred and the on-screen keyboard could not be opened until
+    // the dialog was answered, leaving tapping an option (the one gesture that
+    // commits an answer) as the only thing a phone could do.
+    const { app, setActiveElement } = loadTerminalUiHarness();
+    app.activeSessionId = 'sess-1';
+    app.sessions = new Map([['sess-1', { mode: 'claude' }]]);
+    app.terminal = createTerminalGrid(
+      ['Do you want to proceed?', '', '❯ 1. Yes', '  2. No, tell Claude what to do', '', ''],
+      2
+    );
+    app._sendInputAsync = vi.fn();
+    setActiveElement(null);
+
+    // The dialog's own rows stay TUI-owned: report the tap, keep the keyboard down.
+    expect(app._isActionableMobileTerminalTap(9, 33)).toBe(true); // ❯ 1. Yes
+    expect(app._isActionableMobileTerminalTap(9, 49)).toBe(true); // 2. No, …
+    // Everything else is inert, and must still be able to summon the keyboard.
+    expect(app._isActionableMobileTerminalTap(9, 1)).toBe(false); // question title
+    expect(app._isActionableMobileTerminalTap(9, 65)).toBe(false); // blank row
+
+    app._handleMobileTerminalTap({ clientX: 9, clientY: 1 }, false);
+    expect(app.terminal.focus).toHaveBeenCalledOnce();
+
+    app.terminal.focus.mockClear();
+    app._handleMobileTerminalTap({ clientX: 9, clientY: 33 }, false);
+    expect(app.terminal.focus).not.toHaveBeenCalled();
+  });
+
   it('collapses TUI readback content without opening or retaining the keyboard', () => {
     const { app, setActiveElement } = loadTerminalUiHarness();
     app.activeSessionId = 'sess-1';
@@ -242,6 +273,43 @@ describe('terminal touch tap mouse guard', () => {
 
     expect(app._handleMobileTerminalTap({ clientX: 9, clientY: 65 }, false)).toBe('input');
     expect(app._sendInputAsync).not.toHaveBeenCalled();
+    expect(app.terminal.focus).toHaveBeenCalledOnce();
+  });
+
+  it('closes the keyboard on a second tap of INERT transcript content', () => {
+    const { app, setActiveElement } = loadTerminalUiHarness();
+    app.activeSessionId = 'sess-1';
+    app.sessions = new Map([['sess-1', { mode: 'claude' }]]);
+    app.terminal = createTerminalGrid(['transcript line', '', '', '', '❯ ', ''], 4);
+    app._sendInputAsync = vi.fn();
+
+    // Keyboard DOWN: the tap opens it.
+    setActiveElement(null);
+    expect(app._handleMobileTerminalTap({ clientX: 9, clientY: 1 }, false)).toBe('content');
+    expect(app.terminal.focus).toHaveBeenCalledOnce();
+    expect(app.terminal.textarea.blur).not.toHaveBeenCalled();
+
+    // Keyboard UP on the same inert row: the tap closes it.
+    app.terminal.focus.mockClear();
+    setActiveElement(app.terminal.textarea);
+    expect(app._handleMobileTerminalTap({ clientX: 9, clientY: 1 }, true)).toBe('content');
+    expect(app.terminal.textarea.blur).toHaveBeenCalledOnce();
+    expect(app.terminal.focus).not.toHaveBeenCalled();
+  });
+
+  it('keeps the prompt row focusing rather than toggling, so the caret can still be placed', () => {
+    // The toggle is scoped to 'content' on purpose: a second tap on the PROMPT
+    // must still position the cursor. This is the guarantee that makes the
+    // change safe to make, so it is pinned separately.
+    const { app, setActiveElement } = loadTerminalUiHarness();
+    app.activeSessionId = 'sess-1';
+    app.sessions = new Map([['sess-1', { mode: 'claude' }]]);
+    app.terminal = createTerminalGrid(['transcript line', '', '', '', '❯ ask', ''], 4);
+    app._sendInputAsync = vi.fn();
+
+    setActiveElement(app.terminal.textarea);
+    expect(app._handleMobileTerminalTap({ clientX: 9, clientY: 65 }, true)).toBe('input');
+    expect(app.terminal.textarea.blur).not.toHaveBeenCalled();
     expect(app.terminal.focus).toHaveBeenCalledOnce();
   });
 

@@ -32,9 +32,24 @@ export function createMockRouteContext(options?: {
   return {
     // -- SessionPort --
     sessions,
-    addSession: vi.fn((s: MockSession) => {
+    addSession: vi.fn(async (s: MockSession) => {
       sessions.set(s.id, s);
     }),
+    tabLayouts: {
+      get: vi.fn(),
+      put: vi.fn(),
+      sessionCreated: vi.fn(),
+      webviewCreated: vi.fn(),
+      sessionsRemoved: vi.fn(async () => {}),
+      webviewDeleted: vi.fn(async () => {}),
+      markRestorationComplete: vi.fn(),
+      markRestorationFailed: vi.fn(),
+      markRestorationSkipped: vi.fn(),
+      assertDeletionReady: vi.fn(),
+      runSessionDeletion: vi.fn(async (_removed, action) => action()),
+      runStaleSessionCleanup: vi.fn(async (_activeIds, action) => action()),
+      reconcileAfterRestoration: vi.fn(async () => {}),
+    },
     cleanupSession: vi.fn(async () => {}),
     setupSessionListeners: vi.fn(async () => {}),
     persistSessionState: vi.fn(),

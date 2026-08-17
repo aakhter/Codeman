@@ -25,20 +25,21 @@ import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { registerFileRoutes, _resetUploadRateBuckets } from '../../src/web/routes/file-routes.js';
 import { attachmentRegistry } from '../../src/attachment-registry.js';
+import { resetTrustedAttachmentRootsForTests } from '../../src/config/attachment-guard.js';
 
 interface LocalHarness {
   app: FastifyInstance;
   ctx: MockRouteContext;
 }
 
-async function createEnvelopeHarness(): Promise<LocalHarness> {
+async function createEnvelopeHarness(sessionId?: string): Promise<LocalHarness> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
   await app.register(fastifyMultipart, {
     limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 4, parts: 5 },
   });
 
-  const ctx = createMockRouteContext();
+  const ctx = createMockRouteContext({ sessionId });
   registerFileRoutes(app, ctx as never);
 
   app.addHook('preSerialization', (req, reply, payload: unknown, done) => {
@@ -109,9 +110,192 @@ describe('DELETE /api/sessions/:id/attachments/uploaded (COD-241 unit 3)', () =>
   });
 
   afterEach(async () => {
+    delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    resetTrustedAttachmentRootsForTests();
     attachmentRegistry.clearSession(harness.ctx._sessionId);
     await harness.app.close();
     await fs.rm(workdir, { recursive: true, force: true });
+  });
+
+  it('removes a proven trusted-root upload after registry reconstruction', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    try {
+      const agentPath = await uploadPdf(harness, 'Trusted.pdf');
+      const leaf = agentPath.split('/').at(-1)!;
+      attachmentRegistry.clearSession(harness.ctx._sessionId);
+      const history = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+      expect(JSON.parse(history.body).data.items[0].relativePath).toBe(agentPath);
+
+      const res = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(agentPath)}`,
+      });
+      expect(res.statusCode).toBe(200);
+      await expect(fs.stat(join(trusted, leaf))).rejects.toBeTruthy();
+      expect(harness.ctx._session.attachmentHistory).toHaveLength(0);
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    '.codeman-attachments/',
+    '.codeman-attachments/.',
+    '.codeman-attachments/..',
+    '.codeman-attachments/nested/file.pdf',
+    '.codeman-attachments\\file.pdf',
+    '.codeman-attachments/../file.pdf',
+  ])('rejects an invalid trusted logical path: %s', async (candidate) => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    try {
+      const res = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(candidate)}`,
+      });
+      expect(res.statusCode).toBe(403);
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trusted sibling without provenance and a symlink leaf', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    const sibling = join(trusted, 'sibling.pdf');
+    const leafLink = join(trusted, 'link.pdf');
+    await fs.writeFile(sibling, PDF_BYTES);
+    await fs.symlink(sibling, leafLink);
+    try {
+      for (const name of ['sibling.pdf', 'link.pdf']) {
+        const res = await harness.app.inject({
+          method: 'DELETE',
+          url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(
+            `.codeman-attachments/${name}`
+          )}`,
+        });
+        expect(res.statusCode).toBe(403);
+      }
+      await expect(fs.stat(sibling)).resolves.toBeDefined();
+      await expect(fs.lstat(leafLink)).resolves.toMatchObject({});
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps old history without upload provenance readable but not removable', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    try {
+      const agentPath = await uploadPdf(harness, 'Legacy.pdf');
+      const persisted = harness.ctx._session.getAttachmentHistoryForPersist()![0];
+      harness.ctx._session.upsertAttachmentHistory({ ...persisted, uploadProvenance: undefined });
+      attachmentRegistry.clearSession(harness.ctx._sessionId);
+
+      const list = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+      expect(list.statusCode).toBe(200);
+      expect(JSON.parse(list.body).data.items[0]).toMatchObject({ missing: false });
+      expect(JSON.parse(list.body).data.items[0].relativePath).toBeUndefined();
+
+      const remove = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(agentPath)}`,
+      });
+      expect(remove.statusCode).toBe(403);
+      await expect(fs.stat(join(trusted, agentPath.split('/').at(-1)!))).resolves.toBeDefined();
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when trusted-root configuration is removed', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    try {
+      const agentPath = await uploadPdf(harness, 'Config.pdf');
+      delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+      resetTrustedAttachmentRootsForTests();
+      const remove = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(agentPath)}`,
+      });
+      expect(remove.statusCode).toBe(403);
+      await expect(fs.stat(join(trusted, agentPath.split('/').at(-1)!))).resolves.toBeDefined();
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let another session using the same trusted root delete the upload', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    resetTrustedAttachmentRootsForTests();
+    await fs.symlink(trusted, join(workdir, '.codeman-attachments'));
+    const otherHarness = await createEnvelopeHarness('other-session');
+    const otherWorkspace = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-other-')));
+    otherHarness.ctx._session.workingDir = otherWorkspace;
+    await fs.symlink(trusted, join(otherWorkspace, '.codeman-attachments'));
+    try {
+      const agentPath = await uploadPdf(harness, 'Owned.pdf');
+      const filePath = join(trusted, agentPath.split('/').at(-1)!);
+      const ownerRecord = attachmentRegistry.findByFilePath(harness.ctx._sessionId, filePath)!;
+      attachmentRegistry.register({
+        ...ownerRecord,
+        attachmentId: 'att_registry-is-not-authority',
+        sessionId: otherHarness.ctx._sessionId,
+      });
+      const remove = await otherHarness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${otherHarness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(agentPath)}`,
+      });
+      expect(remove.statusCode).toBe(403);
+      await expect(fs.stat(filePath)).resolves.toBeDefined();
+    } finally {
+      attachmentRegistry.clearSession(otherHarness.ctx._sessionId);
+      await otherHarness.app.close();
+      await fs.rm(otherWorkspace, { recursive: true, force: true });
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the workspace symlink is repointed to another approved root', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-trusted-')));
+    const other = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-remove-repointed-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = `${trusted},${other}`;
+    resetTrustedAttachmentRootsForTests();
+    const link = join(workdir, '.codeman-attachments');
+    await fs.symlink(trusted, link);
+    try {
+      const agentPath = await uploadPdf(harness, 'Repointed.pdf');
+      await fs.unlink(link);
+      await fs.symlink(other, link);
+      const remove = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(agentPath)}`,
+      });
+      expect(remove.statusCode).not.toBe(200);
+      await expect(fs.stat(join(trusted, agentPath.split('/').at(-1)!))).resolves.toBeDefined();
+    } finally {
+      await fs.rm(trusted, { recursive: true, force: true });
+      await fs.rm(other, { recursive: true, force: true });
+    }
   });
 
   it('(a) 200: removes an uploaded file, deletes it from disk, and drops it from history', async () => {

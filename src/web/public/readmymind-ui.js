@@ -26,7 +26,7 @@
  * @dependency app.js (CodemanApp class, this.sessions, this.activeSessionId, showToast)
  * @dependency mobile-handlers.js (MobileDetection.isTouchDevice, focus policy)
  * @dependency settings-ui.js (loadAppSettingsFromStorage)
- * @dependency api-client.js at runtime (this._apiJson; loads later but is only called after init)
+ * @dependency api-client.js at runtime (this._api/this._apiJson; loads later but is only called after init)
  * @loadorder 11.3, after panels-ui.js, before ultracode-panel.js
  */
 
@@ -44,8 +44,9 @@ Object.assign(CodemanApp.prototype, {
       this.showToast('Select a session first', 'warning');
       return;
     }
-    if (session.mode && session.mode !== 'claude') {
-      this.showToast('Read My Mind works on Claude sessions only', 'warning');
+    const unavailableCodex = session.mode === 'codex' && (session.remote || session.docker);
+    if (unavailableCodex || (session.mode && !['claude', 'codex'].includes(session.mode))) {
+      this.showToast('Read My Mind supports Claude and local Codex sessions', 'warning');
       return;
     }
     // Rethink memory resets on each open (a fresh open is a fresh question),
@@ -62,11 +63,35 @@ Object.assign(CodemanApp.prototype, {
     this._rmm = null;
   },
 
+  /** Preserve the uniform API error envelope instead of letting the shared
+   *  `_apiJson()` helper collapse every non-2xx response to null. */
+  async _readMyMindRequest(path, body) {
+    const fallback = 'Read My Mind prediction failed. Please try again.';
+    const response = await this._api(path, { method: 'POST', body });
+    if (!response) return { ok: false, error: fallback };
+
+    let envelope;
+    try {
+      envelope = await response.json();
+    } catch {
+      return { ok: false, error: fallback };
+    }
+    if (!envelope || typeof envelope !== 'object') return { ok: false, error: fallback };
+
+    if (!response.ok || envelope.success === false) {
+      const message = typeof envelope.error === 'string' ? envelope.error.trim().slice(0, 1000) : '';
+      return { ok: false, error: message || fallback };
+    }
+    if (envelope.success === true && 'data' in envelope) return { ok: true, data: envelope.data };
+    return { ok: false, error: fallback };
+  },
+
   /** Run (or re-run) the prediction and render the suggestion set. */
   async _readMyMindPredict() {
     const state = this._rmm;
     if (!state || state.busy) return;
     state.busy = true;
+    state.errorMessage = '';
     this._rmmSetPhase('loading');
 
     const body = {};
@@ -76,13 +101,20 @@ Object.assign(CodemanApp.prototype, {
     // (openReadMyMind clears it), so a plain predict sends neither key.
     const steer = document.getElementById('readMyMindSteer')?.value.trim() ?? '';
     if (steer) body.steer = steer.slice(0, 2000);
-    const data = await this._apiJson(`/api/sessions/${state.sessionId}/readmymind`, { method: 'POST', body });
+    const result = await this._readMyMindRequest(`/api/sessions/${state.sessionId}/readmymind`, body);
 
     // The modal may have been dismissed (or reopened for another session) while
     // the predictor ran; drop a stale response instead of painting over it.
     if (this._rmm !== state) return;
     state.busy = false;
 
+    if (!result.ok) {
+      state.errorMessage = result.error;
+      this._rmmSetPhase('error');
+      return;
+    }
+
+    const data = result.data;
     const suggestions = (data && Array.isArray(data.suggestions) ? data.suggestions : []).filter(
       (s) => s && typeof s.prompt === 'string' && s.prompt.trim()
     );
@@ -203,7 +235,11 @@ Object.assign(CodemanApp.prototype, {
     if (!modal) return;
     modal.querySelector('.readmymind-loading').style.display = phase === 'loading' ? '' : 'none';
     modal.querySelector('.readmymind-result').style.display = phase === 'ready' ? '' : 'none';
-    modal.querySelector('.readmymind-error').style.display = phase === 'error' ? '' : 'none';
+    const error = modal.querySelector('.readmymind-error');
+    if (!error.dataset.defaultMessage) error.dataset.defaultMessage = error.textContent.trim();
+    error.textContent =
+      phase === 'error' && this._rmm?.errorMessage ? this._rmm.errorMessage : error.dataset.defaultMessage;
+    error.style.display = phase === 'error' ? '' : 'none';
     // The steer note belongs to Rethink, so it shows wherever Rethink is live:
     // the ready phase AND the empty-result phase (typed text survives the
     // loading round-trip, only the row's visibility toggles).

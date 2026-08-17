@@ -47,9 +47,15 @@ import { verifyClaudeSessionStartHookCapability } from '../hooks-config.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
 import { Session, type BackgroundTask } from '../session.js';
+import {
+  parseCodexProviderIdentity,
+  type CodexProviderEnvironment,
+  type CodexProviderIdentity,
+} from '../codex-provider-identity.js';
 import type {
   ClaudeMode,
   SessionAttachmentHistoryItem,
+  SessionDocker,
   SessionMode,
   SessionRemote,
   SessionState,
@@ -59,6 +65,8 @@ import { RespawnController, RespawnConfig } from '../respawn-controller.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import { createMultiplexer } from '../mux-factory.js';
 import { getStore } from '../state-store.js';
+import { TabLayoutService } from '../tab-layout-service.js';
+import { readWebviews } from '../webview-store.js';
 import { extractCompletionPhrase } from '../ralph-config.js';
 import { fileStreamManager } from '../file-stream-manager.js';
 import {
@@ -89,6 +97,8 @@ import { getLifecycleLog } from '../session-lifecycle-log.js';
 import { PushSubscriptionStore } from '../push-store.js';
 import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
+import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
+import { deriveWebviewSseHint } from './webview-sse.js';
 import {
   type SessionListenerRefs,
   createSessionListeners,
@@ -140,6 +150,66 @@ export function resolveRestoredSessionName(
   if (savedStateName) return savedStateName;
   if (muxSessionName && muxSessionName !== muxName) return muxSessionName;
   return '';
+}
+
+/** Read recognized Codex recovery provenance; null explicitly fences absent/unsafe restored state. */
+export function resolveRestoredCodexProviderIdentity(
+  mode: SessionMode,
+  savedState: unknown
+): CodexProviderIdentity | null | undefined {
+  if (mode !== 'codex') return undefined;
+  if (!savedState || typeof savedState !== 'object') return null;
+  return (
+    parseCodexProviderIdentity((savedState as { __codexProviderIdentity?: unknown }).__codexProviderIdentity) ?? null
+  );
+}
+
+export function resolveRestoredCodexProviderRecovery(
+  mode: SessionMode,
+  savedState: unknown,
+  liveEnvironment: CodexProviderEnvironment | null
+): { identity: CodexProviderIdentity | null | undefined; environment: CodexProviderEnvironment | undefined } {
+  const savedIdentity = resolveRestoredCodexProviderIdentity(mode, savedState);
+  if (mode !== 'codex') return { identity: undefined, environment: undefined };
+  if (liveEnvironment === null) return { identity: savedIdentity, environment: undefined };
+
+  const environment: CodexProviderEnvironment = {};
+  for (const key of ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY'] as const) {
+    const value = liveEnvironment[key];
+    if (typeof value === 'string' && value) environment[key] = value;
+  }
+  const hasSessionKey = Boolean(environment.OPENAI_API_KEY || environment.CODEX_API_KEY);
+  const codexHome = environment.CODEX_HOME;
+  return {
+    identity: {
+      version: 1,
+      credentialSource: hasSessionKey ? 'session-key' : 'restorable',
+      ...(codexHome ? { codexHome } : {}),
+    },
+    environment,
+  };
+}
+
+export function stripRestoredCodexProviderOverrides(
+  mode: SessionMode,
+  value: unknown
+): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const safe: Record<string, string> = {};
+  for (const [key, candidate] of Object.entries(value)) {
+    if (typeof candidate !== 'string') continue;
+    if (mode === 'codex' && (key === 'CODEX_HOME' || key === 'OPENAI_API_KEY' || key === 'CODEX_API_KEY')) continue;
+    safe[key] = candidate;
+  }
+  return Object.keys(safe).length > 0 ? safe : undefined;
+}
+
+export function shouldRecoverCodexProviderEnvironment(
+  mode: SessionMode,
+  remote: SessionRemote | undefined,
+  docker: SessionDocker | undefined
+): boolean {
+  return mode === 'codex' && !remote && !docker;
 }
 
 /** Heal or conservatively fence authoritative Claude identity hooks on mux restore. */
@@ -207,6 +277,7 @@ import {
   registerWsRoutes,
   registerVoiceRoutes,
   registerWebviewRoutes,
+  registerTabLayoutRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { CronService } from '../cron/cron-service.js';
@@ -284,6 +355,7 @@ export class WebServer extends EventEmitter {
   private cronService!: CronService;
   private sse: SseStreamManager;
   private store = getStore();
+  private tabLayouts!: TabLayoutService;
   private host: string;
   private port: number;
   private https: boolean;
@@ -387,6 +459,13 @@ export class WebServer extends EventEmitter {
       },
       this.cleanup
     );
+    this.tabLayouts = new TabLayoutService({
+      store: this.store,
+      sessions: this.sessions,
+      readWebviews: () => readWebviews(getDataDir()),
+      broadcast: this.broadcast.bind(this),
+    });
+    if (this.testMode) this.tabLayouts.markRestorationSkipped();
 
     // Approvals Inbox → SSE. The singleton has no server reference; these
     // callbacks are its only way out. Broadcasts carry sessionId, so the
@@ -642,9 +721,16 @@ export class WebServer extends EventEmitter {
     return {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
-      addSession: (session: Session) => {
+      addSession: async (session: Session) => {
         this.sessions.set(session.id, session);
+        try {
+          await this.tabLayouts.sessionCreated(session.owner ?? '@single');
+        } catch (error) {
+          this.sessions.delete(session.id);
+          throw error;
+        }
       },
+      tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),
       setupSessionListeners: this.setupSessionListeners.bind(this),
       persistSessionState: this.persistSessionState.bind(this),
@@ -1028,6 +1114,7 @@ export class WebServer extends EventEmitter {
     registerAdminRoutes(this.app, ctx);
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx);
+    registerTabLayoutRoutes(this.app, ctx);
 
     // Cron: build the service from the same context, recompute
     // due times for any persisted jobs, then expose it to its routes.
@@ -1136,16 +1223,17 @@ export class WebServer extends EventEmitter {
 
   /** Persists full session state including respawn config to state.json */
   private _persistSessionStateNow(session: Session): void {
-    // See session-manager.updateSessionState: __envOverrides is an internal disk-only
-    // field kept off SessionState to avoid leaking via API broadcasts.
+    // Private recovery records stay off SessionState and API broadcasts.
     const base = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
+    const codexProviderIdentity = session.getCodexProviderIdentityForPersist();
     // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
     // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
     const state = {
       ...base,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
+      ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
     } as SessionState;
     const controller = this.respawnControllers.get(session.id);
@@ -1191,8 +1279,19 @@ export class WebServer extends EventEmitter {
     }
   }
 
-  private async _doCleanupSession(sessionId: string, killMux: boolean, reason?: string): Promise<void> {
+  private async _doCleanupSession(
+    sessionId: string,
+    killMux: boolean,
+    reason?: string,
+    coordinateLayout = true
+  ): Promise<void> {
     const session = this.sessions.get(sessionId);
+    const pinned = session?.pinned === true || this.store.getSession(sessionId)?.pinned === true;
+    if (coordinateLayout && session && killMux && !pinned) {
+      return this.tabLayouts.runSessionDeletion([{ id: sessionId, owner: session.owner }], () =>
+        this._doCleanupSession(sessionId, killMux, reason, false)
+      );
+    }
     const lifecycleLog = getLifecycleLog();
     lifecycleLog.log({
       event: killMux ? 'deleted' : 'detached',
@@ -1435,6 +1534,7 @@ export class WebServer extends EventEmitter {
         { isCodexAvailable },
         { isGeminiAvailable },
         { isAntigravityAvailable },
+        { isPiAvailable },
         { isCloudflaredAvailable },
         { isGitAvailable },
       ] = await Promise.all([
@@ -1443,6 +1543,7 @@ export class WebServer extends EventEmitter {
         import('../utils/codex-cli-resolver.js'),
         import('../utils/gemini-cli-resolver.js'),
         import('../utils/antigravity-cli-resolver.js'),
+        import('../utils/pi-cli-resolver.js'),
         import('../utils/cloudflared-resolver.js'),
         import('../git-clone.js'),
       ]);
@@ -1452,6 +1553,7 @@ export class WebServer extends EventEmitter {
         codex: isCodexAvailable(),
         gemini: isGeminiAvailable(),
         antigravity: isAntigravityAvailable(),
+        pi: isPiAvailable(),
         cloudflared: isCloudflaredAvailable(),
         // Not a run mode: the Add Case → Clone tab is an offer this box cannot
         // keep without git (issue #236), same reasoning as cloudflared above.
@@ -1820,10 +1922,9 @@ export class WebServer extends EventEmitter {
   }
 
   /**
-   * Read My Mind predictor model (docs/readmymind-plan.md): `readMyMindModel`
-   * setting, defaulting to the AI-checker opus model. Prediction quality is
-   * the product and runs only on an explicit press, so the cost profile is
-   * nothing like the idle checker's.
+   * Claude Read My Mind predictor model (docs/readmymind-plan.md):
+   * `readMyMindModel` setting, defaulting to the AI-checker opus model. Codex
+   * predictions use the authorized session's Codex model instead.
    */
   private async getReadMyMindModel(): Promise<string> {
     const settings = await this.readSettings();
@@ -2062,9 +2163,11 @@ export class WebServer extends EventEmitter {
    * Called on startup and can be called via API endpoint.
    * @returns Number of sessions cleaned up
    */
-  private cleanupStaleSessions(): number {
+  private async cleanupStaleSessions(): Promise<number> {
     const activeSessionIds = new Set(this.sessions.keys());
-    const result = this.store.cleanupStaleSessions(activeSessionIds);
+    const result = await this.tabLayouts.runStaleSessionCleanup(activeSessionIds, () =>
+      this.store.cleanupStaleSessions(activeSessionIds)
+    );
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {
       lifecycleLog.log({ event: 'stale_cleaned', sessionId: s.id, name: s.name });
@@ -2165,7 +2268,6 @@ export class WebServer extends EventEmitter {
       inputCjkForm: process.env.INPUT_CJK_FORM?.toUpperCase() === 'ON',
       codemanCli,
       planUsage: getLatestPlanUsage(), // last-known plan-usage telemetry, for the header chip on fresh load
-      sessionOrder: this.store.getSessionOrder(), // global tab order, synced across devices (COD-131)
     };
 
     this.cachedLightState = { data: result, timestamp: now };
@@ -2203,6 +2305,17 @@ export class WebServer extends EventEmitter {
       event === SseEvent.SessionStatusTelemetry
     ) {
       return { adminOnly: true };
+    }
+    // Layout payloads contain only trusted routing metadata. Route them to that
+    // exact owner plus admins, never by resolving a client-supplied ref.
+    if (event.startsWith('tab:')) {
+      return deriveTabLayoutSseHint(data);
+    }
+    // Saved-webview invalidations carry only the trusted affected owner and
+    // resource identity. Admin edits of foreign records route to that resource
+    // owner (plus admins), never to the requesting admin's personal workspace.
+    if (event.startsWith('webview:')) {
+      return deriveWebviewSseHint(data);
     }
     // Session-scoped families: resolve the owner from the payload's session id.
     const SESSION_PREFIXES = [
@@ -2453,25 +2566,25 @@ export class WebServer extends EventEmitter {
     // This prevents race conditions where clients connect before state is ready
     // CRITICAL: Skip in test mode to prevent tests from picking up user sessions
     if (!this.testMode) {
-      await this.restoreMuxSessions();
+      const restored = await this.restoreMuxSessions();
+      await this.finalizeRestoredState(restored);
 
       // Instance-scoped reaper: after restore, `docker rm -f` managed containers of
       // THIS instance whose case is gone from docker-cases.json (best-effort, never
       // touches another instance's containers). Runs after restore so containers
       // still referenced by a restored session are preserved.
-      void import('../docker-hosts.js')
-        .then(({ reapOrphanedDockerContainers }) => reapOrphanedDockerContainers(getDataDir(), CODEMAN_INSTANCE))
-        .then((reaped) => {
-          if (reaped.length > 0)
-            console.log(`[Docker] reaped ${reaped.length} orphaned container(s): ${reaped.join(', ')}`);
-        })
-        .catch(() => {
-          /* best-effort — daemon may be absent */
-        });
+      if (restored) {
+        void import('../docker-hosts.js')
+          .then(({ reapOrphanedDockerContainers }) => reapOrphanedDockerContainers(getDataDir(), CODEMAN_INSTANCE))
+          .then((reaped) => {
+            if (reaped.length > 0)
+              console.log(`[Docker] reaped ${reaped.length} orphaned container(s): ${reaped.join(', ')}`);
+          })
+          .catch(() => {
+            /* best-effort — daemon may be absent */
+          });
+      }
     }
-
-    // Clean up stale sessions from state file that don't have active mux sessions
-    this.cleanupStaleSessions();
 
     // Bound disk use under heavy paste-image traffic: delete `paste-*` files
     // older than 7 days from each live session's .claude-images/ hourly.
@@ -2699,7 +2812,7 @@ export class WebServer extends EventEmitter {
     return false;
   }
 
-  private async restoreMuxSessions(): Promise<void> {
+  private async restoreMuxSessions(): Promise<boolean> {
     try {
       // Reconcile mux sessions to find which ones are still alive (also discovers unknown ones)
       const { alive, dead, discovered } = await this.mux.reconcileSessions();
@@ -2730,6 +2843,7 @@ export class WebServer extends EventEmitter {
             // would silently un-downgrade a non-granted user's restored session.
             const recoveredOwner = muxSession.owner ?? savedState?.owner;
             const recoveredRemote = resolveRestoredSessionRemote(savedState?.remote, muxSession.remote);
+            const recoveredDocker = muxSession.docker ?? savedState?.docker;
             // Claude watches project settings and reloads hook edits in a running
             // session. Heal local/bind-mounted restored cases before exposing
             // fresh-thread checkpoint capability. Remote settings are not locally
@@ -2748,7 +2862,22 @@ export class WebServer extends EventEmitter {
             // session-manager (see updateSessionState). Cast to read the non-public field.
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
-            const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
+            const savedEnvOverrides = stripRestoredCodexProviderOverrides(
+              muxSession.mode,
+              (savedState as { __envOverrides?: unknown })?.__envOverrides
+            );
+            const liveCodexProviderEnvironment = shouldRecoverCodexProviderEnvironment(
+              muxSession.mode,
+              recoveredRemote,
+              recoveredDocker
+            )
+              ? ((await this.mux.getCodexProviderEnvironment?.(muxSession.muxName)) ?? null)
+              : null;
+            const codexProviderRecovery = resolveRestoredCodexProviderRecovery(
+              muxSession.mode,
+              savedState,
+              liveCodexProviderEnvironment
+            );
             // Prefer the private (externalPath-bearing) history; fall back to the
             // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =
@@ -2760,6 +2889,12 @@ export class WebServer extends EventEmitter {
               remote: recoveredRemote,
               mode: muxSession.mode,
               name: sessionName,
+              // When the session FIRST started, not when this server booted.
+              // Without it every recovered session was restamped `Date.now()` on
+              // each restart, so a week-old pane read as "created 2m ago" on the
+              // home screens (and sorted as the newest thing in the unified list).
+              // mux-sessions.json carries the tmux session's own birth time.
+              createdAt: muxSession.createdAt || savedState?.createdAt,
               mux: this.mux,
               useMux: true,
               muxSession: muxSession, // Pass the existing session so startInteractive() can attach to it
@@ -2769,7 +2904,12 @@ export class WebServer extends EventEmitter {
               codexConfig: muxSession.mode === 'codex' ? savedState?.codexConfig : undefined,
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
-              envOverrides: savedEnvOverrides,
+              piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
+              envOverrides: {
+                ...savedEnvOverrides,
+                ...codexProviderRecovery.environment,
+              },
+              codexProviderIdentity: codexProviderRecovery.identity,
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
               checkpointState: savedState?.checkpoint,
@@ -2785,8 +2925,12 @@ export class WebServer extends EventEmitter {
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
               // (Remote SSH metadata is recovered above via resolveRestoredSessionRemote.)
-              docker: muxSession.docker ?? savedState?.docker,
+              docker: recoveredDocker,
               owner: recoveredOwner,
+              // Tab lineage survives a restart. It is only decoration, so a parent
+              // that did NOT come back is harmless: the frontend draws an edge only
+              // when both tabs are on screen.
+              parentSessionId: savedState?.parentSessionId,
             });
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name
@@ -2985,9 +3129,22 @@ export class WebServer extends EventEmitter {
       if (dead.length > 0) {
         console.log(`[Server] Cleaned up ${dead.length} dead mux session(s)`);
       }
+      return true;
     } catch (err) {
       console.error('[Server] Failed to restore mux sessions:', err);
+      return false;
     }
+  }
+
+  /** Unlock destructive reconciliation only after mux restoration fully succeeds. */
+  private async finalizeRestoredState(restored: boolean): Promise<void> {
+    if (!restored) {
+      this.tabLayouts.markRestorationFailed();
+      return;
+    }
+    this.tabLayouts.markRestorationComplete();
+    await this.cleanupStaleSessions();
+    await this.tabLayouts.reconcileAfterRestoration();
   }
 
   /**

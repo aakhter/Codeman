@@ -86,7 +86,11 @@ describe('COD-97 (a) orphan mux rows are not rendered as normal tabs', () => {
     const items = body.querySelectorAll('.process-item');
     // The orphan must NOT appear as a normal clickable tab row.
     const normalRows = body.querySelectorAll('.process-item.process-item-clickable');
-    const realRowPresent = [...items].some((n) => n.outerHTML.includes("app.selectSession('s-real')"));
+    // Quoting-agnostic: the row id is emitted as escapeHtml(JSON.stringify(id)),
+    // so the attribute reads selectSession(&quot;s-real&quot;), not single quotes.
+    const realRowPresent = [...items].some(
+      (n) => n.outerHTML.includes('app.selectSession(') && n.outerHTML.includes('s-real')
+    );
     const orphanAsNormal = [...normalRows].some((n) => n.outerHTML.includes('restored-xyz'));
 
     expect(realRowPresent).toBe(true);
@@ -151,12 +155,14 @@ describe('COD-97 (b) deleting a UI session removes its Monitor row', () => {
 
     // The deleted session must no longer be rendered as an open tab in the Monitor.
     const orphanGone = body.querySelector('.process-item-orphan');
-    const goneAsNormal = [...body.querySelectorAll('.process-item-clickable')].some((n) =>
-      n.outerHTML.includes("app.selectSession('s-gone')")
+    // Quoting-agnostic, as above. The single-quote form matched NOTHING, so this
+    // negative assertion used to pass no matter what the Monitor rendered.
+    const goneAsNormal = [...body.querySelectorAll('.process-item-clickable')].some(
+      (n) => n.outerHTML.includes('app.selectSession(') && n.outerHTML.includes('s-gone')
     );
     expect(goneAsNormal).toBe(false);
     // The surviving session is still shown.
-    expect(body.outerHTML).toContain("app.selectSession('s-keep')");
+    expect(body.outerHTML).toContain('app.selectSession(&quot;s-keep&quot;)');
     void orphanGone;
   });
 });

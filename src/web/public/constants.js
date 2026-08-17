@@ -187,6 +187,42 @@ function resolveTabOrientation(input) {
   return 'vertical';
 }
 
+// COD-299: vertical-rail sizing policy. Kept pure so restore, viewport clamps,
+// and keyboard behavior do not depend on browser layout timing.
+const TAB_RAIL_MIN_WIDTH = 208;
+const TAB_RAIL_DEFAULT_WIDTH = 256;
+const TAB_RAIL_MAX_WIDTH = 360;
+
+function resolveTabRailWidth(input = {}) {
+  const viewportWidth = Number(input.viewportWidth);
+  const mainWidth = Number(input.mainWidth);
+  const minTerminalWidth = Number(input.minTerminalWidth);
+  const limits = [TAB_RAIL_MAX_WIDTH];
+  if (Number.isFinite(viewportWidth) && viewportWidth > 0) limits.push(Math.floor(viewportWidth * 0.4));
+  if (Number.isFinite(mainWidth) && mainWidth > 0 && Number.isFinite(minTerminalWidth) && minTerminalWidth > 0) {
+    limits.push(Math.floor(mainWidth - minTerminalWidth));
+  }
+  const effectiveMax = Math.max(TAB_RAIL_MIN_WIDTH, Math.min(...limits));
+  const requested = Number(input.width);
+  const width = Number.isFinite(requested) ? requested : TAB_RAIL_DEFAULT_WIDTH;
+  return Math.round(Math.min(effectiveMax, Math.max(TAB_RAIL_MIN_WIDTH, width)));
+}
+
+function resolveTabRailKeyboardWidth(input = {}) {
+  const key = input.key;
+  let width;
+  if (key === 'Home') width = TAB_RAIL_MIN_WIDTH;
+  else if (key === 'End') width = TAB_RAIL_MAX_WIDTH;
+  else if (key === 'Enter') width = TAB_RAIL_DEFAULT_WIDTH;
+  else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+    const direction = key === 'ArrowLeft' ? -1 : 1;
+    width = (Number(input.currentWidth) || TAB_RAIL_DEFAULT_WIDTH) + direction * (input.shiftKey ? 32 : 8);
+  } else {
+    return null;
+  }
+  return resolveTabRailWidth({ ...input, width });
+}
+
 // COD-122: Monitor "Tmux Sessions" row label policy. A row carries up to three
 // identifiers — the tab name (user-facing L1 label), the tmux session name
 // (e.g. "codeman-1fac7304"), and the agent (Claude/Codex) session id. The tab name
@@ -258,6 +294,139 @@ function computeTabScrollLeft(input) {
     target = tabRight + pad - clientWidth;
   }
   return Math.min(Math.max(Math.round(target), 0), maxScroll);
+}
+
+// Session lineage lines — geometry for the arc drawn between a tab and a tab it
+// spawned (a worker started through the codeman agent skill, which passes its own
+// id as parentSessionId). Pure: the caller measures and appends, this decides.
+//
+// Horizontal tabs use a U-bridge HANGING BELOW the strip, from the parent's bottom
+// edge to the child's bottom edge, so the relationship reads as a bracket rather than
+// as a line crossing tabs. Vertical tabs use an orthogonal tree connector in the
+// reserved left gutter; reusing the horizontal formula there makes the equal X centers
+// collapse into the bright vertical stroke through labels reported in COD-311.
+//
+// ⚠ A WRAPPED STRIP USED TO GET ITS OWN SHAPE, AND THAT SHAPE WAS THE BUG. When the
+// desktop strip wraps (`tabs-two-rows` / `tabs-auto-wrap`) a parent on row 1 and its
+// child on row 2 are ~4px apart vertically, so the old parent-bottom → child-TOP bezier
+// had a 4px span to work with and drew a flat horizontal line inside the row gap
+// (reported as "they connect already, but the lines are straight and not easy visible"),
+// and three siblings drew three of them on top of each other. Aiming BOTH ends at the
+// tab BOTTOMS and putting the control points below the LOWER row gives the wrapped case
+// the same bracket as the flat case: it leaves the parent downward, crosses the lower
+// row once, and comes back up under the child. Same formula, no branch.
+//
+// Returns null when the edge must not be drawn: a missing/degenerate rect, or an
+// endpoint scrolled outside the strip. `.session-tabs` is `overflow-x: auto`, so a
+// scrolled-out tab still HAS a rect — one lying over the logo or the header
+// buttons. Skipping is honest; clamping would point at a tab that isn't there.
+// ⚠ THE DIP IS WHAT MAKES THE ARC AN ARC, and it has now been mis-tuned in BOTH
+// directions, so treat these numbers as a corridor rather than a dial to crank:
+// - Too shallow (the first ship, 44px cap): a skill worker is appended to the END of
+//   the strip, so a lead-to-worker span is 800-1500px, and a 44px cap over 1300px is
+//   a 33px sag, a line that reads as STRAIGHT across the terminal (#285).
+// - Too deep (the 104px cap that replaced it): in the wrapped-strip case the cap and
+//   the FULL row offset stacked, bowing the bracket ~106px into the terminal text
+//   (owner screenshot 2026-08-15, "die Linien machen einen grossen Bogen nach unten").
+// The dip is measured from the STRIP'S BOTTOM EDGE (falling back to the lower tab
+// bottom when the strip rect is missing or shorter than its tabs), which buys two
+// things at once: the bow needs no per-row offsets stacked on top, and a same-row
+// arc between ROW-1 tabs of a wrapped strip clears row 2's labels instead of being
+// drawn through them (the retune's own first draft had exactly that regression).
+const LINEAGE_DIP_BASE_PX = 14;
+const LINEAGE_DIP_PER_PX = 0.06;
+const LINEAGE_DIP_MIN_PX = 22;
+const LINEAGE_DIP_MAX_PX = 64;
+// Siblings nest by this much. Widened with the stroke: at 2.5px plus its glow, arcs 6px
+// apart bled into one thick band instead of reading as three separate lines.
+const LINEAGE_SIBLING_STEP_PX = 8;
+const LINEAGE_STRIP_TOLERANCE_PX = 4;
+// COD-311: the vertical rail reserves 24px in CSS. Tracks start near its left edge
+// and move right for siblings, while both endpoints stay on the tab's left border.
+// With depth clamped to 6, 6 + (6 * 3) = 24, still inside that gutter.
+const LINEAGE_VERTICAL_TRACK_INSET_PX = 6;
+const LINEAGE_VERTICAL_SIBLING_STEP_PX = 3;
+const LINEAGE_VERTICAL_ANCHOR_CLEARANCE_PX = 4;
+// Lineage palette, assigned per CHILD in first-seen order and cycled (session-lineage.js).
+// The empty FIRST entry means "no override": the CSS then falls back to --session-blue,
+// which every skin block tunes for its own background, so a lone arc keeps the
+// skin-aware blue that shipped in 1.18.2. The fixed entries are deliberately vivid
+// (owner call 2026-08-15: matrix green, pinkish, violet, red, turquoise "and so on");
+// they ride the same double glow as the blue, which is what keeps them legible over
+// terminal text on every skin.
+const LINEAGE_COLORS = ['', '#00ff66', '#ff5ea8', '#a78bfa', '#ff5252', '#2dd4bf', '#ffa940'];
+
+function computeLineagePath(input) {
+  const parent = input?.parent;
+  const child = input?.child;
+  if (!parent || !child) return null;
+
+  const pw = Number(parent.width) || 0;
+  const ph = Number(parent.height) || 0;
+  const cw = Number(child.width) || 0;
+  const ch = Number(child.height) || 0;
+  if (pw <= 0 || ph <= 0 || cw <= 0 || ch <= 0) return null;
+
+  const orientation = input?.orientation === 'vertical' ? 'vertical' : 'horizontal';
+  const strip = input?.strip;
+  const depth = Math.max(0, Math.min(6, Number(input?.depth) || 0));
+  const pLeft = Number(parent.left);
+  const cLeft = Number(child.left);
+  const pTop = Number(parent.top);
+  const cTop = Number(child.top);
+  if (![pLeft, cLeft, pTop, cTop].every(Number.isFinite)) return null;
+
+  if (orientation === 'vertical') {
+    const py = pTop + ph / 2;
+    const cy = cTop + ch / 2;
+    if (strip && Number(strip.height) > 0) {
+      const min = Number(strip.top) - LINEAGE_STRIP_TOLERANCE_PX;
+      const max = Number(strip.top) + Number(strip.height) + LINEAGE_STRIP_TOLERANCE_PX;
+      if (py < min || py > max || cy < min || cy > max) return null;
+    }
+
+    const stripLeft = strip && Number.isFinite(Number(strip.left))
+      ? Number(strip.left)
+      : Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_TRACK_INSET_PX * 2;
+    const requestedTrack =
+      stripLeft + LINEAGE_VERTICAL_TRACK_INSET_PX + depth * LINEAGE_VERTICAL_SIBLING_STEP_PX;
+    const trackX = Math.min(requestedTrack, Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_ANCHOR_CLEARANCE_PX);
+    const d = `M ${r1(pLeft)} ${r1(py)} H ${r1(trackX)} V ${r1(cy)} H ${r1(cLeft)}`;
+    return { d, endX: cLeft, endY: cy, sameRow: false };
+  }
+
+  const px = pLeft + pw / 2;
+  const cx = cLeft + cw / 2;
+  if (strip && Number(strip.width) > 0) {
+    const min = Number(strip.left) - LINEAGE_STRIP_TOLERANCE_PX;
+    const max = Number(strip.left) + Number(strip.width) + LINEAGE_STRIP_TOLERANCE_PX;
+    if (px < min || px > max || cx < min || cx > max) return null;
+  }
+
+  const pBottom = pTop + ph;
+  const cBottom = cTop + ch;
+  const sameRow = Math.abs(pTop + ph / 2 - (cTop + ch / 2)) <= Math.min(ph, ch) / 2;
+
+  // Both ends anchor on the tab BOTTOM, and the control points hang below the WHOLE
+  // strip, so one formula covers a flat strip, a wrapped pair, and a same-row pair
+  // sitting above further rows (see the corridor note above the constants).
+  const span = Math.abs(cx - px);
+  const stripBottom =
+    strip && Number(strip.height) > 0 && Number.isFinite(Number(strip.top))
+      ? Number(strip.top) + Number(strip.height)
+      : Number.NEGATIVE_INFINITY;
+  const baseline = Math.max(pBottom, cBottom, stripBottom);
+  const dip =
+    Math.min(LINEAGE_DIP_MAX_PX, Math.max(LINEAGE_DIP_MIN_PX, LINEAGE_DIP_BASE_PX + span * LINEAGE_DIP_PER_PX)) +
+    depth * LINEAGE_SIBLING_STEP_PX;
+  const yc = baseline + dip;
+  const d = `M ${r1(px)} ${r1(pBottom)} C ${r1(px)} ${r1(yc)}, ${r1(cx)} ${r1(yc)}, ${r1(cx)} ${r1(cBottom)}`;
+  return { d, endX: cx, endY: cBottom, sameRow };
+}
+
+// One decimal is plenty for a screen-space path and keeps the `d` string short.
+function r1(n) {
+  return Math.round(n * 10) / 10;
 }
 
 // COD-134 — Terminal WebSocket reconnect policy.
@@ -359,6 +528,41 @@ function computeConnectionLossUi(input) {
   };
 }
 
+// SSE staleness policy: is this stream a zombie?
+//
+// An EventSource that stops delivering does not always error. A proxy that
+// idle-closed the connection, a laptop resumed from sleep, a tailnet
+// reconnect: `onerror` never fires, the header dot stays green, and every
+// SSE-driven surface (tab status dots, sessions created on another device,
+// renames) freezes until the user reloads. The server writes a
+// `sse:heartbeat` frame every 15s, so silence longer than three of them means
+// the stream is dead even though the transport still claims otherwise.
+//
+// Stale ONLY when the transport believes it is 'connected': the other states
+// already have the reconnect/backoff machinery running, and re-firing on top
+// of them would stack reconnects. That guard is also the loop breaker: a
+// forced reconnect leaves 'connected' immediately, so the watchdog cannot
+// fire again while one is in flight. `navigator.onLine === false` is not
+// staleness either; there is nothing to reconnect to yet.
+//
+// Pure: no DOM, no timers, no side effects. `now` is passed in.
+const SSE_STALE_TIMEOUT_MS = 45000; // three missed 15s heartbeats
+
+function computeSseStale(input) {
+  const {
+    lastMessageAt = null,
+    now = 0,
+    status = 'connected',
+    isOnline = true,
+    timeoutMs = SSE_STALE_TIMEOUT_MS,
+  } = input || {};
+  if (!isOnline || status !== 'connected') return false;
+  // No frame has ever arrived: `init` lands on connect, so this is a stream
+  // that has not opened yet rather than one that went quiet.
+  if (typeof lastMessageAt !== 'number' || !(lastMessageAt > 0)) return false;
+  return now - lastMessageAt >= timeoutMs;
+}
+
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -370,15 +574,35 @@ if (typeof window !== 'undefined') {
     computeTabScrollLeft,
     TAB_SCROLL_REVEAL_PX,
   };
+  window.CodemanTabRail = {
+    DEFAULT_WIDTH: TAB_RAIL_DEFAULT_WIDTH,
+    MIN_WIDTH: TAB_RAIL_MIN_WIDTH,
+    MAX_WIDTH: TAB_RAIL_MAX_WIDTH,
+    resolveWidth: resolveTabRailWidth,
+    resolveKeyboardWidth: resolveTabRailKeyboardWidth,
+  };
   window.CodemanMonitorLabels = {
     resolveMonitorRowLabels,
   };
   window.CodemanWsReconnect = {
     plan: planWsReconnect,
   };
+  window.CodemanLineage = {
+    computePath: computeLineagePath,
+    DIP_MIN_PX: LINEAGE_DIP_MIN_PX,
+    DIP_MAX_PX: LINEAGE_DIP_MAX_PX,
+    SIBLING_STEP_PX: LINEAGE_SIBLING_STEP_PX,
+    VERTICAL_TRACK_INSET_PX: LINEAGE_VERTICAL_TRACK_INSET_PX,
+    VERTICAL_SIBLING_STEP_PX: LINEAGE_VERTICAL_SIBLING_STEP_PX,
+    COLORS: LINEAGE_COLORS,
+  };
   window.CodemanConnectionLoss = {
     compute: computeConnectionLossUi,
     GRACE_MS: CONNECTION_LOSS_GRACE_MS,
+  };
+  window.CodemanSseStale = {
+    compute: computeSseStale,
+    TIMEOUT_MS: SSE_STALE_TIMEOUT_MS,
   };
 }
 
@@ -492,6 +716,9 @@ const BUILTIN_RESPAWN_PRESETS = [
 const SSE_EVENTS = {
   // Core
   INIT: 'init',
+
+  // Transport
+  HEARTBEAT: 'sse:heartbeat',
 
   // Session lifecycle
   SESSION_CREATED: 'session:created',
@@ -698,6 +925,7 @@ const SSE_EVENTS = {
 
   // Web tabs (dashboard URLs)
   WEBVIEW_CHANGED: 'webview:changed',
+  TAB_LAYOUT_CHANGED: 'tab:layoutChanged',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -725,4 +953,91 @@ const _htmlEscapePattern = /[&<>"']/g;
 function escapeHtml(text) {
   if (typeof text !== 'string') return '';
   return text.replace(_htmlEscapePattern, (ch) => _htmlEscapeMap[ch]);
+}
+
+/**
+ * Human-readable byte size for the partial-history banner (#258).
+ *
+ * Deliberately coarse: the banner is telling the user roughly how much of a
+ * transcript they are looking at, not accounting for bytes. Sub-KB amounts read
+ * as "less than 1 KB" rather than an exact count nobody can act on.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatHistoryBytes(bytes) {
+  const n = typeof bytes === 'number' && isFinite(bytes) && bytes > 0 ? bytes : 0;
+  if (n < 1024) return 'less than 1 KB';
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Decide what the partial-history banner should say (#258).
+ *
+ * PURE so the three states can be tested without a DOM. They exist because one
+ * `truncated` boolean could not distinguish messages the user acts on very
+ * differently:
+ *   - recoverable: we tailed for speed and the rest is still retained
+ *   - atCeiling:   the FULL capture itself hit the byte ceiling
+ *   - exhausted:   a full pull was refused as a downgrade, so this is all there is
+ *
+ * @param {{truncated?: boolean, reason?: string|null, source?: string|null,
+ *          fullSize?: number, retainedBytes?: number, exhausted?: boolean}} state
+ * @returns {{visible: boolean, message: string, canLoadMore: boolean}}
+ */
+function computeHistoryTruncationNotice(state = {}) {
+  if (!state.truncated) return { visible: false, message: '', canLoadMore: false };
+
+  const retained = Math.max(0, state.retainedBytes || 0);
+  const dropped = Math.max(0, (state.fullSize || 0) - retained);
+  const shown = formatHistoryBytes(retained);
+  // A full-history capture that was STILL capped is already everything tmux
+  // holds, so the remainder is out of reach rather than one request away.
+  const atCeiling = state.source === 'mux-full-history' && state.reason === 'capped';
+
+  if (state.exhausted) {
+    return {
+      visible: true,
+      message: `Showing all ${shown} of retained history. Earlier output is no longer kept for this session.`,
+      canLoadMore: false,
+    };
+  }
+  if (atCeiling) {
+    return {
+      visible: true,
+      message: `Showing the most recent ${shown}. Earlier output exceeds the retained history limit and cannot be recovered.`,
+      canLoadMore: false,
+    };
+  }
+  return {
+    visible: true,
+    message: `Showing the most recent ${shown} of this session. ${formatHistoryBytes(dropped)} more may still be retained.`,
+    canLoadMore: true,
+  };
+}
+
+/**
+ * Where to land after a rewrite that REPLACES the whole buffer (#259).
+ *
+ * The backpressure refresh clears the terminal and reloads it from a freshly
+ * fetched capture, so an absolute viewportY captured beforehand means nothing
+ * afterwards: the line it pointed at may not even exist. Distance from the
+ * BOTTOM is the anchor that survives a rewrite, so a reader stays roughly
+ * where they were reading.
+ *
+ * Returns null when the user was following live output, which the caller reads
+ * as "scroll to bottom" — the historical behavior, kept for that case.
+ *
+ * @param {{linesFromBottom?: number, baseY?: number}} input
+ * @returns {number|null}
+ */
+function computeRewriteScrollLine(input) {
+  const linesFromBottom = input?.linesFromBottom || 0;
+  if (!(linesFromBottom > 0)) return null;
+  return Math.max(0, (input?.baseY || 0) - linesFromBottom);
+}
+
+if (typeof window !== 'undefined') {
+  window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
 }

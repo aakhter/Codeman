@@ -1028,6 +1028,25 @@ html.mobile-init .file-browser-panel {
     border-color: rgba(34, 211, 238, 0.5);
   }
 
+  /* Pi mode colors on mobile.
+     `!important` is load-bearing here, not noise: styles.css nests its skin rules
+     inside `html:not([data-skin="og"])`, so a bare `.btn-toolbar.btn-run` in there
+     resolves to (0,2,1) and outranks this (0,2,0) `.mode-pi` pair regardless of
+     load order. The antigravity block right above omits it and is consequently
+     dead on every non-og skin (i.e. on the default) — do not copy that. */
+  .btn-toolbar.btn-run.mode-pi,
+  .btn-toolbar.btn-run-gear.mode-pi {
+    background: #33121f !important;
+    border-color: rgba(244, 114, 182, 0.3) !important;
+    color: #fce7f3 !important;
+  }
+
+  .btn-toolbar.btn-run.mode-pi:active,
+  .btn-toolbar.btn-run-gear.mode-pi:active {
+    background: #9d174d !important;
+    border-color: rgba(244, 114, 182, 0.5) !important;
+  }
+
   /* Run mode dropdown menu — positioned above toolbar on mobile */
   .run-mode-menu {
     bottom: 100%;
@@ -2873,6 +2892,46 @@ html.mobile-init .file-browser-panel {
     text-overflow: ellipsis;
   }
 
+  /* Third line of the row body: "STARTED 3d ago · IDLE 12m". Monospace so the
+     numbers stay put as the clock rewrites them every 20s, and dimmer than the
+     path above it: it answers a question you only ask on purpose. */
+  .mobile-overview-row-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-width: 0;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.63rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .mobile-overview-meta-item {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mobile-overview-meta-key {
+    margin-right: 0.3rem;
+    opacity: 0.6;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .mobile-overview-meta-sep {
+    opacity: 0.45;
+  }
+
+  /* The freshest signal on the row: while a session is actually running, how
+     long the current turn has been going is the number the eye should land on.
+     Same treatment the desktop rail gives its "active" stamp. */
+  .mobile-overview-row--working .mobile-overview-meta-since {
+    color: var(--green);
+    opacity: 0.95;
+  }
+
   .mobile-overview-dot {
     flex-shrink: 0;
     width: 9px;
@@ -3098,6 +3157,12 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
 html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-toolbar.btn-run.mode-antigravity, .btn-toolbar.btn-run-gear.mode-antigravity) {
   background: linear-gradient(135deg, #0e7490, #0891b2);
   border-color: #155e75;
+  color: #ffffff;
+}
+
+html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-toolbar.btn-run.mode-pi, .btn-toolbar.btn-run-gear.mode-pi) {
+  background: linear-gradient(135deg, #be185d, #db2777);
+  border-color: #9d174d;
   color: #ffffff;
 }
 
@@ -3352,9 +3417,36 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
     border-radius: 10px;
   }
 
-  /* Save moves into the header; the bottom action bar would cost 60px */
+  /* Save + Close are the two ways out of the sheet (save-and-close vs
+     discard-and-close), hit in the same corner with the same thumb, so here —
+     and only here, since Save is header-only below 860px — they share a
+     recessed tray and matching pill geometry instead of reading as a fat
+     accent pill parked beside a stray × glyph. Tray colors come from skin
+     tokens, never a hardcoded black alpha, or the light skins get a grey slab.
+     `:has()` keeps the tray off the two sheets that carry a lone × (Session
+     Options and Add Case save from inside their own forms). */
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions:has(.set-head-save) {
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-input);
+  }
+
+  /* Save moves into the header; the bottom action bar would cost 60px. Both
+     buttons grow to a thumb-sized target and keep identical heights so the
+     pair reads as one cluster — 36 + the tray's 3px padding and 1px border on
+     each side is a 44px block, the same height as the phone header. */
   :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-save {
     display: inline-flex;
+    height: 36px;
+    padding: 0 16px;
+    font-size: 0.86rem;
+  }
+
+  :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-head-actions .modal-close {
+    width: 36px;
+    height: 36px;
+    font-size: 1.35rem;
   }
 
   :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-foot {

@@ -82,8 +82,7 @@ Object.assign(CodemanApp.prototype, {
 
     const total = files.length;
     let done = 0;
-    let failed = 0;
-    const results = new Array(total); // preserve selection order for insertion
+    const results = new Array(total); // structured results preserve selection order
     const progress = () =>
       this.showToast(`Uploading ${Math.min(done + 1, total)}/${total} document${total > 1 ? 's' : ''}…`, 'info');
     progress();
@@ -95,11 +94,14 @@ Object.assign(CodemanApp.prototype, {
         const i = next++;
         if (i >= total) return;
         try {
-          results[i] = await this._uploadDocument(sessionId, files[i]);
+          results[i] = { ok: true, path: await this._uploadDocument(sessionId, files[i]) };
         } catch (err) {
-          failed++;
           console.warn('Document upload failed:', err);
-          results[i] = null;
+          results[i] = {
+            ok: false,
+            fileName: this._normalizeDocumentUploadText(files[i]?.name, 'document', 60),
+            reason: this._normalizeDocumentUploadText(err?.message, 'Upload failed'),
+          };
         } finally {
           done++;
           if (done < total) progress();
@@ -108,7 +110,7 @@ Object.assign(CodemanApp.prototype, {
     };
     await Promise.all(Array.from({ length: Math.min(this._uploadConcurrency || 3, total) }, () => worker()));
 
-    const paths = results.filter(Boolean);
+    const paths = results.filter((result) => result?.ok).map((result) => result.path);
     if (paths.length > 0) {
       // JSON.stringify each path so spaces/quotes/control chars can't break the
       // block, then join into a single [Attachments: "a", "b"] block. NO trailing
@@ -118,12 +120,23 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Final status: successes, plus any failures / cap so nothing is silent.
+    const failures = results.filter((result) => result && !result.ok);
+    const firstFailure = failures[0];
     const parts = [];
     if (paths.length > 0) parts.push(`${paths.length} document${paths.length > 1 ? 's' : ''} ready`);
-    if (failed > 0) parts.push(`${failed} failed`);
+    if (firstFailure) parts.push(`${failures.length} failed`);
     if (capped) parts.push(`max ${this._maxBatchDocuments} per batch`);
-    const tone = paths.length > 0 ? (failed > 0 || capped ? 'info' : 'success') : 'error';
-    this.showToast(parts.join(' · ') || 'No documents uploaded', tone);
+    let finalMessage = parts.join(' · ') || 'No documents uploaded';
+    if (firstFailure) finalMessage += `: ${firstFailure.fileName} — ${firstFailure.reason}`;
+    const tone = paths.length > 0 ? (failures.length > 0 || capped ? 'info' : 'success') : 'error';
+    this.showToast(this._normalizeDocumentUploadText(finalMessage, 'No documents uploaded'), tone);
+  },
+
+  // Server errors are untrusted display text. Keep the useful reason while
+  // preventing multiline/oversized responses from taking over the toast.
+  _normalizeDocumentUploadText(value, fallback, maxLength = 160) {
+    const normalized = (typeof value === 'string' ? value : fallback).replace(/\s+/g, ' ').trim();
+    return (normalized || fallback).slice(0, maxLength);
   },
 
   async _uploadDocument(sessionId, file) {
@@ -138,16 +151,16 @@ Object.assign(CodemanApp.prototype, {
       body: form,
     });
 
+    const data = await resp.json().catch(() => null);
     if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      throw new Error(data.error || 'HTTP ' + resp.status);
+      throw new Error(typeof data?.error === 'string' && data.error ? data.error : 'HTTP ' + resp.status);
     }
 
-    const data = await resp.json();
-    if (!data.success) {
-      throw new Error(data.error || 'Upload failed');
+    const agentPath = data?.success === true ? data.data?.agentPath : null;
+    if (typeof agentPath !== 'string' || agentPath.trim().length === 0) {
+      throw new Error('Upload failed');
     }
-    return data.data.agentPath;
+    return agentPath;
   },
 
   // Remove a Codeman-uploaded attachment copy (COD-241 unit 3). Only ever called

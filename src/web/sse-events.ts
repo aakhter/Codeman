@@ -5,8 +5,9 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * 158 event constants organized by category:
+ * 159 event constants organized by category:
  * - **Core** (1): init
+ * - **Transport** (1): sse:heartbeat
  * - **Session lifecycle** (25): created, updated, deleted, terminal, idle, working, parked, resumed, ...
  * - **Session: Ralph** (6): ralphLoopUpdate, todoUpdate, completionDetected, ...
  * - **Session: Bash tools** (3): bashToolStart, bashToolEnd, bashToolsUpdate
@@ -51,6 +52,22 @@
 
 /** Sent to each SSE client on initial connection with full app state. */
 export const Init = 'init' as const;
+
+// ─── Transport ───────────────────────────────────────────────────────────────
+
+/**
+ * Liveness frame written to every SSE client every `SSE_HEARTBEAT_INTERVAL`.
+ * Payload: `{ t: <epoch ms> }`.
+ *
+ * Carries no application data; its only job is to be *observable*. This was a
+ * `:keepalive` SSE **comment**, and comments are invisible to `EventSource` by
+ * spec, so a stream that stopped delivering without erroring (a proxy that
+ * idle-closed it, a laptop resumed from sleep, a tailnet reconnect) was
+ * undetectable to the client: `onerror` never fires and the UI freezes until a
+ * reload. A named event reaches a listener, which is what lets the client's
+ * staleness watchdog notice the silence and force a reconnect.
+ */
+export const Heartbeat = 'sse:heartbeat' as const;
 
 // ─── Session Lifecycle ───────────────────────────────────────────────────────
 
@@ -440,6 +457,8 @@ export const SessionOrderChanged = 'session:orderChanged' as const;
  *  Payload: `{ action: 'created' | 'updated' | 'deleted', id }`. The client
  *  re-fetches the list rather than patching from the payload. */
 export const WebviewChanged = 'webview:changed' as const;
+/** Owner-scoped layout invalidation. Payload contains only `{ owner, version }`. */
+export const TabLayoutChanged = 'tab:layoutChanged' as const;
 
 // ─── Namespace Re-export ─────────────────────────────────────────────────────
 
@@ -450,6 +469,9 @@ export const WebviewChanged = 'webview:changed' as const;
 export const SseEvent = {
   // Core
   Init,
+
+  // Transport
+  Heartbeat,
 
   // Session lifecycle
   SessionCreated,
@@ -657,4 +679,5 @@ export const SseEvent = {
 
   // Web tabs (dashboard URLs)
   WebviewChanged,
+  TabLayoutChanged,
 } as const;

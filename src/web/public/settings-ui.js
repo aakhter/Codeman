@@ -359,6 +359,12 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Phone overview home screen: only meaningful under 430px, so the row is
     // hidden elsewhere rather than offering a toggle that changes nothing.
+    // Spawn lineage lines: desktop-only (the overlay sits UNDER the fixed mobile
+    // header), so the row is hidden elsewhere rather than offering a toggle that
+    // changes nothing. Default ON — only an explicit false turns it off.
+    document.getElementById('appSettingsLineageLines').checked = settings.sessionLineageLines ?? defaults.sessionLineageLines ?? true;
+    const lineageItem = document.getElementById('appSettingsLineageLinesItem');
+    if (lineageItem) lineageItem.style.display = MobileDetection.getDeviceType() === 'desktop' ? '' : 'none';
     document.getElementById('appSettingsMobileOverview').checked = settings.mobileOverviewEnabled ?? defaults.mobileOverviewEnabled ?? false;
     const mobileOverviewItem = document.getElementById('appSettingsMobileOverviewItem');
     if (mobileOverviewItem) mobileOverviewItem.style.display = MobileDetection.getDeviceType() === 'mobile' ? '' : 'none';
@@ -389,6 +395,11 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
     document.getElementById('appSettingsTabOrientation').value =
       settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
+    const tabRailWidth = window.CodemanTabRail?.resolveWidth({
+      width: settings.tabRailWidth ?? defaults.tabRailWidth ?? 256,
+    }) ?? 256;
+    const tabRailWidthSelect = document.getElementById('appSettingsTabRailWidth');
+    if (tabRailWidthSelect) this.syncTabRailWidthSetting?.(tabRailWidth);
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     // Claude CLI settings
@@ -1275,6 +1286,7 @@ Object.assign(CodemanApp.prototype, {
       ['welcomeOpencodeBtn', 'opencode'],
       ['welcomeAntigravityBtn', 'antigravity'],
       ['welcomeGeminiBtn', 'gemini'],
+      ['welcomePiBtn', 'pi'],
       // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
       // without cloudflared can only ever produce "cloudflared not found".
       ['welcomeTunnelBtn', 'cloudflared'],
@@ -2154,6 +2166,7 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
+      sessionLineageLines: document.getElementById('appSettingsLineageLines').checked,
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
       showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
       showCronButton: document.getElementById('appSettingsShowCronButton').checked,
@@ -2170,6 +2183,7 @@ Object.assign(CodemanApp.prototype, {
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
       tabOrientation: document.getElementById('appSettingsTabOrientation').value,
+      tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       skin: document.getElementById('appSettingsSkin').value,
@@ -2332,8 +2346,9 @@ Object.assign(CodemanApp.prototype, {
     this.applyHeaderVisibilitySettings();
     this.applySkin();
     this.applyLocalization();
-    this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
+    this.applyTabOrientation({ settleRailWidth: true });  // COD-286/299 — one settled terminal resize
     this.applyTabWrapSettings();
+    this.applyLineageLineSettings?.();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
     this.renderApprovals?.();  // Approvals Inbox toggle (hide/show bell + drawer)
@@ -2380,8 +2395,15 @@ Object.assign(CodemanApp.prototype, {
       showAwayDigestButton: _adb,
       showCronButton: _crb,
       showTabDetachButton: _tdb,
+      // COD-299: rail width is a device-local display preference. Never sync a
+      // wide-monitor choice onto a smaller browser.
+      tabRailWidth: _trw,
       // Phone-only home surface, and absent from SettingsUpdateSchema (.strict()).
       mobileOverviewEnabled: _mov,
+      // Desktop-only tab decoration, per-device, and likewise absent from the
+      // .strict() schema — syncing it would push a desktop-shaped choice onto
+      // devices that cannot render it at all.
+      sessionLineageLines: _sll,
       ...serverSettings
     } = settings;
     try {
@@ -2610,6 +2632,7 @@ Object.assign(CodemanApp.prototype, {
       terminalBufferMaxBytes: 32 * 1024 * 1024,
       terminalBufferTrimBytes: 24 * 1024 * 1024,
       checkpointDefaultEnabled: true,
+      tabRailWidth: 256,
     };
     const isHandheld =
       MobileDetection.isHandheldDevice?.() ?? MobileDetection.getDeviceType() === 'mobile';
@@ -2994,7 +3017,7 @@ Object.assign(CodemanApp.prototype, {
   // (the header, and #tabRail inside .main). Cloning it would fork every alert
   // badge, drag handler and inline rename between two copies; moving keeps all of
   // app.js's getElementById('sessionTabs') paths working untouched.
-  applyTabOrientation() {
+  applyTabOrientation(options = {}) {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const setting = settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
@@ -3025,11 +3048,15 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
+    const shouldSettleRailWidth =
+      options.settleRailWidth === true && (orientation === 'vertical' || previous !== orientation);
+    this.applyTabRailWidth?.({ settle: shouldSettleRailWidth });
+
     if (previous !== orientation) {
       // The rail takes width from the terminal pane, so xterm must re-measure —
       // the ResizeObserver would eventually catch it, but 300ms late (COD-213).
       this.updateTabOverflowMode?.();
-      this.fitAddon?.fit();
+      if (!shouldSettleRailWidth) this.fitAddon?.fit();
       // Tabs and connection lines are geometry-dependent: re-render the strip and
       // redraw the SVG lines that are aimed at each tab's rect.
       this._fullRenderSessionTabs?.();
@@ -3247,12 +3274,13 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',
+          'sessionLineageLines',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. It

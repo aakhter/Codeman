@@ -18,9 +18,11 @@ import type {
   GeminiConfig,
   EffortLevel,
   AntigravityConfig,
+  PiConfig,
   SessionRemote,
   SessionDocker,
 } from './types.js';
+import type { CodexProviderEnvironment } from './codex-provider-identity.js';
 
 export type CommandDeliveryStage = 'text' | 'enter';
 
@@ -86,6 +88,7 @@ export interface CreateSessionOptions {
   codexConfig?: CodexConfig;
   geminiConfig?: GeminiConfig;
   antigravityConfig?: AntigravityConfig;
+  piConfig?: PiConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Ephemeral — not written to disk. */
@@ -126,6 +129,7 @@ export interface RespawnPaneOptions {
   codexConfig?: CodexConfig;
   geminiConfig?: GeminiConfig;
   antigravityConfig?: AntigravityConfig;
+  piConfig?: PiConfig;
   /** Resume a previous Claude conversation when respawning */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */
@@ -208,6 +212,12 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /** Get process stats for a single session */
   getProcessStats(sessionId: string): Promise<ProcessStats | null>;
+
+  /**
+   * Read the closed Codex provider environment from one surviving local tmux session.
+   * `null` means unreadable; `{}` means it was read successfully and uses ambient authentication.
+   */
+  getCodexProviderEnvironment?(muxName: string): Promise<CodexProviderEnvironment | null>;
 
   // ========== Input ==========
 

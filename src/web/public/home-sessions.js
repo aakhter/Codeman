@@ -36,7 +36,8 @@
  * @dependency app.js (this.sessions, this.cases, this.pendingHooks, selectSession)
  * @dependency mobile-overview.js (_mobileOverviewState, _mobileOverviewCaseFor, shouldUseMobileOverview)
  * @dependency ralph-panel.js (formatRelativeTime — the app's one relative-time formatter)
- * @dependency webview-tabs.js (this.webviews, this.webviewOrder, openWebview)
+ * @dependency tab-layout-browser.js/app.js (complete locally renderable ref projection)
+ * @dependency webview-tabs.js (this.webviews, openWebview)
  * @dependency mobile-handlers.js (MobileDetection)
  * @loadorder 12.56 of 16, after mobile-overview.js, before entrance-animations.js
  */
@@ -69,6 +70,7 @@ const HOME_SESSIONS_MODE_BADGE = {
   codex: 'cx',
   gemini: 'gm',
   antigravity: 'ag',
+  pi: 'pi',
 };
 
 Object.assign(CodemanApp.prototype, {
@@ -78,12 +80,14 @@ Object.assign(CodemanApp.prototype, {
 
   /**
    * Width-driven, like every other layout decision in the app. Explicitly yields
-   * to the phone overview: that surface already lists the same sessions, and two
-   * lists of the same thing on one screen is worse than none.
+   * to the phone overview and persistent vertical tab rail: those surfaces already
+   * list the same sessions, and two lists of the same thing on one screen is worse
+   * than none.
    */
   shouldShowHomeSessions() {
     if (this.isSoloWindow) return false;
     if (this.shouldUseMobileOverview?.()) return false;
+    if (document.documentElement.getAttribute('data-tab-orientation') === 'vertical') return false;
     return window.innerWidth >= HOME_SESSIONS_MIN_WIDTH;
   },
 
@@ -157,6 +161,60 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   /**
+   * Complete locally renderable refs in authoritative order. Collapse is absent
+   * here because Home is a complete tab list, not the visible vertical tree.
+   */
+  _homeTabRefs() {
+    if (this._tabLayoutFirstPaintPending) return [];
+    const projected = Array.isArray(this._completeTabRefs)
+      ? this._completeTabRefs
+      : this._refreshTabProjection?.()?.completeRefs;
+    if (Array.isArray(projected)) return projected;
+
+    // Safe legacy fallback while the authoritative layout is unavailable.
+    const sessions = Array.isArray(this.sessionOrder) ? [...this.sessionOrder] : [];
+    for (const id of this.sessions?.keys() || []) if (!sessions.includes(id)) sessions.push(id);
+    return [
+      ...sessions.filter((id) => this.sessions?.has(id)).map((id) => ({ kind: 'session', id })),
+      ...(this.webviewOrder || []).filter((id) => this.webviews?.has(id)).map((id) => ({ kind: 'webview', id })),
+    ];
+  },
+
+  /**
+   * One descriptor per locally renderable tab in authoritative interleaved order.
+   */
+  buildHomeTabRows() {
+    const cases = Array.isArray(this.cases) ? this.cases : [];
+    return this._homeTabRefs()
+      .map((ref, index) => {
+        if (ref.kind === 'webview') {
+          const webview = this.webviews?.get(ref.id);
+          return webview ? { kind: 'webview', id: ref.id, index, webview } : null;
+        }
+        const session = this.sessions?.get(ref.id);
+        if (!session) return null;
+        const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
+        const state = this._mobileOverviewState(session, this.pendingHooks?.get(ref.id));
+        const mode = session.mode || 'claude';
+        return {
+          kind: 'session',
+          id: ref.id,
+          index,
+          name: this.getSessionName ? this.getSessionName(session) : session.name || ref.id.slice(0, 8),
+          mode,
+          modeBadge: HOME_SESSIONS_MODE_BADGE[mode] || '',
+          caseName: matched ? matched.name : '',
+          dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
+          state,
+          pill: HOME_SESSIONS_PILL_LABEL[state] || state,
+          createdAt: Number(session.createdAt) || 0,
+          lastActivityAt: Number(session.lastActivityAt) || 0,
+        };
+      })
+      .filter(Boolean);
+  },
+
+  /**
    * One row per live session, in the user's tab order. State classification is
    * `_mobileOverviewState()` (mobile-overview.js) so both home screens agree on
    * what counts as needing you; the ORDER differs on purpose — the phone sorts
@@ -165,34 +223,7 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Array<object>} row descriptors, ready to render
    */
   buildHomeSessionRows() {
-    const cases = Array.isArray(this.cases) ? this.cases : [];
-    const order = Array.isArray(this.sessionOrder) ? this.sessionOrder : [];
-    const ids = order.filter((id) => this.sessions?.has(id));
-    // A session created before the order list caught up would otherwise be
-    // invisible here while its tab already exists.
-    for (const id of this.sessions?.keys() || []) if (!ids.includes(id)) ids.push(id);
-
-    return ids.map((id, index) => {
-      const session = this.sessions.get(id);
-      const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
-      const state = this._mobileOverviewState(session, this.pendingHooks?.get(id));
-      const mode = session.mode || 'claude';
-      return {
-        id,
-        index,
-        name: this.getSessionName ? this.getSessionName(session) : session.name || id.slice(0, 8),
-        mode,
-        modeBadge: HOME_SESSIONS_MODE_BADGE[mode] || '',
-        caseName: matched ? matched.name : '',
-        dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
-        state,
-        pill: HOME_SESSIONS_PILL_LABEL[state] || state,
-        // Epoch ms, straight off the session payload; formatting happens at
-        // render time so the clock below can redo it without a re-render.
-        createdAt: Number(session.createdAt) || 0,
-        lastActivityAt: Number(session.lastActivityAt) || 0,
-      };
-    });
+    return this.buildHomeTabRows().filter((row) => row.kind === 'session');
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -203,12 +234,17 @@ Object.assign(CodemanApp.prototype, {
     const el = document.getElementById('homeSessions');
     if (!el) return;
 
-    const rows = this.buildHomeSessionRows();
-    const webviews = (this.webviewOrder || []).map((id) => this.webviews?.get(id)).filter(Boolean);
+    if (this._tabLayoutFirstPaintPending) {
+      el.replaceChildren();
+      this._stopHomeSessionsClock();
+      return;
+    }
+
+    const rows = this.buildHomeTabRows();
 
     // Nothing open means nothing to list: an empty framed box next to a
     // first-run welcome screen is noise, not information.
-    if (!rows.length && !webviews.length) {
+    if (!rows.length) {
       el.hidden = true;
       el.replaceChildren();
       this._stopHomeSessionsClock();
@@ -217,12 +253,17 @@ Object.assign(CodemanApp.prototype, {
     el.hidden = false;
 
     el.replaceChildren();
-    el.appendChild(this._buildHomeSessionsHeader(rows.length + webviews.length));
+    el.appendChild(this._buildHomeSessionsHeader(rows.length));
 
     const list = document.createElement('div');
     list.className = 'home-sessions-list';
-    for (const row of rows) list.appendChild(this._buildHomeSessionRow(row));
-    for (const webview of webviews) list.appendChild(this._buildHomeSessionsWebviewRow(webview));
+    for (const row of rows) {
+      list.appendChild(
+        row.kind === 'webview'
+          ? this._buildHomeSessionsWebviewRow(row.webview, row.index)
+          : this._buildHomeSessionRow(row)
+      );
+    }
     el.appendChild(list);
 
     this._startHomeSessionsClock();
@@ -405,14 +446,22 @@ Object.assign(CodemanApp.prototype, {
     return item;
   },
 
-  /** A saved dashboard, listed after the sessions exactly as in the tab strip. */
-  _buildHomeSessionsWebviewRow(webview) {
+  /** A saved dashboard at its authoritative interleaved position. */
+  _buildHomeSessionsWebviewRow(webview, index) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'home-sessions-row home-sessions-row--web';
     item.dataset.hsAction = 'webview';
     item.dataset.hsWebview = webview.id;
     item.title = webview.url || webview.name;
+
+    if (index < 9) {
+      const number = document.createElement('span');
+      number.className = 'home-sessions-number';
+      number.setAttribute('data-i18n-skip', '');
+      number.textContent = String(index + 1);
+      item.appendChild(number);
+    }
 
     const dot = document.createElement('span');
     dot.className = 'home-sessions-dot home-sessions-dot--web';

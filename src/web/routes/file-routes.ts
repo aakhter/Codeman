@@ -35,6 +35,7 @@ import {
   type FileWriteData,
   type SessionAttachmentHistoryItem,
   type SessionState,
+  type AuthUser,
 } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
 import {
@@ -45,6 +46,7 @@ import {
   buildFileThumbnailRoute,
   getAttachmentType,
   isSupportedAttachmentExtension,
+  maxServableAttachmentBytes,
   resolveGeneratedArtifactReadPath,
   registerExternalAttachment,
   type AttachmentRecord,
@@ -83,8 +85,15 @@ import {
   parseBody,
   validateSessionFilePath,
 } from '../route-helpers.js';
+import { parseByteRange } from '../http-range.js';
 import { isSensitivePath } from '../sensitive-path.js';
-import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
+import {
+  ensureLocalUploadDirectory,
+  isBlockedAttachmentPath,
+  loadAttachmentGuardConfig,
+  resolveLocalUploadDirectory,
+  UploadDirectoryResolutionError,
+} from '../../config/attachment-guard.js';
 import { SseEvent } from '../sse-events.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 import {
@@ -172,7 +181,13 @@ function buildContentDisposition(disposition: 'inline' | 'attachment', fileName:
 
 function sendRawStream(reply: FastifyReply, content: ReadStream, onClose?: () => void): void {
   const headers = reply.getHeaders();
+  // hijack() answers on reply.raw, which keeps Fastify's own status handling out
+  // of the picture — so a 206 set with reply.code() has to be carried across by
+  // hand or a partial body would go out labelled 200 and the browser would treat
+  // it as the whole file.
+  const statusCode = reply.statusCode;
   reply.hijack();
+  reply.raw.statusCode = statusCode;
 
   for (const [name, value] of Object.entries(headers)) {
     if (value !== undefined) {
@@ -200,12 +215,56 @@ function sendRawStream(reply: FastifyReply, content: ReadStream, onClose?: () =>
   content.pipe(reply.raw);
 }
 
+/**
+ * Stream a file body, honoring a `Range` request header.
+ *
+ * Callers set Content-Type/Content-Disposition first; this adds the
+ * range-related headers and the body. Range support is what makes the file
+ * viewer's `<video>`/`<audio>` seekable: with a plain 200 and no
+ * `Accept-Ranges`, Chrome reports `video.seekable` as `[0, 0]`, the scrub bar
+ * does nothing and `currentTime = x` is silently reverted (measured against an
+ * 18MB mp4 before this existed). It also stops each seek from re-reading the
+ * whole file into memory.
+ */
+function sendFileBody(
+  reply: FastifyReply,
+  resolvedPath: string,
+  size: number,
+  rangeHeader: string | string[] | undefined,
+  onClose?: () => void
+): void {
+  reply.header('Accept-Ranges', 'bytes');
+  const range = parseByteRange(rangeHeader, size);
+
+  if (range.kind === 'unsatisfiable') {
+    reply
+      .code(416)
+      .header('Content-Range', `bytes */${size}`)
+      .type('application/json; charset=utf-8')
+      .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Requested range not satisfiable'));
+    onClose?.();
+    return;
+  }
+
+  if (range.kind === 'partial') {
+    reply.code(206);
+    reply.header('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+    reply.header('Content-Length', range.end - range.start + 1);
+    sendRawStream(reply, createReadStream(resolvedPath, { start: range.start, end: range.end }), onClose);
+    return;
+  }
+
+  reply.header('Content-Length', size);
+  sendRawStream(reply, createReadStream(resolvedPath), onClose);
+}
+
 async function serveRawFile(
   reply: FastifyReply,
   resolvedPath: string,
   fileName: string,
   extension: string,
   download?: boolean,
+  rangeHeader?: string | string[],
   maxSizeBytes?: number,
   onClose?: () => void
 ): Promise<void> {
@@ -224,24 +283,21 @@ async function serveRawFile(
       );
     return;
   }
-  const content = createReadStream(resolvedPath);
   if (download || extension === 'svg') {
     reply.header(
       'Content-Type',
       extension === 'svg' ? 'application/octet-stream' : MIME_TYPES[extension] || 'application/octet-stream'
     );
     reply.header('Content-Disposition', buildContentDisposition('attachment', fileName));
-    reply.header('Content-Length', stat.size);
     reply.header('X-Content-Type-Options', 'nosniff');
-    sendRawStream(reply, content, onClose);
+    sendFileBody(reply, resolvedPath, stat.size, rangeHeader, onClose);
     return;
   }
 
   reply.header('Content-Type', MIME_TYPES[extension] || 'application/octet-stream');
   reply.header('Content-Disposition', buildContentDisposition('inline', fileName));
-  reply.header('Content-Length', stat.size);
   reply.header('X-Content-Type-Options', 'nosniff');
-  sendRawStream(reply, content, onClose);
+  sendFileBody(reply, resolvedPath, stat.size, rangeHeader, onClose);
 }
 
 async function serveConvertedPreview(
@@ -341,11 +397,13 @@ async function resolveServableAttachmentPath(
 ): Promise<string | null> {
   let pathToCheck = record.filePath;
   let resolved = false;
+  let trustedBoundaryValidated = false;
   try {
     const generatedPath = await resolveGeneratedArtifactReadPath(record);
     if (generatedPath) {
       pathToCheck = generatedPath;
       resolved = true;
+      trustedBoundaryValidated = !!record.trustedUploadBoundary && !record.generatedArtifactBoundary;
     }
   } catch (err) {
     if (err instanceof AttachmentRegistrationError) {
@@ -369,7 +427,9 @@ async function resolveServableAttachmentPath(
   const blocked =
     isBlockedAttachmentPath(pathToCheck, guard.blockedTrees) ||
     isBlockedAttachmentPath(record.filePath, guard.blockedTrees) ||
-    (guard.confineToWorkspace && (!sessionWorkingDir || !validateSessionFilePath(sessionWorkingDir, pathToCheck)));
+    (guard.confineToWorkspace &&
+      !trustedBoundaryValidated &&
+      (!sessionWorkingDir || !validateSessionFilePath(sessionWorkingDir, pathToCheck)));
 
   if (blocked) {
     reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
@@ -750,7 +810,8 @@ async function buildDetectedAttachmentRouteItem(
 async function buildExternalAttachmentRouteItem(
   sessionId: string,
   item: SessionAttachmentHistoryItem,
-  sessionWorkingDir?: string
+  sessionWorkingDir: string | undefined,
+  authUser: AuthUser
 ): Promise<AttachmentHistoryRouteItem> {
   const safe = sanitizeAttachmentHistoryItem(item);
   if (!item.externalPath) {
@@ -758,9 +819,30 @@ async function buildExternalAttachmentRouteItem(
   }
 
   try {
+    let trustedUploadBoundary: string | undefined;
+    let forceWorkspaceConfinement = false;
+    if (item.uploadProvenance === 'codeman-upload') {
+      if (!sessionWorkingDir) throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      // COD-296: resolve-only — listing history must never create the upload
+      // directory. An absent directory means the uploaded copy is gone too, so
+      // this fails closed to `missing: true` via the catch below.
+      const uploadDirectory = await resolveLocalUploadDirectory(sessionWorkingDir, authUser);
+      if (!uploadDirectory) throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      const canonicalFile = realpathSync(item.externalPath);
+      if (dirname(canonicalFile) !== uploadDirectory.canonicalDir || pathBasename(canonicalFile) !== item.fileName) {
+        throw new AttachmentRegistrationError('Access to this file is blocked', 403);
+      }
+      if (uploadDirectory.kind === 'trusted') {
+        trustedUploadBoundary = uploadDirectory.canonicalDir;
+      } else {
+        forceWorkspaceConfinement = true;
+      }
+    }
     const event = await registerExternalAttachment(sessionId, item.externalPath, {
       sessionWorkingDir,
-      generatedArtifactBoundary: item.generatedArtifactBoundary,
+      generatedArtifactBoundary: item.uploadProvenance ? undefined : item.generatedArtifactBoundary,
+      trustedUploadBoundary,
+      forceWorkspaceConfinement,
     });
     // COD-241 unit 3: expose a workspace-relative path for Codeman-uploaded
     // copies (those inside .codeman-attachments/). The frontend gates its
@@ -770,10 +852,11 @@ async function buildExternalAttachmentRouteItem(
     // is surfaced. Non-workspace published files resolve to null → no relativePath
     // → no Remove button.
     const validated = sessionWorkingDir ? validateSessionFilePath(sessionWorkingDir, item.externalPath) : null;
-    const ownedRelativePath =
-      validated &&
-      (validated.relativePath === '.codeman-attachments' ||
-        validated.relativePath.startsWith(`.codeman-attachments${sep}`))
+    const ownedRelativePath = trustedUploadBoundary
+      ? pathPosix.join('.codeman-attachments', event.fileName)
+      : validated &&
+          (validated.relativePath === '.codeman-attachments' ||
+            validated.relativePath.startsWith(`.codeman-attachments${sep}`))
         ? validated.relativePath
         : undefined;
     return {
@@ -1127,7 +1210,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       await serveConvertedPreview(reply, resolvedPath, fileName, extension);
       return;
     }
-    await serveRawFile(reply, resolvedPath, fileName, extension);
+    await serveRawFile(reply, resolvedPath, fileName, extension, false, req.headers.range);
   });
 
   // File tree listing (tree mode) + server-side search (search mode, COD-236).
@@ -1426,7 +1509,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // remote workspace must be live so its saved connection configuration is
     // available, and findSessionOrFail preserves ownership checks.
     if (remote) findSessionOrFail(ctx, id, req);
-    const workingDir = getSessionAttachmentHistory(ctx, id, req)?.workingDir ?? findSessionOrFail(ctx, id).workingDir;
+    const workingDir =
+      getSessionAttachmentHistory(ctx, id, req)?.workingDir ?? findSessionOrFail(ctx, id, req).workingDir;
 
     if (!filePath) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
@@ -1948,6 +2032,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
 
     const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
 
     // Rate limit per (IP, sessionId): 20/min. Defends against disk-fill DoS.
     if (!consumeUploadToken(`${req.ip}:${id}`)) {
@@ -1955,8 +2040,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       reply.header('Retry-After', '60');
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
     }
-
-    const session = findSessionOrFail(ctx, id);
 
     if (!req.isMultipart()) {
       reply.code(400);
@@ -2047,11 +2130,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           notADirectoryMessage: '.codeman-attachments is not a regular directory',
         });
       } catch (err) {
+        req.log.warn({ category: 'attachment-upload', code: 'remote-transfer-failed', sessionId: id, err });
         reply.code(502);
-        return createErrorResponse(
-          ApiErrorCode.OPERATION_FAILED,
-          `Failed to transfer document to remote host: ${getErrorMessage(err)}`
-        );
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to transfer document to remote host');
       }
 
       // 2) Cache a local copy so the attachment registry can serve preview /
@@ -2066,10 +2147,11 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       } catch (err) {
         // The remote file is already in place (the agent can use it); we just
         // cannot serve a local preview. Surface it rather than half-register.
+        req.log.warn({ category: 'attachment-upload', code: 'remote-cache-failed', sessionId: id, err });
         reply.code(500);
         return createErrorResponse(
           ApiErrorCode.OPERATION_FAILED,
-          `Uploaded to remote but failed to cache locally: ${getErrorMessage(err)}`
+          'Uploaded document could not be prepared for preview'
         );
       }
 
@@ -2106,8 +2188,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           reply.code(err.statusCode);
           return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
         }
+        req.log.warn({ category: 'attachment-upload', code: 'remote-registration-failed', sessionId: id, err });
         reply.code(500);
-        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to register upload');
       }
 
       const remoteRoutes = buildAttachmentRoutes(id, remoteAttachmentId, ext);
@@ -2130,33 +2213,26 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     // (an agent could plant `.codeman-attachments -> ~/.ssh/`). lstat (not stat)
     // so we see the symlink itself; non-recursive mkdir + O_EXCL|O_NOFOLLOW on
     // the file open keep both dir-leaf creation and the write symlink-safe.
-    const attachmentsDir = join(session.workingDir, '.codeman-attachments');
+    let uploadDirectory;
     try {
-      const dirStat = await fs.lstat(attachmentsDir);
-      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-        reply.code(403);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.codeman-attachments is not a regular directory');
+      // COD-296: the upload path is the ONLY one allowed to create the directory.
+      uploadDirectory = await ensureLocalUploadDirectory(session.workingDir, getAuthUser(req));
+    } catch (err) {
+      if (err instanceof UploadDirectoryResolutionError) {
+        reply.code(err.statusCode);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
       }
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      try {
-        await fs.mkdir(attachmentsDir);
-      } catch (mkErr: unknown) {
-        // Concurrent uploads race to create the dir — losers get EEXIST. Treat an
-        // already-present REAL directory as success, but re-verify it isn't a
-        // symlink a racing actor planted.
-        if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
-        const raceStat = await fs.lstat(attachmentsDir);
-        if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) {
-          reply.code(403);
-          return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.codeman-attachments is not a regular directory');
-        }
-      }
+      req.log.warn({ category: 'attachment-upload', code: 'directory-resolution-failed', sessionId: id, err });
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Upload directory is unavailable');
     }
 
-    const dest = join(attachmentsDir, diskName);
+    const dest = join(uploadDirectory.canonicalDir, diskName);
 
     try {
+      if ((await fs.realpath(uploadDirectory.canonicalDir)) !== uploadDirectory.canonicalDir) {
+        throw new Error('upload directory changed');
+      }
       const fh = await fs.open(
         dest,
         fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
@@ -2168,8 +2244,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         await fh.close();
       }
     } catch (err: unknown) {
+      req.log.warn({ category: 'attachment-upload', code: 'write-failed', sessionId: id, err });
       reply.code(500);
-      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to write upload: ${getErrorMessage(err)}`);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to write upload');
     }
 
     // Register as an 'upload' attachment (workspace-confined), then surface it
@@ -2180,7 +2257,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     try {
       const event = await registerExternalAttachment(id, dest, {
         sessionWorkingDir: session.workingDir,
-        forceWorkspaceConfinement: true,
+        forceWorkspaceConfinement: uploadDirectory.kind === 'workspace',
+        trustedUploadBoundary: uploadDirectory.kind === 'trusted' ? uploadDirectory.canonicalDir : undefined,
         source: 'upload',
       });
       attachmentId = event.attachmentId;
@@ -2196,6 +2274,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
             mtimeMs: record.mtimeMs,
             timestamp: event.timestamp,
             generatedArtifactBoundary: record.generatedArtifactBoundary,
+            uploadProvenance: 'codeman-upload',
           })
         );
         ctx.persistSessionState(session);
@@ -2208,12 +2287,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         reply.code(err.statusCode);
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
       }
+      req.log.warn({ category: 'attachment-upload', code: 'registration-failed', sessionId: id, err });
       reply.code(500);
-      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to register upload: ${getErrorMessage(err)}`);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to register upload');
     }
 
-    const agentPath =
-      validateSessionFilePath(session.workingDir, dest)?.relativePath ?? join('.codeman-attachments', diskName);
+    const agentPath = pathPosix.join('.codeman-attachments', diskName);
     const routes = buildAttachmentRoutes(id, attachmentId, ext);
     return {
       success: true,
@@ -2543,11 +2622,94 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const { id } = req.params as { id: string };
     const rawPath = (req.query as { path?: string }).path;
 
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!rawPath || typeof rawPath !== 'string') {
       reply.code(400);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter');
+    }
+
+    let uploadDirectory;
+    try {
+      // COD-296: resolve-only — a delete must not create the directory it is
+      // about to look inside.
+      uploadDirectory = await resolveLocalUploadDirectory(session.workingDir, getAuthUser(req));
+    } catch (err) {
+      if (err instanceof UploadDirectoryResolutionError) {
+        reply.code(err.statusCode);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, err.message);
+      }
+      req.log.warn({ category: 'attachment-remove', code: 'directory-resolution-failed', sessionId: id, err });
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Upload directory is unavailable');
+    }
+
+    // COD-296: `null` (no .codeman-attachments/ at all) deliberately falls
+    // through to the workspace branch below rather than short-circuiting. An
+    // absent directory means "no upload can live here", NOT "the target does not
+    // exist" — the workspace branch already tells those apart correctly with the
+    // directory missing: an unresolvable path 404s, and a real workspace file
+    // outside the attachments dir still 403s. Short-circuiting to 404 here
+    // silently downgraded that 403.
+    if (uploadDirectory?.kind === 'trusted') {
+      const prefix = '.codeman-attachments/';
+      const leaf = rawPath.startsWith(prefix) ? rawPath.slice(prefix.length) : '';
+      if (!leaf || leaf === '.' || leaf === '..' || leaf.includes('/') || leaf.includes('\\') || leaf.includes(sep)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+
+      const target = join(uploadDirectory.canonicalDir, leaf);
+      let targetStat;
+      try {
+        if ((await fs.realpath(uploadDirectory.canonicalDir)) !== uploadDirectory.canonicalDir) {
+          throw new Error('trusted root changed');
+        }
+        targetStat = await fs.lstat(target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          reply.code(404);
+          return createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found');
+        }
+        req.log.warn({ category: 'attachment-remove', code: 'target-validation-failed', sessionId: id, err });
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+      if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+
+      const persistedHistory = session.getAttachmentHistoryForPersist() ?? [];
+      const owningHistory = persistedHistory.find((item) => {
+        if (item.uploadProvenance !== 'codeman-upload' || !item.externalPath) return false;
+        try {
+          return (
+            realpathSync(item.externalPath) === target &&
+            dirname(realpathSync(item.externalPath)) === uploadDirectory.canonicalDir
+          );
+        } catch {
+          return false;
+        }
+      });
+      if (!owningHistory) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only Codeman-uploaded files can be removed');
+      }
+
+      try {
+        await fs.unlink(target);
+      } catch (err) {
+        req.log.warn({ category: 'attachment-remove', code: 'unlink-failed', sessionId: id, err });
+        reply.code(500);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to remove file');
+      }
+
+      const record = attachmentRegistry.findByFilePath(id, target);
+      if (record) attachmentRegistry.remove(id, record.attachmentId);
+      const removed = session.removeAttachmentHistory((item) => item.id === owningHistory.id);
+      if (removed > 0) ctx.persistSessionState(session);
+      return { success: true, data: { removed: true, path: pathPosix.join(prefix, leaf) } };
     }
 
     // Resolve (symlink-safe) and confine to the workspace. A traversal/escape or
@@ -2576,8 +2738,9 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     try {
       await fs.rm(validated.resolvedPath, { force: true });
     } catch (err: unknown) {
+      req.log.warn({ category: 'attachment-remove', code: 'workspace-remove-failed', sessionId: id, err });
       reply.code(500);
-      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to remove file: ${getErrorMessage(err)}`);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to remove file');
     }
 
     // Best-effort cleanup of the in-memory registry + persisted history so the
@@ -2604,7 +2767,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     const items = await Promise.all(
       sessionHistory.history.map((item) =>
         (item.source === 'external'
-          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.workingDir)
+          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.workingDir, getAuthUser(req))
           : buildDetectedAttachmentRouteItem(id, sessionHistory.workingDir, item)
         ).catch(() => ({ ...sanitizeAttachmentHistoryItem(item), missing: true }))
       )
@@ -2677,13 +2840,23 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     try {
       // XLSX preview parsing is intentionally browser-local, but the preview
-      // response is capped before a stream is opened. Explicit downloads retain
-      // the existing attachment-route limit.
+      // response is capped before a stream is opened. Explicit downloads fall
+      // back to the cap that admitted the bytes in the first place (COD-297) —
+      // a hardcoded number here silently 413s a legitimately uploaded file
+      // whenever the upload knob is raised above it.
       const maxSizeBytes =
         record.extension === 'xlsx' && preview === 'true' && download !== 'true'
           ? MAX_XLSX_BROWSER_PREVIEW_BYTES
-          : 50 * 1024 * 1024;
-      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true', maxSizeBytes);
+          : maxServableAttachmentBytes(record);
+      await serveRawFile(
+        reply,
+        servePath,
+        record.fileName,
+        record.extension,
+        download === 'true',
+        req.headers.range,
+        maxSizeBytes
+      );
     } catch (err) {
       reply
         .code(500)
@@ -2997,7 +3170,16 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
           void staged.cleanup();
         };
         try {
-          await serveRawFile(reply, staged.path, rawBasename, ext, download === 'true', undefined, cleanup);
+          await serveRawFile(
+            reply,
+            staged.path,
+            rawBasename,
+            ext,
+            download === 'true',
+            req.headers.range,
+            undefined,
+            cleanup
+          );
         } catch (err) {
           cleanup();
           throw err;
@@ -3032,7 +3214,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       const rawBasename = filePath!.split('/').pop() || 'download';
       const maxSizeBytes =
         ext === 'xlsx' && preview === 'true' && download !== 'true' ? MAX_XLSX_BROWSER_PREVIEW_BYTES : undefined;
-      await serveRawFile(reply, resolvedPath, rawBasename, ext, download === 'true', maxSizeBytes);
+      await serveRawFile(reply, resolvedPath, rawBasename, ext, download === 'true', req.headers.range, maxSizeBytes);
     } catch (err) {
       reply
         .code(500)
@@ -3105,7 +3287,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.get('/api/sessions/:id/tail-file', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: filePath, lines } = req.query as { path?: string; lines?: string };
-    const session = findSessionOrFail(ctx, id);
+    // Ownership-aware lookup BEFORE any filesystem work or stream allocation (COD-294).
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!filePath) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing path parameter'));
@@ -3168,7 +3351,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   // malformed error envelope instead of wrapping it).
   app.delete('/api/sessions/:id/tail-file/:streamId', async (req) => {
     const { id, streamId } = req.params as { id: string; streamId: string };
-    findSessionOrFail(ctx, id); // Validates session exists
+    findSessionOrFail(ctx, id, req); // Validates the session exists AND is the caller's (COD-294)
     const closed = fileStreamManager.closeStream(streamId);
     return { closed };
   });
@@ -3190,7 +3373,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return;
     }
 
-    const session = findSessionOrFail(ctx, sessionId);
+    // Ownership-aware lookup BEFORE the path is resolved or the file is opened (COD-294).
+    const session = findSessionOrFail(ctx, sessionId, req);
     const validated = validateSessionFilePath(session.workingDir, filePath);
     if (!validated) {
       reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));

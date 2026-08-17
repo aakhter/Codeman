@@ -53,7 +53,8 @@ import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { canAccessOwned, getAuthUser, ownerFor, parseBody } from '../route-helpers.js';
 import { WebviewCreateSchema, WebviewProbeSchema, WebviewUpdateSchema } from '../schemas.js';
 import { SseEvent } from '../sse-events.js';
-import type { EventPort } from '../ports/index.js';
+import type { EventPort, TabLayoutPort } from '../ports/index.js';
+import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import {
   buildDownstreamResponseHeaders,
   buildProxyCorsHeaders,
@@ -98,28 +99,32 @@ function withWebviews<T>(fn: (list: Webview[]) => Promise<T> | T): Promise<T> {
   return next;
 }
 
-export function registerWebviewRoutes(app: FastifyInstance, ctx: EventPort): void {
+/** Tab-list/open ownership is exact; admin visibility must not become layout membership. */
+function belongsToLayoutOwner(resourceOwner: string | undefined, requestOwner: string | undefined): boolean {
+  return ownerLayoutKey(resourceOwner) === ownerLayoutKey(requestOwner);
+}
+
+export function registerWebviewRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort): void {
   registerCrudRoutes(app, ctx);
   registerProxyRoutes(app);
 }
 
 // ───────────────────────────── CRUD ─────────────────────────────
 
-function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
+function registerCrudRoutes(app: FastifyInstance, ctx: EventPort & TabLayoutPort): void {
   app.get('/api/webviews', async (req) => {
-    const user = getAuthUser(req);
+    const owner = ownerFor(req);
     const all = await readWebviews(configDir());
-    const webviews = all.filter((w) => canAccessOwned(user, w.owner));
+    const webviews = all.filter((webview) => belongsToLayoutOwner(webview.owner, owner));
     return { success: true, data: { webviews, maxLiveFrames: MAX_LIVE_WEBVIEW_FRAMES } };
   });
 
   app.post('/api/webviews', async (req, reply) => {
     const input = parseBody(WebviewCreateSchema, req.body);
     const owner = ownerFor(req);
-    const user = getAuthUser(req);
 
     const created = await withWebviews(async (list) => {
-      const mine = list.filter((w) => canAccessOwned(user, w.owner));
+      const mine = list.filter((webview) => belongsToLayoutOwner(webview.owner, owner));
       if (mine.length >= MAX_WEBVIEWS) return null;
 
       const webview: Webview = {
@@ -145,7 +150,26 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
         .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, `Webview limit reached (max ${MAX_WEBVIEWS})`));
     }
 
-    ctx.broadcast(SseEvent.WebviewChanged, { action: 'created', id: created.id });
+    try {
+      await ctx.tabLayouts.webviewCreated(ownerLayoutKey(created.owner));
+    } catch (error) {
+      // The saved webview and its layout ref are one logical creation. If the
+      // layout rejects the new ref (for example at MAX_TAB_REFS), roll back the
+      // already-written JSON record and publish neither creation event.
+      await withWebviews(async (list) => {
+        const index = list.findIndex((webview) => webview.id === created.id);
+        if (index >= 0) {
+          list.splice(index, 1);
+          await writeWebviews(configDir(), list);
+        }
+      });
+      throw error;
+    }
+    ctx.broadcast(SseEvent.WebviewChanged, {
+      action: 'created',
+      id: created.id,
+      owner: ownerLayoutKey(created.owner),
+    });
     return { success: true, data: created };
   });
 
@@ -175,7 +199,11 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
     // Any edit invalidates the outstanding capability. Otherwise a token minted
     // against the OLD url keeps proxying to it after the user repointed the tab.
     webviewCapabilities.revokeWebview(id);
-    ctx.broadcast(SseEvent.WebviewChanged, { action: 'updated', id });
+    ctx.broadcast(SseEvent.WebviewChanged, {
+      action: 'updated',
+      id,
+      owner: ownerLayoutKey(updated.owner),
+    });
     return { success: true, data: updated };
   });
 
@@ -187,9 +215,19 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
       const index = list.findIndex((w) => w.id === id);
       if (index === -1) return 'not-found' as const;
       if (!canAccessOwned(user, list[index].owner)) return 'forbidden' as const;
+      const removed = list[index];
       list.splice(index, 1);
       await writeWebviews(configDir(), list);
-      return 'deleted' as const;
+      try {
+        await ctx.tabLayouts.webviewDeleted(ownerLayoutKey(removed.owner), id);
+      } catch (error) {
+        // Still inside withWebviews' mutex: restore the exact record at its
+        // original position without overwriting any concurrent mutation.
+        list.splice(index, 0, removed);
+        await writeWebviews(configDir(), list);
+        throw error;
+      }
+      return { status: 'deleted' as const, owner: removed.owner };
     });
 
     if (result === 'not-found') {
@@ -201,7 +239,11 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
 
     webviewCapabilities.revokeWebview(id);
     socketCounts.delete(id);
-    ctx.broadcast(SseEvent.WebviewChanged, { action: 'deleted', id });
+    ctx.broadcast(SseEvent.WebviewChanged, {
+      action: 'deleted',
+      id,
+      owner: ownerLayoutKey(result.owner),
+    });
     return { success: true, data: { id } };
   });
 
@@ -223,13 +265,13 @@ function registerCrudRoutes(app: FastifyInstance, ctx: EventPort): void {
    * starts on open rather than on page load.
    */
   app.post<{ Params: { id: string } }>('/api/webviews/:id/open', async (req, reply) => {
-    const user = getAuthUser(req);
+    const owner = ownerFor(req);
     const { id } = req.params;
 
     const webview = await withWebviews(async (list) => {
       const index = list.findIndex((w) => w.id === id);
       if (index === -1) return 'not-found' as const;
-      if (!canAccessOwned(user, list[index].owner)) return 'forbidden' as const;
+      if (!belongsToLayoutOwner(list[index].owner, owner)) return 'forbidden' as const;
       list[index] = { ...list[index], lastOpenedAt: Date.now() };
       await writeWebviews(configDir(), list);
       return list[index];

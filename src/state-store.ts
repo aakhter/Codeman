@@ -40,6 +40,7 @@ import {
 } from './types.js';
 import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
 import { dataPath, CODEMAN_INSTANCE } from './config/instance.js';
+import { validateTabLayout, type TabLayout } from './tab-layout.js';
 
 /** Debounce delay for batching state writes (ms) */
 const SAVE_DEBOUNCE_MS = 500;
@@ -295,8 +296,15 @@ export class StateStore {
     if (this.state.sessionOrder) {
       parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
     }
-    if (this.state.sessionOrder) {
-      parts.push(`"sessionOrder":${JSON.stringify(this.state.sessionOrder)}`);
+    if (this.state.tabLayouts !== undefined) {
+      parts.push(`"tabLayouts":${JSON.stringify(this.state.tabLayouts)}`);
+    }
+    // ⚠️ This function is a hand-written ALLOWLIST, not a serializer over the
+    // whole state: a key absent here is silently dropped on every save, however
+    // correctly it was set in memory. `orchestrator` was missing, so orchestrator
+    // state never survived a restart (COD-265). Add new AppState keys here too.
+    if (this.state.orchestrator) {
+      parts.push(`"orchestrator":${JSON.stringify(this.state.orchestrator)}`);
     }
 
     return `{${parts.join(',')}}`;
@@ -537,16 +545,16 @@ export class StateStore {
    */
   cleanupStaleSessions(activeSessionIds: Set<string>): {
     count: number;
-    cleaned: Array<{ id: string; name?: string }>;
+    cleaned: Array<{ id: string; name?: string; owner?: string }>;
   } {
     const allSessionIds = Object.keys(this.state.sessions);
-    const cleaned: Array<{ id: string; name?: string }> = [];
+    const cleaned: Array<{ id: string; name?: string; owner?: string }> = [];
 
     for (const sessionId of allSessionIds) {
       if (!activeSessionIds.has(sessionId)) {
         if (this.state.sessions[sessionId]?.pinned === true) continue; // COD-142: pinned records persist even with no live session
         const name = this.state.sessions[sessionId]?.name;
-        cleaned.push({ id: sessionId, name });
+        cleaned.push({ id: sessionId, name, owner: this.state.sessions[sessionId]?.owner });
         delete this.state.sessions[sessionId];
         this.cachedSessionJsons.delete(sessionId);
         this.dirtySessions.delete(sessionId);
@@ -684,6 +692,18 @@ export class StateStore {
   /** Persists the global tab order (ordered sessionIds) and triggers a debounced save. COD-131. */
   setSessionOrder(order: string[]): void {
     this.state.sessionOrder = order;
+    this.save();
+  }
+
+  /** Returns an owner layout, or null before that owner has been migrated. */
+  getTabLayout(owner: string): TabLayout | null {
+    return this.state.tabLayouts?.[owner] ?? null;
+  }
+
+  /** Validates and atomically persists one owner layout. */
+  setTabLayout(owner: string, layout: TabLayout): void {
+    const validated = validateTabLayout(layout);
+    this.state.tabLayouts = { ...(this.state.tabLayouts ?? {}), [owner]: validated };
     this.save();
   }
 
