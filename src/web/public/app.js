@@ -6062,7 +6062,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
+          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
       _tabIdx++;
     }
@@ -6349,8 +6349,9 @@ class CodemanApp {
     }
   }
 
-  // One delegated Pointer Events system serves mouse, pen, and touch. The
-  // container survives structural renders, so listeners are installed once.
+  // One delegated Pointer Events system serves mouse, pen, and touch from the
+  // explicit ref/group drag handles. The container survives structural renders,
+  // so listeners are installed once without intercepting ordinary tab clicks.
   setupTabDragHandlers() {
     const container = this.$('sessionTabs');
     if (!container || this._tabPointerHandlersBound) return;
@@ -6361,8 +6362,7 @@ class CodemanApp {
       const handle = event.target.closest?.('[data-tab-group-drag]');
       const refHandle = event.target.closest?.('[data-tab-ref-drag]');
       const tab = event.target.closest?.('.session-tab');
-      if (event.pointerType === 'touch' && !handle && !refHandle) return;
-      if (!handle && !refHandle && (!tab || event.target.closest?.('button, input, select, textarea, a, .tab-actions'))) return;
+      if (!handle && !refHandle) return;
       const ref = tab
         ? tab.dataset.webviewId
           ? { kind: 'webview', id: tab.dataset.webviewId }

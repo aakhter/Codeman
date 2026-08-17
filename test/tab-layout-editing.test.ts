@@ -715,6 +715,7 @@ function makeInteractionApp() {
   app._inlineRenameActive = false;
   app._tabLayoutManaged = true;
   app._tabPointerHandlersBound = false;
+  app._tabPointerDrag = null;
   app._tabPendingFollowRefs = new Set();
   app._tabPlacementStates = new Map([
     ['session:child', { kind: 'session', id: 'child', state: 'inherited', parentId: 'parent', canFollow: false }],
@@ -1252,7 +1253,7 @@ describe('COD-307 roving tree and focus restoration', () => {
     expect(app.openTabRefMoveMenu).toHaveBeenCalledWith(expect.anything(), { kind: 'session', id: 'parent' });
   });
 
-  it('keeps horizontal Left/Right/Home/End navigation and Enter activation flat', () => {
+  it('keeps horizontal navigation flat and activates session/webview tabs with Enter or Space', () => {
     const app = makeInteractionApp();
     document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
     app._fullRenderSessionTabs();
@@ -1269,6 +1270,15 @@ describe('COD-307 roving tree and focus restoration', () => {
     tabs[0].focus();
     tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect(app.selectSession).toHaveBeenCalledWith('parent');
+    tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(app.selectSession).toHaveBeenCalledTimes(2);
+
+    const webview = tabs.find((tab) => tab.dataset.webviewId === 'web')!;
+    webview.focus();
+    webview.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    webview.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(app.openWebview).toHaveBeenNthCalledWith(1, 'web');
+    expect(app.openWebview).toHaveBeenNthCalledWith(2, 'web');
   });
 
   it('preserves a group rename input through debounced and authoritative render attempts', () => {
@@ -1403,7 +1413,10 @@ describe('COD-307 delegated pointer behavior', () => {
     const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"][data-tab-drop-index="1"]')!;
     (document as any).elementFromPoint = vi.fn(() => zone);
 
-    parent.dispatchEvent(pointerEvent('pointerdown', { pointerId: 71, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    const parentHandle = parent.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    parentHandle.dispatchEvent(
+      pointerEvent('pointerdown', { pointerId: 71, pointerType: 'mouse', clientX: 1, clientY: 1 })
+    );
     container.dispatchEvent(
       pointerEvent('pointermove', { pointerId: 71, pointerType: 'mouse', clientX: 20, clientY: 20 })
     );
@@ -1464,7 +1477,8 @@ describe('COD-307 delegated pointer behavior', () => {
     const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"][data-tab-drop-index="1"]')!;
     (document as any).elementFromPoint = vi.fn(() => zone);
 
-    tab.dispatchEvent(pointerEvent('pointerdown', { pointerId: 7, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    const handle = tab.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 7, pointerType: 'mouse', clientX: 1, clientY: 1 }));
     container.dispatchEvent(
       pointerEvent('pointermove', { pointerId: 7, pointerType: 'mouse', clientX: 3, clientY: 3 })
     );
@@ -1486,6 +1500,54 @@ describe('COD-307 delegated pointer behavior', () => {
     });
     expect(app._tabPointerDrag).toBeNull();
     expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
+  });
+
+  it('starts reference dragging only from the dedicated handle', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const tab = container.querySelector<HTMLElement>('[data-id="parent"]')!;
+
+    for (const target of [tab, tab.querySelector('.tab-status')!, tab.querySelector('.tab-name')!]) {
+      target.dispatchEvent(
+        pointerEvent('pointerdown', { pointerId: 17, pointerType: 'mouse', clientX: 1, clientY: 1 })
+      );
+      expect(app._tabPointerDrag).toBeNull();
+      expect(container.setPointerCapture).not.toHaveBeenCalled();
+    }
+    tab.dispatchEvent(pointerEvent('pointerdown', { pointerId: 19, pointerType: 'touch', clientX: 1, clientY: 1 }));
+    expect(app._tabPointerDrag).toBeNull();
+    expect(container.setPointerCapture).not.toHaveBeenCalled();
+
+    const handle = tab.querySelector<HTMLElement>('[data-tab-ref-drag]')!;
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 18, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    expect(app._tabPointerDrag?.source).toMatchObject({
+      type: 'ref',
+      ref: { kind: 'session', id: 'parent' },
+    });
+    expect(container.setPointerCapture).toHaveBeenCalledWith(18);
+  });
+
+  it('keeps the drag handle and tab actions separate from row activation', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+    const tab = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    const handlers = new Map(
+      ['.tab-ref-drag-handle', '.tab-gear', '.tab-detach', '.tab-close', '.tab-more'].map((selector) => [
+        selector,
+        tab.querySelector<HTMLElement>(selector)!.getAttribute('onclick'),
+      ])
+    );
+
+    for (const handler of handlers.values()) expect(handler).toContain('event.stopPropagation()');
+    expect(handlers.get('.tab-ref-drag-handle')).toContain('event.preventDefault()');
+    expect(handlers.get('.tab-gear')).toContain('app.openSessionOptions');
+    expect(handlers.get('.tab-detach')).toContain('app.detachSession');
+    expect(handlers.get('.tab-close')).toContain('app.requestCloseSession');
+    expect(handlers.get('.tab-more')).toContain('app.openTabRailActionMenu');
   });
 
   it('supports touch intent and fully cleans up on pointercancel without committing', () => {
@@ -1533,7 +1595,12 @@ describe('COD-307 delegated pointer behavior', () => {
     expect(container.querySelector('.tab-layout-drag-block')).toBeNull();
     const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
     expect(css).toMatch(/vertical[^}]*session-tab[^}]*\{[^}]*touch-action:\s*pan-y/s);
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*display:\s*inline-flex/s);
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*cursor:\s*grab/s);
     expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*touch-action:\s*none/s);
+    expect(css).toMatch(/\.session-tab\s*\{[^}]*cursor:\s*pointer/s);
+    expect(css).toMatch(/\.session-tab:hover\s*\{[^}]*background:/s);
+    expect(css).toMatch(/\.session-tab \.tab-close\s*\{[^}]*cursor:\s*pointer/s);
   });
 });
 
