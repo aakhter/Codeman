@@ -29,8 +29,12 @@ Object.assign(CodemanApp.prototype, {
     this.activeWebviewId = this.activeWebviewId || null;
     this._webviewMaxFrames = this._webviewMaxFrames || 6;
     this._webviewFrameLru = this._webviewFrameLru || [];
+    this._webviewNavigationGeneration = this._webviewNavigationGeneration || 0;
+    this._webviewNavigationId = this._webviewNavigationId || null;
+    this._webviewOpenGenerations = this._webviewOpenGenerations || new Map();
 
-    await this.refreshWebviews();
+    const acquired = await this.refreshWebviews();
+    if (!acquired) return;
 
     // Restore the device-local OPEN SET. The server tab layout is the only source
     // of placement/order; this compatibility array must never seed that layout.
@@ -39,16 +43,22 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async refreshWebviews() {
-    const data = await this._apiJson('/api/webviews');
-    if (!data) return;
+    let data;
+    try {
+      data = await this._apiJson('/api/webviews');
+    } catch {
+      return false;
+    }
+    if (!data || !Array.isArray(data.webviews)) return false;
     this.webviews = new Map((data.webviews || []).map((w) => [w.id, w]));
     if (typeof data.maxLiveFrames === 'number') this._webviewMaxFrames = data.maxLiveFrames;
     this.renderWebviewMenuItems();
+    return true;
   },
 
   /** SSE: the saved list changed (possibly on another device). */
   async _onWebviewChanged(data) {
-    await this.refreshWebviews();
+    if (!(await this.refreshWebviews())) return;
     // A dashboard deleted elsewhere must not linger as a dead tab here.
     if (data && data.action === 'deleted' && data.id) this._removeWebviewTab(data.id);
     this.renderSessionTabs();
@@ -191,6 +201,26 @@ Object.assign(CodemanApp.prototype, {
 
   // ── Opening / closing ─────────────────────────────────────────────────────
 
+  _beginWebviewOpenIntent(id) {
+    this._webviewNavigationGeneration = (this._webviewNavigationGeneration || 0) + 1;
+    this._webviewNavigationId = id;
+    this._webviewOpenGenerations = this._webviewOpenGenerations || new Map();
+    const idGeneration = (this._webviewOpenGenerations.get(id) || 0) + 1;
+    this._webviewOpenGenerations.set(id, idGeneration);
+    return { navigationGeneration: this._webviewNavigationGeneration, idGeneration };
+  },
+
+  _cancelPendingWebviewNavigation() {
+    this._webviewNavigationGeneration = (this._webviewNavigationGeneration || 0) + 1;
+    this._webviewNavigationId = null;
+  },
+
+  _cancelPendingWebviewOpen(id) {
+    this._webviewOpenGenerations = this._webviewOpenGenerations || new Map();
+    this._webviewOpenGenerations.set(id, (this._webviewOpenGenerations.get(id) || 0) + 1);
+    if (this._webviewNavigationId === id) this._cancelPendingWebviewNavigation();
+  },
+
   /**
    * Open (or focus) a dashboard tab. Mints a fresh capability every time: they are
    * memory-only and expire, so a tab reopened after a server restart must not reuse
@@ -199,18 +229,30 @@ Object.assign(CodemanApp.prototype, {
   async openWebview(id) {
     const webview = this.webviews.get(id);
     if (!webview) return;
+    const intent = this._beginWebviewOpenIntent(id);
 
+    const data = await this._apiJson(`/api/webviews/${encodeURIComponent(id)}/open`, { method: 'POST' });
+    if (!data) {
+      if (
+        this._webviewOpenGenerations.get(id) === intent.idGeneration &&
+        this._webviewNavigationGeneration === intent.navigationGeneration
+      ) {
+        this._webviewNavigationId = null;
+        this.showToast?.('Could not open URL', 'error');
+      }
+      return;
+    }
+    if (this._webviewOpenGenerations.get(id) !== intent.idGeneration) return;
+    if (data.webview) this.webviews.set(id, data.webview);
     if (!this.webviewOrder.includes(id)) {
       this.webviewOrder.push(id);
       this._persistWebviewOrder();
     }
-
-    const data = await this._apiJson(`/api/webviews/${encodeURIComponent(id)}/open`, { method: 'POST' });
-    if (!data) {
-      this.showToast?.('Could not open URL', 'error');
+    if (this._webviewNavigationGeneration !== intent.navigationGeneration) {
+      this.renderSessionTabs();
       return;
     }
-    if (data.webview) this.webviews.set(id, data.webview);
+    this._webviewNavigationId = null;
 
     const src = data.embedUrl || data.webview?.url || webview.url;
     this._mountWebviewFrame(id, src, data.webview || webview);
@@ -317,6 +359,9 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _removeWebviewTab(id) {
+    const before = this._refreshTabProjection?.();
+    const completeBefore = Array.isArray(before?.completeRefs) ? before.completeRefs : [];
+    this._cancelPendingWebviewOpen(id);
     this.webviewOrder = (this.webviewOrder || []).filter((x) => x !== id);
     this._webviewFrameLru = (this._webviewFrameLru || []).filter((x) => x !== id);
     this._persistWebviewOrder();
@@ -327,15 +372,17 @@ Object.assign(CodemanApp.prototype, {
 
     if (this.activeWebviewId === id) {
       this.activeWebviewId = null;
-      const next = this.webviewOrder[0];
-      if (next) {
-        this.openWebview(next);
-      } else {
-        this._hideWebviewLayer();
-        // Fall back to whatever session was last shown, or the welcome screen.
-        if (this.activeSessionId) this._updateActiveTabImmediate(this.activeSessionId);
-        else this.showWelcome?.();
-      }
+      this._hideWebviewLayer();
+      const targetIndex = completeBefore.findIndex((ref) => ref.kind === 'webview' && ref.id === id);
+      const isRenderable = (ref) =>
+        ref.kind === 'session' ? this.sessions?.has(ref.id) : this.webviewOrder.includes(ref.id);
+      const next =
+        completeBefore.slice(targetIndex + 1).find(isRenderable) ||
+        completeBefore.slice(0, Math.max(0, targetIndex)).reverse().find(isRenderable);
+      if (next?.kind === 'session') this.selectSession?.(next.id);
+      else if (next?.kind === 'webview') this.openWebview(next.id);
+      else if (this.activeSessionId) this._updateActiveTabImmediate(this.activeSessionId);
+      else this.showWelcome?.();
     }
   },
 

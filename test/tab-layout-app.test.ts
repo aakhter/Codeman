@@ -180,6 +180,26 @@ afterEach(() => {
 });
 
 describe('COD-306 CodemanApp integration', () => {
+  it('keeps a session selection authoritative over a pending webview response', async () => {
+    const app = makeApp();
+    const pending = deferred<any>();
+    app.activeSessionId = 's1';
+    app.activeWebviewId = null;
+    app.webviewOrder = [];
+    app._apiJson = vi.fn(() => pending.promise);
+    app._mountWebviewFrame = vi.fn();
+    app.renderSessionTabs = vi.fn();
+
+    const opening = app.openWebview('w1');
+    await app.selectSession('s1');
+    pending.resolve({ webview: app.webviews.get('w1'), embedUrl: '/webview/a/' });
+    await opening;
+
+    expect(app.activeSessionId).toBe('s1');
+    expect(app.activeWebviewId).toBeNull();
+    expect(app._mountWebviewFrame).not.toHaveBeenCalled();
+  });
+
   it('defers the rail render scheduler while first layout paint is pending', () => {
     const app = makeApp();
     app._tabLayoutFirstPaintPending = true;

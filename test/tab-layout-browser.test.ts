@@ -91,6 +91,14 @@ describe('COD-306 browser projection', () => {
       { kind: 'webview', id: 'w1' },
       { kind: 'session', id: 's1' },
     ]);
+    expect(h.project(layout(), { ...common, orientation: 'vertical' }).completeRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's1' },
+      { kind: 'session', id: 's3' },
+      { kind: 'webview', id: 'w2' },
+      { kind: 'session', id: 's4' },
+    ]);
   });
 
   it('uses legacy order before live insertion order for authoritative omissions', () => {
@@ -106,15 +114,21 @@ describe('COD-306 browser projection', () => {
 
   it('falls back to a deterministic legacy-flat projection', () => {
     const h = loadHelper();
-    expect(
-      h.projectFallback({
-        legacySessionOrder: ['s2', 's1'],
-        liveSessionIds: ['s1', 's2', 's3'],
-        openWebviewIds: ['w2', 'w1'],
-      })
-    ).toEqual({
+    const fallback = h.projectFallback({
+      legacySessionOrder: ['s2', 's1'],
+      liveSessionIds: ['s1', 's2', 's3'],
+      openWebviewIds: ['w2', 'w1'],
+    });
+    expect(fallback).toEqual({
       sessionOrder: ['s2', 's1', 's3'],
       visibleRefs: [
+        { kind: 'session', id: 's2' },
+        { kind: 'session', id: 's1' },
+        { kind: 'session', id: 's3' },
+        { kind: 'webview', id: 'w2' },
+        { kind: 'webview', id: 'w1' },
+      ],
+      completeRefs: [
         { kind: 'session', id: 's2' },
         { kind: 'session', id: 's1' },
         { kind: 'session', id: 's3' },

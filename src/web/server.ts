@@ -98,6 +98,7 @@ import { PushSubscriptionStore } from '../push-store.js';
 import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
 import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
+import { deriveWebviewSseHint } from './webview-sse.js';
 import {
   type SessionListenerRefs,
   createSessionListeners,
@@ -2309,6 +2310,12 @@ export class WebServer extends EventEmitter {
     // exact owner plus admins, never by resolving a client-supplied ref.
     if (event.startsWith('tab:')) {
       return deriveTabLayoutSseHint(data);
+    }
+    // Saved-webview invalidations carry only the trusted affected owner and
+    // resource identity. Admin edits of foreign records route to that resource
+    // owner (plus admins), never to the requesting admin's personal workspace.
+    if (event.startsWith('webview:')) {
+      return deriveWebviewSseHint(data);
     }
     // Session-scoped families: resolve the owner from the payload's session id.
     const SESSION_PREFIXES = [

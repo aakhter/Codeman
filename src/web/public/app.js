@@ -5342,8 +5342,9 @@ class CodemanApp {
 
   _refreshTabProjection() {
     if (this._tabLayoutFirstPaintPending) {
-      const pending = { sessionOrder: [], visibleRefs: [], sections: [], hiddenTabGroupByRef: {} };
+      const pending = { sessionOrder: [], completeRefs: [], visibleRefs: [], sections: [], hiddenTabGroupByRef: {} };
       this.sessionOrder = pending.sessionOrder;
+      this._completeTabRefs = pending.completeRefs;
       this._visibleTabRefs = pending.visibleRefs;
       this._tabLayoutSections = pending.sections;
       this._hiddenTabGroupByRef = new Map();
@@ -5351,6 +5352,7 @@ class CodemanApp {
     }
     const projection = this._projectTabLayout();
     this.sessionOrder = projection.sessionOrder;
+    this._completeTabRefs = projection.completeRefs;
     this._visibleTabRefs = projection.visibleRefs;
     this._tabLayoutSections = projection.sections;
     this._hiddenTabGroupByRef = new Map(Object.entries(projection.hiddenTabGroupByRef || {}));
@@ -6867,6 +6869,10 @@ class CodemanApp {
   }
 
   async selectSession(sessionId, options = {}) {
+    // A session choice supersedes any webview response still in flight. The
+    // request may finish and leave that dashboard open in the background, but
+    // it must not mount or steal the active surface after this intent.
+    this._cancelPendingWebviewNavigation?.();
     // If this session is popped out into its own window, raise that window
     // instead of showing it inline (focus-on-click for detached tabs). If we
     // owned a now-closed window, _raiseDetached re-docks and returns false so

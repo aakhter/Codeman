@@ -174,8 +174,11 @@ describe('POST /api/webviews', () => {
   });
 
   it('broadcasts the change so other devices re-fetch', async () => {
-    await create({ name: 'G', url: 'http://127.0.0.1:4000/' });
-    expect(broadcasts.map((b) => b.event)).toContain('webview:changed');
+    const created = (await create({ name: 'G', url: 'http://127.0.0.1:4000/' })).json().data;
+    expect(broadcasts).toContainEqual({
+      event: 'webview:changed',
+      data: { action: 'created', id: created.id, owner: '@single' },
+    });
   });
 
   it('persists across a fresh read of the store', async () => {
@@ -318,6 +321,10 @@ describe('PATCH /api/webviews/:id', () => {
     expect(res.json().data.url).toBe('http://127.0.0.1:4001/');
     // A token minted against the OLD url must not survive the repoint.
     expect(webviewCapabilities.resolve(cap)).toBeUndefined();
+    expect(broadcasts).toContainEqual({
+      event: 'webview:changed',
+      data: { action: 'updated', id, owner: '@single' },
+    });
   });
 
   it('404s an unknown id', async () => {
@@ -341,6 +348,10 @@ describe('DELETE /api/webviews/:id', () => {
     expect((await app.inject({ method: 'DELETE', url: `/api/webviews/${id}` })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews).toEqual([]);
     expect(webviewCapabilities.resolve(cap)).toBeUndefined();
+    expect(broadcasts).toContainEqual({
+      event: 'webview:changed',
+      data: { action: 'deleted', id, owner: '@single' },
+    });
   });
 
   it('keeps the exact saved record and emits nothing when layout deletion fails', async () => {
@@ -372,11 +383,21 @@ describe('DELETE /api/webviews/:id', () => {
         url: '/api/webviews/bob-view',
         payload: { name: 'Admin corrected' },
       });
+      const updateEvent = broadcasts.at(-1);
       const deleted = await ownedApp.inject({ method: 'DELETE', url: '/api/webviews/bob-view' });
+      const deleteEvent = broadcasts.at(-1);
 
       expect(updated.statusCode).toBe(200);
       expect(updated.json().data.owner).toBe('bob');
       expect(deleted.statusCode).toBe(200);
+      expect(updateEvent).toEqual({
+        event: 'webview:changed',
+        data: { action: 'updated', id: 'bob-view', owner: 'bob' },
+      });
+      expect(deleteEvent).toEqual({
+        event: 'webview:changed',
+        data: { action: 'deleted', id: 'bob-view', owner: 'bob' },
+      });
     } finally {
       await ownedApp.close();
       if (previous === undefined) delete process.env.CODEMAN_MULTIUSER;

@@ -261,6 +261,8 @@
     ]);
     const processedStoredKeys = new Set();
     const ownerSessions = [];
+    const completeRefs = [];
+    const completeSeen = new Set();
     const visibleRefs = [];
     const sections = [];
     const hiddenTabGroupByRef = {};
@@ -274,7 +276,12 @@
       } else if (storedKeys.has(key)) {
         return false;
       }
-      if (!renderable(ref) || seen.has(key)) return false;
+      if (!renderable(ref)) return false;
+      if (!completeSeen.has(key)) {
+        completeSeen.add(key);
+        completeRefs.push({ kind: ref.kind, id: ref.id });
+      }
+      if (seen.has(key)) return false;
       if (orientation === 'vertical' && isCollapsed && key !== highlighted) {
         if (groupId) hiddenTabGroupByRef[key] = groupId;
         return false;
@@ -358,19 +365,21 @@
       });
     }
 
-    return { sessionOrder: ownerSessions, visibleRefs, sections, hiddenTabGroupByRef };
+    return { sessionOrder: ownerSessions, completeRefs, visibleRefs, sections, hiddenTabGroupByRef };
   }
 
   function projectFallback(options = {}) {
     const legacy = stableIds(options.legacySessionOrder);
     const live = stableIds(options.liveSessionIds);
     const sessionOrder = [...legacy.filter((id) => live.includes(id)), ...live.filter((id) => !legacy.includes(id))];
+    const visibleRefs = [
+      ...sessionOrder.map((id) => ({ kind: 'session', id })),
+      ...stableIds(options.openWebviewIds).map((id) => ({ kind: 'webview', id })),
+    ];
     return {
       sessionOrder,
-      visibleRefs: [
-        ...sessionOrder.map((id) => ({ kind: 'session', id })),
-        ...stableIds(options.openWebviewIds).map((id) => ({ kind: 'webview', id })),
-      ],
+      completeRefs: visibleRefs.map((ref) => ({ ...ref })),
+      visibleRefs,
       sections: [],
     };
   }
