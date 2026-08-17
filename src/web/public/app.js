@@ -713,6 +713,7 @@ class CodemanApp {
     this.fileBrowserFilter = '';
     this.fileBrowserAllExpanded = false;
     this.fileBrowserDragListeners = null;
+    this.fileBrowserCurrentDir = '';
     // Show hidden (dot-prefixed) files and folders in the File Viewer tree.
     // Per-device, persisted to its own localStorage key by panels-ui.js. Safe to
     // call a mixin method here: instantiation is deferred to DOMContentLoaded,
