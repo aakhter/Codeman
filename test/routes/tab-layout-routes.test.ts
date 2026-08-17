@@ -22,10 +22,15 @@ async function harness(username?: string, role: 'admin' | 'user' = 'user') {
     });
   }
   const service = {
-    get: vi.fn(async () => layout()),
+    getSnapshot: vi.fn(async () => ({ layout: layout(), placements: [] })),
     put: vi.fn(async (_owner: string, desired: unknown, baseVersion: number) => ({
       status: 'updated' as const,
       layout: { ...(desired as TabLayout), version: baseVersion + 1 },
+    })),
+    putOperations: vi.fn(async (_owner: string, _operations: unknown[], baseVersion: number) => ({
+      status: 'updated' as const,
+      layout: layout(baseVersion + 1),
+      placements: [],
     })),
   };
   registerTabLayoutRoutes(app, { tabLayouts: service } as never);
@@ -42,7 +47,7 @@ describe('tab layout routes', () => {
     const { app, service } = await harness();
     const response = await app.inject({ method: 'GET', url: '/api/tab-layout?owner=foreign' });
     expect(response.statusCode).toBe(200);
-    expect(service.get).toHaveBeenCalledWith('@single');
+    expect(service.getSnapshot).toHaveBeenCalledWith('@single');
     await app.close();
   });
 
@@ -50,7 +55,7 @@ describe('tab layout routes', () => {
     vi.stubEnv('CODEMAN_MULTIUSER', '1');
     const { app, service } = await harness('admin-a', 'admin');
     await app.inject({ method: 'GET', url: '/api/tab-layout?owner=someone-else' });
-    expect(service.get).toHaveBeenCalledWith('admin-a');
+    expect(service.getSnapshot).toHaveBeenCalledWith('admin-a');
     await app.close();
   });
 
@@ -72,6 +77,27 @@ describe('tab layout routes', () => {
     const response = await app.inject({ method: 'PUT', url: '/api/tab-layout', payload: { baseVersion: -1 } });
     expect(response.statusCode).toBe(400);
     expect(service.put).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('routes semantic operation batches by authenticated owner and rejects ambiguous payloads', async () => {
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
+    const { app, service } = await harness('alice');
+    const operations = [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }];
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: { baseVersion: 3, operations },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(service.putOperations).toHaveBeenCalledWith('alice', operations, 3);
+
+    const ambiguous = await app.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: { baseVersion: 3, operations, layout: layout() },
+    });
+    expect(ambiguous.statusCode).toBe(400);
     await app.close();
   });
 

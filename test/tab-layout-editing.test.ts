@@ -5,7 +5,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { followParent, setManualPlacement, type TabRefMetadata } from '../src/tab-layout.js';
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
 const HELPER_SOURCE = readFileSync(join(PUBLIC, 'tab-layout-browser.js'), 'utf8');
@@ -126,7 +125,7 @@ describe('COD-307 browser semantic mirror', () => {
   });
 });
 
-describe('COD-309 browser child-placement semantics', () => {
+describe('COD-309 browser child-placement intents', () => {
   const metadata = [
     { kind: 'session', id: 'parent', ownerValid: true },
     { kind: 'session', id: 'child', parentSessionId: 'parent', ownerValid: true },
@@ -135,7 +134,7 @@ describe('COD-309 browser child-placement semantics', () => {
     { kind: 'webview', id: 'web', ownerValid: true },
   ];
 
-  it('mirrors manual placement and Follow parent again with immediate nested normalization', () => {
+  it('keeps manual placement optimistic but leaves Follow-parent derivation to the server', () => {
     const h = loadHelper();
     const initial = layout();
     initial.groups[0].refs = [
@@ -144,83 +143,18 @@ describe('COD-309 browser child-placement semantics', () => {
     ];
     initial.ungrouped.unshift({ kind: 'session', id: 'child', placement: 'manual' });
 
-    const followed = h.applyOperation(initial, {
-      type: 'followParent',
-      ref: { kind: 'session', id: 'child' },
-      metadata,
-    });
-    expect(followed.groups[0].refs.map((ref: Ref) => ref.id)).toEqual(['parent', 'child', 'grandchild']);
-    expect(followed.groups[0].refs[1]).toEqual({ kind: 'session', id: 'child' });
-
-    const manual = h.applyOperation(followed, {
+    const manual = h.applyOperation(initial, {
       type: 'setManualPlacement',
-      ref: { kind: 'session', id: 'child' },
+      ref: { kind: 'session', id: 'parent' },
       manual: true,
     });
-    expect(manual.groups[0].refs[1]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
-  });
-
-  it('keeps the browser semantic results in parity with the authoritative TypeScript model', () => {
-    const h = loadHelper();
-    const source = layout() as any;
-    source.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
-    source.ungrouped.unshift({ kind: 'session', id: 'grandchild' });
-    const authoritativeMetadata = metadata.map((item, order) => ({
-      ...item,
-      order,
-      visible: true,
-    })) as TabRefMetadata[];
-
+    expect(manual.groups[0].refs[0]).toEqual({ kind: 'session', id: 'parent', placement: 'manual' });
     expect(
-      h.applyOperation(source, {
-        type: 'setManualPlacement',
-        ref: { kind: 'session', id: 'parent' },
-        manual: true,
-      })
-    ).toEqual(setManualPlacement(source, { kind: 'session', id: 'parent' }, true));
-    expect(
-      h.applyOperation(source, {
-        type: 'followParent',
-        ref: { kind: 'session', id: 'child' },
-        metadata: authoritativeMetadata,
-      })
-    ).toEqual(followParent(source, { kind: 'session', id: 'child' }, authoritativeMetadata));
-  });
-
-  it('classifies inherited, manual, dangling, and cycle placement without offering invalid follow', () => {
-    const h = loadHelper();
-    const inherited = h.placementState(layout(), { kind: 'session', id: 'child' }, metadata);
-    expect(inherited).toMatchObject({ state: 'inherited', canFollow: false, parentId: 'parent' });
-
-    const manualLayout = layout();
-    manualLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
-    expect(h.placementState(manualLayout, { kind: 'session', id: 'child' }, metadata)).toMatchObject({
-      state: 'manual',
-      canFollow: true,
-    });
-    expect(h.placementState(manualLayout, { kind: 'session', id: 'child' }, metadata.slice(1))).toMatchObject({
-      state: 'dangling',
-      canFollow: false,
-    });
-
-    const cyclic = [
-      { kind: 'session', id: 'parent', parentSessionId: 'child', ownerValid: true },
-      { kind: 'session', id: 'child', parentSessionId: 'parent', ownerValid: true },
-    ];
-    expect(h.placementState(manualLayout, { kind: 'session', id: 'child' }, cyclic)).toMatchObject({
-      state: 'cycle',
-      canFollow: false,
-    });
+      h.applyOperation(initial, { type: 'followParent', ref: { kind: 'session', id: 'child' }, metadata })
+    ).toEqual(initial);
     expect(() =>
-      h.applyOperation(manualLayout, {
-        type: 'followParent',
-        ref: { kind: 'session', id: 'child' },
-        metadata: [
-          { kind: 'session', id: 'child', parentSessionId: 'parent' },
-          { kind: 'session', id: 'parent', ownerValid: false },
-        ],
-      })
-    ).toThrow(/owner-valid parent/);
+      h.applyOperation(initial, { type: 'followParent', ref: { kind: 'session', id: 'missing' }, metadata })
+    ).toThrow(/unknown ref/);
   });
 });
 
@@ -301,10 +235,25 @@ describe('COD-307 optimistic write coordinator', () => {
     const put = vi
       .fn()
       .mockResolvedValueOnce({ ok: false, status: 409, layout: remote })
-      .mockImplementationOnce(async ({ layout: desired }: any) => ({
+      .mockImplementationOnce(async () => ({
         ok: true,
         status: 200,
-        layout: { ...desired, version: 9 },
+        layout: {
+          ...remote,
+          version: 9,
+          groups: remote.groups.map((group: any) =>
+            group.id === 'g1'
+              ? {
+                  ...group,
+                  refs: [
+                    { kind: 'session', id: 'parent' },
+                    { kind: 'session', id: 'child' },
+                  ],
+                }
+              : group
+          ),
+          ungrouped: remote.ungrouped.filter((ref: Ref) => ref.id !== 'child'),
+        },
       }));
     const coordinator = h.createEditCoordinator({
       initialLayout: initial,
@@ -607,6 +556,10 @@ function makeInteractionApp() {
   app._inlineRenameActive = false;
   app._tabLayoutManaged = true;
   app._tabPointerHandlersBound = false;
+  app._tabPendingFollowRefs = new Set();
+  app._tabPlacementStates = new Map([
+    ['session:child', { kind: 'session', id: 'child', state: 'inherited', parentId: 'parent', canFollow: false }],
+  ]);
   app._tabFocusIdentity = null;
   app.detachedSessions = new Set();
   app.tabAlerts = new Map();
@@ -627,11 +580,22 @@ function makeInteractionApp() {
 
 function enableRealSemanticEditing(app: Record<string, any>) {
   app._tabLayoutEditCoordinator = null;
-  app._putTabLayout = vi.fn(async ({ layout: next }: { layout: Layout }) => ({
-    ok: true,
-    status: 200,
-    layout: { ...next, version: next.version + 1 },
-  }));
+  app._putTabLayout = vi.fn(async ({ layout: next, operations }: { layout: Layout; operations?: any[] }) => {
+    let authoritative = next;
+    if (operations?.some((operation) => operation.type === 'followParent')) {
+      const child = authoritative.ungrouped.find((ref) => ref.kind === 'session' && ref.id === 'child');
+      if (child) {
+        authoritative = {
+          ...authoritative,
+          groups: authoritative.groups.map((group) =>
+            group.id === 'g1' ? { ...group, refs: [...group.refs, { kind: 'session', id: 'child' }] } : group
+          ),
+          ungrouped: authoritative.ungrouped.filter((ref) => !(ref.kind === 'session' && ref.id === 'child')),
+        };
+      }
+    }
+    return { ok: true, status: 200, layout: { ...authoritative, version: authoritative.version + 1 } };
+  });
   app._putTabLayoutKeepalive = vi.fn(() => true);
 }
 
@@ -718,7 +682,25 @@ describe('COD-307 subtree-aware move destinations', () => {
 });
 
 describe('COD-309 shipping placement UI', () => {
-  it('renders understandable escaped placement status and runs Follow parent again through the real coordinator', () => {
+  it('refreshes placement accessibility during an unchanged-structure incremental render', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
+    app._fullRenderSessionTabs();
+    const before = document.querySelector<HTMLElement>('[data-id="child"]')!;
+    expect(before.getAttribute('aria-label')).toContain('can follow Parent');
+
+    app.sessions.get('parent').name = 'Renamed parent';
+    app._renderSessionTabsImmediate();
+
+    const child = document.querySelector<HTMLElement>('[data-id="child"]')!;
+    const badge = child.querySelector<HTMLElement>('.tab-placement-state--manual')!;
+    expect(child.getAttribute('aria-label')).toContain('Placed manually; can follow Renamed parent');
+    expect(child.title).toContain('Placed manually; can follow Renamed parent');
+    expect(badge.getAttribute('aria-label')).toBe('Placed manually; can follow Renamed parent');
+    expect(badge.title).toBe('Placed manually; can follow Renamed parent');
+  });
+
+  it('renders understandable escaped placement status and runs Follow parent again through the real coordinator', async () => {
     const app = makeInteractionApp();
     app.sessions.get('parent').name = 'Parent <unsafe>';
     enableRealSemanticEditing(app);
@@ -741,6 +723,8 @@ describe('COD-309 shipping placement UI', () => {
     );
     expect(placementSummary?.getAttribute('aria-disabled')).toBe('true');
     clickMenuItem('Follow parent again');
+    expect(document.querySelector('.tab-placement-state--following')?.textContent).toBe('Following parent');
+    await app._tabLayoutEditCoordinator.flush();
 
     expect(app.showToast).not.toHaveBeenCalled();
     expect(app.tabLayout.groups[0].refs.map((ref: Ref) => ref.id)).toEqual(['parent', 'child']);
@@ -761,6 +745,13 @@ describe('COD-309 shipping placement UI', () => {
     document.querySelector('.tab-layout-ref-move-menu')?.remove();
 
     app.sessions.delete('parent');
+    app._tabPlacementStates.set('session:child', {
+      kind: 'session',
+      id: 'child',
+      state: 'dangling',
+      parentId: 'parent',
+      canFollow: false,
+    });
     app._lastTabStructureKey = null;
     app._fullRenderSessionTabs();
     child = document.querySelector<HTMLElement>('[data-id="child"]')!;
@@ -779,6 +770,13 @@ describe('COD-309 shipping placement UI', () => {
     ).toBe(false);
 
     app.sessions.set('parent', { id: 'parent', name: 'Parent', parentSessionId: 'child' });
+    app._tabPlacementStates.set('session:child', {
+      kind: 'session',
+      id: 'child',
+      state: 'cycle',
+      parentId: 'parent',
+      canFollow: false,
+    });
     app._lastTabStructureKey = null;
     app._fullRenderSessionTabs();
     child = document.querySelector<HTMLElement>('[data-id="child"]')!;
@@ -792,6 +790,13 @@ describe('COD-309 shipping placement UI', () => {
       const app = makeInteractionApp();
       app.sessions.get('child').owner = 'alice';
       app.sessions.get('parent').owner = 'bob';
+      app._tabPlacementStates.set('session:child', {
+        kind: 'session',
+        id: 'child',
+        state: 'dangling',
+        parentId: 'parent',
+        canFollow: false,
+      });
       app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
       app._fullRenderSessionTabs();
       const child = document.querySelector<HTMLElement>('[data-id="child"]')!;
@@ -983,6 +988,40 @@ function pointerEvent(type: string, values: Record<string, unknown>) {
 }
 
 describe('COD-307 delegated pointer behavior', () => {
+  it('previews and commits a nested subtree through the real edit coordinator/write path', async () => {
+    const app = makeInteractionApp();
+    app.sessions.set('grandchild', { id: 'grandchild', name: 'Grandchild', parentSessionId: 'child' });
+    app.tabLayout.groups[0].refs.push({ kind: 'session', id: 'grandchild' });
+    enableRealSemanticEditing(app);
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const parent = container.querySelector<HTMLElement>('[data-id="parent"]')!;
+    const zone = container.querySelector<HTMLElement>('[data-tab-drop-group="g2"][data-tab-drop-index="1"]')!;
+    (document as any).elementFromPoint = vi.fn(() => zone);
+
+    parent.dispatchEvent(pointerEvent('pointerdown', { pointerId: 71, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 71, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+    expect([...container.querySelectorAll<HTMLElement>('.tab-layout-drag-block')].map((tab) => tab.dataset.id)).toEqual(
+      ['parent', 'child', 'grandchild']
+    );
+    container.dispatchEvent(
+      pointerEvent('pointerup', { pointerId: 71, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+    await app._tabLayoutEditCoordinator.flush();
+
+    expect(app._putTabLayout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operations: [expect.objectContaining({ type: 'moveRef', ref: { kind: 'session', id: 'parent' } })],
+      })
+    );
+    expect(app.tabLayout.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'parent', 'child', 'grandchild']);
+  });
+
   it('installs once and commits one semantic drop after the movement threshold', () => {
     const app = makeInteractionApp();
     app.editTabLayout = vi.fn(() => true);
@@ -1087,6 +1126,7 @@ describe('COD-307 page lifecycle persistence', () => {
     coordinator.flushKeepalive();
     expect(keepalive).toHaveBeenCalledWith({
       baseVersion: 4,
+      operations: [{ type: 'renameGroup', groupId: 'g1', name: 'Leaving' }],
       layout: expect.objectContaining({
         groups: expect.arrayContaining([expect.objectContaining({ name: 'Leaving' })]),
       }),

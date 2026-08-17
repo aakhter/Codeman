@@ -44,6 +44,14 @@ export interface TabRefMetadata {
   parentSessionId?: string;
 }
 
+export interface TabPlacementDescription {
+  kind: 'session';
+  id: string;
+  state: 'inherited' | 'manual' | 'dangling' | 'cycle';
+  parentId: string;
+  canFollow: boolean;
+}
+
 export interface TabMoveTarget {
   /** Null denotes the real ungrouped container. */
   groupId: string | null;
@@ -313,6 +321,60 @@ export function normalizeTabLayout(input: TabLayout, metadata: readonly TabRefMe
     emitSubtree(item.ref, item.container);
   }
   return withContainers(working, output);
+}
+
+/** Server-authoritative presentation facts for lineage-controlled placement. */
+export function describeTabPlacements(
+  input: TabLayout,
+  metadata: readonly TabRefMetadata[]
+): TabPlacementDescription[] {
+  const layout = validateTabLayout(input);
+  const valid = validMetadata(metadata);
+  const represented = new Map(locations(layout).map((item) => [keyOf(item.ref), item.ref]));
+  const sessions = new Map(valid.filter((item) => item.kind === 'session').map((item) => [item.id, item]));
+  const cycleIds = new Set<string>();
+  const state = new Map<string, 'visiting' | 'done'>();
+  const stack: string[] = [];
+  const visit = (id: string): void => {
+    if (state.get(id) === 'done') return;
+    if (state.get(id) === 'visiting') {
+      const start = stack.indexOf(id);
+      for (const cycleId of stack.slice(Math.max(0, start))) cycleIds.add(cycleId);
+      return;
+    }
+    state.set(id, 'visiting');
+    stack.push(id);
+    const parentId = sessions.get(id)?.parentSessionId;
+    if (parentId && sessions.has(parentId) && represented.has(keyOf({ kind: 'session', id: parentId })))
+      visit(parentId);
+    stack.pop();
+    state.set(id, 'done');
+  };
+  for (const item of sessions.values()) if (represented.has(keyOf(item))) visit(item.id);
+
+  const result: TabPlacementDescription[] = [];
+  for (const located of locations(layout)) {
+    if (located.ref.kind !== 'session') continue;
+    const item = sessions.get(located.ref.id);
+    if (!item?.parentSessionId) continue;
+    const parentId = item.parentSessionId;
+    const parentValid = sessions.has(parentId) && represented.has(keyOf({ kind: 'session', id: parentId }));
+    const placementState = !parentValid
+      ? 'dangling'
+      : cycleIds.has(located.ref.id)
+        ? 'cycle'
+        : located.ref.placement === 'manual'
+          ? 'manual'
+          : 'inherited';
+    result.push({
+      kind: 'session',
+      id: located.ref.id,
+      state: placementState,
+      parentId,
+      canFollow: placementState === 'manual',
+    });
+  }
+  return result;
 }
 
 function cloneForEdit(input: TabLayout): TabLayout {

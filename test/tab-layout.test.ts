@@ -5,6 +5,7 @@ import {
   MAX_TAB_REFS,
   createGroup,
   deleteGroup,
+  describeTabPlacements,
   flattenOwnerSessionOrder,
   flattenVisibleRefs,
   followParent,
@@ -248,6 +249,49 @@ describe('session lineage', () => {
     expect(() => setManualPlacement(setManualPlacement(input, ref('a'), true), ref('a'), false)).toThrow(
       /followParent/
     );
+  });
+
+  it('authoritatively describes inherited, manual, dangling, cross-owner, and cycle placement', () => {
+    const base = layout(
+      [],
+      [
+        ref('parent'),
+        ref('inherited'),
+        { ...ref('manual'), placement: 'manual' },
+        { ...ref('dangling'), placement: 'manual' },
+        ref('a'),
+        { ...ref('b'), placement: 'manual' },
+      ]
+    );
+    const metadata = [
+      session('parent', 0),
+      session('inherited', 1, 'parent'),
+      session('manual', 2, 'parent'),
+      session('dangling', 3, 'foreign'),
+      { ...session('foreign', 4), ownerValid: false },
+      session('a', 5, 'b'),
+      session('b', 6, 'a'),
+    ];
+
+    expect(describeTabPlacements(base, metadata)).toEqual([
+      { kind: 'session', id: 'inherited', state: 'inherited', parentId: 'parent', canFollow: false },
+      { kind: 'session', id: 'manual', state: 'manual', parentId: 'parent', canFollow: true },
+      { kind: 'session', id: 'dangling', state: 'dangling', parentId: 'foreign', canFollow: false },
+      { kind: 'session', id: 'a', state: 'cycle', parentId: 'b', canFollow: false },
+      { kind: 'session', id: 'b', state: 'cycle', parentId: 'a', canFollow: false },
+    ]);
+  });
+
+  it('uses validated metadata visibility and deterministic first identity when describing placement', () => {
+    const input = layout([], [ref('parent'), { ...ref('child'), placement: 'manual' }]);
+    expect(
+      describeTabPlacements(input, [
+        { ...session('parent', 0), visible: false },
+        session('parent', 99),
+        session('child', 1, 'parent'),
+        session('child', 50, 'wrong-parent'),
+      ])
+    ).toEqual([{ kind: 'session', id: 'child', state: 'manual', parentId: 'parent', canFollow: true }]);
   });
 
   it('rejects stale follow-parent replay and keeps the child manual across later parent ID reuse', () => {

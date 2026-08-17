@@ -7,8 +7,16 @@
  */
 import type { StateStore } from './state-store.js';
 import {
+  createGroup,
+  deleteGroup,
+  describeTabPlacements,
+  followParent,
   materializeOrphans,
+  moveRef,
   normalizeTabLayout,
+  renameGroup,
+  reorderGroup,
+  setManualPlacement,
   TabLayoutValidationError,
   validateTabLayout,
   type TabLayout,
@@ -40,6 +48,20 @@ interface TabLayoutServiceDeps {
 
 export type TabLayoutPutResult = { status: 'updated'; layout: TabLayout } | { status: 'conflict'; layout: TabLayout };
 
+export type TabLayoutSemanticOperation =
+  | { type: 'createGroup'; id: string; name: string; index?: number }
+  | { type: 'renameGroup'; groupId: string; name: string }
+  | { type: 'deleteGroup'; groupId: string }
+  | { type: 'reorderGroup'; groupId: string; index: number }
+  | { type: 'moveRef'; ref: TabRef; groupId: string | null; index: number }
+  | { type: 'setManualPlacement'; ref: TabRef; manual: true }
+  | { type: 'followParent'; ref: TabRef };
+
+export type TabLayoutSnapshot = {
+  layout: TabLayout;
+  placements: ReturnType<typeof describeTabPlacements>;
+};
+
 export interface RemovedTabLayoutSession {
   id: string;
   owner?: string;
@@ -48,6 +70,12 @@ export interface RemovedTabLayoutSession {
 const ownerOf = (record: { owner?: string }): string => record.owner ?? SINGLE_USER_LAYOUT_OWNER;
 const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000${ref.id}`;
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
+const validOperationRef = (value: unknown): value is TabRef =>
+  value !== null &&
+  typeof value === 'object' &&
+  ((value as TabRef).kind === 'session' || (value as TabRef).kind === 'webview') &&
+  typeof (value as TabRef).id === 'string' &&
+  (value as TabRef).id.length > 0;
 
 export class TabLayoutService {
   private restorationState: 'pending' | 'complete' | 'failed' | 'skipped' = 'pending';
@@ -194,6 +222,82 @@ export class TabLayoutService {
 
   async get(owner: string): Promise<TabLayout> {
     return this.withOwner(owner, () => this.getUnlocked(owner));
+  }
+
+  async getSnapshot(owner: string): Promise<TabLayoutSnapshot> {
+    return this.withOwner(owner, async () => {
+      const layout = await this.getUnlocked(owner);
+      const { metadata } = await this.facts(owner);
+      return { layout, placements: describeTabPlacements(layout, metadata) };
+    });
+  }
+
+  async putOperations(
+    owner: string,
+    operations: readonly TabLayoutSemanticOperation[],
+    baseVersion: number
+  ): Promise<TabLayoutPutResult & { placements: ReturnType<typeof describeTabPlacements> }> {
+    return this.withOwner(owner, async () => {
+      const current = await this.getUnlocked(owner);
+      const { metadata } = await this.facts(owner);
+      if (baseVersion !== current.version) {
+        return { status: 'conflict', layout: current, placements: describeTabPlacements(current, metadata) };
+      }
+      if (!Array.isArray(operations) || operations.length === 0 || operations.length > 64) {
+        throw new TabLayoutValidationError('operations must contain 1–64 semantic edits');
+      }
+      let next = current;
+      for (const operation of operations) {
+        if (!operation || typeof operation !== 'object')
+          throw new TabLayoutValidationError('invalid tab layout operation');
+        if (
+          (operation.type === 'moveRef' ||
+            operation.type === 'setManualPlacement' ||
+            operation.type === 'followParent') &&
+          !validOperationRef(operation.ref)
+        ) {
+          throw new TabLayoutValidationError('tab layout operation has an invalid ref');
+        }
+        switch (operation.type) {
+          case 'createGroup':
+            next = createGroup(next, { id: operation.id, name: operation.name, index: operation.index });
+            break;
+          case 'renameGroup':
+            next = renameGroup(next, operation.groupId, operation.name);
+            break;
+          case 'deleteGroup':
+            next = deleteGroup(next, operation.groupId);
+            break;
+          case 'reorderGroup':
+            next = reorderGroup(next, operation.groupId, operation.index);
+            break;
+          case 'moveRef':
+            next = moveRef(next, operation.ref, { groupId: operation.groupId, index: operation.index }, metadata);
+            break;
+          case 'setManualPlacement':
+            next = setManualPlacement(next, operation.ref, operation.manual);
+            break;
+          case 'followParent': {
+            const followState = describeTabPlacements(next, metadata).find(
+              (placement) => placement.kind === operation.ref.kind && placement.id === operation.ref.id
+            )?.state;
+            if (followState !== 'manual' && followState !== 'inherited') {
+              throw new TabLayoutValidationError('session is not eligible to follow an owner-valid parent');
+            }
+            next = followParent(next, operation.ref, metadata);
+            break;
+          }
+          default:
+            throw new TabLayoutValidationError('unknown tab layout operation');
+        }
+      }
+      next = normalizeTabLayout(next, metadata);
+      if (sameLayout(current, next)) {
+        return { status: 'updated', layout: current, placements: describeTabPlacements(current, metadata) };
+      }
+      const stored = this.commit(owner, current, next);
+      return { status: 'updated', layout: stored, placements: describeTabPlacements(stored, metadata) };
+    });
   }
 
   async put(owner: string, desired: unknown, baseVersion: number): Promise<TabLayoutPutResult> {

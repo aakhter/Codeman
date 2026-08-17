@@ -544,6 +544,8 @@ class CodemanApp {
     this._tabLayoutCoordinator = null;
     this._tabLayoutEditCoordinator = null;
     this._tabLayoutSsePending = false;
+    this._tabPlacementStates = new Map();
+    this._tabPendingFollowRefs = new Set();
     this._tabLayoutPagehideHandler = null;
     this._lastTabStructureKey = null;
     this._tabFocusIdentity = null;
@@ -4821,7 +4823,12 @@ class CodemanApp {
     if (this._tabLayoutCoordinator) return this._tabLayoutCoordinator;
     this._tabLayoutCoordinator = window.CodemanTabLayout.createLoadCoordinator({
       fetchLayout: () => this._fetchTabLayout(),
-      applyLayout: (layout) => this._applyTabLayout(layout),
+      applyLayout: (snapshot) => {
+        this._tabPlacementStates = new Map(
+          (snapshot.placements || []).map((placement) => [`${placement.kind}:${placement.id}`, placement])
+        );
+        this._applyTabLayout(snapshot.layout || snapshot);
+      },
       applyFallback: () => this._applyTabLayoutFallback(),
       scheduleRetry: (retry) => setTimeout(retry, 2000),
       cancelRetry: (timer) => clearTimeout(timer),
@@ -4848,7 +4855,7 @@ class CodemanApp {
     try {
       const data = await this._apiJson('/api/tab-layout', { signal: controller.signal });
       if (!data?.layout) throw new Error('Tab layout unavailable');
-      return data.layout;
+      return data;
     } finally {
       clearTimeout(timeout);
     }
@@ -4887,7 +4894,20 @@ class CodemanApp {
 
   _tabRefPlacementState(ref) {
     if (!this.tabLayout) return null;
-    return window.CodemanTabLayout.placementState?.(this.tabLayout, ref, this._tabLayoutMetadata()) || null;
+    const key = `${ref.kind}:${ref.id}`;
+    const authoritative = this._tabPlacementStates?.get(key) || null;
+    if (this._tabPendingFollowRefs?.has(key) && authoritative) {
+      return { ...authoritative, state: 'following', canFollow: false };
+    }
+    const stored = this._refLocation(ref);
+    const storedRef =
+      stored?.groupId === null
+        ? this.tabLayout.ungrouped[stored.index]
+        : this.tabLayout.groups.find((group) => group.id === stored?.groupId)?.refs[stored?.index];
+    if (storedRef?.placement === 'manual' && authoritative?.state === 'inherited') {
+      return { ...authoritative, state: 'manual', canFollow: true };
+    }
+    return authoritative;
   }
 
   _tabPlacementPresentation(ref) {
@@ -4904,6 +4924,9 @@ class CodemanApp {
     if (placement.state === 'cycle') {
       return { ...placement, short: 'Parent cycle', description: 'Parent cycle; placed independently' };
     }
+    if (placement.state === 'following') {
+      return { ...placement, short: 'Following parent', description: `Following parent ${parentName}…` };
+    }
     return { ...placement, short: 'Parent unavailable', description: 'Parent unavailable; placed independently' };
   }
 
@@ -4917,34 +4940,61 @@ class CodemanApp {
             {
               label: 'Follow parent again',
               run: () =>
-                this.editTabLayout(
-                  { type: 'followParent', ref, metadata: this._tabLayoutMetadata() },
-                  `${ref.kind}:${ref.id}`
-                ),
+                this.editTabLayout({ type: 'followParent', ref }, `${ref.kind}:${ref.id}`),
             },
           ]
         : []),
     ];
   }
 
-  async _putTabLayout({ baseVersion, layout }) {
-    const response = await this._apiPut('/api/tab-layout', { baseVersion, layout });
+  _syncTabPlacementAccessibility(tab, ref, name, tabTooltip) {
+    const placement = this._tabPlacementPresentation(ref);
+    const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
+    const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
+    if (tab.getAttribute('aria-label') !== accessibleName) tab.setAttribute('aria-label', accessibleName);
+    if (tab.title !== completeTooltip) tab.title = completeTooltip;
+    const badge = tab.querySelector('.tab-placement-state');
+    if (!placement || !badge) return;
+    badge.className = `tab-placement-state tab-placement-state--${placement.state}`;
+    badge.textContent = placement.short;
+    badge.setAttribute('aria-label', placement.description);
+    badge.title = placement.description;
+  }
+
+  _tabLayoutWireOperations(operations) {
+    return (operations || []).map(({ metadata: _metadata, ...operation }) => operation);
+  }
+
+  async _putTabLayout({ baseVersion, layout, operations }) {
+    const wireOperations = this._tabLayoutWireOperations(operations);
+    const response = await this._apiPut('/api/tab-layout', { baseVersion, operations: wireOperations });
     if (!response) return { ok: false, status: 0, layout: null };
     let body = null;
     try { body = await response.json(); } catch {}
-    return {
+    const result = {
       ok: response.ok,
       status: response.status,
       layout: body?.data?.layout || null,
     };
+    if (body?.data?.placements) {
+      this._tabPlacementStates = new Map(
+        body.data.placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
+      );
+    }
+    if (response.ok) {
+      for (const operation of wireOperations) {
+        if (operation?.type === 'followParent') this._tabPendingFollowRefs.delete(`${operation.ref.kind}:${operation.ref.id}`);
+      }
+    }
+    return result;
   }
 
-  _putTabLayoutKeepalive({ baseVersion, layout }) {
+  _putTabLayoutKeepalive({ baseVersion, operations }) {
     try {
       void fetch('/api/tab-layout', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseVersion, layout }),
+        body: JSON.stringify({ baseVersion, operations: this._tabLayoutWireOperations(operations) }),
         keepalive: true,
       }).catch(() => {});
       return true;
@@ -5013,7 +5063,12 @@ class CodemanApp {
       put: (request) => this._putTabLayout(request),
       putKeepalive: (request) => this._putTabLayoutKeepalive(request),
       applyLayout: (layout) => this._adoptTabLayoutForEdit(layout),
-      reportError: (message) => this.showToast?.(message, 'error'),
+      reportError: (message) => {
+        this._tabPendingFollowRefs.clear();
+        this._lastTabStructureKey = null;
+        this._fullRenderSessionTabs();
+        this.showToast?.(message, 'error');
+      },
       onSettled: () => {
         if (!this._tabLayoutSsePending) return;
         this._tabLayoutSsePending = false;
@@ -5040,6 +5095,9 @@ class CodemanApp {
       return false;
     }
     try {
+      if (operation?.type === 'followParent') {
+        this._tabPendingFollowRefs.add(`${operation.ref.kind}:${operation.ref.id}`);
+      }
       this._tabFocusIdentity = focusIdentity || this._focusedTabLayoutIdentity();
       this._ensureTabLayoutEditCoordinator().enqueue(operation);
       return true;
@@ -5627,12 +5685,10 @@ class CodemanApp {
             }
             nameEl.dataset.fullName = name;
           }
-          const accessibleName = `${name} session`;
           const tooltip = session.workingDir && session.workingDir !== name
             ? `${name}\n${session.workingDir}`
             : name;
-          if (tab.getAttribute('aria-label') !== accessibleName) tab.setAttribute('aria-label', accessibleName);
-          if (tab.title !== tooltip) tab.title = tooltip;
+          this._syncTabPlacementAccessibility(tab, { kind: 'session', id }, name, tooltip);
         }
 
         // Update task badge

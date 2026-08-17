@@ -226,6 +226,108 @@ describe('TabLayoutService', () => {
     expect(h.broadcast).toHaveBeenLastCalledWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
   });
 
+  it('applies Follow parent intent through the authoritative model instead of accepting a browser-derived layout', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: {
+          ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),
+          groups: [{ id: 'g', name: 'Work', refs: [{ kind: 'session', id: 'parent' }] }],
+        },
+      },
+      live: [
+        { id: 'parent', owner: 'alice', createdAt: 1 },
+        { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+      ],
+    });
+
+    const result = await h.service.putOperations(
+      'alice',
+      [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
+      7
+    );
+    expect(result.status).toBe('updated');
+    expect(result.layout.groups[0].refs).toEqual([
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'child' },
+    ]);
+  });
+
+  it('repairs missing refs before applying semantic intent and rejects duplicate edits atomically', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'parent' }]) },
+      live: [
+        { id: 'parent', owner: 'alice', createdAt: 1 },
+        { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+      ],
+    });
+    const moved = await h.service.putOperations(
+      'alice',
+      [{ type: 'moveRef', ref: { kind: 'session', id: 'child' }, groupId: null, index: 0 }],
+      8
+    );
+    expect(moved.layout.ungrouped[0]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
+
+    await expect(
+      h.service.putOperations(
+        'alice',
+        [
+          { type: 'createGroup', id: 'duplicate', name: 'One' },
+          { type: 'createGroup', id: 'duplicate', name: 'Two' },
+        ],
+        9
+      )
+    ).rejects.toThrow(/duplicate/);
+    expect(h.layouts.alice.groups).toEqual([]);
+  });
+
+  it('rejects invalid, dangling, cross-owner, and cyclic Follow-parent intents', async () => {
+    const dangling = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'child', placement: 'manual' }]) },
+      live: [{ id: 'child', owner: 'alice', createdAt: 1, parentSessionId: 'missing' }],
+    });
+    await expect(
+      dangling.service.putOperations('alice', [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }], 7)
+    ).rejects.toThrow(/eligible/);
+    await expect(
+      dangling.service.putOperations('alice', [{ type: 'followParent', ref: { kind: 'session', id: 'unknown' } }], 7)
+    ).rejects.toThrow(/eligible/);
+    await expect(dangling.service.putOperations('alice', [{ type: 'followParent' } as never], 7)).rejects.toThrow(
+      /invalid ref/
+    );
+
+    const foreign = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'child', placement: 'manual' }]) },
+      live: [
+        { id: 'child', owner: 'alice', createdAt: 1, parentSessionId: 'parent' },
+        { id: 'parent', owner: 'bob', createdAt: 2 },
+      ],
+    });
+    await expect(
+      foreign.service.putOperations('alice', [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }], 7)
+    ).rejects.toThrow(/eligible/);
+
+    const cycle = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'a' },
+          { kind: 'session', id: 'b' },
+        ]),
+      },
+      live: [
+        { id: 'a', owner: 'alice', createdAt: 1, parentSessionId: 'b' },
+        { id: 'b', owner: 'alice', createdAt: 2, parentSessionId: 'a' },
+      ],
+    });
+    const normalized = await cycle.service.get('alice');
+    await expect(
+      cycle.service.putOperations(
+        'alice',
+        [{ type: 'followParent', ref: { kind: 'session', id: normalized.ungrouped[0].id } }],
+        normalized.version
+      )
+    ).rejects.toThrow(/eligible/);
+  });
+
   it('serializes concurrent writes so only one exact base version can win', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },
