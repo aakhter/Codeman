@@ -11402,21 +11402,30 @@ kbd {
   padding-left: 0.5rem;
 }
 
-.file-tree-download {
+.file-tree-download,
+.file-tree-rename,
+.file-tree-delete {
   display: none;
-  margin-left: auto;
+  margin-left: 2px;
   padding: 0 4px;
   color: #888;
   text-decoration: none;
   font-size: 12px;
   flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  line-height: 1;
 }
-.file-tree-item:hover .file-tree-download {
+.file-tree-download { margin-left: auto; }
+.file-tree-item:hover .file-tree-download,
+.file-tree-item:hover .file-tree-rename,
+.file-tree-item:hover .file-tree-delete {
   display: inline;
 }
-.file-tree-download:hover {
-  color: #4fc3f7;
-}
+.file-tree-download:hover { color: #4fc3f7; }
+.file-tree-rename:hover { color: #ffb74d; }
+.file-tree-delete:hover { color: #ef5350; }
 
 /* File tree indent levels */
 .file-tree-item[data-depth="0"] { padding-left: 0.5rem; }
@@ -11429,22 +11438,6 @@ kbd {
 .file-tree-item[data-depth="7"] { padding-left: 5.75rem; }
 .file-tree-item[data-depth="8"] { padding-left: 6.5rem; }
 .file-tree-item[data-depth="9"] { padding-left: 7.25rem; }
-
-.file-tree-download {
-  display: none;
-  margin-left: auto;
-  padding: 0 4px;
-  color: #888;
-  text-decoration: none;
-  font-size: 12px;
-  flex-shrink: 0;
-}
-.file-tree-item:hover .file-tree-download {
-  display: inline;
-}
-.file-tree-download:hover {
-  color: #4fc3f7;
-}
 
 /* ========== File Preview Overlay ========== */
 

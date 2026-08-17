@@ -3420,6 +3420,8 @@ Object.assign(CodemanApp.prototype, {
       const downloadBtn = !isDir
         ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
+      const renameBtn = `<button class="file-tree-rename" data-path="${escapeHtml(node.path)}" title="Rename" aria-label="Rename">✎</button>`;
+      const deleteBtn = `<button class="file-tree-delete" data-path="${escapeHtml(node.path)}" title="Delete" aria-label="Delete">🗑</button>`;
 
       html.push(`
         <div class="file-tree-item${hiddenClass}" data-path="${escapeHtml(node.path)}" data-type="${node.type}" data-depth="${depth}">
@@ -3427,7 +3429,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="file-tree-icon">${icon}</span>
           <span class="${nameClass}">${escapeHtml(node.name)}</span>
           ${sizeStr}
-          ${downloadBtn}
+          ${downloadBtn}${renameBtn}${deleteBtn}
         </div>
       `);
 
@@ -3447,7 +3449,9 @@ Object.assign(CodemanApp.prototype, {
 
     // Add click handlers
     treeEl.querySelectorAll('.file-tree-item').forEach(item => {
-      item.addEventListener('click', () => {
+      item.addEventListener('click', (e) => {
+        // Ignore clicks on action buttons
+        if (e.target && e.target.closest && e.target.closest('.file-tree-rename, .file-tree-delete, .file-tree-download')) return;
         const path = item.dataset.path;
         const type = item.dataset.type;
 
@@ -3467,6 +3471,20 @@ Object.assign(CodemanApp.prototype, {
         e.preventDefault();
         e.stopPropagation();
         this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-rename').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.renameFileBrowserEntry(btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.deleteFileBrowserEntry(btn.dataset.path);
       });
     });
   },
@@ -3661,6 +3679,111 @@ Object.assign(CodemanApp.prototype, {
     });
   },
 
+  async createFileBrowserFolder() {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId) {
+      this.showToast('No active session', 'error');
+      return;
+    }
+    const input = window.prompt('New folder name (e.g. myFolder or a/b/c):');
+    if (input == null) return;
+    const name = String(input).trim();
+    if (!name) return;
+    // Allow nested like a/b/c but strip leading/trailing slashes
+    const sanitized = name.replace(/^\/+/, '').replace(/\\/g, '/').trim();
+    if (!sanitized) {
+      this.showToast('Invalid folder name', 'error');
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files/mkdir`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: sanitized }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Failed (${res.status})`);
+      this.showToast(`Folder "${sanitized}" created`, 'success');
+      await this.loadFileBrowser(sessionId);
+      // Auto-expand parent so new folder is visible
+      const parent = sanitized.includes('/') ? sanitized.split('/').slice(0, -1).join('/') : null;
+      if (parent) this.fileBrowserExpandedDirs.add(parent);
+      this.renderFileBrowserTree();
+    } catch (err) {
+      this.showToast(`Create folder failed: ${err && err.message ? err.message : err}`, 'error');
+    }
+  },
+
+  async renameFileBrowserEntry(oldPath) {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId || !oldPath) return;
+    const base = oldPath.split('/').pop() || oldPath;
+    const next = window.prompt(`Rename "${oldPath}" to:`, base);
+    if (next == null) return;
+    const newBase = String(next).trim();
+    if (!newBase || newBase === base) return;
+    if (newBase.includes('/') || newBase.includes('\\')) {
+      this.showToast('Name must not contain path separators', 'error');
+      return;
+    }
+    const dir = oldPath.includes('/') ? oldPath.split('/').slice(0, -1).join('/') : '';
+    const newPath = dir ? `${dir}/${newBase}` : newBase;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: oldPath, to: newPath }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Failed (${res.status})`);
+      this.showToast(`Renamed to "${newPath}"`, 'success');
+      // If renamed directory was expanded, move expanded state
+      if (this.fileBrowserExpandedDirs.has(oldPath)) {
+        this.fileBrowserExpandedDirs.delete(oldPath);
+        this.fileBrowserExpandedDirs.add(newPath);
+      }
+      // Also update loaded dirs
+      if (this.fileBrowserLoadedDirs && this.fileBrowserLoadedDirs.has(oldPath)) {
+        this.fileBrowserLoadedDirs.delete(oldPath);
+      }
+      await this.loadFileBrowser(sessionId);
+    } catch (err) {
+      this.showToast(`Rename failed: ${err && err.message ? err.message : err}`, 'error');
+    }
+  },
+
+  async deleteFileBrowserEntry(targetPath) {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId || !targetPath) return;
+    const isDir = targetPath && this.fileBrowserData && (() => {
+      const find = (nodes) => {
+        for (const n of nodes || []) {
+          if (n.path === targetPath) return n;
+          const c = find(n.children);
+          if (c) return c;
+        }
+        return null;
+      };
+      const node = find(this.fileBrowserData.tree || []);
+      return node ? node.type === 'directory' : false;
+    })();
+    const label = isDir ? 'folder' : 'file';
+    if (!window.confirm(`Delete ${label} "${targetPath}"?${isDir ? ' This will delete its contents.' : ''}`)) return;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files?path=${encodeURIComponent(targetPath)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Failed (${res.status})`);
+      this.showToast(`Deleted "${targetPath}"`, 'success');
+      this.fileBrowserExpandedDirs.delete(targetPath);
+      if (this.fileBrowserLoadedDirs) this.fileBrowserLoadedDirs.delete(targetPath);
+      await this.loadFileBrowser(sessionId);
+    } catch (err) {
+      this.showToast(`Delete failed: ${err && err.message ? err.message : err}`, 'error');
+    }
+  },
+
   hasMatchingChild(node, filter) {
     if (!node.children) return false;
     for (const child of node.children) {
@@ -3828,6 +3951,8 @@ Object.assign(CodemanApp.prototype, {
       const downloadBtn = !isDir
         ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
+      const renameBtn = `<button class="file-tree-rename" data-path="${escapeHtml(node.path)}" title="Rename" aria-label="Rename">✎</button>`;
+      const deleteBtn = `<button class="file-tree-delete" data-path="${escapeHtml(node.path)}" title="Delete" aria-label="Delete">🗑</button>`;
 
       html.push(`
         <div class="file-tree-item" data-path="${escapeHtml(node.path)}" data-type="${node.type}" data-depth="0">
@@ -3835,7 +3960,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="file-tree-icon">${icon}</span>
           <span class="${nameClass}">${escapeHtml(node.name)}</span>
           ${sizeStr}
-          ${downloadBtn}
+          ${downloadBtn}${renameBtn}${deleteBtn}
         </div>
       `);
     }
@@ -3843,7 +3968,8 @@ Object.assign(CodemanApp.prototype, {
     treeEl.innerHTML = html.join('');
 
     treeEl.querySelectorAll('.file-tree-item').forEach(item => {
-      item.addEventListener('click', () => {
+      item.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.file-tree-rename, .file-tree-delete, .file-tree-download')) return;
         const path = item.dataset.path;
         const type = item.dataset.type;
         if (type === 'directory') {
@@ -3873,6 +3999,20 @@ Object.assign(CodemanApp.prototype, {
         e.preventDefault();
         e.stopPropagation();
         this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-rename').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.renameFileBrowserEntry(btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.deleteFileBrowserEntry(btn.dataset.path);
       });
     });
   },
