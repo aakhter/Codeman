@@ -5100,30 +5100,67 @@ class CodemanApp {
   }
 
   moveTabRefToGroup(ref, groupId, index) {
-    return this.editTabLayout({
-      type: 'moveRef', ref, groupId, index, metadata: this._tabLayoutMetadata(),
-    }, `${ref.kind}:${ref.id}`);
+    return this.editTabLayout(this._tabRefMoveOperation(ref, { groupId, index }), `${ref.kind}:${ref.id}`);
+  }
+
+  _tabRefMoveActions(ref) {
+    const location = this._refLocation(ref);
+    if (!location || !this.tabLayout) return [];
+    const refs = location.groupId === null
+      ? this.tabLayout.ungrouped
+      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs || [];
+    const metadata = this._tabLayoutMetadata();
+    const key = (candidate) => `${candidate.kind}:${candidate.id}`;
+    const movedKeys = new Set(
+      window.CodemanTabLayout.previewOperation(this.tabLayout, {
+        type: 'moveRef', ref, groupId: location.groupId, index: location.index, metadata,
+      }).refs.map(key)
+    );
+    const movedIndices = refs
+      .map((candidate, index) => (movedKeys.has(key(candidate)) ? index : -1))
+      .filter((index) => index >= 0);
+    const sourceStart = movedIndices.length ? Math.min(...movedIndices) : location.index;
+    const sourceEnd = movedIndices.length ? Math.max(...movedIndices) + 1 : location.index + 1;
+    const blocks = [];
+    for (let start = 0; start < refs.length;) {
+      const blockKeys = new Set(
+        window.CodemanTabLayout.previewOperation(this.tabLayout, {
+          type: 'moveRef', ref: refs[start], groupId: location.groupId, index: start, metadata,
+        }).refs.map(key)
+      );
+      let end = start + 1;
+      while (end < refs.length && blockKeys.has(key(refs[end]))) end++;
+      blocks.push({ start, end });
+      start = end;
+    }
+    const previous = blocks.find((block) => block.end === sourceStart);
+    const next = blocks.find((block) => block.start === sourceEnd);
+    return [
+      ...(sourceStart > 0
+        ? [{ label: 'Move earlier', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
+        : []),
+      ...(sourceEnd < refs.length
+        ? [{ label: 'Move later', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
+        : []),
+      { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
+      ...this.tabLayout.groups.map((group) => ({
+        label: `Move to ${group.name}`,
+        groupId: group.id,
+        index: group.refs.length,
+      })),
+    ];
   }
 
   openTabRefMoveMenu(event, ref) {
     event?.preventDefault?.();
     event?.stopPropagation?.();
     document.querySelector('.tab-layout-ref-move-menu')?.remove();
-    const location = this._refLocation(ref);
-    if (!location) return;
-    const currentRefs = location.groupId === null
-      ? this.tabLayout.ungrouped
-      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs || [];
-    const destinations = [
-      ...(location.index > 0 ? [['Move earlier', location.groupId, location.index - 1]] : []),
-      ...(location.index < currentRefs.length - 1 ? [['Move later', location.groupId, location.index + 1]] : []),
-      ['Move to Ungrouped', null, this.tabLayout.ungrouped.length],
-      ...this.tabLayout.groups.map((group) => [`Move to ${group.name}`, group.id, group.refs.length]),
-    ];
+    const destinations = this._tabRefMoveActions(ref);
+    if (!destinations.length) return;
     const menu = document.createElement('div');
     menu.className = 'tab-rail-action-menu tab-layout-ref-move-menu';
     menu.setAttribute('role', 'menu');
-    for (const [label, groupId, index] of destinations) {
+    for (const { label, groupId, index } of destinations) {
       const button = document.createElement('button');
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
@@ -6205,7 +6242,7 @@ class CodemanApp {
     return index >= 0 ? { groupId: null, index } : null;
   }
 
-  _adjustPointerMoveDestination(ref, destination) {
+  _adjustTabRefMoveDestination(ref, destination) {
     const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
       type: 'moveRef', ref, ...destination, metadata: this._tabLayoutMetadata(),
     });
@@ -6215,6 +6252,15 @@ class CodemanApp {
       if (location?.groupId === destination.groupId && location.index < destination.index) removedBefore++;
     }
     return { ...destination, index: Math.max(0, destination.index - removedBefore) };
+  }
+
+  _tabRefMoveOperation(ref, destination) {
+    return {
+      type: 'moveRef',
+      ref,
+      ...this._adjustTabRefMoveDestination(ref, destination),
+      metadata: this._tabLayoutMetadata(),
+    };
   }
 
   _adjustGroupReorderIndex(groupId, destinationIndex) {
@@ -6257,10 +6303,10 @@ class CodemanApp {
           }
         }
         if (destination) {
-          destination = this._adjustPointerMoveDestination(drag.source.ref, destination);
-          this.editTabLayout({
-            type: 'moveRef', ref: drag.source.ref, ...destination, metadata: this._tabLayoutMetadata(),
-          }, `${drag.source.ref.kind}:${drag.source.ref.id}`);
+          this.editTabLayout(
+            this._tabRefMoveOperation(drag.source.ref, destination),
+            `${drag.source.ref.kind}:${drag.source.ref.id}`
+          );
         }
       }
     }
@@ -6270,24 +6316,15 @@ class CodemanApp {
   moveActiveTabLeft() {
     if (!this.activeSessionId) return;
     const ref = { kind: 'session', id: this.activeSessionId };
-    const location = this._refLocation(ref);
-    if (!location || location.index <= 0) return;
-    this.editTabLayout({
-      type: 'moveRef', ref, ...location, index: location.index - 1, metadata: this._tabLayoutMetadata(),
-    });
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move earlier');
+    if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
   moveActiveTabRight() {
     if (!this.activeSessionId) return;
     const ref = { kind: 'session', id: this.activeSessionId };
-    const location = this._refLocation(ref);
-    const refs = location?.groupId === null
-      ? this.tabLayout?.ungrouped
-      : this.tabLayout?.groups?.find((group) => group.id === location?.groupId)?.refs;
-    if (!location || !refs || location.index >= refs.length - 1) return;
-    this.editTabLayout({
-      type: 'moveRef', ref, ...location, index: location.index + 1, metadata: this._tabLayoutMetadata(),
-    });
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move later');
+    if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
   // ═══════════════════════════════════════════════════════════════

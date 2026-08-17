@@ -9,6 +9,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const PUBLIC = join(process.cwd(), 'src/web/public');
 const HELPER_SOURCE = readFileSync(join(PUBLIC, 'tab-layout-browser.js'), 'utf8');
 const APP_SOURCE = readFileSync(join(PUBLIC, 'app.js'), 'utf8');
+const TAB_RAIL_SOURCE = readFileSync(join(PUBLIC, 'tab-rail-resize.js'), 'utf8');
 let CodemanApp: { prototype: Record<string, any> };
 
 beforeAll(() => {
@@ -22,6 +23,8 @@ beforeAll(() => {
     HELPER_SOURCE +
     '\n' +
     APP_SOURCE +
+    '\n' +
+    TAB_RAIL_SOURCE +
     '\n' +
     webviews +
     '\n;globalThis.__Cod307App = CodemanApp;';
@@ -478,6 +481,98 @@ function makeInteractionApp() {
   app.showToast = vi.fn();
   return app;
 }
+
+function enableRealSemanticEditing(app: Record<string, any>) {
+  app._tabLayoutEditCoordinator = null;
+  app._putTabLayout = vi.fn(async ({ layout: next }: { layout: Layout }) => ({
+    ok: true,
+    status: 200,
+    layout: { ...next, version: next.version + 1 },
+  }));
+  app._putTabLayoutKeepalive = vi.fn(() => true);
+}
+
+function clickMenuItem(label: string) {
+  const button = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+    (candidate) => candidate.textContent === label
+  );
+  expect(button, `menu item ${label}`).toBeTruthy();
+  button!.click();
+}
+
+describe('COD-307 subtree-aware move destinations', () => {
+  it('moves to the current group end through the real ref menu without a semantic error', () => {
+    const app = makeInteractionApp();
+    enableRealSemanticEditing(app);
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    app.openTabRefMoveMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: trigger },
+      {
+        kind: 'session',
+        id: 'other',
+      }
+    );
+    clickMenuItem('Move to Ops');
+
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app.tabLayout.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other']);
+  });
+
+  it('does not expose Move later when a parent subtree has no external next block', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs = [
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'child' },
+    ];
+    app.tabLayout.groups[1].refs = [];
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    app.openTabRefMoveMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: trigger },
+      {
+        kind: 'session',
+        id: 'parent',
+      }
+    );
+
+    expect([...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent === 'Move later')).toBe(
+      false
+    );
+  });
+
+  it('moves a parent later through the legacy action with both adjacent subtrees contiguous', () => {
+    const app = makeInteractionApp();
+    app.sessions.set('otherChild', { id: 'otherChild', name: 'Other child', parentSessionId: 'other' });
+    app.tabLayout.groups[0].refs = [
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'child' },
+      { kind: 'session', id: 'other' },
+      { kind: 'session', id: 'otherChild' },
+    ];
+    app.tabLayout.groups[1].refs = [];
+    enableRealSemanticEditing(app);
+    app.moveActiveTabRight();
+
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app.tabLayout.groups[0].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'otherChild', 'parent', 'child']);
+  });
+
+  it('moves a parent subtree to another group end through the session action menu', () => {
+    const app = makeInteractionApp();
+    enableRealSemanticEditing(app);
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.openSessionOptions = vi.fn();
+    app.requestCloseSession = vi.fn();
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, 'parent');
+    clickMenuItem('Move to Ops');
+
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app.tabLayout.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'parent', 'child']);
+  });
+});
 
 describe('COD-307 roving tree and focus restoration', () => {
   it('keeps exactly one vertical treeitem tabbable and implements Up/Down/Home/End', () => {
