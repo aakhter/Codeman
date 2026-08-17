@@ -3,14 +3,26 @@ import { describe, expect, it } from 'vitest';
 
 const appSource = readFileSync('src/web/public/app.js', 'utf8');
 const terminalUiSource = readFileSync('src/web/public/terminal-ui.js', 'utf8');
+const tabLayoutSource = readFileSync('src/web/public/tab-layout-browser.js', 'utf8');
 const helpHtml = readFileSync('src/web/public/index.html', 'utf8');
 const readme = readFileSync('README.md', 'utf8');
 
 describe('keyboard shortcuts', () => {
   it('uses physical Option+number keys so macOS special characters do not break tab switching', () => {
+    // The whole point is the PHYSICAL key: on macOS Option+1 emits "¡", so a
+    // handler reading e.key switches no tabs at all on that layout.
     expect(appSource).toContain('e.code ||');
     expect(appSource).toContain('Digit([1-9])');
-    expect(appSource).toContain('parseInt(digitMatch[1], 10) - 1');
+    expect(appSource).not.toMatch(/e\.key\.match\(\/\^Digit/);
+
+    // The matched digit travels as a 1-BASED tab number (it names Alt+N), and is
+    // converted to an index exactly once, at the site that indexes the
+    // projection. Asserting the dispatch rather than the arithmetic: pinning the
+    // literal '- 1' here is what let this test go stale when COD-306 moved the
+    // decrement into refAtAltNumber, leaving the real invariant unguarded.
+    expect(appSource).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
+    expect(tabLayoutSource).toContain('refs[number - 1]');
+    expect(tabLayoutSource).toMatch(/number < 1 \|\| number > 9/);
   });
 
   it('provides Option+bracket shortcuts for previous and next session', () => {

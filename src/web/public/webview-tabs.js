@@ -234,7 +234,7 @@ Object.assign(CodemanApp.prototype, {
             <span class="tab-name">${escapeHtml(webview.name)}</span>
           </span>
         </span>
-        <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag aria-label="Move ${escapeHtml(webview.name)} web tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
+        <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(webview.name)} web tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
       </div>`;
   },
 
@@ -327,6 +327,9 @@ Object.assign(CodemanApp.prototype, {
     document.querySelector('.main')?.classList.add('webview-active');
     this.renderSessionTabs();
     this._updateActiveWebviewTab();
+    // Web tabs live in the same list as sessions, so picking one from the
+    // handheld session drawer has to dismiss it too (no-op elsewhere).
+    this.closeSessionSidebarOnHandheld?.();
   },
 
   /** Create the frame if absent, then reveal it and hide its siblings. */

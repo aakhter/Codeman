@@ -960,6 +960,17 @@ export const SettingsUpdateSchema = z
      */
     agentSkillEnabled: z.boolean().optional(),
     /**
+     * Install Codeman's hooks block into the workspace of every Claude session,
+     * not only into cases Codeman scaffolded itself. SYNCED, default ON: without
+     * it a linked case or an existing repo runs with no hooks at all, and each
+     * hook-driven surface is silently dead there (tab alert, Approvals Inbox,
+     * push, respawn's definitive idle signals, the wait endpoints' stop/blocked).
+     * Turning it OFF restores the older, narrower behavior — a Codeman hooks
+     * block that is already present is still refreshed when stale, but one is
+     * never added — for a user who wants Codeman to leave their repos alone.
+     */
+    workspaceHooksEnabled: z.boolean().optional(),
+    /**
      * Let browser dictation transcribe through this machine's Claude Code login,
      * the same speech-to-text service the CLI's own `/voice` mode uses
      * (docs/claude-voice-plan.md). SYNCED, default OFF: enabling it spends the
@@ -999,6 +1010,8 @@ export const SettingsUpdateSchema = z
     // CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK env var. Stripped before persisting.
     acknowledgeUnauthTunnel: z.boolean().optional(),
     tabTwoRows: z.boolean().optional(),
+    /** Session list layout: 'header' = horizontal tab strip, 'sidebar' = collapsible left sidebar. Display key (per-device). */
+    sessionListLayout: z.enum(['header', 'sidebar']).optional(),
     // COD-286: session tabs across the top vs a vertical rail beside the terminal.
     // Declared here (like tabTwoRows) so it persists server-side and can seed a
     // fresh device; it is still PER-DEVICE by client policy — settings-ui.js lists

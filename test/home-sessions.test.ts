@@ -2,11 +2,11 @@
 //
 // The desktop home screen's tab column (src/web/public/home-sessions.js) fills
 // the welcome overlay's left gutter. Two things about it can silently go wrong
-// and are pinned here: the row ORDER (it mirrors the tab strip, unlike the phone
-// overview which sorts by urgency, and the number badges are only correct if it
-// does), and the WIDTH GATE, which lives in two places at once — the JS constant
-// and a CSS media query — because the column is absolutely positioned and would
-// overlap the search panel in a narrow window.
+// and are pinned here: the row ORDER (shared with the phone overview via
+// CodemanSessionOrder, with the number badge still carrying the TAB index so
+// Alt+N keeps working), and the WIDTH GATE, which lives in two places at once —
+// the JS constant and a CSS media query — because the column is absolutely
+// positioned and would overlap the search panel in a narrow window.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
@@ -38,9 +38,10 @@ function fakeElement(): any {
 
 /**
  * home-sessions.js reuses `_mobileOverviewState` / `_mobileOverviewCaseFor` /
- * `shouldUseMobileOverview` from mobile-overview.js, so both files run in the
- * same context — which is also the point: if that reuse ever breaks, these
- * tests stop loading rather than quietly testing a divergent copy.
+ * `shouldUseMobileOverview` from mobile-overview.js and the row comparator from
+ * constants.js, so all three files run in the same context, which is also the
+ * point: if that reuse ever breaks, these tests stop loading rather than
+ * quietly testing a divergent copy.
  */
 function loadHomeSessionsApp(
   overrides: Record<string, any> = {},
@@ -65,7 +66,7 @@ function loadHomeSessionsApp(
     setInterval: () => 1,
     clearInterval: () => {},
   });
-  for (const file of ['mobile-overview.js', 'home-sessions.js']) {
+  for (const file of ['constants.js', 'mobile-overview.js', 'home-sessions.js']) {
     vm.runInContext(readFileSync(resolve(PUBLIC, file), 'utf8'), context, { filename: file });
   }
 
@@ -134,9 +135,9 @@ describe('home sessions column: model', () => {
     expect(app.buildHomeSessionRows()).toEqual([]);
   });
 
-  it('lists rows in TAB order, not by urgency, so the number badges match Alt+1..9', () => {
-    // The phone overview would hoist 'needy' to the top; this surface must not,
-    // because its badges are the Alt+N indices.
+  it('hoists a session blocked on you, and keeps its badge on the TAB index', () => {
+    // The badge names the Alt+N shortcut, so a sorted rail shows 2,1,3 rather
+    // than renumbering itself 1,2,3 and lying about which key selects what.
     const app = loadHomeSessionsApp({
       sessions: sessionMap([{ id: 'first' }, { id: 'needy' }, { id: 'third' }]),
       sessionOrder: ['first', 'needy', 'third'],
@@ -145,10 +146,34 @@ describe('home sessions column: model', () => {
     });
 
     const rows = app.buildHomeSessionRows();
-    expect(rows.map((r: any) => r.id)).toEqual(['first', 'needy', 'third']);
-    expect(rows.map((r: any) => r.index)).toEqual([0, 1, 2]);
-    expect(rows[1].state).toBe('needs');
-    expect(rows[1].pill).toBe('needs you');
+    expect(rows.map((r: any) => r.id)).toEqual(['needy', 'first', 'third']);
+    expect(rows.map((r: any) => r.orderIndex)).toEqual([1, 0, 2]);
+    expect(rows[0].state).toBe('needs');
+    expect(rows[0].pill).toBe('needs you');
+  });
+
+  it('orders running sessions longest-turn-first and quiet ones most-recent-first', () => {
+    // The same rule the phone overview follows, and the reason the rail exists:
+    // what is running longest is what is most likely to be done or stuck, and
+    // once nothing is running the session that just stopped is the one you came
+    // back for.
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap([
+        { id: 'young-turn', status: 'busy', lastSubmitAt: 9_000, lastActivityAt: 10_000 },
+        { id: 'old-turn', status: 'busy', lastSubmitAt: 1_000, lastActivityAt: 10_000 },
+        { id: 'stale-idle', status: 'idle', lastActivityAt: 2_000 },
+        { id: 'fresh-idle', status: 'idle', lastActivityAt: 8_000 },
+      ]),
+      sessionOrder: ['young-turn', 'old-turn', 'stale-idle', 'fresh-idle'],
+      cases: CASES,
+    });
+
+    expect(app.buildHomeSessionRows().map((r: any) => r.id)).toEqual([
+      'old-turn',
+      'young-turn',
+      'fresh-idle',
+      'stale-idle',
+    ]);
   });
 
   it('shows a session that is not in the order list yet', () => {
@@ -175,11 +200,13 @@ describe('home sessions column: model', () => {
       cases: CASES,
     });
 
+    // Unstamped rows fall back to the tab order inside a state, so this reads
+    // as the state ranking alone: an errored session is blocked on you.
     expect(app.buildHomeSessionRows().map((r: any) => [r.state, r.pill])).toEqual([
+      ['error', 'error'],
       ['working', 'working'],
       ['idle', 'idle'],
       ['done', 'done'],
-      ['error', 'error'],
     ]);
   });
 
@@ -305,8 +332,93 @@ describe('home sessions column: wiring', () => {
     expect(aside).toBeGreaterThan(overlayStart);
     expect(aside).toBeLessThan(content);
     // Load order: the module reuses prototype methods installed by
-    // mobile-overview.js. Compare the <script> tags, not any mention: both
-    // files are named in explanatory comments earlier in the document.
+    // mobile-overview.js and the comparator installed by constants.js. Compare
+    // the <script> tags, not any mention: both files are named in explanatory
+    // comments earlier in the document.
     expect(html.indexOf('src="home-sessions.js"')).toBeGreaterThan(html.indexOf('src="mobile-overview.js"'));
+    expect(html.indexOf('src="mobile-overview.js"')).toBeGreaterThan(html.indexOf('src="constants.js"'));
+  });
+});
+
+describe('home screens: one order, one numbering', () => {
+  it('produces the same order on the rail and the phone overview for one input', () => {
+    // Both surfaces claim to share CodemanSessionOrder. Nothing used to assert
+    // they actually produce one order for one input, so a future local sort in
+    // either builder would silently split them. The rail is one list; the phone
+    // splits NEEDS YOU / CURRENT, so rail order must equal the concatenation.
+    const fixture = [
+      { id: 'blocked-new', lastActivityAt: 5_000 },
+      { id: 'idle-old', lastActivityAt: 3_000 },
+      { id: 'run-new', status: 'busy', lastSubmitAt: 8_000, lastActivityAt: 9_500 },
+      { id: 'blocked-old', lastActivityAt: 1_000 },
+      { id: 'run-old', status: 'busy', lastSubmitAt: 2_000, lastActivityAt: 9_600 },
+      { id: 'idle-new', lastActivityAt: 9_000 },
+    ];
+    const pendingHooks = new Map([
+      ['blocked-new', new Set(['permission_prompt'])],
+      ['blocked-old', new Set(['permission_prompt'])],
+    ]);
+    const sessionOrder = fixture.map((s) => s.id);
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap(fixture),
+      sessionOrder,
+      cases: CASES,
+      pendingHooks,
+    });
+
+    const railIds = app.buildHomeSessionRows().map((r: any) => r.id);
+    const model = app.buildMobileOverviewModel({
+      sessions: app.sessions,
+      cases: CASES,
+      sessionOrder,
+      pendingHooks,
+    });
+    const phoneIds = [...model.needsYou, ...model.current].map((r: any) => r.id);
+
+    expect(railIds).toEqual(phoneIds);
+    // And the shared order is the documented one: blocked longest-first, then
+    // running longest-first, then quiet newest-first.
+    expect(railIds).toEqual(['blocked-old', 'blocked-new', 'run-old', 'run-new', 'idle-new', 'idle-old']);
+  });
+
+  it('numbers rows over the LIVE projection when sessionOrder holds a dead id', () => {
+    // sessionOrder can transiently contain a deleted session (delete raced the
+    // order sync). The strip paints numbers over live sessions only, and the
+    // Alt+digit handler resolves through the same projection, so the rail must
+    // number alpha=1, beta=2 with no hole where the ghost sits.
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap([{ id: 'alpha' }, { id: 'beta' }]),
+      sessionOrder: ['ghost', 'alpha', 'beta'],
+      cases: CASES,
+    });
+    expect(app.buildHomeSessionRows().map((r: any) => [r.id, r.orderIndex])).toEqual([
+      ['alpha', 0],
+      ['beta', 1],
+    ]);
+  });
+
+  it('Alt+digit resolves through the live-session projection in app.js', () => {
+    // Static guard for the handler half of the invariant above: the digit branch
+    // must never index sessionOrder directly, because a delete that raced the
+    // order sync leaves a dead id in it and every key to its right then names
+    // the wrong tab. It resolves through the tab-layout projection instead —
+    // which is BUILT from live sessions and open web tabs (COD-306), so the
+    // filtering is structural rather than a filter() at the call site, and the
+    // web-tab continuation past the last session comes along with it.
+    const appJs = readFileSync(resolve(PUBLIC, 'app.js'), 'utf8');
+    const start = appJs.indexOf('^Digit([1-9])$');
+    expect(start).toBeGreaterThan(-1);
+    const branch = appJs.slice(start, start + 1200);
+    expect(branch).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
+    expect(branch).not.toContain('this.sessionOrder[idx]');
+
+    const activate = appJs.slice(appJs.indexOf('_activateVisibleTabNumber(number) {'));
+    expect(activate.slice(0, 400)).toContain('refAtAltNumber(projection.visibleRefs, number)');
+    // Both tab kinds are reachable by number, not just sessions.
+    expect(activate.slice(0, 400)).toMatch(/kind === 'session'[\s\S]{0,200}kind === 'webview'/);
+
+    const project = appJs.slice(appJs.indexOf('_projectTabLayout() {'));
+    expect(project.slice(0, 600)).toContain('liveSessionIds: [...this.sessions.keys()]');
+    expect(project.slice(0, 600)).toContain('.filter((id) => this.webviews?.has(id))');
   });
 });

@@ -15,6 +15,11 @@
 
 const AWAY_DIGEST_LAST_VIEWED_KEY = 'codeman-away-digest-last-viewed';
 const FILE_BROWSER_SHOW_HIDDEN_KEY = 'codeman:fileBrowserShowHidden';
+// Bounds for the by-id text preview, mirroring what the workspace text preview
+// already does server-side (500 lines). The byte cap rides a Range request, so
+// a huge log is a partial read rather than a download the viewer throws away.
+const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
+const TEXT_PREVIEW_MAX_LINES = 500;
 const AWAY_DIGEST_SECTIONS = [
   ['needsAttention', 'Needs Attention'],
   ['completed', 'Completed'],
@@ -4293,6 +4298,29 @@ Object.assign(CodemanApp.prototype, {
     }
 
     return this.openFilePreview(fileName, sessionId, attachmentId);
+  },
+
+  /**
+   * Whether a path is absolute and provably OUTSIDE this session's workspace.
+   *
+   * `file-content` / `file-raw` resolve every path against `workingDir` and
+   * refuse anything that escapes it, so an absolute path elsewhere on the host
+   * (an agent's `/tmp` scratchpad capture, a screenshot, another checkout) can
+   * only ever 404 there — it has to go through the attachment routes instead.
+   *
+   * A string compare is enough for ROUTING; the real containment decision stays
+   * server-side (realpath + guard) on whichever route the request lands on. An
+   * unknown workingDir answers false, leaving the historical path untouched.
+   *
+   * Registration for those paths is openExternalPathPreview()'s job (above):
+   * it POSTs to /attachments, then previews the minted id.
+   */
+  _isExternalPreviewPath(filePath, sessionId) {
+    if (typeof filePath !== 'string' || !filePath.startsWith('/')) return false;
+    const workingDir = this.sessions.get(sessionId)?.workingDir;
+    if (!workingDir) return false;
+    const root = workingDir.endsWith('/') ? workingDir : `${workingDir}/`;
+    return filePath !== workingDir && !filePath.startsWith(root);
   },
 
   async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null, options = {}) {

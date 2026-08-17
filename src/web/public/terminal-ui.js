@@ -602,6 +602,17 @@ Object.assign(CodemanApp.prototype, {
         return true;
       }
 
+      // Session-sidebar toggle chord (default Alt+B): same trap as above —
+      // preventDefault() in the capture handler does not stop xterm, so without
+      // this gate every toggle would ALSO send ESC b (readline backward-word)
+      // into the live session and walk the cursor back through the user's
+      // half-typed prompt. Registry-aware and only while the sidebar layout is
+      // active, so a rebind/disable and the default header layout keep plain
+      // Meta-b working in the terminal.
+      if (ev.type === 'keydown' && this.shouldToggleSessionSidebarFromShortcut?.(ev)) {
+        return false;
+      }
+
       // Ctrl+V / Cmd+V: intercept before xterm sends ^V to PTY.
       // Route through our paste trap which handles both images and text.
       if ((ev.ctrlKey || ev.metaKey) && ev.key === 'v' && ev.type === 'keydown') {
@@ -2272,22 +2283,26 @@ Object.assign(CodemanApp.prototype, {
         // the whole tab on hover. Non-empty token + bounded reps is O(n).
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
-        // Pattern 3: Legacy standalone absolute paths. In-workspace previewable
-        // paths are claimed by the document scanner (findPreviewReferences) first;
-        // this remains the live-log fallback for paths outside the session workspace.
-        // Image/PDF extensions are included so pasted-attachment paths
-        // (`.claude-images/paste-*.png`) are clickable; they open the file preview
-        // rather than the log viewer (see addLogLink/PREVIEW_EXTS).
-        const extPattern =
-          /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js|png|jpe?g|gif|webp|bmp|svg|pdf))\b/g;
+        // Pattern 2: Paths with common extensions. Image/PDF/media extensions are
+        // included so pasted-attachment paths (`.claude-images/paste-*.png`) and
+        // screenshots an agent just wrote are clickable; those open the file
+        // preview rather than the log viewer (see addLink).
+        //
+        // The literal lives in constants.js because the response viewer linkifies
+        // the SAME paths out of markdown — one definition, two consumers. A fresh
+        // instance per call: `lastIndex` is per-object state.
+        const extPattern = absoluteFilePathPattern();
 
         // Pattern 4: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
-        /** Extensions that should open the image/document preview, not the log viewer. */
-        const PREVIEW_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'pdf']);
-
         const addLogLink = (filePath, matchIndex) => {
+          // A path with a `..` segment never makes a good link: the log viewer's
+          // allowlist and the attachment guard both realpath and then refuse the
+          // ambiguous ones, so it would render clickable and die. Same reasoning
+          // that keeps /etc out of FILE_PATH_LINK_PATTERN (constants.js), and it
+          // matters more now that pattern reaches /workspace, /mnt and /Users.
+          if (/(^|\/)\.\.(\/|$)/.test(filePath)) return;
           const startCol = lineText.indexOf(filePath, matchIndex);
           if (startCol === -1) return;
           const endCol = startCol + filePath.length;
@@ -2303,9 +2318,27 @@ Object.assign(CodemanApp.prototype, {
             decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
               // Tailing a PNG in the log viewer shows binary noise; the file preview
-              // already renders images and PDFs inline.
-              const ext = (text.split('.').pop() || '').toLowerCase();
-              if (PREVIEW_EXTS.has(ext)) {
+              // already renders images, PDFs, documents and media inline. The
+              // extension list is previewsInFileViewer() in constants.js — shared
+              // with the response viewer and pinned to the attachment registry by
+              // test/media-extension-parity.test.ts, so an in-workspace .m4a can no
+              // longer route to the log viewer while the same file in /tmp plays.
+              //
+              // Routing is by EXTENSION, not by workspace containment: text still
+              // goes to the log viewer even from outside the workspace, because it
+              // follows a file that is still being written and its allowlist covers
+              // /var/log and ~/logs (COD-232 pins those). A previewable path outside
+              // the workspace has to be registered as an attachment first — the
+              // workspace-confined routes can only 404 on it — which is what
+              // openExternalPathPreview does before previewing by id.
+              if (previewsInFileViewer(text)) {
+                if (self._isExternalPreviewPath?.(text, originatingSessionId)) {
+                  const pending = self.openExternalPathPreview(text, originatingSessionId);
+                  if (pending && typeof pending.catch === 'function') {
+                    pending.catch((err) => console.error('Failed to open external path preview:', err));
+                  }
+                  return;
+                }
                 self.openFilePreview(text, originatingSessionId);
                 return;
               }
