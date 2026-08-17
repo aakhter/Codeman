@@ -3275,6 +3275,7 @@ Object.assign(CodemanApp.prototype, {
         this.fileBrowserDragListeners._onFirstDrag = onFirstDrag;
       }
     }
+    this._wireFileBrowserDrop?.();
     // Load LAST: panel + #fileBrowserTree now exist, so loadFileBrowser won't early-return.
     this.loadFileBrowser(sessionId);
   },
@@ -3497,6 +3498,159 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       this.showToast(`Download failed: ${err && err.message ? err.message : err}`, 'error');
     }
+  },
+
+  // ──────────────────────────────────────────────────────────────────
+  // File Browser Upload (COD-317)
+  // ──────────────────────────────────────────────────────────────────
+  _maxBatchFileUploads: 10,
+  _fileBrowserUploadConcurrency: 3,
+
+  triggerFileBrowserUpload(targetDir = '') {
+    if (!this.activeSessionId && !this.fileBrowserSessionId) {
+      this.showToast('No active session', 'error');
+      return;
+    }
+    // Resolve target dir: explicit arg > most-recent drag target > root
+    const dir = typeof targetDir === 'string' ? targetDir : '';
+    this._ensureFileBrowserUploadInput(dir);
+    if (this._fileBrowserUploadInput) {
+      this._fileBrowserUploadTargetDir = dir;
+      this._fileBrowserUploadInput.click();
+    }
+  },
+
+  _ensureFileBrowserUploadInput(initialDir = '') {
+    if (this._fileBrowserUploadInput) {
+      this._fileBrowserUploadTargetDir = initialDir;
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.style.display = 'none';
+    // No accept filter — File Manager is open (any file except blocked/sensitive guard)
+    input.addEventListener('change', () => {
+      const files = Array.from(input.files || []);
+      const targetDir = this._fileBrowserUploadTargetDir || '';
+      input.value = '';
+      if (files.length) this._uploadFilesToFileBrowser(files, targetDir);
+    });
+    document.body.appendChild(input);
+    this._fileBrowserUploadInput = input;
+    this._fileBrowserUploadTargetDir = initialDir;
+  },
+
+  async _uploadFilesToFileBrowser(fileList, targetDir = '') {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId) {
+      this.showToast('No active session', 'error');
+      return;
+    }
+    let files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    let capped = false;
+    if (files.length > this._maxBatchFileUploads) {
+      files = files.slice(0, this._maxBatchFileUploads);
+      capped = true;
+    }
+    const total = files.length;
+    let done = 0;
+    let failed = 0;
+    const results = new Array(total);
+    const progress = () => this.showToast(`Uploading ${Math.min(done + 1, total)}/${total} file${total > 1 ? 's' : ''}…`, 'info');
+    progress();
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= total) return;
+        try {
+          results[i] = await this._uploadFileToWorkspace(sessionId, files[i], targetDir);
+        } catch (err) {
+          failed++;
+          console.warn('File upload failed:', err);
+          results[i] = null;
+        } finally {
+          done++;
+          if (done < total) progress();
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(this._fileBrowserUploadConcurrency, total) }, () => worker())
+    );
+    const succeeded = results.filter(Boolean).length;
+    // Refresh tree preserves expanded state; loadFileBrowser already does that
+    try {
+      await this.loadFileBrowser(sessionId);
+    } catch {}
+    const parts = [];
+    if (succeeded > 0) parts.push(`${succeeded} file${succeeded > 1 ? 's' : ''} uploaded`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    if (capped) parts.push(`max ${this._maxBatchFileUploads} per batch`);
+    const tone = succeeded > 0 ? (failed > 0 || capped ? 'info' : 'success') : 'error';
+    this.showToast(parts.join(' · ') || 'No files uploaded', tone);
+  },
+
+  async _uploadFileToWorkspace(sessionId, file, targetDir = '') {
+    const form = new FormData();
+    form.append('file', file);
+    const query = targetDir ? `?path=${encodeURIComponent(targetDir)}` : '';
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/files/upload${query}`;
+    const resp = await fetch(url, { method: 'POST', body: form });
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`;
+      try {
+        const data = await resp.json();
+        if (data && data.error) msg = data.error;
+      } catch {}
+      throw new Error(msg);
+    }
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.error || 'Upload failed');
+    return data.data && data.data.path;
+  },
+
+  _wireFileBrowserDrop() {
+    const treeEl = this.$('fileBrowserTree');
+    const panel = this.$('fileBrowserPanel');
+    if (!treeEl || !panel || this._fileBrowserDropWired) return;
+    this._fileBrowserDropWired = true;
+    let dragDepth = 0;
+    treeEl.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (dragDepth === 0) treeEl.classList.add('file-browser-drag-active');
+    });
+    treeEl.addEventListener('dragenter', (e) => {
+      if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+      dragDepth++;
+    });
+    treeEl.addEventListener('dragleave', (e) => {
+      if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) treeEl.classList.remove('file-browser-drag-active');
+      // Also handle leaving panel entirely
+      if (!panel.contains(e.relatedTarget)) {
+        dragDepth = 0;
+        treeEl.classList.remove('file-browser-drag-active');
+      }
+    });
+    treeEl.addEventListener('drop', (e) => {
+      dragDepth = 0;
+      treeEl.classList.remove('file-browser-drag-active');
+      if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      let targetDir = '';
+      const folderEl = e.target && e.target.closest ? e.target.closest('.file-tree-item[data-type="directory"]') : null;
+      if (folderEl && folderEl.dataset && folderEl.dataset.path) targetDir = folderEl.dataset.path;
+      this._uploadFilesToFileBrowser(files, targetDir);
+    });
   },
 
   hasMatchingChild(node, filter) {

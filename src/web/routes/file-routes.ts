@@ -903,6 +903,36 @@ export function _resetUploadRateBuckets(): void {
   uploadRateBuckets.clear();
 }
 
+// Per-(IP, sessionId) token bucket for file-manager uploads. 20/min, isolated
+// from document uploads so the two surfaces are rate-limited independently.
+const FILE_MANAGER_UPLOAD_RATE_TOKENS = 20;
+const FILE_MANAGER_UPLOAD_RATE_REFILL_PER_MS = FILE_MANAGER_UPLOAD_RATE_TOKENS / 60_000;
+const fileManagerUploadRateBuckets = new Map<string, { tokens: number; lastRefill: number }>();
+
+function consumeFileManagerUploadToken(key: string, now: number = Date.now()): boolean {
+  if (fileManagerUploadRateBuckets.size > UPLOAD_BUCKET_GC_THRESHOLD) {
+    for (const [k, b] of fileManagerUploadRateBuckets) {
+      if (now - b.lastRefill > UPLOAD_BUCKET_TTL_MS) fileManagerUploadRateBuckets.delete(k);
+    }
+  }
+  let b = fileManagerUploadRateBuckets.get(key);
+  if (!b) {
+    b = { tokens: FILE_MANAGER_UPLOAD_RATE_TOKENS, lastRefill: now };
+    fileManagerUploadRateBuckets.set(key, b);
+  }
+  const delta = (now - b.lastRefill) * FILE_MANAGER_UPLOAD_RATE_REFILL_PER_MS;
+  b.tokens = Math.min(FILE_MANAGER_UPLOAD_RATE_TOKENS, b.tokens + delta);
+  b.lastRefill = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
+/** Test hook: reset the file-manager upload rate buckets between runs. */
+export function _resetFileManagerUploadRateBuckets(): void {
+  fileManagerUploadRateBuckets.clear();
+}
+
 /**
  * Headers Fastify already put on the reply, in a shape `writeHead` accepts.
  *
@@ -2195,6 +2225,308 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         extension: ext,
         attachmentType: getAttachmentType(ext),
         ...routes,
+      },
+    };
+  });
+
+  // COD-317: File Manager upload — write an arbitrary workspace file.
+  // Unlike the attachment upload (which always targets .codeman-attachments/ and
+  // registers an attachment), this writes to `?path=<relativeDir>` inside the
+  // session's workingDir (or remote workspace) and does NOT create an attachment
+  // record. Security mirrors the attachment route: CSRF, per-(IP,session) token
+  // bucket, multipart limits, sanitize, confinement, sensitive/blocked guards,
+  // symlink-safe lstat + O_EXCL|O_NOFOLLOW, remote via writeRemoteFileBytes.
+  app.post('/api/sessions/:id/files/upload', async (req, reply) => {
+    const reqHost = req.headers.host;
+    const origin = req.headers.origin;
+    const referer = req.headers.referer;
+    let csrfOk = false;
+    if (origin) {
+      try {
+        csrfOk = new URL(origin).host === reqHost;
+      } catch {
+        /* invalid Origin → not ok */
+      }
+    } else if (referer) {
+      try {
+        csrfOk = new URL(referer).host === reqHost;
+      } catch {
+        /* invalid Referer → not ok */
+      }
+    } else {
+      csrfOk = !!req.headers['x-codeman-csrf'];
+    }
+    if (!csrfOk) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'CSRF check failed');
+    }
+
+    const { id } = req.params as { id: string };
+    if (!consumeFileManagerUploadToken(`${req.ip}:${id}`)) {
+      reply.code(429);
+      reply.header('Retry-After', '60');
+      return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
+    }
+
+    const session = findSessionOrFail(ctx, id);
+
+    if (!req.isMultipart()) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Expected multipart/form-data');
+    }
+
+    let part: import('@fastify/multipart').MultipartFile | undefined;
+    try {
+      part = await req.file();
+    } catch (err: unknown) {
+      reply.code(413);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || 'Invalid multipart payload');
+    }
+    if (!part) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No file uploaded');
+    }
+    if (part.fieldname !== 'file') {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Unexpected field "${part.fieldname}", expected "file"`);
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await part.toBuffer();
+    } catch (err: unknown) {
+      reply.code(413);
+      const maxMb = Math.round(MAX_PASTE_IMAGE_BYTES / (1024 * 1024));
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || `File too large (max ${maxMb}MB)`);
+    }
+    if (bytes.length === 0) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Empty file');
+    }
+
+    const rawName = part.filename || '';
+    const fileName = sanitizeUploadFilename(rawName);
+    const ext = extname(fileName).slice(1).toLowerCase();
+    const rawTargetDir = ((req.query as { path?: string }).path ?? '').trim();
+
+    // Normalize target dir: empty => workspace root. Validate confinement before
+    // any IO. For remote, use posix validation; for local, use realpath confinement.
+    const normalizedTargetDir = rawTargetDir.replace(/^\/+/, '').replace(/\\/g, '/');
+    if (
+      normalizedTargetDir.includes('\0') ||
+      normalizedTargetDir.includes('\r') ||
+      normalizedTargetDir.includes('\n')
+    ) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+    // Reject path traversal segments in the query dir itself.
+    if (normalizedTargetDir.split('/').some((s) => s === '..')) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+
+    const guard = await loadAttachmentGuardConfig();
+
+    // ── Remote sessions ───────────────────────────────────────────────────
+    if (session.remote) {
+      let remoteDir: string;
+      let remoteFilePath: string;
+      try {
+        const posixDir = normalizedTargetDir ? normalizedTargetDir : '';
+        remoteDir = posixDir ? remoteWorkspacePath(session.remote, posixDir) : session.remote.remotePath;
+        // Validate filename does not carry path segments after sanitization (sanitize strips dirs)
+        remoteFilePath = pathPosix.join(remoteDir, fileName);
+        remoteWorkspacePath(session.remote, normalizedTargetDir ? `${normalizedTargetDir}/${fileName}` : fileName);
+      } catch {
+        reply.code(400);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+      }
+
+      const relativePosix = normalizedTargetDir ? `${normalizedTargetDir}/${fileName}` : fileName;
+      const resolvedPosix = relativePosix.replace(/\\/g, '/');
+
+      if (isSensitivePath(remoteFilePath) || isBlockedAttachmentPath(remoteFilePath, guard.blockedTrees)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+      }
+      if (isDeniedEditRelativePath(resolvedPosix)) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be written');
+      }
+
+      // 409 if already exists — check via SFTP listing without transferring bytes
+      try {
+        await getRemoteWorkspaceFileInfo(session.remote, relativePosix);
+        reply.code(409);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File already exists');
+      } catch {
+        // not found → proceed to write
+      }
+
+      try {
+        await writeRemoteFileBytes(session.remote, {
+          dir: remoteDir,
+          filePath: remoteFilePath,
+          bytes,
+          timeoutMs: REMOTE_ATTACHMENT_SSH_TIMEOUT_MS,
+          transferLabel: 'remote file manager upload',
+          notADirectoryMessage: 'Target is not a regular directory',
+        });
+      } catch (err) {
+        const msg = getErrorMessage(err);
+        if (msg.includes('File already exists') || msg.includes('not a regular directory')) {
+          reply.code(409);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, msg);
+        }
+        reply.code(502);
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to transfer file to remote host: ${msg}`);
+      }
+
+      return {
+        success: true as const,
+        data: {
+          path: relativePosix,
+          fileName,
+          size: bytes.length,
+          extension: ext,
+        },
+      };
+    }
+
+    // ── Local sessions ────────────────────────────────────────────────────
+    // Resolve target dir inside workspace (symlink-safe)
+    let destDirResolved: string;
+    let destDirRelative: string;
+    if (!normalizedTargetDir) {
+      destDirResolved = session.workingDir;
+      destDirRelative = '';
+    } else {
+      // Use validateSessionFilePath for confinement when dir already exists
+      const validated = validateSessionFilePath(session.workingDir, normalizedTargetDir);
+      if (validated) {
+        try {
+          const st = await fs.stat(validated.resolvedPath);
+          if (!st.isDirectory()) {
+            reply.code(400);
+            return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Target path is not a directory');
+          }
+          destDirResolved = validated.resolvedPath;
+          destDirRelative = validated.relativePath;
+        } catch {
+          // Dir does not exist yet — will be created below. Keep validated path as base?
+          // validated may point to non-existent; fall through to creation logic.
+          destDirResolved = validated.resolvedPath;
+          destDirRelative = validated.relativePath;
+        }
+      } else {
+        // Path does not exist yet but is confined (relative check without realpath)?
+        // Do lexical confinement: ensure it stays under workingDir without escaping.
+        // Reject if it would escape.
+        const lexical = resolve(session.workingDir, normalizedTargetDir);
+        const rel = relative(session.workingDir, lexical);
+        if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+          reply.code(400);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+        }
+        destDirResolved = lexical;
+        destDirRelative = normalizedTargetDir;
+      }
+    }
+
+    // Ensure intermediate directories exist safely (non-recursive, symlink-checked)
+    if (normalizedTargetDir) {
+      const segments = normalizedTargetDir.split('/').filter(Boolean);
+      let cur = session.workingDir;
+      for (const seg of segments) {
+        const next = join(cur, seg);
+        try {
+          const st = await fs.lstat(next);
+          if (st.isSymbolicLink() || !st.isDirectory()) {
+            reply.code(403);
+            return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Target is not a regular directory');
+          }
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          try {
+            await fs.mkdir(next);
+          } catch (mkErr: unknown) {
+            if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
+            const raceSt = await fs.lstat(next);
+            if (raceSt.isSymbolicLink() || !raceSt.isDirectory()) {
+              reply.code(403);
+              return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Target is not a regular directory');
+            }
+          }
+        }
+        cur = next;
+      }
+      // Re-resolve final dest dir through realpath for sensitive checks
+      try {
+        destDirResolved = realpathSync(join(session.workingDir, normalizedTargetDir));
+      } catch {
+        destDirResolved = join(session.workingDir, normalizedTargetDir);
+      }
+    }
+
+    const destPath = join(destDirResolved, fileName);
+    const relativePath = destDirRelative ? `${destDirRelative}/${fileName}`.replace(/\\/g, '/') : fileName;
+
+    // Defense-in-depth checks on the final resolved path
+    let finalResolved: string;
+    try {
+      // If file does not exist yet, realpathSync will fail — use destPath for check
+      finalResolved = realpathSync(destPath);
+    } catch {
+      finalResolved = destPath;
+    }
+    if (isSensitivePath(finalResolved) || isBlockedAttachmentPath(finalResolved, guard.blockedTrees)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+    }
+    if (isSensitivePath(destPath) || isBlockedAttachmentPath(destPath, guard.blockedTrees)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this path is blocked');
+    }
+    if (isDeniedEditRelativePath(relativePath)) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Files under .git cannot be written');
+    }
+    // Final confinement: ensure dest stays inside workingDir (lexical + realpath)
+    const finalRel = relative(session.workingDir, destPath);
+    if (isAbsolute(finalRel) || finalRel === '..' || finalRel.startsWith(`..${sep}`)) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid path');
+    }
+
+    try {
+      const fh = await fs.open(
+        destPath,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        await fh.writeFile(bytes);
+      } finally {
+        await fh.close();
+      }
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') {
+        reply.code(409);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File already exists');
+      }
+      reply.code(500);
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to write file: ${getErrorMessage(err)}`);
+    }
+
+    return {
+      success: true as const,
+      data: {
+        path: relativePath,
+        fileName,
+        size: bytes.length,
+        extension: ext,
       },
     };
   });
