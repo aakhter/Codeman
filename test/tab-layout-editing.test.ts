@@ -399,6 +399,45 @@ describe('COD-307 optimistic write coordinator', () => {
     expect(coordinator.getLayout()).toEqual(second);
   });
 
+  it('adopts one stale-intent conflict without retrying when the destination was concurrently deleted', async () => {
+    const h = loadHelper();
+    const initial = layout();
+    const current = {
+      ...layout(8),
+      groups: layout(8).groups.filter((group) => group.id !== 'g2'),
+      ungrouped: [...layout(8).ungrouped, { kind: 'session', id: 'other' }],
+    };
+    const put = vi.fn(async () => ({ ok: false, status: 409, layout: current }));
+    const reportError = vi.fn();
+    const coordinator = h.createEditCoordinator({
+      initialLayout: initial,
+      applyLayout: vi.fn(),
+      reportError,
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+
+    coordinator.enqueue({
+      type: 'moveRef',
+      ref: { kind: 'session', id: 'other' },
+      groupId: 'g2',
+      index: 0,
+      metadata: [
+        { kind: 'session', id: 'parent' },
+        { kind: 'session', id: 'child', parentSessionId: 'parent' },
+        { kind: 'session', id: 'other' },
+        { kind: 'webview', id: 'web' },
+      ],
+    });
+    await vi.runAllTimersAsync();
+
+    expect(put).toHaveBeenCalledOnce();
+    expect(coordinator.getLayout()).toEqual(current);
+    expect(reportError).toHaveBeenCalledOnce();
+  });
+
   it('rebases an in-flight semantic batch over newer SSE state and cannot resurrect a stale success', async () => {
     const h = loadHelper();
     let resolveFirst!: (value: unknown) => void;

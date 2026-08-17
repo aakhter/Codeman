@@ -295,9 +295,18 @@ export class TabLayoutService {
           }
           candidate = normalizeTabLayout(candidate, metadata);
           if (sameContent(candidate, current)) appliedOperationCount = 0;
-          for (let index = 0; index < operations.length; index++) {
-            candidate = normalizeTabLayout(applyOperation(candidate, operations[index]), metadata);
-            if (sameContent(candidate, current)) appliedOperationCount = index + 1;
+          try {
+            for (let index = 0; index < operations.length; index++) {
+              candidate = normalizeTabLayout(applyOperation(candidate, operations[index]), metadata);
+              if (sameContent(candidate, current)) appliedOperationCount = index + 1;
+            }
+          } catch (error) {
+            // The request was valid against its historical base, but concurrent
+            // lineage/ref/group changes can make semantic replay inapplicable.
+            // Prefix inference is advisory: preserve the 409 contract and let
+            // the client adopt current state instead of converting it to 400.
+            if (!(error instanceof TabLayoutValidationError)) throw error;
+            appliedOperationCount = undefined;
           }
         }
         return {

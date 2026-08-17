@@ -323,6 +323,72 @@ describe('TabLayoutService', () => {
     expect(recovery.appliedOperationCount).toBe(prefixLength);
   });
 
+  it.each(['dangling', 'cycle', 'cross-owner'] as const)(
+    'returns an unknown-prefix conflict when stale Follow parent is now %s',
+    async (scenario) => {
+      const base: TabLayout = {
+        ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),
+        groups: [{ id: 'g', name: 'Work', refs: [{ kind: 'session', id: 'parent' }] }],
+      };
+      const live: SessionFact[] =
+        scenario === 'cycle'
+          ? [
+              { id: 'parent', owner: 'alice', createdAt: 1, parentSessionId: 'child' },
+              { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+            ]
+          : [
+              { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
+              ...(scenario === 'cross-owner' ? [{ id: 'parent', owner: 'bob', createdAt: 1 }] : []),
+            ];
+      const current: TabLayout = {
+        ...existing([{ kind: 'session', id: 'child', placement: 'manual' }], 8),
+      };
+      const h = createHarness({ layouts: { alice: current }, live });
+
+      const recovery = await h.service.putOperations(
+        'alice',
+        [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
+        7,
+        base
+      );
+
+      expect(recovery.status).toBe('conflict');
+      expect(recovery.layout.version).toBeGreaterThanOrEqual(8);
+      expect(recovery.appliedOperationCount).toBeUndefined();
+    }
+  );
+
+  it.each(['deleted-ref', 'removed-destination', 'cross-owner-ref'] as const)(
+    'returns an unknown-prefix conflict for a stale move with a %s',
+    async (scenario) => {
+      const base: TabLayout = {
+        ...existing([{ kind: 'session', id: 'moving' }]),
+        groups: [{ id: 'destination', name: 'Destination', refs: [] }],
+      };
+      const current: TabLayout = {
+        ...existing([], 8),
+        groups: scenario === 'removed-destination' ? [] : base.groups,
+      };
+      const live: SessionFact[] =
+        scenario === 'cross-owner-ref'
+          ? [{ id: 'moving', owner: 'bob', createdAt: 1 }]
+          : scenario === 'removed-destination'
+            ? [{ id: 'moving', owner: 'alice', createdAt: 1 }]
+            : [];
+      const h = createHarness({ layouts: { alice: current }, live });
+
+      const recovery = await h.service.putOperations(
+        'alice',
+        [{ type: 'moveRef', ref: { kind: 'session', id: 'moving' }, groupId: 'destination', index: 0 }],
+        7,
+        base
+      );
+
+      expect(recovery.status).toBe('conflict');
+      expect(recovery.appliedOperationCount).toBeUndefined();
+    }
+  );
+
   it('repairs missing refs before applying semantic intent and rejects duplicate edits atomically', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'parent' }]) },

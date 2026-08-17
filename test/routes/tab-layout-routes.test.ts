@@ -3,6 +3,7 @@
  */
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TabLayoutService } from '../../src/tab-layout-service.js';
 import { registerTabLayoutRoutes } from '../../src/web/routes/tab-layout-routes.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import type { TabLayout } from '../../src/tab-layout.js';
@@ -124,6 +125,72 @@ describe('tab layout routes', () => {
     expect(response.statusCode).toBe(409);
     expect(service.putOperations).toHaveBeenCalledWith('alice', operations, 3, layout(3));
     expect(response.json().data.appliedOperationCount).toBe(2);
+    await app.close();
+  });
+
+  it('returns 409 through the real service when a stale Follow parent is now dangling', async () => {
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
+    const current: TabLayout = {
+      ...layout(8),
+      ungrouped: [{ kind: 'session', id: 'child', placement: 'manual' }],
+    };
+    const recoveryBase: TabLayout = {
+      ...layout(7),
+      groups: [{ id: 'g', name: 'Work', refs: [{ kind: 'session', id: 'parent' }] }],
+      ungrouped: [{ kind: 'session', id: 'child', placement: 'manual' }],
+    };
+    const layouts: Record<string, TabLayout> = { alice: current };
+    const service = new TabLayoutService({
+      store: {
+        getTabLayout: (owner: string) => layouts[owner] ?? null,
+        setTabLayout: (owner: string, next: TabLayout) => {
+          layouts[owner] = next;
+        },
+        getSessions: () => ({
+          child: { id: 'child', owner: 'alice', createdAt: 1, parentSessionId: 'missing' },
+        }),
+        getSessionOrder: () => ['child'],
+      } as never,
+      sessions: new Map(),
+      readWebviews: async () => [],
+      broadcast: vi.fn(),
+      now: () => '2026-08-16T12:00:00.000Z',
+    });
+    const app = Fastify({ logger: false });
+    app.addHook('onRequest', async (request) => {
+      (request as unknown as { authUser: { username: string; role: 'user' } }).authUser = {
+        username: 'alice',
+        role: 'user',
+      };
+    });
+    registerTabLayoutRoutes(app, { tabLayouts: service });
+    installRouteErrorHandler(app);
+    await app.ready();
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: {
+        baseVersion: 7,
+        operations: [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
+        recoveryBaseLayout: recoveryBase,
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().data.layout).toEqual(current);
+    expect(response.json().data.appliedOperationCount).toBeUndefined();
+
+    const malformedRecovery = await app.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: {
+        baseVersion: 7,
+        operations: [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
+        recoveryBaseLayout: { version: 7 },
+      },
+    });
+    expect(malformedRecovery.statusCode).toBe(400);
     await app.close();
   });
 
