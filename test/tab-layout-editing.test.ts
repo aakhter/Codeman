@@ -814,6 +814,49 @@ describe('COD-315 dismissible group menu', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('consumes Escape before the shipping listener can close unrelated UI', () => {
+    const app = makeInteractionApp();
+    app._maybeCloseResponseViewerOnEscape = vi.fn(() => false);
+    app.closeAllPanels = vi.fn();
+    app.closeHelp = vi.fn();
+    app.closeShortcutOverlay = vi.fn();
+    app.closeSessionManager = vi.fn();
+    app.closeCommandPalette = vi.fn();
+    app.getShortcutRegistry = vi.fn(() => []);
+    app.setupColorPicker = vi.fn();
+    app._scheduleTerminalRepaint = vi.fn();
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+    const displaced = document.createElement('button');
+    document.body.appendChild(displaced);
+    const documentAddSpy = vi.spyOn(document, 'addEventListener').mockImplementation(() => {});
+    const windowAddSpy = vi.spyOn(window, 'addEventListener').mockImplementation(() => {});
+    app.setupEventListeners();
+    const shippingKeydown = documentAddSpy.mock.calls.find(([type]) => type === 'keydown')?.[1] as EventListener;
+    documentAddSpy.mockRestore();
+    windowAddSpy.mockRestore();
+    document.addEventListener('keydown', shippingKeydown, true);
+
+    try {
+      openGroupMenu(app, trigger);
+      displaced.focus();
+      const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      displaced.dispatchEvent(escape);
+
+      expect(escape.defaultPrevented).toBe(true);
+      expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(app.closeAllPanels).not.toHaveBeenCalled();
+      expect(app.closeHelp).not.toHaveBeenCalled();
+      expect(app.closeShortcutOverlay).not.toHaveBeenCalled();
+      expect(app.closeSessionManager).not.toHaveBeenCalled();
+      expect(app.closeCommandPalette).not.toHaveBeenCalled();
+    } finally {
+      app.closeTabGroupMenu?.();
+      document.removeEventListener('keydown', shippingKeydown, true);
+    }
+  });
+
   it('toggles from the same trigger, replaces from another trigger, and manages ARIA state', () => {
     const app = makeInteractionApp();
     app._fullRenderSessionTabs();

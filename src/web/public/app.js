@@ -1318,8 +1318,12 @@ class CodemanApp {
         return;
       }
 
-      // Escape - close panels and modals (different logic: no preventDefault, no return)
+      // Escape - let the active group menu consume the key before closing unrelated UI.
       if (e.key === 'Escape') {
+        if (this._tabGroupMenu?.isConnected && this._tabGroupMenuKeydown) {
+          this._tabGroupMenuKeydown(e);
+          return;
+        }
         // The View Response overlay is a top-level layer: close it first and
         // consume the key so ESC never reaches xterm/the CLI (where it has its own
         // cancel semantics), then restore terminal focus. Explicit close (not a
@@ -5243,6 +5247,7 @@ class CodemanApp {
     this._tabGroupMenuKeydown = (keyEvent) => {
       if (keyEvent.key !== 'Escape') return;
       keyEvent.preventDefault();
+      keyEvent.stopImmediatePropagation();
       this.closeTabGroupMenu({ restoreFocus: true });
     };
     document.addEventListener('pointerdown', this._tabGroupMenuOutside, true);
