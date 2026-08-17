@@ -10,8 +10,9 @@
  * Key exports:
  * - `generateHooksConfig()` — returns hooks object for settings.local.json
  * - `writeHooksConfig(casePath)` — writes hooks + env config to disk
+ * - `applyWorkspaceHooks(workspace, install?)` — the ONE install-vs-refresh decision
+ *   point every claude-session create path routes through (see its doc comment)
  * - `ensureCodemanHooks(casePath)` — safely installs/updates hooks for a managed case
- *   (no production call site yet; see its doc comment before wiring one)
  * - `updateCaseEnvVars(casePath, envVars)` — merges env vars into settings
  *
  * Hook events generated: `idle_prompt`, `permission_prompt`, `elicitation_dialog`,
@@ -38,6 +39,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import type { HookEventType } from './types.js';
 import { HOOK_TIMEOUT_SECONDS } from './config/auth-config.js';
+import { dataPath } from './config/instance.js';
 
 /**
  * Serializes read-modify-write access to a `settings.local.json` path. Every
@@ -682,22 +684,28 @@ export async function writeHooksConfig(casePath: string): Promise<void> {
 }
 
 /**
- * Ensures an explicitly managed case has the current Codeman hooks.
+ * Ensures a workspace Codeman is about to run Claude in has the current Codeman hooks.
  *
- * Unlike `refreshStaleCodemanHooks`, this may add Codeman handlers to a valid
- * user-owned settings file. It is therefore reserved for case quick-starts,
- * where the user has explicitly asked Codeman to manage that workspace. A
- * malformed existing file is left untouched rather than replaced.
+ * Unlike `refreshStaleCodemanHooks`, this may ADD Codeman handlers to a settings
+ * file that has none (a linked case, a cloned repo, any directory Codeman did not
+ * scaffold). It merges rather than replaces, so a user's own hook entries survive,
+ * and a malformed existing file is left untouched rather than replaced.
  *
- * ⚠️ It has NO production call site: PR #233 landed it with the hook scripts and never
- * wired it up, and knip can't flag it (`test/**` are entry points, so its tests count as
- * a use). Kept anyway, because it is redundant with neither sibling: `writeHooksConfig`
- * REPLACES a malformed settings file and rewrites unconditionally, and
- * `refreshStaleCodemanHooks` deliberately never adds hooks to a case that has none. The
- * one place it fits is quick-start's existing-case branch in session-routes.ts, and
- * moving that branch onto this function is a POLICY change (hooks would come back for a
- * user who deleted them from their case, and linked cases would start getting a hooks
- * block they have never had), so that call is left to the owner rather than made here.
+ * ⚠️ That "may add" is a deliberate POLICY, adopted 2026-08-15 after the symptom it
+ * causes was reported: hooks were only ever written when Codeman CREATED a case
+ * directory, so every session in a linked case ran with no hooks at all and each
+ * hook-driven surface was silently dead there — an AskUserQuestion dialog blocking
+ * the pane while the tab and the phone overview both read a calm `idle`, no
+ * Approvals Inbox item, no push, no definitive `stop`/`idle_prompt` for respawn, and
+ * no `stop`/`blocked` for the agent wait endpoints. The cost of the policy is the
+ * other direction: a user who DELETES Codeman's hooks from a workspace gets them
+ * back on the next session create there, because nothing on disk distinguishes
+ * "removed on purpose" from "never had any".
+ *
+ * Called from both session-create paths (`POST /api/sessions`, `POST /api/quick-start`)
+ * for claude mode, and from `restoreMuxSessions()` so sessions that predate this heal
+ * on the next server start. Claude Code re-reads the file, so a session ALREADY running
+ * in the workspace picks the hooks up without a restart (verified live, 2026-08-15).
  */
 export async function ensureCodemanHooks(casePath: string): Promise<void> {
   await withSafeSettingsWrite(casePath, 'hooks (ensure)', async (claudeDir, settingsPath) => {
@@ -807,6 +815,64 @@ export async function verifyClaudeSessionStartHookCapability(
   if (mode !== 'claude') return true;
   if (remote) return false;
   return refreshStaleCodemanHooks(casePath).catch(() => false);
+}
+
+/**
+ * Hooks for the workspace a Claude session is about to run in. ONE decision point,
+ * shared by every claude-session create path — the interactive routes, quick-start,
+ * cron fires, legacy scheduled runs, the plan-orchestrator one-shots, and the boot
+ * recovery sweep — so the `workspaceHooksEnabled` setting cannot apply to some of
+ * them only.
+ *
+ * ON (the default): INSTALL Codeman's hooks block (`ensureCodemanHooks`), merging so
+ * a user's own hook entries and every other settings key survive. Hooks used to be
+ * written only when Codeman CREATED the case DIRECTORY, so a linked case or any
+ * pre-existing repo — where most sessions actually run — had none, and every
+ * hook-driven surface was silently dead there (full history on `ensureCodemanHooks`).
+ *
+ * OFF: the older, narrower behavior. A Codeman block that is already there is still
+ * refreshed when stale (COD-91: a pre-secret block 401s once the hook-secret gate
+ * went unconditional), but one is never added, so Codeman leaves the repo alone.
+ *
+ * `install` overrides the setting read: route handlers resolve it through their
+ * ConfigPort (`ctx.getWorkspaceHooksEnabled()`, which tests stub), and the boot sweep
+ * passes `true` after checking the setting once for its whole batch. Every other
+ * caller omits it and the synced setting is read from settings.json here — default ON
+ * when the key is absent or the file unreadable, matching the server's resolver.
+ *
+ * Callers gate on their own context (claude mode only; local — never a remote
+ * workingDir, which is a path on ANOTHER host, and never a docker case that opted
+ * out of hooks). The guards EVERY caller needs live here instead:
+ *  - a workspace that does not exist is skipped — `ensureCodemanHooks` mkdir -p's,
+ *    so a deleted repo whose tmux session survived would otherwise be resurrected
+ *    as an empty directory tree holding only `.claude/settings.local.json`;
+ *  - errors are swallowed — a session create must never fail on hooks.
+ */
+export async function applyWorkspaceHooks(workspace: string, install?: boolean): Promise<void> {
+  try {
+    if (!existsSync(workspace)) return;
+    const shouldInstall = install ?? (await readWorkspaceHooksEnabled());
+    await (shouldInstall ? ensureCodemanHooks(workspace) : refreshStaleCodemanHooks(workspace));
+  } catch {
+    // Best-effort by contract (see doc comment): hooks degrade to output-based
+    // idle detection; the create goes ahead.
+  }
+}
+
+/**
+ * The synced `workspaceHooksEnabled` app setting, read straight from settings.json
+ * for callers that live outside the web layer (cron, scheduled runs, the plan
+ * orchestrator). Default ON: an absent key means a user who has never seen the
+ * setting, and OFF for them would mean no tab alerts, no Approvals Inbox and no
+ * respawn idle signals in every workspace Codeman did not scaffold itself.
+ */
+async function readWorkspaceHooksEnabled(): Promise<boolean> {
+  try {
+    const parsed = JSON.parse(await readFile(dataPath('settings.json'), 'utf-8')) as Record<string, unknown>;
+    return parsed.workspaceHooksEnabled !== false;
+  } catch {
+    return true;
+  }
 }
 
 /** Unique marker identifying Codeman's own statusLine command (vs a user's). */

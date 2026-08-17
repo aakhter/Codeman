@@ -29,6 +29,10 @@ function displayCells(text: string): Array<{ chars: string; width: number }> {
 }
 
 function loadTerminalUiPrototype() {
+  // constants.js first: the file-path link pattern (absoluteFilePathPattern) is
+  // single-sourced there and shared with the response viewer, so terminal-ui.js
+  // references it at call time and the vm context has to carry it.
+  const constants = readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8');
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
   const openSpy = vi.fn();
   const context = vm.createContext({
@@ -47,7 +51,7 @@ function loadTerminalUiPrototype() {
       document: { documentElement: { dataset: {} } },
     },
   });
-  vm.runInContext(`${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
+  vm.runInContext(`${constants}\n${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
   return {
     proto: (context as { __proto: Record<string, (...args: any[]) => any> }).__proto,
     openSpy,
@@ -517,12 +521,16 @@ describe('COD-232 terminal document link provider', () => {
     const links = provide();
 
     // In-workspace absolute paths are normalized to a workspace-relative
-    // preview path. Out-of-workspace paths under the well-known prefixes
-    // (/etc here) still link via the legacy standalone-path fallback since
-    // upstream's extPattern gained image/pdf extensions (pasted-attachment
-    // paths) — the backend's validateSessionFilePath guard rejects reads
-    // outside the workspace, so that link cannot expose foreign files.
-    expect(links.map((link) => link.text)).toEqual(['/workspace/project/out/report.pdf', '/etc/secret.pdf']);
+    // preview path. Out-of-workspace paths under the well-known prefixes still
+    // link via the legacy standalone-path fallback, which now shares
+    // FILE_PATH_LINK_PATTERN (constants.js) with the response viewer — so
+    // /workspace is a root and /etc deliberately is NOT (DEFAULT_BLOCKED_TREES
+    // refuses that tree server-side, so every /etc link was a guaranteed 403).
+    // Reads outside the workspace still go through the attachment guard.
+    expect(links.map((link) => link.text)).toEqual([
+      '/workspace/project/out/report.pdf',
+      '/workspace/other/report.pdf',
+    ]);
     links[0].activate(null, links[0].text);
     expect(previewSpy).toHaveBeenCalledWith('out/report.pdf', 'origin-session');
   });
@@ -842,7 +850,12 @@ describe('COD-288 marker-prefixed absolute paths', () => {
       workingDir: '/workspace/project',
     });
 
-    expect(provide()).toEqual([]);
+    // The marker scanner must not manufacture ONE target spanning the tab. The
+    // extensionless `/mnt/c/first` is not a candidate at all, and the complete
+    // second path links on its own through the legacy fallback (/mnt is a root
+    // in the shared FILE_PATH_LINK_PATTERN) — which is a different mechanism and
+    // resolves at click time, so no external target is minted here.
+    expect(provide().map((link: { text: string }) => link.text)).toEqual(['/mnt/c/second.pdf']);
     expect(externalPreviewSpy).not.toHaveBeenCalled();
   });
 

@@ -65,6 +65,8 @@ export interface ImageDetectedEvent {
 
 export type AttachmentDetectedType =
   | 'image'
+  | 'video'
+  | 'audio'
   | 'pdf'
   | 'document'
   | 'presentation'

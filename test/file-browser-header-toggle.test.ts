@@ -80,6 +80,9 @@ function makeSelectSessionHarness(sessionId: string): any {
   app._connectWs = vi.fn();
   app.hideWelcome = vi.fn();
   app.clearPendingHooks = vi.fn();
+  // Real constructor field: selectSession clears the idle alert on view via
+  // markIdleAlertSeen(), which reads this map before delegating to the stub above.
+  app.pendingHooks = new Map();
   app._updateActiveTabImmediate = vi.fn();
   app.renderSessionTabs = vi.fn();
   app.updateAttachmentHistoryBadge = vi.fn();

@@ -18,6 +18,21 @@ const settingsJs = readFileSync(resolve(import.meta.dirname, '../src/web/public/
 const appJs = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
 const schemasTs = readFileSync(resolve(import.meta.dirname, '../src/web/schemas.ts'), 'utf8');
 
+/**
+ * The body of `applyTabOrientation`, from its DEFINITION (not the earlier call
+ * sites) to the next method at the same indent. Sliced structurally rather than
+ * by a character budget so that adding a comment inside it cannot silently push
+ * a guarded line out of range and turn a real assertion into a no-op.
+ */
+function applyTabOrientationBody(): string {
+  const start = settingsJs.indexOf('applyTabOrientation(options = {}) {');
+  expect(start, 'applyTabOrientation definition not found in settings-ui.js').toBeGreaterThan(-1);
+  const rest = settingsJs.slice(start);
+  const end = rest.indexOf('\n  },\n');
+  expect(end, 'applyTabOrientation body terminator not found').toBeGreaterThan(-1);
+  return rest.slice(0, end);
+}
+
 function loadTabOverflowHelper() {
   const context = vm.createContext({ window: {}, globalThis: {} });
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8');
@@ -79,17 +94,19 @@ describe('vertical tab rail wiring (COD-286)', () => {
 
   it('moves the strip between the header and the rail instead of duplicating it', () => {
     expect(settingsJs).toContain('applyTabOrientation');
-    expect(settingsJs).toMatch(/tabRail[\s\S]{0,400}appendChild/);
-    // Horizontal must put the strip back in the header, before the right-hand cluster.
+    // Scoped to the definition rather than a character budget: the body carries
+    // comments, and a budget just measures how much prose sits between two lines.
+    expect(applyTabOrientationBody()).toContain("getElementById('tabRail')");
+    expect(applyTabOrientationBody()).toContain('rail.appendChild(tabsEl)');
+    // Horizontal must put the strip back in the header. Its markup home is
+    // #sessionTabsHost (shared with the sidebar layout, which restores it there
+    // too); the pre-host fallback still inserts before the right-hand cluster.
+    expect(applyTabOrientationBody()).toMatch(/sessionTabsHost[\s\S]*appendChild\(tabsEl\)/);
     expect(settingsJs).toMatch(/headerRight[\s\S]{0,200}insertBefore|insertBefore[\s\S]{0,200}headerRight/);
   });
 
   it('re-fits the terminal when the orientation changes', () => {
-    // Slice from the DEFINITION, not the earlier call site.
-    const defStart = settingsJs.indexOf('applyTabOrientation(options = {}) {');
-    expect(defStart).toBeGreaterThan(-1);
-    const applyBlock = settingsJs.slice(defStart, defStart + 2500);
-    expect(applyBlock).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);
+    expect(applyTabOrientationBody()).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);
   });
 
   it('is applied on load alongside the other tab settings', () => {
