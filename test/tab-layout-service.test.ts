@@ -3,6 +3,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { TabLayoutService } from '../src/tab-layout-service.js';
+import { TabLayoutValidationError } from '../src/tab-layout.js';
 import { SseEvent } from '../src/web/sse-events.js';
 import type { TabLayout } from '../src/tab-layout.js';
 
@@ -388,6 +389,27 @@ describe('TabLayoutService', () => {
       expect(recovery.appliedOperationCount).toBeUndefined();
     }
   );
+
+  it.each([
+    { type: 'unknown' },
+    { type: 'followParent', ref: { kind: 'invalid', id: 'child' } },
+    { type: 'createGroup', id: 'new', name: '', index: 0 },
+    { type: 'reorderGroup', groupId: 'g', index: -1 },
+    { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
+  ])('rejects malformed operation shape before stale-base inference: $type', async (operation) => {
+    const base: TabLayout = {
+      ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),
+      groups: [{ id: 'g', name: 'Work', refs: [] }],
+    };
+    const h = createHarness({
+      layouts: { alice: { ...base, version: 8 } },
+      live: [{ id: 'child', owner: 'alice', createdAt: 1 }],
+    });
+
+    await expect(h.service.putOperations('alice', [operation] as never, 7, base)).rejects.toThrow(
+      TabLayoutValidationError
+    );
+  });
 
   it('repairs missing refs before applying semantic intent and rejects duplicate edits atomically', async () => {
     const h = createHarness({

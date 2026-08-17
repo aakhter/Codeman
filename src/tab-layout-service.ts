@@ -17,6 +17,9 @@ import {
   renameGroup,
   reorderGroup,
   setManualPlacement,
+  MAX_TAB_GROUP_NAME_LENGTH,
+  MAX_TAB_GROUPS,
+  MAX_TAB_REFS,
   TabLayoutValidationError,
   validateTabLayout,
   type TabLayout,
@@ -81,6 +84,65 @@ const validOperationRef = (value: unknown): value is TabRef =>
   ((value as TabRef).kind === 'session' || (value as TabRef).kind === 'webview') &&
   typeof (value as TabRef).id === 'string' &&
   (value as TabRef).id.length > 0;
+const validOperationId = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+const validOperationIndex = (value: unknown, maximumExclusive: number): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) < maximumExclusive;
+const validOperationName = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0 && value.trim().length <= MAX_TAB_GROUP_NAME_LENGTH;
+
+function validateOperationRequest(value: unknown): asserts value is TabLayoutSemanticOperation {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TabLayoutValidationError('invalid tab layout operation');
+  }
+  const operation = value as Record<string, unknown>;
+  switch (operation.type) {
+    case 'createGroup':
+      if (
+        !validOperationId(operation.id) ||
+        !validOperationName(operation.name) ||
+        (operation.index !== undefined && !validOperationIndex(operation.index, MAX_TAB_GROUPS))
+      ) {
+        throw new TabLayoutValidationError('createGroup operation has invalid fields');
+      }
+      return;
+    case 'renameGroup':
+      if (!validOperationId(operation.groupId) || !validOperationName(operation.name)) {
+        throw new TabLayoutValidationError('renameGroup operation has invalid fields');
+      }
+      return;
+    case 'deleteGroup':
+      if (!validOperationId(operation.groupId)) {
+        throw new TabLayoutValidationError('deleteGroup operation has an invalid groupId');
+      }
+      return;
+    case 'reorderGroup':
+      if (!validOperationId(operation.groupId) || !validOperationIndex(operation.index, MAX_TAB_GROUPS)) {
+        throw new TabLayoutValidationError('reorderGroup operation has invalid fields');
+      }
+      return;
+    case 'moveRef':
+      if (
+        !validOperationRef(operation.ref) ||
+        (operation.groupId !== null && !validOperationId(operation.groupId)) ||
+        !validOperationIndex(operation.index, MAX_TAB_REFS)
+      ) {
+        throw new TabLayoutValidationError('moveRef operation has invalid fields');
+      }
+      return;
+    case 'setManualPlacement':
+      if (!validOperationRef(operation.ref) || operation.manual !== true) {
+        throw new TabLayoutValidationError('setManualPlacement operation has invalid fields');
+      }
+      return;
+    case 'followParent':
+      if (!validOperationRef(operation.ref) || operation.ref.kind !== 'session') {
+        throw new TabLayoutValidationError('followParent operation has an invalid ref; session required');
+      }
+      return;
+    default:
+      throw new TabLayoutValidationError('unknown tab layout operation');
+  }
+}
 
 export class TabLayoutService {
   private restorationState: 'pending' | 'complete' | 'failed' | 'skipped' = 'pending';
@@ -249,6 +311,7 @@ export class TabLayoutService {
       if (!Array.isArray(operations) || operations.length === 0 || operations.length > 64) {
         throw new TabLayoutValidationError('operations must contain 1–64 semantic edits');
       }
+      for (const operation of operations) validateOperationRequest(operation);
       const applyOperation = (input: TabLayout, operation: TabLayoutSemanticOperation): TabLayout => {
         if (!operation || typeof operation !== 'object')
           throw new TabLayoutValidationError('invalid tab layout operation');

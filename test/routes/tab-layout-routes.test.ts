@@ -191,6 +191,49 @@ describe('tab layout routes', () => {
       },
     });
     expect(malformedRecovery.statusCode).toBe(400);
+
+    const malformedOperations = [
+      { type: 'unknown' },
+      { type: 'followParent', ref: null },
+      { type: 'followParent', ref: { kind: 'invalid', id: 'child' } },
+      { type: 'followParent', ref: { kind: 'session', id: '' } },
+      { type: 'followParent', ref: { kind: 'webview', id: 'child' } },
+      { type: 'createGroup', id: '', name: 'New' },
+      { type: 'createGroup', id: 'new', name: ' ' },
+      { type: 'createGroup', id: 'new', name: 'x'.repeat(61) },
+      { type: 'createGroup', id: 'new', name: 'New', index: -1 },
+      { type: 'createGroup', id: 'new', name: 'New', index: 999 },
+      { type: 'renameGroup', groupId: '', name: 'Renamed' },
+      { type: 'deleteGroup', groupId: null },
+      { type: 'reorderGroup', groupId: 'g', index: 1.5 },
+      {
+        type: 'moveRef',
+        ref: { kind: 'session', id: 'child' },
+        groupId: 4,
+        index: 0,
+      },
+      {
+        type: 'moveRef',
+        ref: { kind: 'session', id: 'child' },
+        groupId: null,
+        index: -1,
+      },
+      {
+        type: 'moveRef',
+        ref: { kind: 'session', id: 'child' },
+        groupId: null,
+        index: 999,
+      },
+      { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
+    ];
+    for (const operation of malformedOperations) {
+      const malformedOperation = await app.inject({
+        method: 'PUT',
+        url: '/api/tab-layout',
+        payload: { baseVersion: 7, operations: [operation], recoveryBaseLayout: recoveryBase },
+      });
+      expect(malformedOperation.statusCode, JSON.stringify(operation)).toBe(400);
+    }
     await app.close();
   });
 
