@@ -396,7 +396,7 @@ describe('TabLayoutService', () => {
     { type: 'createGroup', id: 'new', name: '', index: 0 },
     { type: 'reorderGroup', groupId: 'g', index: -1 },
     { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
-  ])('rejects malformed operation shape before stale-base inference: $type', async (operation) => {
+  ])('returns conflict for stale malformed $type but rejects it at the matching version', async (operation) => {
     const base: TabLayout = {
       ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),
       groups: [{ id: 'g', name: 'Work', refs: [] }],
@@ -406,7 +406,13 @@ describe('TabLayoutService', () => {
       live: [{ id: 'child', owner: 'alice', createdAt: 1 }],
     });
 
-    await expect(h.service.putOperations('alice', [operation] as never, 7, base)).rejects.toThrow(
+    for (const staleVersion of [7, 9]) {
+      const stale = await h.service.putOperations('alice', [operation] as never, staleVersion, base);
+      expect(stale.status).toBe('conflict');
+      expect(stale.layout.version).toBe(8);
+      expect(stale.appliedOperationCount).toBeUndefined();
+    }
+    await expect(h.service.putOperations('alice', [operation] as never, 8, base)).rejects.toThrow(
       TabLayoutValidationError
     );
   });

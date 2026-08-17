@@ -181,16 +181,29 @@ describe('tab layout routes', () => {
     expect(response.json().data.layout).toEqual(current);
     expect(response.json().data.appliedOperationCount).toBeUndefined();
 
-    const malformedRecovery = await app.inject({
+    for (const staleVersion of [7, 9]) {
+      const malformedRecovery = await app.inject({
+        method: 'PUT',
+        url: '/api/tab-layout',
+        payload: {
+          baseVersion: staleVersion,
+          operations: [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
+          recoveryBaseLayout: { version: staleVersion },
+        },
+      });
+      expect(malformedRecovery.statusCode).toBe(409);
+      expect(malformedRecovery.json().data.layout).toEqual(current);
+    }
+    const matchingMalformedRecovery = await app.inject({
       method: 'PUT',
       url: '/api/tab-layout',
       payload: {
-        baseVersion: 7,
+        baseVersion: 8,
         operations: [{ type: 'followParent', ref: { kind: 'session', id: 'child' } }],
-        recoveryBaseLayout: { version: 7 },
+        recoveryBaseLayout: { version: 8 },
       },
     });
-    expect(malformedRecovery.statusCode).toBe(400);
+    expect(matchingMalformedRecovery.statusCode).toBe(400);
 
     const malformedOperations = [
       { type: 'unknown' },
@@ -227,12 +240,38 @@ describe('tab layout routes', () => {
       { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
     ];
     for (const operation of malformedOperations) {
-      const malformedOperation = await app.inject({
+      for (const staleVersion of [7, 9]) {
+        const staleMalformedOperation = await app.inject({
+          method: 'PUT',
+          url: '/api/tab-layout',
+          payload: { baseVersion: staleVersion, operations: [operation], recoveryBaseLayout: recoveryBase },
+        });
+        expect(staleMalformedOperation.statusCode, JSON.stringify(operation)).toBe(409);
+        expect(staleMalformedOperation.json().data.layout).toEqual(current);
+      }
+      const matchingMalformedOperation = await app.inject({
         method: 'PUT',
         url: '/api/tab-layout',
-        payload: { baseVersion: 7, operations: [operation], recoveryBaseLayout: recoveryBase },
+        payload: { baseVersion: 8, operations: [operation], recoveryBaseLayout: recoveryBase },
       });
-      expect(malformedOperation.statusCode, JSON.stringify(operation)).toBe(400);
+      expect(matchingMalformedOperation.statusCode, JSON.stringify(operation)).toBe(400);
+    }
+    for (const malformedBatch of [null, {}, []]) {
+      for (const staleVersion of [7, 9]) {
+        const staleMalformedBatch = await app.inject({
+          method: 'PUT',
+          url: '/api/tab-layout',
+          payload: { baseVersion: staleVersion, operations: malformedBatch },
+        });
+        expect(staleMalformedBatch.statusCode, JSON.stringify(malformedBatch)).toBe(409);
+        expect(staleMalformedBatch.json().data.layout).toEqual(current);
+      }
+      const matchingMalformedBatch = await app.inject({
+        method: 'PUT',
+        url: '/api/tab-layout',
+        payload: { baseVersion: 8, operations: malformedBatch },
+      });
+      expect(matchingMalformedBatch.statusCode, JSON.stringify(malformedBatch)).toBe(400);
     }
     await app.close();
   });

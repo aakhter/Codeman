@@ -308,10 +308,6 @@ export class TabLayoutService {
     return this.withOwner(owner, async () => {
       const current = await this.getUnlocked(owner);
       const { metadata } = await this.facts(owner);
-      if (!Array.isArray(operations) || operations.length === 0 || operations.length > 64) {
-        throw new TabLayoutValidationError('operations must contain 1–64 semantic edits');
-      }
-      for (const operation of operations) validateOperationRequest(operation);
       const applyOperation = (input: TabLayout, operation: TabLayoutSemanticOperation): TabLayout => {
         if (!operation || typeof operation !== 'object')
           throw new TabLayoutValidationError('invalid tab layout operation');
@@ -351,26 +347,29 @@ export class TabLayoutService {
       };
       if (baseVersion !== current.version) {
         let appliedOperationCount: number | undefined;
-        if (recoveryBaseLayout !== undefined) {
-          let candidate = validateTabLayout(recoveryBaseLayout);
-          if (candidate.version !== baseVersion) {
-            throw new TabLayoutValidationError('recovery base version must match baseVersion');
+        try {
+          if (!Array.isArray(operations) || operations.length === 0 || operations.length > 64) {
+            throw new TabLayoutValidationError('operations must contain 1–64 semantic edits');
           }
-          candidate = normalizeTabLayout(candidate, metadata);
-          if (sameContent(candidate, current)) appliedOperationCount = 0;
-          try {
+          for (const operation of operations) validateOperationRequest(operation);
+          if (recoveryBaseLayout !== undefined) {
+            let candidate = validateTabLayout(recoveryBaseLayout);
+            if (candidate.version !== baseVersion) {
+              throw new TabLayoutValidationError('recovery base version must match baseVersion');
+            }
+            candidate = normalizeTabLayout(candidate, metadata);
+            if (sameContent(candidate, current)) appliedOperationCount = 0;
             for (let index = 0; index < operations.length; index++) {
               candidate = normalizeTabLayout(applyOperation(candidate, operations[index]), metadata);
               if (sameContent(candidate, current)) appliedOperationCount = index + 1;
             }
-          } catch (error) {
-            // The request was valid against its historical base, but concurrent
-            // lineage/ref/group changes can make semantic replay inapplicable.
-            // Prefix inference is advisory: preserve the 409 contract and let
-            // the client adopt current state instead of converting it to 400.
-            if (!(error instanceof TabLayoutValidationError)) throw error;
-            appliedOperationCount = undefined;
           }
+        } catch (error) {
+          // Every version mismatch is a conflict. Malformed advisory recovery
+          // data and semantically invalidated historical intent only make the
+          // applied prefix unknown; neither may replace the authoritative 409.
+          if (!(error instanceof TabLayoutValidationError)) throw error;
+          appliedOperationCount = undefined;
         }
         return {
           status: 'conflict',
@@ -378,6 +377,16 @@ export class TabLayoutService {
           placements: describeTabPlacements(current, metadata),
           ...(appliedOperationCount === undefined ? {} : { appliedOperationCount }),
         };
+      }
+      if (!Array.isArray(operations) || operations.length === 0 || operations.length > 64) {
+        throw new TabLayoutValidationError('operations must contain 1–64 semantic edits');
+      }
+      for (const operation of operations) validateOperationRequest(operation);
+      if (recoveryBaseLayout !== undefined) {
+        const recoveryBase = validateTabLayout(recoveryBaseLayout);
+        if (recoveryBase.version !== baseVersion) {
+          throw new TabLayoutValidationError('recovery base version must match baseVersion');
+        }
       }
       let next = current;
       for (const operation of operations) next = applyOperation(next, operation);

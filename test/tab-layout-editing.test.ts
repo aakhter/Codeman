@@ -1356,6 +1356,82 @@ describe('COD-307 delegated pointer behavior', () => {
 });
 
 describe('COD-307 page lifecycle persistence', () => {
+  it('persists and keepalive-flushes the rebased retry state during pagehide', async () => {
+    vi.useFakeTimers();
+    const h = loadHelper();
+    const initial = layout();
+    const remote = {
+      ...layout(8),
+      groups: [...layout(8).groups, { id: 'new', name: 'New', refs: [] }],
+    };
+    let resolveRetry!: (response: unknown) => void;
+    const retry = new Promise((resolve) => {
+      resolveRetry = resolve;
+    });
+    let markRetryStarted!: () => void;
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+    const put = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 409, layout: remote, appliedOperationCount: 1 })
+      .mockImplementationOnce(() => {
+        markRetryStarted();
+        return retry;
+      });
+    const keepalive = vi.fn();
+    const coordinator = h.createEditCoordinator({
+      initialLayout: initial,
+      applyLayout: vi.fn(),
+      put,
+      putKeepalive: keepalive,
+      debounceMs: 180,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    const remaining = { type: 'renameGroup', groupId: 'new', name: 'Recovered' };
+    coordinator.enqueue({ type: 'createGroup', id: 'new', name: 'New' });
+    coordinator.enqueue(remaining);
+    const writing = coordinator.flush();
+    await retryStarted;
+    expect(put).toHaveBeenCalledTimes(2);
+
+    const app = makeInteractionApp();
+    app._tabLayoutEditCoordinator = coordinator;
+    app._tabLayoutCoordinator = null;
+    app._tabLayoutPagehideHandler = null;
+    app._fetchTabLayout = vi.fn(async () => ({ layout: remote, placements: [] }));
+    app._applyTabLayoutFallback = vi.fn();
+    app._ensureTabLayoutCoordinator();
+    window.dispatchEvent(new Event('pagehide'));
+
+    expect(keepalive).toHaveBeenCalledWith({
+      baseVersion: 8,
+      layout: expect.any(Object),
+      operations: [remaining],
+      recoveryBaseLayout: remote,
+    });
+    expect(JSON.parse(sessionStorage.getItem('codeman:tab-layout-pending-operations')!)).toEqual({
+      baseLayout: remote,
+      operations: [remaining],
+    });
+
+    resolveRetry({
+      ok: true,
+      status: 200,
+      layout: {
+        ...remote,
+        version: 9,
+        groups: remote.groups.map((group) => (group.id === 'new' ? { ...group, name: 'Recovered' } : group)),
+      },
+    });
+    await writing;
+    expect(coordinator.getLayout().version).toBe(9);
+    expect(coordinator.getLayout().groups.find((group: any) => group.id === 'new').name).toBe('Recovered');
+    sessionStorage.removeItem('codeman:tab-layout-pending-operations');
+    vi.useRealTimers();
+  });
+
   it('sends the latest optimistic layout through keepalive on ordinary pagehide only', () => {
     const h = loadHelper();
     const keepalive = vi.fn();

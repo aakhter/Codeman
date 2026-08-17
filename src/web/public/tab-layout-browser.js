@@ -593,7 +593,7 @@
         if (!options.putKeepalive || (!writing && pending.length === 0)) return false;
         if (timer !== null) cancel(timer);
         timer = null;
-        const recoveryBase = inFlightRecoveryBase || pendingRecoveryBase;
+        const recoveryBase = inFlightBase || pendingRecoveryBase;
         options.putKeepalive({
           baseVersion: (recoveryBase || authoritative).version,
           layout: normalizedLayout(optimistic),
