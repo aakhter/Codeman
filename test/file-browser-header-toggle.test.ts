@@ -21,6 +21,11 @@ beforeAll(() => {
     'NotificationManager = function(){}, FocusTrap = function(){ return { activate(){}, deactivate(){} }; };\n' +
     readPublic('constants.js') +
     '\n' +
+    // Immediately before app.js, matching index.html: handleInit() reaches
+    // window.CodemanTabLayout through _loadTabLayout(), so without this the
+    // whole init path dies on an undefined global rather than testing anything.
+    readPublic('tab-layout-browser.js') +
+    '\n' +
     readPublic('app.js') +
     '\n' +
     readPublic('panels-ui.js') +
@@ -325,9 +330,14 @@ describe('COD-235 canonical Files header behavior', () => {
 });
 
 describe('COD-235 direct active-session mutation sync', () => {
-  it('synchronizes immediately when empty init clears the active session after tab rendering', () => {
+  it('synchronizes immediately when empty init clears the active session after tab rendering', async () => {
     const app = makeApp('stale-session');
     app._initGeneration = 0;
+    // COD-306 moved tab restoration behind the owner-layout read, so the clear
+    // that used to run inline now lands in a promise continuation. Stub the read
+    // so it resolves on a microtask; what this test pins is the ADJACENCY of the
+    // clear and the header sync, not which turn of the loop they happen on.
+    app._loadTabLayout = vi.fn(async () => true);
     app._clearTimer = vi.fn();
     app._updateCjkInputState = vi.fn();
     app._applyCodemanCliHints = vi.fn();
@@ -346,8 +356,13 @@ describe('COD-235 direct active-session mutation sync', () => {
     app.updateFileBrowserHeaderButton = vi.fn(() => observedActiveSessions.push(app.activeSessionId));
 
     app.handleInit({ sessions: [], scheduledRuns: [] });
+    // Drain the layout-read continuation the restore now hangs off.
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(app.activeSessionId).toBeNull();
+    // The sync observed the CLEARED value, not the stale one: it runs on the
+    // line after the mutation, so it can never report a session that is gone.
     expect(observedActiveSessions).toEqual([null]);
   });
 

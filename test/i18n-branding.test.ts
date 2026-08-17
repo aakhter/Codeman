@@ -118,7 +118,17 @@ describe('custom display name and browser localization', () => {
     const namedHeader = named.querySelector<HTMLElement>('.tab-layout-group-name')!;
     expect(namedHeader.textContent).toBe('Browser');
     expect(namedHeader.hasAttribute('data-i18n-skip')).toBe(true);
-    expect(named.getAttribute('aria-labelledby')).toBe(namedHeader.id);
+    // The label must sit on whichever element carries role="group", NOT on the
+    // <section>: COD-307 made that a role="presentation" tree wrapper, and ARIA
+    // attributes on a presentation element are ignored. Asserted via the role
+    // rather than a fixed selector so the pair can never drift apart again —
+    // this assertion silently stopped biting when the roles moved.
+    const namedGroup = named.querySelector<HTMLElement>('[role="group"]')!;
+    expect(named.getAttribute('role')).toBe('presentation');
+    expect(namedGroup.getAttribute('aria-labelledby')).toBe(namedHeader.id);
+    expect(namedHeader.id).not.toBe('');
+    // The unnamed group has no header to point at, so it labels itself inline.
+    expect(ungrouped.querySelector('[role="group"]')!.getAttribute('aria-label')).toBe('Ungrouped');
     expect(named.hasAttribute('data-i18n-skip')).toBe(false);
     expect(ungrouped.hasAttribute('data-i18n-skip')).toBe(false);
     dom.window.close();
