@@ -2482,6 +2482,28 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
   display: inline-flex;
 }
 
+.session-tab .tab-placement-state {
+  display: none;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-state {
+  display: block;
+}
+
+.session-tab .tab-placement-state--dangling,
+.session-tab .tab-placement-state--cycle {
+  color: var(--warning, #f59e0b);
+}
+
 /* ===== Tab action icons: active tab only =================================
    All three per-tab icons live in a .tab-actions wrapper (in flow; it adds
    no width of its own while the children keep the width:0 collapse above).

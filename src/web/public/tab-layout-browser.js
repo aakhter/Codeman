@@ -86,6 +86,141 @@
     ];
   }
 
+  function usableMetadata(metadata) {
+    return (Array.isArray(metadata) ? metadata : []).filter(
+      (item) => validRef(item) && item.ownerValid !== false && item.visible !== false
+    );
+  }
+
+  function mapStoredRef(layout, target, transform) {
+    const targetKey = refKey(target);
+    let found = false;
+    const apply = (ref) => {
+      if (refKey(ref) !== targetKey) return ref;
+      found = true;
+      return transform(ref);
+    };
+    layout.groups = layout.groups.map((group) => ({ ...group, refs: group.refs.map(apply) }));
+    layout.ungrouped = layout.ungrouped.map(apply);
+    if (!found) operationError('unknown ref');
+    return layout;
+  }
+
+  function lineageCycleIds(layout, metadata) {
+    const represented = new Set(refLocations(layout).map((item) => refKey(item.ref)));
+    const sessions = new Map(
+      usableMetadata(metadata)
+        .filter((item) => item.kind === 'session' && represented.has(refKey(item)))
+        .map((item) => [item.id, item])
+    );
+    const state = new Map();
+    const stack = [];
+    const cycles = new Set();
+    const visit = (id) => {
+      if (state.get(id) === 'done') return;
+      if (state.get(id) === 'visiting') {
+        const start = stack.indexOf(id);
+        for (const cycleId of stack.slice(Math.max(0, start))) cycles.add(cycleId);
+        return;
+      }
+      state.set(id, 'visiting');
+      stack.push(id);
+      const parentId = sessions.get(id)?.parentSessionId;
+      if (parentId && sessions.has(parentId)) visit(parentId);
+      stack.pop();
+      state.set(id, 'done');
+    };
+    for (const id of sessions.keys()) visit(id);
+    return cycles;
+  }
+
+  function normalizeLineage(layoutInput, metadata) {
+    let layout = normalizedLayout(layoutInput);
+    const valid = usableMetadata(metadata);
+    const sessions = new Map(valid.filter((item) => item.kind === 'session').map((item) => [item.id, item]));
+    const located = refLocations(layout);
+    const stored = new Map(located.map((item) => [refKey(item.ref), item.ref]));
+    const brokenEdges = new Set();
+    const state = new Map();
+    const visit = (id) => {
+      if (state.get(id) === 'done') return;
+      state.set(id, 'visiting');
+      const item = sessions.get(id);
+      const ref = stored.get(refKey({ kind: 'session', id }));
+      if (item?.parentSessionId && ref?.placement !== 'manual') {
+        const parent = sessions.get(item.parentSessionId);
+        const parentRef = stored.get(refKey({ kind: 'session', id: item.parentSessionId }));
+        if (parent && parentRef) {
+          if (state.get(parent.id) === 'visiting') brokenEdges.add(id);
+          else visit(parent.id);
+        }
+      }
+      state.set(id, 'done');
+    };
+    for (const item of located) {
+      if (item.ref.kind === 'session' && state.get(item.ref.id) === undefined) visit(item.ref.id);
+    }
+    if (brokenEdges.size) {
+      for (const id of brokenEdges) {
+        layout = mapStoredRef(layout, { kind: 'session', id }, (ref) => ({ ...ref, placement: 'manual' }));
+      }
+    }
+
+    const ordered = refLocations(layout);
+    const current = new Map(ordered.map((item) => [refKey(item.ref), item.ref]));
+    const parentOf = new Map();
+    const children = new Map();
+    for (const item of ordered) {
+      if (item.ref.kind !== 'session' || item.ref.placement === 'manual') continue;
+      const parentId = sessions.get(item.ref.id)?.parentSessionId;
+      if (!parentId || !sessions.has(parentId) || !current.has(refKey({ kind: 'session', id: parentId }))) continue;
+      parentOf.set(item.ref.id, parentId);
+      const siblings = children.get(parentId) || [];
+      siblings.push(item.ref.id);
+      children.set(parentId, siblings);
+    }
+    const output = new Map(layout.groups.map((group) => [group.id, []]));
+    output.set(null, []);
+    const emitted = new Set();
+    const emit = (ref, groupId) => {
+      const key = refKey(ref);
+      if (emitted.has(key)) return;
+      emitted.add(key);
+      output.get(groupId).push({ ...ref });
+      if (ref.kind !== 'session') return;
+      for (const childId of children.get(ref.id) || []) {
+        const child = current.get(refKey({ kind: 'session', id: childId }));
+        if (child) emit(child, groupId);
+      }
+    };
+    for (const item of ordered) {
+      if (item.ref.kind === 'session' && parentOf.has(item.ref.id)) continue;
+      emit(item.ref, item.groupId);
+    }
+    layout.groups = layout.groups.map((group) => ({ ...group, refs: output.get(group.id) }));
+    layout.ungrouped = output.get(null);
+    return layout;
+  }
+
+  function placementState(layoutInput, target, metadata) {
+    const layout = normalizedLayout(layoutInput);
+    if (!validRef(target) || target.kind !== 'session') return null;
+    const stored = refLocations(layout).find((item) => refKey(item.ref) === refKey(target))?.ref;
+    if (!stored) return null;
+    const valid = usableMetadata(metadata);
+    const item = valid.find((candidate) => refKey(candidate) === refKey(target));
+    if (!item?.parentSessionId) return null;
+    const parentId = item.parentSessionId;
+    const parent = valid.find((candidate) => candidate.kind === 'session' && candidate.id === parentId);
+    const parentRepresented = refLocations(layout).some(
+      (located) => located.ref.kind === 'session' && located.ref.id === parentId
+    );
+    if (!parent || !parentRepresented) return { state: 'dangling', canFollow: false, parentId };
+    if (lineageCycleIds(layout, valid).has(target.id)) return { state: 'cycle', canFollow: false, parentId };
+    if (stored.placement === 'manual') return { state: 'manual', canFollow: true, parentId };
+    return { state: 'inherited', canFollow: false, parentId };
+  }
+
   function inheritedDescendantKeys(layout, target, metadata) {
     const stored = new Map(refLocations(layout).map((item) => [refKey(item.ref), item.ref]));
     const children = new Map();
@@ -124,7 +259,7 @@
   }
 
   function applyOperation(layoutInput, operation) {
-    const layout = normalizedLayout(layoutInput);
+    let layout = normalizedLayout(layoutInput);
     if (!operation || typeof operation.type !== 'string') operationError('missing operation');
     if (operation.type === 'createGroup') {
       if (!operation.id) operationError('invalid group id');
@@ -185,6 +320,19 @@
           : layout.groups.find((group) => group.id === operation.groupId).refs;
       destination.splice(boundedIndex(operation.index, destination.length), 0, ...block);
       return layout;
+    }
+    if (operation.type === 'setManualPlacement') {
+      if (!validRef(operation.ref) || operation.manual !== true) operationError('invalid manual placement');
+      return mapStoredRef(layout, operation.ref, (ref) => ({ ...ref, placement: 'manual' }));
+    }
+    if (operation.type === 'followParent') {
+      if (!validRef(operation.ref) || operation.ref.kind !== 'session') operationError('only a session can follow');
+      layout = normalizeLineage(layout, operation.metadata);
+      const state = placementState(layout, operation.ref, operation.metadata);
+      if (!state || state.state === 'dangling') operationError('session has no owner-valid parent');
+      if (state.state === 'cycle') operationError('session parent is cyclic');
+      layout = mapStoredRef(layout, operation.ref, (ref) => ({ kind: ref.kind, id: ref.id }));
+      return normalizeLineage(layout, operation.metadata);
     }
     operationError(`unknown operation ${operation.type}`);
   }
@@ -351,6 +499,7 @@
       openWebviews: stableIds(input.openWebviewIds),
       activeSessionId: input.activeSessionId || null,
       activeWebviewId: input.activeWebviewId || null,
+      placementStates: Array.isArray(input.placementStates) ? input.placementStates : [],
       refs: (Array.isArray(input.visibleRefs) ? input.visibleRefs : []).filter(validRef).map(refKey),
     });
   }
@@ -596,6 +745,7 @@
     applyOperation,
     operationsAfterAppliedPrefix,
     previewOperation,
+    placementState,
     createEditCoordinator,
     createLoadCoordinator,
     loadCollapsedGroupIds,

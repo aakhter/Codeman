@@ -238,13 +238,15 @@ describe('TabLayoutService', () => {
     expect(h.layouts.alice.version).toBe(8);
   });
 
-  it('places a root at the end and a child after its parent subtree', async () => {
+  it('places Session Bridge children in their parent group and extends the nested subtree', async () => {
     const h = createHarness({
       layouts: {
-        alice: existing([
-          { kind: 'session', id: 'parent' },
-          { kind: 'session', id: 'tail' },
-        ]),
+        alice: {
+          version: 7,
+          updatedAt: '2026-08-15T00:00:00.000Z',
+          groups: [{ id: 'work', name: 'Work', refs: [{ kind: 'session', id: 'parent' }] }],
+          ungrouped: [{ kind: 'session', id: 'tail' }],
+        },
       },
       live: [
         { id: 'parent', owner: 'alice', createdAt: 1 },
@@ -253,11 +255,14 @@ describe('TabLayoutService', () => {
     });
     h.live.set('root', { id: 'root', owner: 'alice', createdAt: 3 } as never);
     await h.service.sessionCreated('alice');
-    expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['parent', 'tail', 'root']);
+    expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['tail', 'root']);
     h.live.set('child', { id: 'child', owner: 'alice', createdAt: 4, parentSessionId: 'parent' } as never);
     await h.service.sessionCreated('alice');
-    expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['parent', 'child', 'tail', 'root']);
-    expect(h.layouts.alice.version).toBe(9);
+    h.live.set('grandchild', { id: 'grandchild', owner: 'alice', createdAt: 5, parentSessionId: 'child' } as never);
+    await h.service.sessionCreated('alice');
+    expect(h.layouts.alice.groups[0].refs.map((ref) => ref.id)).toEqual(['parent', 'child', 'grandchild']);
+    expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['tail', 'root']);
+    expect(h.layouts.alice.version).toBe(10);
   });
 
   it('appends a newly saved owner webview and rejects over-limit writes atomically', async () => {
@@ -291,6 +296,13 @@ describe('TabLayoutService', () => {
     expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'child', placement: 'manual' }]);
     expect(h.layouts.alice.version).toBe(8);
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+
+    h.live.set('parent', { id: 'parent', owner: 'alice', createdAt: 3 } as never);
+    await h.service.sessionCreated('alice');
+    expect(h.layouts.alice.ungrouped).toEqual([
+      { kind: 'session', id: 'child', placement: 'manual' },
+      { kind: 'session', id: 'parent' },
+    ]);
   });
 
   it('does not prune or bump when restoration was skipped', async () => {

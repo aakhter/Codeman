@@ -4870,15 +4870,61 @@ class CodemanApp {
 
   _tabLayoutMetadata() {
     const metadata = [];
+    const currentUser = window.__codemanUser;
     for (const session of this.sessions.values()) {
       metadata.push({
         kind: 'session',
         id: session.id,
+        ownerValid:
+          !currentUser?.multiUser ||
+          (typeof session.owner === 'string' && session.owner.length > 0 && session.owner === currentUser.username),
         ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
       });
     }
     for (const id of this.webviews?.keys?.() || []) metadata.push({ kind: 'webview', id });
     return metadata;
+  }
+
+  _tabRefPlacementState(ref) {
+    if (!this.tabLayout) return null;
+    return window.CodemanTabLayout.placementState?.(this.tabLayout, ref, this._tabLayoutMetadata()) || null;
+  }
+
+  _tabPlacementPresentation(ref) {
+    const placement = this._tabRefPlacementState(ref);
+    if (!placement) return null;
+    const parent = this.sessions.get(placement.parentId);
+    const parentName = parent ? this.getSessionName(parent) : placement.parentId;
+    if (placement.state === 'inherited') {
+      return { ...placement, short: 'Follows parent', description: `Follows parent ${parentName}` };
+    }
+    if (placement.state === 'manual') {
+      return { ...placement, short: 'Manual', description: `Placed manually; can follow ${parentName}` };
+    }
+    if (placement.state === 'cycle') {
+      return { ...placement, short: 'Parent cycle', description: 'Parent cycle; placed independently' };
+    }
+    return { ...placement, short: 'Parent unavailable', description: 'Parent unavailable; placed independently' };
+  }
+
+  _tabRefPlacementActions(ref) {
+    const placement = this._tabPlacementPresentation(ref);
+    if (!placement) return [];
+    return [
+      { label: placement.description, disabled: true },
+      ...(placement.canFollow
+        ? [
+            {
+              label: 'Follow parent again',
+              run: () =>
+                this.editTabLayout(
+                  { type: 'followParent', ref, metadata: this._tabLayoutMetadata() },
+                  `${ref.kind}:${ref.id}`
+                ),
+            },
+          ]
+        : []),
+    ];
   }
 
   async _putTabLayout({ baseVersion, layout }) {
@@ -4942,7 +4988,9 @@ class CodemanApp {
         : storedOperations;
       if (!operations.length) return false;
       const restored = operations.map((operation) =>
-        operation?.type === 'moveRef' ? { ...operation, metadata: this._tabLayoutMetadata() } : operation
+        operation?.type === 'moveRef' || operation?.type === 'followParent'
+          ? { ...operation, metadata: this._tabLayoutMetadata() }
+          : operation
       );
       restored.reduce(
         (candidate, operation) => window.CodemanTabLayout.applyOperation(candidate, operation),
@@ -5155,19 +5203,30 @@ class CodemanApp {
     event?.preventDefault?.();
     event?.stopPropagation?.();
     document.querySelector('.tab-layout-ref-move-menu')?.remove();
-    const destinations = this._tabRefMoveActions(ref);
-    if (!destinations.length) return;
+    const actions = [
+      ...this._tabRefPlacementActions(ref),
+      ...this._tabRefMoveActions(ref).map(({ label, groupId, index }) => ({
+        label,
+        run: () => this.moveTabRefToGroup(ref, groupId, index),
+      })),
+    ];
+    if (!actions.length) return;
     const menu = document.createElement('div');
     menu.className = 'tab-rail-action-menu tab-layout-ref-move-menu';
     menu.setAttribute('role', 'menu');
-    for (const { label, groupId, index } of destinations) {
+    for (const { label, run, disabled } of actions) {
       const button = document.createElement('button');
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
       button.textContent = label;
+      if (disabled) {
+        button.setAttribute('aria-disabled', 'true');
+        button.classList.add('tab-placement-summary');
+      }
       button.addEventListener('click', () => {
+        if (disabled) return;
         menu.remove();
-        this.moveTabRefToGroup(ref, groupId, index);
+        run();
       });
       menu.appendChild(button);
     }
@@ -5268,6 +5327,10 @@ class CodemanApp {
   }
 
   _tabStructureKey(projection) {
+    const placementStates = projection.visibleRefs.map((ref) => {
+      const placement = this._tabRefPlacementState(ref);
+      return placement ? `${ref.kind}:${ref.id}:${placement.state}:${placement.parentId}` : `${ref.kind}:${ref.id}:root`;
+    });
     return window.CodemanTabLayout.structureKey({
       version: this.tabLayoutVersion,
       collapsedGroupIds: [...this.collapsedTabGroupIds],
@@ -5276,6 +5339,7 @@ class CodemanApp {
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
       visibleRefs: projection.visibleRefs,
+      placementStates,
     });
   }
 
@@ -5852,8 +5916,14 @@ class CodemanApp {
       const tabTooltip = session.workingDir && session.workingDir !== name
         ? `${name}\n${session.workingDir}`
         : name;
+      const placement = this._tabPlacementPresentation({ kind: 'session', id });
+      const placementBadge = placement
+        ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" title="${escapeHtml(placement.description)}" aria-label="${escapeHtml(placement.description)}">${escapeHtml(placement.short)}</span>`
+        : '';
+      const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
+      const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
@@ -5864,6 +5934,7 @@ class CodemanApp {
               <span class="tab-name" data-session-id="${escapeHtml(id)}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
+            ${placementBadge}
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
           </span>
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}

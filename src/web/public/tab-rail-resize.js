@@ -281,6 +281,7 @@ Object.assign(CodemanApp.prototype, {
         label: destination.label,
         run: () => this.moveTabRefToGroup(ref, destination.groupId, destination.index),
       })) || [];
+    placementActions.unshift(...(this._tabRefPlacementActions?.(ref) || []));
     const actions = [
       { label: 'Session options', run: () => this.openSessionOptions(sessionId) },
       ...placementActions,
@@ -294,8 +295,13 @@ Object.assign(CodemanApp.prototype, {
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
       button.textContent = action.label;
+      if (action.disabled) {
+        button.setAttribute('aria-disabled', 'true');
+        button.classList.add('tab-placement-summary');
+      }
       if (action.className) button.className = action.className;
       button.addEventListener('click', () => {
+        if (action.disabled) return;
         this.closeTabRailActionMenu();
         action.run();
       });

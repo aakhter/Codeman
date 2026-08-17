@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { followParent, setManualPlacement, type TabRefMetadata } from '../src/tab-layout.js';
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
 const HELPER_SOURCE = readFileSync(join(PUBLIC, 'tab-layout-browser.js'), 'utf8');
@@ -125,6 +126,104 @@ describe('COD-307 browser semantic mirror', () => {
   });
 });
 
+describe('COD-309 browser child-placement semantics', () => {
+  const metadata = [
+    { kind: 'session', id: 'parent', ownerValid: true },
+    { kind: 'session', id: 'child', parentSessionId: 'parent', ownerValid: true },
+    { kind: 'session', id: 'grandchild', parentSessionId: 'child', ownerValid: true },
+    { kind: 'session', id: 'other', ownerValid: true },
+    { kind: 'webview', id: 'web', ownerValid: true },
+  ];
+
+  it('mirrors manual placement and Follow parent again with immediate nested normalization', () => {
+    const h = loadHelper();
+    const initial = layout();
+    initial.groups[0].refs = [
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'grandchild' },
+    ];
+    initial.ungrouped.unshift({ kind: 'session', id: 'child', placement: 'manual' });
+
+    const followed = h.applyOperation(initial, {
+      type: 'followParent',
+      ref: { kind: 'session', id: 'child' },
+      metadata,
+    });
+    expect(followed.groups[0].refs.map((ref: Ref) => ref.id)).toEqual(['parent', 'child', 'grandchild']);
+    expect(followed.groups[0].refs[1]).toEqual({ kind: 'session', id: 'child' });
+
+    const manual = h.applyOperation(followed, {
+      type: 'setManualPlacement',
+      ref: { kind: 'session', id: 'child' },
+      manual: true,
+    });
+    expect(manual.groups[0].refs[1]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
+  });
+
+  it('keeps the browser semantic results in parity with the authoritative TypeScript model', () => {
+    const h = loadHelper();
+    const source = layout() as any;
+    source.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
+    source.ungrouped.unshift({ kind: 'session', id: 'grandchild' });
+    const authoritativeMetadata = metadata.map((item, order) => ({
+      ...item,
+      order,
+      visible: true,
+    })) as TabRefMetadata[];
+
+    expect(
+      h.applyOperation(source, {
+        type: 'setManualPlacement',
+        ref: { kind: 'session', id: 'parent' },
+        manual: true,
+      })
+    ).toEqual(setManualPlacement(source, { kind: 'session', id: 'parent' }, true));
+    expect(
+      h.applyOperation(source, {
+        type: 'followParent',
+        ref: { kind: 'session', id: 'child' },
+        metadata: authoritativeMetadata,
+      })
+    ).toEqual(followParent(source, { kind: 'session', id: 'child' }, authoritativeMetadata));
+  });
+
+  it('classifies inherited, manual, dangling, and cycle placement without offering invalid follow', () => {
+    const h = loadHelper();
+    const inherited = h.placementState(layout(), { kind: 'session', id: 'child' }, metadata);
+    expect(inherited).toMatchObject({ state: 'inherited', canFollow: false, parentId: 'parent' });
+
+    const manualLayout = layout();
+    manualLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
+    expect(h.placementState(manualLayout, { kind: 'session', id: 'child' }, metadata)).toMatchObject({
+      state: 'manual',
+      canFollow: true,
+    });
+    expect(h.placementState(manualLayout, { kind: 'session', id: 'child' }, metadata.slice(1))).toMatchObject({
+      state: 'dangling',
+      canFollow: false,
+    });
+
+    const cyclic = [
+      { kind: 'session', id: 'parent', parentSessionId: 'child', ownerValid: true },
+      { kind: 'session', id: 'child', parentSessionId: 'parent', ownerValid: true },
+    ];
+    expect(h.placementState(manualLayout, { kind: 'session', id: 'child' }, cyclic)).toMatchObject({
+      state: 'cycle',
+      canFollow: false,
+    });
+    expect(() =>
+      h.applyOperation(manualLayout, {
+        type: 'followParent',
+        ref: { kind: 'session', id: 'child' },
+        metadata: [
+          { kind: 'session', id: 'child', parentSessionId: 'parent' },
+          { kind: 'session', id: 'parent', ownerValid: false },
+        ],
+      })
+    ).toThrow(/owner-valid parent/);
+  });
+});
+
 describe('COD-307 optimistic write coordinator', () => {
   beforeEach(() => vi.useFakeTimers());
 
@@ -181,6 +280,50 @@ describe('COD-307 optimistic write coordinator', () => {
     expect(put.mock.calls[1][0].baseVersion).toBe(8);
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'remote')).toBeTruthy();
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
+  });
+
+  it('rebases Follow parent again over one conflict with fresh lineage metadata', async () => {
+    const h = loadHelper();
+    const initial = layout();
+    initial.groups[0].refs = [{ kind: 'session', id: 'parent' }];
+    initial.ungrouped.unshift({ kind: 'session', id: 'child', placement: 'manual' });
+    const metadata = [
+      { kind: 'session', id: 'parent', ownerValid: true },
+      { kind: 'session', id: 'child', parentSessionId: 'parent', ownerValid: true },
+      { kind: 'session', id: 'other', ownerValid: true },
+      { kind: 'webview', id: 'web', ownerValid: true },
+    ];
+    const remote = {
+      ...initial,
+      version: 8,
+      groups: [...initial.groups, { id: 'remote', name: 'Remote', refs: [] }],
+    };
+    const put = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 409, layout: remote })
+      .mockImplementationOnce(async ({ layout: desired }: any) => ({
+        ok: true,
+        status: 200,
+        layout: { ...desired, version: 9 },
+      }));
+    const coordinator = h.createEditCoordinator({
+      initialLayout: initial,
+      applyLayout: vi.fn(),
+      put,
+      debounceMs: 0,
+      schedule: setTimeout,
+      cancel: clearTimeout,
+    });
+    coordinator.enqueue({
+      type: 'followParent',
+      ref: { kind: 'session', id: 'child' },
+      metadata,
+    });
+    await vi.runAllTimersAsync();
+
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(coordinator.getLayout().groups[0].refs.map((ref: Ref) => ref.id)).toEqual(['parent', 'child']);
+    expect(coordinator.getLayout().groups.at(-1).id).toBe('remote');
   });
 
   it('adopts a 409 layout that already contains the complete semantic burst without replaying moves', async () => {
@@ -571,6 +714,109 @@ describe('COD-307 subtree-aware move destinations', () => {
 
     expect(app.showToast).not.toHaveBeenCalled();
     expect(app.tabLayout.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other', 'parent', 'child']);
+  });
+});
+
+describe('COD-309 shipping placement UI', () => {
+  it('renders understandable escaped placement status and runs Follow parent again through the real coordinator', () => {
+    const app = makeInteractionApp();
+    app.sessions.get('parent').name = 'Parent <unsafe>';
+    enableRealSemanticEditing(app);
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.openSessionOptions = vi.fn();
+    app.requestCloseSession = vi.fn();
+    expect(app.moveTabRefToGroup({ kind: 'session', id: 'child' }, null, 0)).toBe(true);
+    app._fullRenderSessionTabs();
+
+    const child = document.querySelector<HTMLElement>('[data-id="child"]')!;
+    expect(app.tabLayout.ungrouped[0]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
+    expect(child.getAttribute('aria-label')).toContain('Placed manually; can follow Parent <unsafe>');
+    expect(child.querySelector('.tab-placement-state--manual')?.textContent).toBe('Manual');
+    expect(child.textContent).not.toContain('Parent <unsafe>');
+    expect(child.querySelector('unsafe')).toBeNull();
+    const trigger = child.querySelector<HTMLElement>('.tab-more')!;
+    app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, 'child');
+    const placementSummary = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) =>
+      item.textContent?.startsWith('Placed manually;')
+    );
+    expect(placementSummary?.getAttribute('aria-disabled')).toBe('true');
+    clickMenuItem('Follow parent again');
+
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app.tabLayout.groups[0].refs.map((ref: Ref) => ref.id)).toEqual(['parent', 'child']);
+    expect(app.tabLayout.groups[0].refs[1]).toEqual({ kind: 'session', id: 'child' });
+  });
+
+  it('exposes Follow parent again through the real Shift+F10 ref menu but not for dangling or cyclic children', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
+    enableRealSemanticEditing(app);
+    app._fullRenderSessionTabs();
+    let child = document.querySelector<HTMLElement>('[data-id="child"]')!;
+    child.focus();
+    child.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
+    expect(
+      [...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent === 'Follow parent again')
+    ).toBe(true);
+    document.querySelector('.tab-layout-ref-move-menu')?.remove();
+
+    app.sessions.delete('parent');
+    app._lastTabStructureKey = null;
+    app._fullRenderSessionTabs();
+    child = document.querySelector<HTMLElement>('[data-id="child"]')!;
+    expect(child.querySelector('.tab-placement-state--dangling')?.textContent).toBe('Parent unavailable');
+    app.openTabRefMoveMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: child },
+      { kind: 'session', id: 'child' }
+    );
+    expect(
+      [...document.querySelectorAll('[role="menuitem"]')].some(
+        (item) => item.textContent === 'Parent unavailable; placed independently'
+      )
+    ).toBe(true);
+    expect(
+      [...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent === 'Follow parent again')
+    ).toBe(false);
+
+    app.sessions.set('parent', { id: 'parent', name: 'Parent', parentSessionId: 'child' });
+    app._lastTabStructureKey = null;
+    app._fullRenderSessionTabs();
+    child = document.querySelector<HTMLElement>('[data-id="child"]')!;
+    expect(child.querySelector('.tab-placement-state--cycle')?.textContent).toBe('Parent cycle');
+  });
+
+  it('treats an administrator-visible cross-owner parent as unavailable', () => {
+    const previousUser = (window as any).__codemanUser;
+    (window as any).__codemanUser = { username: 'alice', role: 'admin', multiUser: true };
+    try {
+      const app = makeInteractionApp();
+      app.sessions.get('child').owner = 'alice';
+      app.sessions.get('parent').owner = 'bob';
+      app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
+      app._fullRenderSessionTabs();
+      const child = document.querySelector<HTMLElement>('[data-id="child"]')!;
+      expect(child.querySelector('.tab-placement-state--dangling')?.textContent).toBe('Parent unavailable');
+      expect(app._tabRefPlacementActions({ kind: 'session', id: 'child' })).toEqual([
+        { label: 'Parent unavailable; placed independently', disabled: true },
+      ]);
+    } finally {
+      (window as any).__codemanUser = previousUser;
+    }
+  });
+
+  it('keeps placement badges visually scoped to the vertical rail', () => {
+    const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
+    expect(css).toMatch(/\.session-tab \.tab-placement-state\s*\{[^}]*display:\s*none/s);
+    expect(css).toMatch(
+      /html\[data-tab-orientation='vertical'\] \.tab-rail \.session-tab \.tab-placement-state\s*\{[^}]*display:\s*block/s
+    );
+
+    const app = makeInteractionApp();
+    document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
+    app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', placement: 'manual' };
+    app._fullRenderSessionTabs();
+    expect(document.querySelector('.tab-placement-state--manual')).toBeTruthy();
+    expect(document.getElementById('sessionTabs')?.getAttribute('role')).toBe('tablist');
   });
 });
 
