@@ -5181,10 +5181,33 @@ class CodemanApp {
     );
   }
 
+  closeTabGroupMenu(options = {}) {
+    const menu = this._tabGroupMenu;
+    const trigger = this._tabGroupMenuTrigger;
+    menu?.remove();
+    if (this._tabGroupMenuOutside) {
+      document.removeEventListener('pointerdown', this._tabGroupMenuOutside, true);
+      this._tabGroupMenuOutside = null;
+    }
+    if (this._tabGroupMenuKeydown) {
+      document.removeEventListener('keydown', this._tabGroupMenuKeydown, true);
+      this._tabGroupMenuKeydown = null;
+    }
+    if (trigger?.classList?.contains('tab-layout-group-menu')) trigger.setAttribute('aria-expanded', 'false');
+    this._tabGroupMenu = null;
+    this._tabGroupMenuTrigger = null;
+    if (options.restoreFocus) trigger?.focus?.();
+  }
+
   openTabGroupMenu(event, groupId) {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-    document.querySelector('.tab-layout-group-action-menu')?.remove();
+    const trigger = event?.currentTarget;
+    if (this._tabGroupMenu?.isConnected && this._tabGroupMenuTrigger === trigger) {
+      this.closeTabGroupMenu();
+      return;
+    }
+    this.closeTabGroupMenu();
     const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
     if (groupIndex < 0) return;
     const menu = document.createElement('div');
@@ -5201,17 +5224,33 @@ class CodemanApp {
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
       button.textContent = label;
-      button.addEventListener('click', () => { menu.remove(); run(); });
+      button.addEventListener('click', () => {
+        this.closeTabGroupMenu();
+        run();
+      });
       menu.appendChild(button);
     }
     document.body.appendChild(menu);
-    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    const rect = trigger?.getBoundingClientRect?.();
     if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
+    this._tabGroupMenu = menu;
+    this._tabGroupMenuTrigger = trigger;
+    if (trigger?.classList?.contains('tab-layout-group-menu')) trigger.setAttribute('aria-expanded', 'true');
+    this._tabGroupMenuOutside = (pointerEvent) => {
+      if (menu.contains(pointerEvent.target) || trigger?.contains?.(pointerEvent.target)) return;
+      this.closeTabGroupMenu();
+    };
+    this._tabGroupMenuKeydown = (keyEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault();
+      this.closeTabGroupMenu({ restoreFocus: true });
+    };
+    document.addEventListener('pointerdown', this._tabGroupMenuOutside, true);
+    document.addEventListener('keydown', this._tabGroupMenuKeydown, true);
     menu.addEventListener('keydown', (keyEvent) => {
       const buttons = [...menu.querySelectorAll('button')];
       const current = buttons.indexOf(document.activeElement);
-      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
-      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+      if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
         keyEvent.preventDefault();
         buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
       }
@@ -5912,6 +5951,7 @@ class CodemanApp {
 
   _fullRenderSessionTabs() {
     if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
+    this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
     const projection = this._refreshTabProjection();
     const structureKey = this._tabStructureKey(projection);
