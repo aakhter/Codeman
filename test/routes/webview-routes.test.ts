@@ -10,8 +10,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyWebsocket from '@fastify/websocket';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { JSDOM } from 'jsdom';
 import { registerWebviewRoutes } from '../../src/web/routes/webview-routes.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { webviewCapabilities } from '../../src/webview-capabilities.js';
@@ -19,6 +21,12 @@ import { capabilityFromProxyPath } from '../../src/web/webview-proxy.js';
 import { TabLayoutService } from '../../src/tab-layout-service.js';
 import type { TabLayout } from '../../src/tab-layout.js';
 import { MAX_WEBVIEWS } from '../../src/config/webview-limits.js';
+import { writeWebviews } from '../../src/webview-store.js';
+import type { AuthUser, Webview } from '../../src/types.js';
+
+const CONSTANTS_SOURCE = readFileSync(new URL('../../src/web/public/constants.js', import.meta.url), 'utf8');
+const TAB_LAYOUT_SOURCE = readFileSync(new URL('../../src/web/public/tab-layout-browser.js', import.meta.url), 'utf8');
+const WEBVIEW_TABS_SOURCE = readFileSync(new URL('../../src/web/public/webview-tabs.js', import.meta.url), 'utf8');
 
 let app: FastifyInstance;
 let tmpDir: string;
@@ -56,6 +64,61 @@ afterEach(async () => {
 
 const create = (payload: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/webviews', payload });
 
+async function createAuthenticatedApp(authUser: AuthUser): Promise<FastifyInstance> {
+  const ownedApp = Fastify({ logger: false });
+  await ownedApp.register(fastifyCookie);
+  await ownedApp.register(fastifyWebsocket);
+  ownedApp.addHook('onRequest', async (req) => {
+    req.authUser = authUser;
+  });
+  registerWebviewRoutes(ownedApp, {
+    broadcast: (event: string, data: unknown) => broadcasts.push({ event, data }),
+    tabLayouts: { webviewCreated, webviewDeleted },
+  } as never);
+  installRouteErrorHandler(ownedApp);
+  await ownedApp.ready();
+  return ownedApp;
+}
+
+function ownedWebview(id: string, owner: string): Webview {
+  return {
+    id,
+    owner,
+    name: id,
+    url: `https://${id}.example/`,
+    embedMode: 'proxy',
+    trusted: false,
+    createdAt: 1,
+  };
+}
+
+async function projectBrowserResponse(webviews: Webview[]): Promise<string[]> {
+  const dom = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost/', runScripts: 'outside-only' });
+  const win = dom.window as unknown as Window &
+    typeof globalThis & {
+      CodemanApp: new () => Record<string, any>;
+      CodemanTabLayout: { project(layout: unknown, options: unknown): { visibleRefs: Array<{ id: string }> } };
+    };
+  (win as unknown as { eval(source: string): void }).eval(
+    ['window.CodemanApp = class CodemanApp {};', CONSTANTS_SOURCE, TAB_LAYOUT_SOURCE, WEBVIEW_TABS_SOURCE].join('\n')
+  );
+  win.localStorage.setItem('codeman-webview-order', '["bob-view","alice-view"]');
+  const browser = new win.CodemanApp();
+  browser._apiJson = vi.fn(async () => ({ webviews }));
+  browser.renderWebviewMenuItems = vi.fn();
+  browser.renderSessionTabs = vi.fn();
+  await browser.initWebviews();
+  return win.CodemanTabLayout.project(
+    {
+      version: 1,
+      updatedAt: '2026-08-16T00:00:00.000Z',
+      groups: [],
+      ungrouped: [{ kind: 'webview', id: 'alice-view' }],
+    },
+    { openWebviewIds: browser.webviewOrder }
+  ).visibleRefs.map((ref) => ref.id);
+}
+
 describe('GET /api/webviews', () => {
   it('starts empty and reports the frame budget the client must honour', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/webviews' });
@@ -64,6 +127,38 @@ describe('GET /api/webviews', () => {
     expect(body.success).toBe(true);
     expect(body.data.webviews).toEqual([]);
     expect(typeof body.data.maxLiveFrames).toBe('number');
+  });
+
+  it('returns only the authenticated layout owner records even for an admin', async () => {
+    const previous = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    const ownedApp = await createAuthenticatedApp({ username: 'alice', role: 'admin' });
+    try {
+      await writeWebviews(tmpDir, [ownedWebview('alice-view', 'alice'), ownedWebview('bob-view', 'bob')]);
+
+      const response = await ownedApp.inject({ method: 'GET', url: '/api/webviews' });
+      const listed = response.json().data.webviews as Webview[];
+
+      expect(response.statusCode).toBe(200);
+      expect(listed.map((webview) => webview.id)).toEqual(['alice-view']);
+      expect(await projectBrowserResponse(listed)).toEqual(['alice-view']);
+    } finally {
+      await ownedApp.close();
+      if (previous === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = previous;
+    }
+  });
+
+  it('maps undefined saved-webview ownership to the single-user layout owner', async () => {
+    await writeWebviews(tmpDir, [
+      { ...ownedWebview('single-view', 'discarded'), owner: undefined },
+      ownedWebview('multiuser-leftover', 'alice'),
+    ]);
+
+    const response = await app.inject({ method: 'GET', url: '/api/webviews' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.webviews.map((webview: Webview) => webview.id)).toEqual(['single-view']);
   });
 });
 
@@ -100,6 +195,41 @@ describe('POST /api/webviews', () => {
     expect(overflow.statusCode).toBe(400);
     expect(overflow.json().error).toContain(`max ${MAX_WEBVIEWS}`);
     expect((await app.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews).toHaveLength(MAX_WEBVIEWS);
+  });
+
+  it('counts the configured quota by exact owner even when the requester is an admin', async () => {
+    const previous = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    const ownedApp = await createAuthenticatedApp({ username: 'alice', role: 'admin' });
+    try {
+      const records = [
+        ...Array.from({ length: MAX_WEBVIEWS }, (_, index) => ownedWebview(`bob-${index}`, 'bob')),
+        ...Array.from({ length: MAX_WEBVIEWS - 1 }, (_, index) => ownedWebview(`alice-${index}`, 'alice')),
+      ];
+      await writeWebviews(tmpDir, records);
+
+      const lastAllowed = await ownedApp.inject({
+        method: 'POST',
+        url: '/api/webviews',
+        payload: { name: 'alice-last', url: 'https://alice-last.example/' },
+      });
+      const overflow = await ownedApp.inject({
+        method: 'POST',
+        url: '/api/webviews',
+        payload: { name: 'alice-overflow', url: 'https://alice-overflow.example/' },
+      });
+      const listed = (await ownedApp.inject({ method: 'GET', url: '/api/webviews' })).json().data.webviews;
+
+      expect(lastAllowed.statusCode).toBe(200);
+      expect(lastAllowed.json().data.owner).toBe('alice');
+      expect(overflow.statusCode).toBe(400);
+      expect(listed).toHaveLength(MAX_WEBVIEWS);
+      expect(listed.every((webview: Webview) => webview.owner === 'alice')).toBe(true);
+    } finally {
+      await ownedApp.close();
+      if (previous === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = previous;
+    }
   });
 
   it('rejects URLs that are not plain http(s)', async () => {
@@ -229,6 +359,30 @@ describe('DELETE /api/webviews/:id', () => {
   it('404s an unknown id', async () => {
     expect((await app.inject({ method: 'DELETE', url: '/api/webviews/nope' })).statusCode).toBe(404);
   });
+
+  it('preserves explicit admin edit and delete authority over foreign records', async () => {
+    const previous = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    const ownedApp = await createAuthenticatedApp({ username: 'alice', role: 'admin' });
+    try {
+      await writeWebviews(tmpDir, [ownedWebview('bob-view', 'bob')]);
+
+      const updated = await ownedApp.inject({
+        method: 'PATCH',
+        url: '/api/webviews/bob-view',
+        payload: { name: 'Admin corrected' },
+      });
+      const deleted = await ownedApp.inject({ method: 'DELETE', url: '/api/webviews/bob-view' });
+
+      expect(updated.statusCode).toBe(200);
+      expect(updated.json().data.owner).toBe('bob');
+      expect(deleted.statusCode).toBe(200);
+    } finally {
+      await ownedApp.close();
+      if (previous === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = previous;
+    }
+  });
 });
 
 describe('POST /api/webviews/:id/open', () => {
@@ -237,6 +391,24 @@ describe('POST /api/webviews/:id/open', () => {
     const data = (await app.inject({ method: 'POST', url: `/api/webviews/${id}/open` })).json().data;
     expect(data.embedUrl).toMatch(/^\/webview\/[A-Za-z0-9_-]{16,}\/$/);
     expect(capabilityFromProxyPath(data.embedUrl)).toBeTruthy();
+  });
+
+  it('does not let an admin open a foreign-owner webview outside their layout', async () => {
+    const previous = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    const ownedApp = await createAuthenticatedApp({ username: 'alice', role: 'admin' });
+    try {
+      await writeWebviews(tmpDir, [ownedWebview('bob-view', 'bob')]);
+
+      const response = await ownedApp.inject({ method: 'POST', url: '/api/webviews/bob-view/open' });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().errorCode).toBe('FORBIDDEN');
+    } finally {
+      await ownedApp.close();
+      if (previous === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = previous;
+    }
   });
 
   it('returns no embed path in direct mode, where the iframe uses the real URL', async () => {
