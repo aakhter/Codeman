@@ -50,6 +50,12 @@ interface TabLayoutServiceDeps {
   now?: () => string;
 }
 
+interface ReconciledTabLayout {
+  base: TabLayout;
+  candidate: TabLayout;
+  metadata: TabRefMetadata[];
+}
+
 export type TabLayoutPutResult =
   | { status: 'updated'; layout: TabLayout }
   | { status: 'conflict'; layout: TabLayout; appliedOperationCount?: number };
@@ -284,7 +290,7 @@ export class TabLayoutService {
 
   private commitPrepared(owner: string, stored: TabLayout): TabLayout {
     this.deps.store.setTabLayout(owner, stored);
-    this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: stored.version });
+    this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: stored.version, layout: stored });
     return stored;
   }
 
@@ -292,10 +298,10 @@ export class TabLayoutService {
     return this.commitPrepared(owner, this.prepareCommit(base, next));
   }
 
-  private async getUnlocked(owner: string): Promise<TabLayout> {
+  private async reconcileUnlocked(owner: string): Promise<ReconciledTabLayout> {
     const facts = await this.facts(owner);
     const current = this.deps.store.getTabLayout(owner);
-    const migrated = normalizeOrMigrateOwnerTabLayout({
+    const candidate = normalizeOrMigrateOwnerTabLayout({
       owner,
       layouts: current ? { [owner]: current } : undefined,
       sessionOrder: this.deps.store.getSessionOrder(),
@@ -304,11 +310,16 @@ export class TabLayoutService {
       webviews: facts.webviews,
       updatedAt: (this.deps.now ?? (() => new Date().toISOString()))(),
     }).layout;
-    if (!current) {
-      const initialBase = { ...migrated, version: -1 };
-      return this.commit(owner, initialBase, migrated);
-    }
-    return sameLayout(current, migrated) ? current : this.commit(owner, current, migrated);
+    return {
+      base: current ?? { ...candidate, version: -1 },
+      candidate,
+      metadata: facts.metadata,
+    };
+  }
+
+  private async getUnlocked(owner: string): Promise<TabLayout> {
+    const { base, candidate } = await this.reconcileUnlocked(owner);
+    return sameLayout(base, candidate) ? base : this.commit(owner, base, candidate);
   }
 
   async get(owner: string): Promise<TabLayout> {
@@ -443,8 +454,56 @@ export class TabLayoutService {
   }
 
   /** Reconcile one completed session creation into one versioned mutation. */
-  async sessionCreated(owner: string): Promise<TabLayout> {
-    return this.get(owner);
+  async sessionCreated(owner: string, sessionId: string, tabGroupId?: string): Promise<TabLayout> {
+    return this.withOwner(owner, async () => {
+      const { base, candidate, metadata } = await this.reconcileUnlocked(owner);
+      let next = candidate;
+      const targetGroup = tabGroupId ? candidate.groups.find((group) => group.id === tabGroupId) : undefined;
+
+      if (targetGroup) {
+        const target = { kind: 'session' as const, id: sessionId };
+        const storedRefs = [...candidate.groups.flatMap((group) => group.refs), ...candidate.ungrouped];
+        const stored = new Map(storedRefs.map((ref) => [refKey(ref), ref]));
+        const children = new Map<string, string[]>();
+        for (const item of metadata) {
+          if (
+            item.kind !== 'session' ||
+            !item.ownerValid ||
+            !item.visible ||
+            !item.parentSessionId ||
+            !stored.has(refKey(item)) ||
+            stored.get(refKey(item))?.placement === 'manual' ||
+            !stored.has(refKey({ kind: 'session', id: item.parentSessionId }))
+          ) {
+            continue;
+          }
+          const siblings = children.get(item.parentSessionId) ?? [];
+          siblings.push(item.id);
+          children.set(item.parentSessionId, siblings);
+        }
+        const blockKeys = new Set<string>();
+        const addDescendants = (ref: TabRef): void => {
+          const key = refKey(ref);
+          if (blockKeys.has(key)) return;
+          blockKeys.add(key);
+          if (ref.kind !== 'session') return;
+          for (const childId of children.get(ref.id) ?? []) {
+            addDescendants({ kind: 'session', id: childId });
+          }
+        };
+        addDescendants(target);
+        const removedFromTarget = targetGroup.refs.filter((ref) => blockKeys.has(refKey(ref))).length;
+        const destinationIndex = targetGroup.refs.length - removedFromTarget;
+        try {
+          next = moveRef(candidate, target, { groupId: targetGroup.id, index: destinationIndex }, metadata);
+        } catch (error) {
+          if (!(error instanceof TabLayoutValidationError)) throw error;
+          next = candidate;
+        }
+      }
+
+      return sameLayout(base, next) ? base : this.commit(owner, base, next);
+    });
   }
 
   /** Reconcile one completed saved-webview creation into one versioned mutation. */

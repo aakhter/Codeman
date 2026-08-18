@@ -170,7 +170,11 @@ describe('TabLayoutService', () => {
     expect(first.version).toBe(8);
     await h.service.get('alice');
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
-    expect(h.broadcast).toHaveBeenCalledWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
+    expect(h.broadcast).toHaveBeenCalledWith(SseEvent.TabLayoutChanged, {
+      owner: 'alice',
+      version: 8,
+      layout: first,
+    });
   });
 
   it('isolates owner metadata and filters saved webviews by exact owner', async () => {
@@ -213,7 +217,7 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
   });
 
-  it('stores a matching write with one fresh version and minimal event payload', async () => {
+  it('stores a matching write with one fresh version and an authoritative event payload', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },
       live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
@@ -226,7 +230,11 @@ describe('TabLayoutService', () => {
     expect(result.status).toBe('updated');
     expect(result.layout).toMatchObject({ version: 8, updatedAt: '2026-08-16T12:00:00.000Z' });
     expect(result.layout.groups[0].name).toBe('Group');
-    expect(h.broadcast).toHaveBeenLastCalledWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
+    expect(h.broadcast).toHaveBeenLastCalledWith(SseEvent.TabLayoutChanged, {
+      owner: 'alice',
+      version: 8,
+      layout: result.layout,
+    });
   });
 
   it('preserves authoritative Focus flags across legacy full-layout writes', async () => {
@@ -586,6 +594,211 @@ describe('TabLayoutService', () => {
     expect(h.layouts.alice.version).toBe(8);
   });
 
+  it('keeps get, getSnapshot, put, and putOperations reconciliation behavior stable', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'first' }]) },
+      live: [
+        { id: 'first', owner: 'alice', createdAt: 1 },
+        { id: 'second', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    const reconciled = await h.service.get('alice');
+    expect(reconciled).toMatchObject({
+      version: 8,
+      ungrouped: [
+        { kind: 'session', id: 'first' },
+        { kind: 'session', id: 'second' },
+      ],
+    });
+    const snapshot = await h.service.getSnapshot('alice');
+    expect(snapshot.layout).toEqual(reconciled);
+    expect(snapshot.placements).toEqual([]);
+
+    const put = await h.service.put(
+      'alice',
+      { ...reconciled, groups: [{ id: 'work', name: 'Work', refs: [] }] },
+      reconciled.version
+    );
+    expect(put.status).toBe('updated');
+    const operations = await h.service.putOperations(
+      'alice',
+      [{ type: 'renameGroup', groupId: 'work', name: 'Focused work' }],
+      put.layout.version
+    );
+    expect(operations).toMatchObject({ status: 'updated', layout: { version: 10 } });
+    expect(operations.layout.groups[0].name).toBe('Focused work');
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(3);
+  });
+
+  it('reconciles and places a created session at the end of an existing group in one mutation', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: {
+          ...existing([{ kind: 'session', id: 'outside' }]),
+          groups: [{ id: 'work', name: 'Work', refs: [{ kind: 'session', id: 'inside' }] }],
+        },
+      },
+      live: [
+        { id: 'inside', owner: 'alice', createdAt: 1 },
+        { id: 'outside', owner: 'alice', createdAt: 2 },
+      ],
+    });
+    h.live.set('new-session', { id: 'new-session', owner: 'alice', createdAt: 3 } as never);
+
+    const layout = await h.service.sessionCreated('alice', 'new-session', 'work');
+
+    expect(layout.groups[0].refs.at(-1)).toEqual({ kind: 'session', id: 'new-session' });
+    expect(layout.version).toBe(8);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+    expect(h.broadcast).toHaveBeenCalledTimes(1);
+    expect(h.broadcast).toHaveBeenCalledWith(SseEvent.TabLayoutChanged, {
+      owner: 'alice',
+      version: 8,
+      layout,
+    });
+  });
+
+  it('commits a missing owner layout once at version zero while targeting a group is unavailable', async () => {
+    const h = createHarness({ live: [{ id: 'new-session', owner: 'alice', createdAt: 1 }] });
+
+    const layout = await h.service.sessionCreated('alice', 'new-session', 'work');
+
+    expect(layout.version).toBe(0);
+    expect(layout.ungrouped).toEqual([{ kind: 'session', id: 'new-session' }]);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+    expect(h.broadcast).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['unknown', 'deleted', 'bob-work'])(
+    'falls back to normal reconciled placement for an unavailable %s group hint',
+    async (tabGroupId) => {
+      const h = createHarness({
+        layouts: {
+          alice: existing([{ kind: 'session', id: 'existing' }]),
+          bob: {
+            ...existing([], 4),
+            groups: [{ id: 'bob-work', name: 'Bob work', refs: [] }],
+          },
+        },
+        live: [
+          { id: 'existing', owner: 'alice', createdAt: 1 },
+          { id: 'bob-session', owner: 'bob', createdAt: 1 },
+        ],
+      });
+      h.live.set('new-session', { id: 'new-session', owner: 'alice', createdAt: 2 } as never);
+
+      const layout = await h.service.sessionCreated('alice', 'new-session', tabGroupId);
+
+      expect(layout.groups).toEqual([]);
+      expect(layout.ungrouped.at(-1)).toEqual({ kind: 'session', id: 'new-session' });
+      expect(layout.version).toBe(8);
+      expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('prefers an explicit group over inherited parent placement and marks the child manual', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: {
+          ...existing([]),
+          groups: [
+            { id: 'parent-work', name: 'Parent work', refs: [{ kind: 'session', id: 'parent' }] },
+            { id: 'target', name: 'Target', refs: [] },
+          ],
+        },
+      },
+      live: [{ id: 'parent', owner: 'alice', createdAt: 1 }],
+    });
+    h.live.set('child', {
+      id: 'child',
+      owner: 'alice',
+      createdAt: 2,
+      parentSessionId: 'parent',
+    } as never);
+
+    const layout = await h.service.sessionCreated('alice', 'child', 'target');
+
+    expect(layout.groups.find((group) => group.id === 'parent-work')?.refs).toEqual([
+      { kind: 'session', id: 'parent' },
+    ]);
+    expect(layout.groups.find((group) => group.id === 'target')?.refs.at(-1)).toEqual({
+      kind: 'session',
+      id: 'child',
+      placement: 'manual',
+    });
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes concurrent targeted creations and appends them in owner-queue order', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: { ...existing([]), groups: [{ id: 'work', name: 'Work', refs: [] }] },
+      },
+      live: [
+        { id: 'first', owner: 'alice', createdAt: 1 },
+        { id: 'second', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    const [first, second] = await Promise.all([
+      h.service.sessionCreated('alice', 'first', 'work'),
+      h.service.sessionCreated('alice', 'second', 'work'),
+    ]);
+
+    expect(first.groups[0].refs.map((ref) => ref.id)).toEqual(['first']);
+    expect(second.groups[0].refs.map((ref) => ref.id)).toEqual(['first', 'second']);
+    expect(second.version).toBe(9);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to the reconciled candidate when only explicit placement is invalid', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: { ...existing([]), groups: [{ id: 'work', name: 'Work', refs: [] }] },
+      },
+      live: [{ id: 'actual-new-session', owner: 'alice', createdAt: 1 }],
+    });
+
+    const layout = await h.service.sessionCreated('alice', 'missing-created-session', 'work');
+
+    expect(layout.groups[0].refs).toEqual([]);
+    expect(layout.ungrouped).toEqual([{ kind: 'session', id: 'actual-new-session' }]);
+    expect(layout.version).toBe(8);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+  });
+
+  it('appends an already-targeted created session after removing its complete inherited descendant block', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: {
+          ...existing([]),
+          groups: [
+            {
+              id: 'work',
+              name: 'Work',
+              refs: [
+                { kind: 'session', id: 'created' },
+                { kind: 'session', id: 'child' },
+                { kind: 'session', id: 'tail' },
+              ],
+            },
+          ],
+        },
+      },
+      live: [
+        { id: 'created', owner: 'alice', createdAt: 1 },
+        { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'created' },
+        { id: 'tail', owner: 'alice', createdAt: 3 },
+      ],
+    });
+
+    const layout = await h.service.sessionCreated('alice', 'created', 'work');
+
+    expect(layout.groups[0].refs.map((ref) => ref.id)).toEqual(['tail', 'created', 'child']);
+    expect(layout.version).toBe(8);
+  });
+
   it('places Session Bridge children in their parent group and extends the nested subtree', async () => {
     const h = createHarness({
       layouts: {
@@ -602,12 +815,12 @@ describe('TabLayoutService', () => {
       ],
     });
     h.live.set('root', { id: 'root', owner: 'alice', createdAt: 3 } as never);
-    await h.service.sessionCreated('alice');
+    await h.service.sessionCreated('alice', 'root');
     expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['tail', 'root']);
     h.live.set('child', { id: 'child', owner: 'alice', createdAt: 4, parentSessionId: 'parent' } as never);
-    await h.service.sessionCreated('alice');
+    await h.service.sessionCreated('alice', 'child');
     h.live.set('grandchild', { id: 'grandchild', owner: 'alice', createdAt: 5, parentSessionId: 'child' } as never);
-    await h.service.sessionCreated('alice');
+    await h.service.sessionCreated('alice', 'grandchild');
     expect(h.layouts.alice.groups[0].refs.map((ref) => ref.id)).toEqual(['parent', 'child', 'grandchild']);
     expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['tail', 'root']);
     expect(h.layouts.alice.version).toBe(10);
@@ -646,7 +859,7 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
 
     h.live.set('parent', { id: 'parent', owner: 'alice', createdAt: 3 } as never);
-    await h.service.sessionCreated('alice');
+    await h.service.sessionCreated('alice', 'parent');
     expect(h.layouts.alice.ungrouped).toEqual([
       { kind: 'session', id: 'child', placement: 'manual' },
       { kind: 'session', id: 'parent' },
