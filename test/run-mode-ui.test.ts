@@ -202,6 +202,38 @@ describe('Run launch synchronization', () => {
     }
   });
 
+  it('passes the targeted response layout at every shipping session-creation callsite', () => {
+    const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    const dataCall = 'data.data.sessionId, data.data.session, data.data.tabLayout';
+    const resultCall = 'result.data.session.id, result.data.session, result.data.tabLayout';
+    const expectedByMethod = new Map<string, string[]>([
+      ['runClaude', [dataCall, resultCall]],
+      ['runShell', [dataCall, resultCall]],
+      ['runOpenCode', [dataCall]],
+      ['runCodex', [dataCall]],
+      ['runAntigravity', [dataCall]],
+      ['runGemini', [dataCall]],
+      ['runPi', [dataCall]],
+    ]);
+    let totalCallsites = 0;
+
+    for (const [method, expectedCalls] of expectedByMethod) {
+      const startMarker = `  async ${method}() {`;
+      const start = src.indexOf(startMarker);
+      const end = src.indexOf('\n  },', start + startMarker.length);
+      expect(start, `${method}() must exist`).toBeGreaterThanOrEqual(0);
+      expect(end, `${method}() must have a detectable end`).toBeGreaterThan(start);
+      const calls = [...src.slice(start, end).matchAll(/await this\._ensureCreatedSessionVisible\(([^)]+)\);/g)].map(
+        (match) => match[1]
+      );
+      expect(calls, `${method}() creation layout arguments`).toEqual(expectedCalls);
+      totalCallsites += calls.length;
+    }
+
+    expect(totalCallsites).toBe(9);
+    expect([...src.matchAll(/await this\._ensureCreatedSessionVisible\(/g)]).toHaveLength(9);
+  });
+
   it('coalesces overlapping Run activations and disables the button while the request is active', async () => {
     const runBtn = {
       disabled: false,

@@ -5017,6 +5017,14 @@ class CodemanApp {
 
   _onTabLayoutChanged(data) {
     const currentUser = window.__codemanUser;
+    const hasTrustedMultiUserIdentity =
+      currentUser?.multiUser === true &&
+      typeof currentUser.username === 'string' &&
+      currentUser.username.length > 0;
+    if (data?.layout && data.owner && data.owner !== '@single' && !hasTrustedMultiUserIdentity) {
+      this._loadTabLayout();
+      return;
+    }
     if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
     if (data?.layout) {
       this._applyTabLayout(data.layout);

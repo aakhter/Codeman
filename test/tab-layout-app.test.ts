@@ -619,6 +619,34 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app._loadTabLayout).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['unset', undefined],
+    ['ambiguous', { multiUser: true }],
+  ])('refetches rather than adopting a multi-user inline layout when identity is %s', (_label, identity) => {
+    const app = makeApp();
+    app._applyTabLayout = vi.fn();
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = identity;
+
+    app._onTabLayoutChanged({ owner: 'bob', version: 11, layout: { ...layout, version: 11 } });
+
+    expect(app._applyTabLayout).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).toHaveBeenCalledOnce();
+  });
+
+  it('adopts a single-user inline layout before identity is populated', () => {
+    const app = makeApp();
+    const inlineLayout = { ...layout, version: 11 };
+    app._applyTabLayout = vi.fn();
+    app._loadTabLayout = vi.fn();
+    delete (window as any).__codemanUser;
+
+    app._onTabLayoutChanged({ owner: '@single', version: 11, layout: inlineLayout });
+
+    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
   it('keeps GET fallback behavior for layout-change payloads without inline layouts', () => {
     const app = makeApp();
     app._loadTabLayout = vi.fn();
