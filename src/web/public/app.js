@@ -5772,7 +5772,9 @@ class CodemanApp {
 
   _applyTabLayoutFallback() {
     // Any failed owner-layout read makes the authoritative ordering unknown.
-    // Paint the safe legacy-flat projection read-only until a retry succeeds.
+    // Paint every live session in the safe legacy-flat projection read-only until
+    // a retry succeeds; deferred target placement is unknowable in this mode.
+    this._deferredCreatedSessionIds?.clear();
     this.tabLayout = null;
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;

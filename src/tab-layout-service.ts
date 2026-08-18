@@ -292,7 +292,9 @@ export class TabLayoutService {
 
   private commitPrepared(owner: string, stored: TabLayout): TabLayout {
     this.deps.store.setTabLayout(owner, stored);
-    this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: stored.version, layout: stored });
+    // Generic mutations invalidate the browser cache. Only session creation has
+    // the complete layout + placement snapshot required for safe inline adoption.
+    this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: stored.version });
     return stored;
   }
 

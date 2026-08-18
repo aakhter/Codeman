@@ -174,7 +174,6 @@ describe('TabLayoutService', () => {
     expect(h.broadcast).toHaveBeenCalledWith(SseEvent.TabLayoutChanged, {
       owner: 'alice',
       version: 8,
-      layout: first,
     });
   });
 
@@ -218,7 +217,7 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
   });
 
-  it('stores a matching write with one fresh version and an authoritative event payload', async () => {
+  it('stores a matching write with one fresh version and an invalidation event payload', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },
       live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
@@ -234,7 +233,6 @@ describe('TabLayoutService', () => {
     expect(h.broadcast).toHaveBeenLastCalledWith(SseEvent.TabLayoutChanged, {
       owner: 'alice',
       version: 8,
-      layout: result.layout,
     });
   });
 

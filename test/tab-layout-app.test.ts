@@ -483,6 +483,23 @@ describe('COD-306 CodemanApp integration', () => {
     app._tabLayoutCoordinator.dispose();
   });
 
+  it('releases a deferred live session into the legacy-flat projection on fallback', () => {
+    const app = makeApp();
+    app.sessions.set('new-session', { id: 'new-session', name: 'New' });
+    app._deferredCreatedSessionIds.add('new-session');
+    app._fullRenderSessionTabs();
+
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+
+    app._applyTabLayoutFallback();
+
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(false);
+    expect(app.tabLayout).toBeNull();
+    expect(app.tabLayoutReadOnly).toBe(true);
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(0);
+  });
+
   it('refreshes visible home/mobile consumers when an adopted projection reorders sessions', () => {
     const app = makeApp();
     const home = document.createElement('div');
