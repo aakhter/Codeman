@@ -2044,8 +2044,12 @@ class CodemanApp {
   _onSessionCreated(data) {
     this.sessions.set(data.id, data);
     this.updateAttachmentHistoryCountFromSession?.(data);
+    const visibilityDeferred =
+      this._tabLayoutEditCoordinator?.hasPending() &&
+      this.tabLayout &&
+      !this._refLocation({ kind: 'session', id: data.id });
     // Add new session to end of tab order
-    if (!this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
+    if (!visibilityDeferred && !this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
       this.sessionOrder.push(data.id);
       this.saveSessionOrder();
     }
@@ -5022,18 +5026,22 @@ class CodemanApp {
       typeof currentUser.username === 'string' &&
       currentUser.username.length > 0;
     if (data?.layout && data.owner && data.owner !== '@single' && !hasTrustedMultiUserIdentity) {
+      if (this._tabLayoutEditCoordinator?.hasPending()) {
+        this._tabLayoutSsePending = true;
+        return;
+      }
       this._loadTabLayout();
       return;
     }
     if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
-    if (data?.layout) {
-      this._applyTabLayout(data.layout);
-      return;
-    }
-    // A pending semantic edit owns its optimistic projection. A refetch may
-    // update its authoritative base, but must not paint stale server state over it.
+    // An optimistic edit owns its request until the PUT settles. Inline events can
+    // be that same write's server echo, so adopting them would replay in-flight intent.
     if (this._tabLayoutEditCoordinator?.hasPending()) {
       this._tabLayoutSsePending = true;
+      return;
+    }
+    if (data?.layout) {
+      this._applyTabLayout(data.layout, data.placements);
       return;
     }
     this._loadTabLayout();

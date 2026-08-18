@@ -647,7 +647,8 @@ describe('TabLayoutService', () => {
     });
     h.live.set('new-session', { id: 'new-session', owner: 'alice', createdAt: 3 } as never);
 
-    const layout = await h.service.sessionCreated('alice', 'new-session', 'work');
+    const result = await h.service.sessionCreated('alice', 'new-session', 'work');
+    const { layout } = result;
 
     expect(layout.groups[0].refs.at(-1)).toEqual({ kind: 'session', id: 'new-session' });
     expect(layout.version).toBe(8);
@@ -657,13 +658,85 @@ describe('TabLayoutService', () => {
       owner: 'alice',
       version: 8,
       layout,
+      placements: result.placements,
     });
+  });
+
+  it('registers a new live session only after older owner work completes', async () => {
+    let releaseFacts!: () => void;
+    const blockedFacts = new Promise<void>((resolve) => {
+      releaseFacts = resolve;
+    });
+    let reads = 0;
+    const h = createHarness({
+      layouts: {
+        alice: {
+          ...existing([{ kind: 'session', id: 'existing' }]),
+          groups: [{ id: 'work', name: 'Work', refs: [] }],
+        },
+      },
+      live: [{ id: 'existing', owner: 'alice', createdAt: 1 }],
+      readWebviews: vi.fn(async () => {
+        if (reads++ === 0) await blockedFacts;
+        return [];
+      }),
+    });
+    const older = h.service.putOperations(
+      'alice',
+      [{ type: 'renameGroup', groupId: 'work', name: 'Older mutation' }],
+      7
+    );
+    await Promise.resolve();
+    const created = { id: 'new-session', owner: 'alice', createdAt: 2 };
+    const register = vi.fn(() => {
+      h.live.set(created.id, created as never);
+      return () => h.live.delete(created.id);
+    });
+    const creation = h.service.sessionCreated('alice', created.id, 'work', register);
+
+    expect(register).not.toHaveBeenCalled();
+    expect(h.live.has(created.id)).toBe(false);
+    releaseFacts();
+    const olderResult = await older;
+    const creationResult = await creation;
+
+    expect(olderResult.layout.groups[0].refs).toEqual([]);
+    expect(register).toHaveBeenCalledOnce();
+    expect(creationResult.layout.groups[0].refs).toEqual([{ kind: 'session', id: created.id }]);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
+    expect(h.broadcast.mock.calls.at(-1)?.[1]).toMatchObject({
+      version: 9,
+      layout: creationResult.layout,
+      placements: creationResult.placements,
+    });
+  });
+
+  it('rolls back owner-queued live registration when creation reconciliation fails', async () => {
+    const reconciliationError = new Error('saved webviews unavailable');
+    const h = createHarness({
+      layouts: { alice: existing([]) },
+      readWebviews: vi.fn(async () => {
+        throw reconciliationError;
+      }),
+    });
+    const created = { id: 'new-session', owner: 'alice', createdAt: 1 };
+
+    await expect(
+      h.service.sessionCreated('alice', created.id, 'work', () => {
+        h.live.set(created.id, created as never);
+        return () => h.live.delete(created.id);
+      })
+    ).rejects.toBe(reconciliationError);
+
+    expect(h.live.has(created.id)).toBe(false);
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 
   it('commits a missing owner layout once at version zero while targeting a group is unavailable', async () => {
     const h = createHarness({ live: [{ id: 'new-session', owner: 'alice', createdAt: 1 }] });
 
-    const layout = await h.service.sessionCreated('alice', 'new-session', 'work');
+    const { layout } = await h.service.sessionCreated('alice', 'new-session', 'work');
 
     expect(layout.version).toBe(0);
     expect(layout.ungrouped).toEqual([{ kind: 'session', id: 'new-session' }]);
@@ -689,7 +762,7 @@ describe('TabLayoutService', () => {
       });
       h.live.set('new-session', { id: 'new-session', owner: 'alice', createdAt: 2 } as never);
 
-      const layout = await h.service.sessionCreated('alice', 'new-session', tabGroupId);
+      const { layout } = await h.service.sessionCreated('alice', 'new-session', tabGroupId);
 
       expect(layout.groups).toEqual([]);
       expect(layout.ungrouped.at(-1)).toEqual({ kind: 'session', id: 'new-session' });
@@ -718,7 +791,8 @@ describe('TabLayoutService', () => {
       parentSessionId: 'parent',
     } as never);
 
-    const layout = await h.service.sessionCreated('alice', 'child', 'target');
+    const result = await h.service.sessionCreated('alice', 'child', 'target');
+    const { layout } = result;
 
     expect(layout.groups.find((group) => group.id === 'parent-work')?.refs).toEqual([
       { kind: 'session', id: 'parent' },
@@ -729,6 +803,13 @@ describe('TabLayoutService', () => {
       placement: 'manual',
     });
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+    expect(result.placements).toContainEqual({
+      kind: 'session',
+      id: 'child',
+      state: 'manual',
+      parentId: 'parent',
+      canFollow: true,
+    });
   });
 
   it('serializes concurrent targeted creations and appends them in owner-queue order', async () => {
@@ -747,9 +828,9 @@ describe('TabLayoutService', () => {
       h.service.sessionCreated('alice', 'second', 'work'),
     ]);
 
-    expect(first.groups[0].refs.map((ref) => ref.id)).toEqual(['first']);
-    expect(second.groups[0].refs.map((ref) => ref.id)).toEqual(['first', 'second']);
-    expect(second.version).toBe(9);
+    expect(first.layout.groups[0].refs.map((ref) => ref.id)).toEqual(['first']);
+    expect(second.layout.groups[0].refs.map((ref) => ref.id)).toEqual(['first', 'second']);
+    expect(second.layout.version).toBe(9);
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
   });
 
@@ -761,7 +842,7 @@ describe('TabLayoutService', () => {
       live: [{ id: 'actual-new-session', owner: 'alice', createdAt: 1 }],
     });
 
-    const layout = await h.service.sessionCreated('alice', 'missing-created-session', 'work');
+    const { layout } = await h.service.sessionCreated('alice', 'missing-created-session', 'work');
 
     expect(layout.groups[0].refs).toEqual([]);
     expect(layout.ungrouped).toEqual([{ kind: 'session', id: 'actual-new-session' }]);
@@ -811,7 +892,7 @@ describe('TabLayoutService', () => {
       ],
     });
 
-    const layout = await h.service.sessionCreated('alice', 'created', 'work');
+    const { layout } = await h.service.sessionCreated('alice', 'created', 'work');
 
     expect(layout.groups[0].refs.map((ref) => ref.id)).toEqual(['tail', 'created', 'child']);
     expect(layout.version).toBe(8);

@@ -1097,7 +1097,7 @@ export function registerSessionRoutes(
       parentSessionId: resolveParentSessionId(ctx, req, body.parentSessionId, owner),
     });
 
-    const tabLayout = body.tabGroupId
+    const tabLayoutSnapshot = body.tabGroupId
       ? await ctx.addSession(session, { tabGroupId: body.tabGroupId })
       : await ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
@@ -1116,7 +1116,10 @@ export function registerSessionRoutes(
     // Avoids serializing 2-3MB of terminal+text buffers per session creation.
     const lightState = ctx.getSessionStateWithRespawn(session);
     ctx.broadcast(SseEvent.SessionCreated, lightState);
-    return { session: lightState, ...(body.tabGroupId ? { tabLayout } : {}) };
+    return {
+      session: lightState,
+      ...(body.tabGroupId ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements } : {}),
+    };
   });
 
   // ========== Rename Session ==========
@@ -3364,7 +3367,9 @@ export function registerSessionRoutes(
       }
     }
 
-    const tabLayout = tabGroupId ? await ctx.addSession(session, { tabGroupId }) : await ctx.addSession(session);
+    const tabLayoutSnapshot = tabGroupId
+      ? await ctx.addSession(session, { tabGroupId })
+      : await ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
@@ -3448,7 +3453,7 @@ export function registerSessionRoutes(
         sessionId: session.id,
         casePath: resolvedCasePath,
         caseName,
-        ...(tabGroupId ? { tabLayout } : {}),
+        ...(tabGroupId ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements } : {}),
       };
     } catch (err) {
       // Clean up session on error to prevent orphaned resources

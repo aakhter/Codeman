@@ -391,8 +391,8 @@ describe('Run launch synchronization', () => {
 
   it('passes the targeted response layout at every shipping session-creation callsite', () => {
     const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
-    const dataCall = 'data.data.sessionId, data.data.session, data.data.tabLayout';
-    const resultCall = 'result.data.session.id, result.data.session, result.data.tabLayout';
+    const dataCall = 'data.data.sessionId, data.data.session, data.data.tabLayout, data.data.tabPlacements';
+    const resultCall = 'result.data.session.id, result.data.session, result.data.tabLayout, result.data.tabPlacements';
     const expectedByMethod = new Map<string, string[]>([
       ['runClaude', [dataCall, resultCall]],
       ['runShell', [dataCall, resultCall]],
@@ -411,7 +411,7 @@ describe('Run launch synchronization', () => {
       expect(start, `${method}() must exist`).toBeGreaterThanOrEqual(0);
       expect(end, `${method}() must have a detectable end`).toBeGreaterThan(start);
       const calls = [...src.slice(start, end).matchAll(/await this\._ensureCreatedSessionVisible\(([^)]+)\);/g)].map(
-        (match) => match[1]
+        (match) => match[1].replace(/\s+/g, ' ').trim()
       );
       expect(calls, `${method}() creation layout arguments`).toEqual(expectedCalls);
       totalCallsites += calls.length;
@@ -485,13 +485,47 @@ describe('Run launch synchronization', () => {
     const snapshot = { id: 'sess-new', name: 'w1-case', workingDir: '/tmp/case' };
     const authoritativeLayout = { version: 12, groups: [], ungrouped: [{ kind: 'session', id: snapshot.id }] };
 
-    await app._ensureCreatedSessionVisible(snapshot.id, snapshot, authoritativeLayout);
+    const placements = [{ kind: 'session', id: snapshot.id, state: 'manual', parentId: 'parent', canFollow: true }];
+    await app._ensureCreatedSessionVisible(snapshot.id, snapshot, authoritativeLayout, placements);
 
     expect(context.fetch).not.toHaveBeenCalled();
-    expect(app._applyTabLayout).toHaveBeenCalledWith(authoritativeLayout);
+    expect(app._applyTabLayout).toHaveBeenCalledWith(authoritativeLayout, placements);
     expect(app.sessions.get(snapshot.id)).toEqual(snapshot);
     expect(app._renderSessionTabsImmediate).toHaveBeenCalledTimes(1);
     expect(calls).toEqual(['layout', 'session', 'render']);
+  });
+
+  it('defers a targeted creation snapshot and does not paint it while an edit is pending', async () => {
+    const CodemanApp = function CodemanApp(this: any) {};
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: () => null },
+      fetch: vi.fn(),
+      console,
+    });
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.sessions = new Map();
+    app._tabLayoutEditCoordinator = { hasPending: () => true };
+    app._tabLayoutSsePending = false;
+    app._applyTabLayout = vi.fn();
+    app._onSessionCreated = vi.fn((session: any) => app.sessions.set(session.id, session));
+    app._renderSessionTabsImmediate = vi.fn();
+    const snapshot = { id: 'sess-new' };
+    const targeted = {
+      version: 12,
+      groups: [{ id: 'work', name: 'Work', refs: [{ kind: 'session', id: snapshot.id }] }],
+      ungrouped: [],
+    };
+
+    await app._ensureCreatedSessionVisible(snapshot.id, snapshot, targeted, []);
+
+    expect(app._applyTabLayout).not.toHaveBeenCalled();
+    expect(app._tabLayoutSsePending).toBe(true);
+    expect(app._onSessionCreated).toHaveBeenCalledWith(snapshot);
   });
 
   it('routes stale targeted response layouts through the authoritative version gate', async () => {
@@ -533,7 +567,7 @@ describe('Run launch synchronization', () => {
 
     await app._ensureCreatedSessionVisible(snapshot.id, snapshot, staleLayout);
 
-    expect(applyTabLayout).toHaveBeenCalledWith(staleLayout);
+    expect(applyTabLayout).toHaveBeenCalledWith(staleLayout, undefined);
     expect(app.tabLayout).toBe(currentLayout);
     expect(app.tabLayoutVersion).toBe(12);
     expect(app.sessions.get(snapshot.id)).toEqual(snapshot);

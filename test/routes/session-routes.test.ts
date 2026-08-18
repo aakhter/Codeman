@@ -143,10 +143,16 @@ describe('session-routes', () => {
     ungrouped: [],
     updatedAt: '2026-08-18T12:00:00.000Z',
   };
+  const authoritativeTabPlacements = [
+    { kind: 'session' as const, id: 'created-session', state: 'manual' as const, parentId: 'parent', canFollow: true },
+  ];
 
   describe('session creation tab placement', () => {
     it('returns the authoritative layout for a targeted session creation', async () => {
-      harness.ctx.addSession.mockResolvedValueOnce(authoritativeTabLayout);
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+      });
 
       const response = await harness.app.inject({
         method: 'POST',
@@ -157,6 +163,7 @@ describe('session-routes', () => {
       expect(response.statusCode).toBe(200);
       expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { tabGroupId: 'work' });
       expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+      expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
     });
 
     it('keeps an ordinary session creation response and addSession call unchanged', async () => {
@@ -170,6 +177,7 @@ describe('session-routes', () => {
       expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session));
       expect(harness.ctx.addSession.mock.calls.at(-1)).toHaveLength(1);
       expect(JSON.parse(response.body).data).not.toHaveProperty('tabLayout');
+      expect(JSON.parse(response.body).data).not.toHaveProperty('tabPlacements');
     });
 
     it.each([
@@ -191,7 +199,10 @@ describe('session-routes', () => {
 
     it('returns the authoritative layout for a targeted quick-start', async () => {
       const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
-      harness.ctx.addSession.mockResolvedValueOnce(authoritativeTabLayout);
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+      });
       try {
         const response = await harness.app.inject({
           method: 'POST',
@@ -202,6 +213,7 @@ describe('session-routes', () => {
         expect(response.statusCode).toBe(200);
         expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { tabGroupId: 'work' });
         expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+        expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
       } finally {
         startShell.mockRestore();
       }
@@ -220,6 +232,7 @@ describe('session-routes', () => {
         expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session));
         expect(harness.ctx.addSession.mock.calls.at(-1)).toHaveLength(1);
         expect(JSON.parse(response.body).data).not.toHaveProperty('tabLayout');
+        expect(JSON.parse(response.body).data).not.toHaveProperty('tabPlacements');
       } finally {
         startShell.mockRestore();
       }

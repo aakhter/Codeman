@@ -475,6 +475,106 @@ describe('COD-307 optimistic write coordinator', () => {
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
   });
 
+  it('defers an SSE-before-response self echo without duplicating an in-flight create or losing a queued edit', async () => {
+    const app = makeInteractionApp();
+    let resolveFirst!: (value: unknown) => void;
+    const firstResponse = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    app._putTabLayout = vi
+      .fn()
+      .mockReturnValueOnce(firstResponse)
+      .mockImplementationOnce(async ({ baseVersion, layout: next }: any) => ({
+        ok: true,
+        status: 200,
+        layout: { ...next, version: baseVersion + 1 },
+      }));
+    app._loadTabLayout = vi.fn(async () => true);
+    app._tabLayoutSsePending = false;
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({ type: 'createGroup', id: 'new', name: 'New' });
+    const writing = coordinator.flush();
+    await Promise.resolve();
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Queued rename' });
+    const committedCreate = {
+      ...coordinator.getLayout(),
+      version: 5,
+      groups: coordinator
+        .getLayout()
+        .groups.map((group: any) => (group.id === 'g1' ? { ...group, name: 'One' } : group)),
+    };
+
+    app._onTabLayoutChanged({ owner: '@single', version: 5, layout: committedCreate, placements: [] });
+
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+    expect(app._tabLayoutSsePending).toBe(true);
+    resolveFirst({ ok: true, status: 200, layout: committedCreate, placements: [] });
+    await writing;
+    await vi.runAllTimersAsync();
+
+    expect(app._putTabLayout).toHaveBeenCalledTimes(2);
+    expect(app._putTabLayout.mock.calls[0][0].operations).toEqual([{ type: 'createGroup', id: 'new', name: 'New' }]);
+    expect(app._putTabLayout.mock.calls[1][0].operations).toEqual([
+      { type: 'renameGroup', groupId: 'g1', name: 'Queued rename' },
+    ]);
+    expect(app.tabLayout.groups.find((group: any) => group.id === 'g1').name).toBe('Queued rename');
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay an edit when its PUT response arrives before the inline SSE', async () => {
+    const app = makeInteractionApp();
+    app._putTabLayout = vi.fn(async ({ baseVersion, layout: next }: any) => ({
+      ok: true,
+      status: 200,
+      layout: { ...next, version: baseVersion + 1 },
+      placements: [],
+    }));
+    app._loadTabLayout = vi.fn(async () => true);
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({ type: 'createGroup', id: 'new', name: 'New' });
+    await coordinator.flush();
+    const committed = coordinator.getLayout();
+
+    app._onTabLayoutChanged({ owner: '@single', version: committed.version, layout: committed, placements: [] });
+    await vi.runAllTimersAsync();
+
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('defers an inline layout while followParent is in flight', async () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs = app.tabLayout.groups[0].refs.filter((ref: Ref) => ref.id !== 'child');
+    app.tabLayout.ungrouped.push({ kind: 'session', id: 'child', placement: 'manual' });
+    let resolvePut!: (value: unknown) => void;
+    app._putTabLayout = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolvePut = resolve;
+        })
+    );
+    app._loadTabLayout = vi.fn(async () => true);
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({
+      type: 'followParent',
+      ref: { kind: 'session', id: 'child' },
+      metadata: app._tabLayoutMetadata(),
+    });
+    const writing = coordinator.flush();
+    await Promise.resolve();
+
+    app._onTabLayoutChanged({ owner: '@single', version: 5, layout: coordinator.getLayout(), placements: [] });
+    expect(app._tabLayoutSsePending).toBe(true);
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+
+    resolvePut({ ok: true, status: 200, layout: { ...coordinator.getLayout(), version: 5 }, placements: [] });
+    await writing;
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+    expect(app.showToast).not.toHaveBeenCalled();
+  });
+
   it('does not let a late PUT response overwrite placements adopted with a newer GET/SSE layout', async () => {
     const app = makeInteractionApp();
     app._fullRenderSessionTabs();

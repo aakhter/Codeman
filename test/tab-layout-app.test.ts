@@ -582,17 +582,18 @@ describe('COD-306 CodemanApp integration', () => {
   it('adopts an inline owner layout without refetching', () => {
     const app = makeApp();
     const inlineLayout = { ...layout, version: 11 };
+    const placements = [{ kind: 'session', id: 's1', state: 'manual', parentId: 's2', canFollow: true }];
     app._applyTabLayout = vi.fn();
     app._loadTabLayout = vi.fn();
     (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
 
-    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout });
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout, placements });
 
-    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout);
+    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout, placements);
     expect(app._loadTabLayout).not.toHaveBeenCalled();
   });
 
-  it('rebases a pending semantic edit through inline layout adoption', () => {
+  it('defers an inline layout while a semantic edit is pending', () => {
     const app = makeApp();
     const inlineLayout = { ...layout, version: 11 };
     const adoptExternal = vi.fn();
@@ -602,8 +603,41 @@ describe('COD-306 CodemanApp integration', () => {
 
     app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout });
 
-    expect(adoptExternal).toHaveBeenCalledWith(inlineLayout, { placements: undefined });
-    expect(app._tabLayoutSsePending).not.toBe(true);
+    expect(adoptExternal).not.toHaveBeenCalled();
+    expect(app._tabLayoutSsePending).toBe(true);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('upserts but does not paint a targeted session missing from the optimistic layout', () => {
+    const app = makeApp();
+    app._tabLayoutEditCoordinator = { hasPending: () => true };
+    app.sessionOrder = ['s2', 's1', 's3'];
+    app.updateAttachmentHistoryCountFromSession = vi.fn();
+    app.saveSessionOrder = vi.fn();
+    app.renderSessionTabs = vi.fn();
+    app.updateCost = vi.fn();
+    app.renderMuxSessions = vi.fn();
+
+    app._onSessionCreated({ id: 'new-session', name: 'New' });
+
+    expect(app.sessions.has('new-session')).toBe(true);
+    expect(app.sessionOrder).toEqual(['s2', 's1', 's3']);
+    expect(app.saveSessionOrder).not.toHaveBeenCalled();
+  });
+
+  it('adopts inline placement metadata for inherited labels and actions without a reload', () => {
+    const app = makeApp();
+    app.sessions.get('s1').parentSessionId = 's2';
+    const inlineLayout = { ...layout, version: 11 };
+    const placements = [{ kind: 'session', id: 's1', state: 'inherited', parentId: 's2', canFollow: false }];
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout, placements });
+
+    expect(app._tabRefPlacementState({ kind: 'session', id: 's1' })).toEqual(placements[0]);
+    expect(app._tabPlacementPresentation({ kind: 'session', id: 's1' }).short).toBe('Follows parent');
+    expect(app._tabRefPlacementActions({ kind: 'session', id: 's1' })).toHaveLength(1);
     expect(app._loadTabLayout).not.toHaveBeenCalled();
   });
 
@@ -643,7 +677,7 @@ describe('COD-306 CodemanApp integration', () => {
 
     app._onTabLayoutChanged({ owner: '@single', version: 11, layout: inlineLayout });
 
-    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout);
+    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout, undefined);
     expect(app._loadTabLayout).not.toHaveBeenCalled();
   });
 

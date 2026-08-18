@@ -724,13 +724,12 @@ export class WebServer extends EventEmitter {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
       addSession: async (session: Session, options: SessionCreationOptions = {}) => {
-        this.sessions.set(session.id, session);
-        try {
-          return await this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options.tabGroupId);
-        } catch (error) {
-          this.sessions.delete(session.id);
-          throw error;
-        }
+        return this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options.tabGroupId, () => {
+          this.sessions.set(session.id, session);
+          return () => {
+            if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+          };
+        });
       },
       tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),

@@ -393,9 +393,12 @@ Object.assign(CodemanApp.prototype, {
   /** Ensure a newly-created session is visible without waiting for the SSE event.
    *  The POST response and session:created can arrive in either order, so the
    *  normal idempotent SSE handler remains the single state-upsert path. */
-  async _ensureCreatedSessionVisible(sessionId, sessionSnapshot, tabLayout) {
+  async _ensureCreatedSessionVisible(sessionId, sessionSnapshot, tabLayout, tabPlacements) {
     if (!sessionId) return;
-    if (tabLayout) this._applyTabLayout(tabLayout);
+    if (tabLayout) {
+      if (this._tabLayoutEditCoordinator?.hasPending()) this._tabLayoutSsePending = true;
+      else this._applyTabLayout(tabLayout, tabPlacements);
+    }
 
     let session = sessionSnapshot;
     if (!session && !this.sessions?.has(sessionId)) {
@@ -795,7 +798,12 @@ Object.assign(CodemanApp.prototype, {
             }
           }
           if (!data.success) throw new Error(data.error || 'Failed to start remote Claude session');
-          await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+          await this._ensureCreatedSessionVisible(
+            data.data.sessionId,
+            data.data.session,
+            data.data.tabLayout,
+            data.data.tabPlacements
+          );
           remoteIds.push(data.data.sessionId);
         }
         this._appendSessionLaunchStatus(ownsLaunchTerminal, `All ${tabCount} remote session(s) ready`);
@@ -863,7 +871,12 @@ Object.assign(CodemanApp.prototype, {
       const sessionIds = [];
       for (const result of createResults) {
         if (!result.success) throw new Error(result.error);
-        await this._ensureCreatedSessionVisible(result.data.session.id, result.data.session, result.data.tabLayout);
+        await this._ensureCreatedSessionVisible(
+          result.data.session.id,
+          result.data.session,
+          result.data.tabLayout,
+          result.data.tabPlacements
+        );
         sessionIds.push(result.data.session.id);
       }
       firstSessionId = sessionIds[0];
@@ -986,7 +999,12 @@ Object.assign(CodemanApp.prototype, {
           });
           const data = await res.json();
           if (!data.success) throw new Error(data.error || 'Failed to start remote shell session');
-          await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+          await this._ensureCreatedSessionVisible(
+            data.data.sessionId,
+            data.data.session,
+            data.data.tabLayout,
+            data.data.tabPlacements
+          );
           remoteIds.push(data.data.sessionId);
         }
         if (remoteIds[0]) {
@@ -1026,7 +1044,12 @@ Object.assign(CodemanApp.prototype, {
       const sessionIds = [];
       for (const result of createResults) {
         if (!result.success) throw new Error(result.error);
-        await this._ensureCreatedSessionVisible(result.data.session.id, result.data.session, result.data.tabLayout);
+        await this._ensureCreatedSessionVisible(
+          result.data.session.id,
+          result.data.session,
+          result.data.tabLayout,
+          result.data.tabPlacements
+        );
         sessionIds.push(result.data.session.id);
       }
 
@@ -1105,7 +1128,12 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start OpenCode');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
 
       // Switch to the new session (don't pre-set activeSessionId — selectSession
       // early-returns when IDs match, skipping buffer load and sendResize)
@@ -1164,7 +1192,12 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Codex');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -1216,7 +1249,12 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Antigravity');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -1268,7 +1306,12 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);
@@ -1326,7 +1369,12 @@ Object.assign(CodemanApp.prototype, {
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Pi');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session, data.data.tabLayout);
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
 
       if (data.data.sessionId) {
         await this.selectSession(data.data.sessionId);

@@ -75,6 +75,8 @@ export type TabLayoutSnapshot = {
   placements: ReturnType<typeof describeTabPlacements>;
 };
 
+export type RegisterTabLayoutSession = () => void | (() => void);
+
 export interface RemovedTabLayoutSession {
   id: string;
   owner?: string;
@@ -454,55 +456,73 @@ export class TabLayoutService {
   }
 
   /** Reconcile one completed session creation into one versioned mutation. */
-  async sessionCreated(owner: string, sessionId: string, tabGroupId?: string): Promise<TabLayout> {
+  async sessionCreated(
+    owner: string,
+    sessionId: string,
+    tabGroupId?: string,
+    register?: RegisterTabLayoutSession
+  ): Promise<TabLayoutSnapshot> {
     return this.withOwner(owner, async () => {
-      const { base, candidate, metadata } = await this.reconcileUnlocked(owner);
-      let next = candidate;
-      const targetGroup = tabGroupId ? candidate.groups.find((group) => group.id === tabGroupId) : undefined;
+      let rollback: (() => void) | void = undefined;
+      try {
+        rollback = register?.();
+        const { base, candidate, metadata } = await this.reconcileUnlocked(owner);
+        let next = candidate;
+        const targetGroup = tabGroupId ? candidate.groups.find((group) => group.id === tabGroupId) : undefined;
 
-      if (targetGroup) {
-        const target = { kind: 'session' as const, id: sessionId };
-        const storedRefs = [...candidate.groups.flatMap((group) => group.refs), ...candidate.ungrouped];
-        const stored = new Map(storedRefs.map((ref) => [refKey(ref), ref]));
-        const children = new Map<string, string[]>();
-        for (const item of metadata) {
-          if (
-            item.kind !== 'session' ||
-            !item.ownerValid ||
-            !item.visible ||
-            !item.parentSessionId ||
-            !stored.has(refKey(item)) ||
-            stored.get(refKey(item))?.placement === 'manual' ||
-            !stored.has(refKey({ kind: 'session', id: item.parentSessionId }))
-          ) {
-            continue;
+        if (targetGroup) {
+          const target = { kind: 'session' as const, id: sessionId };
+          const storedRefs = [...candidate.groups.flatMap((group) => group.refs), ...candidate.ungrouped];
+          const stored = new Map(storedRefs.map((ref) => [refKey(ref), ref]));
+          const children = new Map<string, string[]>();
+          for (const item of metadata) {
+            if (
+              item.kind !== 'session' ||
+              !item.ownerValid ||
+              !item.visible ||
+              !item.parentSessionId ||
+              !stored.has(refKey(item)) ||
+              stored.get(refKey(item))?.placement === 'manual' ||
+              !stored.has(refKey({ kind: 'session', id: item.parentSessionId }))
+            ) {
+              continue;
+            }
+            const siblings = children.get(item.parentSessionId) ?? [];
+            siblings.push(item.id);
+            children.set(item.parentSessionId, siblings);
           }
-          const siblings = children.get(item.parentSessionId) ?? [];
-          siblings.push(item.id);
-          children.set(item.parentSessionId, siblings);
-        }
-        const blockKeys = new Set<string>();
-        const addDescendants = (ref: TabRef): void => {
-          const key = refKey(ref);
-          if (blockKeys.has(key)) return;
-          blockKeys.add(key);
-          if (ref.kind !== 'session') return;
-          for (const childId of children.get(ref.id) ?? []) {
-            addDescendants({ kind: 'session', id: childId });
+          const blockKeys = new Set<string>();
+          const addDescendants = (ref: TabRef): void => {
+            const key = refKey(ref);
+            if (blockKeys.has(key)) return;
+            blockKeys.add(key);
+            if (ref.kind !== 'session') return;
+            for (const childId of children.get(ref.id) ?? []) {
+              addDescendants({ kind: 'session', id: childId });
+            }
+          };
+          addDescendants(target);
+          const removedFromTarget = targetGroup.refs.filter((ref) => blockKeys.has(refKey(ref))).length;
+          const destinationIndex = targetGroup.refs.length - removedFromTarget;
+          try {
+            next = moveRef(candidate, target, { groupId: targetGroup.id, index: destinationIndex }, metadata);
+          } catch (error) {
+            if (!(error instanceof TabLayoutValidationError)) throw error;
+            next = candidate;
           }
-        };
-        addDescendants(target);
-        const removedFromTarget = targetGroup.refs.filter((ref) => blockKeys.has(refKey(ref))).length;
-        const destinationIndex = targetGroup.refs.length - removedFromTarget;
-        try {
-          next = moveRef(candidate, target, { groupId: targetGroup.id, index: destinationIndex }, metadata);
-        } catch (error) {
-          if (!(error instanceof TabLayoutValidationError)) throw error;
-          next = candidate;
         }
+
+        const layout = sameLayout(base, next) ? base : this.prepareCommit(base, next);
+        const placements = describeTabPlacements(layout, metadata);
+        if (!sameLayout(base, next)) {
+          this.deps.store.setTabLayout(owner, layout);
+          this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: layout.version, layout, placements });
+        }
+        return { layout, placements };
+      } catch (error) {
+        rollback?.();
+        throw error;
       }
-
-      return sameLayout(base, next) ? base : this.commit(owner, base, next);
     });
   }
 

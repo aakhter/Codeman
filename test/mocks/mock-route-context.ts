@@ -36,12 +36,13 @@ export function createMockRouteContext(options?: {
     sessions,
     addSession: vi.fn(async (s: MockSession, _options?: SessionCreationOptions) => {
       sessions.set(s.id, s);
-      return {
+      const layout = {
         version: 0,
         groups: [],
         ungrouped: [{ kind: 'session' as const, id: s.id }],
         updatedAt: '1970-01-01T00:00:00.000Z',
       };
+      return { layout, placements: [] };
     }),
     tabLayouts: {
       get: vi.fn(),
