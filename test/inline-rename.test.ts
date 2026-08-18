@@ -71,6 +71,10 @@ describe('Inline rename input', () => {
       const host = document.getElementById('sessionTabsHost') as HTMLElement;
       host.appendChild(container);
       document.documentElement.dataset.tabOrientation = 'horizontal';
+      document.documentElement.dataset.sessionList = 'header';
+      document.documentElement.classList.remove('tab-rail-compact');
+      const rail = document.getElementById('tabRail') as HTMLElement;
+      rail.style.removeProperty('--tab-rail-width');
       container.setAttribute('role', 'tablist');
       container.setAttribute('aria-label', 'Session tabs');
       container.setAttribute('aria-orientation', 'horizontal');
@@ -99,6 +103,40 @@ describe('Inline rename input', () => {
         tabName.className = 'tab-name';
         tabName.setAttribute('data-session-id', id);
         tabName.textContent = name;
+        wrap.appendChild(tabName);
+        document.body.appendChild(wrap);
+        app.startInlineRename(id);
+        return !!tabName.querySelector('input.tab-rename-input');
+      },
+      { id: sessionId, name }
+    );
+  }
+
+  async function startCanonicalPrefixedRename(sessionId: string, name: string): Promise<boolean> {
+    return page.evaluate(
+      ({ id, name }) => {
+        const app = (
+          window as unknown as {
+            app: {
+              sessions: Map<string, { id: string; name: string }>;
+              startInlineRename: (id: string) => void;
+            };
+          }
+        ).app;
+        const separator = name.indexOf(': ');
+        const prefix = name.slice(0, separator + 2);
+        const suffix = name.slice(separator + 2);
+        app.sessions.set(id, { id, name });
+        const wrap = document.createElement('div');
+        wrap.setAttribute('data-test-tab', '1');
+        const tabName = document.createElement('span');
+        tabName.className = 'tab-name';
+        tabName.dataset.sessionId = id;
+        tabName.dataset.fullName = name;
+        const prefixLabel = document.createElement('span');
+        prefixLabel.className = 'tab-name-prefix';
+        prefixLabel.textContent = prefix;
+        tabName.append(prefixLabel, document.createTextNode(suffix));
         wrap.appendChild(tabName);
         document.body.appendChild(wrap);
         app.startInlineRename(id);
@@ -261,6 +299,43 @@ describe('Inline rename input', () => {
     expect(result.afterFirstNull).toBe(true);
     expect(result.afterSecondNull).toBe(true);
     expect(result.threw).toBe(false);
+  });
+
+  it('Settle-once: a saved cancel callback is inert after a successful PUT', async () => {
+    await resetState();
+    expect(await startRename('late-cancel', 'OldName')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: { cancel: () => void } | null;
+            sessions: Map<string, { id: string; name: string }>;
+          };
+        }
+      ).app;
+      const origFetch = window.fetch;
+      window.fetch = (async () =>
+        new Response('{"success":true,"data":{"name":"NewName"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })) as typeof window.fetch;
+      const cancel = app._activeRename!.cancel;
+      const input = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      input.value = 'NewName';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      cancel();
+      window.fetch = origFetch;
+      const label = document.querySelector('.tab-name[data-session-id="late-cancel"]') as HTMLElement;
+      return {
+        label: label.textContent,
+        mapName: app.sessions.get('late-cancel')?.name ?? null,
+        renameActive: !!app._activeRename,
+      };
+    });
+
+    expect(result).toEqual({ label: 'NewName', mapName: 'NewName', renameActive: false });
   });
 
   it('Render guard: _renderSessionTabsImmediate() does not destroy an open rename input', async () => {
@@ -463,6 +538,231 @@ describe('Inline rename input', () => {
     expect(result.toasts).toContain('Failed to rename');
   });
 
+  it('Cancel restores the canonical prefixed label children', async () => {
+    await resetState();
+    expect(await startCanonicalPrefixedRename('canonical-cancel', 'w9-case: original')).toBe(true);
+
+    const result = await page.evaluate(() => {
+      const app = (window as unknown as { app: { _activeRename: { cancel: () => void } | null } }).app;
+      app._activeRename!.cancel();
+      const label = document.querySelector('.tab-name[data-session-id="canonical-cancel"]') as HTMLElement;
+      return {
+        text: label.textContent,
+        fullName: label.dataset.fullName,
+        prefixClass: label.firstElementChild?.className ?? null,
+        prefixText: label.firstElementChild?.textContent ?? null,
+      };
+    });
+
+    expect(result).toEqual({
+      text: 'w9-case: original',
+      fullName: 'w9-case: original',
+      prefixClass: 'tab-name-prefix',
+      prefixText: 'w9-case: ',
+    });
+  });
+
+  it('A no-op commit restores the canonical prefixed label children', async () => {
+    await resetState();
+    expect(await startCanonicalPrefixedRename('canonical-noop', 'w9-case: original')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const input = document.querySelector(
+        '.tab-name[data-session-id="canonical-noop"] input.tab-rename-input'
+      ) as HTMLInputElement;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const label = document.querySelector('.tab-name[data-session-id="canonical-noop"]') as HTMLElement;
+      return {
+        prefixClass: label.firstElementChild?.className ?? null,
+        prefixText: label.firstElementChild?.textContent ?? null,
+      };
+    });
+
+    expect(result).toEqual({ prefixClass: 'tab-name-prefix', prefixText: 'w9-case: ' });
+  });
+
+  it('A rejected rename restores the canonical prefixed label children', async () => {
+    await resetState();
+    expect(await startCanonicalPrefixedRename('canonical-failure', 'w9-case: original')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const origFetch = window.fetch;
+      window.fetch = (async () =>
+        new Response('{"success":false}', {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })) as typeof window.fetch;
+      const input = document.querySelector(
+        '.tab-name[data-session-id="canonical-failure"] input.tab-rename-input'
+      ) as HTMLInputElement;
+      input.value = 'rejected';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      window.fetch = origFetch;
+      const label = document.querySelector('.tab-name[data-session-id="canonical-failure"]') as HTMLElement;
+      return {
+        prefixClass: label.firstElementChild?.className ?? null,
+        prefixText: label.firstElementChild?.textContent ?? null,
+      };
+    });
+
+    expect(result).toEqual({ prefixClass: 'tab-name-prefix', prefixText: 'w9-case: ' });
+  });
+
+  it('Deletion invalidates a pending rename PUT synchronously', async () => {
+    await resetState();
+    expect(await startRename('pending-delete', 'OldName')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: unknown;
+            _inlineRenameActive: boolean;
+            _cleanupSessionData: (id: string) => void;
+            sessions: Map<string, { id: string; name: string }>;
+          };
+        }
+      ).app;
+      const origFetch = window.fetch;
+      let resolvePut!: (response: Response) => void;
+      window.fetch = (() => new Promise<Response>((resolve) => (resolvePut = resolve))) as typeof window.fetch;
+      const input = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      input.value = 'PendingName';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const inlineReleasedWhilePending = app._inlineRenameActive === false;
+      app._cleanupSessionData('pending-delete');
+      const invalidatedSynchronously = !app._activeRename && app._inlineRenameActive === false;
+      resolvePut(
+        new Response('{"success":true,"data":{"name":"PendingName"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      window.fetch = origFetch;
+      return {
+        inlineReleasedWhilePending,
+        invalidatedSynchronously,
+        sessionGone: !app.sessions.has('pending-delete'),
+      };
+    });
+
+    expect(result).toEqual({
+      inlineReleasedWhilePending: true,
+      invalidatedSynchronously: true,
+      sessionGone: true,
+    });
+  });
+
+  it('A late old failure cannot destroy or toast over a same-session re-entry', async () => {
+    await resetState();
+    expect(await startRename('pending-reentry', 'OldName')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: { sessionId: string } | null;
+            startInlineRename: (id: string) => void;
+            showToast: (message: string, kind: string) => void;
+          };
+        }
+      ).app;
+      const origFetch = window.fetch;
+      const origToast = app.showToast;
+      const toasts: string[] = [];
+      app.showToast = (message: string) => void toasts.push(message);
+      let resolveOld!: (response: Response) => void;
+      window.fetch = (() => new Promise<Response>((resolve) => (resolveOld = resolve))) as typeof window.fetch;
+
+      const oldInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      oldInput.value = 'FirstAttempt';
+      oldInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      app.startInlineRename('pending-reentry');
+      const newInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      newInput.value = 'SecondAttempt';
+
+      resolveOld(
+        new Response('{"success":false}', {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      window.fetch = origFetch;
+      app.showToast = origToast;
+      return {
+        inputSurvives: document.body.contains(newInput),
+        value: newInput.value,
+        activeSessionId: app._activeRename?.sessionId ?? null,
+        toasts,
+      };
+    });
+
+    expect(result).toEqual({
+      inputSurvives: true,
+      value: 'SecondAttempt',
+      activeSessionId: 'pending-reentry',
+      toasts: [],
+    });
+  });
+
+  it('A late old success cannot overwrite a newer confirmed rename', async () => {
+    await resetState();
+    expect(await startRename('pending-order', 'OldName')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            sessions: Map<string, { id: string; name: string }>;
+            startInlineRename: (id: string) => void;
+          };
+        }
+      ).app;
+      const origFetch = window.fetch;
+      const pending: Array<{ resolve: (response: Response) => void }> = [];
+      window.fetch = (() =>
+        new Promise<Response>((resolve) => {
+          pending.push({ resolve });
+        })) as typeof window.fetch;
+
+      const oldInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      oldInput.value = 'FirstAttempt';
+      oldInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      app.startInlineRename('pending-order');
+      const newInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      newInput.value = 'SecondAttempt';
+      newInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      pending[1].resolve(
+        new Response('{"success":true,"data":{"name":"SecondAttempt"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      pending[0].resolve(
+        new Response('{"success":true,"data":{"name":"FirstAttempt"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      window.fetch = origFetch;
+      return app.sessions.get('pending-order')?.name ?? null;
+    });
+
+    expect(result).toBe('SecondAttempt');
+  });
+
   it('Re-entry: starting rename while one is active aborts the previous one', async () => {
     await resetState();
     expect(await startRename('first-id', 'First')).toBe(true);
@@ -604,5 +904,91 @@ describe('Inline rename input', () => {
     expect(cancelledState.classActive).toBe(false);
     expect(cancelledState.inputPresent).toBe(false);
     expect(cancelledState.webkitLineClamp).toBe('2');
+  });
+
+  it('Compact 208px vertical rail reserves usable input width with a long prefix', async () => {
+    await resetState();
+
+    const result = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            sessions: Map<string, { id: string; name: string; status: string }>;
+            startInlineRename: (id: string) => void;
+          };
+        }
+      ).app;
+      const id = 'compact-long-prefix';
+      const name = 'w123-this_is_a_very_long_valid_prefix: title';
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.add('tab-rail-compact');
+      const rail = document.getElementById('tabRail') as HTMLElement;
+      rail.style.setProperty('--tab-rail-width', '208px');
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      rail.appendChild(container);
+      app.sessions.set(id, { id, name, status: 'idle' });
+
+      const tab = document.createElement('div');
+      tab.setAttribute('data-test-tab', '1');
+      tab.className = 'session-tab active';
+      tab.dataset.id = id;
+      tab.innerHTML =
+        '<span class="tab-number">1</span><span class="tab-status idle"></span>' +
+        '<span class="tab-info"><span class="tab-name-row">' +
+        `<span class="tab-name" data-session-id="${id}" data-full-name="${name}">` +
+        '<span class="tab-name-prefix">w123-this_is_a_very_long_valid_prefix: </span>title</span>' +
+        '</span></span><button class="tab-ref-drag-handle" type="button">&#x2630;</button>' +
+        '<span class="tab-actions"><span class="tab-gear">&#x2699;</span>' +
+        '<span class="tab-detach">&#x29C9;</span><span class="tab-close">&times;</span>' +
+        '<button class="tab-more" type="button">&#x22EF;</button></span>';
+      container.appendChild(tab);
+      app.startInlineRename(id);
+
+      const tabName = tab.querySelector('.tab-name') as HTMLElement;
+      const input = tabName.querySelector('.tab-rename-input') as HTMLInputElement;
+      const prefix = tabName.querySelector('.tab-rename-prefix') as HTMLElement;
+      const tabNameRect = tabName.getBoundingClientRect();
+      const inputRect = input.getBoundingClientRect();
+      return {
+        inputWidth: inputRect.width,
+        inside: inputRect.left >= tabNameRect.left && inputRect.right <= tabNameRect.right,
+        prefixOverflow: getComputedStyle(prefix).textOverflow,
+      };
+    });
+
+    expect(result.inputWidth).toBeGreaterThanOrEqual(64);
+    expect(result.inside).toBe(true);
+    expect(result.prefixOverflow).toBe('ellipsis');
+  });
+
+  it('Session-list sidebar keeps its full-width inline editor', async () => {
+    await resetState();
+
+    const width = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            sessions: Map<string, { id: string; name: string }>;
+            startInlineRename: (id: string) => void;
+          };
+        }
+      ).app;
+      const id = 'sidebar-width';
+      document.documentElement.dataset.sessionList = 'sidebar';
+      app.sessions.set(id, { id, name: 'SidebarName' });
+      const sidebar = document.createElement('aside');
+      sidebar.className = 'session-sidebar';
+      sidebar.setAttribute('data-test-tab', '1');
+      const tabName = document.createElement('span');
+      tabName.className = 'tab-name';
+      tabName.dataset.sessionId = id;
+      tabName.textContent = 'SidebarName';
+      sidebar.appendChild(tabName);
+      document.body.appendChild(sidebar);
+      app.startInlineRename(id);
+      return (tabName.querySelector('.tab-rename-input') as HTMLInputElement).style.width;
+    });
+
+    expect(width).toBe('100%');
   });
 });

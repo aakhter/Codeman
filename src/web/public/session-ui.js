@@ -1913,6 +1913,10 @@ Object.assign(CodemanApp.prototype, {
     const currentName = this.getSessionName(session);
     const parsed = parseSessionPrefix(session.name);
     const originalContent = tabName.textContent;
+    const originalChildren = [...tabName.childNodes].map((node) => node.cloneNode(true));
+    const restoreOriginalChildren = () => {
+      tabName.replaceChildren(...originalChildren.map((node) => node.cloneNode(true)));
+    };
     // Clear existing content to make room for the input element
     tabName.textContent = '';
     while (tabName.firstChild) tabName.removeChild(tabName.firstChild);
@@ -1933,42 +1937,71 @@ Object.assign(CodemanApp.prototype, {
     input.className = 'tab-rename-input';
     // 80px is tuned for the narrow header tab; a full-width sidebar row can and
     // should give the whole line to the input.
-    const renameWidth = this.isSessionSidebarActive?.() ? 'auto' : '80px';
+    const renameWidth = tabName.closest('.tab-rail')
+      ? 'auto'
+      : this.isSessionSidebarActive?.()
+        ? '100%'
+        : '80px';
     input.style.cssText = `width: ${renameWidth}; min-width: 0; font-size: 0.75rem; padding: 2px 4px; background: var(--bg-input); border: 1px solid var(--accent); border-radius: 3px; color: var(--text); outline: none;`;
 
     tabName.appendChild(input);
     input.focus();
     input.select();
 
-    let settled = false;
+    let editSettled = false;
+    let invalidated = false;
+    let completed = false;
+
+    const completeCurrentRename = () => {
+      if (this._activeRename !== renameHandle) return;
+      completed = true;
+      this._inlineRenameActive = false;
+      this._activeRename = null;
+      this.renderSessionTabs();
+    };
+
+    const cancelRename = () => {
+      if (invalidated || completed) return;
+      invalidated = true;
+      editSettled = true;
+      if (this._activeRename !== renameHandle) return;
+      tabName.classList.remove('tab-name-renaming');
+      restoreOriginalChildren();
+      completeCurrentRename();
+    };
+
     const finishRename = async ({ commit }) => {
-      if (settled) return;
-      settled = true;
+      if (editSettled || invalidated) return;
+      editSettled = true;
       tabName.classList.remove('tab-name-renaming');
 
       // Aborted (e.g. the session was deleted mid-rename, or Escape): re-render
       // so any ghost DOM is replaced with the canonical tab list, and skip the
       // API call — a cancel must not fire a stale rename PUT.
       if (!commit) {
-        tabName.textContent = originalContent;
-        if (this._activeRename === renameHandle) {
-          this._inlineRenameActive = false;
-          this._activeRename = null;
-          this.renderSessionTabs();
-        }
+        cancelRename();
         return;
       }
 
+      if (this._activeRename !== renameHandle) return;
+      this._inlineRenameActive = false;
+
       const suffix = input.value.trim();
       const fullName = parsed ? parsed.prefix + (suffix ? ': ' + suffix : '') : suffix;
+      if (fullName === session.name) {
+        restoreOriginalChildren();
+        completeCurrentRename();
+        return;
+      }
       tabName.textContent = fullName || originalContent;
 
       // Skip the API call if the session vanished between focus and blur.
       const stillExists = this.sessions.has(sessionId);
-      if (stillExists && fullName !== session.name) {
+      if (stillExists) {
         const confirmed = await this._putSessionName(sessionId, fullName);
+        if (invalidated || this._activeRename !== renameHandle || !this.sessions.has(sessionId)) return;
         if (confirmed === null) {
-          tabName.textContent = originalContent;
+          restoreOriginalChildren();
           this.showToast('Failed to rename', 'error');
         } else {
           // The re-render below repaints from this.sessions, so the new name has
@@ -1977,16 +2010,12 @@ Object.assign(CodemanApp.prototype, {
         }
       }
       // Re-render tabs to restore full tab structure
-      if (this._activeRename === renameHandle) {
-        this._inlineRenameActive = false;
-        this._activeRename = null;
-        this.renderSessionTabs();
-      }
+      completeCurrentRename();
     };
 
     const renameHandle = {
       sessionId,
-      cancel: () => finishRename({ commit: false }),
+      cancel: cancelRename,
     };
     this._activeRename = renameHandle;
 
