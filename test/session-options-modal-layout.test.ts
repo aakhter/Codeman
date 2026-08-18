@@ -17,12 +17,12 @@ describe('Session Options modal layout (COD-88)', () => {
     expect(block).toMatch(/class="modal-content[^"]*\bmodal-lg\b/);
   });
 
-  it('lays the Context tab out in a multi-column grid at tablet+ widths', () => {
-    // Reduce vertical height on wider viewports by flowing the Context tab form
-    // rows into multiple columns (reporter asked for "wider + multiple columns").
-    const mediaIdx = css.search(/@media[^{]*min-width:\s*6\d\dpx/);
+  it('uses one Context column by default and two only on genuinely wide screens', () => {
+    expect(css).toMatch(/#sessionOptionsModal #context-tab\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+
+    const mediaIdx = css.search(/@media[^{]*min-width:\s*1200px/);
     expect(mediaIdx).toBeGreaterThan(-1);
     const after = css.slice(mediaIdx);
-    expect(after).toMatch(/#context-tab[^}]*grid-template-columns/);
+    expect(after).toMatch(/#sessionOptionsModal #context-tab\s*{[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);
   });
 });
