@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.19.7
+
+### Patch Changes
+
+- Fix several desktop tab and terminal interaction regressions: replace ambiguous tab hamburger drag handles with grip affordances, keep vertical tab-rail layout and ARIA orientation synchronized when switching console placement, prevent Session Options from overflowing horizontally while retaining a wide-screen two-column layout, and unblock CJK typing when terminal composition wedges.
+
 ## 1.19.6
 
 ### Patch Changes
