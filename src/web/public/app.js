@@ -5876,12 +5876,15 @@ class CodemanApp {
     const sidebarList = document.getElementById('sessionSidebarList');
     if (!tabsEl || !headerHost || !sidebarList) return;
 
-    const host = mode === 'sidebar' ? sidebarList : headerHost;
+    const rail = document.getElementById('tabRail');
+    const railOwnsTabs =
+      mode === 'header' && document.documentElement.getAttribute('data-tab-orientation') === 'vertical';
+    const host = mode === 'sidebar' ? sidebarList : railOwnsTabs && rail ? rail : headerHost;
     if (tabsEl.parentElement !== host) host.appendChild(tabsEl);
 
     document.documentElement.dataset.sessionList = mode;
     document.documentElement.dataset.sidebar = collapsed ? 'collapsed' : 'expanded';
-    tabsEl.setAttribute('aria-orientation', mode === 'sidebar' ? 'vertical' : 'horizontal');
+    tabsEl.setAttribute('aria-orientation', host === headerHost ? 'horizontal' : 'vertical');
 
     const btn = document.getElementById('sidebarToggleBtn');
     if (btn) {
