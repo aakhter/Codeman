@@ -1818,6 +1818,46 @@ describe('COD-307 delegated pointer behavior', () => {
   });
 });
 
+describe('COD-322 drag handle affordance', () => {
+  it('renders a glyph-free grip at the leading edge of session and web tabs', () => {
+    const app = makeInteractionApp();
+    app._fullRenderSessionTabs();
+
+    for (const selector of ['[data-id="parent"]', '[data-webview-id="web"]']) {
+      const tab = document.querySelector<HTMLElement>(selector)!;
+      const handle = tab.querySelector<HTMLElement>('.tab-ref-drag-handle')!;
+      // The hamburger glyph is what made the handle read as a menu button; the
+      // grip is painted in CSS instead so nothing menu-shaped is in the DOM.
+      expect(handle.textContent).toBe('');
+      expect(handle.getAttribute('title')).toBe('Drag to reorder');
+      // Grip-first, so the handle stops competing with the trailing actions.
+      expect(tab.firstElementChild).toBe(handle);
+    }
+  });
+
+  it('paints an orientation-aware grip that rests dim and lights up with the row', () => {
+    const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
+    // Dimmed, never display:none — COD-316 needs the handle visible and tappable
+    // in both orientations, and touch dragging is handle-only.
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*opacity:\s*0\.35/s);
+    expect(css).toMatch(/\.session-tab:hover\s+\.tab-ref-drag-handle[^{]*\{[^}]*opacity:\s*1/s);
+    // The dot grid IS the content box, so it has to be clipped to it.
+    expect(css).toMatch(/\.tab-ref-drag-handle\s*\{[^}]*background-clip:\s*content-box/s);
+    // Transposed per orientation, so the grip always runs along the axis the
+    // tab actually moves: 2 columns in the strip, 2 rows in the rail.
+    const gripBox = (selector: string) => {
+      const rule = new RegExp(`${selector}[^{]*\\.tab-ref-drag-handle\\s*\\{([^}]*)\\}`, 's').exec(css)?.[1];
+      return /padding:\s*(\S+)\s+(\S+)\s*;/.exec(rule ?? '')?.slice(1, 3);
+    };
+    // The strip rule keys off :not(vertical), so it also covers the first paint
+    // before settings-ui.js sets the attribute at all.
+    const strip = gripBox("html:not\\(\\[data-tab-orientation='vertical'\\]\\)");
+    expect(strip).toBeDefined();
+    expect(strip![0]).not.toBe(strip![1]);
+    expect(gripBox("html\\[data-tab-orientation='vertical'\\]")).toEqual([...strip!].reverse());
+  });
+});
+
 describe('COD-307 page lifecycle persistence', () => {
   it('persists and keepalive-flushes the rebased retry state during pagehide', async () => {
     vi.useFakeTimers();

@@ -230,6 +230,7 @@ Object.assign(CodemanApp.prototype, {
         onclick="app.handleWebviewTabClick(event, ${jsonId})"
         tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
         aria-label="${escapeHtml(webview.name)} web tab" title="${escapeHtml(webview.url)}">
+        <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(webview.name)} web tab"></button>
         ${index < 9 ? '<span class="tab-number">' + (index + 1) + '</span>' : ''}
         <span class="tab-web-icon" aria-hidden="true">${icon || this._webviewGlobeIcon()}</span>
         <span class="tab-info">
@@ -238,7 +239,7 @@ Object.assign(CodemanApp.prototype, {
           </span>
         </span>
         ${focusMarker}
-        <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(webview.name)} web tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
+        <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
       </div>`;
   },
 
