@@ -15,6 +15,7 @@ export interface TabRef {
   kind: TabRefKind;
   id: string;
   placement?: 'manual';
+  focus?: true;
 }
 
 export interface TabGroup {
@@ -112,7 +113,15 @@ function parseRef(value: unknown, label: string): TabRef {
   if (value.placement !== undefined && value.placement !== 'manual') {
     throw new TabLayoutValidationError(`${label}.placement must be manual when present`);
   }
-  return value.placement === 'manual' ? { kind: value.kind, id, placement: 'manual' } : { kind: value.kind, id };
+  if (value.focus !== undefined && value.focus !== true) {
+    throw new TabLayoutValidationError(`${label}.focus must be true when present`);
+  }
+  return {
+    kind: value.kind,
+    id,
+    ...(value.placement === 'manual' ? { placement: 'manual' as const } : {}),
+    ...(value.focus === true ? { focus: true as const } : {}),
+  };
 }
 
 function parseTabLayout(input: unknown, repairDuplicates: boolean): TabLayout {
@@ -457,6 +466,15 @@ export function setManualPlacement(input: TabLayout, target: TabRef, manual: boo
   return mapRef(input, target, (ref) => ({ ...ref, placement: 'manual' }));
 }
 
+export function setTabFocus(input: TabLayout, target: TabRef, focused: boolean): TabLayout {
+  return mapRef(input, target, (ref) => {
+    if (focused) return ref.focus === true ? ref : { ...ref, focus: true };
+    if (ref.focus !== true) return ref;
+    const { focus: _focus, ...rest } = ref;
+    return rest;
+  });
+}
+
 export function followParent(input: TabLayout, target: TabRef, metadata: readonly TabRefMetadata[]): TabLayout {
   const normalized = normalizeTabLayout(input, metadata);
   if (target.kind !== 'session') {
@@ -482,7 +500,10 @@ export function followParent(input: TabLayout, target: TabRef, metadata: readonl
     throw new TabLayoutValidationError(`session parent is not represented: ${targetMetadata.parentSessionId}`);
   }
 
-  const cleared = mapRef(normalized, target, (ref) => ({ kind: ref.kind, id: ref.id }));
+  const cleared = mapRef(normalized, target, (ref) => {
+    const { placement: _placement, ...rest } = ref;
+    return rest;
+  });
   return normalizeTabLayout(cleared, metadata);
 }
 
