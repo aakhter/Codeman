@@ -6536,6 +6536,7 @@ class CodemanApp {
     tab.setAttribute('data-tab-focus-shortcut', key);
     tab.setAttribute(ref.kind === 'webview' ? 'data-focus-webview-id' : 'data-focus-session-id', ref.id);
     tab.removeAttribute(ref.kind === 'webview' ? 'data-webview-id' : 'data-id');
+    tab.removeAttribute('oncontextmenu');
     tab.removeAttribute('aria-selected');
     tab.setAttribute('aria-current', selected ? 'page' : 'false');
     tab.setAttribute('role', 'treeitem');
@@ -6550,6 +6551,7 @@ class CodemanApp {
     const more = document.createElement('button');
     more.type = 'button';
     more.className = 'tab-more';
+    more.textContent = '⋯';
     more.title = 'Focus actions';
     more.setAttribute('aria-label', 'Focus actions');
     more.setAttribute(

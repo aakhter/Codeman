@@ -786,6 +786,10 @@ describe('COD-319 Focus smart group rendering', () => {
     expect(focus.querySelector('[data-tab-focus-shortcut="webview:web"]')).not.toBeNull();
     expect(focus.querySelector('.tab-number, [data-tab-ref-drag]')).toBeNull();
     expect(focus.querySelector('[aria-selected]')).toBeNull();
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.hasAttribute('oncontextmenu')).toBe(
+      false
+    );
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"] .tab-more')?.textContent).toBe('⋯');
     expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.getAttribute('aria-current')).toBe(
       'page'
     );
