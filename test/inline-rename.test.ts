@@ -16,12 +16,18 @@
  * Port: 3164 (per MEMORY.md, ports 3150+ for tests)
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { WebServer } from '../src/web/server.js';
+import { TmuxManager } from '../src/tmux-manager.js';
 
 const PORT = 3164;
 const BASE_URL = `http://localhost:${PORT}`;
+
+// Browser coverage here never creates a terminal session. test/setup gives the
+// suite an isolated HOME, so the server's host-level `which tmux` probe cannot
+// see the installed binary; avoid coupling this UI-only test to that probe.
+vi.spyOn(TmuxManager, 'isTmuxAvailable').mockReturnValue(true);
 
 describe('Inline rename input', () => {
   let server: WebServer;
@@ -386,10 +392,16 @@ describe('Inline rename input', () => {
       await new Promise((r) => setTimeout(r, 60));
 
       window.fetch = origFetch;
-      return { mapName: app.sessions.get('no-sse')?.name ?? null };
+      return {
+        mapName: app.sessions.get('no-sse')?.name ?? null,
+        classActive:
+          document.querySelector('.tab-name[data-session-id="no-sse"]')?.classList.contains('tab-name-renaming') ??
+          false,
+      };
     });
 
     expect(result.mapName).toBe('w9-case: fresh');
+    expect(result.classActive).toBe(false);
   });
 
   it('A rejected rename restores the old label and leaves app.sessions untouched', async () => {
@@ -426,12 +438,16 @@ describe('Inline rename input', () => {
       return {
         mapName: app.sessions.get('rename-500')?.name ?? null,
         label: document.querySelector('.tab-name[data-session-id="rename-500"]')?.textContent ?? null,
+        classActive:
+          document.querySelector('.tab-name[data-session-id="rename-500"]')?.classList.contains('tab-name-renaming') ??
+          false,
         toasts,
       };
     });
 
     expect(result.mapName).toBe('w9-case');
     expect(result.label).toBe('w9-case');
+    expect(result.classActive).toBe(false);
     expect(result.toasts).toContain('Failed to rename');
   });
 
@@ -450,6 +466,13 @@ describe('Inline rename input', () => {
         }
       ).app;
       const firstActive = app._activeRename?.sessionId;
+      const firstInput = document.querySelector(
+        '.tab-name[data-session-id="first-id"] input.tab-rename-input'
+      ) as HTMLInputElement;
+      // A browser moving focus to the second editor normally happens to commit
+      // the first one. Stop that incidental blur settlement so this test proves
+      // startInlineRename() itself tears down an already-active editor.
+      firstInput.addEventListener('blur', (event) => event.stopImmediatePropagation(), true);
       // Start a second rename without cancelling — startInlineRename should
       // pre-emptively cancel the previous one so state never gets stuck on the dead session.
       app.sessions.set('second-id', { id: 'second-id', name: 'Second' });
@@ -462,10 +485,109 @@ describe('Inline rename input', () => {
       wrap.appendChild(tabName);
       document.body.appendChild(wrap);
       app.startInlineRename('second-id');
-      return { firstActive, secondActive: app._activeRename?.sessionId };
+      return {
+        firstActive,
+        secondActive: app._activeRename?.sessionId,
+        firstInputPresent: !!document.querySelector('.tab-name[data-session-id="first-id"] input.tab-rename-input'),
+        firstRenameClassActive:
+          document.querySelector('.tab-name[data-session-id="first-id"]')?.classList.contains('tab-name-renaming') ??
+          false,
+        secondInputPresent: !!document.querySelector('.tab-name[data-session-id="second-id"] input.tab-rename-input'),
+      };
     });
 
     expect(result.firstActive).toBe('first-id');
     expect(result.secondActive).toBe('second-id');
+    expect(result.firstInputPresent).toBe(false);
+    expect(result.firstRenameClassActive).toBe(false);
+    expect(result.secondInputPresent).toBe(true);
+  });
+
+  it('Vertical rail paints native typing inside an unclamped, visible rename editor', async () => {
+    await resetState();
+
+    const id = 'vertical-live-input';
+    await page.evaluate((sessionId) => {
+      const app = (
+        window as unknown as {
+          app: {
+            sessions: Map<string, { id: string; name: string; status: string }>;
+            sessionOrder: string[];
+            startInlineRename: (id: string) => void;
+          };
+        }
+      ).app;
+      document.documentElement.dataset.tabOrientation = 'vertical';
+
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      const rail = document.getElementById('tabRail') as HTMLElement;
+      rail.appendChild(container);
+
+      app.sessions.set(sessionId, { id: sessionId, name: 'w9-case: old', status: 'idle' });
+      app.sessionOrder = [sessionId];
+      const tab = document.createElement('div');
+      tab.setAttribute('data-test-tab', '1');
+      tab.className = 'session-tab';
+      tab.dataset.id = sessionId;
+      tab.innerHTML =
+        '<span class="tab-status idle"></span><span class="tab-info"><span class="tab-name-row">' +
+        `<span class="tab-name" data-session-id="${sessionId}">w9-case: old</span>` +
+        '</span></span>';
+      container.appendChild(tab);
+
+      app.startInlineRename(sessionId);
+    }, id);
+
+    const input = page.locator(`.tab-name[data-session-id="${id}"] input.tab-rename-input`);
+    await input.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await page.keyboard.type('visible title');
+
+    const liveState = await page.evaluate((sessionId) => {
+      const tabName = document.querySelector(`.tab-name[data-session-id="${sessionId}"]`) as HTMLElement;
+      const input = tabName.querySelector('input.tab-rename-input') as HTMLInputElement;
+      const prefix = tabName.querySelector(':scope > span') as HTMLElement;
+      const tabNameRect = tabName.getBoundingClientRect();
+      const inputRect = input.getBoundingClientRect();
+      const prefixRect = prefix.getBoundingClientRect();
+      return {
+        focused: document.activeElement === input,
+        value: input.value,
+        classActive: tabName.classList.contains('tab-name-renaming'),
+        webkitLineClamp: getComputedStyle(tabName).webkitLineClamp,
+        inputRect,
+        prefixRect,
+        tabNameRect,
+      };
+    }, id);
+
+    expect(liveState.focused).toBe(true);
+    expect(liveState.value).toBe('visible title');
+    expect({ classActive: liveState.classActive, webkitLineClamp: liveState.webkitLineClamp }).toEqual({
+      classActive: true,
+      webkitLineClamp: 'none',
+    });
+    expect(liveState.inputRect.width).toBeGreaterThan(0);
+    expect(liveState.inputRect.height).toBeGreaterThan(0);
+    expect(liveState.prefixRect.width).toBeGreaterThan(0);
+    expect(liveState.prefixRect.height).toBeGreaterThan(0);
+    expect(liveState.inputRect.left).toBeGreaterThanOrEqual(liveState.tabNameRect.left);
+    expect(liveState.inputRect.right).toBeLessThanOrEqual(liveState.tabNameRect.right);
+    expect(liveState.inputRect.top).toBeGreaterThanOrEqual(liveState.tabNameRect.top);
+    expect(liveState.inputRect.bottom).toBeLessThanOrEqual(liveState.tabNameRect.bottom);
+
+    const cancelledState = await page.evaluate((sessionId) => {
+      const app = (window as unknown as { app: { _activeRename: { cancel: () => void } | null } }).app;
+      app._activeRename!.cancel();
+      const tabName = document.querySelector(`.tab-name[data-session-id="${sessionId}"]`) as HTMLElement;
+      return {
+        classActive: tabName.classList.contains('tab-name-renaming'),
+        inputPresent: !!tabName.querySelector('input.tab-rename-input'),
+        webkitLineClamp: getComputedStyle(tabName).webkitLineClamp,
+      };
+    }, id);
+
+    expect(cancelledState.classActive).toBe(false);
+    expect(cancelledState.inputPresent).toBe(false);
+    expect(cancelledState.webkitLineClamp).toBe('2');
   });
 });
