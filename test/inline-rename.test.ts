@@ -830,6 +830,166 @@ describe('Inline rename input', () => {
     expect(after).toEqual({ groupSettled: true, guardReleased: true });
   });
 
+  it('Document F2 preserves a group editor over a pending session rename handle', async () => {
+    await resetState();
+    expect(await startRename('combined-owner-session', 'OldName')).toBe(true);
+
+    const setup = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: unknown;
+            _inlineRenameActive: boolean;
+            activeSessionId: string | null;
+            startTabGroupRename: (groupId: string) => boolean;
+            tabLayout: { groups: Array<{ id: string; name: string; refs: unknown[] }> } | null;
+            tabLayoutReadOnly: boolean;
+          };
+        }
+      ).app;
+      const globals = window as unknown as {
+        __combinedOriginalFetch?: typeof window.fetch;
+        __combinedOriginalLayout?: unknown;
+        __combinedOriginalReadOnly?: boolean;
+        __combinedPendingHandle?: unknown;
+        __resolveCombinedPut?: (response: Response) => void;
+      };
+      globals.__combinedOriginalFetch = window.fetch;
+      globals.__combinedOriginalLayout = app.tabLayout;
+      globals.__combinedOriginalReadOnly = app.tabLayoutReadOnly;
+      window.fetch = (() =>
+        new Promise<Response>((resolve) => {
+          globals.__resolveCombinedPut = resolve;
+        })) as typeof window.fetch;
+
+      const sessionInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      sessionInput.value = 'PendingName';
+      sessionInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      globals.__combinedPendingHandle = app._activeRename;
+      app.activeSessionId = 'combined-owner-session';
+
+      const groupId = 'combined-owner-group';
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      const group = document.createElement('section');
+      group.setAttribute('data-test-tab', '1');
+      group.className = 'tab-layout-group';
+      group.innerHTML =
+        `<div class="tab-layout-group-header"><button data-tab-group-header="${groupId}"></button>` +
+        '<span class="tab-layout-group-label">Combined Owner</span></div>';
+      container.appendChild(group);
+      app.tabLayout = {
+        ...(app.tabLayout ?? { groups: [] }),
+        groups: [...(app.tabLayout?.groups ?? []), { id: groupId, name: 'Combined Owner', refs: [] }],
+      };
+      app.tabLayoutReadOnly = false;
+      return {
+        groupStarted: app.startTabGroupRename(groupId),
+        groupOwnsGuard: app._inlineRenameActive,
+      };
+    });
+    expect(setup).toEqual({ groupStarted: true, groupOwnsGuard: true });
+
+    const groupInput = page.locator('.tab-layout-group-rename-input');
+    expect(await groupInput.evaluate((input) => document.activeElement === input)).toBe(true);
+    await groupInput.press('F2');
+    const during = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: { ownsRenderGuard?: boolean } | null;
+            _inlineRenameActive: boolean;
+          };
+        }
+      ).app;
+      const globals = window as unknown as { __combinedPendingHandle?: unknown };
+      const input = document.querySelector('.tab-layout-group-rename-input');
+      return {
+        groupConnected: !!input?.isConnected,
+        groupFocused: document.activeElement === input,
+        groupGuardActive: app._inlineRenameActive,
+        sessionInputPresent: !!document.querySelector('input.tab-rename-input'),
+        pendingHandlePreserved: app._activeRename === globals.__combinedPendingHandle,
+        pendingHandleOwnsGuard: app._activeRename?.ownsRenderGuard ?? null,
+      };
+    });
+
+    await page.evaluate(() => {
+      const resolvePut = (window as unknown as { __resolveCombinedPut?: (response: Response) => void })
+        .__resolveCombinedPut;
+      resolvePut?.(
+        new Response('{"success":true,"data":{"name":"PendingName"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const afterResponse = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: { _activeRename: unknown; _inlineRenameActive: boolean };
+        }
+      ).app;
+      const input = document.querySelector('.tab-layout-group-rename-input');
+      return {
+        groupConnected: !!input?.isConnected,
+        groupFocused: document.activeElement === input,
+        groupGuardActive: app._inlineRenameActive,
+        pendingHandleCompleted: !app._activeRename,
+      };
+    });
+    if (afterResponse.groupConnected) await groupInput.press('Escape');
+    const afterSettlement = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: { cancel: () => void } | null;
+            _inlineRenameActive: boolean;
+            tabLayout: unknown;
+            tabLayoutReadOnly: boolean;
+          };
+        }
+      ).app;
+      const globals = window as unknown as {
+        __combinedOriginalFetch?: typeof window.fetch;
+        __combinedOriginalLayout?: unknown;
+        __combinedOriginalReadOnly?: boolean;
+        __combinedPendingHandle?: unknown;
+        __resolveCombinedPut?: unknown;
+      };
+      app._activeRename?.cancel();
+      app.tabLayout = globals.__combinedOriginalLayout;
+      app.tabLayoutReadOnly = globals.__combinedOriginalReadOnly ?? true;
+      if (globals.__combinedOriginalFetch) window.fetch = globals.__combinedOriginalFetch;
+      delete globals.__combinedOriginalFetch;
+      delete globals.__combinedOriginalLayout;
+      delete globals.__combinedOriginalReadOnly;
+      delete globals.__combinedPendingHandle;
+      delete globals.__resolveCombinedPut;
+      return {
+        groupSettled: !document.querySelector('.tab-layout-group-rename-input'),
+        guardReleased: app._inlineRenameActive === false,
+      };
+    });
+
+    expect(during).toEqual({
+      groupConnected: true,
+      groupFocused: true,
+      groupGuardActive: true,
+      sessionInputPresent: false,
+      pendingHandlePreserved: true,
+      pendingHandleOwnsGuard: false,
+    });
+    expect(afterResponse).toEqual({
+      groupConnected: true,
+      groupFocused: true,
+      groupGuardActive: true,
+      pendingHandleCompleted: true,
+    });
+    expect(afterSettlement).toEqual({ groupSettled: true, guardReleased: true });
+  });
+
   it('A late old failure cannot destroy or toast over a same-session re-entry', async () => {
     await resetState();
     expect(await startRename('pending-reentry', 'OldName')).toBe(true);

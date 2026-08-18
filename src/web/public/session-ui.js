@@ -1935,8 +1935,9 @@ Object.assign(CodemanApp.prototype, {
     const tabName = document.querySelector(`.tab-name[data-session-id="${sessionId}"]`);
     if (!tabName) return;
 
-    if (this._inlineRenameActive && !this._activeRename) return;
-    this._activeRename?.cancel();
+    const activeRename = this._activeRename;
+    if (this._inlineRenameActive && activeRename?.ownsRenderGuard !== true) return;
+    activeRename?.cancel();
 
     // Prevent tab re-renders from destroying the input while renaming
     this._inlineRenameActive = true;
@@ -1983,11 +1984,10 @@ Object.assign(CodemanApp.prototype, {
     let editSettled = false;
     let invalidated = false;
     let completed = false;
-    let ownsRenderGuard = true;
 
     const releaseRenderGuard = () => {
-      if (!ownsRenderGuard) return;
-      ownsRenderGuard = false;
+      if (!renameHandle.ownsRenderGuard) return;
+      renameHandle.ownsRenderGuard = false;
       this._inlineRenameActive = false;
     };
 
@@ -2049,6 +2049,7 @@ Object.assign(CodemanApp.prototype, {
 
     const renameHandle = {
       sessionId,
+      ownsRenderGuard: true,
       cancel: cancelRename,
     };
     this._activeRename = renameHandle;
