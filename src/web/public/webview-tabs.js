@@ -223,6 +223,9 @@ Object.assign(CodemanApp.prototype, {
     const isActive = id === this.activeWebviewId;
     const jsonId = escapeHtml(JSON.stringify(id));
     const icon = webview.icon ? escapeHtml(webview.icon) : '';
+    const focusMarker = this._tabRefFocused?.({ kind: 'webview', id })
+      ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
+      : '';
     return `<div class="session-tab session-tab--web ${isActive ? 'active' : ''}" data-webview-id="${escapeHtml(id)}"
         onclick="app.handleWebviewTabClick(event, ${jsonId})"
         tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
@@ -234,6 +237,7 @@ Object.assign(CodemanApp.prototype, {
             <span class="tab-name">${escapeHtml(webview.name)}</span>
           </span>
         </span>
+        ${focusMarker}
         <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(webview.name)} web tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
       </div>`;
   },
@@ -262,6 +266,16 @@ Object.assign(CodemanApp.prototype, {
         tab.classList.remove('active');
         tab.setAttribute('aria-selected', 'false');
       }
+    }
+    for (const tab of container.querySelectorAll('.session-tab[data-focus-webview-id]')) {
+      tab.classList.remove('active');
+      tab.removeAttribute('aria-selected');
+      tab.setAttribute('aria-current', tab.dataset.focusWebviewId === this.activeWebviewId ? 'page' : 'false');
+    }
+    for (const tab of container.querySelectorAll('.session-tab[data-focus-session-id]')) {
+      tab.classList.remove('active');
+      tab.removeAttribute('aria-selected');
+      tab.setAttribute('aria-current', 'false');
     }
   },
 
@@ -327,6 +341,9 @@ Object.assign(CodemanApp.prototype, {
     document.querySelector('.main')?.classList.add('webview-active');
     this.renderSessionTabs();
     this._updateActiveWebviewTab();
+    // Web tabs live in the same list as sessions, so picking one from the
+    // handheld session drawer has to dismiss it too (no-op elsewhere).
+    this.closeSessionSidebarOnHandheld?.();
   },
 
   /** Create the frame if absent, then reveal it and hide its siblings. */

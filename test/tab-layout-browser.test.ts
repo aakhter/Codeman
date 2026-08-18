@@ -112,6 +112,96 @@ describe('COD-306 browser projection', () => {
     expect(result.visibleRefs.map((ref: Ref) => ref.id)).toEqual(['s1', 'new-a', 'new-b']);
   });
 
+  it('derives vertical-only Focus refs in canonical order without changing behavioral orders', () => {
+    const h = loadHelper();
+    const focused = layout();
+    focused.groups[0].refs[0] = { ...focused.groups[0].refs[0], focus: true };
+    focused.groups[0].refs[1] = { ...focused.groups[0].refs[1], focus: true };
+    focused.groups[0].refs[3] = { ...focused.groups[0].refs[3], focus: true };
+    focused.ungrouped[1] = { ...focused.ungrouped[1], focus: true };
+    const options = {
+      liveSessionIds: ['s1', 's2', 's3', 's4'],
+      openWebviewIds: ['w1', 'w2'],
+      collapsedGroupIds: ['g1'],
+      activeSessionId: 's1',
+      orientation: 'vertical',
+      focusCollapsed: true,
+    };
+
+    const result = h.project(focused, options);
+    expect(result.focusRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's4' },
+    ]);
+    expect(result.focusCollapsed).toBe(true);
+    expect(result.visibleRefs).toEqual([
+      { kind: 'session', id: 's1' },
+      { kind: 'session', id: 's3' },
+      { kind: 'webview', id: 'w2' },
+      { kind: 'session', id: 's4' },
+    ]);
+    expect(result.completeRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's1' },
+      { kind: 'session', id: 's3' },
+      { kind: 'webview', id: 'w2' },
+      { kind: 'session', id: 's4' },
+    ]);
+
+    expect(h.project(focused, { ...options, orientation: 'horizontal' }).focusRefs).toEqual([]);
+  });
+
+  it('optimistically sets and clears Focus while preserving it through ordinary edits', () => {
+    const h = loadHelper();
+    const initial = layout();
+    const focused = h.applyOperation(initial, {
+      type: 'setFocus',
+      ref: { kind: 'session', id: 's2' },
+      focused: true,
+    });
+    expect(focused.groups[0].refs[0]).toEqual({ kind: 'session', id: 's2', focus: true });
+
+    const moved = h.applyOperation(focused, {
+      type: 'moveRef',
+      ref: { kind: 'session', id: 's2' },
+      groupId: 'g2',
+      index: 1,
+    });
+    expect(moved.groups[1].refs[1]).toEqual({ kind: 'session', id: 's2', focus: true });
+    expect(
+      h.applyOperation(moved, {
+        type: 'setFocus',
+        ref: { kind: 'session', id: 's2' },
+        focused: false,
+      }).groups[1].refs[1]
+    ).toEqual({ kind: 'session', id: 's2' });
+  });
+
+  it('treats Focus membership and smart collapse as structural rendering state', () => {
+    const h = loadHelper();
+    const common = {
+      version: 4,
+      orientation: 'vertical',
+      visibleRefs: [{ kind: 'session', id: 's1' }],
+    };
+    const plain = h.structureKey({ ...common, focusRefs: [], focusCollapsed: false });
+    const focused = h.structureKey({
+      ...common,
+      focusRefs: [{ kind: 'session', id: 's1' }],
+      focusCollapsed: false,
+    });
+    const collapsed = h.structureKey({
+      ...common,
+      focusRefs: [{ kind: 'session', id: 's1' }],
+      focusCollapsed: true,
+    });
+
+    expect(focused).not.toBe(plain);
+    expect(collapsed).not.toBe(focused);
+  });
+
   it('falls back to a deterministic legacy-flat projection', () => {
     const h = loadHelper();
     const fallback = h.projectFallback({
@@ -185,6 +275,70 @@ describe('COD-306 structure and activation policy', () => {
     ]);
   });
 
+  it('renders a fixed vertical-only Focus section with shortcut-only controls', () => {
+    const h = loadHelper();
+    const projection = {
+      visibleRefs: [{ kind: 'session', id: 'canonical' }],
+      focusRefs: [
+        { kind: 'session', id: 'focused' },
+        { kind: 'webview', id: 'dash' },
+      ],
+      focusCollapsed: false,
+      sections: [
+        {
+          id: null,
+          name: '',
+          refs: [{ kind: 'session', id: 'canonical' }],
+          refIndices: [0],
+          count: 1,
+          collapsed: false,
+        },
+      ],
+    };
+    const html = h.renderProjection(
+      projection,
+      'vertical',
+      (ref: Ref, index: number) => `<button role="tab" tabindex="0" data-canonical="${ref.id}">${index + 1}</button>`,
+      (value: string) => value,
+      (ref: Ref) => `<button data-tab-focus-shortcut="${ref.kind}:${ref.id}">${ref.id}</button>`
+    );
+    const dom = new JSDOM(`<main>${html}</main>`);
+    const focus = dom.window.document.querySelector('[data-tab-focus-group]')!;
+
+    expect(focus.previousElementSibling).toBeNull();
+    expect(focus.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('true');
+    expect(focus.querySelector('.tab-layout-group-count')?.textContent).toBe('2');
+    expect(focus.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
+    expect(focus.querySelector('[data-tab-group-drag], .tab-layout-group-menu, .tab-layout-drop-zone')).toBeNull();
+    expect(dom.window.document.querySelector('[data-canonical="canonical"]')).not.toBeNull();
+
+    projection.focusCollapsed = true;
+    const collapsed = new JSDOM(
+      `<main>${h.renderProjection(
+        projection,
+        'vertical',
+        () => '<button role="tab">canonical</button>',
+        (value: string) => value,
+        () => '<button data-tab-focus-shortcut>shortcut</button>'
+      )}</main>`
+    );
+    expect(collapsed.window.document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe(
+      'false'
+    );
+    expect(collapsed.window.document.querySelector('[data-tab-focus-shortcut]')).toBeNull();
+
+    const horizontal = new JSDOM(
+      `<main>${h.renderProjection(
+        projection,
+        'horizontal',
+        () => '<button data-canonical>canonical</button>',
+        (value: string) => value,
+        () => '<button data-tab-focus-shortcut>shortcut</button>'
+      )}</main>`
+    );
+    expect(horizontal.window.document.querySelector('[data-tab-focus-group]')).toBeNull();
+  });
+
   it('makes ordered identities and every structural input part of the cache key', () => {
     const h = loadHelper();
     const base = {
@@ -234,11 +388,12 @@ describe('COD-306 structure and activation policy', () => {
 
 describe('COD-305 local collapse policy', () => {
   function storage(initial: string | null = null) {
-    let value = initial;
+    const values = new Map<string, string>();
+    if (initial !== null) values.set('codeman:tab-groups-collapsed', initial);
     return {
-      getItem: vi.fn(() => value),
-      setItem: vi.fn((_key: string, next: string) => {
-        value = next;
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, next: string) => {
+        values.set(key, next);
       }),
     };
   }
@@ -249,6 +404,16 @@ describe('COD-305 local collapse policy', () => {
     expect(h.saveCollapsedGroupIds(local, ['g2', 'g1'])).toEqual({ ids: ['g2', 'g1'], ok: true });
     expect(h.loadCollapsedGroupIds(local, ['g1', 'g2'])).toEqual({ ids: ['g2', 'g1'], ok: true });
     expect(local.setItem).toHaveBeenCalledWith('codeman:tab-groups-collapsed', '["g2","g1"]');
+  });
+
+  it('keeps Focus collapse storage independent from a real group named @focus', () => {
+    const h = loadHelper();
+    const local = storage();
+    expect(h.saveCollapsedGroupIds(local, ['@focus', 'stale']).ok).toBe(true);
+    expect(h.saveFocusGroupCollapsed(local, true)).toEqual({ collapsed: true, ok: true });
+    expect(h.loadCollapsedGroupIds(local, ['@focus'])).toEqual({ ids: ['@focus'], ok: true });
+    expect(h.loadFocusGroupCollapsed(local)).toEqual({ collapsed: true, ok: true });
+    expect(local.setItem).toHaveBeenCalledWith('codeman:focus-group-collapsed', 'true');
   });
 
   it('garbage-collects stale group IDs during layout adoption', () => {
@@ -274,6 +439,8 @@ describe('COD-305 local collapse policy', () => {
     };
     expect(h.loadCollapsedGroupIds(readFailure, ['g1'])).toEqual({ ids: [], ok: false });
     expect(h.saveCollapsedGroupIds(writeFailure, ['g1'])).toEqual({ ids: [], ok: false });
+    expect(h.loadFocusGroupCollapsed(readFailure)).toEqual({ collapsed: false, ok: false });
+    expect(h.saveFocusGroupCollapsed(writeFailure, true)).toEqual({ collapsed: false, ok: false });
   });
 
   it('renders stable clickable group headers with collapse state', () => {

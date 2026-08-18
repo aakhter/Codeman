@@ -16,6 +16,7 @@
  * feature), so the "stays attachable" cases matter just as much: over-blocking
  * breaks the publish skill and the review-card loop.
  */
+import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { isSensitivePath } from '../src/web/sensitive-path.js';
 
@@ -73,6 +74,20 @@ describe('isSensitivePath', () => {
       ['codeman hook secret', `${HOME}/.codeman/hook-secret`],
       ['codeman user table', `${HOME}/.codeman/users.json`],
       ['codeman hook secret on a named instance', `${HOME}/.codeman-beta/hook-secret`],
+      // state.json persists SessionState.envOverrides, and the env allowlist
+      // admits key-shaped names (GEMINI_API_KEY, CLAUDE_CODE_*), so it can hold
+      // a live credential. Named once .json became previewable from outside the
+      // workspace.
+      ['codeman state file', `${HOME}/.codeman/state.json`],
+      ['codeman state file on a named instance', `${HOME}/.codeman-beta/state.json`],
+      ['codeman state sibling (same payload)', `${HOME}/.codeman/state-inner.json`],
+      // settings.json holds voiceSettings.apiKey by schema; push-keys.json holds
+      // the VAPID PRIVATE key; intents.json is 0600 because captured prompts can
+      // contain secrets and is deliberately kept out of /api/search.
+      ['codeman settings (Deepgram key)', `${HOME}/.codeman/settings.json`],
+      ['codeman push keys (VAPID private)', `${HOME}/.codeman/push-keys.json`],
+      ['codeman intent profiles', `${HOME}/.codeman/intents.json`],
+      ['codeman intents on a named instance', `${HOME}/.codeman-beta/intents.json`],
     ];
 
     it.each(blocked)('blocks the %s', (_label, path) => {
@@ -88,6 +103,7 @@ describe('isSensitivePath', () => {
       // The publish skill and the review-card loop attach from these trees, so
       // only their named secret members are blocked, never the whole tree.
       ['a codeman screenshot', `${HOME}/.codeman/screenshots/shot.png`],
+      ['a codeman lifecycle log', `${HOME}/.codeman/session-lifecycle.jsonl`],
       ['a claude transcript', `${HOME}/.claude/projects/proj/session.jsonl`],
       ['a claude team inbox', `${HOME}/.claude/teams/alpha/inboxes/bob.json`],
       // isUnderTree-style separator awareness: a sibling name that merely starts
@@ -106,5 +122,35 @@ describe('isSensitivePath', () => {
     // docblock states, which every caller depends on.
     expect(isSensitivePath('/srv/app/looks-innocent')).toBe(false);
     expect(isSensitivePath(`${HOME}/.ssh/looks-innocent`)).toBe(true);
+  });
+
+  describe('home-anchored Claude config (credential-bearing by schema)', () => {
+    // ~/.claude/settings.json can hold `env: {ANTHROPIC_API_KEY}` and
+    // `apiKeyHelper` by schema (settings.local.json shares it), and
+    // ~/.claude.json holds account/OAuth-adjacent state. These are anchored to
+    // the REAL homedir, read at CHECK time — test/setup.ts points HOME at a
+    // per-file fixture, so a homedir() captured at module load would be a
+    // different directory than the one this suite resolves.
+    const home = homedir();
+
+    it.each([
+      ['claude account state', `${home}/.claude.json`],
+      ['claude user settings', `${home}/.claude/settings.json`],
+      ['claude user local settings', `${home}/.claude/settings.local.json`],
+    ])('blocks the %s', (_label, path) => {
+      expect(isSensitivePath(path)).toBe(true);
+    });
+
+    // A blanket `/\.claude\/settings\.json$/` would also catch every CASE-level
+    // settings file, which users legitimately view and edit in the File Viewer
+    // (model override, hooks) — the home anchor is what keeps those servable.
+    it.each([
+      ['a case-level .claude/settings.json', '/srv/app/.claude/settings.json'],
+      ['a case-level .claude/settings.local.json', '/srv/app/.claude/settings.local.json'],
+      ['a .claude/settings.json under some OTHER home', `${HOME}/.claude/settings.json`],
+      ['a .claude.json under some OTHER home', `${HOME}/.claude.json`],
+    ])('keeps %s servable', (_label, path) => {
+      expect(isSensitivePath(path)).toBe(false);
+    });
   });
 });

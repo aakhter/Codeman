@@ -402,6 +402,8 @@ Object.assign(CodemanApp.prototype, {
     if (tabRailWidthSelect) this.syncTabRailWidthSetting?.(tabRailWidth);
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
+    document.getElementById('appSettingsSessionListLayout').value =
+      settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
     // Claude CLI settings
     const claudeModeSelect = document.getElementById('appSettingsClaudeMode');
     const allowedToolsRow = document.getElementById('allowedToolsRow');
@@ -435,6 +437,9 @@ Object.assign(CodemanApp.prototype, {
     // Claude Permissions settings
     document.getElementById('appSettingsAgentTeams').checked = settings.agentTeamsEnabled ?? false;
     document.getElementById('appSettingsAgentSkill').checked = settings.agentSkillEnabled ?? false;
+    // Default ON: an absent key is a user who has never seen this setting, and OFF
+    // for them means no tab alerts in any workspace Codeman did not scaffold.
+    document.getElementById('appSettingsWorkspaceHooks').checked = settings.workspaceHooksEnabled !== false;
     document.getElementById('appSettingsClaudeModel').value = settings.claudeModel ?? '';
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsTruecolor').checked = settings.truecolorEnabled ?? defaults.truecolorEnabled ?? false;
@@ -2186,6 +2191,7 @@ Object.assign(CodemanApp.prototype, {
       tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
+      sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
@@ -2203,6 +2209,7 @@ Object.assign(CodemanApp.prototype, {
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       agentSkillEnabled: document.getElementById('appSettingsAgentSkill').checked,
+      workspaceHooksEnabled: document.getElementById('appSettingsWorkspaceHooks').checked,
       claudeVoiceEnabled: document.getElementById('appSettingsClaudeVoice').checked,
       claudeModel: document.getElementById('appSettingsClaudeModel').value,
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
@@ -2346,8 +2353,12 @@ Object.assign(CodemanApp.prototype, {
     this.applyHeaderVisibilitySettings();
     this.applySkin();
     this.applyLocalization();
+    // Re-parents #sessionTabs between header host and sidebar if the layout
+    // changed, then calls applyTabWrapSettings() itself — do not call both.
+    // Runs FIRST so the vertical rail below sees the settled sidebar state and
+    // yields to it (applyTabOrientation no-ops while the sidebar is active).
+    this.applySessionListLayout();
     this.applyTabOrientation({ settleRailWidth: true });  // COD-286/299 — one settled terminal resize
-    this.applyTabWrapSettings();
     this.applyLineageLineSettings?.();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
@@ -2688,6 +2699,7 @@ Object.assign(CodemanApp.prototype, {
         // COD-286: phones are forced horizontal by resolveTabOrientation anyway;
         // this keeps the picker honest if the layout ever reaches a tablet width.
         tabOrientation: 'horizontal',
+        sessionListLayout: 'header',
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
         webglRendererEnabled: false, // mobile always uses the DOM renderer
@@ -3021,12 +3033,19 @@ Object.assign(CodemanApp.prototype, {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const setting = settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
-    const orientation = window.CodemanTabOverflow?.resolveTabOrientation
-      ? window.CodemanTabOverflow.resolveTabOrientation({
-          deviceType: MobileDetection.getDeviceType(),
-          setting,
-        })
-      : 'horizontal';
+    // The upstream sidebar layout re-parents the SAME #sessionTabs node
+    // (applySessionListLayout in app.js). Two movers fighting over one element
+    // would each undo the other on every settings save and every resize, so the
+    // COD-286 rail yields entirely whenever the sidebar layout is the active one
+    // — same precedence the home rail's gate uses (home-sessions.js).
+    const sidebarOwnsTabs = this.isSessionSidebarActive?.() === true;
+    const orientation =
+      !sidebarOwnsTabs && window.CodemanTabOverflow?.resolveTabOrientation
+        ? window.CodemanTabOverflow.resolveTabOrientation({
+            deviceType: MobileDetection.getDeviceType(),
+            setting,
+          })
+        : 'horizontal';
 
     const root = document.documentElement;
     const previous = root.getAttribute('data-tab-orientation') || 'horizontal';
@@ -3036,9 +3055,15 @@ Object.assign(CodemanApp.prototype, {
     const rail = document.getElementById('tabRail');
     const header = document.querySelector('.header');
     const headerRight = document.getElementById('headerRight');
-    if (tabsEl && rail && header) {
+    // #sessionTabsHost is the strip's markup home (index.html) and what
+    // applySessionListLayout() restores it to; moving it to .header directly
+    // would strand it outside the host every sidebar consumer keys off.
+    const headerHost = document.getElementById('sessionTabsHost');
+    if (!sidebarOwnsTabs && tabsEl && rail && header) {
       if (orientation === 'vertical') {
         if (tabsEl.parentElement !== rail) rail.appendChild(tabsEl);
+      } else if (headerHost) {
+        if (tabsEl.parentElement !== headerHost) headerHost.appendChild(tabsEl);
       } else if (tabsEl.parentElement !== header) {
         // Back to its original slot: after the brand, before the mobile utility
         // toggle (which precedes headerRight in the source order).
@@ -3068,20 +3093,28 @@ Object.assign(CodemanApp.prototype, {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const deviceType = MobileDetection.getDeviceType();
+    // The left sidebar is one vertical column with its own scroller: there is no
+    // row to wrap into, and its rows are always tall (name + folder) because that
+    // is the cheapest way to tell 25 sessions apart. Header strip keeps the old
+    // rules unchanged. Kept here rather than only in applySessionListLayout() so
+    // that a stray applyTabWrapSettings() call (this one is invoked from
+    // saveAppSettings and from the resize path) cannot leave the sidebar wrapped.
+    const sidebar = this.isSessionSidebarActive?.() === true;
     // Two-row tabs disabled on mobile/tablet — not enough screen space
-    const twoRows = deviceType === 'desktop'
+    const twoRows = !sidebar && deviceType === 'desktop'
       ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false)
       : false;
+    const showFolder = sidebar || twoRows;
     const prevTallTabs = this._tallTabsEnabled;
-    this._tallTabsEnabled = twoRows;
+    this._tallTabsEnabled = showFolder;
     const tabsEl = document.getElementById('sessionTabs');
     if (tabsEl) {
       tabsEl.classList.toggle('tabs-two-rows', twoRows);
-      tabsEl.classList.toggle('tabs-show-folder', twoRows);
+      tabsEl.classList.toggle('tabs-show-folder', showFolder);
     }
     this.updateTabOverflowMode?.();
     // Re-render tabs if folder visibility changed (folder spans are generated in JS)
-    if (prevTallTabs !== undefined && prevTallTabs !== twoRows) {
+    if (prevTallTabs !== undefined && prevTallTabs !== showFolder) {
       this._fullRenderSessionTabs();
     }
   },
@@ -3274,7 +3307,8 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'sessionListLayout',
+          'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',

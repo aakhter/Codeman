@@ -17,6 +17,7 @@ import {
   renameGroup,
   reorderGroup,
   setManualPlacement,
+  setTabFocus,
   MAX_TAB_GROUP_NAME_LENGTH,
   MAX_TAB_GROUPS,
   MAX_TAB_REFS,
@@ -60,6 +61,7 @@ export type TabLayoutSemanticOperation =
   | { type: 'reorderGroup'; groupId: string; index: number }
   | { type: 'moveRef'; ref: TabRef; groupId: string | null; index: number }
   | { type: 'setManualPlacement'; ref: TabRef; manual: true }
+  | { type: 'setFocus'; ref: TabRef; focused: boolean }
   | { type: 'followParent'; ref: TabRef };
 
 export type TabLayoutSnapshot = {
@@ -75,6 +77,23 @@ export interface RemovedTabLayoutSession {
 const ownerOf = (record: { owner?: string }): string => record.owner ?? SINGLE_USER_LAYOUT_OWNER;
 const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000${ref.id}`;
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+const preserveLegacyFocusFlags = (desired: TabLayout, current: TabLayout): TabLayout => {
+  const focused = new Set(
+    [...current.groups.flatMap((group) => group.refs), ...current.ungrouped]
+      .filter((ref) => ref.focus === true)
+      .map(refKey)
+  );
+  const ref = (value: TabRef): TabRef => {
+    const { focus: _ignored, ...rest } = value;
+    return focused.has(refKey(value)) ? { ...rest, focus: true } : rest;
+  };
+  return {
+    ...desired,
+    groups: desired.groups.map((group) => ({ ...group, refs: group.refs.map(ref) })),
+    ungrouped: desired.ungrouped.map(ref),
+  };
+};
 const sameContent = (a: TabLayout, b: TabLayout): boolean =>
   JSON.stringify({ groups: a.groups, ungrouped: a.ungrouped }) ===
   JSON.stringify({ groups: b.groups, ungrouped: b.ungrouped });
@@ -132,6 +151,11 @@ function validateOperationRequest(value: unknown): asserts value is TabLayoutSem
     case 'setManualPlacement':
       if (!validOperationRef(operation.ref) || operation.manual !== true) {
         throw new TabLayoutValidationError('setManualPlacement operation has invalid fields');
+      }
+      return;
+    case 'setFocus':
+      if (!validOperationRef(operation.ref) || typeof operation.focused !== 'boolean') {
+        throw new TabLayoutValidationError('setFocus operation has invalid fields');
       }
       return;
     case 'followParent':
@@ -314,6 +338,7 @@ export class TabLayoutService {
         if (
           (operation.type === 'moveRef' ||
             operation.type === 'setManualPlacement' ||
+            operation.type === 'setFocus' ||
             operation.type === 'followParent') &&
           !validOperationRef(operation.ref)
         ) {
@@ -332,6 +357,8 @@ export class TabLayoutService {
             return moveRef(input, operation.ref, { groupId: operation.groupId, index: operation.index }, metadata);
           case 'setManualPlacement':
             return setManualPlacement(input, operation.ref, operation.manual);
+          case 'setFocus':
+            return setTabFocus(input, operation.ref, operation.focused);
           case 'followParent': {
             const followState = describeTabPlacements(input, metadata).find(
               (placement) => placement.kind === operation.ref.kind && placement.id === operation.ref.id
@@ -403,7 +430,7 @@ export class TabLayoutService {
     return this.withOwner(owner, async () => {
       const current = await this.getUnlocked(owner);
       if (baseVersion !== current.version) return { status: 'conflict', layout: current };
-      const validated = validateTabLayout(desired);
+      const validated = preserveLegacyFocusFlags(validateTabLayout(desired), current);
       const { metadata } = await this.facts(owner);
       const owned = new Set(metadata.filter((item) => item.ownerValid && item.visible).map(refKey));
       const refs = [...validated.groups.flatMap((group) => group.refs), ...validated.ungrouped];

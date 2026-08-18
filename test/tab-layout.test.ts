@@ -15,6 +15,7 @@ import {
   renameGroup,
   reorderGroup,
   setManualPlacement,
+  setTabFocus,
   validateTabLayout,
   type TabLayout,
   type TabRefMetadata,
@@ -142,6 +143,18 @@ describe('tab layout validation and normalization', () => {
     moveRef(input, ref('parent'), { groupId: 'g', index: 0 }, [session('parent', 0), session('child', 1, 'parent')]);
     expect(input).toEqual(snapshot);
   });
+
+  it('accepts only literal true for Focus and preserves it through normalization', () => {
+    const input = layout(
+      [{ id: 'g', name: 'G', refs: [{ ...ref('focused'), focus: true }] }],
+      [{ ...ref('unknown-web', 'webview'), focus: true }]
+    );
+
+    expect(validateTabLayout(input)).toEqual(input);
+    expect(normalizeTabLayout(input, [session('focused', 0)])).toEqual(input);
+    expect(() => validateTabLayout(layout([], [{ ...ref('bad'), focus: false } as never]))).toThrow(/focus/);
+    expect(() => validateTabLayout(layout([], [{ ...ref('bad'), focus: 'yes' } as never]))).toThrow(/focus/);
+  });
 });
 
 describe('tab group operations', () => {
@@ -169,6 +182,23 @@ describe('tab group operations', () => {
     expect(value.ungrouped).toEqual([ref('c'), ref('a')]);
     value = moveRef(value, ref('c'), { groupId: 'g', index: 1 }, metadata);
     expect(value.groups[0].refs).toEqual([ref('b'), ref('c')]);
+  });
+
+  it('sets and clears Focus idempotently while preserving it through structural edits', () => {
+    const metadata = [session('a', 0), session('b', 1, 'a')];
+    let value = layout([{ id: 'g', name: 'G', refs: [ref('a'), ref('b')] }]);
+    value = setTabFocus(value, ref('b'), true);
+    expect(value.groups[0].refs[1]).toEqual({ ...ref('b'), focus: true });
+    expect(setTabFocus(value, ref('b'), true)).toEqual(value);
+
+    value = moveRef(value, ref('b'), { groupId: null, index: 0 }, metadata);
+    expect(value.ungrouped[0]).toEqual({ ...ref('b'), placement: 'manual', focus: true });
+    value = followParent(value, ref('b'), metadata);
+    expect(value.groups[0].refs[1]).toEqual({ ...ref('b'), focus: true });
+    value = deleteGroup(value, 'g');
+    expect(value.ungrouped).toContainEqual({ ...ref('b'), focus: true });
+    expect(setTabFocus(value, ref('b'), false).ungrouped).toContainEqual(ref('b'));
+    expect(() => setTabFocus(value, ref('missing'), true)).toThrow(/unknown ref/);
   });
 });
 

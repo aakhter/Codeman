@@ -2398,6 +2398,10 @@ and effort involved in moving workloads.
   describe('POST /api/sessions with resumeSessionId', () => {
     it('fails closed for a new arbitrary local Claude session without verified hooks', async () => {
       const workingDir = await mkdtemp(join(tmpdir(), 'codeman-route-no-hooks-'));
+      // Create now INSTALLS hooks into any claude workspace (applyWorkspaceHooks),
+      // so the only way to reach a genuinely hook-less workspace — the condition
+      // this fail-closed path exists for — is with the setting off.
+      harness.ctx.getWorkspaceHooksEnabled.mockResolvedValue(false);
       const res = await harness.app.inject({
         method: 'POST',
         url: '/api/sessions',

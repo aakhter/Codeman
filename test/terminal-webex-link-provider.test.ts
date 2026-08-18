@@ -4,6 +4,10 @@ import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
 function loadTerminalUiPrototype() {
+  // constants.js first: the file-path link pattern (absoluteFilePathPattern) is
+  // single-sourced there and shared with the response viewer, so terminal-ui.js
+  // references it at call time and the vm context has to carry it.
+  const constants = readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8');
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
   const openSpy = vi.fn();
   const context = vm.createContext({
@@ -22,7 +26,7 @@ function loadTerminalUiPrototype() {
       document: { documentElement: { dataset: {} } },
     },
   });
-  vm.runInContext(`${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
+  vm.runInContext(`${constants}\n${source}\nglobalThis.__proto = CodemanApp.prototype;`, context);
   return {
     proto: (context as { __proto: Record<string, (...args: unknown[]) => unknown> }).__proto,
     openSpy,

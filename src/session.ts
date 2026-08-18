@@ -182,6 +182,13 @@ const SHELL_BURST_SETTLE_MS = 1500;
  *  EXTERNAL_CLI_IDLE_DELAY_MS so positive polls keep re-arming the
  *  quiet-window timer. */
 const WORKING_FRAME_POLL_MS = 2000;
+// How long after construction a RECOVERED session's wire activity stamp keeps
+// its restored previous-run value. Recovery attaches every pane at boot and the
+// attach repaint arrives as ordinary PTY output; without this window that
+// repaint would overwrite every restored stamp within the same second, which is
+// exactly the restart flattening the restore exists to prevent. Real actions
+// (input, task assignment, respawn) always stamp through it.
+const WIRE_ACTIVITY_SETTLE_MS = 15_000;
 
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
@@ -503,6 +510,12 @@ export class Session extends EventEmitter {
   private _textOutput = new BufferAccumulator(MAX_TEXT_OUTPUT_SIZE, TEXT_OUTPUT_TRIM_SIZE);
   private _errorBuffer: string = '';
   private _lastActivityAt: number;
+  // Display twin of _lastActivityAt, reported by toState()/the getter. It can
+  // lag behind on recovery: the restored previous-run stamp survives the attach
+  // repaint (see _markActivity), so a restart does not flatten the home
+  // screens' quiet ordering. Idle detection never reads it.
+  private _wireActivityAt: number;
+  private _wireActivitySettleUntil: number;
   private _claudeSessionId: string | null = null;
   private _claudeAuthoritativeSessionId: string | null = null;
   private _claudeSessionIdentityAdopted = false;
@@ -763,6 +776,8 @@ export class Session extends EventEmitter {
       tmuxHistoryLimit?: number;
       /** Restored wall-clock ms of the pane's last Enter (see `lastSubmitAt`). */
       lastSubmitAt?: number;
+      /** Restored wall-clock ms of the pane's last output (recovery only; see `_wireActivityAt`). */
+      lastActivityAt?: number;
       /** Remote execution metadata for sessions launched through SSH inside local tmux. */
       remote?: SessionRemote;
       /** Creating browser's terminal dims — new tmux windows spawn at this size instead of 120x40 (COD-179). */
@@ -794,8 +809,8 @@ export class Session extends EventEmitter {
     // NOW, not `createdAt`: recovery passes the ORIGINAL creation time of a
     // days-old tmux session, and seeding last-activity from it would report a
     // freshly re-attached pane as having been silent for days, which the idle
-    // confirmation reads as "already quiet" and the home screens print as its
-    // idle duration. For a genuinely new session the two are the same instant.
+    // confirmation reads as "already quiet". For a genuinely new session the
+    // two are the same instant.
     this._lastActivityAt = Date.now();
     this._terminalBufferMaxSize = config.terminalBufferConfig?.maxBytes ?? MAX_TERMINAL_BUFFER_SIZE;
     this._terminalBufferTrimSize = config.terminalBufferConfig?.trimBytes ?? TERMINAL_BUFFER_TRIM_SIZE;
@@ -803,6 +818,15 @@ export class Session extends EventEmitter {
     this._remote = config.remote;
     this._initialDims = config.initialDims;
     this._terminalBuffer = new BufferAccumulator(this._terminalBufferMaxSize, this._terminalBufferTrimSize);
+    // The WIRE copy of the stamp is allowed to be older: recovery threads the
+    // previous run's value so a restart does not flatten the home screens'
+    // most-recently-quiet ordering (every stamp otherwise resets to boot time,
+    // and the attach repaint re-bumps the rest within the same second). The
+    // settle window in _markActivity() carries the restored value through that
+    // repaint; the private stamp above stays boot-anchored because the idle
+    // confirmation reads it as "how long has the pane been quiet".
+    this._wireActivityAt = config.lastActivityAt || Date.now();
+    this._wireActivitySettleUntil = config.lastActivityAt ? Date.now() + WIRE_ACTIVITY_SETTLE_MS : 0;
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.claudeSessionId ?? config.resumeSessionId ?? this.id;
     this._claudeAuthoritativeSessionId = config.claudeSessionId ?? config.resumeSessionId ?? null;
@@ -1029,7 +1053,21 @@ export class Session extends EventEmitter {
   }
 
   get lastActivityAt(): number {
-    return this._lastActivityAt;
+    return this._wireActivityAt;
+  }
+
+  /**
+   * Stamp activity NOW. The private stamp (idle detection's "how long has the
+   * pane been quiet") always moves; the wire stamp holds its restored value
+   * through the post-recovery attach-repaint window unless the activity is a
+   * real action (input, task assignment, respawn), which always writes through.
+   */
+  private _markActivity(realAction = false): void {
+    this._lastActivityAt = Date.now();
+    if (realAction || Date.now() >= this._wireActivitySettleUntil) {
+      this._wireActivityAt = this._lastActivityAt;
+      this._wireActivitySettleUntil = 0;
+    }
   }
 
   get claudeSessionId(): string | null {
@@ -1812,7 +1850,9 @@ export class Session extends EventEmitter {
       parentSessionId: this._parentSessionId,
       currentTaskId: this._currentTaskId,
       createdAt: this.createdAt,
-      lastActivityAt: this._lastActivityAt,
+      // The wire twin, not the private stamp: it survives the post-recovery
+      // attach repaint, so the home screens' quiet ordering survives a restart.
+      lastActivityAt: this._wireActivityAt,
       name: this._name,
       mode: this.mode,
       autoClearEnabled: this._autoOps.autoClearEnabled,
@@ -2255,7 +2295,7 @@ export class Session extends EventEmitter {
 
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
-    this._lastActivityAt = Date.now();
+    this._markActivity();
     this.emit('terminal', data);
     this.emit('output', data);
   }
@@ -3192,7 +3232,7 @@ export class Session extends EventEmitter {
     this._messages = [];
     this._lineBuffer = '';
     this._altScreenSeqCarry = '';
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
   }
 
   /**
@@ -3995,7 +4035,7 @@ export class Session extends EventEmitter {
   // Legacy method for sending input - wraps runPrompt
   async sendInput(input: string): Promise<void> {
     this._status = 'busy';
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
     this.runPrompt(input).catch((err) => {
       const errorMsg = getErrorMessage(err);
       // Clean up task state so the task queue doesn't get stuck
@@ -4003,7 +4043,7 @@ export class Session extends EventEmitter {
         const taskId = this._currentTaskId;
         this._currentTaskId = null;
         this._status = 'idle';
-        this._lastActivityAt = Date.now();
+        this._markActivity(true);
         this.emit('taskError', taskId, errorMsg);
       } else {
         this._status = 'idle';
@@ -4253,13 +4293,13 @@ export class Session extends EventEmitter {
     this._textOutput.clear();
     this._errorBuffer = '';
     this._messages = [];
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
   }
 
   clearTask(): void {
     this._currentTaskId = null;
     this._status = 'idle';
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
   }
 
   getOutput(): string {

@@ -29,6 +29,9 @@
  * symlink pointing at a sensitive target is also caught.
  */
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 const SENSITIVE_PATTERNS: RegExp[] = [
   // System account databases.
   /^\/etc\/shadow$/,
@@ -80,12 +83,45 @@ const SENSITIVE_PATTERNS: RegExp[] = [
   /\/\.claude\/\.credentials\.json$/,
   /\/\.codeman[^/]*\/hook-secret$/,
   /\/\.codeman[^/]*\/users\.json$/,
+  // Codeman's own state files. Named once `.json` became previewable outside
+  // the workspace: `SessionState.envOverrides` persists whatever the user set
+  // for a session, and the env allowlist admits key-shaped names
+  // (`GEMINI_API_KEY`, `CLAUDE_CODE_*`), so state can hold a live credential.
+  // `state[^/]*` rather than `state`: siblings like state-inner.json carry the
+  // same payload. Same reasoning as the two entries above, and it leaves the
+  // rest of ~/.codeman attachable.
+  /\/\.codeman[^/]*\/state[^/]*\.json$/,
+  // settings.json holds a credential BY SCHEMA (`voiceSettings.apiKey`, the
+  // Deepgram key); push-keys.json holds the VAPID PRIVATE key (enough to forge
+  // push notifications to every subscribed device); intents.json is written
+  // 0600 precisely because captured prompts can contain secrets, and is
+  // deliberately kept out of /api/search — it must not be readable through a
+  // different route instead.
+  /\/\.codeman[^/]*\/settings\.json$/,
+  /\/\.codeman[^/]*\/push-keys\.json$/,
+  /\/\.codeman[^/]*\/intents\.json$/,
 ];
+
+/**
+ * Claude config members that are credential-bearing ONLY under the user's real
+ * home directory: `~/.claude/settings.json` can hold `env.ANTHROPIC_API_KEY`
+ * and `apiKeyHelper` by schema (settings.local.json shares that schema), and
+ * `~/.claude.json` holds account/OAuth-adjacent state. A blanket
+ * `/\.claude\/settings\.json$/` would also block every CASE-level
+ * `.claude/settings.json`, which users legitimately view and edit in the File
+ * Viewer (model override, hooks) — so these are anchored to homedir(), read at
+ * CHECK time inside isSensitivePath, never captured at module load (wrong for
+ * anything that changes HOME later, e.g. per-file test fixtures — same
+ * reasoning as the `.ssh/` note above).
+ */
+const HOME_SENSITIVE_MEMBERS = ['.claude.json', '.claude/settings.json', '.claude/settings.local.json'];
 
 /**
  * Returns true if the given ABSOLUTE, symlink-resolved path matches the
  * sensitive-file blocklist and must not be served to the browser.
  */
 export function isSensitivePath(absPath: string): boolean {
-  return SENSITIVE_PATTERNS.some((pattern) => pattern.test(absPath));
+  if (SENSITIVE_PATTERNS.some((pattern) => pattern.test(absPath))) return true;
+  const home = homedir();
+  return HOME_SENSITIVE_MEMBERS.some((member) => absPath === join(home, member));
 }

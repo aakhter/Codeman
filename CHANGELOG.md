@@ -1,5 +1,86 @@
 # aicodeman
 
+## Unreleased
+
+### Minor Changes
+
+- **File Manager: uploads, mkdir, rename, delete (COD-317, COD-318)** — the File Viewer is now a full workspace manager for both local and remote (SFTP) sessions.
+
+  **Upload (COD-317):** `POST /api/sessions/:id/files/upload?path=<relativeDir>` writes any file to the workspace with CSRF (`Origin/Referer==Host` or `X-Codeman-CSRF`), per-`(IP,session)` token bucket (20/min), `sanitizeUploadFilename`, `validateSessionFilePath` confinement, `isSensitivePath`/`isBlockedAttachmentPath`/`.git` guards, symlink-safe `lstat` + `O_EXCL|O_NOFOLLOW` and non-recursive `mkdir` loop, `409` on exists, 50 MB cap via `@fastify/multipart`; remote writes via `writeRemoteFileBytes` (`umask 077`, atomic `mv -n`, 15 s timeout). Header `⬆ Upload` handles multi-file (10/batch, concurrency 3, progress toasts, order-preserving) and drag-drop onto a folder now targets that folder; both now respect the **current folder** (last expanded) and show `· in <dir>` in the status bar.
+
+  **Mkdir / Rename / Delete (COD-318):** `POST /api/sessions/:id/files/mkdir {path}`, `POST /api/sessions/:id/files/rename {from,to}`, `DELETE /api/sessions/:id/files?path=` share the same guards plus recursive `fs.rm` for local deletes and `mkdir -p`/`SFTP rename`/`rm -rf` for remote via new `remote-sftp.ts` helpers (`createRemoteWorkspaceDirectory`, `renameRemoteWorkspacePath`, `deleteRemoteWorkspacePath`). Header `＋ New folder` creates in the current folder (e.g. `src/utils` when that is expanded) and auto-expands it; per-row `✎ Rename` (prompt for new base, moves expanded/current state) and `🗑 Delete` (confirm, recursive for non-empty dirs) appear on hover. All operations refresh the tree and keep `fileBrowserCurrentDir`/`ExpandedDirs` consistent.
+## 1.19.5
+
+### Patch Changes
+
+- Closing the session you are looking at now always moves you to the next tab.
+
+  The delete request and its own `session_deleted` broadcast raced each other: the close path selected the next tab, while the broadcast handler cleared the active session and showed the home screen, and whichever ran first decided what you saw. On one build, closing a tab either switched sessions or dumped you on the welcome screen depending on timing. The close now owns that handoff from beginning to end, and the broadcast handler stays out of the way for a close started in that tab. A session deleted from somewhere else still returns you to the home screen, which is the honest answer when what you were looking at was taken away.
+
+  The next tab is also picked from sessions that still exist, so a stale entry in the tab order can no longer name a tab that is already gone.
+
+## 1.19.4
+
+### Patch Changes
+
+- Only a human opening a session clears its yellow "waiting for input" tab alert.
+
+  1.19.2 made that clear durable and cross-device, which also meant the app itself could spend it: restoring your last session on page load, a popped-out window opening its target, and the fallback to another tab after you close the active one all counted as "I checked it", so a yellow tab could clear itself before you ever saw it. Those three app-driven selections are now marked and skip the acknowledgement, so the alert survives until you actually open the session.
+
+  Everything a human does still clears it, on every surface: tapping a tab, tapping a row on the phone home screen, the keyboard tab shortcuts, and submitting a prompt into the session. The flag defaults to user-initiated, so a selection path nobody marked keeps acknowledging rather than leaving an alert nothing can clear.
+
+## 1.19.3
+
+### Patch Changes
+
+- Red "needs you" tab alerts now follow the dialog instead of the keyboard.
+
+  Typing in the terminal no longer clears a red alert. It used to clear every pending alert on the device you typed on, but a permission or question dialog ignores keystrokes that are not one of its options, so the dialog was still open and still blocking: the other devices stayed red and a reload brought the red back on the first one. Input now spends the yellow idle alert only, and it does that through the server-side acknowledgement added in 1.19.2, so the clear is durable and reaches every device.
+
+  A dialog answered in the terminal now clears by itself. Claude Code fires no "permission answered" hook, so the item stayed pending until the whole turn ended, and any page load in between re-armed a red alert for a dialog that was long gone. Listing approvals now re-captures the pane and resolves items whose dialog is no longer on screen, using the same conservative check the answer path already uses: only an item whose original frame parsed numbered options can be dropped this way, so an unreadable capture keeps the alert rather than losing a live one. Measured against a real AskUserQuestion dialog: the stale item cleared 5 seconds ahead of the stop hook that used to be the only signal, while a dialog still on screen survived 11 consecutive listings over 55 seconds untouched.
+
+## 1.19.2
+
+### Patch Changes
+
+- Yellow "waiting for input" tab alerts now stay cleared once you have checked them, on every device.
+
+  Viewing a session used to clear its idle alert in that browser's memory only. The server-side approval store still held the prompt, so the next page load seeded the alert straight back and a tab you had already checked went yellow again, while your other devices never heard about the click at all. Opening a session now acknowledges its pending idle prompt server-side (`POST /api/approvals/session/:sessionId/viewed`, a new `acknowledgedAt` field on approval items, broadcast as `approval:updated`), so the clear survives reloads and reaches every connected client.
+
+  Acknowledgement is deliberately not resolution: the prompt is still unanswered, so the item stays in the Approvals Inbox, stays answerable, and stays available as Read My Mind context, it just stops arming the tab alert. Permission and question dialogs are never acknowledged this way, since looking at a dialog does not answer it, so the red "needs you" alert survives being viewed. Clicking the tab you are already on now clears the alert as well; that path returned early before, so an alert armed on the active tab could not be cleared by clicking at all.
+
+## 1.19.1
+
+### Patch Changes
+
+- Follow-up hardening from the 1.19.0 reviews, across all three of that release's areas (#309, #310, #311).
+
+  Home screens: the activity ordering introduced in 1.19.0 now stays truthful. Hook events push a session state broadcast, so a blocked session ranks by a fresh stamp instead of whatever the page loaded with; a working row with no recorded submit shows the same stamp it sorts by; Alt+1..9 resolves through the live sessions the tabs actually paint, so a stale id in the saved order can no longer shift every number off its target; and the "most recently quiet" ordering survives restarts, since recovery now restores each session's previous activity stamp from state.json instead of restamping everything at boot (previously every deploy flattened the ordering to tab order).
+
+  Files and sidebar: playable media extensions are pinned to the attachment registry by a parity test, so an in-workspace .m4a/.flac/.opus opens the preview player instead of the log viewer; /etc paths no longer render as links that can only 403; the sidebar session count counts the rows actually on screen (web tabs included, filtered rows excluded) and follows the filter box; connectors re-anchor on incremental renders in sidebar layout; and ~/.claude.json plus ~/.claude/settings(.local).json are blocked from file serving, home-anchored only, so case-level .claude files stay viewable.
+
+  Workspace hooks: the install-vs-refresh decision is one shared core that every claude create path routes through, so the workspaceHooksEnabled setting now also applies to cron jobs, legacy scheduled runs, and plan-orchestrator one-shots; a shell session in a docker case no longer authors a hooks block; the boot sweep no longer resurrects a deleted workspace as an empty directory; and the statusLine exporter got the same remote-attach and cwd-fallback guards as the hooks install.
+
+## 1.19.0
+
+### Minor Changes
+
+- c01edcb: Add an optional collapsible left session sidebar as an alternative to the header tab strip.
+
+  With many concurrent sessions the horizontal strip wraps into several rows and stops being scannable. The new layout puts the session list in a vertical `<aside>` with a filter box and a live session count, collapsible to a 44px rail that keeps the status dots and task badges visible.
+
+  Opt-in via Settings → Layout → Tabs → Session List Layout; the default stays the header strip, so nothing changes unless you switch. Both layouts share one `#sessionTabs` element that is re-parented between mount points, so every existing affordance (status, mode badge, alerts, drag-reorder, keyboard navigation, web tabs, subagent windows) behaves identically in both. Below 1024px the sidebar is an off-canvas drawer that overlays the terminal instead of shrinking it. Collapse state persists per device; `Alt+B` toggles it.
+
+- Codeman hooks now install into every claude workspace at session create, not just cases Codeman created (#304). Linked cases and cloned repos previously ran hook-blind: tab alerts, the Approvals Inbox, and the agent skill's stop/blocked wait signals were silently dead there. The install is an add-only merge that preserves user-authored hooks and leaves malformed files untouched, and a boot sweep heals sessions recovered from a restart. Opt out with the new synced `workspaceHooksEnabled` setting. Note: a `.claude/settings.local.json` can now appear in repos you link as cases; it contains no secrets. Remote SSH attaches and creates without a `workingDir` never write hooks.
+
+  File paths an agent prints are now clickable in both the terminal and the response viewer, opening the file preview overlay, including paths outside the session workspace (#306). Out-of-workspace paths are served through the attachment routes' extension allowlist, realpath confinement, and sensitive-path blocklist; Codeman's own credential-bearing files (`settings.json`, `push-keys.json`, `intents.json`, `state*.json`) are blocked from serving.
+
+  Both home screens (the desktop home tab rail and the phone overview) sort sessions by activity instead of tab order (#303): blocked sessions first with the longest-blocked on top, then running sessions longest-running first, then quiet sessions most recently active first. A turn starting now pushes a session state broadcast so the ordering stays live after page load.
+
+  The codeman agent skill docs teach hook presence as a setting to check rather than a consequence of who created the workspace, and the §0 preamble stamp is bumped to 1.19.0 (#305).
+
+  ### Thanks
+  - @christianhaberl designed and built the collapsible left session sidebar (#307)
 ## 1.18.6
 
 ### Patch Changes

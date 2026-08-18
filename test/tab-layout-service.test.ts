@@ -66,7 +66,7 @@ describe('TabLayoutService', () => {
 
   it('prepares and commits a complete-state session deletion around the resource action', async () => {
     const h = createHarness({
-      layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },
+      layouts: { alice: existing([{ kind: 'session', id: 'mine', focus: true }]) },
       live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
     });
     h.service.markRestorationComplete();
@@ -229,6 +229,39 @@ describe('TabLayoutService', () => {
     expect(h.broadcast).toHaveBeenLastCalledWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
   });
 
+  it('preserves authoritative Focus flags across legacy full-layout writes', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'focused', focus: true },
+          { kind: 'session', id: 'plain' },
+        ]),
+      },
+      live: [
+        { id: 'focused', owner: 'alice', createdAt: 1 },
+        { id: 'plain', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    const result = await h.service.put(
+      'alice',
+      {
+        ...existing([
+          { kind: 'session', id: 'plain', focus: true },
+          { kind: 'session', id: 'focused' },
+        ]),
+        groups: [{ id: 'g', name: 'Moved', refs: [] }],
+      },
+      7
+    );
+
+    expect(result.status).toBe('updated');
+    expect(result.layout.ungrouped).toEqual([
+      { kind: 'session', id: 'plain' },
+      { kind: 'session', id: 'focused', focus: true },
+    ]);
+  });
+
   it('applies Follow parent intent through the authoritative model instead of accepting a browser-derived layout', async () => {
     const h = createHarness({
       layouts: {
@@ -288,6 +321,50 @@ describe('TabLayoutService', () => {
     expect(result.layout.version).toBe(7);
     expect(result.placements.find((placement) => placement.id === 'child')?.state).toBe('inherited');
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('sets Focus for owned session and webview refs and does not bump an idempotent repeat', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'mine' },
+          { kind: 'webview', id: 'dash' },
+        ]),
+      },
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+      webviews: [{ id: 'dash', owner: 'alice' }],
+    });
+
+    const sessionFocused = await h.service.putOperations(
+      'alice',
+      [{ type: 'setFocus', ref: { kind: 'session', id: 'mine' }, focused: true }],
+      7
+    );
+    expect(sessionFocused.layout.ungrouped[0]).toEqual({ kind: 'session', id: 'mine', focus: true });
+
+    const webFocused = await h.service.putOperations(
+      'alice',
+      [{ type: 'setFocus', ref: { kind: 'webview', id: 'dash' }, focused: true }],
+      8
+    );
+    expect(webFocused.layout.ungrouped[1]).toEqual({ kind: 'webview', id: 'dash', focus: true });
+
+    const unchanged = await h.service.putOperations(
+      'alice',
+      [{ type: 'setFocus', ref: { kind: 'webview', id: 'dash' }, focused: true }],
+      9
+    );
+    expect(unchanged.layout.version).toBe(9);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
+    expect(h.broadcast).toHaveBeenCalledTimes(2);
+
+    await expect(
+      h.service.putOperations(
+        'alice',
+        [{ type: 'setFocus', ref: { kind: 'session', id: 'foreign' }, focused: true }],
+        9
+      )
+    ).rejects.toThrow(/unknown ref/);
   });
 
   it.each([
@@ -398,6 +475,8 @@ describe('TabLayoutService', () => {
     { type: 'createGroup', id: 'new', name: '', index: 0 },
     { type: 'reorderGroup', groupId: 'g', index: -1 },
     { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
+    { type: 'setFocus', ref: { kind: 'session', id: 'child' } },
+    { type: 'setFocus', ref: { kind: 'session', id: 'child' }, focused: 'yes' },
   ])('returns conflict for stale malformed $type but rejects it at the matching version', async (operation) => {
     const base: TabLayout = {
       ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),
@@ -588,7 +667,7 @@ describe('TabLayoutService', () => {
       layouts: {
         alice: existing([
           { kind: 'session', id: 'pinned' },
-          { kind: 'webview', id: 'gone-web' },
+          { kind: 'webview', id: 'gone-web', focus: true },
         ]),
       },
       persisted: [{ id: 'pinned', owner: 'alice', createdAt: 1, pinned: true }],

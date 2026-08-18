@@ -17,6 +17,7 @@
   const asIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []);
   const stableIds = (value) => [...new Set(asIds(value))];
   const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
+  const FOCUS_COLLAPSED_STORAGE_KEY = 'codeman:focus-group-collapsed';
 
   function loadCollapsedGroupIds(storage, validGroupIds) {
     try {
@@ -44,6 +45,26 @@
     }
   }
 
+  function loadFocusGroupCollapsed(storage) {
+    try {
+      const raw = storage.getItem(FOCUS_COLLAPSED_STORAGE_KEY);
+      if (raw === null || raw === 'false') return { collapsed: false, ok: true };
+      if (raw === 'true') return { collapsed: true, ok: true };
+      throw new Error('Invalid Focus collapse state');
+    } catch (_error) {
+      return { collapsed: false, ok: false };
+    }
+  }
+
+  function saveFocusGroupCollapsed(storage, collapsed) {
+    try {
+      storage.setItem(FOCUS_COLLAPSED_STORAGE_KEY, collapsed === true ? 'true' : 'false');
+      return { collapsed: collapsed === true, ok: true };
+    } catch (_error) {
+      return { collapsed: false, ok: false };
+    }
+  }
+
   function normalizedLayout(value) {
     if (!value || typeof value !== 'object') throw new Error('Invalid tab layout');
     const groups = Array.isArray(value.groups) ? value.groups : [];
@@ -59,6 +80,7 @@
               kind: ref.kind,
               id: ref.id,
               ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
+              ...(ref.focus === true ? { focus: true } : {}),
             }))
           : [],
       })),
@@ -66,6 +88,7 @@
         kind: ref.kind,
         id: ref.id,
         ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
+        ...(ref.focus === true ? { focus: true } : {}),
       })),
     };
   }
@@ -204,6 +227,14 @@
       if (!validRef(operation.ref) || operation.manual !== true) operationError('invalid manual placement');
       return mapStoredRef(layout, operation.ref, (ref) => ({ ...ref, placement: 'manual' }));
     }
+    if (operation.type === 'setFocus') {
+      if (!validRef(operation.ref) || typeof operation.focused !== 'boolean') operationError('invalid Focus state');
+      return mapStoredRef(layout, operation.ref, (ref) => {
+        if (operation.focused) return { ...ref, focus: true };
+        const { focus: _focus, ...rest } = ref;
+        return rest;
+      });
+    }
     if (operation.type === 'followParent') {
       if (!validRef(operation.ref) || operation.ref.kind !== 'session') operationError('only a session can follow');
       if (!refLocations(layout).some((item) => refKey(item.ref) === refKey(operation.ref)))
@@ -264,10 +295,16 @@
     const completeRefs = [];
     const completeSeen = new Set();
     const visibleRefs = [];
+    const focusRefs = [];
     const sections = [];
     const hiddenTabGroupByRef = {};
 
     const renderable = (ref) => (ref.kind === 'session' ? liveSessionIds.has(ref.id) : openWebviewIds.has(ref.id));
+    if (orientation === 'vertical') {
+      for (const { ref } of refLocations(layout)) {
+        if (ref.focus === true && renderable(ref)) focusRefs.push({ kind: ref.kind, id: ref.id });
+      }
+    }
     const addVisible = (ref, sectionRefs, isCollapsed, groupId = null, stored = true) => {
       const key = refKey(ref);
       if (stored) {
@@ -365,7 +402,15 @@
       });
     }
 
-    return { sessionOrder: ownerSessions, completeRefs, visibleRefs, sections, hiddenTabGroupByRef };
+    return {
+      sessionOrder: ownerSessions,
+      completeRefs,
+      visibleRefs,
+      focusRefs,
+      focusCollapsed: orientation === 'vertical' && options.focusCollapsed === true,
+      sections,
+      hiddenTabGroupByRef,
+    };
   }
 
   function projectFallback(options = {}) {
@@ -396,6 +441,8 @@
       openWebviews: stableIds(input.openWebviewIds),
       activeSessionId: input.activeSessionId || null,
       activeWebviewId: input.activeWebviewId || null,
+      focusCollapsed: input.focusCollapsed === true,
+      focusRefs: (Array.isArray(input.focusRefs) ? input.focusRefs : []).filter(validRef).map(refKey),
       placementStates: Array.isArray(input.placementStates) ? input.placementStates : [],
       refs: (Array.isArray(input.visibleRefs) ? input.visibleRefs : []).filter(validRef).map(refKey),
     });
@@ -415,12 +462,29 @@
     return order[(start + (delta < 0 ? -1 : 1) + order.length) % order.length] || null;
   }
 
-  function renderProjection(projection, orientation, renderRef, escapeHtml) {
+  function renderProjection(projection, orientation, renderRef, escapeHtml, renderFocusRef = renderRef) {
     const refs = Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [];
     const sections = Array.isArray(projection?.sections) ? projection.sections : [];
     if (orientation !== 'vertical' || sections.length === 0) {
       return refs.map((ref, index) => renderRef(ref, index)).join('');
     }
+    const focusRefs = Array.isArray(projection?.focusRefs) ? projection.focusRefs : [];
+    const focusCollapsed = projection?.focusCollapsed === true;
+    const focusContent = focusCollapsed
+      ? ''
+      : focusRefs
+          .map((ref) => {
+            let rendered = renderFocusRef(ref, -1, { focusShortcut: true })
+              .replace(/role="tab"/, 'role="treeitem"')
+              .replace(/tabindex="0"/g, 'tabindex="-1"')
+              .replace(/<button(?![^>]*tabindex)/g, '<button tabindex="-1"');
+            if (!/role="treeitem"/.test(rendered)) rendered = rendered.replace(/^<([a-z]+)/, '<$1 role="treeitem"');
+            return rendered;
+          })
+          .join('');
+    const focus = focusRefs.length
+      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}"><button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleFocusGroupCollapsed()"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button><span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
+      : '';
     let index = 0;
     const groups = sections
       .map((section, sectionIndex) => {
@@ -449,7 +513,7 @@
         return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-before-group="${escapeHtml(section.id || '')}"></div><section class="tab-layout-group" role="presentation" data-tab-group-id="${escapeHtml(section.id || '')}">${header}${members}</section>`;
       })
       .join('');
-    return `<div class="tab-layout-tree" role="tree" aria-label="Sessions">${groups}</div><button type="button" tabindex="-1" class="tab-layout-create-group" onclick="app.createTabGroup()">Create group</button>`;
+    return `<div class="tab-layout-tree" role="tree" aria-label="Sessions">${focus}${groups}</div><button type="button" tabindex="-1" class="tab-layout-create-group" onclick="app.createTabGroup()">Create group</button>`;
   }
 
   function createEditCoordinator(options) {
@@ -702,5 +766,7 @@
     createLoadCoordinator,
     loadCollapsedGroupIds,
     saveCollapsedGroupIds,
+    loadFocusGroupCollapsed,
+    saveFocusGroupCollapsed,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

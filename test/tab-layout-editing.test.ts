@@ -42,7 +42,7 @@ beforeAll(() => {
   CodemanApp = (globalThis as any).__Cod307App;
 });
 
-type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual' };
+type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual'; focus?: true };
 type Layout = {
   version: number;
   updatedAt: string;
@@ -770,6 +770,196 @@ function clickMenuItem(label: string) {
 function openGroupMenu(app: Record<string, any>, trigger: HTMLElement, groupId = 'g1') {
   app.openTabGroupMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, groupId);
 }
+
+describe('COD-319 Focus smart group rendering', () => {
+  it('renders vertical shortcuts ahead of canonical groups without numbering or tab semantics', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app._fullRenderSessionTabs();
+
+    const focus = document.querySelector<HTMLElement>('[data-tab-focus-group]')!;
+    expect(focus).not.toBeNull();
+    expect(focus.previousElementSibling).toBeNull();
+    expect(focus.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
+    expect(focus.querySelector('[data-tab-focus-shortcut="webview:web"]')).not.toBeNull();
+    expect(focus.querySelector('.tab-number, [data-tab-ref-drag]')).toBeNull();
+    expect(focus.querySelector('[aria-selected]')).toBeNull();
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.hasAttribute('oncontextmenu')).toBe(
+      false
+    );
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"] .tab-more')?.textContent).toBe('⋯');
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.getAttribute('aria-current')).toBe(
+      'page'
+    );
+    expect(document.querySelectorAll('[data-id="parent"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-webview-id="web"]')).toHaveLength(1);
+  });
+
+  it('keeps a focused shortcut visible when its canonical real group is collapsed', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', focus: true };
+    app.collapsedTabGroupIds.add('g1');
+    app._fullRenderSessionTabs();
+
+    expect(document.querySelector('[data-tab-focus-shortcut="session:child"]')).not.toBeNull();
+    expect(document.querySelector('[data-id="child"]')).toBeNull();
+  });
+
+  it('activates session and webview shortcuts with Enter and Space through roving focus', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app._fullRenderSessionTabs();
+    const session = document.querySelector<HTMLElement>('[data-tab-focus-shortcut="session:parent"]')!;
+    const webview = document.querySelector<HTMLElement>('[data-tab-focus-shortcut="webview:web"]')!;
+
+    session.focus();
+    session.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    webview.focus();
+    webview.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+
+    expect(app.selectSession).toHaveBeenCalledWith('parent');
+    expect(app.openWebview).toHaveBeenCalledWith('web');
+    expect(app._tabLayoutIdentity(session)).toBe('focus:session:parent');
+    expect(app._tabLayoutIdentity(webview)).toBe('focus:webview:web');
+  });
+
+  it('persists Focus collapse independently of real groups and hides all shortcuts', () => {
+    localStorage.clear();
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app._fullRenderSessionTabs();
+
+    let header = document
+      .querySelector<HTMLElement>('[data-tab-focus-toggle]')!
+      .closest<HTMLElement>('[role="treeitem"]')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('false');
+    header = document.querySelector<HTMLElement>('[data-tab-focus-toggle]')!.closest<HTMLElement>('[role="treeitem"]')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('true');
+
+    expect(app.toggleFocusGroupCollapsed(true)).toBe(true);
+    expect(localStorage.getItem('codeman:focus-group-collapsed')).toBe('true');
+    expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('false');
+    expect(document.querySelector('[data-tab-focus-shortcut]')).toBeNull();
+    expect(app.toggleFocusGroupCollapsed(false)).toBe(true);
+    expect(document.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
+  });
+
+  it('does not collide when a real group ID is @focus', () => {
+    localStorage.clear();
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].id = '@focus';
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app._fullRenderSessionTabs();
+
+    expect(app.toggleTabGroupCollapsed('@focus', true)).toBe(true);
+    expect(app.toggleFocusGroupCollapsed(true)).toBe(true);
+    expect(app.collapsedTabGroupIds.has('@focus')).toBe(true);
+    expect(app.focusTabGroupCollapsed).toBe(true);
+    expect(JSON.parse(localStorage.getItem('codeman:tab-groups-collapsed')!)).toEqual(['@focus']);
+    expect(localStorage.getItem('codeman:focus-group-collapsed')).toBe('true');
+
+    expect(app.toggleFocusGroupCollapsed(false)).toBe(true);
+    expect(app.collapsedTabGroupIds.has('@focus')).toBe(true);
+    expect(app.focusTabGroupCollapsed).toBe(false);
+  });
+
+  it('offers exact Focus actions from canonical and shortcut menus', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.openSessionOptions = vi.fn();
+    app.requestCloseSession = vi.fn();
+    app.editTabLayout = vi.fn(() => true);
+    app._fullRenderSessionTabs();
+
+    const canonicalSessionTrigger = document.querySelector<HTMLElement>('[data-id="parent"] .tab-more')!;
+    app.openTabRailActionMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: canonicalSessionTrigger },
+      'parent'
+    );
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toContain(
+      'Remove from Focus'
+    );
+    clickMenuItem('Remove from Focus');
+    expect(app.editTabLayout).toHaveBeenLastCalledWith(
+      { type: 'setFocus', ref: { kind: 'session', id: 'parent' }, focused: false },
+      'session:parent'
+    );
+
+    const canonicalWebTrigger = document.querySelector<HTMLElement>('[data-webview-id="web"] .tab-more')!;
+    app.openTabRefMoveMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: canonicalWebTrigger },
+      { kind: 'webview', id: 'web' }
+    );
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toContain(
+      'Add to Focus'
+    );
+    document.querySelector('.tab-layout-ref-move-menu')?.remove();
+
+    const shortcutTrigger = document.querySelector<HTMLElement>('[data-tab-focus-shortcut] .tab-more')!;
+    app.openFocusShortcutMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: shortcutTrigger },
+      { kind: 'session', id: 'parent' }
+    );
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([
+      'Remove from Focus',
+    ]);
+  });
+
+  it('keeps canonical markers and shortcut state synchronized without duplicate selected semantics', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app._fullRenderSessionTabs();
+
+    const canonical = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    let shortcut = document.querySelector<HTMLElement>('[data-tab-focus-shortcut="session:parent"]')!;
+    expect(canonical.querySelector('.tab-focus-marker')).not.toBeNull();
+    expect(shortcut.querySelector('.tab-focus-marker')).toBeNull();
+    expect(shortcut.classList.contains('active')).toBe(false);
+    expect(shortcut.hasAttribute('aria-selected')).toBe(false);
+
+    app.activeSessionId = 'child';
+    app._updateActiveTabImmediate('child');
+    expect(shortcut.getAttribute('aria-current')).toBe('false');
+    app.activeSessionId = 'parent';
+    app._updateActiveTabImmediate('parent');
+    expect(shortcut.getAttribute('aria-current')).toBe('page');
+
+    app.terminalLoadStates.set('parent', { generation: 1, phase: 'history' });
+    app._updateTerminalLoadTab('parent');
+    expect(
+      document.querySelectorAll('[data-id="parent"].tab-loading, [data-focus-session-id="parent"].tab-loading')
+    ).toHaveLength(2);
+
+    app.sessions.get('parent').name = 'Renamed focus';
+    app._renderSessionTabsImmediate();
+    expect(
+      [...document.querySelectorAll('[data-id="parent"] .tab-name, [data-focus-session-id="parent"] .tab-name')].map(
+        (element) => element.textContent
+      )
+    ).toEqual(['Renamed focus', 'Renamed focus']);
+
+    app.activeSessionId = 'parent';
+    app.activeWebviewId = 'web';
+    app._updateActiveWebviewTab();
+    const webShortcut = document.querySelector<HTMLElement>('[data-focus-webview-id="web"]')!;
+    expect(webShortcut.getAttribute('aria-current')).toBe('page');
+    expect(webShortcut.classList.contains('active')).toBe(false);
+    expect(document.querySelectorAll('[aria-selected="true"]')).toHaveLength(1);
+
+    const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
+    expect(css).toContain("html[data-tab-orientation='vertical'] .tab-layout-focus-group");
+    expect(css).toContain("html[data-tab-orientation='vertical'] .tab-focus-shortcut[aria-current='page']");
+  });
+});
 
 describe('COD-315 dismissible group menu', () => {
   it('dismisses on an outside tab pointerdown without suppressing activation or running an action', () => {
@@ -1500,6 +1690,29 @@ describe('COD-307 delegated pointer behavior', () => {
     });
     expect(app._tabPointerDrag).toBeNull();
     expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
+  });
+
+  it('does not advertise Focus shortcuts as drag destinations', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const handle = container.querySelector<HTMLElement>('[data-id="child"] [data-tab-ref-drag]')!;
+    const shortcut = container.querySelector<HTMLElement>('[data-tab-focus-shortcut="session:parent"]')!;
+    (document as any).elementFromPoint = vi.fn(() => shortcut);
+
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 72, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 72, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+
+    expect(shortcut.classList.contains('tab-layout-drop-active')).toBe(false);
+    container.dispatchEvent(
+      pointerEvent('pointercancel', { pointerId: 72, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
   });
 
   it('starts reference dragging only from the dedicated handle', () => {

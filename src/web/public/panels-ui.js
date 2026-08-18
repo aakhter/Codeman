@@ -15,6 +15,11 @@
 
 const AWAY_DIGEST_LAST_VIEWED_KEY = 'codeman-away-digest-last-viewed';
 const FILE_BROWSER_SHOW_HIDDEN_KEY = 'codeman:fileBrowserShowHidden';
+// Bounds for the by-id text preview, mirroring what the workspace text preview
+// already does server-side (500 lines). The byte cap rides a Range request, so
+// a huge log is a partial read rather than a download the viewer throws away.
+const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
+const TEXT_PREVIEW_MAX_LINES = 500;
 const AWAY_DIGEST_SECTIONS = [
   ['needsAttention', 'Needs Attention'],
   ['completed', 'Completed'],
@@ -3354,15 +3359,19 @@ Object.assign(CodemanApp.prototype, {
 
       // Keep the rendered tree bound to the session that produced it. The active
       // terminal tab can change independently while this panel remains open.
+      const isNewSession = this.fileBrowserSessionId !== sessionId;
       this.fileBrowserSessionId = sessionId;
       this.fileBrowserData = result.data;
       this.fileBrowserLoadedDirs = new Set();
+      if (isNewSession) this.fileBrowserCurrentDir = '';
       this.renderFileBrowserTree();
 
-      // Update status
+      // Update status — include current dir if set
       if (statusEl) {
         const { totalFiles, totalDirectories, truncated } = result.data;
-        statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}${showHidden ? ' · hidden shown' : ''}`;
+        const base = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
+        const dir = this.fileBrowserCurrentDir || '';
+        statusEl.textContent = dir ? `${base} · in ${dir}${showHidden ? ' · hidden shown' : ''}` : `${base}${showHidden ? ' · hidden shown' : ''}`;
       }
     } catch (err) {
       if (loadGeneration !== this.fileBrowserLoadGeneration) return;
@@ -3420,6 +3429,8 @@ Object.assign(CodemanApp.prototype, {
       const downloadBtn = !isDir
         ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
+      const renameBtn = `<button class="file-tree-rename" data-path="${escapeHtml(node.path)}" title="Rename" aria-label="Rename">✎</button>`;
+      const deleteBtn = `<button class="file-tree-delete" data-path="${escapeHtml(node.path)}" title="Delete" aria-label="Delete">🗑</button>`;
 
       html.push(`
         <div class="file-tree-item${hiddenClass}" data-path="${escapeHtml(node.path)}" data-type="${node.type}" data-depth="${depth}">
@@ -3427,7 +3438,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="file-tree-icon">${icon}</span>
           <span class="${nameClass}">${escapeHtml(node.name)}</span>
           ${sizeStr}
-          ${downloadBtn}
+          ${downloadBtn}${renameBtn}${deleteBtn}
         </div>
       `);
 
@@ -3447,7 +3458,9 @@ Object.assign(CodemanApp.prototype, {
 
     // Add click handlers
     treeEl.querySelectorAll('.file-tree-item').forEach(item => {
-      item.addEventListener('click', () => {
+      item.addEventListener('click', (e) => {
+        // Ignore clicks on action buttons
+        if (e.target && e.target.closest && e.target.closest('.file-tree-rename, .file-tree-delete, .file-tree-download')) return;
         const path = item.dataset.path;
         const type = item.dataset.type;
 
@@ -3467,6 +3480,20 @@ Object.assign(CodemanApp.prototype, {
         e.preventDefault();
         e.stopPropagation();
         this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-rename').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.renameFileBrowserEntry(btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.deleteFileBrowserEntry(btn.dataset.path);
       });
     });
   },
@@ -3519,11 +3546,12 @@ Object.assign(CodemanApp.prototype, {
       this.showToast('No active session', 'error');
       return;
     }
-    // Resolve target dir: explicit arg > most-recent drag target > root
-    const dir = typeof targetDir === 'string' ? targetDir : '';
-    this._ensureFileBrowserUploadInput(dir);
+    // Default to current folder when no explicit target (e.g. header button)
+    const effectiveDir =
+      typeof targetDir === 'string' && targetDir !== '' ? targetDir : this.fileBrowserCurrentDir || '';
+    this._ensureFileBrowserUploadInput(effectiveDir);
     if (this._fileBrowserUploadInput) {
-      this._fileBrowserUploadTargetDir = dir;
+      this._fileBrowserUploadTargetDir = effectiveDir;
       this._fileBrowserUploadInput.click();
     }
   },
@@ -3592,6 +3620,19 @@ Object.assign(CodemanApp.prototype, {
     // Refresh tree preserves expanded state; loadFileBrowser already does that
     try {
       await this.loadFileBrowser(sessionId);
+      if (succeeded > 0 && targetDir) {
+        // Ensure uploaded-to folder is visible after reload
+        this.fileBrowserExpandedDirs.add(targetDir);
+        // Walk up to ensure parents are expanded as well
+        let p = targetDir;
+        while (p.includes('/')) {
+          p = p.split('/').slice(0, -1).join('/');
+          if (p) this.fileBrowserExpandedDirs.add(p);
+        }
+        this.fileBrowserCurrentDir = targetDir;
+        this.renderFileBrowserTree();
+        this._updateFileBrowserStatus?.();
+      }
     } catch {}
     const parts = [];
     if (succeeded > 0) parts.push(`${succeeded} file${succeeded > 1 ? 's' : ''} uploaded`);
@@ -3661,6 +3702,141 @@ Object.assign(CodemanApp.prototype, {
     });
   },
 
+  _updateFileBrowserStatus() {
+    const statusEl = this.$('fileBrowserStatus');
+    if (!statusEl || !this.fileBrowserData) return;
+    const { totalFiles, totalDirectories, truncated } = this.fileBrowserData;
+    const base = `${totalFiles} files, ${totalDirectories} dirs${truncated ? ' (truncated)' : ''}`;
+    const dir = this.fileBrowserCurrentDir || '';
+    const showHidden = this.fileBrowserShowHidden === true ? ' · hidden shown' : '';
+    statusEl.textContent = dir ? `${base} · in ${dir}${showHidden}` : `${base}${showHidden}`;
+  },
+
+  async createFileBrowserFolder() {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId) {
+      this.showToast('No active session', 'error');
+      return;
+    }
+    const hint = this.fileBrowserCurrentDir ? ` (in ${this.fileBrowserCurrentDir}/)` : '';
+    const input = window.prompt(`New folder name${hint} (e.g. myFolder or a/b/c):`);
+    if (input == null) return;
+    const name = String(input).trim();
+    if (!name) return;
+    // Allow nested like a/b/c but strip leading/trailing slashes
+    const sanitized = name.replace(/^\/+/, '').replace(/\\/g, '/').trim();
+    if (!sanitized) {
+      this.showToast('Invalid folder name', 'error');
+      return;
+    }
+    const finalPath = this.fileBrowserCurrentDir ? `${this.fileBrowserCurrentDir}/${sanitized}` : sanitized;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files/mkdir`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: finalPath }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Failed (${res.status})`);
+      this.showToast(`Folder "${finalPath}" created`, 'success');
+      await this.loadFileBrowser(sessionId);
+      // Auto-expand current dir and parent so new folder is visible
+      if (this.fileBrowserCurrentDir) this.fileBrowserExpandedDirs.add(this.fileBrowserCurrentDir);
+      const parent = finalPath.includes('/') ? finalPath.split('/').slice(0, -1).join('/') : null;
+      if (parent) this.fileBrowserExpandedDirs.add(parent);
+      this.fileBrowserExpandedDirs.add(finalPath);
+      this.fileBrowserCurrentDir = finalPath;
+      this._updateFileBrowserStatus?.();
+      this.renderFileBrowserTree();
+    } catch (err) {
+      this.showToast(`Create folder failed: ${err && err.message ? err.message : err}`, 'error');
+    }
+  },
+
+  async renameFileBrowserEntry(oldPath) {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId || !oldPath) return;
+    const base = oldPath.split('/').pop() || oldPath;
+    const next = window.prompt(`Rename "${oldPath}" to:`, base);
+    if (next == null) return;
+    const newBase = String(next).trim();
+    if (!newBase || newBase === base) return;
+    if (newBase.includes('/') || newBase.includes('\\')) {
+      this.showToast('Name must not contain path separators', 'error');
+      return;
+    }
+    const dir = oldPath.includes('/') ? oldPath.split('/').slice(0, -1).join('/') : '';
+    const newPath = dir ? `${dir}/${newBase}` : newBase;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: oldPath, to: newPath }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Failed (${res.status})`);
+      this.showToast(`Renamed to "${newPath}"`, 'success');
+      // If renamed directory was expanded, move expanded state
+      if (this.fileBrowserExpandedDirs.has(oldPath)) {
+        this.fileBrowserExpandedDirs.delete(oldPath);
+        this.fileBrowserExpandedDirs.add(newPath);
+      }
+      // Move current dir if it was the renamed path or a child
+      if (this.fileBrowserCurrentDir === oldPath) this.fileBrowserCurrentDir = newPath;
+      else if ((this.fileBrowserCurrentDir || '').startsWith(oldPath + '/')) {
+        this.fileBrowserCurrentDir = newPath + this.fileBrowserCurrentDir.slice(oldPath.length);
+      }
+      // Also update loaded dirs
+      if (this.fileBrowserLoadedDirs && this.fileBrowserLoadedDirs.has(oldPath)) {
+        this.fileBrowserLoadedDirs.delete(oldPath);
+      }
+      await this.loadFileBrowser(sessionId);
+      // Preserve moved current dir across reload (load would otherwise keep old)
+      if (this.fileBrowserCurrentDir === newPath || (this.fileBrowserCurrentDir || '').startsWith(newPath + '/')) {
+        this._updateFileBrowserStatus?.();
+      }
+    } catch (err) {
+      this.showToast(`Rename failed: ${err && err.message ? err.message : err}`, 'error');
+    }
+  },
+
+  async deleteFileBrowserEntry(targetPath) {
+    const sessionId = this.fileBrowserSessionId || this.activeSessionId;
+    if (!sessionId || !targetPath) return;
+    const isDir = targetPath && this.fileBrowserData && (() => {
+      const find = (nodes) => {
+        for (const n of nodes || []) {
+          if (n.path === targetPath) return n;
+          const c = find(n.children);
+          if (c) return c;
+        }
+        return null;
+      };
+      const node = find(this.fileBrowserData.tree || []);
+      return node ? node.type === 'directory' : false;
+    })();
+    const label = isDir ? 'folder' : 'file';
+    if (!window.confirm(`Delete ${label} "${targetPath}"?${isDir ? ' This will delete its contents.' : ''}`)) return;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files?path=${encodeURIComponent(targetPath)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Failed (${res.status})`);
+      this.showToast(`Deleted "${targetPath}"`, 'success');
+      this.fileBrowserExpandedDirs.delete(targetPath);
+      // If deleted path was current dir or ancestor, move current up
+      if (this.fileBrowserCurrentDir === targetPath || (this.fileBrowserCurrentDir || '').startsWith(targetPath + '/')) {
+        const parent = targetPath.includes('/') ? targetPath.split('/').slice(0, -1).join('/') : '';
+        this.fileBrowserCurrentDir = parent;
+      }
+      if (this.fileBrowserLoadedDirs) this.fileBrowserLoadedDirs.delete(targetPath);
+      await this.loadFileBrowser(sessionId);
+    } catch (err) {
+      this.showToast(`Delete failed: ${err && err.message ? err.message : err}`, 'error');
+    }
+  },
+
   hasMatchingChild(node, filter) {
     if (!node.children) return false;
     for (const child of node.children) {
@@ -3673,11 +3849,18 @@ Object.assign(CodemanApp.prototype, {
   async toggleFileBrowserFolder(path) {
     if (this.fileBrowserExpandedDirs.has(path)) {
       this.fileBrowserExpandedDirs.delete(path);
+      if (this.fileBrowserCurrentDir === path || (this.fileBrowserCurrentDir || '').startsWith(path + '/')) {
+        const parent = path.includes('/') ? path.split('/').slice(0, -1).join('/') : '';
+        this.fileBrowserCurrentDir = parent;
+        this._updateFileBrowserStatus?.();
+      }
       this.renderFileBrowserTree();
       return;
     }
 
     this.fileBrowserExpandedDirs.add(path);
+    this.fileBrowserCurrentDir = path;
+    this._updateFileBrowserStatus?.();
     const treeData = this.fileBrowserData;
     if (!treeData?.lazy || this.fileBrowserLoadedDirs?.has(path)) {
       this.renderFileBrowserTree();
@@ -3828,6 +4011,8 @@ Object.assign(CodemanApp.prototype, {
       const downloadBtn = !isDir
         ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
+      const renameBtn = `<button class="file-tree-rename" data-path="${escapeHtml(node.path)}" title="Rename" aria-label="Rename">✎</button>`;
+      const deleteBtn = `<button class="file-tree-delete" data-path="${escapeHtml(node.path)}" title="Delete" aria-label="Delete">🗑</button>`;
 
       html.push(`
         <div class="file-tree-item" data-path="${escapeHtml(node.path)}" data-type="${node.type}" data-depth="0">
@@ -3835,7 +4020,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="file-tree-icon">${icon}</span>
           <span class="${nameClass}">${escapeHtml(node.name)}</span>
           ${sizeStr}
-          ${downloadBtn}
+          ${downloadBtn}${renameBtn}${deleteBtn}
         </div>
       `);
     }
@@ -3843,7 +4028,8 @@ Object.assign(CodemanApp.prototype, {
     treeEl.innerHTML = html.join('');
 
     treeEl.querySelectorAll('.file-tree-item').forEach(item => {
-      item.addEventListener('click', () => {
+      item.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.file-tree-rename, .file-tree-delete, .file-tree-download')) return;
         const path = item.dataset.path;
         const type = item.dataset.type;
         if (type === 'directory') {
@@ -3873,6 +4059,20 @@ Object.assign(CodemanApp.prototype, {
         e.preventDefault();
         e.stopPropagation();
         this.downloadWorkspaceFile(fileBrowserSessionId, btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-rename').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.renameFileBrowserEntry(btn.dataset.path);
+      });
+    });
+    treeEl.querySelectorAll('.file-tree-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.deleteFileBrowserEntry(btn.dataset.path);
       });
     });
   },
@@ -4153,6 +4353,29 @@ Object.assign(CodemanApp.prototype, {
     }
 
     return this.openFilePreview(fileName, sessionId, attachmentId);
+  },
+
+  /**
+   * Whether a path is absolute and provably OUTSIDE this session's workspace.
+   *
+   * `file-content` / `file-raw` resolve every path against `workingDir` and
+   * refuse anything that escapes it, so an absolute path elsewhere on the host
+   * (an agent's `/tmp` scratchpad capture, a screenshot, another checkout) can
+   * only ever 404 there — it has to go through the attachment routes instead.
+   *
+   * A string compare is enough for ROUTING; the real containment decision stays
+   * server-side (realpath + guard) on whichever route the request lands on. An
+   * unknown workingDir answers false, leaving the historical path untouched.
+   *
+   * Registration for those paths is openExternalPathPreview()'s job (above):
+   * it POSTs to /attachments, then previews the minted id.
+   */
+  _isExternalPreviewPath(filePath, sessionId) {
+    if (typeof filePath !== 'string' || !filePath.startsWith('/')) return false;
+    const workingDir = this.sessions.get(sessionId)?.workingDir;
+    if (!workingDir) return false;
+    const root = workingDir.endsWith('/') ? workingDir : `${workingDir}/`;
+    return filePath !== workingDir && !filePath.startsWith(root);
   },
 
   async openFilePreview(filePath, sessionId = this.activeSessionId, attachmentId = null, options = {}) {

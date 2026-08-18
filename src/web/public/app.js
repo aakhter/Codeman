@@ -480,6 +480,16 @@ const DEFAULT_SHORTCUTS = [
     action: 'openCommandPalette',
   },
   {
+    id: 'toggle-session-sidebar',
+    group: 'Session',
+    label: 'Toggle Session Sidebar',
+    // Alt+B, not Ctrl+B: Ctrl+B must reach the terminal (tmux prefix,
+    // readline backward-char). The Alt block below claims only Digit1-9 and
+    // the brackets, and the registry claims Alt for KeyK and Slash only.
+    bindings: [{ modifiers: ['alt'], key: 'b', code: 'KeyB' }],
+    action: 'toggleSessionSidebar',
+  },
+  {
     id: 'previous-next-session',
     group: 'Session',
     label: 'Previous / Next Session',
@@ -537,6 +547,7 @@ class CodemanApp {
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;
     this.collapsedTabGroupIds = new Set();
+    this.focusTabGroupCollapsed = false;
     this._tabCollapseStorageFailed = false;
     this._visibleTabRefs = [];
     this._tabLayoutManaged = true;
@@ -703,6 +714,7 @@ class CodemanApp {
     this.fileBrowserFilter = '';
     this.fileBrowserAllExpanded = false;
     this.fileBrowserDragListeners = null;
+    this.fileBrowserCurrentDir = '';
     // Show hidden (dot-prefixed) files and folders in the File Viewer tree.
     // Per-device, persisted to its own localStorage key by panels-ui.js. Safe to
     // call a mixin method here: instantiation is deferred to DOMContentLoaded,
@@ -722,6 +734,11 @@ class CodemanApp {
     // Pending hooks per session: Map<sessionId, Set<hookType>>
     // Tracks pending hook events that need resolution (permission_prompt, elicitation_dialog, idle_prompt)
     this.pendingHooks = new Map();
+
+    // Sessions THIS tab is closing right now. closeSession() owns the follow-up
+    // selection, so _onSessionDeleted must not race its own delete's SSE
+    // broadcast to the welcome screen. Set<sessionId>, cleared in a finally.
+    this._closingSessions = new Set();
 
     // Approvals Inbox: Map<approvalId, ApprovalItem> (methods in approvals-ui.js)
     this.approvals = new Map();
@@ -953,6 +970,26 @@ class CodemanApp {
     this.updateTabAlertFromHooks(sessionId);
   }
 
+  /**
+   * "I looked at this session": spend its pending IDLE tab alert (the yellow
+   * one), locally AND server-side. The clear used to live only in this tab's
+   * memory, so `seedApprovals()` re-armed it from `GET /api/approvals` on the
+   * next reload (a tab you had already checked went yellow again), and the
+   * user's other devices never heard about it. The server marks the approval
+   * item acknowledged (it stays pending and answerable) and broadcasts
+   * `approval:updated`, which is what clears the alert everywhere else.
+   *
+   * ⚠️ Idle only: action alerts (permission/question) mean an unanswered dialog
+   * is on screen, and looking at one does not answer it.
+   */
+  markIdleAlertSeen(sessionId) {
+    // `pendingHooks?` because _ackDelivery calls this from the input hot path,
+    // which partial app instances (the vm-loaded delivery tests) also drive.
+    if (!this.pendingHooks?.get(sessionId)?.has('idle_prompt')) return;
+    this.clearPendingHooks(sessionId, 'idle_prompt');
+    this.acknowledgeIdleApprovalOnView?.(sessionId);
+  }
+
   updateTabAlertFromHooks(sessionId) {
     const hooks = this.pendingHooks.get(sessionId);
     if (!hooks || hooks.size === 0) {
@@ -991,6 +1028,10 @@ class CodemanApp {
     this.restorePlanUsageChip();
     this.applySkin();
     this.applyLocalization();
+    // applySessionListLayout() re-parents #sessionTabs and calls
+    // applyTabWrapSettings() itself; the COD-286 rail runs after it and yields
+    // whenever the sidebar layout is the active one (see applyTabOrientation).
+    this.applySessionListLayout();
     this.applyTabOrientation();  // COD-286 — before the wrap pass: vertical disables it
     this.initTabRailResize?.();  // COD-299 — apply device width before terminal creation
     this.applyTabWrapSettings();
@@ -1061,7 +1102,7 @@ class CodemanApp {
       this.applyHeaderVisibilitySettings();
       this.applySkin();
       this.applyLocalization();
-      this.applyTabWrapSettings();
+      this.applySessionListLayout();
       this.applyMonitorVisibility();
       this.applyLineageLineSettings?.();
       // ultracodeFloatingWindows syncs from the server (non-display key), but on a
@@ -1335,6 +1376,15 @@ class CodemanApp {
         if (this.attachmentHistoryDrawerOpen) this.closeAttachmentHistory();
         this.closeSessionManager();
         this.closeCommandPalette?.();
+        this.closeShortcutOverlay?.();
+        // Overlay layouts only: below 1024px the sidebar is a modal off-canvas
+        // drawer over the terminal, so Escape must close it. The docked desktop
+        // sidebar is chrome, not a dialog — collapsing it would be a surprise.
+        if (this._isSessionSidebarOverlay() &&
+            this.isSessionSidebarActive() && !this.isSessionSidebarCollapsed()) {
+          this.toggleSessionSidebar();
+          document.getElementById('sidebarToggleBtn')?.focus();
+        }
       }
 
       // Option/Alt session navigation uses physical key CODES, not e.key, so macOS
@@ -1532,8 +1582,12 @@ class CodemanApp {
   _markDetached(id, on) {
     if (on) this.detachedSessions.add(id); else this.detachedSessions.delete(id);
     const container = this.$('sessionTabs');
-    const tab = container && container.querySelector(`.session-tab[data-id="${id}"]`);
-    if (tab) tab.classList.toggle('detached', on);
+    if (!container) return;
+    for (const tab of container.querySelectorAll(
+      `.session-tab[data-id="${CSS.escape(id)}"], .session-tab[data-focus-session-id="${CSS.escape(id)}"]`
+    )) {
+      tab.classList.toggle('detached', on);
+    }
   }
 
   /** Poll a window we opened; when it closes, re-dock its tab. This is the
@@ -1645,9 +1699,10 @@ class CodemanApp {
     document.body.classList.add('solo-mode');
     const session = this.sessions.get(this.soloSessionId);
     if (!session) { this._showSoloSessionGone(); return; }
-    // Force re-select (handleInit cleared terminal state above).
+    // Force re-select (handleInit cleared terminal state above). `auto`: the
+    // window is opening its own target, which is not a human checking on it.
     this.activeSessionId = null;
-    this.selectSession(this.soloSessionId);
+    this.selectSession(this.soloSessionId, { auto: true });
     const name = this.getSessionName(session) || 'Session';
     const titleEl = document.getElementById('soloSessionTitle');
     if (titleEl) { titleEl.textContent = name; titleEl.style.display = ''; }
@@ -2046,7 +2101,13 @@ class CodemanApp {
     // Dashboard: a detached session ended → clear its detached state/timers.
     if (this.detachedSessions.has(data.id)) this._redock(data.id);
     this._cleanupSessionData(data.id);
-    if (this.activeSessionId === data.id) {
+    // ⚠️ Skip the whole active-session handoff while THIS tab is closing that
+    // session: closeSession() owns the follow-up selection and moves you to the
+    // next tab, so acting here would race it and flash the welcome screen (or
+    // strand you on it) for a close the user initiated right here. A delete from
+    // anywhere else still lands on the home screen, which is the honest answer
+    // when the thing you were looking at was taken away.
+    if (this.activeSessionId === data.id && !this._closingSessions.has(data.id)) {
       this.activeSessionId = null;
       try { localStorage.removeItem('codeman-active-session'); } catch {}
       this.terminal.clear();
@@ -2446,6 +2507,28 @@ class CodemanApp {
           emptyMessage: 'No section content to copy',
           failureMessage: 'Failed to copy section',
         });
+        return;
+      }
+
+      // File path (_linkifyFilePaths): open it in the preview overlay. An
+      // out-of-workspace path has to be registered as an attachment first —
+      // the workspace-confined routes can only 404 on it — which is exactly
+      // what openExternalPathPreview does before previewing by id.
+      const pathLink = ev.target.closest('a.rv-path');
+      if (pathLink) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const filePath = pathLink.dataset.path;
+        if (filePath) {
+          if (this._isExternalPreviewPath(filePath, this.activeSessionId)) {
+            const pending = this.openExternalPathPreview(filePath, this.activeSessionId);
+            if (pending && typeof pending.catch === 'function') {
+              pending.catch((err) => console.error('Failed to open external path preview:', err));
+            }
+          } else {
+            this.openFilePreview(filePath, this.activeSessionId);
+          }
+        }
         return;
       }
 
@@ -2862,8 +2945,64 @@ class CodemanApp {
     const renderedText = document.createElement('div');
     renderedText.className = 'rv-text';
     renderedText.innerHTML = this._renderMarkdown(text);
+    this._linkifyFilePaths(renderedText);
     div.appendChild(renderedText);
     return div;
+  }
+
+  /**
+   * Make absolute file paths in a rendered message clickable.
+   *
+   * The terminal's link provider never sees these: the response viewer is
+   * markdown, and a path the agent wrote as prose or inline code renders as
+   * inert text — so the file it just produced (a screenshot, a report) was one
+   * copy-paste away from being viewable instead of one click. Same pattern the
+   * terminal uses (constants.js), same destination (the file-preview overlay).
+   *
+   * Walks TEXT NODES and builds anchors with DOM APIs — never innerHTML, and
+   * never a string rebuild of already-sanitized markup: the source is model
+   * output. Subtrees already inside an `<a>` are skipped so an autolinked URL
+   * is never re-cut, and the anchor's textContent is the path verbatim, so
+   * "copy code" still yields exactly what the agent printed.
+   */
+  _linkifyFilePaths(root) {
+    if (!root || typeof document === 'undefined') return;
+    // Guarded: a stale cached constants.js must degrade to plain text, not throw
+    // out of the middle of rendering a message.
+    if (typeof absoluteFilePathPattern !== 'function') return;
+    const pattern = absoluteFilePathPattern();
+
+    // Collect first: replacing a node while the walker is positioned on it
+    // invalidates the traversal.
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const targets = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.parentElement?.closest('a')) continue;
+      pattern.lastIndex = 0;
+      if (pattern.test(node.nodeValue || '')) targets.push(node);
+    }
+
+    for (const node of targets) {
+      const value = node.nodeValue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      let match;
+      pattern.lastIndex = 0;
+      while ((match = pattern.exec(value)) !== null) {
+        const path = match[1];
+        if (match.index > cursor) frag.appendChild(document.createTextNode(value.slice(cursor, match.index)));
+        const link = document.createElement('a');
+        link.className = 'rv-path';
+        link.href = '#';
+        link.dataset.path = path;
+        link.title = path;
+        link.textContent = path;
+        frag.appendChild(link);
+        cursor = match.index + path.length;
+      }
+      if (cursor < value.length) frag.appendChild(document.createTextNode(value.slice(cursor)));
+      node.parentNode?.replaceChild(frag, node);
+    }
   }
 
   _getResponseViewerAgentLabel() {
@@ -4056,7 +4195,14 @@ class CodemanApp {
         this._updateConnectionIndicator();
       }
     }
-    this.clearPendingHooks?.(sessionId);
+    // ⚠️ IDLE ONLY, and acknowledged server-side rather than cleared in memory.
+    // Delivering input answers "Claude is waiting for a prompt" by definition,
+    // so this is the same "I am on it" signal as opening the tab. It does NOT
+    // answer a permission/question dialog: those ignore any keystroke that is
+    // not one of their options, so the dialog is still up and still needs you.
+    // Clearing action alerts here hid a LIVE alert on this device alone (the
+    // other devices stayed red and a reload re-seeded it straight back).
+    this.markIdleAlertSeen?.(sessionId);
   }
 
   /** Server input-ACK frame ({t:'ia',seq}) over the WebSocket. */
@@ -4804,10 +4950,13 @@ class CodemanApp {
         if (!restoreId || !this.sessions.has(restoreId)) {
           try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
         }
+        // `auto`: the app is restoring a session on load, not a human opening
+        // one, so a pending idle alert on that tab stays armed until it is
+        // actually tapped (see the userInitiated note in selectSession).
         if (restoreId && this.sessions.has(restoreId)) {
-          this.selectSession(restoreId);
+          this.selectSession(restoreId, { auto: true });
         } else {
-          this.selectSession(this.sessionOrder[0]);
+          this.selectSession(this.sessionOrder[0], { auto: true });
         }
       }
     });
@@ -4866,7 +5015,9 @@ class CodemanApp {
     return this._ensureTabLayoutCoordinator().load();
   }
 
-  _onTabLayoutChanged() {
+  _onTabLayoutChanged(data) {
+    const currentUser = window.__codemanUser;
+    if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
     // A pending semantic edit owns its optimistic projection. A refetch may
     // update its authoritative base, but must not paint stale server state over it.
     if (this._tabLayoutEditCoordinator?.hasPending()) {
@@ -4946,6 +5097,30 @@ class CodemanApp {
           ]
         : []),
     ];
+  }
+
+  _tabStoredRef(ref) {
+    const location = this._refLocation(ref);
+    if (!location) return null;
+    return location.groupId === null
+      ? this.tabLayout.ungrouped[location.index]
+      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs[location.index] || null;
+  }
+
+  _tabRefFocused(ref) {
+    return this._tabStoredRef(ref)?.focus === true;
+  }
+
+  setTabRefFocus(ref, focused) {
+    return this.editTabLayout({ type: 'setFocus', ref, focused }, `${ref.kind}:${ref.id}`);
+  }
+
+  _tabRefFocusAction(ref) {
+    const focused = this._tabRefFocused(ref);
+    return {
+      label: focused ? 'Remove from Focus' : 'Add to Focus',
+      run: () => this.setTabRefFocus(ref, !focused),
+    };
   }
 
   _syncTabPlacementAccessibility(tab, ref, name, tabTooltip) {
@@ -5320,6 +5495,7 @@ class CodemanApp {
     event?.stopPropagation?.();
     document.querySelector('.tab-layout-ref-move-menu')?.remove();
     const actions = [
+      this._tabRefFocusAction(ref),
       ...this._tabRefPlacementActions(ref),
       ...this._tabRefMoveActions(ref).map(({ label, groupId, index }) => ({
         label,
@@ -5361,6 +5537,46 @@ class CodemanApp {
     menu.querySelector('button')?.focus();
   }
 
+  openFocusShortcutMenu(event, ref) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    this.closeTabRailActionMenu?.();
+    document.querySelector('.tab-focus-action-menu')?.remove();
+    const trigger = event?.currentTarget;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-focus-action-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Focus actions');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'menuitem');
+    button.textContent = 'Remove from Focus';
+    button.addEventListener('click', () => {
+      this.closeTabRailActionMenu?.();
+      this.setTabRefFocus(ref, false);
+    });
+    menu.appendChild(button);
+    document.body.appendChild(menu);
+    const rect = trigger?.getBoundingClientRect?.();
+    if (rect) {
+      menu.style.left = `${rect.left}px`;
+      menu.style.top = `${rect.bottom + 4}px`;
+    }
+    this._tabRailActionMenuTrigger = trigger;
+    this._tabRailActionMenuOutside = (pointerEvent) => {
+      if (!menu.contains(pointerEvent.target) && !trigger?.contains?.(pointerEvent.target)) {
+        this.closeTabRailActionMenu?.();
+      }
+    };
+    document.addEventListener('pointerdown', this._tabRailActionMenuOutside, true);
+    menu.addEventListener('keydown', (keyEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault();
+      this.closeTabRailActionMenu?.({ restoreFocus: true });
+    });
+    button.focus();
+  }
+
   _tabOrientation() {
     return document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
   }
@@ -5374,6 +5590,7 @@ class CodemanApp {
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
       orientation: this._tabOrientation(),
+      focusCollapsed: this.focusTabGroupCollapsed,
     };
     return this.tabLayout
       ? window.CodemanTabLayout.project(this.tabLayout, options)
@@ -5386,7 +5603,15 @@ class CodemanApp {
 
   _refreshTabProjection() {
     if (this._tabLayoutFirstPaintPending) {
-      const pending = { sessionOrder: [], completeRefs: [], visibleRefs: [], sections: [], hiddenTabGroupByRef: {} };
+      const pending = {
+        sessionOrder: [],
+        completeRefs: [],
+        visibleRefs: [],
+        focusRefs: [],
+        focusCollapsed: false,
+        sections: [],
+        hiddenTabGroupByRef: {},
+      };
       this.sessionOrder = pending.sessionOrder;
       this._completeTabRefs = pending.completeRefs;
       this._visibleTabRefs = pending.visibleRefs;
@@ -5427,8 +5652,13 @@ class CodemanApp {
           layout.groups?.map((group) => group.id) || []
         )
       : { ids: [], ok: false };
-    if (!collapsedState.ok) this._tabCollapseStorageFailed = true;
-    this.collapsedTabGroupIds = new Set(collapsedState.ids);
+    const focusState = collapsedState.ok && storage
+      ? window.CodemanTabLayout.loadFocusGroupCollapsed(storage)
+      : { collapsed: false, ok: false };
+    const collapseStateOk = collapsedState.ok && focusState.ok;
+    if (!collapseStateOk) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(collapseStateOk ? collapsedState.ids : []);
+    this.focusTabGroupCollapsed = collapseStateOk ? focusState.collapsed : false;
     this.tabLayoutReadOnly = false;
     this._tabLayoutFirstPaintPending = false;
     this._lastTabStructureKey = null;
@@ -5461,6 +5691,8 @@ class CodemanApp {
       openWebviewIds: [...(this.webviewOrder || [])],
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
+      focusRefs: projection.focusRefs,
+      focusCollapsed: projection.focusCollapsed,
       visibleRefs: projection.visibleRefs,
       placementStates,
     });
@@ -5502,6 +5734,19 @@ class CodemanApp {
     return this.collapsedTabGroupIds.has(groupId) === shouldCollapse;
   }
 
+  toggleFocusGroupCollapsed(forceCollapsed) {
+    const shouldCollapse = forceCollapsed === undefined ? !this.focusTabGroupCollapsed : forceCollapsed === true;
+    const storage = this._getTabCollapseStorage();
+    const saved = storage
+      ? window.CodemanTabLayout.saveFocusGroupCollapsed(storage, shouldCollapse)
+      : { collapsed: false, ok: false };
+    if (!saved.ok) this._tabCollapseStorageFailed = true;
+    this.focusTabGroupCollapsed = saved.collapsed;
+    this._lastTabStructureKey = null;
+    this._fullRenderSessionTabs();
+    return this.focusTabGroupCollapsed === shouldCollapse;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Debounce Utility
   // ═══════════════════════════════════════════════════════════════
@@ -5515,6 +5760,277 @@ class CodemanApp {
       this._debounceTimers[timerKey] = null;
       fn.call(this);
     }, delayMs);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Session List Layout (header strip ⟷ collapsible left sidebar)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * 'header' | 'sidebar'. Solo (detached single-session) windows are ALWAYS
+   * 'header': they show exactly one session, so a session list is noise — and
+   * #sessionTabs must never be parked inside the display:none <aside>, where
+   * updateTabOverflowMode() would measure 0/0 and the inline rename input would
+   * get zero geometry.
+   */
+  getSessionListLayout() {
+    if (this.soloSessionId) return 'header';
+    const settings = this.loadAppSettingsFromStorage();
+    const defaults = this.getDefaultSettings();
+    const layout = settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
+    return layout === 'sidebar' ? 'sidebar' : 'header';
+  }
+
+  /**
+   * Reads the APPLIED layout off <html>, not the settings blob: this is called
+   * per dragover event and per tab in render loops, and getSessionListLayout()
+   * re-parses localStorage on every call. The attribute is written by the
+   * pre-paint script in index.html and thereafter only by applySessionListLayout(),
+   * so it is authoritative from the very first frame.
+   */
+  isSessionSidebarActive() {
+    return document.documentElement.dataset.sessionList === 'sidebar';
+  }
+
+  /**
+   * True where the sidebar is a MODAL off-canvas drawer over the terminal
+   * instead of a docked column.
+   *
+   * That behaviour is defined purely in mobile.css, which index.html loads with
+   * media="(max-width: 1023px)" — so this must test the SAME breakpoint.
+   * MobileDetection.getDeviceType() is NOT usable here: it calls anything
+   * >= 768px 'desktop', which would leave 768-1023px (iPad portrait, a narrowed
+   * desktop window) with overlay CSS but docked-sidebar logic — drawer opens
+   * itself on load, tapping a session doesn't dismiss it, Escape does nothing.
+   * Mirrored in the pre-paint script in index.html.
+   */
+  _isSessionSidebarOverlay() {
+    return window.innerWidth < 1024;
+  }
+
+  /**
+   * Collapse state is per-device and lives in its OWN localStorage key, not in
+   * the app-settings blob: saveAppSettings() rebuilds that blob from the DOM
+   * controls, so any key without a control is silently wiped on every Save.
+   * Precedent: codeman:skin, codeman-session-order, codeman-active-session.
+   */
+  isSessionSidebarCollapsed() {
+    // In-memory intent wins over storage: where localStorage throws (Safari
+    // private mode, disabled storage, quota) the write in toggleSessionSidebar()
+    // is a no-op, and re-reading here would return the OLD value — the sidebar
+    // would refuse to collapse at all. Persistence degrades, the control does not.
+    if (this._sidebarCollapsedOverride !== undefined) return this._sidebarCollapsedOverride;
+    let raw = null;
+    try {
+      raw = localStorage.getItem('codeman-sidebar-collapsed');
+    } catch {}
+    // Never chosen yet: the docked desktop sidebar starts open, the overlay
+    // drawer starts CLOSED — "expanded" there would mean a drawer covering the
+    // terminal on every cold load.
+    if (raw === null) return this._isSessionSidebarOverlay();
+    return raw === '1';
+  }
+
+  /**
+   * True when this keydown is the sidebar-toggle chord AND toggling would
+   * actually do something. Used by terminal-ui.js's custom key handler to keep
+   * the chord out of the PTY: the document CAPTURE handler has already toggled
+   * the sidebar by the time xterm sees the event, but its preventDefault() does
+   * NOT stop xterm — without this gate Alt+B would ALSO write ESC b into the
+   * live session, which readline/Ink read as backward-word and which walks the
+   * cursor back through whatever the user was typing (same trap as COD-153).
+   *
+   * Deliberately registry-aware and gated on the sidebar being active, so a
+   * rebound/disabled shortcut — and the default header layout, where the toggle
+   * is a no-op — leave Meta-b reaching the terminal exactly as before.
+   */
+  shouldToggleSessionSidebarFromShortcut(e) {
+    if (!e) return false;
+    // Every dispatchable binding requires Ctrl/Cmd/Alt, so plain typing exits
+    // before any registry work — this runs on the xterm keydown hot path.
+    if (!e.ctrlKey && !e.metaKey && !e.altKey) return false;
+    if (!this.isSessionSidebarActive()) return false;
+    if (typeof this.getShortcutRegistry !== 'function' || typeof this.matchesShortcutEvent !== 'function') {
+      return false;
+    }
+    const shortcut = this.getShortcutRegistry().find((s) => s.id === 'toggle-session-sidebar');
+    if (!shortcut || shortcut.disabled) return false;
+    return this.matchesShortcutEvent(e, shortcut);
+  }
+
+  /**
+   * Move the ONE #sessionTabs element between its two hosts and set the layout
+   * attributes that all the sidebar CSS keys off.
+   *
+   * Never clones or recreates the node: this.$('sessionTabs') caches elements by
+   * id and never invalidates, and settings-ui.js / webview-tabs.js resolve the
+   * same id independently. A rebuilt container would leave every consumer
+   * writing into a detached orphan — silently, with no error.
+   */
+  applySessionListLayout() {
+    const mode = this.getSessionListLayout();
+    const collapsed = this.isSessionSidebarCollapsed();
+    const prevMode = document.documentElement.dataset.sessionList;
+    const tabsEl = document.getElementById('sessionTabs');
+    const headerHost = document.getElementById('sessionTabsHost');
+    const sidebarList = document.getElementById('sessionSidebarList');
+    if (!tabsEl || !headerHost || !sidebarList) return;
+
+    const host = mode === 'sidebar' ? sidebarList : headerHost;
+    if (tabsEl.parentElement !== host) host.appendChild(tabsEl);
+
+    document.documentElement.dataset.sessionList = mode;
+    document.documentElement.dataset.sidebar = collapsed ? 'collapsed' : 'expanded';
+    tabsEl.setAttribute('aria-orientation', mode === 'sidebar' ? 'vertical' : 'horizontal');
+
+    const btn = document.getElementById('sidebarToggleBtn');
+    if (btn) {
+      btn.classList.toggle('btn-sidebar-toggle--hidden', mode !== 'sidebar');
+      const label = collapsed ? 'Expand session sidebar' : 'Collapse session sidebar';
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      btn.setAttribute('aria-label', label);
+      btn.setAttribute('title', label);
+    }
+
+    // Handheld (mobile.css): the sidebar is an off-canvas overlay, and
+    // "collapsed" means the drawer is closed.
+    const aside = document.getElementById('sessionSidebar');
+    if (aside) {
+      aside.classList.toggle('open', mode === 'sidebar' && !collapsed);
+      // A closed overlay drawer is only moved off screen by translateX(-100%);
+      // it keeps display:flex, so without this its filter box and ~4 tab stops
+      // per session stay in the Tab order and in the accessibility tree.
+      // NOT applied to the docked desktop rail — its rows are still clickable.
+      const hiddenDrawer = mode === 'sidebar' && collapsed && this._isSessionSidebarOverlay();
+      aside.toggleAttribute('inert', hiddenDrawer);
+      if (hiddenDrawer) aside.setAttribute('aria-hidden', 'true');
+      else aside.removeAttribute('aria-hidden');
+    }
+
+    // The filter box only exists inside the sidebar; leaving a stale filter
+    // applied when the layout goes back to the header strip would hide sessions
+    // from the tab bar with no reachable control to clear it.
+    if (mode !== 'sidebar') {
+      this._sidebarFilter = '';
+      const filterInput = document.getElementById('sessionSidebarFilter');
+      if (filterInput) filterInput.value = '';
+    }
+
+    // applyTabWrapSettings() (settings-ui.js) is the ONE owner of
+    // tabs-two-rows / tabs-show-folder / _tallTabsEnabled and is itself
+    // sidebar-aware — it reads the data-session-list attribute set just above,
+    // so it must run AFTER it. It re-renders by itself when the folder row
+    // appears or disappears.
+    const prevTall = this._tallTabsEnabled;
+    this.applyTabWrapSettings();
+    // A layout flip alone still needs one render: the rows are rebuilt into the
+    // new host with the drag/keyboard handlers re-bound. Skipped when
+    // applyTabWrapSettings() already rendered for the folder-row change.
+    if (prevMode !== mode && prevTall === this._tallTabsEnabled) {
+      this._fullRenderSessionTabs();
+    }
+    // tabs-auto-wrap is measured, not derived from settings — updateTabOverflowMode()
+    // drops it in sidebar mode, but drop it here too so nothing paints wrapped
+    // for a frame before the next measure.
+    if (mode === 'sidebar') tabsEl.classList.remove('tabs-auto-wrap');
+    // Collapse/expand changes whether the filter is reachable, so re-evaluate it
+    // here too — not only at the render tails.
+    this.applySidebarFilter(this._sidebarFilter);
+    this.updateConnectionLines();
+    // The desktop home rail defers to the sidebar (both dock the session list
+    // flush left), so a layout flip while the welcome screen is up has to
+    // re-evaluate it — showHomeSessions() self-gates on shouldShowHomeSessions().
+    if (document.getElementById('welcomeOverlay')?.classList.contains('visible')) {
+      this.showHomeSessions?.();
+    }
+  }
+
+  toggleSessionSidebar() {
+    if (!this.isSessionSidebarActive()) return;
+    const collapsed = !this.isSessionSidebarCollapsed();
+    this._sidebarCollapsedOverride = collapsed;
+    try {
+      localStorage.setItem('codeman-sidebar-collapsed', collapsed ? '1' : '0');
+    } catch {}
+    // Collapsing hides the filter row. If focus is sitting in there it would be
+    // reset to <body>, dropping the user back to the top of the tab order — so
+    // hand it to the toggle, which is the control they just used.
+    if (collapsed && this.$('sessionSidebar')?.contains(document.activeElement)) {
+      document.getElementById('sidebarToggleBtn')?.focus();
+    }
+    this.applySessionListLayout();
+    // Opening the MODAL drawer moves focus into it, as a dialog should. The
+    // docked desktop sidebar is not modal: stealing focus there would pull the
+    // caret out of the terminal mid-prompt, and .session-tab handles only
+    // arrows/Home/End/Enter/Space, so everything typed after would be swallowed.
+    if (!collapsed && this._isSessionSidebarOverlay()) {
+      this.$('sessionTabs')?.querySelector('.session-tab.active')?.focus();
+    }
+  }
+
+  /**
+   * Overlay layouts only: below 1024px the sidebar is a modal drawer on top of
+   * the terminal (mobile.css), so picking a session from it must get it out of
+   * the way again. The docked desktop sidebar stays exactly where the user put
+   * it. No-op unless the drawer is actually open.
+   */
+  closeSessionSidebarOnHandheld() {
+    if (!this._isSessionSidebarOverlay()) return;
+    if (!this.isSessionSidebarActive() || this.isSessionSidebarCollapsed()) return;
+    this.toggleSessionSidebar();
+  }
+
+  /**
+   * The count is what is actually ON the list: session rows plus web-tab rows,
+   * minus whatever the sidebar filter is hiding. `this.sessions.size` was the
+   * original source and disagreed with the screen twice over — web tabs render
+   * in the same list but are not sessions (3 sessions + 2 dashboards read "3"
+   * above 5 rows), and a filter hides rows without touching the map. Counting
+   * the rendered rows keeps one source of truth: the list itself.
+   */
+  updateSidebarCount() {
+    const el = document.getElementById('sessionSidebarCount');
+    if (!el) return;
+    const container = this.$('sessionTabs');
+    const count = container
+      ? container.querySelectorAll('.session-tab:not(.tab-filtered-out)').length
+      : (this.sessions?.size ?? 0);
+    el.textContent = String(count);
+  }
+
+  /**
+   * Sidebar filter box. Pure DOM class toggling — no re-render, no state on the
+   * sessions themselves. Matches the rendered aria-label (session name) and the
+   * title (working directory).
+   *
+   * Re-applied at the tail of both render paths: _fullRenderSessionTabs() rebuilds
+   * innerHTML wholesale, so without that the filtered-out rows flicker back in on
+   * every SSE tick.
+   *
+   * The filter only takes effect while the box that produced it is on screen —
+   * i.e. the expanded sidebar. In the header strip, the collapsed rail or a
+   * closed drawer the classes come off, otherwise sessions would stay hidden
+   * with no visible cause and no reachable control to clear them. The remembered
+   * needle is restored when the box comes back.
+   */
+  applySidebarFilter(query) {
+    this._sidebarFilter = (query ?? '').trim().toLowerCase();
+    const container = this.$('sessionTabs');
+    if (!container) return;
+    const reachable =
+      this.isSessionSidebarActive() && document.documentElement.dataset.sidebar !== 'collapsed';
+    const needle = reachable ? this._sidebarFilter : '';
+    for (const tab of container.querySelectorAll('.session-tab')) {
+      if (!needle) {
+        tab.classList.remove('tab-filtered-out');
+        continue;
+      }
+      const haystack = `${tab.getAttribute('aria-label') || ''} ${tab.getAttribute('title') || ''}`.toLowerCase();
+      tab.classList.toggle('tab-filtered-out', !haystack.includes(needle));
+    }
+    // The count shows visible rows, so it moves with every filter change —
+    // including keystrokes in the filter box, which call this directly.
+    this.updateSidebarCount();
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -5547,6 +6063,16 @@ class CodemanApp {
       tab.classList.remove('active');
       tab.setAttribute('aria-selected', 'false');
     }
+    for (const tab of container.querySelectorAll('.session-tab[data-focus-session-id]')) {
+      tab.classList.remove('active');
+      tab.removeAttribute('aria-selected');
+      tab.setAttribute('aria-current', tab.dataset.focusSessionId === sessionId ? 'page' : 'false');
+    }
+    for (const tab of container.querySelectorAll('.session-tab[data-focus-webview-id]')) {
+      tab.classList.remove('active');
+      tab.removeAttribute('aria-selected');
+      tab.setAttribute('aria-current', 'false');
+    }
     // #257: selection used to stop at the class toggle. On phones/tablets the
     // strip scrolls horizontally, so a tab selected from the palette, a swipe,
     // Alt+N or a push notification could stay parked off-screen.
@@ -5576,6 +6102,16 @@ class CodemanApp {
       ) || container.querySelector('.session-tab.active');
     if (!tab) return;
 
+    // Sidebar layout: the list scrolls VERTICALLY in its own scroller, so the
+    // horizontal computeTabScrollLeft math below would always no-op (scrollLeft
+    // pinned at 0). With 25+ sessions the active row is routinely below the
+    // fold; 'nearest' never scrolls when it is already visible, and only the
+    // list's own scroller moves — the drawer and document stay put.
+    if (this.isSessionSidebarActive()) {
+      tab.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+
     const policy = window.CodemanTabOverflow?.computeTabScrollLeft;
     if (!policy) return;
     const containerRect = container.getBoundingClientRect();
@@ -5600,6 +6136,45 @@ class CodemanApp {
     }
   }
 
+  /**
+   * Where a floating window (subagent / ultracode) attaches to its parent tab.
+   * Header strip: below the tab, connector runs vertically. Sidebar: to the
+   * RIGHT of the tab, connector runs horizontally — otherwise the window spawns
+   * on top of the sidebar and its bezier loops backwards underneath it.
+   */
+  _tabAnchor(rect) {
+    if (this.isSessionSidebarActive()) {
+      return {
+        x: rect.right,
+        y: rect.top + rect.height / 2,
+        spawnLeft: rect.right + 14,
+        spawnTop: rect.top,
+        vertical: false,
+      };
+    }
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.bottom,
+      spawnLeft: rect.left,
+      spawnTop: rect.bottom,
+      vertical: true,
+    };
+  }
+
+  /** Bezier from a _tabAnchor() to a window rect, curving along the right axis. */
+  _tabConnectorPath(anchor, winRect) {
+    if (anchor.vertical) {
+      const x2 = winRect.left + winRect.width / 2;
+      const y2 = winRect.top;
+      const midY = (anchor.y + y2) / 2;
+      return `M ${anchor.x} ${anchor.y} C ${anchor.x} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
+    }
+    const x2 = winRect.left;
+    const y2 = winRect.top + winRect.height / 2;
+    const midX = (anchor.x + x2) / 2;
+    return `M ${anchor.x} ${anchor.y} C ${midX} ${anchor.y}, ${midX} ${y2}, ${x2} ${y2}`;
+  }
+
   _setTerminalLoadState(sessionId, selectGen, phase) {
     this.terminalLoadStates.set(sessionId, { generation: selectGen, phase });
     this._updateTerminalLoadTab(sessionId);
@@ -5613,29 +6188,29 @@ class CodemanApp {
   }
 
   _updateTerminalLoadTab(sessionId) {
-    const tab = this.$('sessionTabs')?.querySelector(`.session-tab[data-id="${sessionId}"]`);
-    if (!tab) return;
-
+    const tabs = this.$('sessionTabs')?.querySelectorAll(
+      `.session-tab[data-id="${CSS.escape(sessionId)}"], .session-tab[data-focus-session-id="${CSS.escape(sessionId)}"]`
+    );
+    if (!tabs?.length) return;
     const loadState = this.terminalLoadStates.get(sessionId);
-    tab.classList.toggle('tab-loading', !!loadState);
-    if (loadState) {
-      tab.setAttribute('aria-busy', 'true');
-      tab.dataset.loadPhase = loadState.phase;
-      if (!tab.querySelector('.tab-load-spinner')) {
-        const spinner = document.createElement('span');
-        spinner.className = 'tab-load-spinner';
-        spinner.setAttribute('aria-hidden', 'true');
-        const numberEl = tab.querySelector('.tab-number');
-        if (numberEl) {
-          numberEl.insertAdjacentElement('afterend', spinner);
-        } else {
-          tab.insertBefore(spinner, tab.firstChild);
+    for (const tab of tabs) {
+      tab.classList.toggle('tab-loading', !!loadState);
+      if (loadState) {
+        tab.setAttribute('aria-busy', 'true');
+        tab.dataset.loadPhase = loadState.phase;
+        if (!tab.querySelector('.tab-load-spinner')) {
+          const spinner = document.createElement('span');
+          spinner.className = 'tab-load-spinner';
+          spinner.setAttribute('aria-hidden', 'true');
+          const numberEl = tab.querySelector('.tab-number');
+          if (numberEl) numberEl.insertAdjacentElement('afterend', spinner);
+          else tab.insertBefore(spinner, tab.firstChild);
         }
+      } else {
+        tab.setAttribute('aria-busy', 'false');
+        delete tab.dataset.loadPhase;
+        tab.querySelector('.tab-load-spinner')?.remove();
       }
-    } else {
-      tab.setAttribute('aria-busy', 'false');
-      delete tab.dataset.loadPhase;
-      tab.querySelector('.tab-load-spinner')?.remove();
     }
   }
 
@@ -5650,11 +6225,12 @@ class CodemanApp {
     const container = this.$('sessionTabs');
     const projection = this._refreshTabProjection();
     const structureKey = this._tabStructureKey(projection);
-    const existingRefs = [...container.querySelectorAll('.session-tab')].map((tab) =>
+    const existingRefs = [...container.querySelectorAll('.session-tab:not(.tab-focus-shortcut)')].map((tab) =>
       tab.dataset.webviewId ? `webview:${tab.dataset.webviewId}` : `session:${tab.dataset.id}`
     );
     const wantedRefs = projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`);
     const canIncremental =
+      (projection.focusRefs?.length || 0) === 0 &&
       structureKey === this._lastTabStructureKey &&
       existingRefs.length === wantedRefs.length &&
       existingRefs.every((identity, index) => identity === wantedRefs[index]);
@@ -5838,8 +6414,13 @@ class CodemanApp {
     // The full-render path already redraws the connection SVG; this incremental
     // one does not, and a badge appearing widens a tab and shifts every tab after
     // it, sliding the lineage arcs off their anchors. Only pay for it when there
-    // is an arc to keep anchored.
-    if (this._lineageEdgeCount > 0) this.updateConnectionLines();
+    // is something anchored to tab rects: lineage arcs, or — in sidebar layout,
+    // where lineage is skipped and the edge count stays 0 — the subagent/
+    // ultracode connectors, whose rows a badge changes the HEIGHT of. Same
+    // widening as the strip-scroll listener in session-lineage.js.
+    if (this._lineageEdgeCount > 0 || this.isSessionSidebarActive()) this.updateConnectionLines();
+
+    this.applySidebarFilter(this._sidebarFilter);
   }
 
   // Auto-wrap desktop session tabs to a second row when they overflow one row,
@@ -5848,6 +6429,13 @@ class CodemanApp {
   updateTabOverflowMode() {
     const container = this.$('sessionTabs');
     if (!container) return;
+
+    // The sidebar list is a single vertical column with its own scroller —
+    // there is no row to overflow, and measuring it would fight the CSS.
+    if (this.isSessionSidebarActive()) {
+      container.classList.remove('tabs-auto-wrap');
+      return;
+    }
 
     const deviceType = MobileDetection.getDeviceType();
     const settings = this.loadAppSettingsFromStorage();
@@ -5954,12 +6542,63 @@ class CodemanApp {
     });
   }
 
+  _renderFocusShortcut(ref, sourceHtml) {
+    if (!sourceHtml) return '';
+    const template = document.createElement('template');
+    template.innerHTML = sourceHtml.trim();
+    const tab = template.content.firstElementChild;
+    if (!tab) return '';
+    const key = `${ref.kind}:${ref.id}`;
+    const selected = ref.kind === 'webview'
+      ? this.activeWebviewId === ref.id
+      : !this.activeWebviewId && this.activeSessionId === ref.id;
+    tab.classList.remove('active');
+    tab.classList.add('tab-focus-shortcut');
+    tab.setAttribute('data-tab-focus-shortcut', key);
+    tab.setAttribute(ref.kind === 'webview' ? 'data-focus-webview-id' : 'data-focus-session-id', ref.id);
+    tab.removeAttribute(ref.kind === 'webview' ? 'data-webview-id' : 'data-id');
+    tab.removeAttribute('oncontextmenu');
+    tab.removeAttribute('aria-selected');
+    tab.setAttribute('aria-current', selected ? 'page' : 'false');
+    tab.setAttribute('role', 'treeitem');
+    tab.setAttribute('tabindex', '-1');
+    tab.setAttribute('aria-label', `Focus shortcut, ${tab.getAttribute('aria-label') || ref.id}`);
+    tab
+      .querySelectorAll('.tab-number, .tab-focus-marker, [data-tab-ref-drag], .tab-actions')
+      .forEach((element) => element.remove());
+    tab.querySelectorAll('[id]').forEach((element) => element.removeAttribute('id'));
+    const actions = document.createElement('span');
+    actions.className = 'tab-actions tab-focus-actions';
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'tab-more';
+    more.textContent = '⋯';
+    more.title = 'Focus actions';
+    more.setAttribute('aria-label', 'Focus actions');
+    more.setAttribute(
+      'onclick',
+      `event.stopPropagation(); app.openFocusShortcutMenu(event, ${JSON.stringify(ref)})`
+    );
+    actions.appendChild(more);
+    tab.appendChild(actions);
+    return tab.outerHTML;
+  }
+
   _fullRenderSessionTabs() {
     if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
     this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
     const projection = this._refreshTabProjection();
     const structureKey = this._tabStructureKey(projection);
+
+    // Sidebar rows are always tall (name + folder) and never wrap. Re-assert it
+    // here so a render triggered straight from applyTabWrapSettings() — which
+    // only knows the header strip — cannot leave the sidebar folderless.
+    if (this.isSessionSidebarActive()) {
+      this._tallTabsEnabled = true;
+      container.classList.add('tabs-show-folder');
+      container.classList.remove('tabs-two-rows', 'tabs-auto-wrap');
+    }
 
     // Clean up any orphaned dropdowns before re-rendering
     document.querySelectorAll('body > .subagent-dropdown').forEach(d => d.remove());
@@ -5971,6 +6610,9 @@ class CodemanApp {
     // right-hand tabs kept getting yanked back to the first one. Remember
     // where the strip was; the browser clamps the restore to the new content.
     const prevScrollLeft = container.scrollLeft;
+    // Sidebar layout scrolls the same container VERTICALLY, so it needs the
+    // same protection on the other axis.
+    const prevScrollTop = container.scrollTop;
     const focusIdentity = this._tabFocusIdentity || this._focusedTabLayoutIdentity();
     const prevActiveTabIdentity = this._lastRenderedActiveTabIdentity;
     const isFirstRender = !container.querySelector('.session-tab');
@@ -5984,14 +6626,20 @@ class CodemanApp {
     // depended on which render path happened to run. Scrolling the active tab
     // into view replaces it.
     const parts = [];
+    const renderedRefs = [];
     const orientation = this._tabOrientation();
-    const tabOrder = projection.visibleRefs;
+    const visibleKeys = new Set(projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`));
+    const tabOrder = [
+      ...projection.visibleRefs,
+      ...(projection.focusRefs || []).filter((ref) => !visibleKeys.has(`${ref.kind}:${ref.id}`)),
+    ];
     let _tabIdx = 0;
     for (const ref of tabOrder) {
       if (ref.kind === 'webview') {
         const html = this.renderWebviewTab?.(ref.id, _tabIdx);
         if (html) {
           parts.push(html);
+          renderedRefs.push(ref);
           _tabIdx++;
         }
         continue;
@@ -6042,6 +6690,9 @@ class CodemanApp {
       const placementBadge = placement
         ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" title="${escapeHtml(placement.description)}" aria-label="${escapeHtml(placement.description)}">${escapeHtml(placement.short)}</span>`
         : '';
+      const focusMarker = this._tabRefFocused({ kind: 'session', id })
+        ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
+        : '';
       const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
       const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
@@ -6059,20 +6710,25 @@ class CodemanApp {
             ${placementBadge}
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
           </span>
+          ${focusMarker}
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
+      renderedRefs.push(ref);
       _tabIdx++;
     }
 
-    let renderedIndex = 0;
+    const renderedByRef = new Map(
+      renderedRefs.map((ref, index) => [`${ref.kind}:${ref.id}`, parts[index]])
+    );
     container.innerHTML = window.CodemanTabLayout.renderProjection(
       projection,
       orientation,
-      () => parts[renderedIndex++] || '',
-      escapeHtml
+      (ref) => renderedByRef.get(`${ref.kind}:${ref.id}`) || '',
+      escapeHtml,
+      (ref) => this._renderFocusShortcut(ref, renderedByRef.get(`${ref.kind}:${ref.id}`) || '')
     );
     container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
     container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
@@ -6084,6 +6740,7 @@ class CodemanApp {
     // the strip while a background rebuild fires, without the active tab ever
     // being stranded off-screen after a switch.
     container.scrollLeft = prevScrollLeft;
+    container.scrollTop = prevScrollTop;
     const activeTabIdentity = this.activeWebviewId
       ? `webview:${this.activeWebviewId}`
       : this.activeSessionId
@@ -6118,6 +6775,10 @@ class CodemanApp {
     this._refreshMobileOverviewIfVisible?.();
     this._refreshHomeSessionsIfVisible?.();
     this._refreshCommandPaletteIfOpen?.();
+
+    // innerHTML was rebuilt wholesale, so the sidebar filter classes are gone —
+    // re-apply them or filtered-out sessions flicker back on every SSE tick.
+    this.applySidebarFilter(this._sidebarFilter);
   }
 
   // Set up arrow key navigation for session tabs (accessibility)
@@ -6130,9 +6791,12 @@ class CodemanApp {
     this._tabKeydownHandler = (e) => {
       if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
       const vertical = this._tabOrientation() === 'vertical';
+      // Rows hidden by the sidebar filter must not be steppable — arrowing onto
+      // an invisible row leaves focus nowhere and Enter then selects a session
+      // the user cannot see.
       const items = vertical
-        ? [...container.querySelectorAll('[role="treeitem"]')]
-        : [...container.querySelectorAll('.session-tab[role="tab"]')];
+        ? [...container.querySelectorAll('[role="treeitem"]:not(.tab-filtered-out)')]
+        : [...container.querySelectorAll('.session-tab[role="tab"]:not(.tab-filtered-out)')];
       const active = document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]');
       const currentIndex = items.indexOf(active);
       if (currentIndex < 0) return;
@@ -6146,9 +6810,18 @@ class CodemanApp {
       };
       const activate = () => {
         const current = items[currentIndex];
-        const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
-        if (currentGroupId) {
+        const currentIsFocusGroup = Boolean(current.querySelector?.('[data-tab-focus-toggle]'));
+        const currentGroupId =
+          current.dataset.tabGroupHeader ||
+          current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+        if (currentIsFocusGroup) {
+          this.toggleFocusGroupCollapsed();
+        } else if (currentGroupId) {
           this.toggleTabGroupCollapsed(currentGroupId);
+        } else if (current.dataset.focusSessionId) {
+          this.selectSession(current.dataset.focusSessionId);
+        } else if (current.dataset.focusWebviewId) {
+          this.openWebview(current.dataset.focusWebviewId);
         } else if (current.dataset.id) {
           this.selectSession(current.dataset.id);
         } else if (current.dataset.webviewId) {
@@ -6156,7 +6829,10 @@ class CodemanApp {
         }
       };
       const current = items[currentIndex];
-      const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      const currentIsFocusGroup = Boolean(current.querySelector?.('[data-tab-focus-toggle]'));
+      const currentGroupId =
+        current.dataset.tabGroupHeader ||
+        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
       if (vertical && e.key === 'Insert') {
         e.preventDefault();
         this.createTabGroup();
@@ -6172,7 +6848,12 @@ class CodemanApp {
         this.deleteTabGroup(currentGroupId);
         return;
       }
-      if (vertical && currentGroupId && e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (
+        vertical &&
+        currentGroupId &&
+        e.ctrlKey &&
+        (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+      ) {
         e.preventDefault();
         const groupIndex = this.tabLayout.groups.findIndex((group) => group.id === currentGroupId);
         const index = Math.max(0, Math.min(this.tabLayout.groups.length - 1, groupIndex + (e.key === 'ArrowUp' ? -1 : 1)));
@@ -6183,7 +6864,12 @@ class CodemanApp {
         e.preventDefault();
         const syntheticEvent = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
         if (currentGroupId) this.openTabGroupMenu(syntheticEvent, currentGroupId);
-        else {
+        else if (current.dataset.focusSessionId || current.dataset.focusWebviewId) {
+          const ref = current.dataset.focusWebviewId
+            ? { kind: 'webview', id: current.dataset.focusWebviewId }
+            : { kind: 'session', id: current.dataset.focusSessionId };
+          this.openFocusShortcutMenu(syntheticEvent, ref);
+        } else {
           const ref = current.dataset.webviewId
             ? { kind: 'webview', id: current.dataset.webviewId }
             : current.dataset.id
@@ -6214,17 +6900,21 @@ class CodemanApp {
         return;
       }
       if (!vertical || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
-      const groupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
-      if (groupId) {
+      const groupId =
+        current.dataset.tabGroupHeader ||
+        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      if (groupId || currentIsFocusGroup) {
         const expanded = current.getAttribute('aria-expanded') === 'true';
         if (e.key === 'ArrowLeft' && expanded) {
           e.preventDefault();
-          this._tabFocusIdentity = `group:${groupId}`;
-          this.toggleTabGroupCollapsed(groupId, true);
+          this._tabFocusIdentity = currentIsFocusGroup ? 'focus-group' : `group:${groupId}`;
+          if (currentIsFocusGroup) this.toggleFocusGroupCollapsed(true);
+          else this.toggleTabGroupCollapsed(groupId, true);
         } else if (e.key === 'ArrowRight' && !expanded) {
           e.preventDefault();
-          this._tabFocusIdentity = `group:${groupId}`;
-          this.toggleTabGroupCollapsed(groupId, false);
+          this._tabFocusIdentity = currentIsFocusGroup ? 'focus-group' : `group:${groupId}`;
+          if (currentIsFocusGroup) this.toggleFocusGroupCollapsed(false);
+          else this.toggleTabGroupCollapsed(groupId, false);
         } else if (e.key === 'ArrowRight' && expanded) {
           const child = current.closest('.tab-layout-group')?.querySelector('[role="group"] [role="treeitem"]');
           if (child) {
@@ -6249,8 +6939,11 @@ class CodemanApp {
 
   _tabLayoutIdentity(element) {
     if (!element) return null;
+    if (element.querySelector?.('[data-tab-focus-toggle]')) return 'focus-group';
     const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
     if (groupId) return `group:${groupId}`;
+    if (element.dataset?.focusSessionId) return `focus:session:${element.dataset.focusSessionId}`;
+    if (element.dataset?.focusWebviewId) return `focus:webview:${element.dataset.focusWebviewId}`;
     if (element.dataset?.id) return `session:${element.dataset.id}`;
     if (element.dataset?.webviewId) return `webview:${element.dataset.webviewId}`;
     if (element.classList?.contains('tab-layout-ungrouped-header')) return 'group:ungrouped';
@@ -6400,7 +7093,8 @@ class CodemanApp {
       }
       event.preventDefault();
       const hit = document.elementFromPoint?.(event.clientX, event.clientY);
-      const zone = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
+      const candidate = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
+      const zone = candidate?.classList?.contains('tab-focus-shortcut') ? null : candidate;
       if (drag.zone === zone) return;
       drag.zone?.classList?.remove('tab-layout-drop-active');
       drag.zone = zone;
@@ -6488,8 +7182,13 @@ class CodemanApp {
             : { kind: 'session', id: zone.dataset.id };
           const targetLocation = this._refLocation(target);
           if (targetLocation) {
+            // Which axis decides before/after has to follow the layout that is
+            // actually on screen, and there are TWO vertical ones: the COD-286
+            // rail (data-tab-orientation) and the upstream sidebar. Read both
+            // here, inside the handler — this listener survives a layout flip.
             const rect = zone.getBoundingClientRect();
-            const after = this._tabOrientation() === 'vertical'
+            const stacked = this._tabOrientation() === 'vertical' || this.isSessionSidebarActive?.() === true;
+            const after = stacked
               ? event.clientY >= rect.top + rect.height / 2
               : event.clientX >= rect.left + rect.width / 2;
             destination = { ...targetLocation, index: targetLocation.index + (after ? 1 : 0) };
@@ -6927,7 +7626,25 @@ class CodemanApp {
     }
     const forceReload = options?.forceReload === true;
     this.closeMobileHeaderUtilities?.();
-    if (this.activeSessionId === sessionId && !this.activeWebviewId && !forceReload) return;
+    // ⚠️ `auto: true` marks a selection the APP made rather than the human:
+    // the boot restore, a solo window opening its target, the fallback after
+    // the active session is deleted. Those must NOT spend a pending idle alert
+    // (the yellow survives until a real tap), because "the app put this on
+    // screen" is not "I checked it". The DEFAULT is user-initiated, so a call
+    // site nobody tagged fails toward acknowledging rather than toward an
+    // alert that can never be cleared.
+    const userInitiated = options?.auto !== true;
+    // `!activeWebviewId`: with a dashboard foregrounded, re-selecting the
+    // session behind it is a real switch, not a no-op, so it must not early-return.
+    if (this.activeSessionId === sessionId && !this.activeWebviewId && !forceReload) {
+      // Tapping the tab you are already on is still "I checked it". The alert
+      // can be armed on the ACTIVE tab (a live idle_prompt fires regardless of
+      // which tab is showing, and so does the reload seed), and every other
+      // clear path runs on the switch this early return skips, leaving a
+      // yellow tab that no tap could clear.
+      if (userInitiated) this.markIdleAlertSeen(sessionId);
+      return;
+    }
     if (this.activeSessionId === sessionId && forceReload) {
       this.terminalBufferCache?.delete(sessionId);
       this._clearTimer('syncWaitTimeout');
@@ -6993,10 +7710,16 @@ class CodemanApp {
     // switch when that option is on. Transform/opacity/clip-path only, xterm's
     // FitAddon reads the untransformed layout box, so this cannot reach the PTY.
     this.playTerminalEntrance?.(sessionId);
-    // Clear idle hooks on view, but keep action hooks until user interacts
-    this.clearPendingHooks(sessionId, 'idle_prompt');
+    // Clear idle hooks on view, but keep action hooks until user interacts.
+    // Also acknowledged server-side, so the yellow does not come back on the
+    // next reload and the user's other devices clear it too. Skipped for an
+    // `auto` selection (see userInitiated above).
+    if (userInitiated) this.markIdleAlertSeen(sessionId);
     // Instant active-class toggle (no 100ms debounce), then schedule full render for badges/status
     this._updateActiveTabImmediate(sessionId);
+    // Handheld: the session drawer overlays the terminal, so slide it away now
+    // that a session has been picked. No-op on desktop and in header layout.
+    this.closeSessionSidebarOnHandheld();
     this.renderSessionTabs();
     this.updateAttachmentHistoryBadge?.();
     if (this.attachmentHistoryDrawerOpen) {
@@ -7487,19 +8210,34 @@ class CodemanApp {
   }
 
   async closeSession(sessionId, killMux = true) {
+    // ⚠️ Captured BEFORE the await, and the delete is announced to
+    // _onSessionDeleted through _closingSessions. The `session_deleted` SSE
+    // broadcast for THIS delete routinely lands while the request is still in
+    // flight, and that handler nulls activeSessionId and shows the welcome
+    // screen. Re-reading the field after the await therefore made the fallback
+    // below a coin flip: closing the tab you were on either moved you to the
+    // next session or dumped you on the home screen, depending on which path
+    // won the race (both outcomes measured on one build, 2026-08-17).
+    const wasActive = this.activeSessionId === sessionId;
+    this._closingSessions.add(sessionId);
     try {
       await this._apiDelete(`/api/sessions/${sessionId}?killMux=${killMux}`);
       this._cleanupSessionData(sessionId);
 
-      if (this.activeSessionId === sessionId) {
+      if (wasActive) {
         this.activeSessionId = null;
         try { localStorage.removeItem('codeman-active-session'); } catch {}
         // COD-285: reset terminal background to the skin's slate when no session is active
         try { this.syncTerminalBackground?.(); } catch {}
-        // Select another session or show welcome (use sessionOrder for consistent ordering)
-        if (this.sessionOrder.length > 0 && this.sessions.size > 0) {
-          const nextSessionId = this.sessionOrder[0];
-          this.selectSession(nextSessionId);
+        // Next tab in the user's own order, skipping ids the cleanup has not
+        // caught up with yet: sessionOrder can transiently hold a dead id
+        // (delete racing the order sync), which is the same reason Alt+N
+        // indexes a live-filtered list rather than sessionOrder directly.
+        const nextSessionId = this.sessionOrder.find((id) => id !== sessionId && this.sessions.has(id));
+        if (nextSessionId) {
+          // `auto`: this tab was chosen by the app because the previous one
+          // went away, so it must not spend that session's idle alert.
+          this.selectSession(nextSessionId, { auto: true });
         } else {
           this.terminal.clear();
           this.showWelcome();
@@ -7516,6 +8254,8 @@ class CodemanApp {
       }
     } catch (err) {
       this.showToast('Failed to close session', 'error');
+    } finally {
+      this._closingSessions.delete(sessionId);
     }
   }
 
