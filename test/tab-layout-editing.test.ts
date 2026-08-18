@@ -1069,13 +1069,18 @@ describe('COD-315 dismissible group menu', () => {
     expect(document.querySelectorAll('.tab-layout-group-action-menu')).toHaveLength(1);
     expect(first.getAttribute('aria-expanded')).toBe('false');
     expect(second.getAttribute('aria-expanded')).toBe('true');
-    expect(document.activeElement?.textContent).toBe('Rename group');
-    app.closeTabGroupMenu();
+    try {
+      expect(document.activeElement?.textContent).toBe('New session');
+    } finally {
+      app.closeTabGroupMenu();
+    }
   });
 
   it('preserves wrapping arrow navigation and runs the chosen action exactly once', () => {
     const app = makeInteractionApp();
-    app.startTabGroupRename = vi.fn();
+    app.createSessionInTabGroup = vi.fn(() => {
+      expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+    });
     app._fullRenderSessionTabs();
     const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
     openGroupMenu(app, trigger);
@@ -1087,10 +1092,106 @@ describe('COD-315 dismissible group menu', () => {
     expect(document.activeElement).toBe(items[0]);
     items[0].click();
 
-    expect(app.startTabGroupRename).toHaveBeenCalledOnce();
-    expect(app.startTabGroupRename).toHaveBeenCalledWith('g1');
+    expect(app.createSessionInTabGroup).toHaveBeenCalledOnce();
+    expect(app.createSessionInTabGroup).toHaveBeenCalledWith('g1');
     expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('names and focuses the first command for its target group without changing its visible label', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].name = 'Work';
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+
+    openGroupMenu(app, trigger);
+    try {
+      const first = document.querySelector<HTMLButtonElement>('.tab-layout-group-action-menu [role="menuitem"]')!;
+      expect(first.textContent).toBe('New session');
+      expect(first.getAttribute('aria-label')).toBe('New session in Work');
+      expect(document.activeElement).toBe(first);
+    } finally {
+      app.closeTabGroupMenu();
+    }
+  });
+
+  it('expands and persists a collapsed target before starting its session', async () => {
+    const app = makeInteractionApp();
+    app.collapsedTabGroupIds.add('g1');
+    localStorage.setItem('codeman:tab-groups-collapsed', JSON.stringify(['g1']));
+    app.terminal = { focus: vi.fn() };
+    app.run = vi.fn(async () => {
+      expect(app.collapsedTabGroupIds.has('g1')).toBe(false);
+      expect(localStorage.getItem('codeman:tab-groups-collapsed')).toBe('[]');
+    });
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(true);
+
+    expect(app.run).toHaveBeenCalledWith({ count: 1, tabGroupId: 'g1' });
+  });
+
+  it('reports an in-flight launch before expanding or starting another one', async () => {
+    const app = makeInteractionApp();
+    app._runInFlight = true;
+    app.collapsedTabGroupIds.add('g1');
+    app.toggleTabGroupCollapsed = vi.fn();
+    app.run = vi.fn();
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(false);
+
+    expect(app.showToast).toHaveBeenCalledWith('A session is already starting.', 'info');
+    expect(app.toggleTabGroupCollapsed).not.toHaveBeenCalled();
+    expect(app.collapsedTabGroupIds.has('g1')).toBe(true);
+    expect(app.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'])(
+    'focuses the terminal synchronously and delegates the %s selection through run',
+    async (mode) => {
+      const app = makeInteractionApp();
+      let settleRun!: () => void;
+      const pendingRun = new Promise<void>((resolve) => {
+        settleRun = resolve;
+      });
+      app._runMode = mode;
+      app.terminal = { focus: vi.fn() };
+      app.run = vi.fn(() => pendingRun);
+
+      const launch = app.createSessionInTabGroup('g1');
+
+      expect(app.terminal.focus).toHaveBeenCalledOnce();
+      expect(app.run).toHaveBeenCalledWith({ count: 1, tabGroupId: 'g1' });
+      settleRun();
+      await expect(launch).resolves.toBe(true);
+    }
+  );
+
+  it('starts nothing for a read-only layout or a missing group', async () => {
+    const app = makeInteractionApp();
+    app.terminal = { focus: vi.fn() };
+    app.toggleTabGroupCollapsed = vi.fn();
+    app.run = vi.fn();
+    app.tabLayoutReadOnly = true;
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(false);
+    app.tabLayoutReadOnly = false;
+    await expect(app.createSessionInTabGroup('missing')).resolves.toBe(false);
+
+    expect(app.toggleTabGroupCollapsed).not.toHaveBeenCalled();
+    expect(app.terminal.focus).not.toHaveBeenCalled();
+    expect(app.run).not.toHaveBeenCalled();
+  });
+
+  it('toasts a rejected launch and permits a later launch', async () => {
+    const app = makeInteractionApp();
+    app.terminal = { focus: vi.fn() };
+    app.run = vi.fn().mockRejectedValueOnce(new Error('Launch failed')).mockResolvedValueOnce(undefined);
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(false);
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(true);
+
+    expect(app.showToast).toHaveBeenCalledWith('Launch failed', 'error');
+    expect(app.run).toHaveBeenCalledTimes(2);
   });
 
   it('pairs transient document listeners across repeated open and close cycles', () => {

@@ -5372,6 +5372,25 @@ class CodemanApp {
     );
   }
 
+  async createSessionInTabGroup(groupId) {
+    if (this._runInFlight) {
+      this.showToast?.('A session is already starting.', 'info');
+      return false;
+    }
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    if (this.tabLayoutReadOnly || !group) return false;
+
+    this.toggleTabGroupCollapsed(groupId, false);
+    this.terminal.focus();
+    try {
+      await this.run({ count: 1, tabGroupId: groupId });
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not start session.', 'error');
+      return false;
+    }
+  }
+
   closeTabGroupMenu(options = {}) {
     const menu = this._tabGroupMenu;
     const trigger = this._tabGroupMenuTrigger;
@@ -5401,23 +5420,48 @@ class CodemanApp {
     this.closeTabGroupMenu();
     const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
     if (groupIndex < 0) return;
+    const group = this.tabLayout.groups[groupIndex];
     const menu = document.createElement('div');
     menu.className = 'tab-rail-action-menu tab-layout-group-action-menu';
     menu.setAttribute('role', 'menu');
     const actions = [
-      ['Rename group', () => this.startTabGroupRename(groupId)],
-      ['Move group earlier', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) }, `group:${groupId}`)],
-      ['Move group later', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1) }, `group:${groupId}`)],
-      ['Delete group', () => this.deleteTabGroup(groupId)],
+      {
+        label: 'New session',
+        ariaLabel: `New session in ${group.name}`,
+        run: () => this.createSessionInTabGroup(groupId),
+      },
+      { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
+      {
+        label: 'Move group earlier',
+        run: () =>
+          this.editTabLayout(
+            { type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) },
+            `group:${groupId}`
+          ),
+      },
+      {
+        label: 'Move group later',
+        run: () =>
+          this.editTabLayout(
+            {
+              type: 'reorderGroup',
+              groupId,
+              index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1),
+            },
+            `group:${groupId}`
+          ),
+      },
+      { label: 'Delete group', run: () => this.deleteTabGroup(groupId) },
     ];
-    for (const [label, run] of actions) {
+    for (const action of actions) {
       const button = document.createElement('button');
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
-      button.textContent = label;
+      button.textContent = action.label;
+      if (action.ariaLabel) button.setAttribute('aria-label', action.ariaLabel);
       button.addEventListener('click', () => {
         this.closeTabGroupMenu();
-        run();
+        action.run();
       });
       menu.appendChild(button);
     }
