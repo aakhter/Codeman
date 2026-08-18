@@ -33,7 +33,13 @@ function loadRunModeHarness() {
 
   const runModeMenu = { classList: { remove: () => {} } };
   const gearBtn = { className: '' };
-  const runBtn = { className: '', nextElementSibling: gearBtn };
+  const runBtn = {
+    className: '',
+    disabled: false,
+    nextElementSibling: gearBtn,
+    setAttribute: vi.fn(),
+    removeAttribute: vi.fn(),
+  };
   const runBtnLabel = { textContent: '' };
   elements.runModeMenu = runModeMenu;
   elements.runBtn = runBtn;
@@ -45,6 +51,83 @@ function loadRunModeHarness() {
   app._apiPut = () => Promise.resolve();
 
   return { app, storage, runBtnLabel };
+}
+
+function loadSessionLaunchHarness(
+  options: {
+    location?: 'local' | 'remote' | 'docker';
+    tabCount?: string;
+    shellCount?: string;
+  } = {}
+) {
+  const location = options.location ?? 'local';
+  const elements: Record<string, any> = {
+    quickStartCase: { value: 'launch-case' },
+    tabCount: { value: options.tabCount ?? '3' },
+    shellCount: { value: options.shellCount ?? '4' },
+  };
+  const requests: Array<{ url: string; method: string; body?: any }> = [];
+  const CodemanApp = function CodemanApp(this: any) {};
+  let nextSession = 0;
+  const caseData = {
+    name: 'launch-case',
+    path: location === 'local' ? '/tmp/launch-case' : 'host:/work/launch-case',
+    ...(location === 'local' ? {} : { location }),
+  };
+
+  const context = vm.createContext({
+    CodemanApp,
+    localStorage: { getItem: () => null, setItem: () => {} },
+    document: { getElementById: (id: string) => elements[id] ?? null },
+    fetch: async (url: string, init: { method?: string; body?: string } = {}) => {
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      requests.push({ url, method: init.method ?? 'GET', body });
+      if (url === '/api/cases/launch-case') return { json: async () => ({ success: true, data: caseData }) };
+      if (/^\/api\/(opencode|codex|gemini|antigravity|pi)\/status$/.test(url)) {
+        return { json: async () => ({ success: true, data: { available: true } }) };
+      }
+      if (url === '/api/sessions' || url === '/api/quick-start') {
+        nextSession += 1;
+        const session = { id: `sess-${nextSession}`, name: body?.sessionName ?? body?.name };
+        return {
+          json: async () => ({
+            success: true,
+            data: url === '/api/sessions' ? { session } : { sessionId: session.id, session },
+          }),
+        };
+      }
+      if (/^\/api\/sessions\/sess-\d+\/(interactive|ralph-config|shell|resize)$/.test(url)) {
+        return { json: async () => ({ success: true }) };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+    console,
+  });
+  const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+  vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+  const app = new (CodemanApp as any)();
+  app.terminal = { cols: 120, rows: 40, clear: vi.fn(), writeln: vi.fn(), focus: vi.fn() };
+  app.cases = [caseData];
+  app.sessions = new Map();
+  app._nextCaseSessionStartNumber = () => 1;
+  app._beginSessionLaunchStatus = () => false;
+  app._appendSessionLaunchStatus = vi.fn();
+  app._reportSessionLaunchError = (_owns: boolean, message: string) => {
+    throw new Error(message);
+  };
+  app._ensureCreatedSessionVisible = vi.fn();
+  app.selectSession = vi.fn(async () => {});
+  app.loadQuickStartCases = vi.fn();
+  app.loadAppSettingsFromStorage = () => ({});
+  app.getCaseSettings = () => ({});
+  app.buildEnvOverrides = () => ({});
+  app.getEffortSetting = () => '';
+  app.planUsageChipEnabled = () => false;
+  app.isRalphTrackerEnabledByDefault = () => false;
+  app.getTerminalDimensions = () => null;
+
+  return { app, elements, requests };
 }
 
 describe('run mode UI', () => {
@@ -99,6 +182,110 @@ describe('run mode UI', () => {
 });
 
 describe('Run launch synchronization', () => {
+  const dispatchedModes = [
+    ['claude', 'runClaude'],
+    ['shell', 'runShell'],
+    ['opencode', 'runOpenCode'],
+    ['codex', 'runCodex'],
+    ['gemini', 'runGemini'],
+    ['antigravity', 'runAntigravity'],
+    ['pi', 'runPi'],
+  ] as const;
+  const creationPaths = [
+    ['runClaude', 'local', '/api/sessions'],
+    ['runClaude', 'remote', '/api/quick-start'],
+    ['runClaude', 'docker', '/api/quick-start'],
+    ['runShell', 'local', '/api/sessions'],
+    ['runShell', 'remote', '/api/quick-start'],
+    ['runShell', 'docker', '/api/quick-start'],
+    ['runOpenCode', 'local', '/api/quick-start'],
+    ['runCodex', 'local', '/api/quick-start'],
+    ['runGemini', 'local', '/api/quick-start'],
+    ['runAntigravity', 'local', '/api/quick-start'],
+    ['runPi', 'local', '/api/quick-start'],
+  ] as const;
+
+  it.each(dispatchedModes)('forwards the same narrow launch options to %s', async (mode, method) => {
+    const { app } = loadRunModeHarness();
+    const launchOptions = { count: 1, tabGroupId: 'work' };
+    app._runMinLockMs = 0;
+    app._runMode = mode;
+    for (const [, candidate] of dispatchedModes) app[candidate] = vi.fn(async () => {});
+
+    await app.run(launchOptions);
+
+    expect(app[method]).toHaveBeenCalledTimes(1);
+    expect(app[method]).toHaveBeenCalledWith(launchOptions);
+    expect(app[method].mock.calls[0][0]).toBe(launchOptions);
+    expect(dispatchedModes.reduce((total, [, candidate]) => total + app[candidate].mock.calls.length, 0)).toBe(1);
+  });
+
+  it('releases the run lock and propagates a dispatched rejection without storing placement state', async () => {
+    const { app } = loadRunModeHarness();
+    const launchOptions = { count: 1, tabGroupId: 'work' };
+    const failure = new Error('rejected before launch');
+    app._runMinLockMs = 0;
+    app._runMode = 'claude';
+    app.runClaude = vi.fn(() => Promise.reject(failure));
+
+    await expect(app.run(launchOptions)).rejects.toBe(failure);
+
+    expect(app._runInFlight).toBe(false);
+    expect(Object.keys(app).filter((key) => /group|placement/i.test(key))).toEqual([]);
+  });
+
+  it.each([
+    ['runClaude', 'tabCount'],
+    ['runShell', 'shellCount'],
+  ] as const)(
+    '%s uses the count override for one local creation without mutating the toolbar input',
+    async (method, inputId) => {
+      const { app, elements, requests } = loadSessionLaunchHarness({ tabCount: '6', shellCount: '7' });
+      const originalValue = elements[inputId].value;
+
+      await app[method]({ count: 1, tabGroupId: 'work' });
+
+      expect(requests.filter((request) => request.url === '/api/sessions')).toHaveLength(1);
+      expect(elements[inputId].value).toBe(originalValue);
+    }
+  );
+
+  it.each([
+    ['runClaude', 'tabCount', 3],
+    ['runShell', 'shellCount', 4],
+  ] as const)('%s retains the toolbar batch count when launch options are omitted', async (method, inputId, count) => {
+    const { app, elements, requests } = loadSessionLaunchHarness({ tabCount: '3', shellCount: '4' });
+    const originalValue = elements[inputId].value;
+
+    await app[method]();
+
+    expect(requests.filter((request) => request.url === '/api/sessions')).toHaveLength(count);
+    expect(elements[inputId].value).toBe(originalValue);
+  });
+
+  it.each(creationPaths)('%s includes tabGroupId in its %s creation request', async (method, location, endpoint) => {
+    const { app, requests } = loadSessionLaunchHarness({ location });
+
+    await app[method]({ count: 1, tabGroupId: 'work' });
+
+    const creationRequests = requests.filter((request) => request.url === endpoint && request.method === 'POST');
+    expect(creationRequests).toHaveLength(1);
+    expect(creationRequests[0].body.tabGroupId).toBe('work');
+  });
+
+  it.each(creationPaths)(
+    '%s omits tabGroupId from its %s creation request when launch options are absent',
+    async (method, location, endpoint) => {
+      const { app, requests } = loadSessionLaunchHarness({ location });
+
+      await app[method]();
+
+      const creationRequests = requests.filter((request) => request.method === 'POST' && request.url === endpoint);
+      expect(creationRequests.length).toBeGreaterThan(0);
+      for (const request of creationRequests) expect(request.body).not.toHaveProperty('tabGroupId');
+    }
+  );
+
   it('keeps launch progress out of an active session terminal', () => {
     const CodemanApp = function CodemanApp(this: any) {};
     const context = vm.createContext({
@@ -172,7 +359,7 @@ describe('Run launch synchronization', () => {
     // Methods live in one Object.assign(prototype, {...}) block at a fixed
     // 2-space indent, so `\n  },` reliably closes the one we are inside.
     const bodies = new Map<string, string>();
-    const header = /^ {2}async (run[A-Za-z]*)\(\) \{$/gm;
+    const header = /^ {2}async (run[A-Za-z]*)\(options = \{\}\) \{$/gm;
     for (let m = header.exec(src); m; m = header.exec(src)) {
       const start = m.index + m[0].length;
       const end = src.indexOf('\n  },', start);
@@ -218,7 +405,7 @@ describe('Run launch synchronization', () => {
     let totalCallsites = 0;
 
     for (const [method, expectedCalls] of expectedByMethod) {
-      const startMarker = `  async ${method}() {`;
+      const startMarker = `  async ${method}(options = {}) {`;
       const start = src.indexOf(startMarker);
       const end = src.indexOf('\n  },', start + startMarker.length);
       expect(start, `${method}() must exist`).toBeGreaterThanOrEqual(0);

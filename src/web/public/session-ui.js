@@ -412,7 +412,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /** Run using the selected mode (Claude Code, OpenCode, Codex, Gemini, or Antigravity) */
-  async run() {
+  async run(options = {}) {
     if (this._runInFlight) return;
 
     const startedAt = Date.now();
@@ -427,24 +427,24 @@ Object.assign(CodemanApp.prototype, {
     try {
       const mode = this._runMode || 'claude';
       if (mode === 'opencode') {
-        return await this.runOpenCode();
+        return await this.runOpenCode(options);
       }
       if (mode === 'codex') {
-        return await this.runCodex();
+        return await this.runCodex(options);
       }
       if (mode === 'gemini') {
-        return await this.runGemini();
+        return await this.runGemini(options);
       }
       if (mode === 'antigravity') {
-        return await this.runAntigravity();
+        return await this.runAntigravity(options);
       }
       if (mode === 'pi') {
-        return await this.runPi();
+        return await this.runPi(options);
       }
       if (mode === 'shell') {
-        return await this.runShell();
+        return await this.runShell(options);
       }
-      return await this.runClaude();
+      return await this.runClaude(options);
     } finally {
       const remaining = minLockMs - (Date.now() - startedAt);
       if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
@@ -705,9 +705,10 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runClaude() {
+  async runClaude(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const tabCount = Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
+    const requestedCount = options.count ?? parseInt(document.getElementById('tabCount').value);
+    const tabCount = Math.min(20, Math.max(1, requestedCount || 1));
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} Claude session(s) in ${caseName}...`
@@ -765,6 +766,7 @@ Object.assign(CodemanApp.prototype, {
         for (let i = 0; i < tabCount; i++) {
           const quickStartBody = JSON.stringify({
             caseName, mode: 'claude', sessionName: `w${startNumber + i}-${caseName}`,
+            ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
             ...(dockerModelOverride !== undefined ? { modelOverride: dockerModelOverride } : {})
           });
           const doQuickStart = async () => {
@@ -841,6 +843,7 @@ Object.assign(CodemanApp.prototype, {
             ...(hasEnvOverrides ? { envOverrides } : {}),
             ...(effort ? { effort } : {}),
             ...(modelOverride !== undefined ? { modelOverride } : {}),
+            ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
             // Plan-usage statusLine exporter (App Settings → Display). The server
             // ADDS our exporter on create when true; when false it intentionally
             // leaves any existing exporter in place (a per-repo settings.local.json
@@ -929,9 +932,10 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runShell() {
+  async runShell(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const shellCount = Math.min(20, Math.max(1, parseInt(document.getElementById('shellCount').value) || 1));
+    const requestedCount = options.count ?? parseInt(document.getElementById('shellCount').value);
+    const shellCount = Math.min(20, Math.max(1, requestedCount || 1));
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${shellCount} Shell session(s) in ${caseName}...`,
@@ -973,7 +977,12 @@ Object.assign(CodemanApp.prototype, {
           const res = await fetch('/api/quick-start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ caseName, mode: 'shell', sessionName: `s${startNumber + i}-${caseName}` })
+            body: JSON.stringify({
+              caseName,
+              mode: 'shell',
+              sessionName: `s${startNumber + i}-${caseName}`,
+              ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {})
+            })
           });
           const data = await res.json();
           if (!data.success) throw new Error(data.error || 'Failed to start remote shell session');
@@ -1007,6 +1016,7 @@ Object.assign(CodemanApp.prototype, {
             ...(isRemoteCase ? { caseName } : { workingDir }),
             mode: 'shell',
             name,
+            ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
             ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
           })
         }).then(r => r.json())
@@ -1051,7 +1061,7 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runOpenCode() {
+  async runOpenCode(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run the CLI on the REMOTE host — the local /api/opencode/status
     // probe and the local-only config/env below don't apply (quick-start rejects them).
@@ -1086,6 +1096,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode: 'opencode',
           sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
           ...(isRemote ? {} : {
             openCodeConfig: { autoAllowTools: true },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -1108,7 +1119,7 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runCodex() {
+  async runCodex(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run Codex on the REMOTE host — skip the local status probe and the
     // local-only config/env below (quick-start rejects them for remote cases).
@@ -1140,6 +1151,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode: 'codex',
           sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
           ...(isRemote ? {} : {
             codexConfig: {
               dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
@@ -1164,7 +1176,7 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runAntigravity() {
+  async runAntigravity(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote/docker cases run agy on the OTHER side — skip the local status probe and the
     // local-only config/env below (quick-start rejects them for remote cases).
@@ -1195,6 +1207,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode: 'antigravity',
           sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
           ...(isRemote ? {} : {
             antigravityConfig: { dangerouslySkipPermissions: true },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -1215,7 +1228,7 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runGemini() {
+  async runGemini(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run Gemini on the REMOTE host — skip the local status probe and the
     // local-only config/env below (quick-start rejects them for remote cases).
@@ -1246,6 +1259,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode: 'gemini',
           sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
           ...(isRemote ? {} : {
             geminiConfig: { approvalMode: 'yolo' },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -1275,7 +1289,7 @@ Object.assign(CodemanApp.prototype, {
    * `approveProjectTrust: true` here would silently opt every browser-launched pi
    * session into executing repo-supplied TypeScript.
    */
-  async runPi() {
+  async runPi(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote/docker cases run pi on the OTHER side — skip the local status probe and the
     // local-only config/env below (quick-start rejects them for remote cases).
@@ -1306,6 +1320,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode: 'pi',
           sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
           ...(isRemote || Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
         })
       });
