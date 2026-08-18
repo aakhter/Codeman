@@ -830,6 +830,65 @@ describe('COD-306 CodemanApp integration', () => {
     app._tabLayoutCoordinator.dispose();
   });
 
+  it('preserves same-owner deferred visibility through reconnect until the fresh target layout arrives', async () => {
+    const app = makeInitApp();
+    const request = deferred<any>();
+    const newSession = { id: 'new-session', name: 'New', owner: 'alice', status: 'idle' };
+    const changedOwner = { id: 'changed-owner', name: 'Changed', owner: 'alice', status: 'idle' };
+    const missing = { id: 'missing-session', name: 'Missing', owner: 'alice', status: 'idle' };
+    app.sessions.set(newSession.id, newSession);
+    app.sessions.set(changedOwner.id, changedOwner);
+    app.sessions.set(missing.id, missing);
+    app._deferredCreatedSessionIds = new Set([newSession.id, changedOwner.id, missing.id]);
+    app._tabLayoutFirstPaintPending = false;
+    app._fetchTabLayout = () => request.promise;
+    app._resetAllAppState = vi.fn(() => {
+      app.sessions.clear();
+      app._deferredCreatedSessionIds = new Set();
+    });
+    app.renderSessionTabs = () => app._fullRenderSessionTabs();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+    const reconnectData = {
+      ...initData,
+      sessions: [
+        ...initData.sessions.map((session) => ({ ...session, owner: 'alice' })),
+        newSession,
+        {
+          ...changedOwner,
+          owner: 'bob',
+        },
+      ],
+    };
+
+    app.handleInit(reconnectData);
+
+    expect([...app._deferredCreatedSessionIds]).toEqual([newSession.id]);
+    expect(app._deferredCreatedSessionIds.has(changedOwner.id)).toBe(false);
+    expect(app._deferredCreatedSessionIds.has(missing.id)).toBe(false);
+    expect(app.sessions.has(missing.id)).toBe(false);
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+
+    const authoritative = {
+      ...layout,
+      version: 10,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: [...group.refs, { kind: 'session', id: newSession.id }],
+      })),
+    };
+    request.resolve({ layout: authoritative, placements: [] });
+    await request.promise;
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('[data-tab-group-id="group-x"] [data-id="new-session"]')).toHaveLength(1)
+    );
+
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+    expect(app._deferredCreatedSessionIds.has(newSession.id)).toBe(false);
+    app._tabLayoutCoordinator.dispose();
+  });
+
   it('does not steal a webview activated while reconnect layout loading is delayed', async () => {
     const app = makeInitApp();
     const request = deferred<any>();

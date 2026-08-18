@@ -4794,6 +4794,19 @@ class CodemanApp {
     // Stop any active voice recording on reconnect
     VoiceInput.cleanup();
 
+    const deferredCreatedSessionOwners = new Map();
+    for (const id of this._deferredCreatedSessionIds || []) {
+      const session = this.sessions.get(id);
+      if (session) deferredCreatedSessionOwners.set(id, this._tabLayoutSessionOwnerIdentity(session));
+    }
+    const currentUser = window.__codemanUser;
+    const currentLayoutOwner =
+      currentUser?.multiUser === true && typeof currentUser.username === 'string' && currentUser.username.length > 0
+        ? currentUser.username
+        : currentUser?.multiUser === false
+          ? '@single'
+          : null;
+
     this._resetAllAppState();
 
     data.sessions.forEach(s => {
@@ -4807,6 +4820,15 @@ class CodemanApp {
         });
       }
     });
+    this._deferredCreatedSessionIds = new Set(
+      data.sessions
+        .filter((session) => {
+          if (!deferredCreatedSessionOwners.has(session.id)) return false;
+          const owner = this._tabLayoutSessionOwnerIdentity(session);
+          return deferredCreatedSessionOwners.get(session.id) === owner && (!currentLayoutOwner || owner === currentLayoutOwner);
+        })
+        .map((session) => session.id)
+    );
 
     // Server is source of truth for open sessions — don't resurrect stale tabs
     // from localStorage (would show phantom "ended" tabs when a session was closed
@@ -5065,6 +5087,10 @@ class CodemanApp {
     }
     for (const id of this.webviews?.keys?.() || []) metadata.push({ kind: 'webview', id });
     return metadata;
+  }
+
+  _tabLayoutSessionOwnerIdentity(session) {
+    return typeof session?.owner === 'string' && session.owner.length > 0 ? session.owner : '@single';
   }
 
   _tabRefPlacementState(ref) {
