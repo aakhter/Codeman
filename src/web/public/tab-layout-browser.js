@@ -17,6 +17,7 @@
   const asIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []);
   const stableIds = (value) => [...new Set(asIds(value))];
   const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
+  const FOCUS_COLLAPSE_ID = '@focus';
 
   function loadCollapsedGroupIds(storage, validGroupIds) {
     try {
@@ -441,12 +442,29 @@
     return order[(start + (delta < 0 ? -1 : 1) + order.length) % order.length] || null;
   }
 
-  function renderProjection(projection, orientation, renderRef, escapeHtml) {
+  function renderProjection(projection, orientation, renderRef, escapeHtml, renderFocusRef = renderRef) {
     const refs = Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [];
     const sections = Array.isArray(projection?.sections) ? projection.sections : [];
     if (orientation !== 'vertical' || sections.length === 0) {
       return refs.map((ref, index) => renderRef(ref, index)).join('');
     }
+    const focusRefs = Array.isArray(projection?.focusRefs) ? projection.focusRefs : [];
+    const focusCollapsed = projection?.focusCollapsed === true;
+    const focusContent = focusCollapsed
+      ? ''
+      : focusRefs
+          .map((ref) => {
+            let rendered = renderFocusRef(ref, -1, { focusShortcut: true })
+              .replace(/role="tab"/, 'role="treeitem"')
+              .replace(/tabindex="0"/g, 'tabindex="-1"')
+              .replace(/<button(?![^>]*tabindex)/g, '<button tabindex="-1"');
+            if (!/role="treeitem"/.test(rendered)) rendered = rendered.replace(/^<([a-z]+)/, '<$1 role="treeitem"');
+            return rendered;
+          })
+          .join('');
+    const focus = focusRefs.length
+      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}"><button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed('${FOCUS_COLLAPSE_ID}')"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button><span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
+      : '';
     let index = 0;
     const groups = sections
       .map((section, sectionIndex) => {
@@ -475,7 +493,7 @@
         return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-before-group="${escapeHtml(section.id || '')}"></div><section class="tab-layout-group" role="presentation" data-tab-group-id="${escapeHtml(section.id || '')}">${header}${members}</section>`;
       })
       .join('');
-    return `<div class="tab-layout-tree" role="tree" aria-label="Sessions">${groups}</div><button type="button" tabindex="-1" class="tab-layout-create-group" onclick="app.createTabGroup()">Create group</button>`;
+    return `<div class="tab-layout-tree" role="tree" aria-label="Sessions">${focus}${groups}</div><button type="button" tabindex="-1" class="tab-layout-create-group" onclick="app.createTabGroup()">Create group</button>`;
   }
 
   function createEditCoordinator(options) {

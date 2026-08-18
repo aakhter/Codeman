@@ -5518,6 +5518,7 @@ class CodemanApp {
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
       orientation: this._tabOrientation(),
+      focusCollapsed: this.collapsedTabGroupIds.has('@focus'),
     };
     return this.tabLayout
       ? window.CodemanTabLayout.project(this.tabLayout, options)
@@ -5530,7 +5531,15 @@ class CodemanApp {
 
   _refreshTabProjection() {
     if (this._tabLayoutFirstPaintPending) {
-      const pending = { sessionOrder: [], completeRefs: [], visibleRefs: [], sections: [], hiddenTabGroupByRef: {} };
+      const pending = {
+        sessionOrder: [],
+        completeRefs: [],
+        visibleRefs: [],
+        focusRefs: [],
+        focusCollapsed: false,
+        sections: [],
+        hiddenTabGroupByRef: {},
+      };
       this.sessionOrder = pending.sessionOrder;
       this._completeTabRefs = pending.completeRefs;
       this._visibleTabRefs = pending.visibleRefs;
@@ -5605,6 +5614,8 @@ class CodemanApp {
       openWebviewIds: [...(this.webviewOrder || [])],
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
+      focusRefs: projection.focusRefs,
+      focusCollapsed: projection.focusCollapsed,
       visibleRefs: projection.visibleRefs,
       placementStates,
     });
@@ -6430,6 +6441,44 @@ class CodemanApp {
     });
   }
 
+  _renderFocusShortcut(ref, sourceHtml) {
+    if (!sourceHtml) return '';
+    const template = document.createElement('template');
+    template.innerHTML = sourceHtml.trim();
+    const tab = template.content.firstElementChild;
+    if (!tab) return '';
+    const key = `${ref.kind}:${ref.id}`;
+    const selected = ref.kind === 'webview'
+      ? this.activeWebviewId === ref.id
+      : !this.activeWebviewId && this.activeSessionId === ref.id;
+    tab.classList.remove('active');
+    tab.classList.add('tab-focus-shortcut');
+    tab.setAttribute('data-tab-focus-shortcut', key);
+    tab.setAttribute(ref.kind === 'webview' ? 'data-focus-webview-id' : 'data-focus-session-id', ref.id);
+    tab.removeAttribute(ref.kind === 'webview' ? 'data-webview-id' : 'data-id');
+    tab.removeAttribute('aria-selected');
+    tab.setAttribute('aria-current', selected ? 'page' : 'false');
+    tab.setAttribute('role', 'treeitem');
+    tab.setAttribute('tabindex', '-1');
+    tab.setAttribute('aria-label', `Focus shortcut, ${tab.getAttribute('aria-label') || ref.id}`);
+    tab.querySelectorAll('.tab-number, [data-tab-ref-drag], .tab-actions').forEach((element) => element.remove());
+    tab.querySelectorAll('[id]').forEach((element) => element.removeAttribute('id'));
+    const actions = document.createElement('span');
+    actions.className = 'tab-actions tab-focus-actions';
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'tab-more';
+    more.title = 'Focus actions';
+    more.setAttribute('aria-label', 'Focus actions');
+    more.setAttribute(
+      'onclick',
+      `event.stopPropagation(); app.openFocusShortcutMenu(event, ${JSON.stringify(ref)})`
+    );
+    actions.appendChild(more);
+    tab.appendChild(actions);
+    return tab.outerHTML;
+  }
+
   _fullRenderSessionTabs() {
     if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
     this.closeTabGroupMenu();
@@ -6472,14 +6521,20 @@ class CodemanApp {
     // depended on which render path happened to run. Scrolling the active tab
     // into view replaces it.
     const parts = [];
+    const renderedRefs = [];
     const orientation = this._tabOrientation();
-    const tabOrder = projection.visibleRefs;
+    const visibleKeys = new Set(projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`));
+    const tabOrder = [
+      ...projection.visibleRefs,
+      ...(projection.focusRefs || []).filter((ref) => !visibleKeys.has(`${ref.kind}:${ref.id}`)),
+    ];
     let _tabIdx = 0;
     for (const ref of tabOrder) {
       if (ref.kind === 'webview') {
         const html = this.renderWebviewTab?.(ref.id, _tabIdx);
         if (html) {
           parts.push(html);
+          renderedRefs.push(ref);
           _tabIdx++;
         }
         continue;
@@ -6552,15 +6607,19 @@ class CodemanApp {
           ${ultracodeBadge}
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
+      renderedRefs.push(ref);
       _tabIdx++;
     }
 
-    let renderedIndex = 0;
+    const renderedByRef = new Map(
+      renderedRefs.map((ref, index) => [`${ref.kind}:${ref.id}`, parts[index]])
+    );
     container.innerHTML = window.CodemanTabLayout.renderProjection(
       projection,
       orientation,
-      () => parts[renderedIndex++] || '',
-      escapeHtml
+      (ref) => renderedByRef.get(`${ref.kind}:${ref.id}`) || '',
+      escapeHtml,
+      (ref) => this._renderFocusShortcut(ref, renderedByRef.get(`${ref.kind}:${ref.id}`) || '')
     );
     container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
     container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
@@ -6645,6 +6704,10 @@ class CodemanApp {
         const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
         if (currentGroupId) {
           this.toggleTabGroupCollapsed(currentGroupId);
+        } else if (current.dataset.focusSessionId) {
+          this.selectSession(current.dataset.focusSessionId);
+        } else if (current.dataset.focusWebviewId) {
+          this.openWebview(current.dataset.focusWebviewId);
         } else if (current.dataset.id) {
           this.selectSession(current.dataset.id);
         } else if (current.dataset.webviewId) {
@@ -6747,6 +6810,8 @@ class CodemanApp {
     if (!element) return null;
     const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
     if (groupId) return `group:${groupId}`;
+    if (element.dataset?.focusSessionId) return `focus:session:${element.dataset.focusSessionId}`;
+    if (element.dataset?.focusWebviewId) return `focus:webview:${element.dataset.focusWebviewId}`;
     if (element.dataset?.id) return `session:${element.dataset.id}`;
     if (element.dataset?.webviewId) return `webview:${element.dataset.webviewId}`;
     if (element.classList?.contains('tab-layout-ungrouped-header')) return 'group:ungrouped';

@@ -275,6 +275,70 @@ describe('COD-306 structure and activation policy', () => {
     ]);
   });
 
+  it('renders a fixed vertical-only Focus section with shortcut-only controls', () => {
+    const h = loadHelper();
+    const projection = {
+      visibleRefs: [{ kind: 'session', id: 'canonical' }],
+      focusRefs: [
+        { kind: 'session', id: 'focused' },
+        { kind: 'webview', id: 'dash' },
+      ],
+      focusCollapsed: false,
+      sections: [
+        {
+          id: null,
+          name: '',
+          refs: [{ kind: 'session', id: 'canonical' }],
+          refIndices: [0],
+          count: 1,
+          collapsed: false,
+        },
+      ],
+    };
+    const html = h.renderProjection(
+      projection,
+      'vertical',
+      (ref: Ref, index: number) => `<button role="tab" tabindex="0" data-canonical="${ref.id}">${index + 1}</button>`,
+      (value: string) => value,
+      (ref: Ref) => `<button data-tab-focus-shortcut="${ref.kind}:${ref.id}">${ref.id}</button>`
+    );
+    const dom = new JSDOM(`<main>${html}</main>`);
+    const focus = dom.window.document.querySelector('[data-tab-focus-group]')!;
+
+    expect(focus.previousElementSibling).toBeNull();
+    expect(focus.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('true');
+    expect(focus.querySelector('.tab-layout-group-count')?.textContent).toBe('2');
+    expect(focus.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
+    expect(focus.querySelector('[data-tab-group-drag], .tab-layout-group-menu, .tab-layout-drop-zone')).toBeNull();
+    expect(dom.window.document.querySelector('[data-canonical="canonical"]')).not.toBeNull();
+
+    projection.focusCollapsed = true;
+    const collapsed = new JSDOM(
+      `<main>${h.renderProjection(
+        projection,
+        'vertical',
+        () => '<button role="tab">canonical</button>',
+        (value: string) => value,
+        () => '<button data-tab-focus-shortcut>shortcut</button>'
+      )}</main>`
+    );
+    expect(collapsed.window.document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe(
+      'false'
+    );
+    expect(collapsed.window.document.querySelector('[data-tab-focus-shortcut]')).toBeNull();
+
+    const horizontal = new JSDOM(
+      `<main>${h.renderProjection(
+        projection,
+        'horizontal',
+        () => '<button data-canonical>canonical</button>',
+        (value: string) => value,
+        () => '<button data-tab-focus-shortcut>shortcut</button>'
+      )}</main>`
+    );
+    expect(horizontal.window.document.querySelector('[data-tab-focus-group]')).toBeNull();
+  });
+
   it('makes ordered identities and every structural input part of the cache key', () => {
     const h = loadHelper();
     const base = {

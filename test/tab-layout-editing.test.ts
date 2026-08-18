@@ -42,7 +42,7 @@ beforeAll(() => {
   CodemanApp = (globalThis as any).__Cod307App;
 });
 
-type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual' };
+type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual'; focus?: true };
 type Layout = {
   version: number;
   updatedAt: string;
@@ -770,6 +770,58 @@ function clickMenuItem(label: string) {
 function openGroupMenu(app: Record<string, any>, trigger: HTMLElement, groupId = 'g1') {
   app.openTabGroupMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, groupId);
 }
+
+describe('COD-319 Focus smart group rendering', () => {
+  it('renders vertical shortcuts ahead of canonical groups without numbering or tab semantics', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app._fullRenderSessionTabs();
+
+    const focus = document.querySelector<HTMLElement>('[data-tab-focus-group]')!;
+    expect(focus).not.toBeNull();
+    expect(focus.previousElementSibling).toBeNull();
+    expect(focus.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
+    expect(focus.querySelector('[data-tab-focus-shortcut="webview:web"]')).not.toBeNull();
+    expect(focus.querySelector('.tab-number, [data-tab-ref-drag]')).toBeNull();
+    expect(focus.querySelector('[aria-selected]')).toBeNull();
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.getAttribute('aria-current')).toBe(
+      'page'
+    );
+    expect(document.querySelectorAll('[data-id="parent"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-webview-id="web"]')).toHaveLength(1);
+  });
+
+  it('keeps a focused shortcut visible when its canonical real group is collapsed', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[1] = { kind: 'session', id: 'child', focus: true };
+    app.collapsedTabGroupIds.add('g1');
+    app._fullRenderSessionTabs();
+
+    expect(document.querySelector('[data-tab-focus-shortcut="session:child"]')).not.toBeNull();
+    expect(document.querySelector('[data-id="child"]')).toBeNull();
+  });
+
+  it('activates session and webview shortcuts with Enter and Space through roving focus', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app._fullRenderSessionTabs();
+    const session = document.querySelector<HTMLElement>('[data-tab-focus-shortcut="session:parent"]')!;
+    const webview = document.querySelector<HTMLElement>('[data-tab-focus-shortcut="webview:web"]')!;
+
+    session.focus();
+    session.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    webview.focus();
+    webview.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+
+    expect(app.selectSession).toHaveBeenCalledWith('parent');
+    expect(app.openWebview).toHaveBeenCalledWith('web');
+    expect(app._tabLayoutIdentity(session)).toBe('focus:session:parent');
+    expect(app._tabLayoutIdentity(webview)).toBe('focus:webview:web');
+  });
+});
 
 describe('COD-315 dismissible group menu', () => {
   it('dismisses on an outside tab pointerdown without suppressing activation or running an action', () => {
