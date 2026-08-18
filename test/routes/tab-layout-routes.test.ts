@@ -238,6 +238,8 @@ describe('tab layout routes', () => {
         index: 999,
       },
       { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
+      { type: 'setFocus', ref: { kind: 'session', id: 'child' } },
+      { type: 'setFocus', ref: { kind: 'session', id: 'child' }, focused: 'yes' },
     ];
     for (const operation of malformedOperations) {
       for (const staleVersion of [7, 9]) {

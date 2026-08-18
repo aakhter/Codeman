@@ -290,6 +290,50 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
   });
 
+  it('sets Focus for owned session and webview refs and does not bump an idempotent repeat', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'mine' },
+          { kind: 'webview', id: 'dash' },
+        ]),
+      },
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+      webviews: [{ id: 'dash', owner: 'alice' }],
+    });
+
+    const sessionFocused = await h.service.putOperations(
+      'alice',
+      [{ type: 'setFocus', ref: { kind: 'session', id: 'mine' }, focused: true }],
+      7
+    );
+    expect(sessionFocused.layout.ungrouped[0]).toEqual({ kind: 'session', id: 'mine', focus: true });
+
+    const webFocused = await h.service.putOperations(
+      'alice',
+      [{ type: 'setFocus', ref: { kind: 'webview', id: 'dash' }, focused: true }],
+      8
+    );
+    expect(webFocused.layout.ungrouped[1]).toEqual({ kind: 'webview', id: 'dash', focus: true });
+
+    const unchanged = await h.service.putOperations(
+      'alice',
+      [{ type: 'setFocus', ref: { kind: 'webview', id: 'dash' }, focused: true }],
+      9
+    );
+    expect(unchanged.layout.version).toBe(9);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
+    expect(h.broadcast).toHaveBeenCalledTimes(2);
+
+    await expect(
+      h.service.putOperations(
+        'alice',
+        [{ type: 'setFocus', ref: { kind: 'session', id: 'foreign' }, focused: true }],
+        9
+      )
+    ).rejects.toThrow(/unknown ref/);
+  });
+
   it.each([
     ['beginning', 1],
     ['middle', 2],
@@ -398,6 +442,8 @@ describe('TabLayoutService', () => {
     { type: 'createGroup', id: 'new', name: '', index: 0 },
     { type: 'reorderGroup', groupId: 'g', index: -1 },
     { type: 'setManualPlacement', ref: { kind: 'session', id: 'child' }, manual: false },
+    { type: 'setFocus', ref: { kind: 'session', id: 'child' } },
+    { type: 'setFocus', ref: { kind: 'session', id: 'child' }, focused: 'yes' },
   ])('returns conflict for stale malformed $type but rejects it at the matching version', async (operation) => {
     const base: TabLayout = {
       ...existing([{ kind: 'session', id: 'child', placement: 'manual' }]),

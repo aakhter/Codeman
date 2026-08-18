@@ -17,6 +17,7 @@ import {
   renameGroup,
   reorderGroup,
   setManualPlacement,
+  setTabFocus,
   MAX_TAB_GROUP_NAME_LENGTH,
   MAX_TAB_GROUPS,
   MAX_TAB_REFS,
@@ -60,6 +61,7 @@ export type TabLayoutSemanticOperation =
   | { type: 'reorderGroup'; groupId: string; index: number }
   | { type: 'moveRef'; ref: TabRef; groupId: string | null; index: number }
   | { type: 'setManualPlacement'; ref: TabRef; manual: true }
+  | { type: 'setFocus'; ref: TabRef; focused: boolean }
   | { type: 'followParent'; ref: TabRef };
 
 export type TabLayoutSnapshot = {
@@ -132,6 +134,11 @@ function validateOperationRequest(value: unknown): asserts value is TabLayoutSem
     case 'setManualPlacement':
       if (!validOperationRef(operation.ref) || operation.manual !== true) {
         throw new TabLayoutValidationError('setManualPlacement operation has invalid fields');
+      }
+      return;
+    case 'setFocus':
+      if (!validOperationRef(operation.ref) || typeof operation.focused !== 'boolean') {
+        throw new TabLayoutValidationError('setFocus operation has invalid fields');
       }
       return;
     case 'followParent':
@@ -314,6 +321,7 @@ export class TabLayoutService {
         if (
           (operation.type === 'moveRef' ||
             operation.type === 'setManualPlacement' ||
+            operation.type === 'setFocus' ||
             operation.type === 'followParent') &&
           !validOperationRef(operation.ref)
         ) {
@@ -332,6 +340,8 @@ export class TabLayoutService {
             return moveRef(input, operation.ref, { groupId: operation.groupId, index: operation.index }, metadata);
           case 'setManualPlacement':
             return setManualPlacement(input, operation.ref, operation.manual);
+          case 'setFocus':
+            return setTabFocus(input, operation.ref, operation.focused);
           case 'followParent': {
             const followState = describeTabPlacements(input, metadata).find(
               (placement) => placement.kind === operation.ref.kind && placement.id === operation.ref.id
