@@ -4620,6 +4620,7 @@ class CodemanApp {
     cjkEl.style.display = showCjk ? 'block' : 'none';
     cjkEl.setAttribute('aria-hidden', showCjk ? 'false' : 'true');
     if (!showCjk) window.cjkActive = false;
+    try { this._updateTypingBlockedBanner?.(showCjk && window.cjkActive ? 'cjk' : 'none'); } catch {}
     if (typeof KeyboardHandler !== 'undefined') KeyboardHandler.updateLayoutForKeyboard();
   }
 

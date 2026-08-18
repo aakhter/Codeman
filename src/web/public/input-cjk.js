@@ -239,6 +239,25 @@ const CjkInput = (() => {
         // window lets xterm's onData process duplicated input.
         if (!_textarea.classList.contains('cjk-input-visible')) {
           window.cjkActive = false;
+        } else {
+          // Wedge guard: if CJK is visible but nothing has focus (body), the
+          // next keystroke will be swallowed by the CJK gate forever (w1-nzbdav).
+          // Auto-clear after a short grace so normal typing resumes.
+          setTimeout(() => {
+            if (
+              window.cjkActive &&
+              _textarea.classList.contains('cjk-input-visible') &&
+              document.activeElement !== _textarea &&
+              !_composing
+            ) {
+              const activeId = document.activeElement?.id || '';
+              // Only auto-clear if focus is on body/terminal, not on search/rename inputs
+              if (activeId === '' || activeId === 'terminalContainer' || document.activeElement === document.body) {
+                _t('auto-clear cjkActive wedge');
+                window.cjkActive = false;
+              }
+            }
+          }, 800);
         }
         // Reset composing state — some IMEs fire compositionstart without a
         // matching compositionend, leaving _composing stuck true and blocking

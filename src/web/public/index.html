@@ -408,6 +408,8 @@
              on. Populated by app.js _renderHistoryTruncationBanner(). -->
         <div class="history-trunc-bar" id="historyTruncationBar" role="status" aria-live="polite" hidden></div>
         <div class="terminal-container" id="terminalContainer"></div>
+        <!-- Typing blocked banner (w1-nzbdav): shows why input is suppressed and offers Fix -->
+        <div id="typingBlockedBanner" class="typing-blocked-banner" hidden role="alert" aria-live="assertive"></div>
         <!-- COD-187: frozen history view indicator for live-mirror tabs -->
         <div id="historyPill" class="history-pill" hidden onclick="app._exitHistoryView?.()"></div>
         <textarea id="cjkInput" rows="1" placeholder="CJK input (Enter = send, Esc = clear)"

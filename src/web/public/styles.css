@@ -17259,6 +17259,41 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   display: none !important;
 }
 
+.typing-blocked-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #fef3c7;
+  background: #92400e;
+  border-bottom: 1px solid #78350f;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 22%);
+}
+.typing-blocked-banner[hidden] {
+  display: none !important;
+}
+.typing-blocked-fix-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #fff;
+  background: #b45309;
+  border: 1px solid #d97706;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.typing-blocked-fix-btn:hover {
+  background: #d97706;
+}
+
 .offline-banner-dot {
   width: 9px;
   height: 9px;
