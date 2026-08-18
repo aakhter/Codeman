@@ -120,3 +120,26 @@ git status --short --branch
 ```
 
 Expected: no whitespace errors; the branch contains only the COD-327 spec, plan, test, and implementation commits.
+
+### Review Follow-up: Synchronize ARIA during orientation changes
+
+**Files:**
+- Modify: `src/web/public/settings-ui.js`
+- Modify: `test/session-list-layout.test.ts`
+
+- [ ] **Step 1: Add a failing test for immediate ARIA synchronization**
+
+Switch from horizontal to vertical and back through `applyTabOrientation()`. After each move, assert both the parent host
+and `aria-orientation` before any later session-list refresh runs.
+
+- [ ] **Step 2: Update ARIA in the orientation owner**
+
+After `applyTabOrientation()` resolves the effective orientation and host, set:
+
+```js
+tabsEl.setAttribute('aria-orientation', sidebarOwnsTabs || orientation === 'vertical' ? 'vertical' : 'horizontal');
+```
+
+- [ ] **Step 3: Re-run focused and repository verification**
+
+Run the Task 3 commands again and require every command to exit with status 0.

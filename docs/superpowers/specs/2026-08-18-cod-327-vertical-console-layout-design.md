@@ -22,7 +22,8 @@ unconditionally takes `#sessionTabs` back from `#tabRail` and places it in `#ses
 
 The method will set `aria-orientation` from the resolved owner so the DOM placement, visual direction, and accessibility
 state cannot disagree. `applyTabOrientation()` remains responsible for recalculating orientation when settings or device
-class change; this fix prevents an unrelated session-list refresh from undoing its settled placement.
+class change and will update `aria-orientation` when it moves the tab list. This fix prevents an unrelated session-list
+refresh from undoing its settled placement or leaving stale accessibility state.
 
 ## Scope
 
@@ -37,6 +38,9 @@ Extend `test/session-list-layout.test.ts` with the vertical rail in its DOM harn
 2. Apply the normal placement sequence so `#sessionTabs` is in `#tabRail`.
 3. Reapply `applySessionListLayout()` as the asynchronous settings refresh does.
 4. Assert that `#sessionTabs` remains in `#tabRail` and retains `aria-orientation="vertical"`.
+
+A second test will switch tab orientation in both directions and assert that the host and `aria-orientation` agree
+immediately after each `applyTabOrientation()` call.
 
 Existing session-list tests continue to verify sidebar precedence, horizontal header placement, collapse behavior, and
 the invariant that the same DOM node moves between owners.

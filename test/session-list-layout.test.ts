@@ -179,6 +179,26 @@ describe('session list layout', () => {
     expect(tabsEl(win).getAttribute('aria-orientation')).toBe('vertical');
   });
 
+  it('keeps aria orientation synchronized when tab orientation moves hosts', () => {
+    const { win, app } = boot({ stored: { sessionListLayout: 'header', tabOrientation: 'vertical' } });
+
+    app.applySessionListLayout();
+    app.applyTabOrientation();
+
+    expect(tabsEl(win).parentElement?.id).toBe('tabRail');
+    expect(tabsEl(win).getAttribute('aria-orientation')).toBe('vertical');
+
+    win.localStorage.setItem(
+      'codeman-app-settings',
+      JSON.stringify({ sessionListLayout: 'header', tabOrientation: 'horizontal' })
+    );
+    delete (app as unknown as { _cachedAppSettings?: unknown })._cachedAppSettings;
+    app.applyTabOrientation();
+
+    expect(tabsEl(win).parentElement?.id).toBe('sessionTabsHost');
+    expect(tabsEl(win).getAttribute('aria-orientation')).toBe('horizontal');
+  });
+
   it('re-parents the tab list into the sidebar and flips the a11y state', () => {
     const { win, app } = boot({ stored: { sessionListLayout: 'sidebar' } });
     expect(app.getSessionListLayout()).toBe('sidebar');
