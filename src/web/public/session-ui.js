@@ -1904,8 +1904,11 @@ Object.assign(CodemanApp.prototype, {
     const tabName = document.querySelector(`.tab-name[data-session-id="${sessionId}"]`);
     if (!tabName) return;
 
+    this._activeRename?.cancel();
+
     // Prevent tab re-renders from destroying the input while renaming
     this._inlineRenameActive = true;
+    tabName.classList.add('tab-name-renaming');
 
     const currentName = this.getSessionName(session);
     const parsed = parseSessionPrefix(session.name);
@@ -1917,6 +1920,7 @@ Object.assign(CodemanApp.prototype, {
     // If prefix detected, show it as non-editable label
     if (parsed) {
       const prefixLabel = document.createElement('span');
+      prefixLabel.className = 'tab-rename-prefix';
       prefixLabel.textContent = parsed.prefix + ': ';
       prefixLabel.style.cssText = 'color: var(--text-muted); font-size: 0.75rem; white-space: nowrap;';
       tabName.appendChild(prefixLabel);
@@ -1929,23 +1933,29 @@ Object.assign(CodemanApp.prototype, {
     input.className = 'tab-rename-input';
     // 80px is tuned for the narrow header tab; a full-width sidebar row can and
     // should give the whole line to the input.
-    const renameWidth = this.isSessionSidebarActive?.() ? '100%' : '80px';
+    const renameWidth = this.isSessionSidebarActive?.() ? 'auto' : '80px';
     input.style.cssText = `width: ${renameWidth}; min-width: 0; font-size: 0.75rem; padding: 2px 4px; background: var(--bg-input); border: 1px solid var(--accent); border-radius: 3px; color: var(--text); outline: none;`;
 
     tabName.appendChild(input);
     input.focus();
     input.select();
 
+    let settled = false;
     const finishRename = async ({ commit }) => {
-      if (!this._inlineRenameActive) return; // prevent double-fire
-      this._inlineRenameActive = false;
-      this._activeRename = null;
+      if (settled) return;
+      settled = true;
+      tabName.classList.remove('tab-name-renaming');
 
       // Aborted (e.g. the session was deleted mid-rename, or Escape): re-render
       // so any ghost DOM is replaced with the canonical tab list, and skip the
       // API call — a cancel must not fire a stale rename PUT.
       if (!commit) {
-        this.renderSessionTabs();
+        tabName.textContent = originalContent;
+        if (this._activeRename === renameHandle) {
+          this._inlineRenameActive = false;
+          this._activeRename = null;
+          this.renderSessionTabs();
+        }
         return;
       }
 
@@ -1967,14 +1977,18 @@ Object.assign(CodemanApp.prototype, {
         }
       }
       // Re-render tabs to restore full tab structure
-      this.renderSessionTabs();
+      if (this._activeRename === renameHandle) {
+        this._inlineRenameActive = false;
+        this._activeRename = null;
+        this.renderSessionTabs();
+      }
     };
 
-    // Register only after the input is wired so a throw above can't strand state.
-    this._activeRename = {
+    const renameHandle = {
       sessionId,
       cancel: () => finishRename({ commit: false }),
     };
+    this._activeRename = renameHandle;
 
     input.addEventListener('blur', () => finishRename({ commit: true }));
     input.addEventListener('keydown', (e) => {

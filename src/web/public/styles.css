@@ -926,6 +926,23 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name {
   line-height: 1.25;
 }
 
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name.tab-name-renaming {
+  display: flex;
+  align-items: center;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+
+html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-prefix {
+  flex: 0 0 auto;
+}
+
+html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tab-rail,
   .tab-rail-resize-handle::after {
