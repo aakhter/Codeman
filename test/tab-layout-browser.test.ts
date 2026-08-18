@@ -112,6 +112,96 @@ describe('COD-306 browser projection', () => {
     expect(result.visibleRefs.map((ref: Ref) => ref.id)).toEqual(['s1', 'new-a', 'new-b']);
   });
 
+  it('derives vertical-only Focus refs in canonical order without changing behavioral orders', () => {
+    const h = loadHelper();
+    const focused = layout();
+    focused.groups[0].refs[0] = { ...focused.groups[0].refs[0], focus: true };
+    focused.groups[0].refs[1] = { ...focused.groups[0].refs[1], focus: true };
+    focused.groups[0].refs[3] = { ...focused.groups[0].refs[3], focus: true };
+    focused.ungrouped[1] = { ...focused.ungrouped[1], focus: true };
+    const options = {
+      liveSessionIds: ['s1', 's2', 's3', 's4'],
+      openWebviewIds: ['w1', 'w2'],
+      collapsedGroupIds: ['g1'],
+      activeSessionId: 's1',
+      orientation: 'vertical',
+      focusCollapsed: true,
+    };
+
+    const result = h.project(focused, options);
+    expect(result.focusRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's4' },
+    ]);
+    expect(result.focusCollapsed).toBe(true);
+    expect(result.visibleRefs).toEqual([
+      { kind: 'session', id: 's1' },
+      { kind: 'session', id: 's3' },
+      { kind: 'webview', id: 'w2' },
+      { kind: 'session', id: 's4' },
+    ]);
+    expect(result.completeRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's1' },
+      { kind: 'session', id: 's3' },
+      { kind: 'webview', id: 'w2' },
+      { kind: 'session', id: 's4' },
+    ]);
+
+    expect(h.project(focused, { ...options, orientation: 'horizontal' }).focusRefs).toEqual([]);
+  });
+
+  it('optimistically sets and clears Focus while preserving it through ordinary edits', () => {
+    const h = loadHelper();
+    const initial = layout();
+    const focused = h.applyOperation(initial, {
+      type: 'setFocus',
+      ref: { kind: 'session', id: 's2' },
+      focused: true,
+    });
+    expect(focused.groups[0].refs[0]).toEqual({ kind: 'session', id: 's2', focus: true });
+
+    const moved = h.applyOperation(focused, {
+      type: 'moveRef',
+      ref: { kind: 'session', id: 's2' },
+      groupId: 'g2',
+      index: 1,
+    });
+    expect(moved.groups[1].refs[1]).toEqual({ kind: 'session', id: 's2', focus: true });
+    expect(
+      h.applyOperation(moved, {
+        type: 'setFocus',
+        ref: { kind: 'session', id: 's2' },
+        focused: false,
+      }).groups[1].refs[1]
+    ).toEqual({ kind: 'session', id: 's2' });
+  });
+
+  it('treats Focus membership and smart collapse as structural rendering state', () => {
+    const h = loadHelper();
+    const common = {
+      version: 4,
+      orientation: 'vertical',
+      visibleRefs: [{ kind: 'session', id: 's1' }],
+    };
+    const plain = h.structureKey({ ...common, focusRefs: [], focusCollapsed: false });
+    const focused = h.structureKey({
+      ...common,
+      focusRefs: [{ kind: 'session', id: 's1' }],
+      focusCollapsed: false,
+    });
+    const collapsed = h.structureKey({
+      ...common,
+      focusRefs: [{ kind: 'session', id: 's1' }],
+      focusCollapsed: true,
+    });
+
+    expect(focused).not.toBe(plain);
+    expect(collapsed).not.toBe(focused);
+  });
+
   it('falls back to a deterministic legacy-flat projection', () => {
     const h = loadHelper();
     const fallback = h.projectFallback({

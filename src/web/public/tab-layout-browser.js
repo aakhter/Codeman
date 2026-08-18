@@ -59,6 +59,7 @@
               kind: ref.kind,
               id: ref.id,
               ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
+              ...(ref.focus === true ? { focus: true } : {}),
             }))
           : [],
       })),
@@ -66,6 +67,7 @@
         kind: ref.kind,
         id: ref.id,
         ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
+        ...(ref.focus === true ? { focus: true } : {}),
       })),
     };
   }
@@ -204,6 +206,14 @@
       if (!validRef(operation.ref) || operation.manual !== true) operationError('invalid manual placement');
       return mapStoredRef(layout, operation.ref, (ref) => ({ ...ref, placement: 'manual' }));
     }
+    if (operation.type === 'setFocus') {
+      if (!validRef(operation.ref) || typeof operation.focused !== 'boolean') operationError('invalid Focus state');
+      return mapStoredRef(layout, operation.ref, (ref) => {
+        if (operation.focused) return { ...ref, focus: true };
+        const { focus: _focus, ...rest } = ref;
+        return rest;
+      });
+    }
     if (operation.type === 'followParent') {
       if (!validRef(operation.ref) || operation.ref.kind !== 'session') operationError('only a session can follow');
       if (!refLocations(layout).some((item) => refKey(item.ref) === refKey(operation.ref)))
@@ -264,10 +274,16 @@
     const completeRefs = [];
     const completeSeen = new Set();
     const visibleRefs = [];
+    const focusRefs = [];
     const sections = [];
     const hiddenTabGroupByRef = {};
 
     const renderable = (ref) => (ref.kind === 'session' ? liveSessionIds.has(ref.id) : openWebviewIds.has(ref.id));
+    if (orientation === 'vertical') {
+      for (const { ref } of refLocations(layout)) {
+        if (ref.focus === true && renderable(ref)) focusRefs.push({ kind: ref.kind, id: ref.id });
+      }
+    }
     const addVisible = (ref, sectionRefs, isCollapsed, groupId = null, stored = true) => {
       const key = refKey(ref);
       if (stored) {
@@ -365,7 +381,15 @@
       });
     }
 
-    return { sessionOrder: ownerSessions, completeRefs, visibleRefs, sections, hiddenTabGroupByRef };
+    return {
+      sessionOrder: ownerSessions,
+      completeRefs,
+      visibleRefs,
+      focusRefs,
+      focusCollapsed: orientation === 'vertical' && options.focusCollapsed === true,
+      sections,
+      hiddenTabGroupByRef,
+    };
   }
 
   function projectFallback(options = {}) {
@@ -396,6 +420,8 @@
       openWebviews: stableIds(input.openWebviewIds),
       activeSessionId: input.activeSessionId || null,
       activeWebviewId: input.activeWebviewId || null,
+      focusCollapsed: input.focusCollapsed === true,
+      focusRefs: (Array.isArray(input.focusRefs) ? input.focusRefs : []).filter(validRef).map(refKey),
       placementStates: Array.isArray(input.placementStates) ? input.placementStates : [],
       refs: (Array.isArray(input.visibleRefs) ? input.visibleRefs : []).filter(validRef).map(refKey),
     });
