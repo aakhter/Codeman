@@ -115,7 +115,7 @@ describe('POST /api/sessions parentSessionId', () => {
     harness.ctx.tabLayouts = service as never;
     harness.ctx.addSession = (async (session: any) => {
       harness.ctx.sessions.set(session.id, session);
-      await service.sessionCreated('@single');
+      await service.sessionCreated('@single', session.id);
     }) as never;
 
     const childResponse = await harness.app.inject({

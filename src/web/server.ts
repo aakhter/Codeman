@@ -100,6 +100,7 @@ import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
 import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
 import { deriveWebviewSseHint } from './webview-sse.js';
+import type { SessionCreationOptions } from './ports/session-port.js';
 import {
   type SessionListenerRefs,
   createSessionListeners,
@@ -722,14 +723,13 @@ export class WebServer extends EventEmitter {
     return {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
-      addSession: async (session: Session) => {
-        this.sessions.set(session.id, session);
-        try {
-          await this.tabLayouts.sessionCreated(session.owner ?? '@single');
-        } catch (error) {
-          this.sessions.delete(session.id);
-          throw error;
-        }
+      addSession: async (session: Session, options: SessionCreationOptions = {}) => {
+        return this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options.tabGroupId, () => {
+          this.sessions.set(session.id, session);
+          return () => {
+            if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+          };
+        });
       },
       tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),

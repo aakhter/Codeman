@@ -555,6 +555,7 @@ class CodemanApp {
     this._tabLayoutCoordinator = null;
     this._tabLayoutEditCoordinator = null;
     this._tabLayoutSsePending = false;
+    this._deferredCreatedSessionIds = new Set();
     this._tabPlacementStates = new Map();
     this._tabPendingFollowRefs = new Set();
     this._tabLayoutPagehideHandler = null;
@@ -2044,8 +2045,13 @@ class CodemanApp {
   _onSessionCreated(data) {
     this.sessions.set(data.id, data);
     this.updateAttachmentHistoryCountFromSession?.(data);
+    const visibilityDeferred =
+      this._tabLayoutEditCoordinator?.hasPending() &&
+      this.tabLayout &&
+      !this._refLocation({ kind: 'session', id: data.id });
+    if (visibilityDeferred) (this._deferredCreatedSessionIds ??= new Set()).add(data.id);
     // Add new session to end of tab order
-    if (!this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
+    if (!visibilityDeferred && !this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
       this.sessionOrder.push(data.id);
       this.saveSessionOrder();
     }
@@ -4663,6 +4669,7 @@ class CodemanApp {
    */
   _resetAllAppState() {
     this.sessions.clear();
+    this._deferredCreatedSessionIds = new Set();
     this.ralphStates.clear();
     this.terminalBuffers.clear();
     this.terminalBufferCache.clear();
@@ -4788,6 +4795,19 @@ class CodemanApp {
     // Stop any active voice recording on reconnect
     VoiceInput.cleanup();
 
+    const deferredCreatedSessionOwners = new Map();
+    for (const id of this._deferredCreatedSessionIds || []) {
+      const session = this.sessions.get(id);
+      if (session) deferredCreatedSessionOwners.set(id, this._tabLayoutSessionOwnerIdentity(session));
+    }
+    const currentUser = window.__codemanUser;
+    const currentLayoutOwner =
+      currentUser?.multiUser === true && typeof currentUser.username === 'string' && currentUser.username.length > 0
+        ? currentUser.username
+        : currentUser?.multiUser === false
+          ? '@single'
+          : null;
+
     this._resetAllAppState();
 
     data.sessions.forEach(s => {
@@ -4801,6 +4821,15 @@ class CodemanApp {
         });
       }
     });
+    this._deferredCreatedSessionIds = new Set(
+      data.sessions
+        .filter((session) => {
+          if (!deferredCreatedSessionOwners.has(session.id)) return false;
+          const owner = this._tabLayoutSessionOwnerIdentity(session);
+          return deferredCreatedSessionOwners.get(session.id) === owner && (!currentLayoutOwner || owner === currentLayoutOwner);
+        })
+        .map((session) => session.id)
+    );
 
     // Server is source of truth for open sessions — don't resurrect stale tabs
     // from localStorage (would show phantom "ended" tabs when a session was closed
@@ -5018,11 +5047,27 @@ class CodemanApp {
 
   _onTabLayoutChanged(data) {
     const currentUser = window.__codemanUser;
+    const hasTrustedMultiUserIdentity =
+      currentUser?.multiUser === true &&
+      typeof currentUser.username === 'string' &&
+      currentUser.username.length > 0;
+    if (data?.layout && data.owner && data.owner !== '@single' && !hasTrustedMultiUserIdentity) {
+      if (this._tabLayoutEditCoordinator?.hasPending()) {
+        this._tabLayoutSsePending = true;
+        return;
+      }
+      this._loadTabLayout();
+      return;
+    }
     if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
-    // A pending semantic edit owns its optimistic projection. A refetch may
-    // update its authoritative base, but must not paint stale server state over it.
+    // An optimistic edit owns its request until the PUT settles. Inline events can
+    // be that same write's server echo, so adopting them would replay in-flight intent.
     if (this._tabLayoutEditCoordinator?.hasPending()) {
       this._tabLayoutSsePending = true;
+      return;
+    }
+    if (data?.layout) {
+      this._applyTabLayout(data.layout, data.placements);
       return;
     }
     this._loadTabLayout();
@@ -5043,6 +5088,10 @@ class CodemanApp {
     }
     for (const id of this.webviews?.keys?.() || []) metadata.push({ kind: 'webview', id });
     return metadata;
+  }
+
+  _tabLayoutSessionOwnerIdentity(session) {
+    return typeof session?.owner === 'string' && session.owner.length > 0 ? session.owner : '@single';
   }
 
   _tabRefPlacementState(ref) {
@@ -5277,6 +5326,7 @@ class CodemanApp {
     }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
+    if (meta.authoritative) this._releaseDeferredCreatedSessions(meta.authoritativeLayout || layout);
     this.tabLayoutReadOnly = false;
     this._lastTabStructureKey = null;
     this._refreshTabProjection();
@@ -5361,6 +5411,25 @@ class CodemanApp {
     );
   }
 
+  async createSessionInTabGroup(groupId) {
+    if (this._runInFlight) {
+      this.showToast?.('A session is already starting.', 'info');
+      return false;
+    }
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    if (this.tabLayoutReadOnly || !group) return false;
+
+    this.toggleTabGroupCollapsed(groupId, false);
+    this.terminal.focus();
+    try {
+      await this.run({ count: 1, tabGroupId: groupId });
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not start session.', 'error');
+      return false;
+    }
+  }
+
   closeTabGroupMenu(options = {}) {
     const menu = this._tabGroupMenu;
     const trigger = this._tabGroupMenuTrigger;
@@ -5390,23 +5459,48 @@ class CodemanApp {
     this.closeTabGroupMenu();
     const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
     if (groupIndex < 0) return;
+    const group = this.tabLayout.groups[groupIndex];
     const menu = document.createElement('div');
     menu.className = 'tab-rail-action-menu tab-layout-group-action-menu';
     menu.setAttribute('role', 'menu');
     const actions = [
-      ['Rename group', () => this.startTabGroupRename(groupId)],
-      ['Move group earlier', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) }, `group:${groupId}`)],
-      ['Move group later', () => this.editTabLayout({ type: 'reorderGroup', groupId, index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1) }, `group:${groupId}`)],
-      ['Delete group', () => this.deleteTabGroup(groupId)],
+      {
+        label: 'New session',
+        ariaLabel: `New session in ${group.name}`,
+        run: () => this.createSessionInTabGroup(groupId),
+      },
+      { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
+      {
+        label: 'Move group earlier',
+        run: () =>
+          this.editTabLayout(
+            { type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) },
+            `group:${groupId}`
+          ),
+      },
+      {
+        label: 'Move group later',
+        run: () =>
+          this.editTabLayout(
+            {
+              type: 'reorderGroup',
+              groupId,
+              index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1),
+            },
+            `group:${groupId}`
+          ),
+      },
+      { label: 'Delete group', run: () => this.deleteTabGroup(groupId) },
     ];
-    for (const [label, run] of actions) {
+    for (const action of actions) {
       const button = document.createElement('button');
       button.type = 'button';
       button.setAttribute('role', 'menuitem');
-      button.textContent = label;
+      button.textContent = action.label;
+      if (action.ariaLabel) button.setAttribute('aria-label', action.ariaLabel);
       button.addEventListener('click', () => {
         this.closeTabGroupMenu();
-        run();
+        action.run();
       });
       menu.appendChild(button);
     }
@@ -5583,8 +5677,9 @@ class CodemanApp {
   }
 
   _projectTabLayout() {
+    const deferredCreatedSessionIds = this._deferredCreatedSessionIds || new Set();
     const options = {
-      liveSessionIds: [...this.sessions.keys()],
+      liveSessionIds: [...this.sessions.keys()].filter((id) => !deferredCreatedSessionIds.has(id)),
       legacySessionOrder: this._legacySessionOrder,
       openWebviewIds: [...(this.webviewOrder || [])].filter((id) => this.webviews?.has(id)),
       collapsedGroupIds: [...this.collapsedTabGroupIds],
@@ -5600,6 +5695,13 @@ class CodemanApp {
           liveSessionIds: options.liveSessionIds,
           openWebviewIds: options.openWebviewIds,
         });
+  }
+
+  _releaseDeferredCreatedSessions(layout) {
+    if (!this._deferredCreatedSessionIds?.size) return;
+    for (const ref of [...(layout?.groups || []).flatMap((group) => group.refs || []), ...(layout?.ungrouped || [])]) {
+      if (ref.kind === 'session') this._deferredCreatedSessionIds.delete(ref.id);
+    }
   }
 
   _refreshTabProjection() {
@@ -5646,6 +5748,7 @@ class CodemanApp {
     }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
+    this._releaseDeferredCreatedSessions(layout);
     const storage = this._getTabCollapseStorage();
     const collapsedState = storage
       ? window.CodemanTabLayout.loadCollapsedGroupIds(
@@ -5670,7 +5773,9 @@ class CodemanApp {
 
   _applyTabLayoutFallback() {
     // Any failed owner-layout read makes the authoritative ordering unknown.
-    // Paint the safe legacy-flat projection read-only until a retry succeeds.
+    // Paint every live session in the safe legacy-flat projection read-only until
+    // a retry succeeds; deferred target placement is unknowable in this mode.
+    this._deferredCreatedSessionIds?.clear();
     this.tabLayout = null;
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;
@@ -8164,6 +8269,7 @@ class CodemanApp {
       this._activeRename.cancel();
     }
     this.sessions.delete(sessionId);
+    this._deferredCreatedSessionIds?.delete(sessionId);
     // Remove from tab order
     const orderIndex = this.sessionOrder.indexOf(sessionId);
     if (orderIndex !== -1) {
