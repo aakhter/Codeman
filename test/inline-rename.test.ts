@@ -16,18 +16,12 @@
  * Port: 3164 (per MEMORY.md, ports 3150+ for tests)
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { WebServer } from '../src/web/server.js';
-import { TmuxManager } from '../src/tmux-manager.js';
 
 const PORT = 3164;
 const BASE_URL = `http://localhost:${PORT}`;
-
-// Browser coverage here never creates a terminal session. test/setup gives the
-// suite an isolated HOME, so the server's host-level `which tmux` probe cannot
-// see the installed binary; avoid coupling this UI-only test to that probe.
-vi.spyOn(TmuxManager, 'isTmuxAvailable').mockReturnValue(true);
 
 describe('Inline rename input', () => {
   let server: WebServer;
@@ -53,19 +47,37 @@ describe('Inline rename input', () => {
     if (server) await server.stop();
   }, 60000);
 
-  // Reset state between tests so each starts from a clean slate.
+  // Reset state between tests so each starts from a clean slate, including when
+  // an assertion aborts a test before it can restore its own vertical-rail DOM.
   async function resetState(): Promise<void> {
     await page.evaluate(() => {
       const app = (
-        window as unknown as { app: { _activeRename: { cancel: () => void } | null; sessions: Map<string, unknown> } }
+        window as unknown as {
+          app: {
+            _activeRename: { cancel: () => void } | null;
+            _debounceTimers: Record<string, ReturnType<typeof setTimeout> | null | undefined>;
+            sessions: Map<string, unknown>;
+            sessionOrder: string[];
+          };
+        }
       ).app;
       if (app._activeRename) app._activeRename.cancel();
+      clearTimeout(app._debounceTimers.sessionTabs);
+      app._debounceTimers.sessionTabs = null;
       app.sessions.clear();
+      app.sessionOrder = [];
       document.querySelectorAll('[data-test-tab]').forEach((n) => n.remove());
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      const host = document.getElementById('sessionTabsHost') as HTMLElement;
+      host.appendChild(container);
+      document.documentElement.dataset.tabOrientation = 'horizontal';
+      container.setAttribute('role', 'tablist');
+      container.setAttribute('aria-label', 'Session tabs');
+      container.setAttribute('aria-orientation', 'horizontal');
     });
-    // Allow any cancel-triggered renderSessionTabs to settle.
-    await page.waitForTimeout(20);
   }
+
+  afterEach(async () => resetState());
 
   // Helper: stub a session + tab-name DOM node, then start rename.
   // Returns whether the rename input was successfully created.
@@ -392,15 +404,16 @@ describe('Inline rename input', () => {
       await new Promise((r) => setTimeout(r, 60));
 
       window.fetch = origFetch;
+      const label = document.querySelector('.tab-name[data-session-id="no-sse"]') as HTMLElement | null;
       return {
         mapName: app.sessions.get('no-sse')?.name ?? null,
-        classActive:
-          document.querySelector('.tab-name[data-session-id="no-sse"]')?.classList.contains('tab-name-renaming') ??
-          false,
+        label: label?.textContent ?? null,
+        classActive: label ? label.classList.contains('tab-name-renaming') : null,
       };
     });
 
     expect(result.mapName).toBe('w9-case: fresh');
+    expect(result.label).toBe('w9-case: fresh');
     expect(result.classActive).toBe(false);
   });
 
@@ -435,12 +448,11 @@ describe('Inline rename input', () => {
 
       window.fetch = origFetch;
       app.showToast = origToast;
+      const label = document.querySelector('.tab-name[data-session-id="rename-500"]') as HTMLElement | null;
       return {
         mapName: app.sessions.get('rename-500')?.name ?? null,
-        label: document.querySelector('.tab-name[data-session-id="rename-500"]')?.textContent ?? null,
-        classActive:
-          document.querySelector('.tab-name[data-session-id="rename-500"]')?.classList.contains('tab-name-renaming') ??
-          false,
+        label: label?.textContent ?? null,
+        classActive: label ? label.classList.contains('tab-name-renaming') : null,
         toasts,
       };
     });
@@ -485,19 +497,22 @@ describe('Inline rename input', () => {
       wrap.appendChild(tabName);
       document.body.appendChild(wrap);
       app.startInlineRename('second-id');
+      const firstLabel = document.querySelector('.tab-name[data-session-id="first-id"]') as HTMLElement | null;
       return {
         firstActive,
         secondActive: app._activeRename?.sessionId,
-        firstInputPresent: !!document.querySelector('.tab-name[data-session-id="first-id"] input.tab-rename-input'),
-        firstRenameClassActive:
-          document.querySelector('.tab-name[data-session-id="first-id"]')?.classList.contains('tab-name-renaming') ??
-          false,
+        firstLabelPresent: !!firstLabel,
+        firstLabel: firstLabel?.textContent ?? null,
+        firstInputPresent: !!firstLabel?.querySelector('input.tab-rename-input'),
+        firstRenameClassActive: firstLabel ? firstLabel.classList.contains('tab-name-renaming') : null,
         secondInputPresent: !!document.querySelector('.tab-name[data-session-id="second-id"] input.tab-rename-input'),
       };
     });
 
     expect(result.firstActive).toBe('first-id');
     expect(result.secondActive).toBe('second-id');
+    expect(result.firstLabelPresent).toBe(true);
+    expect(result.firstLabel).toBe('First');
     expect(result.firstInputPresent).toBe(false);
     expect(result.firstRenameClassActive).toBe(false);
     expect(result.secondInputPresent).toBe(true);
