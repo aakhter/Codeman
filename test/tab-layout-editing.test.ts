@@ -234,7 +234,7 @@ describe('COD-307 optimistic write coordinator', () => {
 
   it('coalesces a deterministic semantic burst and adopts the successful PUT version', async () => {
     const h = loadHelper();
-    const adopted: Layout[] = [];
+    const adopted: Array<{ layout: Layout; meta: Record<string, unknown> }> = [];
     const put = vi.fn(async ({ baseVersion, layout: next }: any) => ({
       ok: true,
       status: 200,
@@ -242,7 +242,7 @@ describe('COD-307 optimistic write coordinator', () => {
     }));
     const coordinator = h.createEditCoordinator({
       initialLayout: layout(),
-      applyLayout: (next: Layout) => adopted.push(next),
+      applyLayout: (next: Layout, meta: Record<string, unknown>) => adopted.push({ layout: next, meta }),
       put,
       debounceMs: 100,
       schedule: setTimeout,
@@ -251,12 +251,13 @@ describe('COD-307 optimistic write coordinator', () => {
 
     coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Platform' });
     coordinator.enqueue({ type: 'reorderGroup', groupId: 'g2', index: 0 });
-    expect(adopted.at(-1)?.groups.map((group) => group.id)).toEqual(['g2', 'g1']);
+    expect(adopted.at(-1)?.layout.groups.map((group) => group.id)).toEqual(['g2', 'g1']);
     expect(put).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(100);
     expect(put).toHaveBeenCalledTimes(1);
     expect(put.mock.calls[0][0].baseVersion).toBe(4);
     expect(coordinator.getLayout().version).toBe(5);
+    expect(adopted.at(-1)?.meta.authoritativeLayout).toEqual(coordinator.getLayout());
   });
 
   it('rebases the same pending semantic operations once after 409 and retries once', async () => {

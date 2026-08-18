@@ -86,6 +86,7 @@ function makeApp() {
   app._lastTabStructureKey = null;
   app._inlineRenameActive = false;
   app._tabLayoutManaged = true;
+  app._deferredCreatedSessionIds = new Set();
   app.detachedSessions = new Set();
   app.tabAlerts = new Map();
   app.terminalLoadStates = new Map();
@@ -555,8 +556,10 @@ describe('COD-306 CodemanApp integration', () => {
     app.closeSessionAttachmentCards = () => {};
     app.closeSessionSubagentWindows = () => {};
     app.saveSessionOrder = () => {};
+    app._deferredCreatedSessionIds.add('s1');
     app._cleanupSessionData('s1');
     expect(app.sessionOrder).toEqual(['s2', 's3']);
+    expect(app._deferredCreatedSessionIds.has('s1')).toBe(false);
   });
 
   it('sequences concurrent app loads', async () => {
@@ -608,21 +611,75 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app._loadTabLayout).not.toHaveBeenCalled();
   });
 
-  it('upserts but does not paint a targeted session missing from the optimistic layout', () => {
+  it('keeps a deferred targeted session out of projection until authoritative placement settles', () => {
     const app = makeApp();
     app._tabLayoutEditCoordinator = { hasPending: () => true };
     app.sessionOrder = ['s2', 's1', 's3'];
     app.updateAttachmentHistoryCountFromSession = vi.fn();
     app.saveSessionOrder = vi.fn();
-    app.renderSessionTabs = vi.fn();
+    app.renderSessionTabs = () => app._fullRenderSessionTabs();
     app.updateCost = vi.fn();
     app.renderMuxSessions = vi.fn();
+    app._fullRenderSessionTabs();
 
     app._onSessionCreated({ id: 'new-session', name: 'New' });
 
     expect(app.sessions.has('new-session')).toBe(true);
     expect(app.sessionOrder).toEqual(['s2', 's1', 's3']);
     expect(app.saveSessionOrder).not.toHaveBeenCalled();
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+
+    const authoritative = {
+      ...layout,
+      version: 9,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: [...group.refs, { kind: 'session', id: 'new-session' }],
+      })),
+    };
+    app._adoptTabLayoutForEdit(authoritative, {
+      authoritative: true,
+      authoritativeLayout: { ...layout, version: 9 },
+      placements: [],
+    });
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(true);
+
+    app._adoptTabLayoutForEdit(authoritative, {
+      authoritative: true,
+      authoritativeLayout: authoritative,
+      placements: [],
+    });
+
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-tab-group-id="group-x"] [data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(false);
+  });
+
+  it('releases a deferred session when a direct authoritative layout contains it', () => {
+    const app = makeApp();
+    app.sessions.set('new-session', { id: 'new-session', name: 'New' });
+    app._deferredCreatedSessionIds.add('new-session');
+    app._getTabCollapseStorage = vi.fn(() => null);
+    app._restorePendingTabLayoutOperations = vi.fn(() => false);
+    app._applyTabLayout({ ...layout, version: 9 }, []);
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(true);
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    const authoritative = {
+      ...layout,
+      version: 10,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: [...group.refs, { kind: 'session', id: 'new-session' }],
+      })),
+    };
+
+    app._applyTabLayout(authoritative, []);
+
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(false);
+    expect(document.querySelectorAll('[data-tab-group-id="group-x"] [data-id="new-session"]')).toHaveLength(1);
   });
 
   it('adopts inline placement metadata for inherited labels and actions without a reload', () => {

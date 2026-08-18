@@ -555,6 +555,7 @@ class CodemanApp {
     this._tabLayoutCoordinator = null;
     this._tabLayoutEditCoordinator = null;
     this._tabLayoutSsePending = false;
+    this._deferredCreatedSessionIds = new Set();
     this._tabPlacementStates = new Map();
     this._tabPendingFollowRefs = new Set();
     this._tabLayoutPagehideHandler = null;
@@ -2048,6 +2049,7 @@ class CodemanApp {
       this._tabLayoutEditCoordinator?.hasPending() &&
       this.tabLayout &&
       !this._refLocation({ kind: 'session', id: data.id });
+    if (visibilityDeferred) (this._deferredCreatedSessionIds ??= new Set()).add(data.id);
     // Add new session to end of tab order
     if (!visibilityDeferred && !this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
       this.sessionOrder.push(data.id);
@@ -4666,6 +4668,7 @@ class CodemanApp {
    */
   _resetAllAppState() {
     this.sessions.clear();
+    this._deferredCreatedSessionIds = new Set();
     this.ralphStates.clear();
     this.terminalBuffers.clear();
     this.terminalBufferCache.clear();
@@ -5296,6 +5299,7 @@ class CodemanApp {
     }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
+    if (meta.authoritative) this._releaseDeferredCreatedSessions(meta.authoritativeLayout || layout);
     this.tabLayoutReadOnly = false;
     this._lastTabStructureKey = null;
     this._refreshTabProjection();
@@ -5646,8 +5650,9 @@ class CodemanApp {
   }
 
   _projectTabLayout() {
+    const deferredCreatedSessionIds = this._deferredCreatedSessionIds || new Set();
     const options = {
-      liveSessionIds: [...this.sessions.keys()],
+      liveSessionIds: [...this.sessions.keys()].filter((id) => !deferredCreatedSessionIds.has(id)),
       legacySessionOrder: this._legacySessionOrder,
       openWebviewIds: [...(this.webviewOrder || [])].filter((id) => this.webviews?.has(id)),
       collapsedGroupIds: [...this.collapsedTabGroupIds],
@@ -5663,6 +5668,13 @@ class CodemanApp {
           liveSessionIds: options.liveSessionIds,
           openWebviewIds: options.openWebviewIds,
         });
+  }
+
+  _releaseDeferredCreatedSessions(layout) {
+    if (!this._deferredCreatedSessionIds?.size) return;
+    for (const ref of [...(layout?.groups || []).flatMap((group) => group.refs || []), ...(layout?.ungrouped || [])]) {
+      if (ref.kind === 'session') this._deferredCreatedSessionIds.delete(ref.id);
+    }
   }
 
   _refreshTabProjection() {
@@ -5709,6 +5721,7 @@ class CodemanApp {
     }
     this.tabLayout = layout;
     this.tabLayoutVersion = layout.version;
+    this._releaseDeferredCreatedSessions(layout);
     const storage = this._getTabCollapseStorage();
     const collapsedState = storage
       ? window.CodemanTabLayout.loadCollapsedGroupIds(
@@ -8224,6 +8237,7 @@ class CodemanApp {
       this._activeRename.cancel();
     }
     this.sessions.delete(sessionId);
+    this._deferredCreatedSessionIds?.delete(sessionId);
     // Remove from tab order
     const orderIndex = this.sessionOrder.indexOf(sessionId);
     if (orderIndex !== -1) {
