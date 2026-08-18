@@ -15,6 +15,7 @@ function createHarness(
     persisted?: SessionFact[];
     live?: SessionFact[];
     webviews?: Array<{ id: string; owner?: string }>;
+    readWebviews?: () => Promise<Array<{ id: string; owner?: string }>>;
   } = {}
 ) {
   const layouts = { ...(options.layouts ?? {}) };
@@ -32,7 +33,7 @@ function createHarness(
   const service = new TabLayoutService({
     store: store as never,
     sessions: live as never,
-    readWebviews: vi.fn(async () => options.webviews ?? []),
+    readWebviews: options.readWebviews ?? vi.fn(async () => options.webviews ?? []),
     broadcast,
     now: () => '2026-08-16T12:00:00.000Z',
   });
@@ -766,6 +767,23 @@ describe('TabLayoutService', () => {
     expect(layout.ungrouped).toEqual([{ kind: 'session', id: 'actual-new-session' }]);
     expect(layout.version).toBe(8);
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates reconciliation failures without writing or broadcasting a layout', async () => {
+    const reconciliationError = new Error('saved webviews unavailable');
+    const h = createHarness({
+      layouts: {
+        alice: { ...existing([]), groups: [{ id: 'work', name: 'Work', refs: [] }] },
+      },
+      live: [{ id: 'new-session', owner: 'alice', createdAt: 1 }],
+      readWebviews: vi.fn(async () => {
+        throw reconciliationError;
+      }),
+    });
+
+    await expect(h.service.sessionCreated('alice', 'new-session', 'work')).rejects.toBe(reconciliationError);
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 
   it('appends an already-targeted created session after removing its complete inherited descendant block', async () => {

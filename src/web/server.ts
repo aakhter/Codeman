@@ -725,7 +725,7 @@ export class WebServer extends EventEmitter {
       addSession: async (session: Session) => {
         this.sessions.set(session.id, session);
         try {
-          await this.tabLayouts.sessionCreated(session.owner ?? '@single');
+          await this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id);
         } catch (error) {
           this.sessions.delete(session.id);
           throw error;
