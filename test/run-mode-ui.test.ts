@@ -276,30 +276,49 @@ describe('Run launch synchronization', () => {
   });
 
   it('routes stale targeted response layouts through the authoritative version gate', async () => {
-    const CodemanApp = function CodemanApp(this: any) {};
     const context = vm.createContext({
-      CodemanApp,
       localStorage: { getItem: () => null, setItem: () => {} },
       document: { getElementById: () => null },
       fetch: vi.fn(),
       console,
     });
+    const appSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
-    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+    const classStart = appSource.indexOf('class CodemanApp {');
+    const classEndMarker = '\n}\n\n// ═══════════════════════════════════════════════════════════════\n// Module Init';
+    const classEnd = appSource.indexOf(classEndMarker, classStart);
+    expect(classStart).toBeGreaterThanOrEqual(0);
+    expect(classEnd).toBeGreaterThan(classStart);
+    vm.runInContext(
+      `${appSource.slice(classStart, classEnd + 2)}\n${sessionUi}\nglobalThis.__RunModeCodemanApp = CodemanApp;`,
+      context,
+      { filename: 'app-and-session-ui.js' }
+    );
 
-    const app = new (CodemanApp as any)();
+    const CodemanApp = (context as any).__RunModeCodemanApp;
+    const app = Object.create(CodemanApp.prototype);
     const currentLayout = { version: 12, groups: [], ungrouped: [] };
     const staleLayout = { version: 11, groups: [], ungrouped: [] };
     app.tabLayout = currentLayout;
+    app.tabLayoutVersion = currentLayout.version;
+    app._tabLayoutEditCoordinator = null;
+    app._getTabCollapseStorage = vi.fn(() => null);
+    app._refreshTabProjection = vi.fn();
+    app._restorePendingTabLayoutOperations = vi.fn(() => false);
+    app._fullRenderSessionTabs = vi.fn();
     app.sessions = new Map();
-    app._applyTabLayout = vi.fn();
-    app._onSessionCreated = vi.fn();
+    const applyTabLayout = vi.spyOn(app, '_applyTabLayout');
+    const snapshot = { id: 'sess-new' };
+    app._onSessionCreated = vi.fn((session: any) => app.sessions.set(session.id, session));
     app._renderSessionTabsImmediate = vi.fn();
 
-    await app._ensureCreatedSessionVisible('sess-new', { id: 'sess-new' }, staleLayout);
+    await app._ensureCreatedSessionVisible(snapshot.id, snapshot, staleLayout);
 
-    expect(app._applyTabLayout).toHaveBeenCalledWith(staleLayout);
+    expect(applyTabLayout).toHaveBeenCalledWith(staleLayout);
     expect(app.tabLayout).toBe(currentLayout);
+    expect(app.tabLayoutVersion).toBe(12);
+    expect(app.sessions.get(snapshot.id)).toEqual(snapshot);
+    expect(app._renderSessionTabsImmediate).toHaveBeenCalledOnce();
   });
 
   it('loads the new session when a quick-start response wins the race with SSE', async () => {
