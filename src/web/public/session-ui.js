@@ -1591,6 +1591,37 @@ Object.assign(CodemanApp.prototype, {
     return typeof confirmed === 'string' ? confirmed : name;
   },
 
+  _queueInlineSessionName(sessionId, desiredName) {
+    this._inlineRenameWriteQueues ??= new Map();
+    const queues = this._inlineRenameWriteQueues;
+    const previous = queues.get(sessionId) || Promise.resolve();
+    const task = previous.then(async () => {
+      const session = this.sessions.get(sessionId);
+      if (!session) return { status: 'deleted' };
+      if (session.name === desiredName) {
+        return { status: 'confirmed', name: session.name, wrote: false };
+      }
+
+      let confirmed = null;
+      try {
+        confirmed = await this._putSessionName(sessionId, desiredName);
+      } catch {
+        // Keep queue failures as values so a later desired write still runs.
+      }
+      if (!this.sessions.has(sessionId)) return { status: 'deleted' };
+      if (confirmed === null) return { status: 'failed' };
+
+      this._applyLocalSessionName(sessionId, confirmed);
+      this.renderSessionTabs();
+      return { status: 'confirmed', name: confirmed, wrote: true };
+    });
+    queues.set(sessionId, task);
+    void task.then(() => {
+      if (queues.get(sessionId) === task) queues.delete(sessionId);
+    });
+    return task;
+  },
+
   async saveSessionName() {
     if (!this.editingSessionId) return;
     // Captured: the modal can be closed (or switched to another session) while
@@ -1951,11 +1982,18 @@ Object.assign(CodemanApp.prototype, {
     let editSettled = false;
     let invalidated = false;
     let completed = false;
+    let ownsRenderGuard = true;
+
+    const releaseRenderGuard = () => {
+      if (!ownsRenderGuard) return;
+      ownsRenderGuard = false;
+      this._inlineRenameActive = false;
+    };
 
     const completeCurrentRename = () => {
       if (this._activeRename !== renameHandle) return;
       completed = true;
-      this._inlineRenameActive = false;
+      releaseRenderGuard();
       this._activeRename = null;
       this.renderSessionTabs();
     };
@@ -1984,29 +2022,24 @@ Object.assign(CodemanApp.prototype, {
       }
 
       if (this._activeRename !== renameHandle) return;
-      this._inlineRenameActive = false;
+      releaseRenderGuard();
 
       const suffix = input.value.trim();
       const fullName = parsed ? parsed.prefix + (suffix ? ': ' + suffix : '') : suffix;
       if (fullName === session.name) {
         restoreOriginalChildren();
-        completeCurrentRename();
-        return;
+      } else {
+        tabName.textContent = fullName || originalContent;
       }
-      tabName.textContent = fullName || originalContent;
 
       // Skip the API call if the session vanished between focus and blur.
       const stillExists = this.sessions.has(sessionId);
       if (stillExists) {
-        const confirmed = await this._putSessionName(sessionId, fullName);
+        const result = await this._queueInlineSessionName(sessionId, fullName);
         if (invalidated || this._activeRename !== renameHandle || !this.sessions.has(sessionId)) return;
-        if (confirmed === null) {
+        if (result.status === 'failed') {
           restoreOriginalChildren();
           this.showToast('Failed to rename', 'error');
-        } else {
-          // The re-render below repaints from this.sessions, so the new name has
-          // to be in the map before it runs (see _applyLocalSessionName()).
-          this._applyLocalSessionName(sessionId, confirmed);
         }
       }
       // Re-render tabs to restore full tab structure

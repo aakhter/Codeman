@@ -658,6 +658,72 @@ describe('Inline rename input', () => {
     });
   });
 
+  it('A pending session PUT cannot release a tab-group rename render guard', async () => {
+    await resetState();
+    expect(await startRename('group-guard-session', 'OldName')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            _inlineRenameActive: boolean;
+            sessions: Map<string, { id: string; name: string }>;
+            startTabGroupRename: (groupId: string) => boolean;
+            tabLayout: { groups: Array<{ id: string; name: string; refs: unknown[] }> } | null;
+          };
+        }
+      ).app;
+      const origFetch = window.fetch;
+      const origLayout = app.tabLayout;
+      let resolvePut!: (response: Response) => void;
+      window.fetch = (() => new Promise<Response>((resolve) => (resolvePut = resolve))) as typeof window.fetch;
+
+      const sessionInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      sessionInput.value = 'ConfirmedName';
+      sessionInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      const group = document.createElement('section');
+      group.setAttribute('data-test-tab', '1');
+      group.className = 'tab-layout-group';
+      group.innerHTML =
+        '<div class="tab-layout-group-header"><button data-tab-group-header="guard-group"></button>' +
+        '<span class="tab-layout-group-label">Guard Group</span></div>';
+      container.appendChild(group);
+      app.tabLayout = {
+        ...(origLayout ?? { groups: [] }),
+        groups: [...(origLayout?.groups ?? []), { id: 'guard-group', name: 'Guard Group', refs: [] }],
+      };
+      const groupStarted = app.startTabGroupRename('guard-group');
+      const groupInput = document.querySelector('.tab-layout-group-rename-input') as HTMLInputElement;
+
+      resolvePut(
+        new Response('{"success":true,"data":{"name":"ConfirmedName"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const inputSurvives = document.body.contains(groupInput);
+      const flagWhileGroupEditing = app._inlineRenameActive;
+      if (inputSurvives) {
+        groupInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      }
+      const flagAfterGroupSettlement = app._inlineRenameActive;
+      app.tabLayout = origLayout;
+      window.fetch = origFetch;
+      return { groupStarted, inputSurvives, flagWhileGroupEditing, flagAfterGroupSettlement };
+    });
+
+    expect(result).toEqual({
+      groupStarted: true,
+      inputSurvives: true,
+      flagWhileGroupEditing: true,
+      flagAfterGroupSettlement: false,
+    });
+  });
+
   it('A late old failure cannot destroy or toast over a same-session re-entry', async () => {
     await resetState();
     expect(await startRename('pending-reentry', 'OldName')).toBe(true);
@@ -712,7 +778,132 @@ describe('Inline rename input', () => {
     });
   });
 
-  it('A late old success cannot overwrite a newer confirmed rename', async () => {
+  it('A stale no-op queues a compensating write behind the pending rename', async () => {
+    await resetState();
+    expect(await startRename('pending-stale-noop', 'Old')).toBe(true);
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            sessions: Map<string, { id: string; name: string }>;
+            startInlineRename: (id: string) => void;
+          };
+        }
+      ).app;
+      const origFetch = window.fetch;
+      const requests: Array<{ body: string; resolve: (response: Response) => void }> = [];
+      window.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          requests.push({ body: String(init?.body ?? ''), resolve });
+        })) as typeof window.fetch;
+
+      const firstInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      firstInput.value = 'First';
+      firstInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      app.startInlineRename('pending-stale-noop');
+      const staleInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      staleInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const requestCountBeforeFirstSettled = requests.length;
+      requests[0].resolve(
+        new Response('{"success":true,"data":{"name":"First"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const compensatingWriteStarted = requests.length === 2;
+      if (compensatingWriteStarted) {
+        requests[1].resolve(
+          new Response('{"success":true,"data":{"name":"Old"}}', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      window.fetch = origFetch;
+      const label = document.querySelector('.tab-name[data-session-id="pending-stale-noop"]') as HTMLElement;
+      return {
+        requestCountBeforeFirstSettled,
+        compensatingWriteStarted,
+        bodies: requests.map(({ body }) => JSON.parse(body).name),
+        mapName: app.sessions.get('pending-stale-noop')?.name ?? null,
+        label: label.textContent,
+      };
+    });
+
+    expect(result).toEqual({
+      requestCountBeforeFirstSettled: 1,
+      compensatingWriteStarted: true,
+      bodies: ['First', 'Old'],
+      mapName: 'Old',
+      label: 'Old',
+    });
+  });
+
+  it('Cancelling a re-entry does not erase the earlier confirmed write', async () => {
+    await resetState();
+
+    const result = await page.evaluate(async () => {
+      const app = (
+        window as unknown as {
+          app: {
+            _activeRename: { cancel: () => void } | null;
+            sessions: Map<string, { id: string; name: string; status: string }>;
+            sessionOrder: string[];
+            startInlineRename: (id: string) => void;
+          };
+        }
+      ).app;
+      const id = 'pending-cancel-reentry';
+      app.sessions.set(id, { id, name: 'Old', status: 'idle' });
+      app.sessionOrder = [id];
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      const tab = document.createElement('div');
+      tab.setAttribute('data-test-tab', '1');
+      tab.className = 'session-tab';
+      tab.dataset.id = id;
+      tab.innerHTML =
+        '<span class="tab-status idle"></span><span class="tab-info"><span class="tab-name-row">' +
+        `<span class="tab-name" data-session-id="${id}" data-full-name="Old">Old</span>` +
+        '</span></span>';
+      container.appendChild(tab);
+
+      const origFetch = window.fetch;
+      let resolveFirst!: (response: Response) => void;
+      window.fetch = (() => new Promise<Response>((resolve) => (resolveFirst = resolve))) as typeof window.fetch;
+      app.startInlineRename(id);
+      const firstInput = tab.querySelector('input.tab-rename-input') as HTMLInputElement;
+      firstInput.value = 'First';
+      firstInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      app.startInlineRename(id);
+      app._activeRename!.cancel();
+
+      resolveFirst(
+        new Response('{"success":true,"data":{"name":"First"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      window.fetch = origFetch;
+      const label = document.querySelector(`.tab-name[data-session-id="${id}"]`) as HTMLElement | null;
+      return {
+        mapName: app.sessions.get(id)?.name ?? null,
+        label: label?.textContent ?? null,
+        renameActive: !!app._activeRename,
+      };
+    });
+
+    expect(result).toEqual({ mapName: 'First', label: 'First', renameActive: false });
+  });
+
+  it('Serializes successive rename writes in user-intent order', async () => {
     await resetState();
     expect(await startRename('pending-order', 'OldName')).toBe(true);
 
@@ -726,10 +917,10 @@ describe('Inline rename input', () => {
         }
       ).app;
       const origFetch = window.fetch;
-      const pending: Array<{ resolve: (response: Response) => void }> = [];
-      window.fetch = (() =>
+      const pending: Array<{ body: string; resolve: (response: Response) => void }> = [];
+      window.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
         new Promise<Response>((resolve) => {
-          pending.push({ resolve });
+          pending.push({ body: String(init?.body ?? ''), resolve });
         })) as typeof window.fetch;
 
       const oldInput = document.querySelector('input.tab-rename-input') as HTMLInputElement;
@@ -742,13 +933,7 @@ describe('Inline rename input', () => {
       newInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      pending[1].resolve(
-        new Response('{"success":true,"data":{"name":"SecondAttempt"}}', {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      );
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const requestCountBeforeFirstSettled = pending.length;
       pending[0].resolve(
         new Response('{"success":true,"data":{"name":"FirstAttempt"}}', {
           status: 200,
@@ -756,11 +941,29 @@ describe('Inline rename input', () => {
         })
       );
       await new Promise((resolve) => setTimeout(resolve, 20));
+      const secondStartedAfterFirst = pending.length === 2;
+      pending[1]?.resolve(
+        new Response('{"success":true,"data":{"name":"SecondAttempt"}}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
       window.fetch = origFetch;
-      return app.sessions.get('pending-order')?.name ?? null;
+      return {
+        requestCountBeforeFirstSettled,
+        secondStartedAfterFirst,
+        bodies: pending.map(({ body }) => JSON.parse(body).name),
+        mapName: app.sessions.get('pending-order')?.name ?? null,
+      };
     });
 
-    expect(result).toBe('SecondAttempt');
+    expect(result).toEqual({
+      requestCountBeforeFirstSettled: 1,
+      secondStartedAfterFirst: true,
+      bodies: ['FirstAttempt', 'SecondAttempt'],
+      mapName: 'SecondAttempt',
+    });
   });
 
   it('Re-entry: starting rename while one is active aborts the previous one', async () => {
