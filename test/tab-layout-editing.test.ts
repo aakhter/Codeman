@@ -843,12 +843,31 @@ describe('COD-319 Focus smart group rendering', () => {
     header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('true');
 
-    expect(app.toggleTabGroupCollapsed('@focus', true)).toBe(true);
-    expect(JSON.parse(localStorage.getItem('codeman:tab-groups-collapsed')!)).toContain('@focus');
+    expect(app.toggleFocusGroupCollapsed(true)).toBe(true);
+    expect(localStorage.getItem('codeman:focus-group-collapsed')).toBe('true');
     expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('false');
     expect(document.querySelector('[data-tab-focus-shortcut]')).toBeNull();
-    expect(app.toggleTabGroupCollapsed('@focus', false)).toBe(true);
+    expect(app.toggleFocusGroupCollapsed(false)).toBe(true);
     expect(document.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
+  });
+
+  it('does not collide when a real group ID is @focus', () => {
+    localStorage.clear();
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].id = '@focus';
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app._fullRenderSessionTabs();
+
+    expect(app.toggleTabGroupCollapsed('@focus', true)).toBe(true);
+    expect(app.toggleFocusGroupCollapsed(true)).toBe(true);
+    expect(app.collapsedTabGroupIds.has('@focus')).toBe(true);
+    expect(app.focusTabGroupCollapsed).toBe(true);
+    expect(JSON.parse(localStorage.getItem('codeman:tab-groups-collapsed')!)).toEqual(['@focus']);
+    expect(localStorage.getItem('codeman:focus-group-collapsed')).toBe('true');
+
+    expect(app.toggleFocusGroupCollapsed(false)).toBe(true);
+    expect(app.collapsedTabGroupIds.has('@focus')).toBe(true);
+    expect(app.focusTabGroupCollapsed).toBe(false);
   });
 
   it('offers exact Focus actions from canonical and shortcut menus', () => {
@@ -1671,6 +1690,29 @@ describe('COD-307 delegated pointer behavior', () => {
     });
     expect(app._tabPointerDrag).toBeNull();
     expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
+  });
+
+  it('does not advertise Focus shortcuts as drag destinations', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const handle = container.querySelector<HTMLElement>('[data-id="child"] [data-tab-ref-drag]')!;
+    const shortcut = container.querySelector<HTMLElement>('[data-tab-focus-shortcut="session:parent"]')!;
+    (document as any).elementFromPoint = vi.fn(() => shortcut);
+
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 72, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 72, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+
+    expect(shortcut.classList.contains('tab-layout-drop-active')).toBe(false);
+    container.dispatchEvent(
+      pointerEvent('pointercancel', { pointerId: 72, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
   });
 
   it('starts reference dragging only from the dedicated handle', () => {

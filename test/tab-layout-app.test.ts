@@ -169,6 +169,7 @@ const initData = {
 
 beforeEach(() => {
   (globalThis as any).CSS = { escape: (value: string) => value };
+  delete (window as any).__codemanUser;
   document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
   document.body.innerHTML = '';
   localStorage.removeItem('codeman:tab-groups-collapsed');
@@ -330,6 +331,27 @@ describe('COD-306 CodemanApp integration', () => {
 
     app._applyTabLayout(layout);
     expect(app.collapsedTabGroupIds.size).toBe(0);
+  });
+
+  it('falls back to all-expanded when either collapse storage record is malformed', () => {
+    const app = makeApp();
+    localStorage.setItem('codeman:tab-groups-collapsed', JSON.stringify(['group-x']));
+    localStorage.setItem('codeman:focus-group-collapsed', 'invalid');
+
+    app._applyTabLayout({
+      ...layout,
+      version: 9,
+      groups: [
+        {
+          ...layout.groups[0],
+          refs: layout.groups[0].refs.map((ref) => (ref.id === 's2' ? { ...ref, focus: true } : ref)),
+        },
+      ],
+    });
+
+    expect(app._tabCollapseStorageFailed).toBe(true);
+    expect(app.collapsedTabGroupIds.size).toBe(0);
+    expect(app.focusTabGroupCollapsed).toBe(false);
   });
 
   it('adopts and renders grouped layout when acquiring localStorage throws', () => {
@@ -557,6 +579,11 @@ describe('COD-306 CodemanApp integration', () => {
     app._loadTabLayout = vi.fn();
     app._onTabLayoutChanged();
     expect(app._loadTabLayout).toHaveBeenCalledOnce();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+    app._onTabLayoutChanged({ owner: 'bob', version: 11 });
+    expect(app._loadTabLayout).toHaveBeenCalledOnce();
+    app._onTabLayoutChanged({ owner: 'alice', version: 11 });
+    expect(app._loadTabLayout).toHaveBeenCalledTimes(2);
     app._tabLayoutCoordinator.dispose();
   });
 

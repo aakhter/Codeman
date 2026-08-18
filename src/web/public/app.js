@@ -547,6 +547,7 @@ class CodemanApp {
     this.tabLayoutVersion = null;
     this.tabLayoutReadOnly = true;
     this.collapsedTabGroupIds = new Set();
+    this.focusTabGroupCollapsed = false;
     this._tabCollapseStorageFailed = false;
     this._visibleTabRefs = [];
     this._tabLayoutManaged = true;
@@ -5014,7 +5015,9 @@ class CodemanApp {
     return this._ensureTabLayoutCoordinator().load();
   }
 
-  _onTabLayoutChanged() {
+  _onTabLayoutChanged(data) {
+    const currentUser = window.__codemanUser;
+    if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
     // A pending semantic edit owns its optimistic projection. A refetch may
     // update its authoritative base, but must not paint stale server state over it.
     if (this._tabLayoutEditCoordinator?.hasPending()) {
@@ -5587,7 +5590,7 @@ class CodemanApp {
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
       orientation: this._tabOrientation(),
-      focusCollapsed: this.collapsedTabGroupIds.has('@focus'),
+      focusCollapsed: this.focusTabGroupCollapsed,
     };
     return this.tabLayout
       ? window.CodemanTabLayout.project(this.tabLayout, options)
@@ -5649,8 +5652,13 @@ class CodemanApp {
           layout.groups?.map((group) => group.id) || []
         )
       : { ids: [], ok: false };
-    if (!collapsedState.ok) this._tabCollapseStorageFailed = true;
-    this.collapsedTabGroupIds = new Set(collapsedState.ids);
+    const focusState = collapsedState.ok && storage
+      ? window.CodemanTabLayout.loadFocusGroupCollapsed(storage)
+      : { collapsed: false, ok: false };
+    const collapseStateOk = collapsedState.ok && focusState.ok;
+    if (!collapseStateOk) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(collapseStateOk ? collapsedState.ids : []);
+    this.focusTabGroupCollapsed = collapseStateOk ? focusState.collapsed : false;
     this.tabLayoutReadOnly = false;
     this._tabLayoutFirstPaintPending = false;
     this._lastTabStructureKey = null;
@@ -5710,7 +5718,7 @@ class CodemanApp {
   }
 
   toggleTabGroupCollapsed(groupId, forceCollapsed) {
-    if (groupId !== '@focus' && !this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
+    if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
     const next = new Set(this.collapsedTabGroupIds);
     const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
     if (shouldCollapse) next.add(groupId);
@@ -5724,6 +5732,19 @@ class CodemanApp {
     this._lastTabStructureKey = null;
     this._fullRenderSessionTabs();
     return this.collapsedTabGroupIds.has(groupId) === shouldCollapse;
+  }
+
+  toggleFocusGroupCollapsed(forceCollapsed) {
+    const shouldCollapse = forceCollapsed === undefined ? !this.focusTabGroupCollapsed : forceCollapsed === true;
+    const storage = this._getTabCollapseStorage();
+    const saved = storage
+      ? window.CodemanTabLayout.saveFocusGroupCollapsed(storage, shouldCollapse)
+      : { collapsed: false, ok: false };
+    if (!saved.ok) this._tabCollapseStorageFailed = true;
+    this.focusTabGroupCollapsed = saved.collapsed;
+    this._lastTabStructureKey = null;
+    this._fullRenderSessionTabs();
+    return this.focusTabGroupCollapsed === shouldCollapse;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -6789,11 +6810,13 @@ class CodemanApp {
       };
       const activate = () => {
         const current = items[currentIndex];
+        const currentIsFocusGroup = Boolean(current.querySelector?.('[data-tab-focus-toggle]'));
         const currentGroupId =
           current.dataset.tabGroupHeader ||
-          current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader ||
-          (current.querySelector?.('[data-tab-focus-toggle]') ? '@focus' : null);
-        if (currentGroupId) {
+          current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+        if (currentIsFocusGroup) {
+          this.toggleFocusGroupCollapsed();
+        } else if (currentGroupId) {
           this.toggleTabGroupCollapsed(currentGroupId);
         } else if (current.dataset.focusSessionId) {
           this.selectSession(current.dataset.focusSessionId);
@@ -6806,21 +6829,21 @@ class CodemanApp {
         }
       };
       const current = items[currentIndex];
+      const currentIsFocusGroup = Boolean(current.querySelector?.('[data-tab-focus-toggle]'));
       const currentGroupId =
         current.dataset.tabGroupHeader ||
-        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader ||
-        (current.querySelector?.('[data-tab-focus-toggle]') ? '@focus' : null);
+        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
       if (vertical && e.key === 'Insert') {
         e.preventDefault();
         this.createTabGroup();
         return;
       }
-      if (vertical && currentGroupId && currentGroupId !== '@focus' && e.key === 'F2') {
+      if (vertical && currentGroupId && e.key === 'F2') {
         e.preventDefault();
         this.startTabGroupRename(currentGroupId);
         return;
       }
-      if (vertical && currentGroupId && currentGroupId !== '@focus' && e.key === 'Delete') {
+      if (vertical && currentGroupId && e.key === 'Delete') {
         e.preventDefault();
         this.deleteTabGroup(currentGroupId);
         return;
@@ -6828,7 +6851,6 @@ class CodemanApp {
       if (
         vertical &&
         currentGroupId &&
-        currentGroupId !== '@focus' &&
         e.ctrlKey &&
         (e.key === 'ArrowUp' || e.key === 'ArrowDown')
       ) {
@@ -6841,7 +6863,7 @@ class CodemanApp {
       if (vertical && e.shiftKey && e.key === 'F10') {
         e.preventDefault();
         const syntheticEvent = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
-        if (currentGroupId && currentGroupId !== '@focus') this.openTabGroupMenu(syntheticEvent, currentGroupId);
+        if (currentGroupId) this.openTabGroupMenu(syntheticEvent, currentGroupId);
         else if (current.dataset.focusSessionId || current.dataset.focusWebviewId) {
           const ref = current.dataset.focusWebviewId
             ? { kind: 'webview', id: current.dataset.focusWebviewId }
@@ -6880,18 +6902,19 @@ class CodemanApp {
       if (!vertical || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
       const groupId =
         current.dataset.tabGroupHeader ||
-        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader ||
-        (current.querySelector?.('[data-tab-focus-toggle]') ? '@focus' : null);
-      if (groupId) {
+        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      if (groupId || currentIsFocusGroup) {
         const expanded = current.getAttribute('aria-expanded') === 'true';
         if (e.key === 'ArrowLeft' && expanded) {
           e.preventDefault();
-          this._tabFocusIdentity = `group:${groupId}`;
-          this.toggleTabGroupCollapsed(groupId, true);
+          this._tabFocusIdentity = currentIsFocusGroup ? 'focus-group' : `group:${groupId}`;
+          if (currentIsFocusGroup) this.toggleFocusGroupCollapsed(true);
+          else this.toggleTabGroupCollapsed(groupId, true);
         } else if (e.key === 'ArrowRight' && !expanded) {
           e.preventDefault();
-          this._tabFocusIdentity = `group:${groupId}`;
-          this.toggleTabGroupCollapsed(groupId, false);
+          this._tabFocusIdentity = currentIsFocusGroup ? 'focus-group' : `group:${groupId}`;
+          if (currentIsFocusGroup) this.toggleFocusGroupCollapsed(false);
+          else this.toggleTabGroupCollapsed(groupId, false);
         } else if (e.key === 'ArrowRight' && expanded) {
           const child = current.closest('.tab-layout-group')?.querySelector('[role="group"] [role="treeitem"]');
           if (child) {
@@ -6916,7 +6939,7 @@ class CodemanApp {
 
   _tabLayoutIdentity(element) {
     if (!element) return null;
-    if (element.querySelector?.('[data-tab-focus-toggle]')) return 'group:@focus';
+    if (element.querySelector?.('[data-tab-focus-toggle]')) return 'focus-group';
     const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
     if (groupId) return `group:${groupId}`;
     if (element.dataset?.focusSessionId) return `focus:session:${element.dataset.focusSessionId}`;
@@ -7070,7 +7093,8 @@ class CodemanApp {
       }
       event.preventDefault();
       const hit = document.elementFromPoint?.(event.clientX, event.clientY);
-      const zone = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
+      const candidate = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
+      const zone = candidate?.classList?.contains('tab-focus-shortcut') ? null : candidate;
       if (drag.zone === zone) return;
       drag.zone?.classList?.remove('tab-layout-drop-active');
       drag.zone = zone;

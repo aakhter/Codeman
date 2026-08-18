@@ -2572,6 +2572,22 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
   cursor: pointer;
 }
 
+.session-tab:hover > .tab-actions > .tab-more,
+.session-tab:focus-within > .tab-actions > .tab-more,
+.tab-focus-shortcut > .tab-actions > .tab-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (pointer: coarse) {
+  .session-tab > .tab-actions > .tab-more {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
 /* At the legacy compact width, one overflow button replaces the three in-flow
    icons. The actions remain keyboard/touch reachable without starving the name
    column that COD-299 is intended to restore. */

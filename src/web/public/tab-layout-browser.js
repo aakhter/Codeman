@@ -17,7 +17,7 @@
   const asIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []);
   const stableIds = (value) => [...new Set(asIds(value))];
   const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
-  const FOCUS_COLLAPSE_ID = '@focus';
+  const FOCUS_COLLAPSED_STORAGE_KEY = 'codeman:focus-group-collapsed';
 
   function loadCollapsedGroupIds(storage, validGroupIds) {
     try {
@@ -26,7 +26,7 @@
       if (!Array.isArray(parsed)) throw new Error('Invalid collapsed tab groups');
       const loaded = stableIds(parsed);
       if (validGroupIds === undefined) return { ids: loaded, ok: true };
-      const valid = new Set([...stableIds(validGroupIds), FOCUS_COLLAPSE_ID]);
+      const valid = new Set(stableIds(validGroupIds));
       const kept = loaded.filter((id) => valid.has(id));
       if (kept.length !== loaded.length) storage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(kept));
       return { ids: kept, ok: true };
@@ -42,6 +42,26 @@
       return { ids, ok: true };
     } catch (_error) {
       return { ids: [], ok: false };
+    }
+  }
+
+  function loadFocusGroupCollapsed(storage) {
+    try {
+      const raw = storage.getItem(FOCUS_COLLAPSED_STORAGE_KEY);
+      if (raw === null || raw === 'false') return { collapsed: false, ok: true };
+      if (raw === 'true') return { collapsed: true, ok: true };
+      throw new Error('Invalid Focus collapse state');
+    } catch (_error) {
+      return { collapsed: false, ok: false };
+    }
+  }
+
+  function saveFocusGroupCollapsed(storage, collapsed) {
+    try {
+      storage.setItem(FOCUS_COLLAPSED_STORAGE_KEY, collapsed === true ? 'true' : 'false');
+      return { collapsed: collapsed === true, ok: true };
+    } catch (_error) {
+      return { collapsed: false, ok: false };
     }
   }
 
@@ -463,7 +483,7 @@
           })
           .join('');
     const focus = focusRefs.length
-      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}"><button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed('${FOCUS_COLLAPSE_ID}')"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button><span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
+      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}"><button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleFocusGroupCollapsed()"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button><span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
       : '';
     let index = 0;
     const groups = sections
@@ -746,5 +766,7 @@
     createLoadCoordinator,
     loadCollapsedGroupIds,
     saveCollapsedGroupIds,
+    loadFocusGroupCollapsed,
+    saveFocusGroupCollapsed,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

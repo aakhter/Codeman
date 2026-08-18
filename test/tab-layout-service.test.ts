@@ -66,7 +66,7 @@ describe('TabLayoutService', () => {
 
   it('prepares and commits a complete-state session deletion around the resource action', async () => {
     const h = createHarness({
-      layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },
+      layouts: { alice: existing([{ kind: 'session', id: 'mine', focus: true }]) },
       live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
     });
     h.service.markRestorationComplete();
@@ -227,6 +227,39 @@ describe('TabLayoutService', () => {
     expect(result.layout).toMatchObject({ version: 8, updatedAt: '2026-08-16T12:00:00.000Z' });
     expect(result.layout.groups[0].name).toBe('Group');
     expect(h.broadcast).toHaveBeenLastCalledWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
+  });
+
+  it('preserves authoritative Focus flags across legacy full-layout writes', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'focused', focus: true },
+          { kind: 'session', id: 'plain' },
+        ]),
+      },
+      live: [
+        { id: 'focused', owner: 'alice', createdAt: 1 },
+        { id: 'plain', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    const result = await h.service.put(
+      'alice',
+      {
+        ...existing([
+          { kind: 'session', id: 'plain', focus: true },
+          { kind: 'session', id: 'focused' },
+        ]),
+        groups: [{ id: 'g', name: 'Moved', refs: [] }],
+      },
+      7
+    );
+
+    expect(result.status).toBe('updated');
+    expect(result.layout.ungrouped).toEqual([
+      { kind: 'session', id: 'plain' },
+      { kind: 'session', id: 'focused', focus: true },
+    ]);
   });
 
   it('applies Follow parent intent through the authoritative model instead of accepting a browser-derived layout', async () => {
@@ -634,7 +667,7 @@ describe('TabLayoutService', () => {
       layouts: {
         alice: existing([
           { kind: 'session', id: 'pinned' },
-          { kind: 'webview', id: 'gone-web' },
+          { kind: 'webview', id: 'gone-web', focus: true },
         ]),
       },
       persisted: [{ id: 'pinned', owner: 'alice', createdAt: 1, pinned: true }],

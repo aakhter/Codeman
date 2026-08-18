@@ -388,11 +388,12 @@ describe('COD-306 structure and activation policy', () => {
 
 describe('COD-305 local collapse policy', () => {
   function storage(initial: string | null = null) {
-    let value = initial;
+    const values = new Map<string, string>();
+    if (initial !== null) values.set('codeman:tab-groups-collapsed', initial);
     return {
-      getItem: vi.fn(() => value),
-      setItem: vi.fn((_key: string, next: string) => {
-        value = next;
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, next: string) => {
+        values.set(key, next);
       }),
     };
   }
@@ -405,11 +406,14 @@ describe('COD-305 local collapse policy', () => {
     expect(local.setItem).toHaveBeenCalledWith('codeman:tab-groups-collapsed', '["g2","g1"]');
   });
 
-  it('retains the reserved Focus collapse identity while pruning stale real groups', () => {
+  it('keeps Focus collapse storage independent from a real group named @focus', () => {
     const h = loadHelper();
     const local = storage();
-    expect(h.saveCollapsedGroupIds(local, ['@focus', 'stale', 'g1']).ok).toBe(true);
-    expect(h.loadCollapsedGroupIds(local, ['g1'])).toEqual({ ids: ['@focus', 'g1'], ok: true });
+    expect(h.saveCollapsedGroupIds(local, ['@focus', 'stale']).ok).toBe(true);
+    expect(h.saveFocusGroupCollapsed(local, true)).toEqual({ collapsed: true, ok: true });
+    expect(h.loadCollapsedGroupIds(local, ['@focus'])).toEqual({ ids: ['@focus'], ok: true });
+    expect(h.loadFocusGroupCollapsed(local)).toEqual({ collapsed: true, ok: true });
+    expect(local.setItem).toHaveBeenCalledWith('codeman:focus-group-collapsed', 'true');
   });
 
   it('garbage-collects stale group IDs during layout adoption', () => {
@@ -435,6 +439,8 @@ describe('COD-305 local collapse policy', () => {
     };
     expect(h.loadCollapsedGroupIds(readFailure, ['g1'])).toEqual({ ids: [], ok: false });
     expect(h.saveCollapsedGroupIds(writeFailure, ['g1'])).toEqual({ ids: [], ok: false });
+    expect(h.loadFocusGroupCollapsed(readFailure)).toEqual({ collapsed: false, ok: false });
+    expect(h.saveFocusGroupCollapsed(writeFailure, true)).toEqual({ collapsed: false, ok: false });
   });
 
   it('renders stable clickable group headers with collapse state', () => {
