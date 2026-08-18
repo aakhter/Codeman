@@ -2599,7 +2599,11 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
 }
 
 .session-tab .tab-more {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  pointer-events: none;
   width: 1.75rem;
   height: 1.5rem;
   padding: 0;
@@ -2613,17 +2617,16 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
 
 .session-tab:hover > .tab-actions > .tab-more,
 .session-tab:focus-within > .tab-actions > .tab-more,
+.session-tab.active > .tab-actions > .tab-more,
 .tab-focus-shortcut > .tab-actions > .tab-more {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 @media (pointer: coarse) {
   .session-tab > .tab-actions > .tab-more {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    visibility: visible;
+    pointer-events: auto;
   }
 }
 
@@ -2637,9 +2640,8 @@ html[data-tab-orientation='vertical'].tab-rail-compact .session-tab .tab-actions
 }
 
 html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active .tab-more {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .session-tab .tab-more:hover,
