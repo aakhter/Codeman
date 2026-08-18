@@ -724,6 +724,112 @@ describe('Inline rename input', () => {
     });
   });
 
+  it('Document F2 cannot replace a focused tab-group rename with a session editor', async () => {
+    await resetState();
+
+    const setup = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            activeSessionId: string | null;
+            sessions: Map<string, { id: string; name: string; status: string }>;
+            sessionOrder: string[];
+            startTabGroupRename: (groupId: string) => boolean;
+            tabLayout: { groups: Array<{ id: string; name: string; refs: unknown[] }> } | null;
+            tabLayoutReadOnly: boolean;
+          };
+          __inlineRenameOriginalLayout?: unknown;
+          __inlineRenameOriginalReadOnly?: boolean;
+        }
+      ).app;
+      const id = 'group-f2-session';
+      const groupId = 'group-f2-owner';
+      app.sessions.set(id, { id, name: 'Session Name', status: 'idle' });
+      app.sessionOrder = [id];
+      app.activeSessionId = id;
+      const container = document.getElementById('sessionTabs') as HTMLElement;
+      const tab = document.createElement('div');
+      tab.setAttribute('data-test-tab', '1');
+      tab.className = 'session-tab active';
+      tab.dataset.id = id;
+      tab.innerHTML =
+        '<span class="tab-status idle"></span><span class="tab-info"><span class="tab-name-row">' +
+        `<span class="tab-name" data-session-id="${id}" data-full-name="Session Name">Session Name</span>` +
+        '</span></span>';
+      container.appendChild(tab);
+      const group = document.createElement('section');
+      group.setAttribute('data-test-tab', '1');
+      group.className = 'tab-layout-group';
+      group.innerHTML =
+        `<div class="tab-layout-group-header"><button data-tab-group-header="${groupId}"></button>` +
+        '<span class="tab-layout-group-label">Owned Group</span></div>';
+      container.appendChild(group);
+      (window as unknown as { __inlineRenameOriginalLayout?: unknown }).__inlineRenameOriginalLayout = app.tabLayout;
+      (window as unknown as { __inlineRenameOriginalReadOnly?: boolean }).__inlineRenameOriginalReadOnly =
+        app.tabLayoutReadOnly;
+      app.tabLayout = {
+        ...(app.tabLayout ?? { groups: [] }),
+        groups: [...(app.tabLayout?.groups ?? []), { id: groupId, name: 'Owned Group', refs: [] }],
+      };
+      app.tabLayoutReadOnly = false;
+      return { started: app.startTabGroupRename(groupId) };
+    });
+    expect(setup.started).toBe(true);
+
+    const groupInput = page.locator('.tab-layout-group-rename-input');
+    expect(await groupInput.evaluate((input) => document.activeElement === input)).toBe(true);
+    await groupInput.press('F2');
+    const during = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: { _activeRename: unknown; _inlineRenameActive: boolean };
+        }
+      ).app;
+      const input = document.querySelector('.tab-layout-group-rename-input');
+      return {
+        groupConnected: !!input?.isConnected,
+        groupFocused: document.activeElement === input,
+        sessionInputPresent: !!document.querySelector('input.tab-rename-input'),
+        sessionRenameActive: !!app._activeRename,
+        guardActive: app._inlineRenameActive,
+      };
+    });
+    if (during.groupConnected) await groupInput.press('Escape');
+    const after = await page.evaluate(() => {
+      const app = (
+        window as unknown as {
+          app: {
+            _inlineRenameActive: boolean;
+            tabLayout: unknown;
+            tabLayoutReadOnly: boolean;
+          };
+          __inlineRenameOriginalLayout?: unknown;
+          __inlineRenameOriginalReadOnly?: boolean;
+        }
+      ).app;
+      const originalLayout = (window as unknown as { __inlineRenameOriginalLayout?: unknown })
+        .__inlineRenameOriginalLayout;
+      app.tabLayout = originalLayout;
+      app.tabLayoutReadOnly =
+        (window as unknown as { __inlineRenameOriginalReadOnly?: boolean }).__inlineRenameOriginalReadOnly ?? true;
+      delete (window as unknown as { __inlineRenameOriginalLayout?: unknown }).__inlineRenameOriginalLayout;
+      delete (window as unknown as { __inlineRenameOriginalReadOnly?: boolean }).__inlineRenameOriginalReadOnly;
+      return {
+        groupSettled: !document.querySelector('.tab-layout-group-rename-input'),
+        guardReleased: app._inlineRenameActive === false,
+      };
+    });
+
+    expect(during).toEqual({
+      groupConnected: true,
+      groupFocused: true,
+      sessionInputPresent: false,
+      sessionRenameActive: false,
+      guardActive: true,
+    });
+    expect(after).toEqual({ groupSettled: true, guardReleased: true });
+  });
+
   it('A late old failure cannot destroy or toast over a same-session re-entry', async () => {
     await resetState();
     expect(await startRename('pending-reentry', 'OldName')).toBe(true);
@@ -1116,6 +1222,7 @@ describe('Inline rename input', () => {
       const app = (
         window as unknown as {
           app: {
+            _activeRename: { cancel: () => void } | null;
             sessions: Map<string, { id: string; name: string; status: string }>;
             startInlineRename: (id: string) => void;
           };
@@ -1152,16 +1259,36 @@ describe('Inline rename input', () => {
       const prefix = tabName.querySelector('.tab-rename-prefix') as HTMLElement;
       const tabNameRect = tabName.getBoundingClientRect();
       const inputRect = input.getBoundingClientRect();
+      const prefixRect = prefix.getBoundingClientRect();
+      const tabRect = tab.getBoundingClientRect();
+      const railRect = rail.getBoundingClientRect();
+      const dragHandle = tab.querySelector('.tab-ref-drag-handle') as HTMLElement;
+      const actions = tab.querySelector('.tab-actions') as HTMLElement;
+      const controlsHidden =
+        getComputedStyle(dragHandle).display === 'none' && getComputedStyle(actions).display === 'none';
+      const prefixOverflow = getComputedStyle(prefix).textOverflow;
+      app._activeRename?.cancel();
       return {
         inputWidth: inputRect.width,
-        inside: inputRect.left >= tabNameRect.left && inputRect.right <= tabNameRect.right,
-        prefixOverflow: getComputedStyle(prefix).textOverflow,
+        prefixWidth: prefixRect.width,
+        inputInside: inputRect.left >= tabNameRect.left && inputRect.right <= tabNameRect.right,
+        prefixInside: prefixRect.left >= tabNameRect.left && prefixRect.right <= tabNameRect.right,
+        rowInsideRail: tabRect.left >= railRect.left && tabRect.right <= railRect.right,
+        prefixOverflow,
+        controlsHidden,
+        controlsRestored:
+          getComputedStyle(dragHandle).display !== 'none' && getComputedStyle(actions).display !== 'none',
       };
     });
 
+    expect(result.prefixWidth).toBeGreaterThanOrEqual(32);
     expect(result.inputWidth).toBeGreaterThanOrEqual(64);
-    expect(result.inside).toBe(true);
+    expect(result.inputInside).toBe(true);
+    expect(result.prefixInside).toBe(true);
+    expect(result.rowInsideRail).toBe(true);
     expect(result.prefixOverflow).toBe('ellipsis');
+    expect(result.controlsHidden).toBe(true);
+    expect(result.controlsRestored).toBe(true);
   });
 
   it('Session-list sidebar keeps its full-width inline editor', async () => {

@@ -938,9 +938,20 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-info:has(.tab-
   min-width: 4rem;
 }
 
+html[data-tab-orientation='vertical'].tab-rail-compact
+  .tab-rail
+  .session-tab:has(.tab-name-renaming)
+  > .tab-ref-drag-handle,
+html[data-tab-orientation='vertical'].tab-rail-compact
+  .tab-rail
+  .session-tab:has(.tab-name-renaming)
+  > .tab-actions {
+  display: none;
+}
+
 html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-prefix {
   flex: 0 1 auto;
-  min-width: 0;
+  min-width: 2rem;
   max-width: 50%;
   overflow: hidden;
   text-overflow: ellipsis;
