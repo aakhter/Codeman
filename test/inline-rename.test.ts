@@ -1400,14 +1400,18 @@ describe('Inline rename input', () => {
 
       const tab = document.createElement('div');
       tab.setAttribute('data-test-tab', '1');
-      tab.className = 'session-tab active';
+      tab.className = 'session-tab active detached';
       tab.dataset.id = id;
       tab.innerHTML =
+        '<button class="tab-ref-drag-handle" data-tab-ref-drag type="button"></button>' +
         '<span class="tab-number">1</span><span class="tab-status idle"></span>' +
-        '<span class="tab-info"><span class="tab-name-row">' +
+        '<span class="tab-info"><span class="tab-name-row"><span class="tab-mode codex">cx</span>' +
         `<span class="tab-name" data-session-id="${id}" data-full-name="${name}">` +
         '<span class="tab-name-prefix">w123-this_is_a_very_long_valid_prefix: </span>title</span>' +
-        '</span></span><button class="tab-ref-drag-handle" type="button">&#x2630;</button>' +
+        '<span class="tab-detached-badge">detached</span></span></span>' +
+        '<span class="tab-focus-marker">&#x2605;</span><span class="tab-badge">3</span>' +
+        '<span class="tab-subagent-badge"><span class="subagent-label">SUB</span></span>' +
+        '<span class="tab-ultracode-badge"><span class="subagent-label">ULTRA</span></span>' +
         '<span class="tab-actions"><span class="tab-gear">&#x2699;</span>' +
         '<span class="tab-detach">&#x29C9;</span><span class="tab-close">&times;</span>' +
         '<button class="tab-more" type="button">&#x22EF;</button></span>';
@@ -1422,10 +1426,17 @@ describe('Inline rename input', () => {
       const prefixRect = prefix.getBoundingClientRect();
       const tabRect = tab.getBoundingClientRect();
       const railRect = rail.getBoundingClientRect();
-      const dragHandle = tab.querySelector('.tab-ref-drag-handle') as HTMLElement;
-      const actions = tab.querySelector('.tab-actions') as HTMLElement;
-      const controlsHidden =
-        getComputedStyle(dragHandle).display === 'none' && getComputedStyle(actions).display === 'none';
+      const adornments = [
+        '.tab-ref-drag-handle',
+        '.tab-mode',
+        '.tab-detached-badge',
+        '.tab-focus-marker',
+        '.tab-badge',
+        '.tab-subagent-badge',
+        '.tab-ultracode-badge',
+        '.tab-actions',
+      ].map((selector) => tab.querySelector(selector) as HTMLElement);
+      const adornmentsHidden = adornments.every((element) => getComputedStyle(element).display === 'none');
       const prefixOverflow = getComputedStyle(prefix).textOverflow;
       app._activeRename?.cancel();
       return {
@@ -1435,9 +1446,9 @@ describe('Inline rename input', () => {
         prefixInside: prefixRect.left >= tabNameRect.left && prefixRect.right <= tabNameRect.right,
         rowInsideRail: tabRect.left >= railRect.left && tabRect.right <= railRect.right,
         prefixOverflow,
-        controlsHidden,
-        controlsRestored:
-          getComputedStyle(dragHandle).display !== 'none' && getComputedStyle(actions).display !== 'none',
+        adornmentCount: adornments.length,
+        adornmentsHidden,
+        adornmentsRestored: adornments.every((element) => getComputedStyle(element).display !== 'none'),
       };
     });
 
@@ -1447,8 +1458,9 @@ describe('Inline rename input', () => {
     expect(result.prefixInside).toBe(true);
     expect(result.rowInsideRail).toBe(true);
     expect(result.prefixOverflow).toBe('ellipsis');
-    expect(result.controlsHidden).toBe(true);
-    expect(result.controlsRestored).toBe(true);
+    expect(result.adornmentCount).toBe(8);
+    expect(result.adornmentsHidden).toBe(true);
+    expect(result.adornmentsRestored).toBe(true);
   });
 
   it('Session-list sidebar keeps its full-width inline editor', async () => {

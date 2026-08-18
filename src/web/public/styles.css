@@ -941,11 +941,16 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-info:has(.tab-
 html[data-tab-orientation='vertical'].tab-rail-compact
   .tab-rail
   .session-tab:has(.tab-name-renaming)
-  > .tab-ref-drag-handle,
-html[data-tab-orientation='vertical'].tab-rail-compact
-  .tab-rail
-  .session-tab:has(.tab-name-renaming)
-  > .tab-actions {
+  :is(
+    .tab-ref-drag-handle,
+    .tab-mode,
+    .tab-detached-badge,
+    .tab-focus-marker,
+    .tab-badge,
+    .tab-subagent-badge,
+    .tab-ultracode-badge,
+    .tab-actions
+  ) {
   display: none;
 }
 
