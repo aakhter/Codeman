@@ -559,7 +559,7 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.sessionOrder).toEqual(['s2', 's3']);
   });
 
-  it('sequences concurrent app loads and routes layout-change invalidation through refetch', async () => {
+  it('sequences concurrent app loads', async () => {
     const app = makeApp();
     const pending: Array<(value: unknown) => void> = [];
     app._fetchTabLayout = () => new Promise((resolve) => pending.push(resolve));
@@ -576,15 +576,60 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app._applyTabLayout).toHaveBeenCalledTimes(1);
     expect(app._applyTabLayout).toHaveBeenCalledWith({ ...layout, version: 10 }, placements);
 
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('adopts an inline owner layout without refetching', () => {
+    const app = makeApp();
+    const inlineLayout = { ...layout, version: 11 };
+    app._applyTabLayout = vi.fn();
     app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout });
+
+    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('rebases a pending semantic edit through inline layout adoption', () => {
+    const app = makeApp();
+    const inlineLayout = { ...layout, version: 11 };
+    const adoptExternal = vi.fn();
+    app._tabLayoutEditCoordinator = { hasPending: () => true, adoptExternal };
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout });
+
+    expect(adoptExternal).toHaveBeenCalledWith(inlineLayout, { placements: undefined });
+    expect(app._tabLayoutSsePending).not.toBe(true);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('ignores foreign-owner inline layouts', () => {
+    const app = makeApp();
+    app._applyTabLayout = vi.fn();
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'bob', version: 11, layout: { ...layout, version: 11 } });
+
+    expect(app._applyTabLayout).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('keeps GET fallback behavior for layout-change payloads without inline layouts', () => {
+    const app = makeApp();
+    app._loadTabLayout = vi.fn();
+
     app._onTabLayoutChanged();
     expect(app._loadTabLayout).toHaveBeenCalledOnce();
-    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
-    app._onTabLayoutChanged({ owner: 'bob', version: 11 });
+
+    app._tabLayoutEditCoordinator = { hasPending: () => true };
+    app._onTabLayoutChanged({ version: 11 });
+    expect(app._tabLayoutSsePending).toBe(true);
     expect(app._loadTabLayout).toHaveBeenCalledOnce();
-    app._onTabLayoutChanged({ owner: 'alice', version: 11 });
-    expect(app._loadTabLayout).toHaveBeenCalledTimes(2);
-    app._tabLayoutCoordinator.dispose();
   });
 
   it('waits for the authoritative initial layout before selecting its first session', async () => {

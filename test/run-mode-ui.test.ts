@@ -242,7 +242,7 @@ describe('Run launch synchronization', () => {
     expect(runBtn.removeAttribute).toHaveBeenCalledWith('aria-busy');
   });
 
-  it('renders a POST response session immediately without waiting for SSE', async () => {
+  it('adopts the authoritative POST layout before upserting and rendering the session', async () => {
     const CodemanApp = function CodemanApp(this: any) {};
     const context = vm.createContext({
       CodemanApp,
@@ -255,16 +255,51 @@ describe('Run launch synchronization', () => {
     vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
 
     const app = new (CodemanApp as any)();
+    const calls: string[] = [];
     app.sessions = new Map();
-    app._onSessionCreated = vi.fn((session: any) => app.sessions.set(session.id, session));
-    app._renderSessionTabsImmediate = vi.fn();
+    app._applyTabLayout = vi.fn(() => calls.push('layout'));
+    app._onSessionCreated = vi.fn((session: any) => {
+      calls.push('session');
+      app.sessions.set(session.id, session);
+    });
+    app._renderSessionTabsImmediate = vi.fn(() => calls.push('render'));
     const snapshot = { id: 'sess-new', name: 'w1-case', workingDir: '/tmp/case' };
+    const authoritativeLayout = { version: 12, groups: [], ungrouped: [{ kind: 'session', id: snapshot.id }] };
 
-    await app._ensureCreatedSessionVisible(snapshot.id, snapshot);
+    await app._ensureCreatedSessionVisible(snapshot.id, snapshot, authoritativeLayout);
 
     expect(context.fetch).not.toHaveBeenCalled();
+    expect(app._applyTabLayout).toHaveBeenCalledWith(authoritativeLayout);
     expect(app.sessions.get(snapshot.id)).toEqual(snapshot);
     expect(app._renderSessionTabsImmediate).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['layout', 'session', 'render']);
+  });
+
+  it('routes stale targeted response layouts through the authoritative version gate', async () => {
+    const CodemanApp = function CodemanApp(this: any) {};
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: () => null },
+      fetch: vi.fn(),
+      console,
+    });
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    const currentLayout = { version: 12, groups: [], ungrouped: [] };
+    const staleLayout = { version: 11, groups: [], ungrouped: [] };
+    app.tabLayout = currentLayout;
+    app.sessions = new Map();
+    app._applyTabLayout = vi.fn();
+    app._onSessionCreated = vi.fn();
+    app._renderSessionTabsImmediate = vi.fn();
+
+    await app._ensureCreatedSessionVisible('sess-new', { id: 'sess-new' }, staleLayout);
+
+    expect(app._applyTabLayout).toHaveBeenCalledWith(staleLayout);
+    expect(app.tabLayout).toBe(currentLayout);
   });
 
   it('loads the new session when a quick-start response wins the race with SSE', async () => {

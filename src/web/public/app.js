@@ -5018,6 +5018,10 @@ class CodemanApp {
   _onTabLayoutChanged(data) {
     const currentUser = window.__codemanUser;
     if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
+    if (data?.layout) {
+      this._applyTabLayout(data.layout);
+      return;
+    }
     // A pending semantic edit owns its optimistic projection. A refetch may
     // update its authoritative base, but must not paint stale server state over it.
     if (this._tabLayoutEditCoordinator?.hasPending()) {
