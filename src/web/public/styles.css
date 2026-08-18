@@ -753,26 +753,65 @@ html[data-tab-orientation='vertical'] .tab-focus-shortcut[aria-current='page'] {
   touch-action: none;
 }
 
+/* COD-322: the grip is PAINTED from dots, never a text glyph. The old ☰
+   glyph read as the hamburger MENU icon — on an inactive tab it was the only
+   visible control, so people clicked it and nothing happened — and its three
+   horizontal bars pointed across the axis of motion in the horizontal strip.
+   The dot grid is the content box, so the orientation rules below transpose it
+   by swapping the padding alone: 2 columns x 3 rows in the horizontal strip
+   (drag left/right), 3 columns x 2 rows in the vertical rail (drag up/down).
+   Painting via background-clip:content-box is what confines the tiled dots to
+   that box while the button keeps a full 1.5rem hit target — do not shrink the
+   button, it is the ONLY way to drag-reorder on touch (COD-316). Dimmed at
+   rest rather than hidden for the same reason: COD-316 requires the handle
+   visible and tappable in both orientations. */
 .tab-ref-drag-handle {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  box-sizing: border-box;
   flex: 0 0 auto;
   width: 1.5rem;
   height: 1.5rem;
-  padding: 0;
   border: 0;
   border-radius: 3px;
   color: var(--text-muted);
-  background: transparent;
+  background-color: transparent;
+  background-image: radial-gradient(currentColor 1px, transparent 1.5px);
+  background-repeat: repeat;
+  background-origin: content-box;
+  background-clip: content-box;
+  background-size: 4px 4px;
   cursor: grab;
+  opacity: 0.35;
   touch-action: none;
+  transition:
+    opacity var(--transition-smooth),
+    background-color var(--transition-smooth);
+}
+
+/* :not(vertical) rather than =horizontal — settings-ui.js sets the attribute
+   only once settings load, and every JS reader treats absent as horizontal. */
+html:not([data-tab-orientation='vertical']) .tab-ref-drag-handle {
+  padding: 6px 8px;
+}
+
+html[data-tab-orientation='vertical'] .tab-ref-drag-handle {
+  padding: 8px 6px;
+}
+
+/* The grip belongs to the row, so it lights up with the row rather than
+   demanding attention on every idle tab. */
+.session-tab:hover .tab-ref-drag-handle,
+.session-tab:focus-within .tab-ref-drag-handle,
+.session-tab.active .tab-ref-drag-handle,
+.tab-ref-drag-handle:hover,
+.tab-ref-drag-handle:focus-visible {
+  opacity: 1;
 }
 
 .tab-ref-drag-handle:hover,
 .tab-ref-drag-handle:focus-visible {
   color: var(--text);
-  background: var(--control-bg-hover);
+  background-color: var(--control-bg-hover);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }

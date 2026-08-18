@@ -5876,12 +5876,15 @@ class CodemanApp {
     const sidebarList = document.getElementById('sessionSidebarList');
     if (!tabsEl || !headerHost || !sidebarList) return;
 
-    const host = mode === 'sidebar' ? sidebarList : headerHost;
+    const rail = document.getElementById('tabRail');
+    const railOwnsTabs =
+      mode === 'header' && document.documentElement.getAttribute('data-tab-orientation') === 'vertical';
+    const host = mode === 'sidebar' ? sidebarList : railOwnsTabs && rail ? rail : headerHost;
     if (tabsEl.parentElement !== host) host.appendChild(tabsEl);
 
     document.documentElement.dataset.sessionList = mode;
     document.documentElement.dataset.sidebar = collapsed ? 'collapsed' : 'expanded';
-    tabsEl.setAttribute('aria-orientation', mode === 'sidebar' ? 'vertical' : 'horizontal');
+    tabsEl.setAttribute('aria-orientation', host === headerHost ? 'horizontal' : 'vertical');
 
     const btn = document.getElementById('sidebarToggleBtn');
     if (btn) {
@@ -6698,6 +6701,7 @@ class CodemanApp {
 
       parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}" data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
+          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${escapeHtml(status)}" aria-hidden="true"></span>
@@ -6714,7 +6718,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" aria-label="Move ${escapeHtml(name)} tab">&#x2630;</button><span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
+          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
         </div>`);
       renderedRefs.push(ref);
       _tabIdx++;

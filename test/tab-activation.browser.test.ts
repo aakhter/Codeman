@@ -223,6 +223,51 @@ describe('COD-316 full-row tab activation in Chromium', () => {
     expect(await page.evaluate(() => (window as any).__activation)).toBeNull();
   });
 
+  it('paints a dimmed but visible grip that transposes per orientation and lights with the row', async () => {
+    await renderLayout(page, 'horizontal');
+    await page.mouse.move(600, 400);
+    const handle = page.locator('[data-id="session"] .tab-ref-drag-handle');
+
+    const resting = await handle.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        opacity: Number(style.opacity),
+        painted: style.backgroundImage !== 'none',
+        padding: [style.paddingTop, style.paddingLeft],
+      };
+    });
+    // Dim enough that an idle tab stops looking like it carries a control, but
+    // genuinely drawn — COD-316 needs the handle reachable, not merely present.
+    expect(resting.opacity).toBeGreaterThan(0);
+    expect(resting.opacity).toBeLessThan(1);
+    expect(resting.painted).toBe(true);
+
+    // Poll: opacity is transitioned, so a single read lands mid-interpolation.
+    await page.locator('[data-id="session"] .tab-name').hover();
+    await expect.poll(() => handle.evaluate((element) => Number(getComputedStyle(element).opacity))).toBe(1);
+
+    // settings-ui.js only sets data-tab-orientation once settings load, and the
+    // rest of the app reads "not vertical" as horizontal. The grip has to agree,
+    // or the first paint tiles dots across the whole button.
+    await page.evaluate(() => document.documentElement.removeAttribute('data-tab-orientation'));
+    expect(
+      await handle.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return [style.paddingTop, style.paddingLeft];
+      })
+    ).toEqual(resting.padding);
+
+    // The rail transposes the dot grid so it runs along the axis of motion.
+    await renderLayout(page, 'vertical', true);
+    await page.mouse.move(600, 400);
+    const railPadding = await handle.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return [style.paddingTop, style.paddingLeft];
+    });
+    expect(resting.padding[0]).not.toBe(resting.padding[1]);
+    expect(railPadding).toEqual([...resting.padding].reverse());
+  });
+
   it('retains full-row hover and pointer feedback while action controls remain separate', async () => {
     await renderLayout(page, 'horizontal');
     const session = page.locator('[data-id="session"]');

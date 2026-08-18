@@ -3072,6 +3072,9 @@ Object.assign(CodemanApp.prototype, {
         else header.appendChild(tabsEl);
       }
     }
+    if (tabsEl) {
+      tabsEl.setAttribute('aria-orientation', sidebarOwnsTabs || orientation === 'vertical' ? 'vertical' : 'horizontal');
+    }
 
     const shouldSettleRailWidth =
       options.settleRailWidth === true && (orientation === 'vertical' || previous !== orientation);
