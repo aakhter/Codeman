@@ -828,6 +828,17 @@ describe('COD-319 Focus smart group rendering', () => {
     app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
     app._fullRenderSessionTabs();
 
+    let header = document
+      .querySelector<HTMLElement>('[data-tab-focus-toggle]')!
+      .closest<HTMLElement>('[role="treeitem"]')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('false');
+    header = document.querySelector<HTMLElement>('[data-tab-focus-toggle]')!.closest<HTMLElement>('[role="treeitem"]')!;
+    header.focus();
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('true');
+
     expect(app.toggleTabGroupCollapsed('@focus', true)).toBe(true);
     expect(JSON.parse(localStorage.getItem('codeman:tab-groups-collapsed')!)).toContain('@focus');
     expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('false');
@@ -877,6 +888,53 @@ describe('COD-319 Focus smart group rendering', () => {
     expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([
       'Remove from Focus',
     ]);
+  });
+
+  it('keeps canonical markers and shortcut state synchronized without duplicate selected semantics', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app._fullRenderSessionTabs();
+
+    const canonical = document.querySelector<HTMLElement>('[data-id="parent"]')!;
+    let shortcut = document.querySelector<HTMLElement>('[data-tab-focus-shortcut="session:parent"]')!;
+    expect(canonical.querySelector('.tab-focus-marker')).not.toBeNull();
+    expect(shortcut.querySelector('.tab-focus-marker')).toBeNull();
+    expect(shortcut.classList.contains('active')).toBe(false);
+    expect(shortcut.hasAttribute('aria-selected')).toBe(false);
+
+    app.activeSessionId = 'child';
+    app._updateActiveTabImmediate('child');
+    expect(shortcut.getAttribute('aria-current')).toBe('false');
+    app.activeSessionId = 'parent';
+    app._updateActiveTabImmediate('parent');
+    expect(shortcut.getAttribute('aria-current')).toBe('page');
+
+    app.terminalLoadStates.set('parent', { generation: 1, phase: 'history' });
+    app._updateTerminalLoadTab('parent');
+    expect(
+      document.querySelectorAll('[data-id="parent"].tab-loading, [data-focus-session-id="parent"].tab-loading')
+    ).toHaveLength(2);
+
+    app.sessions.get('parent').name = 'Renamed focus';
+    app._renderSessionTabsImmediate();
+    expect(
+      [...document.querySelectorAll('[data-id="parent"] .tab-name, [data-focus-session-id="parent"] .tab-name')].map(
+        (element) => element.textContent
+      )
+    ).toEqual(['Renamed focus', 'Renamed focus']);
+
+    app.activeSessionId = 'parent';
+    app.activeWebviewId = 'web';
+    app._updateActiveWebviewTab();
+    const webShortcut = document.querySelector<HTMLElement>('[data-focus-webview-id="web"]')!;
+    expect(webShortcut.getAttribute('aria-current')).toBe('page');
+    expect(webShortcut.classList.contains('active')).toBe(false);
+    expect(document.querySelectorAll('[aria-selected="true"]')).toHaveLength(1);
+
+    const css = readFileSync(join(PUBLIC, 'styles.css'), 'utf8');
+    expect(css).toContain("html[data-tab-orientation='vertical'] .tab-layout-focus-group");
+    expect(css).toContain("html[data-tab-orientation='vertical'] .tab-focus-shortcut[aria-current='page']");
   });
 });
 

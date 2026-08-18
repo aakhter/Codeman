@@ -1581,8 +1581,12 @@ class CodemanApp {
   _markDetached(id, on) {
     if (on) this.detachedSessions.add(id); else this.detachedSessions.delete(id);
     const container = this.$('sessionTabs');
-    const tab = container && container.querySelector(`.session-tab[data-id="${id}"]`);
-    if (tab) tab.classList.toggle('detached', on);
+    if (!container) return;
+    for (const tab of container.querySelectorAll(
+      `.session-tab[data-id="${CSS.escape(id)}"], .session-tab[data-focus-session-id="${CSS.escape(id)}"]`
+    )) {
+      tab.classList.toggle('detached', on);
+    }
   }
 
   /** Poll a window we opened; when it closes, re-dock its tab. This is the
@@ -6038,6 +6042,16 @@ class CodemanApp {
       tab.classList.remove('active');
       tab.setAttribute('aria-selected', 'false');
     }
+    for (const tab of container.querySelectorAll('.session-tab[data-focus-session-id]')) {
+      tab.classList.remove('active');
+      tab.removeAttribute('aria-selected');
+      tab.setAttribute('aria-current', tab.dataset.focusSessionId === sessionId ? 'page' : 'false');
+    }
+    for (const tab of container.querySelectorAll('.session-tab[data-focus-webview-id]')) {
+      tab.classList.remove('active');
+      tab.removeAttribute('aria-selected');
+      tab.setAttribute('aria-current', 'false');
+    }
     // #257: selection used to stop at the class toggle. On phones/tablets the
     // strip scrolls horizontally, so a tab selected from the palette, a swipe,
     // Alt+N or a push notification could stay parked off-screen.
@@ -6153,29 +6167,29 @@ class CodemanApp {
   }
 
   _updateTerminalLoadTab(sessionId) {
-    const tab = this.$('sessionTabs')?.querySelector(`.session-tab[data-id="${sessionId}"]`);
-    if (!tab) return;
-
+    const tabs = this.$('sessionTabs')?.querySelectorAll(
+      `.session-tab[data-id="${CSS.escape(sessionId)}"], .session-tab[data-focus-session-id="${CSS.escape(sessionId)}"]`
+    );
+    if (!tabs?.length) return;
     const loadState = this.terminalLoadStates.get(sessionId);
-    tab.classList.toggle('tab-loading', !!loadState);
-    if (loadState) {
-      tab.setAttribute('aria-busy', 'true');
-      tab.dataset.loadPhase = loadState.phase;
-      if (!tab.querySelector('.tab-load-spinner')) {
-        const spinner = document.createElement('span');
-        spinner.className = 'tab-load-spinner';
-        spinner.setAttribute('aria-hidden', 'true');
-        const numberEl = tab.querySelector('.tab-number');
-        if (numberEl) {
-          numberEl.insertAdjacentElement('afterend', spinner);
-        } else {
-          tab.insertBefore(spinner, tab.firstChild);
+    for (const tab of tabs) {
+      tab.classList.toggle('tab-loading', !!loadState);
+      if (loadState) {
+        tab.setAttribute('aria-busy', 'true');
+        tab.dataset.loadPhase = loadState.phase;
+        if (!tab.querySelector('.tab-load-spinner')) {
+          const spinner = document.createElement('span');
+          spinner.className = 'tab-load-spinner';
+          spinner.setAttribute('aria-hidden', 'true');
+          const numberEl = tab.querySelector('.tab-number');
+          if (numberEl) numberEl.insertAdjacentElement('afterend', spinner);
+          else tab.insertBefore(spinner, tab.firstChild);
         }
+      } else {
+        tab.setAttribute('aria-busy', 'false');
+        delete tab.dataset.loadPhase;
+        tab.querySelector('.tab-load-spinner')?.remove();
       }
-    } else {
-      tab.setAttribute('aria-busy', 'false');
-      delete tab.dataset.loadPhase;
-      tab.querySelector('.tab-load-spinner')?.remove();
     }
   }
 
@@ -6190,11 +6204,12 @@ class CodemanApp {
     const container = this.$('sessionTabs');
     const projection = this._refreshTabProjection();
     const structureKey = this._tabStructureKey(projection);
-    const existingRefs = [...container.querySelectorAll('.session-tab')].map((tab) =>
+    const existingRefs = [...container.querySelectorAll('.session-tab:not(.tab-focus-shortcut)')].map((tab) =>
       tab.dataset.webviewId ? `webview:${tab.dataset.webviewId}` : `session:${tab.dataset.id}`
     );
     const wantedRefs = projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`);
     const canIncremental =
+      (projection.focusRefs?.length || 0) === 0 &&
       structureKey === this._lastTabStructureKey &&
       existingRefs.length === wantedRefs.length &&
       existingRefs.every((identity, index) => identity === wantedRefs[index]);
@@ -6526,7 +6541,9 @@ class CodemanApp {
     tab.setAttribute('role', 'treeitem');
     tab.setAttribute('tabindex', '-1');
     tab.setAttribute('aria-label', `Focus shortcut, ${tab.getAttribute('aria-label') || ref.id}`);
-    tab.querySelectorAll('.tab-number, [data-tab-ref-drag], .tab-actions').forEach((element) => element.remove());
+    tab
+      .querySelectorAll('.tab-number, .tab-focus-marker, [data-tab-ref-drag], .tab-actions')
+      .forEach((element) => element.remove());
     tab.querySelectorAll('[id]').forEach((element) => element.removeAttribute('id'));
     const actions = document.createElement('span');
     actions.className = 'tab-actions tab-focus-actions';
@@ -6650,6 +6667,9 @@ class CodemanApp {
       const placementBadge = placement
         ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" title="${escapeHtml(placement.description)}" aria-label="${escapeHtml(placement.description)}">${escapeHtml(placement.short)}</span>`
         : '';
+      const focusMarker = this._tabRefFocused({ kind: 'session', id })
+        ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
+        : '';
       const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
       const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
@@ -6667,6 +6687,7 @@ class CodemanApp {
             ${placementBadge}
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
           </span>
+          ${focusMarker}
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
@@ -6824,8 +6845,7 @@ class CodemanApp {
             ? { kind: 'webview', id: current.dataset.focusWebviewId }
             : { kind: 'session', id: current.dataset.focusSessionId };
           this.openFocusShortcutMenu(syntheticEvent, ref);
-        }
-        else {
+        } else {
           const ref = current.dataset.webviewId
             ? { kind: 'webview', id: current.dataset.webviewId }
             : current.dataset.id
@@ -6856,7 +6876,10 @@ class CodemanApp {
         return;
       }
       if (!vertical || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
-      const groupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      const groupId =
+        current.dataset.tabGroupHeader ||
+        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader ||
+        (current.querySelector?.('[data-tab-focus-toggle]') ? '@focus' : null);
       if (groupId) {
         const expanded = current.getAttribute('aria-expanded') === 'true';
         if (e.key === 'ArrowLeft' && expanded) {

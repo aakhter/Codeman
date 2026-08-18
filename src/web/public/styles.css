@@ -710,6 +710,35 @@ html[data-tab-orientation='vertical'] .session-tab[role='treeitem']:focus-visibl
   opacity: 0.75;
 }
 
+.tab-focus-marker {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 0.7rem;
+  line-height: 1;
+  pointer-events: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-focus-group {
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+html[data-tab-orientation='vertical'] .tab-layout-focus-header {
+  color: var(--text);
+}
+
+html[data-tab-orientation='vertical'] .tab-focus-shortcut {
+  opacity: 0.88;
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+html[data-tab-orientation='vertical'] .tab-focus-shortcut[aria-current='page'] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+}
+
 .tab-layout-group-toggle,
 .tab-layout-group-drag-handle,
 .tab-layout-group-menu,
