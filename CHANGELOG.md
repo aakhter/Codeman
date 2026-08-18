@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.19.7
+
+### Patch Changes
+
+- Fix vertical-session-rail editing and layout behavior: F2 inline renames now repaint typed text immediately, remain usable in compact rails, preserve group editors and serialize overlapping saves; vertical console placement and tab-list accessibility stay synchronized; Session Options adapts to narrow viewports; and CJK input no longer wedges while agent output is active.
+
 ## 1.19.6
 
 ### Patch Changes
