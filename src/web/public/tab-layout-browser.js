@@ -26,7 +26,7 @@
       if (!Array.isArray(parsed)) throw new Error('Invalid collapsed tab groups');
       const loaded = stableIds(parsed);
       if (validGroupIds === undefined) return { ids: loaded, ok: true };
-      const valid = new Set(stableIds(validGroupIds));
+      const valid = new Set([...stableIds(validGroupIds), FOCUS_COLLAPSE_ID]);
       const kept = loaded.filter((id) => valid.has(id));
       if (kept.length !== loaded.length) storage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(kept));
       return { ids: kept, ok: true };

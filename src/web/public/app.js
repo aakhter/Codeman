@@ -5092,6 +5092,30 @@ class CodemanApp {
     ];
   }
 
+  _tabStoredRef(ref) {
+    const location = this._refLocation(ref);
+    if (!location) return null;
+    return location.groupId === null
+      ? this.tabLayout.ungrouped[location.index]
+      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs[location.index] || null;
+  }
+
+  _tabRefFocused(ref) {
+    return this._tabStoredRef(ref)?.focus === true;
+  }
+
+  setTabRefFocus(ref, focused) {
+    return this.editTabLayout({ type: 'setFocus', ref, focused }, `${ref.kind}:${ref.id}`);
+  }
+
+  _tabRefFocusAction(ref) {
+    const focused = this._tabRefFocused(ref);
+    return {
+      label: focused ? 'Remove from Focus' : 'Add to Focus',
+      run: () => this.setTabRefFocus(ref, !focused),
+    };
+  }
+
   _syncTabPlacementAccessibility(tab, ref, name, tabTooltip) {
     const placement = this._tabPlacementPresentation(ref);
     const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
@@ -5464,6 +5488,7 @@ class CodemanApp {
     event?.stopPropagation?.();
     document.querySelector('.tab-layout-ref-move-menu')?.remove();
     const actions = [
+      this._tabRefFocusAction(ref),
       ...this._tabRefPlacementActions(ref),
       ...this._tabRefMoveActions(ref).map(({ label, groupId, index }) => ({
         label,
@@ -5503,6 +5528,46 @@ class CodemanApp {
       }
     });
     menu.querySelector('button')?.focus();
+  }
+
+  openFocusShortcutMenu(event, ref) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    this.closeTabRailActionMenu?.();
+    document.querySelector('.tab-focus-action-menu')?.remove();
+    const trigger = event?.currentTarget;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-focus-action-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Focus actions');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'menuitem');
+    button.textContent = 'Remove from Focus';
+    button.addEventListener('click', () => {
+      this.closeTabRailActionMenu?.();
+      this.setTabRefFocus(ref, false);
+    });
+    menu.appendChild(button);
+    document.body.appendChild(menu);
+    const rect = trigger?.getBoundingClientRect?.();
+    if (rect) {
+      menu.style.left = `${rect.left}px`;
+      menu.style.top = `${rect.bottom + 4}px`;
+    }
+    this._tabRailActionMenuTrigger = trigger;
+    this._tabRailActionMenuOutside = (pointerEvent) => {
+      if (!menu.contains(pointerEvent.target) && !trigger?.contains?.(pointerEvent.target)) {
+        this.closeTabRailActionMenu?.();
+      }
+    };
+    document.addEventListener('pointerdown', this._tabRailActionMenuOutside, true);
+    menu.addEventListener('keydown', (keyEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault();
+      this.closeTabRailActionMenu?.({ restoreFocus: true });
+    });
+    button.focus();
   }
 
   _tabOrientation() {
@@ -5641,7 +5706,7 @@ class CodemanApp {
   }
 
   toggleTabGroupCollapsed(groupId, forceCollapsed) {
-    if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
+    if (groupId !== '@focus' && !this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
     const next = new Set(this.collapsedTabGroupIds);
     const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
     if (shouldCollapse) next.add(groupId);
@@ -6701,7 +6766,10 @@ class CodemanApp {
       };
       const activate = () => {
         const current = items[currentIndex];
-        const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+        const currentGroupId =
+          current.dataset.tabGroupHeader ||
+          current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader ||
+          (current.querySelector?.('[data-tab-focus-toggle]') ? '@focus' : null);
         if (currentGroupId) {
           this.toggleTabGroupCollapsed(currentGroupId);
         } else if (current.dataset.focusSessionId) {
@@ -6715,23 +6783,32 @@ class CodemanApp {
         }
       };
       const current = items[currentIndex];
-      const currentGroupId = current.dataset.tabGroupHeader || current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
+      const currentGroupId =
+        current.dataset.tabGroupHeader ||
+        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader ||
+        (current.querySelector?.('[data-tab-focus-toggle]') ? '@focus' : null);
       if (vertical && e.key === 'Insert') {
         e.preventDefault();
         this.createTabGroup();
         return;
       }
-      if (vertical && currentGroupId && e.key === 'F2') {
+      if (vertical && currentGroupId && currentGroupId !== '@focus' && e.key === 'F2') {
         e.preventDefault();
         this.startTabGroupRename(currentGroupId);
         return;
       }
-      if (vertical && currentGroupId && e.key === 'Delete') {
+      if (vertical && currentGroupId && currentGroupId !== '@focus' && e.key === 'Delete') {
         e.preventDefault();
         this.deleteTabGroup(currentGroupId);
         return;
       }
-      if (vertical && currentGroupId && e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (
+        vertical &&
+        currentGroupId &&
+        currentGroupId !== '@focus' &&
+        e.ctrlKey &&
+        (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+      ) {
         e.preventDefault();
         const groupIndex = this.tabLayout.groups.findIndex((group) => group.id === currentGroupId);
         const index = Math.max(0, Math.min(this.tabLayout.groups.length - 1, groupIndex + (e.key === 'ArrowUp' ? -1 : 1)));
@@ -6741,7 +6818,13 @@ class CodemanApp {
       if (vertical && e.shiftKey && e.key === 'F10') {
         e.preventDefault();
         const syntheticEvent = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
-        if (currentGroupId) this.openTabGroupMenu(syntheticEvent, currentGroupId);
+        if (currentGroupId && currentGroupId !== '@focus') this.openTabGroupMenu(syntheticEvent, currentGroupId);
+        else if (current.dataset.focusSessionId || current.dataset.focusWebviewId) {
+          const ref = current.dataset.focusWebviewId
+            ? { kind: 'webview', id: current.dataset.focusWebviewId }
+            : { kind: 'session', id: current.dataset.focusSessionId };
+          this.openFocusShortcutMenu(syntheticEvent, ref);
+        }
         else {
           const ref = current.dataset.webviewId
             ? { kind: 'webview', id: current.dataset.webviewId }
@@ -6808,6 +6891,7 @@ class CodemanApp {
 
   _tabLayoutIdentity(element) {
     if (!element) return null;
+    if (element.querySelector?.('[data-tab-focus-toggle]')) return 'group:@focus';
     const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
     if (groupId) return `group:${groupId}`;
     if (element.dataset?.focusSessionId) return `focus:session:${element.dataset.focusSessionId}`;

@@ -405,6 +405,13 @@ describe('COD-305 local collapse policy', () => {
     expect(local.setItem).toHaveBeenCalledWith('codeman:tab-groups-collapsed', '["g2","g1"]');
   });
 
+  it('retains the reserved Focus collapse identity while pruning stale real groups', () => {
+    const h = loadHelper();
+    const local = storage();
+    expect(h.saveCollapsedGroupIds(local, ['@focus', 'stale', 'g1']).ok).toBe(true);
+    expect(h.loadCollapsedGroupIds(local, ['g1'])).toEqual({ ids: ['@focus', 'g1'], ok: true });
+  });
+
   it('garbage-collects stale group IDs during layout adoption', () => {
     const h = loadHelper();
     const local = storage('["gone","g1"]');

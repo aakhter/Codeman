@@ -821,6 +821,63 @@ describe('COD-319 Focus smart group rendering', () => {
     expect(app._tabLayoutIdentity(session)).toBe('focus:session:parent');
     expect(app._tabLayoutIdentity(webview)).toBe('focus:webview:web');
   });
+
+  it('persists Focus collapse independently of real groups and hides all shortcuts', () => {
+    localStorage.clear();
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app._fullRenderSessionTabs();
+
+    expect(app.toggleTabGroupCollapsed('@focus', true)).toBe(true);
+    expect(JSON.parse(localStorage.getItem('codeman:tab-groups-collapsed')!)).toContain('@focus');
+    expect(document.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('false');
+    expect(document.querySelector('[data-tab-focus-shortcut]')).toBeNull();
+    expect(app.toggleTabGroupCollapsed('@focus', false)).toBe(true);
+    expect(document.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
+  });
+
+  it('offers exact Focus actions from canonical and shortcut menus', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.openSessionOptions = vi.fn();
+    app.requestCloseSession = vi.fn();
+    app.editTabLayout = vi.fn(() => true);
+    app._fullRenderSessionTabs();
+
+    const canonicalSessionTrigger = document.querySelector<HTMLElement>('[data-id="parent"] .tab-more')!;
+    app.openTabRailActionMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: canonicalSessionTrigger },
+      'parent'
+    );
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toContain(
+      'Remove from Focus'
+    );
+    clickMenuItem('Remove from Focus');
+    expect(app.editTabLayout).toHaveBeenLastCalledWith(
+      { type: 'setFocus', ref: { kind: 'session', id: 'parent' }, focused: false },
+      'session:parent'
+    );
+
+    const canonicalWebTrigger = document.querySelector<HTMLElement>('[data-webview-id="web"] .tab-more')!;
+    app.openTabRefMoveMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: canonicalWebTrigger },
+      { kind: 'webview', id: 'web' }
+    );
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toContain(
+      'Add to Focus'
+    );
+    document.querySelector('.tab-layout-ref-move-menu')?.remove();
+
+    const shortcutTrigger = document.querySelector<HTMLElement>('[data-tab-focus-shortcut] .tab-more')!;
+    app.openFocusShortcutMenu(
+      { preventDefault() {}, stopPropagation() {}, currentTarget: shortcutTrigger },
+      { kind: 'session', id: 'parent' }
+    );
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([
+      'Remove from Focus',
+    ]);
+  });
 });
 
 describe('COD-315 dismissible group menu', () => {

@@ -284,6 +284,7 @@ Object.assign(CodemanApp.prototype, {
     placementActions.unshift(...(this._tabRefPlacementActions?.(ref) || []));
     const actions = [
       { label: 'Session options', run: () => this.openSessionOptions(sessionId) },
+      this._tabRefFocusAction(ref),
       ...placementActions,
       ...(settings.showTabDetachButton || this.detachedSessions?.has(sessionId)
         ? [{ label: 'Open in a new window', run: () => this.detachSession(sessionId) }]
