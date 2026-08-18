@@ -57,6 +57,7 @@ export default defineConfig({
       'test/tab-group-menu.browser.test.ts', // browser (Playwright + chromium)
       'test/tab-activation.browser.test.ts', // browser (Playwright + chromium)
       'test/tab-focus-smart-group.browser.test.ts', // browser (Playwright + chromium)
+      'test/session-options-responsive.browser.test.ts', // browser (Playwright + chromium)
     ],
     setupFiles: ['./test/setup.ts'],
     fileParallelism: false,
