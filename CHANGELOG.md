@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Fix several desktop tab and terminal interaction regressions: replace ambiguous tab hamburger drag handles with grip affordances, keep vertical tab-rail layout and ARIA orientation synchronized when switching console placement, prevent Session Options from overflowing horizontally while retaining a wide-screen two-column layout, and unblock CJK typing when terminal composition wedges.
+- Fix desktop tab and terminal interaction regressions: replace ambiguous tab hamburger drag handles with grip affordances; make F2 inline renames repaint immediately, remain usable in compact rails, preserve group editors, and serialize overlapping saves; keep vertical console placement and tab-list accessibility synchronized; adapt Session Options to narrow viewports; and unblock CJK input while agent output is active.
 
 ## 1.19.6
 
