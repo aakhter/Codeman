@@ -320,6 +320,7 @@ export const CreateSessionSchema = z.object({
   workingDir: safePathSchema.optional(),
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']).optional(),
   name: z.string().max(100).optional(),
+  tabGroupId: z.string().min(1).max(100).optional(),
   /** Session that spawned this one — see parentSessionIdSchema. */
   parentSessionId: parentSessionIdSchema,
   envOverrides: safeEnvOverridesSchema,
@@ -782,6 +783,7 @@ export const QuickStartSchema = z.object({
   /** Display name for the created session tab (e.g. w1-mycase). Cosmetic; the durable
    *  mux/container names derive from the session id, not this. Defaults server-side. */
   sessionName: z.string().max(128).optional(),
+  tabGroupId: z.string().min(1).max(100).optional(),
   /** Session that spawned this one — see parentSessionIdSchema. */
   parentSessionId: parentSessionIdSchema,
   /** Model override written to <case>/.claude/settings.local.json (e.g. "opus[1m]").
