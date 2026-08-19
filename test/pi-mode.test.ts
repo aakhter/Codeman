@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { CreateSessionSchema, QuickStartSchema } from '../src/web/schemas.js';
 import { buildSpawnCommand } from '../src/tmux-manager.js';
 import { defaultDockerCommandForMode } from '../src/docker-hosts.js';
@@ -30,21 +31,32 @@ function createPiResolverHost(
 }
 
 describe('Pi CLI resolution', () => {
-  it('accepts an existing candidate under Vitest when using the hermetic default probe', () => {
+  it("honors an injected probe rejection when VITEST is the truthy string 'false'", () => {
     const servicePathCandidate = '/usr/bin/pi';
-    const resolver = createPiResolverForTest(
-      createPiResolverHost({
-        processPathCandidate: servicePathCandidate,
-        existingPaths: [servicePathCandidate],
-      })
-    );
+    const versionProbe = vi.fn(() => null);
+    const previousVitest = process.env.VITEST;
+    process.env.VITEST = 'false';
 
-    expect(resolver.resolve()).toEqual({
-      binaryPath: servicePathCandidate,
-      directory: '/usr/bin',
-      source: 'process-path',
-      metadata: undefined,
-    });
+    try {
+      const resolver = createPiResolverForTest(
+        createPiResolverHost({
+          processPathCandidate: servicePathCandidate,
+          existingPaths: [servicePathCandidate],
+        }),
+        versionProbe
+      );
+
+      expect(resolver.resolve()).toBeNull();
+      expect(versionProbe).toHaveBeenCalledWith(servicePathCandidate);
+    } finally {
+      if (previousVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = previousVitest;
+    }
+  });
+
+  it('contains no production VITEST environment bypass', () => {
+    const source = readFileSync(new URL('../src/utils/pi-cli-resolver.ts', import.meta.url), 'utf8');
+    expect(source).not.toContain('process.env.VITEST');
   });
 
   it('rejects generic and common pi candidates before accepting login-shell Pi with its version', () => {

@@ -56,12 +56,8 @@ const PI_NOT_FOUND = 'Pi CLI not found. Install with: npm install -g --ignore-sc
  * looks like the coding agent. Returns null for anything else — a missing
  * binary, a non-zero exit, a hang (timeout), or output that is not semver-shaped
  * (which is how an unrelated `pi` on PATH gets rejected).
- *
- * Never runs under vitest: the suites must stay hermetic and must not depend on
- * whether the dev box happens to have pi installed.
  */
 function probePiVersion(binPath: string): string | null {
-  if (process.env.VITEST) return null;
   try {
     const out = execFileSync(binPath, ['--version'], {
       encoding: 'utf-8',
@@ -86,7 +82,6 @@ function createPiResolver(host?: CliResolverHost, versionProbe: PiVersionProbe =
       binary: 'pi',
       searchDirs: PI_SEARCH_DIRS,
       validateCandidate: (binPath) => {
-        if (process.env.VITEST && versionProbe === probePiVersion) return { accepted: true };
         const version = versionProbe(binPath);
         return version ? { accepted: true, metadata: version } : { accepted: false };
       },
@@ -95,8 +90,8 @@ function createPiResolver(host?: CliResolverHost, versionProbe: PiVersionProbe =
   );
 }
 
-/** Creates an isolated Pi wrapper around an injected host and optional version probe. */
-export function createPiResolverForTest(host: CliResolverHost, versionProbe?: PiVersionProbe) {
+/** Creates an isolated Pi wrapper around an injected host and version probe. */
+export function createPiResolverForTest(host: CliResolverHost, versionProbe: PiVersionProbe) {
   return createPiResolver(host, versionProbe);
 }
 
@@ -126,9 +121,8 @@ export function getPiNotFoundMessage(): string {
 }
 
 /**
- * Version reported by the resolved `pi` binary, or null when pi is unavailable
- * (or when the probe was skipped, i.e. under vitest). Surfaced through
- * `GET /api/pi/status` so a misresolution is diagnosable from the UI.
+ * Version reported by the resolved `pi` binary, or null when pi is unavailable.
+ * Surfaced through `GET /api/pi/status` so a misresolution is diagnosable from the UI.
  */
 export function getPiCliVersion(): string | null {
   return piResolver.resolve()?.metadata ?? null;
