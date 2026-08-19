@@ -3306,7 +3306,8 @@ export class Session extends EventEmitter {
   /**
    * Positive external-CLI working signal — from a stream chunk match OR from
    * the COD-181 rendered-frame poller. Marks the session busy and re-arms the
-   * quiet-window timer; idle comes from that timer expiring.
+   * quiet-window timer. For Codex, expiry must also find positive rendered
+   * input-ready evidence before it can end the turn.
    */
   private _noteExternalWorkingFrame(): void {
     if (!this._isWorking) {
@@ -3385,11 +3386,10 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * (Re-)arm the external-CLI quiet-window timer. Fires idle when no working
-   * frame has been seen for EXTERNAL_CLI_IDLE_DELAY_MS — covering both a turn
-   * that just finished (wasWorking) and a freshly spawned/attached session
-   * whose _resetBuffers() 'busy' status would otherwise never clear because
-   * codex's '›' prompt can't match the Claude '❯' initial-ready path.
+   * (Re-)arm the external-CLI quiet-window timer. For a working Codex turn,
+   * expiry consults the rendered pane and only an input-ready state ends the
+   * turn; working or unknown state re-arms the timer. Startup readiness and
+   * other external CLIs retain the original quiet-window behavior.
    */
   private _armExternalCliIdleTimer(): void {
     if (this._externalCliIdleTimer) clearTimeout(this._externalCliIdleTimer);
@@ -3398,6 +3398,14 @@ export class Session extends EventEmitter {
       if (this._isStopped) return;
       const wasWorking = this._isWorking;
       const isInitialReady = this._status === 'busy' && !this._isWorking;
+      if (wasWorking && this.mode === 'codex') {
+        const muxName = this._muxSession?.muxName;
+        const frame = muxName ? this._mux?.captureActivePaneBuffer?.(muxName) : null;
+        if (classifyCodexRenderedState(frame) !== 'input-ready') {
+          this._armExternalCliIdleTimer();
+          return;
+        }
+      }
       if (wasWorking || isInitialReady) {
         this._isWorking = false;
         this._status = 'idle';

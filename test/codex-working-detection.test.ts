@@ -762,10 +762,15 @@ describe('checkpoint prompt observations', () => {
 
 describe('Codex idle transition (COD-175)', () => {
   let session: Session;
+  let frame: string | null;
 
   beforeEach(() => {
     vi.useFakeTimers();
     session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    frame = null;
+    const internals = session as unknown as { _mux: unknown; _muxSession: unknown };
+    internals._mux = { captureActivePaneBuffer: vi.fn(() => frame) };
+    internals._muxSession = { muxName: 'codeman-test1234' };
   });
 
   afterEach(async () => {
@@ -777,7 +782,7 @@ describe('Codex idle transition (COD-175)', () => {
     (session as unknown as { _detectInteractiveActivity(data: string): void })._detectInteractiveActivity(data);
   }
 
-  it('clears isWorking and emits idle after working frames stop', () => {
+  it('clears isWorking when the rendered composer confirms turn end', () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
@@ -792,7 +797,8 @@ describe('Codex idle transition (COD-175)', () => {
     expect(session.isWorking).toBe(true);
     expect(idleEvents.length).toBe(0);
 
-    // frames stop → idle after the quiet window
+    // A rendered composer positively confirms the turn ended.
+    frame = '› Type your next prompt';
     vi.advanceTimersByTime(6000);
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
@@ -821,6 +827,7 @@ describe('Codex idle transition (COD-175)', () => {
 
   it('re-enters working on the next turn after going idle', () => {
     feed('• Working (2s • esc to interrupt)');
+    frame = '› Type your next prompt';
     vi.advanceTimersByTime(10_000);
     expect(session.isWorking).toBe(false);
 
@@ -837,6 +844,22 @@ describe('Codex idle transition (COD-175)', () => {
     vi.advanceTimersByTime(20_000);
     expect(claude.isWorking).toBe(true);
     return claude.stop();
+  });
+
+  it('keeps non-Codex external CLI quiet-window behavior unchanged', async () => {
+    const opencode = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const idleEvents: Array<{ reason?: string }> = [];
+    opencode.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    (opencode as unknown as { _detectInteractiveActivity(data: string): void })._detectInteractiveActivity('Working');
+    expect(opencode.isWorking).toBe(true);
+
+    vi.advanceTimersByTime(6_000);
+
+    expect(opencode.isWorking).toBe(false);
+    expect(opencode.status).toBe('idle');
+    expect(idleEvents).toEqual([{ reason: 'turn-end' }]);
+    await opencode.stop();
   });
 });
 
@@ -862,7 +885,7 @@ describe('COD-181 remote working-frame poller', () => {
       _muxSession: unknown;
       _startWorkingFramePoller(): void;
     };
-    s._mux = { captureActivePaneBuffer: vi.fn(() => frame) };
+    s._mux = { captureActivePaneBuffer: vi.fn(() => frame), killSession: vi.fn(async () => false) };
     s._muxSession = { muxName: 'codeman-test1234' };
     s._startWorkingFramePoller();
   });
@@ -907,6 +930,81 @@ describe('COD-181 remote working-frame poller', () => {
     expect(session.status).toBe('idle');
     expect(idleEvents.length).toBe(1);
     expect(idleEvents[0]).toEqual({ reason: 'turn-end' });
+  });
+
+  it('stays busy across quiet windows while the current Codex layout still says Working', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    frame = '• Working (31)\n› retained prompt';
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(session.isWorking).toBe(true);
+    expect(session.status).toBe('busy');
+    expect(idleEvents).toEqual([]);
+  });
+
+  it('stays busy across quiet windows when the rendered state is unknown', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    frame = 'tool output with no current Codex UI';
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(session.isWorking).toBe(true);
+    expect(session.status).toBe('busy');
+    expect(idleEvents).toEqual([]);
+  });
+
+  it('emits exactly one turn-end idle for a rendered composer', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    frame = '› Type your next prompt';
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(session.isWorking).toBe(false);
+    expect(session.status).toBe('idle');
+    expect(idleEvents).toEqual([{ reason: 'turn-end' }]);
+  });
+
+  it('emits exactly one turn-end idle for a rendered numbered-choice dialog', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    frame = 'Allow this command?\n  1. Yes\n❯ 2. No';
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(session.isWorking).toBe(false);
+    expect(session.status).toBe('idle');
+    expect(idleEvents).toEqual([{ reason: 'turn-end' }]);
+  });
+
+  it('lets working evidence override a retained composer at the timer boundary', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    frame = '• Working (31)\n› retained prompt';
+
+    vi.advanceTimersByTime(5_100);
+
+    expect(session.isWorking).toBe(true);
+    expect(session.status).toBe('busy');
+    expect(idleEvents).toEqual([]);
   });
 
   it('never flips busy from an idle frame', () => {
