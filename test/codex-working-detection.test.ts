@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { detectClaudeCheckpointWorkingFrame, detectExternalCliWorkingFrame, Session } from '../src/session.js';
+import {
+  classifyCodexRenderedState,
+  detectClaudeCheckpointWorkingFrame,
+  detectExternalCliWorkingFrame,
+  Session,
+} from '../src/session.js';
 import { formatPaneSnapshot } from '../src/tmux-manager.js';
 
 describe('Codex working detection', () => {
@@ -22,6 +27,37 @@ describe('Codex working detection', () => {
     expect(
       detectExternalCliWorkingFrame('• Starting MCP servers (3/4): bitbucket (3s • esc to interrupt)', 'codex')
     ).toBe(false);
+  });
+});
+
+describe('Codex rendered state classification', () => {
+  it('gives working evidence precedence over a retained composer', () => {
+    expect(classifyCodexRenderedState('• Working (31)\n› retained prompt')).toBe('working');
+  });
+
+  it('recognizes the Codex composer as input-ready', () => {
+    expect(classifyCodexRenderedState('› Type your next prompt')).toBe('input-ready');
+  });
+
+  it('recognizes a selected numbered choice block as input-ready', () => {
+    expect(classifyCodexRenderedState('Allow this command?\n❯ 1. Yes\n  2. No')).toBe('input-ready');
+  });
+
+  it('returns unknown for plain tool output and absent frames', () => {
+    expect(classifyCodexRenderedState('Read package.json\nCompleted in 12ms')).toBe('unknown');
+    expect(classifyCodexRenderedState(null)).toBe('unknown');
+  });
+
+  it('normalizes ANSI and absolute-row tmux snapshots before classifying', () => {
+    const frame = formatPaneSnapshot(['Codex CLI', '\x1b[32m› Type your next prompt\x1b[0m'], {
+      cols: 80,
+      rows: 4,
+      cursorX: 2,
+      cursorY: 1,
+    });
+
+    expect(frame).not.toContain('\n');
+    expect(classifyCodexRenderedState(frame)).toBe('input-ready');
   });
 });
 
