@@ -51,6 +51,12 @@ export const UPLOAD_ALLOWED_EXTENSIONS: ReadonlySet<string> = new Set([
   'html',
   'css',
   'csv',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
 ]);
 
 /** Normalize an extension: lowercase, strip a single leading dot. */
@@ -142,6 +148,32 @@ export function documentMagicMatchesExt(data: Buffer, ext: string): boolean {
         if (data[i] === 0x00) return false;
       }
       return true;
+    }
+    case 'png': {
+      if (data.length < 8) return false;
+      return data.readUInt32BE(0) === 0x89504e47 && data.readUInt32BE(4) === 0x0d0a1a0a;
+    }
+    case 'jpg':
+    case 'jpeg': {
+      return data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+    }
+    case 'gif': {
+      return (
+        data.length >= 6 &&
+        data[0] === 0x47 &&
+        data[1] === 0x49 &&
+        data[2] === 0x46 &&
+        data[3] === 0x38 &&
+        (data[4] === 0x37 || data[4] === 0x39) &&
+        data[5] === 0x61
+      );
+    }
+    case 'webp': {
+      if (data.length < 12) return false;
+      return data.readUInt32BE(0) === 0x52494646 && data.readUInt32BE(8) === 0x57454250;
+    }
+    case 'bmp': {
+      return data.length >= 2 && data[0] === 0x42 && data[1] === 0x4d;
     }
     default:
       return false;

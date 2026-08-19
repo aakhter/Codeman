@@ -56,6 +56,12 @@ describe('UPLOAD_ALLOWED_EXTENSIONS', () => {
         'html',
         'css',
         'csv',
+        'png',
+        'jpg',
+        'jpeg',
+        'gif',
+        'webp',
+        'bmp',
       ].sort()
     );
   });
@@ -83,6 +89,14 @@ describe('isAllowedUploadExtension', () => {
       'html',
       'css',
       'csv',
+      'png',
+      'PNG',
+      'jpg',
+      'JPG',
+      'jpeg',
+      'gif',
+      'webp',
+      'bmp',
     ]) {
       expect(isAllowedUploadExtension(ext)).toBe(true);
     }
@@ -95,7 +109,7 @@ describe('isAllowedUploadExtension', () => {
   });
 
   it('rejects unsupported / unknown extensions', () => {
-    for (const ext of ['exe', 'png', 'zip', 'doc', 'ppt', 'xls', '']) {
+    for (const ext of ['exe', 'zip', 'doc', 'ppt', 'xls', '']) {
       expect(isAllowedUploadExtension(ext)).toBe(false);
     }
   });

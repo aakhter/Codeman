@@ -36,6 +36,12 @@
   - That drift was a silent hole, not a tidiness problem: a file excluded from CI and added to no runner is tested by NOTHING, and every command stays green, because vitest counts "no files matched" as success. `test/test-suite-partition.test.ts` now fails if any test file is reachable by no runner or by two.
   - ⚠️ A file filter must match its runner: `npm test -- test/mobile/keyboard.test.ts` matches nothing and exits green having run zero tests, because the gate excludes that path. Use `npm run test:mobile -- <file>`. Documented in CLAUDE.md, and the one place that recommended the old form was corrected.
   - Docs synced: CLAUDE.md, AGENTS.md, .github/CONTRIBUTING.md, both READMEs, and two ci.yml comments that claimed only `test/mobile/**` was excluded (it is three suites, and 5 Playwright files rather than 3).
+## 1.19.11
+
+### Patch Changes
+
+- Add predictive echo and typing-lag instrumentation for OpenCode, harden agent CLI discovery through login shells, allow code-file source uploads and derive source titles from selected filenames, and add live session-name search to the resizable vertical tab rail with collapsed-group discovery and state restoration.
+
 ## 1.19.10
 
 ### Patch Changes

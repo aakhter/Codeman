@@ -61,6 +61,12 @@ Object.assign(CodemanApp.prototype, {
     'html',
     'css',
     'csv',
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'webp',
+    'bmp',
   ],
 
   // True when a dropped/selected File has an allowlisted document extension.
@@ -86,7 +92,7 @@ Object.assign(CodemanApp.prototype, {
       input.type = 'file';
       input.multiple = true;
       input.accept =
-        '.pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.sh,.bash,.zsh,.go,.rs,.java,.c,.cpp,.h,.hpp,.cs,.rb,.php,.swift,.kt,.scala,.sql,.html,.css,.csv';
+        '.pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.sh,.bash,.zsh,.go,.rs,.java,.c,.cpp,.h,.hpp,.cs,.rb,.php,.swift,.kt,.scala,.sql,.html,.css,.csv,.png,.jpg,.jpeg,.gif,.webp,.bmp';
       input.style.display = 'none';
       input.addEventListener('change', () => {
         // Snapshot into a stable array BEFORE resetting value: input.files is a
