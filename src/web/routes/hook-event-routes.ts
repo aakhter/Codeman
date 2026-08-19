@@ -15,6 +15,7 @@ import { persistDockerCaseClaudeSessionId } from '../../docker-hosts.js';
 import { getDataDir } from '../../config/instance.js';
 import { sessionWaits, hooksAvailableForMode } from '../session-wait-registry.js';
 import { approvalInbox, type ApprovalKind } from '../approval-inbox.js';
+import { buildPaneCapture } from '../pane-capture.js';
 import type { SessionPort, EventPort, RespawnPort, ConfigPort, InfraPort } from '../ports/index.js';
 
 /** Hook events that open an Approvals Inbox item. */
@@ -139,17 +140,14 @@ export function registerHookEventRoutes(
           sessionId,
           sessionName,
           kind: approvalKind,
+          mode: session.mode,
           toolName: typeof safeData.tool_name === 'string' ? safeData.tool_name : undefined,
           toolSummary: typeof toolSummary === 'string' ? toolSummary : undefined,
           message: typeof safeData.message === 'string' ? safeData.message : undefined,
           cwd: typeof safeData.cwd === 'string' ? safeData.cwd : undefined,
           // Visible tmux frame first (it IS the dialog); raw byte-buffer tail as
           // the fallback for direct-PTY sessions and the no-op test mux.
-          capture: () => {
-            const muxName = session.muxName;
-            const frame = muxName ? (ctx.mux.capturePaneBuffer?.(muxName) ?? null) : null;
-            return frame ?? session.terminalBuffer.slice(-8192) ?? null;
-          },
+          capture: buildPaneCapture(session, ctx.mux),
         });
         approvalId = item.id;
       } else if (APPROVAL_RESOLVING_EVENTS.has(event)) {

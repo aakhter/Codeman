@@ -200,6 +200,8 @@
     Stopped: '已停止',
     Running: '运行中',
     Idle: '空闲',
+    'Codex is waiting for your input': 'Codex 正在等待您的输入',
+    'Claude is waiting for your input': 'Claude 正在等待您的输入',
     Working: '工作中',
     Today: '今天',
     Home: '主页',

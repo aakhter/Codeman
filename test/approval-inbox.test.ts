@@ -165,6 +165,17 @@ describe('ApprovalInbox', () => {
     expect(inbox.getForSession('s1')?.id).toBe(item.id);
   });
 
+  it('preserves the optional session mode on the public item', () => {
+    const item = inbox.notePrompt({
+      sessionId: 's1',
+      sessionName: 'Codex session',
+      kind: 'idle',
+      mode: 'codex',
+    });
+
+    expect(item.mode).toBe('codex');
+  });
+
   it('a new prompt supersedes the session previous item', () => {
     const { resolved } = collect(inbox);
     const first = inbox.notePrompt({ sessionId: 's1', sessionName: 'w1', kind: 'permission' });

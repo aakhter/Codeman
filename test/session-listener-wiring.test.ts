@@ -1,7 +1,37 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
 import { createSessionListeners } from '../src/web/session-listener-wiring.js';
 import { SseEvent } from '../src/web/sse-events.js';
+import { approvalInbox } from '../src/web/approval-inbox.js';
+
+function listenerDeps(frame = '› ready for another prompt') {
+  return {
+    broadcast: vi.fn(),
+    batchTerminalData: vi.fn(),
+    batchTaskUpdate: vi.fn(),
+    broadcastSessionStateDebounced: vi.fn(),
+    sendPushNotifications: vi.fn(),
+    persistSessionState: vi.fn(),
+    getSessionStateWithRespawn: vi.fn(() => ({})),
+    getRunSummaryTracker: vi.fn(() => undefined),
+    stopTranscriptWatcher: vi.fn(),
+    cleanupSessionBatches: vi.fn(),
+    cancelPersistDebounce: vi.fn(),
+    removeRunSummaryTracker: vi.fn(),
+    removeSessionListenerRefs: vi.fn(),
+    cleanupRespawnOnExit: vi.fn(),
+    getStore: vi.fn(() => ({ updateRalphState: vi.fn() })),
+    registerAttachment: vi.fn(async () => undefined),
+    mux: { capturePaneBuffer: vi.fn(() => frame) },
+  } as unknown as Parameters<typeof createSessionListeners>[1];
+}
+
+afterEach(() => {
+  for (const item of approvalInbox.listPending()) {
+    approvalInbox.resolveForSession(item.sessionId, 'dismissed');
+  }
+  approvalInbox.onPending = approvalInbox.onUpdated = approvalInbox.onResolved = undefined;
+});
 
 describe('session listener wiring', () => {
   it('forwards the attachment request source through registerAttachment', async () => {
@@ -80,5 +110,89 @@ describe('session listener wiring', () => {
       runId: 'new-run',
     });
     expect(persistSessionState).not.toHaveBeenCalled();
+  });
+});
+
+describe('Codex Approvals Inbox idle wiring', () => {
+  it.each([
+    { mode: 'codex', reason: 'turn-end', creates: true },
+    { mode: 'codex', reason: 'initial-ready', creates: false },
+    { mode: 'claude', reason: 'turn-end', creates: false },
+    { mode: 'gemini', reason: 'turn-end', creates: false },
+  ] as const)('$mode + $reason creates=$creates', ({ mode, reason, creates }) => {
+    const session = new Session({ id: `wiring-${mode}-${reason}`, workingDir: '/tmp', mode });
+    (session as unknown as { _muxSession: { muxName: string } })._muxSession = {
+      muxName: `codeman-test-${mode}`,
+    };
+    const refs = createSessionListeners(session, listenerDeps());
+
+    refs.idle({ reason });
+
+    const item = approvalInbox.getForSession(session.id);
+    expect(Boolean(item)).toBe(creates);
+    if (creates) {
+      expect(item).toMatchObject({ kind: 'idle', mode: 'codex' });
+      expect(item?.context).toBeTruthy();
+    }
+  });
+
+  it('does not supersede an existing acknowledged idle item', () => {
+    const session = new Session({ id: 'wiring-codex-dedupe', workingDir: '/tmp', mode: 'codex' });
+    const refs = createSessionListeners(session, listenerDeps());
+    refs.idle({ reason: 'turn-end' });
+    const first = approvalInbox.getForSession(session.id)!;
+    approvalInbox.acknowledge(session.id);
+
+    refs.idle({ reason: 'turn-end' });
+
+    const second = approvalInbox.getForSession(session.id)!;
+    expect(second.id).toBe(first.id);
+    expect(second.acknowledgedAt).toBe(first.acknowledgedAt);
+  });
+
+  it('does not re-alert an acknowledged turn after a heuristic working-idle flap', () => {
+    const session = new Session({ id: 'wiring-codex-flap', workingDir: '/tmp', mode: 'codex' });
+    const refs = createSessionListeners(session, listenerDeps());
+    (session as unknown as { _lastSubmitAt: number })._lastSubmitAt = 100;
+    refs.idle({ reason: 'turn-end' });
+    approvalInbox.acknowledge(session.id);
+
+    refs.working();
+    refs.idle({ reason: 'turn-end' });
+
+    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
+
+    (session as unknown as { _lastSubmitAt: number })._lastSubmitAt = 200;
+    refs.working();
+    refs.idle({ reason: 'turn-end' });
+    expect(approvalInbox.getForSession(session.id)).toMatchObject({ kind: 'idle', mode: 'codex' });
+  });
+
+  it('sends the existing actionless idle push for a Codex approval', () => {
+    const session = new Session({ id: 'wiring-codex-push', workingDir: '/tmp', mode: 'codex' });
+    const deps = listenerDeps();
+    const refs = createSessionListeners(session, deps);
+
+    refs.idle({ reason: 'turn-end' });
+
+    const item = approvalInbox.getForSession(session.id)!;
+    expect(deps.sendPushNotifications).toHaveBeenCalledWith(SseEvent.HookIdlePrompt, {
+      sessionId: session.id,
+      sessionName: session.name,
+      approvalId: item.id,
+    });
+  });
+
+  it('resolves the Codex idle item on working and exit', () => {
+    const session = new Session({ id: 'wiring-codex-resolve', workingDir: '/tmp', mode: 'codex' });
+    const refs = createSessionListeners(session, listenerDeps());
+
+    refs.idle({ reason: 'turn-end' });
+    refs.working();
+    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
+
+    refs.idle({ reason: 'turn-end' });
+    refs.exit(0);
+    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
   });
 });

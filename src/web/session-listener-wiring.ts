@@ -22,14 +22,17 @@ import type {
   RalphTrackerState,
   RalphTodoItem,
   ActiveBashTool,
+  SessionIdleInfo,
 } from '../session.js';
+import type { TerminalMultiplexer } from '../mux-interface.js';
 import type { RalphStatusBlock, CircuitBreakerStatus } from '../types.js';
 import { SseEvent } from './sse-events.js';
 import { getLifecycleLog } from '../session-lifecycle-log.js';
 import { fileStreamManager } from '../file-stream-manager.js';
 import type { CheckpointProgress } from '../session-auto-ops.js';
-import { sessionWaits } from './session-wait-registry.js';
+import { approvalsAvailableForMode, sessionWaits } from './session-wait-registry.js';
 import { approvalInbox } from './approval-inbox.js';
+import { buildPaneCapture } from './pane-capture.js';
 
 /** Stored listener references for session cleanup (prevents memory leaks) */
 export interface SessionListenerRefs {
@@ -42,7 +45,7 @@ export interface SessionListenerRefs {
   completion: (result: string, cost: number) => void;
   exit: (code: number | null) => void;
   working: () => void;
-  idle: () => void;
+  idle: (info?: SessionIdleInfo) => void;
   taskCreated: (task: BackgroundTask) => void;
   taskUpdated: (task: BackgroundTask) => void;
   taskCompleted: (task: BackgroundTask) => void;
@@ -70,6 +73,7 @@ export interface SessionListenerRefs {
 
 /** Dependencies injected by WebServer — keeps listener creation decoupled from server internals. */
 interface SessionListenerDeps {
+  mux: TerminalMultiplexer;
   broadcast(event: string, data: unknown): void;
   batchTerminalData(sessionId: string, data: string): void;
   batchTaskUpdate(sessionId: string, task: BackgroundTask): void;
@@ -93,6 +97,11 @@ interface SessionListenerDeps {
  * Call `attachSessionListeners()` after to wire them to the session.
  */
 export function createSessionListeners(session: Session, deps: SessionListenerDeps): SessionListenerRefs {
+  // Distinguish a genuine next turn from a rendered-frame working/idle flap.
+  // `lastSubmitAt` changes on Enter; it survives acknowledgement and the
+  // working listener's resolution of the visible item.
+  let lastIdleApprovalSubmitAt: number | undefined;
+
   return {
     // ─── Terminal Output ─────────────────────────────────────
 
@@ -246,8 +255,33 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
     },
 
     /** Broadcasts `session:idle` — Claude finished processing, waiting for input */
-    idle: () => {
+    idle: (info) => {
       sessionWaits.notifySignal(session.id, 'idle');
+      // Codex has no hook equivalent, so only a confirmed working -> idle
+      // transition opens an item. The 2s rendered-frame poller can miss a turn
+      // shorter than one poll interval; that accepted false negative produces
+      // neither working nor turn-end idle and therefore no inbox item.
+      if (
+        approvalsAvailableForMode(session.mode) &&
+        session.mode !== 'claude' &&
+        info?.reason === 'turn-end' &&
+        lastIdleApprovalSubmitAt !== session.lastSubmitAt &&
+        approvalInbox.getForSession(session.id)?.kind !== 'idle'
+      ) {
+        const item = approvalInbox.notePrompt({
+          sessionId: session.id,
+          sessionName: session.name,
+          kind: 'idle',
+          mode: session.mode,
+          capture: buildPaneCapture(session, deps.mux),
+        });
+        lastIdleApprovalSubmitAt = session.lastSubmitAt;
+        deps.sendPushNotifications(SseEvent.HookIdlePrompt, {
+          sessionId: session.id,
+          sessionName: session.name,
+          approvalId: item.id,
+        });
+      }
       deps.broadcast(SseEvent.SessionIdle, { id: session.id });
       deps.broadcastSessionStateDebounced(session.id);
       const tracker = deps.getRunSummaryTracker(session.id);
