@@ -150,22 +150,19 @@ describe('Codex Approvals Inbox idle wiring', () => {
     expect(second.acknowledgedAt).toBe(first.acknowledgedAt);
   });
 
-  it('does not re-alert an acknowledged turn after a heuristic working-idle flap', () => {
-    const session = new Session({ id: 'wiring-codex-flap', workingDir: '/tmp', mode: 'codex' });
+  it('creates a later item for terminal-driven turns whose submit timestamp is unchanged', () => {
+    const session = new Session({ id: 'wiring-codex-terminal-turns', workingDir: '/tmp', mode: 'codex' });
     const refs = createSessionListeners(session, listenerDeps());
-    (session as unknown as { _lastSubmitAt: number })._lastSubmitAt = 100;
     refs.idle({ reason: 'turn-end' });
-    approvalInbox.acknowledge(session.id);
+    const first = approvalInbox.getForSession(session.id)!;
 
     refs.working();
-    refs.idle({ reason: 'turn-end' });
-
     expect(approvalInbox.getForSession(session.id)).toBeUndefined();
-
-    (session as unknown as { _lastSubmitAt: number })._lastSubmitAt = 200;
-    refs.working();
     refs.idle({ reason: 'turn-end' });
-    expect(approvalInbox.getForSession(session.id)).toMatchObject({ kind: 'idle', mode: 'codex' });
+
+    const second = approvalInbox.getForSession(session.id);
+    expect(second).toMatchObject({ kind: 'idle', mode: 'codex' });
+    expect(second?.id).not.toBe(first.id);
   });
 
   it('sends the existing actionless idle push for a Codex approval', () => {
@@ -180,6 +177,7 @@ describe('Codex Approvals Inbox idle wiring', () => {
       sessionId: session.id,
       sessionName: session.name,
       approvalId: item.id,
+      approvalsInboxOnly: true,
     });
   });
 
@@ -192,6 +190,7 @@ describe('Codex Approvals Inbox idle wiring', () => {
     expect(approvalInbox.getForSession(session.id)).toBeUndefined();
 
     refs.idle({ reason: 'turn-end' });
+    expect(approvalInbox.getForSession(session.id)).toBeDefined();
     refs.exit(0);
     expect(approvalInbox.getForSession(session.id)).toBeUndefined();
   });

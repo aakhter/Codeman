@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- e0cab9b: Add Codex turn-end prompts to the Approvals Inbox with answer support, localized mode labels, shared pane capture, live tab and mobile alerts, actionless push notifications, restart-safe working-state detection, and same-turn flap suppression.
+- e0cab9b: Add Codex turn-end prompts to the Approvals Inbox with answer support, localized mode labels, shared pane capture, live tab and mobile alerts, opt-in actionless push notifications, and restart-safe working-state detection.
 
 ## 1.19.8
 

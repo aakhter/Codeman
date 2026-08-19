@@ -52,7 +52,7 @@ Module-level singleton in the style of `session-wait-registry.ts` (pure, no `Ses
 ### Wiring
 
 - `hook-event-routes.ts`: on `permission_prompt` / `elicitation_dialog` / `idle_prompt`, call `notePrompt` with sanitized data + a pane capture callback (`mux.capturePaneBuffer(muxName)` visible frame, ANSI-stripped via existing utils; fall back to `session.terminalBuffer` tail). On `stop` / `elicitation_complete` / `elicitation_response`, `resolveForSession(id, 'resolved_in_terminal')`.
-- `session-listener-wiring.ts`: a Codex `idle({ reason: 'turn-end' })` creates an idle item unless one is already pending or the session's `lastSubmitAt` matches the previously alerted turn; initial/shell readiness does not. The submit timestamp guard prevents a heuristic working→idle flap from re-alerting an acknowledged turn. `working` resolves **idle items only** (`working` is heuristic and can flap mid-turn, so it must never clear a pending permission/question dialog); `exit` resolves with `session_ended`. Same singleton-import pattern as `sessionWaits`.
+- `session-listener-wiring.ts`: a Codex `idle({ reason: 'turn-end' })` creates an idle item unless one is already pending; initial/shell readiness does not. It does not key turns solely on `lastSubmitAt`, because input from an attached tmux client bypasses Codeman's write methods and would otherwise suppress every later turn. `working` resolves **idle items only** (`working` is heuristic and can flap mid-turn, so it must never clear a pending permission/question dialog); `exit` resolves with `session_ended`. Same singleton-import pattern as `sessionWaits`.
 - Session delete route: resolve with `session_ended`.
 - **New hook matchers** `elicitation_complete` + `elicitation_response` added to `generateHooksConfig()`, `HookEventType`, `HookEventSchema`, and both SSE registries. `refreshStaleCodemanHooks` gets a staleness probe for them (`hooksJson.includes('elicitation_complete')`) so existing cases heal on next Claude spawn, exactly like the `-k`/secret/marker probes.
 - `sanitizeHookData`: allowlist `message` (bounded 500 chars). This also un-deadens the existing notification text paths.
@@ -80,7 +80,7 @@ Normal authed API (NOT the hook-secret bypass), `ApiResponse` envelope, Zod sche
 - `sendPushNotifications` payload gains `approvalId` for the three hook events. Both `approvalId` and the Approve/Deny `actions` are **gated on the opt-in setting**: with it off, permission pushes carry no buttons at all (pre-inbox they rendered and did nothing, so stripping them is the honest shape).
 - `sw.js` `notificationclick`: when `event.action` is `approve`/`deny`, POST `/api/approvals/:id/answer` directly from the worker (same-origin, cookie credentials) so the buttons work **with no tab open**; on failure fall back to focusing/opening a tab. Non-action clicks keep today's behavior.
 - Page-side `notification-click` handler: honor `action` instead of dropping it (also setting-gated, for stale notifications sent before the toggle flipped).
-- Question/idle pushes keep no action buttons (options vary per dialog); tapping opens the inbox. Codex turn-end wiring reuses the existing `hook:idle_prompt` push template and includes the new approval ID.
+- Question/idle pushes keep no action buttons (options vary per dialog); tapping opens the inbox. Codex turn-end wiring reuses the existing `hook:idle_prompt` push template and includes the new approval ID, but the entire transition-inferred Codex push is suppressed while the Approvals Inbox setting is off.
 
 ## Frontend
 

@@ -193,6 +193,20 @@ async function sendPermissionPush(server: WebServer): Promise<ApprovalAwarePaylo
   return lastPayload() as ApprovalAwarePayload;
 }
 
+async function sendCodexIdlePush(server: WebServer): Promise<ApprovalAwarePayload | undefined> {
+  await (
+    server as unknown as {
+      sendPushNotifications: (e: string, d: Record<string, unknown>) => Promise<void>;
+    }
+  ).sendPushNotifications('hook:idle_prompt', {
+    sessionId: 's-codex-idle',
+    sessionName: 'codex-session',
+    approvalId: 's-codex-idle:1',
+    approvalsInboxOnly: true,
+  });
+  return sendNotification.mock.calls.length > 0 ? (lastPayload() as ApprovalAwarePayload) : undefined;
+}
+
 describe('push payload Approvals Inbox gating', () => {
   beforeEach(() => {
     sendNotification.mockClear();
@@ -225,5 +239,20 @@ describe('push payload Approvals Inbox gating', () => {
     const payload = await sendPermissionPush(server);
     expect(payload.actions).toBeUndefined();
     expect(payload.approvalId).toBeUndefined();
+  });
+
+  it('does not send transition-inferred Codex idle pushes while the inbox is off', async () => {
+    const server = makeServerWithHost('codex-idle-off');
+    setSettings(server, {});
+    expect(await sendCodexIdlePush(server)).toBeUndefined();
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it('sends actionless Codex idle pushes with the approval id while the inbox is on', async () => {
+    const server = makeServerWithHost('codex-idle-on');
+    setSettings(server, { approvalsInboxEnabled: true });
+    const payload = await sendCodexIdlePush(server);
+    expect(payload).toMatchObject({ title: 'Waiting for Input', approvalId: 's-codex-idle:1' });
+    expect(payload?.actions).toBeUndefined();
   });
 });
