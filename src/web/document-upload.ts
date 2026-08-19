@@ -19,6 +19,38 @@ export const UPLOAD_ALLOWED_EXTENSIONS: ReadonlySet<string> = new Set([
   'md',
   'markdown',
   'txt',
+  'py',
+  'js',
+  'ts',
+  'jsx',
+  'tsx',
+  'json',
+  'yaml',
+  'yml',
+  'toml',
+  'ini',
+  'cfg',
+  'conf',
+  'sh',
+  'bash',
+  'zsh',
+  'go',
+  'rs',
+  'java',
+  'c',
+  'cpp',
+  'h',
+  'hpp',
+  'cs',
+  'rb',
+  'php',
+  'swift',
+  'kt',
+  'scala',
+  'sql',
+  'html',
+  'css',
+  'csv',
 ]);
 
 /** Normalize an extension: lowercase, strip a single leading dot. */
@@ -72,7 +104,39 @@ export function documentMagicMatchesExt(data: Buffer, ext: string): boolean {
     }
     case 'md':
     case 'markdown':
-    case 'txt': {
+    case 'txt':
+    case 'py':
+    case 'js':
+    case 'ts':
+    case 'jsx':
+    case 'tsx':
+    case 'json':
+    case 'yaml':
+    case 'yml':
+    case 'toml':
+    case 'ini':
+    case 'cfg':
+    case 'conf':
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+    case 'go':
+    case 'rs':
+    case 'java':
+    case 'c':
+    case 'cpp':
+    case 'h':
+    case 'hpp':
+    case 'cs':
+    case 'rb':
+    case 'php':
+    case 'swift':
+    case 'kt':
+    case 'scala':
+    case 'sql':
+    case 'html':
+    case 'css':
+    case 'csv': {
       const end = Math.min(data.length, TEXT_SNIFF_BYTES);
       for (let i = 0; i < end; i++) {
         if (data[i] === 0x00) return false;
