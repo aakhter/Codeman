@@ -97,10 +97,12 @@ function expectNoVulnerableBraceExpansion(lock: PackageLock): void {
   expect(versions, 'brace-expansion should be present in package-lock.json').not.toHaveLength(0);
   for (const version of versions) {
     const major = Number(version.split('.')[0]);
+    // GHSA-3jxr-9vmj-r5cp (exponential-time expansion DoS) covers <=1.1.17 || 3.0.0 - 5.0.8,
+    // which is why both live branches moved up rather than just the 5.x one.
     if (major === 1) {
       expect(
-        compareVersions(version, '1.1.13'),
-        `brace-expansion@${version} should be >= 1.1.13`
+        compareVersions(version, '1.1.18'),
+        `brace-expansion@${version} should be >= 1.1.18`
       ).toBeGreaterThanOrEqual(0);
     } else if (major === 4) {
       expect(
@@ -108,7 +110,7 @@ function expectNoVulnerableBraceExpansion(lock: PackageLock): void {
         `brace-expansion@${version} should not remain on vulnerable 4.x`
       ).toBeGreaterThanOrEqual(0);
     } else if (major === 5) {
-      expect(compareVersions(version, '5.0.6'), `brace-expansion@${version} should be >= 5.0.6`).toBeGreaterThanOrEqual(
+      expect(compareVersions(version, '5.0.9'), `brace-expansion@${version} should be >= 5.0.9`).toBeGreaterThanOrEqual(
         0
       );
     }
@@ -120,7 +122,7 @@ describe('dependency security policy', () => {
     const rootPackage = readJson<PackageLockPackage>('package.json');
     const xtermPackage = readJson<PackageLockPackage>('packages/xterm-zerolag-input/package.json');
 
-    expect(rootPackage.dependencies?.['@fastify/static']).toBe('^9.1.3');
+    expect(rootPackage.dependencies?.['@fastify/static']).toBe('^10.1.3');
     expect(rootPackage.dependencies?.fastify).toBe('^5.8.5');
     expect(rootPackage.dependencies?.uuid).toBe('^14.0.0');
     expect(rootPackage.devDependencies?.['@remotion/cli']).toBe('4.0.473');
@@ -137,7 +139,9 @@ describe('dependency security policy', () => {
     expectEveryLockedVersionAtLeast(lock, 'vitest', '4.1.0');
     expectEveryLockedVersionAtLeast(lock, '@vitest/coverage-v8', '4.1.0');
     expectEveryLockedVersionAtLeast(lock, 'fastify', '5.8.5');
-    expectEveryLockedVersionAtLeast(lock, '@fastify/static', '9.1.3');
+    // GHSA-8pvw-jcv7-9cmj (authorization bypass via non-canonical URL paths) covers
+    // <=10.1.1, so every 9.x is affected and the fix is only on the 10.x line.
+    expectEveryLockedVersionAtLeast(lock, '@fastify/static', '10.1.2');
     expectEveryLockedVersionAtLeast(lock, 'ip-address', '10.2.0');
     // This suite's policy is CRITICAL and HIGH findings. Our own uuid stays >= 14,
     // but exceljs@4.4.0 (the COD-280 XLSX preview, a fork-only dependency upstream
@@ -146,8 +150,16 @@ describe('dependency security policy', () => {
     // so the alternative is forcing an override of a just-shipped viewer's
     // dependency to satisfy a rule that was never aimed at it.
     expectEveryLockedVersionAtLeast(lock, 'uuid', '14.0.0', ['8.3.2']);
+    // ⚠️ Floor stays 8.20.1, NOT 8.21.0. Production ws is already 8.21.0 and clear of
+    // GHSA-96hv-2xvq-fx4p, but @remotion/renderer bundles its own ws@8.20.1 and remotion
+    // is pinned to 4.0.473 on purpose (the compositor refuses to start on a version
+    // mismatch). That copy is devDependencies-only and never ships to users.
     expectEveryLockedVersionAtLeast(lock, 'ws', '8.20.1');
-    expectEveryLockedVersionAtLeast(lock, 'fast-uri', '3.1.2');
+    // GHSA-v2hh-gcrm-f6hx (host confusion via literal backslash authority delimiter)
+    // covers 3.0.0 - 3.1.4.
+    expectEveryLockedVersionAtLeast(lock, 'fast-uri', '3.1.5');
+    // GHSA-c96f-x56v-gq3h (HTTP/2 DDoS) covers <=9.6.0.
+    expectEveryLockedVersionAtLeast(lock, 'find-my-way', '9.7.0');
     expectEveryLockedVersionAtLeast(lock, 'basic-ftp', '5.3.1');
     expectEveryLockedVersionAtLeast(lock, 'flatted', '3.4.2');
     expectNoVulnerableBraceExpansion(lock);

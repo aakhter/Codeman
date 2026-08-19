@@ -1012,8 +1012,17 @@ export const SettingsUpdateSchema = z
     // CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK env var. Stripped before persisting.
     acknowledgeUnauthTunnel: z.boolean().optional(),
     tabTwoRows: z.boolean().optional(),
-    /** Session list layout: 'header' = horizontal tab strip, 'sidebar' = collapsible left sidebar. Display key (per-device). */
-    sessionListLayout: z.enum(['header', 'sidebar']).optional(),
+    /**
+     * Session list layout. Display key (per-device).
+     * 'header'       = horizontal tab strip
+     * 'sidebar'      = collapsible left sidebar, one compact row per session
+     * 'sidebar-rich' = same sidebar, each row carrying the home screen's detail
+     *                  (created/idle/working stamps + status pill)
+     * Both sidebar values render the SAME docked column and set
+     * data-session-list="sidebar"; they differ only in row detail, which rides
+     * on data-sidebar-detail. See applySessionListLayout() in app.js.
+     */
+    sessionListLayout: z.enum(['header', 'sidebar', 'sidebar-rich']).optional(),
     // COD-286: session tabs across the top vs a vertical rail beside the terminal.
     // Declared here (like tabTwoRows) so it persists server-side and can seed a
     // fresh device; it is still PER-DEVICE by client policy — settings-ui.js lists

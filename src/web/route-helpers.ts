@@ -63,6 +63,15 @@ export async function readJsonConfig<T>(filePath: string, logLabel: string, defa
  * Validates that a file path (possibly containing symlinks) resolves to a location
  * within the given session working directory. Returns the resolved and relative paths,
  * or null if the path escapes the directory or doesn't exist.
+ *
+ * BOTH sides are realpath-resolved before they are compared. Resolving only the
+ * candidate leaves the two paths in different namespaces whenever the workspace
+ * itself is reached through a symlink, and `relative()` then reports a spurious
+ * `../` for a file that is genuinely inside it — refusing every read and write in
+ * that session. A symlinked workspace is ordinary: `os.tmpdir()` returns one on
+ * macOS (`/tmp` -> `/private/tmp`), as do symlinked project dirs and bind-mounted
+ * case paths. Canonicalizing the base only makes the comparison honest; escapes
+ * are still refused, since the candidate keeps its own realpath.
  */
 export function validateSessionFilePath(
   sessionWorkingDir: string,

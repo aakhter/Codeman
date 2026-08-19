@@ -34,11 +34,12 @@ jobs:
       - name: Frontend JS syntax check
         run: npm run check:frontend-syntax
 
-      - name: Public asset integrity check
+      - name: Public asset check
         run: npm run check:public-assets
 
-      # Guards the test job below: a browser-driven test left out of the CI
-      # exclude list has no chromium to launch and takes the whole suite down.
+      # Asks `vitest list` what CI would actually collect, rather than matching
+      # filenames: a browser-driven test missing from BROWSER_TEST_GLOBS passes
+      # locally and dies here with "browserType.launch: Executable doesn't exist".
       - name: Browser-test exclusion check
         run: npm run check:browser-excludes
 
@@ -95,8 +96,9 @@ jobs:
           fi
 
       - name: Run unit & integration tests
-        # Excludes the browser-driven mobile suite (test/mobile/**); see config/vitest.ci.config.ts.
-        # The mobile suite runs in the separate, non-blocking `mobile` job below.
+        # Excludes the suites that need chromium, per-machine PNG baselines or a
+        # quiet machine — see config/test-suites.ts for the list and the reason
+        # behind each entry. Identical to what `npm test` runs locally.
         # Safe in CI: TmuxManager no-ops all shell commands under VITEST (test/setup.ts).
         run: npm run test:ci
 
@@ -108,51 +110,11 @@ jobs:
         run: npx vitest run
         working-directory: packages/xterm-zerolag-input
 
-  mobile:
-    name: Mobile suite (allow-fail)
-    runs-on: ubuntu-latest
-    # NON-BLOCKING (COD-83): the browser-driven mobile suite needs chromium and
-    # compares DPR-aware PNG baselines + some env-sensitive geometry that render
-    # differently across machines. Marking the job continue-on-error keeps those
-    # environment diffs from reddening the build while still running the suite and
-    # surfacing diffs (uploaded as artifacts) for human review. Behavioral coverage
-    # is advisory here until/unless a pinned canonical CI env is introduced.
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install tmux
-        run: |
-          if ! command -v tmux >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y tmux
-          fi
-
-      - name: Install Playwright chromium
-        run: npx playwright install --with-deps chromium
-
-      - name: Run mobile suite (non-blocking)
-        # Each test file starts an in-process WebServer on its own port (helpers/server.ts);
-        # no build needed (vitest transforms src). Visual diffs are written next to baselines.
-        run: npm run test:mobile
-
-      - name: Upload visual-regression diffs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mobile-visual-diffs
-          path: |
-            test/mobile/snapshots/*.actual.png
-            test/mobile/snapshots/*.diff.png
-          if-no-files-found: ignore
-          retention-days: 14
+# Note: three suites are excluded from CI, each with its own local runner:
+#   npm run test:browser  Playwright + chromium (+ a live server, and a real
+#                         codex binary for codex-predictive-echo)
+#   npm run test:mobile   the above plus environment-specific PNG baselines
+#   npm run test:perf     wall-clock benchmarks; need an otherwise idle machine
+# config/test-suites.ts holds the globs; the configs derive from it so the
+# exclusions here and those runners cannot drift apart. Everything else runs in
+# the `test` job above, which is the same thing `npm test` runs.
