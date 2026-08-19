@@ -1,5 +1,21 @@
 # aicodeman
 
+## 1.19.10
+
+### Patch Changes
+
+- Add atomic creation of new sessions inside an existing tab group, including API validation, lineage propagation, reconnect-safe layout projection, and grouped-launch UI actions.
+
+  Harden the Approvals Inbox and tab-alert propagation across reconnects and disabled-inbox clients, with regression coverage for permission and idle hook state.
+
+  Require positive Codex rendered-pane evidence before declaring a completed turn ready for input. Working, unknown, and unavailable frames now remain active, while verified composers and coherent choice dialogs trigger the input-needed state.
+
+## 1.19.9
+
+### Patch Changes
+
+- e0cab9b: Add Codex turn-end prompts to the Approvals Inbox with answer support, localized mode labels, shared pane capture, live tab and mobile alerts, opt-in actionless push notifications, and restart-safe working-state detection.
+
 ## 1.19.8
 
 ### Patch Changes

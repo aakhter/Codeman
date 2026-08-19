@@ -234,7 +234,7 @@ describe('COD-307 optimistic write coordinator', () => {
 
   it('coalesces a deterministic semantic burst and adopts the successful PUT version', async () => {
     const h = loadHelper();
-    const adopted: Layout[] = [];
+    const adopted: Array<{ layout: Layout; meta: Record<string, unknown> }> = [];
     const put = vi.fn(async ({ baseVersion, layout: next }: any) => ({
       ok: true,
       status: 200,
@@ -242,7 +242,7 @@ describe('COD-307 optimistic write coordinator', () => {
     }));
     const coordinator = h.createEditCoordinator({
       initialLayout: layout(),
-      applyLayout: (next: Layout) => adopted.push(next),
+      applyLayout: (next: Layout, meta: Record<string, unknown>) => adopted.push({ layout: next, meta }),
       put,
       debounceMs: 100,
       schedule: setTimeout,
@@ -251,12 +251,13 @@ describe('COD-307 optimistic write coordinator', () => {
 
     coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Platform' });
     coordinator.enqueue({ type: 'reorderGroup', groupId: 'g2', index: 0 });
-    expect(adopted.at(-1)?.groups.map((group) => group.id)).toEqual(['g2', 'g1']);
+    expect(adopted.at(-1)?.layout.groups.map((group) => group.id)).toEqual(['g2', 'g1']);
     expect(put).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(100);
     expect(put).toHaveBeenCalledTimes(1);
     expect(put.mock.calls[0][0].baseVersion).toBe(4);
     expect(coordinator.getLayout().version).toBe(5);
+    expect(adopted.at(-1)?.meta.authoritativeLayout).toEqual(coordinator.getLayout());
   });
 
   it('rebases the same pending semantic operations once after 409 and retries once', async () => {
@@ -473,6 +474,106 @@ describe('COD-307 optimistic write coordinator', () => {
     expect(coordinator.getLayout().version).toBe(9);
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'remote')).toBeTruthy();
     expect(coordinator.getLayout().groups.find((group: any) => group.id === 'g1').name).toBe('Local');
+  });
+
+  it('defers an SSE-before-response self echo without duplicating an in-flight create or losing a queued edit', async () => {
+    const app = makeInteractionApp();
+    let resolveFirst!: (value: unknown) => void;
+    const firstResponse = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    app._putTabLayout = vi
+      .fn()
+      .mockReturnValueOnce(firstResponse)
+      .mockImplementationOnce(async ({ baseVersion, layout: next }: any) => ({
+        ok: true,
+        status: 200,
+        layout: { ...next, version: baseVersion + 1 },
+      }));
+    app._loadTabLayout = vi.fn(async () => true);
+    app._tabLayoutSsePending = false;
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({ type: 'createGroup', id: 'new', name: 'New' });
+    const writing = coordinator.flush();
+    await Promise.resolve();
+    coordinator.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Queued rename' });
+    const committedCreate = {
+      ...coordinator.getLayout(),
+      version: 5,
+      groups: coordinator
+        .getLayout()
+        .groups.map((group: any) => (group.id === 'g1' ? { ...group, name: 'One' } : group)),
+    };
+
+    app._onTabLayoutChanged({ owner: '@single', version: 5, layout: committedCreate, placements: [] });
+
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+    expect(app._tabLayoutSsePending).toBe(true);
+    resolveFirst({ ok: true, status: 200, layout: committedCreate, placements: [] });
+    await writing;
+    await vi.runAllTimersAsync();
+
+    expect(app._putTabLayout).toHaveBeenCalledTimes(2);
+    expect(app._putTabLayout.mock.calls[0][0].operations).toEqual([{ type: 'createGroup', id: 'new', name: 'New' }]);
+    expect(app._putTabLayout.mock.calls[1][0].operations).toEqual([
+      { type: 'renameGroup', groupId: 'g1', name: 'Queued rename' },
+    ]);
+    expect(app.tabLayout.groups.find((group: any) => group.id === 'g1').name).toBe('Queued rename');
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay an edit when its PUT response arrives before the inline SSE', async () => {
+    const app = makeInteractionApp();
+    app._putTabLayout = vi.fn(async ({ baseVersion, layout: next }: any) => ({
+      ok: true,
+      status: 200,
+      layout: { ...next, version: baseVersion + 1 },
+      placements: [],
+    }));
+    app._loadTabLayout = vi.fn(async () => true);
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({ type: 'createGroup', id: 'new', name: 'New' });
+    await coordinator.flush();
+    const committed = coordinator.getLayout();
+
+    app._onTabLayoutChanged({ owner: '@single', version: committed.version, layout: committed, placements: [] });
+    await vi.runAllTimersAsync();
+
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+    expect(app.showToast).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('defers an inline layout while followParent is in flight', async () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs = app.tabLayout.groups[0].refs.filter((ref: Ref) => ref.id !== 'child');
+    app.tabLayout.ungrouped.push({ kind: 'session', id: 'child', placement: 'manual' });
+    let resolvePut!: (value: unknown) => void;
+    app._putTabLayout = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolvePut = resolve;
+        })
+    );
+    app._loadTabLayout = vi.fn(async () => true);
+    const coordinator = app._ensureTabLayoutEditCoordinator();
+    coordinator.enqueue({
+      type: 'followParent',
+      ref: { kind: 'session', id: 'child' },
+      metadata: app._tabLayoutMetadata(),
+    });
+    const writing = coordinator.flush();
+    await Promise.resolve();
+
+    app._onTabLayoutChanged({ owner: '@single', version: 5, layout: coordinator.getLayout(), placements: [] });
+    expect(app._tabLayoutSsePending).toBe(true);
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+
+    resolvePut({ ok: true, status: 200, layout: { ...coordinator.getLayout(), version: 5 }, placements: [] });
+    await writing;
+    expect(app._putTabLayout).toHaveBeenCalledOnce();
+    expect(app.showToast).not.toHaveBeenCalled();
   });
 
   it('does not let a late PUT response overwrite placements adopted with a newer GET/SSE layout', async () => {
@@ -1069,13 +1170,18 @@ describe('COD-315 dismissible group menu', () => {
     expect(document.querySelectorAll('.tab-layout-group-action-menu')).toHaveLength(1);
     expect(first.getAttribute('aria-expanded')).toBe('false');
     expect(second.getAttribute('aria-expanded')).toBe('true');
-    expect(document.activeElement?.textContent).toBe('Rename group');
-    app.closeTabGroupMenu();
+    try {
+      expect(document.activeElement?.textContent).toBe('New session');
+    } finally {
+      app.closeTabGroupMenu();
+    }
   });
 
   it('preserves wrapping arrow navigation and runs the chosen action exactly once', () => {
     const app = makeInteractionApp();
-    app.startTabGroupRename = vi.fn();
+    app.createSessionInTabGroup = vi.fn(() => {
+      expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+    });
     app._fullRenderSessionTabs();
     const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
     openGroupMenu(app, trigger);
@@ -1087,10 +1193,106 @@ describe('COD-315 dismissible group menu', () => {
     expect(document.activeElement).toBe(items[0]);
     items[0].click();
 
-    expect(app.startTabGroupRename).toHaveBeenCalledOnce();
-    expect(app.startTabGroupRename).toHaveBeenCalledWith('g1');
+    expect(app.createSessionInTabGroup).toHaveBeenCalledOnce();
+    expect(app.createSessionInTabGroup).toHaveBeenCalledWith('g1');
     expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('names and focuses the first command for its target group without changing its visible label', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].name = 'Work';
+    app._fullRenderSessionTabs();
+    const trigger = document.querySelector<HTMLElement>('[data-tab-group-id="g1"] .tab-layout-group-menu')!;
+
+    openGroupMenu(app, trigger);
+    try {
+      const first = document.querySelector<HTMLButtonElement>('.tab-layout-group-action-menu [role="menuitem"]')!;
+      expect(first.textContent).toBe('New session');
+      expect(first.getAttribute('aria-label')).toBe('New session in Work');
+      expect(document.activeElement).toBe(first);
+    } finally {
+      app.closeTabGroupMenu();
+    }
+  });
+
+  it('expands and persists a collapsed target before starting its session', async () => {
+    const app = makeInteractionApp();
+    app.collapsedTabGroupIds.add('g1');
+    localStorage.setItem('codeman:tab-groups-collapsed', JSON.stringify(['g1']));
+    app.terminal = { focus: vi.fn() };
+    app.run = vi.fn(async () => {
+      expect(app.collapsedTabGroupIds.has('g1')).toBe(false);
+      expect(localStorage.getItem('codeman:tab-groups-collapsed')).toBe('[]');
+    });
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(true);
+
+    expect(app.run).toHaveBeenCalledWith({ count: 1, tabGroupId: 'g1' });
+  });
+
+  it('reports an in-flight launch before expanding or starting another one', async () => {
+    const app = makeInteractionApp();
+    app._runInFlight = true;
+    app.collapsedTabGroupIds.add('g1');
+    app.toggleTabGroupCollapsed = vi.fn();
+    app.run = vi.fn();
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(false);
+
+    expect(app.showToast).toHaveBeenCalledWith('A session is already starting.', 'info');
+    expect(app.toggleTabGroupCollapsed).not.toHaveBeenCalled();
+    expect(app.collapsedTabGroupIds.has('g1')).toBe(true);
+    expect(app.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'])(
+    'focuses the terminal synchronously and delegates the %s selection through run',
+    async (mode) => {
+      const app = makeInteractionApp();
+      let settleRun!: () => void;
+      const pendingRun = new Promise<void>((resolve) => {
+        settleRun = resolve;
+      });
+      app._runMode = mode;
+      app.terminal = { focus: vi.fn() };
+      app.run = vi.fn(() => pendingRun);
+
+      const launch = app.createSessionInTabGroup('g1');
+
+      expect(app.terminal.focus).toHaveBeenCalledOnce();
+      expect(app.run).toHaveBeenCalledWith({ count: 1, tabGroupId: 'g1' });
+      settleRun();
+      await expect(launch).resolves.toBe(true);
+    }
+  );
+
+  it('starts nothing for a read-only layout or a missing group', async () => {
+    const app = makeInteractionApp();
+    app.terminal = { focus: vi.fn() };
+    app.toggleTabGroupCollapsed = vi.fn();
+    app.run = vi.fn();
+    app.tabLayoutReadOnly = true;
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(false);
+    app.tabLayoutReadOnly = false;
+    await expect(app.createSessionInTabGroup('missing')).resolves.toBe(false);
+
+    expect(app.toggleTabGroupCollapsed).not.toHaveBeenCalled();
+    expect(app.terminal.focus).not.toHaveBeenCalled();
+    expect(app.run).not.toHaveBeenCalled();
+  });
+
+  it('toasts a rejected launch and permits a later launch', async () => {
+    const app = makeInteractionApp();
+    app.terminal = { focus: vi.fn() };
+    app.run = vi.fn().mockRejectedValueOnce(new Error('Launch failed')).mockResolvedValueOnce(undefined);
+
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(false);
+    await expect(app.createSessionInTabGroup('g1')).resolves.toBe(true);
+
+    expect(app.showToast).toHaveBeenCalledWith('Launch failed', 'error');
+    expect(app.run).toHaveBeenCalledTimes(2);
   });
 
   it('pairs transient document listeners across repeated open and close cycles', () => {

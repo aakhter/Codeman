@@ -100,6 +100,7 @@ import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
 import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
 import { deriveWebviewSseHint } from './webview-sse.js';
+import type { SessionCreationOptions } from './ports/session-port.js';
 import {
   type SessionListenerRefs,
   createSessionListeners,
@@ -722,14 +723,13 @@ export class WebServer extends EventEmitter {
     return {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
-      addSession: async (session: Session) => {
-        this.sessions.set(session.id, session);
-        try {
-          await this.tabLayouts.sessionCreated(session.owner ?? '@single');
-        } catch (error) {
-          this.sessions.delete(session.id);
-          throw error;
-        }
+      addSession: async (session: Session, options: SessionCreationOptions = {}) => {
+        return this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options.tabGroupId, () => {
+          this.sessions.set(session.id, session);
+          return () => {
+            if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+          };
+        });
       },
       tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),
@@ -1688,6 +1688,7 @@ export class WebServer extends EventEmitter {
   /** Build the deps object for session listener wiring. */
   private buildSessionListenerDeps() {
     return {
+      mux: this.mux,
       broadcast: this.broadcast.bind(this),
       batchTerminalData: this.batchTerminalData.bind(this),
       batchTaskUpdate: this.batchTaskUpdate.bind(this),
@@ -2432,11 +2433,13 @@ export class WebServer extends EventEmitter {
     // Pre-inbox these buttons rendered and did nothing; stripping them when
     // the feature is off is the honest shape. Cheap: the settings read is
     // cached (~2s TTL) and only taken for events that carry approval parts.
+    const approvalsInboxOnly = data.approvalsInboxOnly === true;
     let approvalsEnabled = false;
-    if (template.actions || typeof data.approvalId === 'string') {
+    if (approvalsInboxOnly || template.actions || typeof data.approvalId === 'string') {
       const settings = await this.readSettings();
       approvalsEnabled = settings.approvalsInboxEnabled === true;
     }
+    if (approvalsInboxOnly && !approvalsEnabled) return;
 
     const vapidKeys = this.pushStore.getVapidKeys();
     webpush.setVapidDetails('mailto:codeman@localhost', vapidKeys.publicKey, vapidKeys.privateKey);

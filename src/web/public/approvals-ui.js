@@ -71,6 +71,11 @@ Object.assign(CodemanApp.prototype, {
       if (existing.sessionId === item.sessionId) this.approvals.delete(id);
     }
     this.approvals.set(item.id, item);
+    // Hook-fed Claude prompts also arrive through their hook:* handlers, but
+    // transition-fed Codex prompts have only approval:pending. Feed the shared
+    // alert state machine here so live tabs and the phone overview do not wait
+    // for seedApprovals() on the next reload. Set-add is idempotent for Claude.
+    if (!item.acknowledgedAt) this.setPendingHook(item.sessionId, approvalKindToHook(item.kind));
     this.renderApprovals();
   },
 
@@ -227,9 +232,15 @@ Object.assign(CodemanApp.prototype, {
   _approvalCardHtml(item) {
     const id = escapeHtml(item.id);
     const kindLabel = item.kind === 'permission' ? 'Permission' : item.kind === 'question' ? 'Question' : 'Idle';
+    const generatedIdleLabel =
+      item.kind === 'idle' && item.mode === 'codex'
+        ? 'Codex is waiting for your input'
+        : item.kind === 'idle' && item.mode === 'claude'
+          ? 'Claude is waiting for your input'
+          : '';
     const summary = item.toolName
       ? `${item.toolName}${item.toolSummary ? ': ' + item.toolSummary : ''}`
-      : item.message || '';
+      : item.message || generatedIdleLabel;
     const age = this._approvalAge(item.createdAt);
     let actions = '';
     if (item.kind === 'idle') {
@@ -260,7 +271,9 @@ Object.assign(CodemanApp.prototype, {
       `<span class="approval-session" data-i18n-skip>${escapeHtml(item.sessionName || item.sessionId.slice(0, 8))}</span>` +
       `<span class="approval-age" data-i18n-skip>${age}</span>` +
       `</div>` +
-      (summary ? `<div class="approval-summary" data-i18n-skip>${escapeHtml(summary)}</div>` : '') +
+      (summary
+        ? `<div class="approval-summary"${generatedIdleLabel && !item.message ? '' : ' data-i18n-skip'}>${escapeHtml(summary)}</div>`
+        : '') +
       (item.context ? `<pre class="approval-context">${escapeHtml(item.context)}</pre>` : '') +
       `<div class="approval-actions">${actions}</div>` +
       `<div class="approval-meta-actions">` +

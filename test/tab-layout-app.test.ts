@@ -86,6 +86,7 @@ function makeApp() {
   app._lastTabStructureKey = null;
   app._inlineRenameActive = false;
   app._tabLayoutManaged = true;
+  app._deferredCreatedSessionIds = new Set();
   app.detachedSessions = new Set();
   app.tabAlerts = new Map();
   app.terminalLoadStates = new Map();
@@ -482,6 +483,23 @@ describe('COD-306 CodemanApp integration', () => {
     app._tabLayoutCoordinator.dispose();
   });
 
+  it('releases a deferred live session into the legacy-flat projection on fallback', () => {
+    const app = makeApp();
+    app.sessions.set('new-session', { id: 'new-session', name: 'New' });
+    app._deferredCreatedSessionIds.add('new-session');
+    app._fullRenderSessionTabs();
+
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+
+    app._applyTabLayoutFallback();
+
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(false);
+    expect(app.tabLayout).toBeNull();
+    expect(app.tabLayoutReadOnly).toBe(true);
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('.tab-layout-group')).toHaveLength(0);
+  });
+
   it('refreshes visible home/mobile consumers when an adopted projection reorders sessions', () => {
     const app = makeApp();
     const home = document.createElement('div');
@@ -555,11 +573,13 @@ describe('COD-306 CodemanApp integration', () => {
     app.closeSessionAttachmentCards = () => {};
     app.closeSessionSubagentWindows = () => {};
     app.saveSessionOrder = () => {};
+    app._deferredCreatedSessionIds.add('s1');
     app._cleanupSessionData('s1');
     expect(app.sessionOrder).toEqual(['s2', 's3']);
+    expect(app._deferredCreatedSessionIds.has('s1')).toBe(false);
   });
 
-  it('sequences concurrent app loads and routes layout-change invalidation through refetch', async () => {
+  it('sequences concurrent app loads', async () => {
     const app = makeApp();
     const pending: Array<(value: unknown) => void> = [];
     app._fetchTabLayout = () => new Promise((resolve) => pending.push(resolve));
@@ -576,15 +596,176 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app._applyTabLayout).toHaveBeenCalledTimes(1);
     expect(app._applyTabLayout).toHaveBeenCalledWith({ ...layout, version: 10 }, placements);
 
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('adopts an inline owner layout without refetching', () => {
+    const app = makeApp();
+    const inlineLayout = { ...layout, version: 11 };
+    const placements = [{ kind: 'session', id: 's1', state: 'manual', parentId: 's2', canFollow: true }];
+    app._applyTabLayout = vi.fn();
     app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout, placements });
+
+    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout, placements);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('defers an inline layout while a semantic edit is pending', () => {
+    const app = makeApp();
+    const inlineLayout = { ...layout, version: 11 };
+    const adoptExternal = vi.fn();
+    app._tabLayoutEditCoordinator = { hasPending: () => true, adoptExternal };
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout });
+
+    expect(adoptExternal).not.toHaveBeenCalled();
+    expect(app._tabLayoutSsePending).toBe(true);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('keeps a deferred targeted session out of projection until authoritative placement settles', () => {
+    const app = makeApp();
+    app._tabLayoutEditCoordinator = { hasPending: () => true };
+    app.sessionOrder = ['s2', 's1', 's3'];
+    app.updateAttachmentHistoryCountFromSession = vi.fn();
+    app.saveSessionOrder = vi.fn();
+    app.renderSessionTabs = () => app._fullRenderSessionTabs();
+    app.updateCost = vi.fn();
+    app.renderMuxSessions = vi.fn();
+    app._fullRenderSessionTabs();
+
+    app._onSessionCreated({ id: 'new-session', name: 'New' });
+
+    expect(app.sessions.has('new-session')).toBe(true);
+    expect(app.sessionOrder).toEqual(['s2', 's1', 's3']);
+    expect(app.saveSessionOrder).not.toHaveBeenCalled();
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+
+    const authoritative = {
+      ...layout,
+      version: 9,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: [...group.refs, { kind: 'session', id: 'new-session' }],
+      })),
+    };
+    app._adoptTabLayoutForEdit(authoritative, {
+      authoritative: true,
+      authoritativeLayout: { ...layout, version: 9 },
+      placements: [],
+    });
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(true);
+
+    app._adoptTabLayoutForEdit(authoritative, {
+      authoritative: true,
+      authoritativeLayout: authoritative,
+      placements: [],
+    });
+
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-tab-group-id="group-x"] [data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(false);
+  });
+
+  it('releases a deferred session when a direct authoritative layout contains it', () => {
+    const app = makeApp();
+    app.sessions.set('new-session', { id: 'new-session', name: 'New' });
+    app._deferredCreatedSessionIds.add('new-session');
+    app._getTabCollapseStorage = vi.fn(() => null);
+    app._restorePendingTabLayoutOperations = vi.fn(() => false);
+    app._applyTabLayout({ ...layout, version: 9 }, []);
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(true);
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    const authoritative = {
+      ...layout,
+      version: 10,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: [...group.refs, { kind: 'session', id: 'new-session' }],
+      })),
+    };
+
+    app._applyTabLayout(authoritative, []);
+
+    expect(app._deferredCreatedSessionIds.has('new-session')).toBe(false);
+    expect(document.querySelectorAll('[data-tab-group-id="group-x"] [data-id="new-session"]')).toHaveLength(1);
+  });
+
+  it('adopts inline placement metadata for inherited labels and actions without a reload', () => {
+    const app = makeApp();
+    app.sessions.get('s1').parentSessionId = 's2';
+    const inlineLayout = { ...layout, version: 11 };
+    const placements = [{ kind: 'session', id: 's1', state: 'inherited', parentId: 's2', canFollow: false }];
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'alice', version: 11, layout: inlineLayout, placements });
+
+    expect(app._tabRefPlacementState({ kind: 'session', id: 's1' })).toEqual(placements[0]);
+    expect(app._tabPlacementPresentation({ kind: 'session', id: 's1' }).short).toBe('Follows parent');
+    expect(app._tabRefPlacementActions({ kind: 'session', id: 's1' })).toHaveLength(1);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('ignores foreign-owner inline layouts', () => {
+    const app = makeApp();
+    app._applyTabLayout = vi.fn();
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+
+    app._onTabLayoutChanged({ owner: 'bob', version: 11, layout: { ...layout, version: 11 } });
+
+    expect(app._applyTabLayout).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unset', undefined],
+    ['ambiguous', { multiUser: true }],
+  ])('refetches rather than adopting a multi-user inline layout when identity is %s', (_label, identity) => {
+    const app = makeApp();
+    app._applyTabLayout = vi.fn();
+    app._loadTabLayout = vi.fn();
+    (window as any).__codemanUser = identity;
+
+    app._onTabLayoutChanged({ owner: 'bob', version: 11, layout: { ...layout, version: 11 } });
+
+    expect(app._applyTabLayout).not.toHaveBeenCalled();
+    expect(app._loadTabLayout).toHaveBeenCalledOnce();
+  });
+
+  it('adopts a single-user inline layout before identity is populated', () => {
+    const app = makeApp();
+    const inlineLayout = { ...layout, version: 11 };
+    app._applyTabLayout = vi.fn();
+    app._loadTabLayout = vi.fn();
+    delete (window as any).__codemanUser;
+
+    app._onTabLayoutChanged({ owner: '@single', version: 11, layout: inlineLayout });
+
+    expect(app._applyTabLayout).toHaveBeenCalledWith(inlineLayout, undefined);
+    expect(app._loadTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('keeps GET fallback behavior for layout-change payloads without inline layouts', () => {
+    const app = makeApp();
+    app._loadTabLayout = vi.fn();
+
     app._onTabLayoutChanged();
     expect(app._loadTabLayout).toHaveBeenCalledOnce();
-    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
-    app._onTabLayoutChanged({ owner: 'bob', version: 11 });
+
+    app._tabLayoutEditCoordinator = { hasPending: () => true };
+    app._onTabLayoutChanged({ version: 11 });
+    expect(app._tabLayoutSsePending).toBe(true);
     expect(app._loadTabLayout).toHaveBeenCalledOnce();
-    app._onTabLayoutChanged({ owner: 'alice', version: 11 });
-    expect(app._loadTabLayout).toHaveBeenCalledTimes(2);
-    app._tabLayoutCoordinator.dispose();
   });
 
   it('waits for the authoritative initial layout before selecting its first session', async () => {
@@ -663,6 +844,65 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.activeSessionId).toBe('s2');
     expect(app.selectSession).toHaveBeenCalledTimes(1);
     expect(app.selectSession).toHaveBeenCalledWith('s2');
+    app._tabLayoutCoordinator.dispose();
+  });
+
+  it('preserves same-owner deferred visibility through reconnect until the fresh target layout arrives', async () => {
+    const app = makeInitApp();
+    const request = deferred<any>();
+    const newSession = { id: 'new-session', name: 'New', owner: 'alice', status: 'idle' };
+    const changedOwner = { id: 'changed-owner', name: 'Changed', owner: 'alice', status: 'idle' };
+    const missing = { id: 'missing-session', name: 'Missing', owner: 'alice', status: 'idle' };
+    app.sessions.set(newSession.id, newSession);
+    app.sessions.set(changedOwner.id, changedOwner);
+    app.sessions.set(missing.id, missing);
+    app._deferredCreatedSessionIds = new Set([newSession.id, changedOwner.id, missing.id]);
+    app._tabLayoutFirstPaintPending = false;
+    app._fetchTabLayout = () => request.promise;
+    app._resetAllAppState = vi.fn(() => {
+      app.sessions.clear();
+      app._deferredCreatedSessionIds = new Set();
+    });
+    app.renderSessionTabs = () => app._fullRenderSessionTabs();
+    (window as any).__codemanUser = { multiUser: true, username: 'alice', role: 'admin' };
+    const reconnectData = {
+      ...initData,
+      sessions: [
+        ...initData.sessions.map((session) => ({ ...session, owner: 'alice' })),
+        newSession,
+        {
+          ...changedOwner,
+          owner: 'bob',
+        },
+      ],
+    };
+
+    app.handleInit(reconnectData);
+
+    expect([...app._deferredCreatedSessionIds]).toEqual([newSession.id]);
+    expect(app._deferredCreatedSessionIds.has(changedOwner.id)).toBe(false);
+    expect(app._deferredCreatedSessionIds.has(missing.id)).toBe(false);
+    expect(app.sessions.has(missing.id)).toBe(false);
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(0);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+
+    const authoritative = {
+      ...layout,
+      version: 10,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: [...group.refs, { kind: 'session', id: newSession.id }],
+      })),
+    };
+    request.resolve({ layout: authoritative, placements: [] });
+    await request.promise;
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('[data-tab-group-id="group-x"] [data-id="new-session"]')).toHaveLength(1)
+    );
+
+    expect(document.querySelectorAll('[data-id="new-session"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-tab-group-id=""] [data-id="new-session"]')).toHaveLength(0);
+    expect(app._deferredCreatedSessionIds.has(newSession.id)).toBe(false);
     app._tabLayoutCoordinator.dispose();
   });
 

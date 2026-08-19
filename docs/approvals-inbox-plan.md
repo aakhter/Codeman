@@ -11,7 +11,7 @@ One cross-session inbox for every prompt that is waiting on a human: permission 
 
 ## Scope
 
-- Claude mode only (hooks fire only for `claude`; external CLIs keep their output-stabilization heuristics and get no inbox items). This mirrors the wait-primitive `stop`/`blocked` gating.
+- Claude prompts remain hook-driven. Codex additionally creates an `idle` item only for a detected `working` → `idle` turn-end transition; other external CLIs create no inbox items. Hook-only `stop`/`blocked` waits remain Claude-only.
 - Permission prompts occur for sessions running `ClaudeMode` `normal` / `auto` / `allowedTools` (and the trust-folder dialog even under skip-permissions). Question and idle prompts occur in every mode including `dangerously-skip-permissions`.
 - In-memory store (plus the frontend seeding from it on load). Server restart drops items; hooks re-fire on the next prompt. No new state file in v1.
 
@@ -21,16 +21,17 @@ At most **one active item per session**: the Claude TUI shows one dialog at a ti
 
 ```ts
 interface ApprovalItem {
-  id: string;                 // `${sessionId}:${seq}`
+  id: string; // `${sessionId}:${seq}`
   sessionId: string;
   sessionName: string;
   kind: 'permission' | 'question' | 'idle';
+  mode?: SessionMode; // client-localized generated labels
   createdAt: number;
-  toolName?: string;          // from sanitized hook data
-  toolSummary?: string;       // command / file_path / description, already bounded
-  message?: string;           // Notification hook `message` (newly allowlisted)
+  toolName?: string; // from sanitized hook data
+  toolSummary?: string; // command / file_path / description, already bounded
+  message?: string; // Notification hook `message` (newly allowlisted)
   cwd?: string;
-  context?: string;           // ANSI-stripped visible pane frame tail, ≤ 4000 chars
+  context?: string; // ANSI-stripped visible pane frame tail, ≤ 4000 chars
   options?: { n: number; label: string }[]; // parsed from context when confident
 }
 ```
@@ -51,7 +52,7 @@ Module-level singleton in the style of `session-wait-registry.ts` (pure, no `Ses
 ### Wiring
 
 - `hook-event-routes.ts`: on `permission_prompt` / `elicitation_dialog` / `idle_prompt`, call `notePrompt` with sanitized data + a pane capture callback (`mux.capturePaneBuffer(muxName)` visible frame, ANSI-stripped via existing utils; fall back to `session.terminalBuffer` tail). On `stop` / `elicitation_complete` / `elicitation_response`, `resolveForSession(id, 'resolved_in_terminal')`.
-- `session-listener-wiring.ts`: `working` listener resolves **idle items only** (`working` is heuristic and can flap mid-turn, so it must never clear a pending permission/question dialog); `exit` resolves with `session_ended`. Same singleton-import pattern as `sessionWaits`.
+- `session-listener-wiring.ts`: a Codex `idle({ reason: 'turn-end' })` creates an idle item unless one is already pending; initial/shell readiness does not. It does not key turns solely on `lastSubmitAt`, because input from an attached tmux client bypasses Codeman's write methods and would otherwise suppress every later turn. `working` resolves **idle items only** (`working` is heuristic and can flap mid-turn, so it must never clear a pending permission/question dialog); `exit` resolves with `session_ended`. Same singleton-import pattern as `sessionWaits`.
 - Session delete route: resolve with `session_ended`.
 - **New hook matchers** `elicitation_complete` + `elicitation_response` added to `generateHooksConfig()`, `HookEventType`, `HookEventSchema`, and both SSE registries. `refreshStaleCodemanHooks` gets a staleness probe for them (`hooksJson.includes('elicitation_complete')`) so existing cases heal on next Claude spawn, exactly like the `-k`/secret/marker probes.
 - `sanitizeHookData`: allowlist `message` (bounded 500 chars). This also un-deadens the existing notification text paths.
@@ -66,7 +67,7 @@ Normal authed API (NOT the hook-secret bypass), `ApiResponse` envelope, Zod sche
   - `deny` → `writeViaMux('\x1b')` (Esc is the official No/cancel; precedent: auto-resume sends Esc the same way).
   - `option` → digit `String(n)`; accepted only when `n` is within the item's parsed options (prevents blind digit-poking at an unparsed dialog).
   - `text` → `idle` items only: single line, embedded newlines stripped, sent as `text\r` (the `\r` discipline from CLAUDE.md).
-  - Guards: item still pending (404 otherwise), session exists + ownership via `findSessionOrFail`, session mode installs hooks. **Answer-time re-capture**: for items whose frame parsed options, the pane is re-captured before sending; if the dialog no longer parses, the item resolves and the answer is refused with 409 (the keystroke would land in whatever now has focus). Marks `answered` BEFORE the write so a double-tap cannot double-send; rolls back to pending if the write fails.
+  - Guards: item still pending (404 otherwise), session exists + ownership via `findSessionOrFail`, session mode supports approvals (Claude or Codex). **Answer-time re-capture**: for items whose frame parsed options, the pane is re-captured before sending; if the dialog no longer parses, the item resolves and the answer is refused with 409 (the keystroke would land in whatever now has focus). Marks `answered` BEFORE the write so a double-tap cannot double-send; rolls back to pending if the write fails.
 - `POST /api/approvals/:id/dismiss` → remove without keystrokes.
 - `POST /api/approvals/session/:sessionId/viewed` → acknowledge the session's pending **idle** item (`acknowledgedAt`, emitted as `approval:updated`). Added after the owner reported that a yellow tab clicked and checked went yellow again on reload: the view-clears-idle rule lived in one browser's memory, so the seed re-armed it and other devices never saw the clear. Acknowledgement is deliberately **not** resolution (the prompt is still unanswered, so it stays in the inbox and stays available as Read My Mind context), and deliberately **idle-only** (looking at a permission/question dialog does not answer it, so the red alert survives being viewed).
 
@@ -79,13 +80,13 @@ Normal authed API (NOT the hook-secret bypass), `ApiResponse` envelope, Zod sche
 - `sendPushNotifications` payload gains `approvalId` for the three hook events. Both `approvalId` and the Approve/Deny `actions` are **gated on the opt-in setting**: with it off, permission pushes carry no buttons at all (pre-inbox they rendered and did nothing, so stripping them is the honest shape).
 - `sw.js` `notificationclick`: when `event.action` is `approve`/`deny`, POST `/api/approvals/:id/answer` directly from the worker (same-origin, cookie credentials) so the buttons work **with no tab open**; on failure fall back to focusing/opening a tab. Non-action clicks keep today's behavior.
 - Page-side `notification-click` handler: honor `action` instead of dropping it (also setting-gated, for stale notifications sent before the toggle flipped).
-- Question/idle pushes keep no action buttons (options vary per dialog); tapping opens the inbox.
+- Question/idle pushes keep no action buttons (options vary per dialog); tapping opens the inbox. Codex turn-end wiring reuses the existing `hook:idle_prompt` push template and includes the new approval ID, but the entire transition-inferred Codex push is suppressed while the Approvals Inbox setting is off.
 
 ## Frontend
 
 New module `approvals-ui.js` (@loadorder 11.2, after panels-ui.js), prettier-formatted (not added to `.prettierignore`).
 
-- **Seed on connect**: `GET /api/approvals` on init and SSE reconnect; each pending item re-feeds `setPendingHook(...)` so tab alerts and the phone overview survive reload (fixes problem 2 with zero changes to the alert state machine). Items carrying `acknowledgedAt` are skipped, and `markIdleAlertSeen()` (app.js) is what sets it: viewing a session clears its yellow locally and POSTs `.../viewed`, so "I checked it" survives the reload and reaches the user's other devices through `approval:updated`.
+- **Live and seed alerts**: `approval:pending` feeds `setPendingHook(...)` immediately, including transition-fed Codex items; Claude's later hook handler is an idempotent set-add. `GET /api/approvals` on init and SSE reconnect re-feeds the same state so tab alerts and the phone overview survive reload. Items carrying `acknowledgedAt` are skipped, and `markIdleAlertSeen()` (app.js) is what sets it: viewing a session clears its yellow locally and POSTs `.../viewed`, so "I checked it" survives the reload and reaches the user's other devices through `approval:updated`.
 - **Desktop**: header bell `btn-approvals` with count badge. Ships default-hidden via marker class `btn-approvals--hidden` (same policy as the attachments button, so `test/mobile-header-buttons-policy.test.ts` excludes it from the default-visible enumeration); JS shows it only while count > 0. Click toggles a drawer of cards: session name + kind, tool/message summary, mono context block, buttons rendered from parsed options (else Approve/Deny), plus Dismiss and Open session. Esc closes; existing z-index layers respected.
 - **Phone**: header button stays hidden (`mobile.css`); the phone surface is the overview's NEEDS YOU section, whose rows gain inline ✓/✗ buttons for permission items (tap-through to the session remains the row's main action). Toolbar classes/status language rules from the mobile-overview section of CLAUDE.md apply.
 - **i18n**: new strings registered in i18n.js (en + zh-CN); status words carry `data-i18n-skip` where they would collide (mirroring the overview pills).
@@ -94,6 +95,8 @@ New module `approvals-ui.js` (@loadorder 11.2, after panels-ui.js), prettier-for
 ## Race honesty
 
 The prompt can be answered in the terminal a moment before an inbox answer lands; then the keystroke would hit whatever now has focus (worst case: a digit typed into the composer, not submitted, since no `\r` is ever sent for menu answers). Mitigations, in order: answer-time re-capture (the dialog must still parse on screen or the answer is refused), answered-before-write marking, digit-only/Esc-only writes for menus, and the card's context block showing what the pane looked like when captured. This is the same class of risk `writeViaMux` automation (auto-resume, respawn) already accepts.
+
+Codex detection has two accepted limitations. The rendered working-frame poller runs every two seconds, so a turn shorter than one poll interval can produce neither `working` nor a `turn-end` idle event and therefore no item. Conversely, idle items have no parseable dialog for `verifyStillAnswerable()` to re-check, so a fast terminal-side turn may leave a stale item until the next detected `working` transition, session exit, or the 12-hour TTL.
 
 ## Tests
 

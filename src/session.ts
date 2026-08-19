@@ -141,6 +141,12 @@ export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.j
 
 export type ResizeViewportType = 'mobile' | 'tablet' | 'desktop';
 
+export type SessionIdleReason = 'turn-end' | 'initial-ready' | 'shell-ready';
+
+export interface SessionIdleInfo {
+  reason: SessionIdleReason;
+}
+
 /** Line buffer flush interval (100ms) - forces processing of partial lines */
 const LINE_BUFFER_FLUSH_INTERVAL = 100;
 
@@ -255,6 +261,51 @@ export function detectCodexCheckpointWorkingFrame(data: string): boolean {
     /^\s*[•·]\s+Working(?:\s*\([^\n)]*\))?(?:\s*[•·]|\s*$)/m.test(data) ||
     /(?:^|\s)·\s*Working\s*·(?:\s|$)/m.test(data)
   );
+}
+
+export type CodexRenderedState = 'working' | 'input-ready' | 'unknown';
+
+const CODEX_COMPOSER_LINE_PATTERN = /^[ \t]*›(?![ \t]*\d+[.)](?:[ \t]|$))(?:[ \t]|$)/m;
+const CODEX_NUMBERED_CHOICE_LINE_PATTERN = /^\s*([›❯])?\s*(\d+)[.)](?:[ \t]+(\S(?:.*\S)?))?[ \t]*$/;
+
+function hasCodexNumberedChoiceBlock(frame: string): boolean {
+  const lines = frame.split(NEWLINE_SPLIT_PATTERN);
+  for (let start = 0; start < lines.length; start++) {
+    const firstOption = lines[start].match(CODEX_NUMBERED_CHOICE_LINE_PATTERN);
+    if (firstOption?.[2] !== '1') continue;
+
+    let expectedOption = 1;
+    let optionCount = 0;
+    let selectionVisible = false;
+    let previousOptionLine = start - 1;
+    let coherent = true;
+    for (let lineIndex = start; lineIndex < lines.length; lineIndex++) {
+      if (lineIndex - previousOptionLine > 4) break;
+      const option = lines[lineIndex].match(CODEX_NUMBERED_CHOICE_LINE_PATTERN);
+      if (!option) continue;
+      if (Number(option[2]) !== expectedOption || !option[3]) {
+        coherent = false;
+        break;
+      }
+
+      optionCount++;
+      selectionVisible ||= Boolean(option[1]);
+      previousOptionLine = lineIndex;
+      expectedOption++;
+    }
+    if (coherent && optionCount >= 2 && optionCount <= 6 && selectionVisible) return true;
+  }
+  return false;
+}
+
+export function classifyCodexRenderedState(frame: string | null | undefined): CodexRenderedState {
+  if (!frame) return 'unknown';
+
+  const plain = frame.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n').replace(ANSI_ESCAPE_PATTERN_FULL, '');
+  if (detectCodexCheckpointWorkingFrame(plain)) return 'working';
+  if (CODEX_COMPOSER_LINE_PATTERN.test(plain)) return 'input-ready';
+  if (hasCodexNumberedChoiceBlock(plain)) return 'input-ready';
+  return 'unknown';
 }
 
 /**
@@ -2883,7 +2934,7 @@ export class Session extends EventEmitter {
       this._isWorking = false;
       this._status = 'idle';
       this._lastPromptTime = Date.now();
-      this.emit('idle');
+      this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
     }
   }
 
@@ -3095,7 +3146,7 @@ export class Session extends EventEmitter {
       this._shellIdleTimer = null;
       this._status = 'idle';
       this._isWorking = false;
-      this.emit('idle');
+      this.emit('idle', { reason: 'shell-ready' } satisfies SessionIdleInfo);
     }, 500);
   }
 
@@ -3244,6 +3295,10 @@ export class Session extends EventEmitter {
 
   private _resetBuffers(): void {
     this._status = 'busy';
+    // A Session object can be restarted after its PTY exits. Do not carry a
+    // latched working frame from the previous process into the new startup
+    // quiet window, where it would be misclassified as a completed turn.
+    this._isWorking = false;
     this._terminalBuffer.clear();
     this._textOutput.clear();
     this._errorBuffer = '';
@@ -3256,7 +3311,8 @@ export class Session extends EventEmitter {
   /**
    * Positive external-CLI working signal — from a stream chunk match OR from
    * the COD-181 rendered-frame poller. Marks the session busy and re-arms the
-   * quiet-window timer; idle comes from that timer expiring.
+   * quiet-window timer. For Codex, expiry must also find positive rendered
+   * input-ready evidence before it can end the turn.
    */
   private _noteExternalWorkingFrame(): void {
     if (!this._isWorking) {
@@ -3335,11 +3391,10 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * (Re-)arm the external-CLI quiet-window timer. Fires idle when no working
-   * frame has been seen for EXTERNAL_CLI_IDLE_DELAY_MS — covering both a turn
-   * that just finished (wasWorking) and a freshly spawned/attached session
-   * whose _resetBuffers() 'busy' status would otherwise never clear because
-   * codex's '›' prompt can't match the Claude '❯' initial-ready path.
+   * (Re-)arm the external-CLI quiet-window timer. For a working Codex turn,
+   * expiry consults the rendered pane and only an input-ready state ends the
+   * turn; working or unknown state re-arms the timer. Startup readiness and
+   * other external CLIs retain the original quiet-window behavior.
    */
   private _armExternalCliIdleTimer(): void {
     if (this._externalCliIdleTimer) clearTimeout(this._externalCliIdleTimer);
@@ -3348,11 +3403,19 @@ export class Session extends EventEmitter {
       if (this._isStopped) return;
       const wasWorking = this._isWorking;
       const isInitialReady = this._status === 'busy' && !this._isWorking;
+      if (wasWorking && this.mode === 'codex') {
+        const muxName = this._muxSession?.muxName;
+        const frame = muxName ? this._mux?.captureActivePaneBuffer?.(muxName) : null;
+        if (classifyCodexRenderedState(frame) !== 'input-ready') {
+          this._armExternalCliIdleTimer();
+          return;
+        }
+      }
       if (wasWorking || isInitialReady) {
         this._isWorking = false;
         this._status = 'idle';
         this._lastPromptTime = Date.now();
-        this.emit('idle');
+        this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
       }
     }, EXTERNAL_CLI_IDLE_DELAY_MS);
   }

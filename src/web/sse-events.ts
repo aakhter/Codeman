@@ -457,7 +457,8 @@ export const SessionOrderChanged = 'session:orderChanged' as const;
  *  Payload: `{ action: 'created' | 'updated' | 'deleted', id }`. The client
  *  re-fetches the list rather than patching from the payload. */
 export const WebviewChanged = 'webview:changed' as const;
-/** Owner-scoped layout invalidation. Payload contains only `{ owner, version }`. */
+/** Owner-scoped layout change. New payloads include `{ owner, version, layout }` for inline adoption;
+ *  legacy `{ owner, version }` payloads remain invalidations that make the client re-fetch. */
 export const TabLayoutChanged = 'tab:layoutChanged' as const;
 
 // ─── Namespace Re-export ─────────────────────────────────────────────────────

@@ -27,6 +27,75 @@ describe('Interactive Session Lifecycle', () => {
   }, 60000); // Extended timeout for cleanup
 
   describe('Session Creation', () => {
+    it('places a targeted session at the end of the requested tab group', async () => {
+      const groupId = `session-create-${Date.now()}`;
+      const baseResponse = await fetch(`${baseUrl}/api/tab-layout`);
+      const baseData = await baseResponse.json();
+      const baseLayout = baseData.data.layout;
+
+      const groupResponse = await fetch(`${baseUrl}/api/tab-layout`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseVersion: baseLayout.version,
+          operations: [{ type: 'createGroup', id: groupId, name: 'Session creation target' }],
+        }),
+      });
+      const groupData = await groupResponse.json();
+      expect(groupData.success).toBe(true);
+
+      let sessionId: string | undefined;
+      let assertionsPassed = false;
+      try {
+        const createResponse = await fetch(`${baseUrl}/api/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workingDir: testWorkingDir, mode: 'shell', tabGroupId: groupId }),
+        });
+        const createData = await createResponse.json();
+        expect(createData.success).toBe(true);
+        sessionId = createData.data.session.id;
+        expect(
+          createData.data.tabLayout.groups.find((group: { id: string }) => group.id === groupId)?.refs.at(-1)
+        ).toEqual({ kind: 'session', id: sessionId });
+
+        const currentResponse = await fetch(`${baseUrl}/api/tab-layout`);
+        const currentData = await currentResponse.json();
+        expect(currentData.data.layout).toEqual(createData.data.tabLayout);
+        assertionsPassed = true;
+      } finally {
+        const cleanupErrors: unknown[] = [];
+        if (sessionId) {
+          try {
+            const deleteSessionResponse = await fetch(`${baseUrl}/api/sessions/${sessionId}`, { method: 'DELETE' });
+            const deleteSessionData = await deleteSessionResponse.json();
+            if (!deleteSessionData.success) cleanupErrors.push(new Error('Failed to delete created session'));
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+        }
+
+        try {
+          const cleanupLayoutResponse = await fetch(`${baseUrl}/api/tab-layout`);
+          const cleanupLayoutData = await cleanupLayoutResponse.json();
+          const deleteGroupResponse = await fetch(`${baseUrl}/api/tab-layout`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              baseVersion: cleanupLayoutData.data.layout.version,
+              operations: [{ type: 'deleteGroup', groupId }],
+            }),
+          });
+          const deleteGroupData = await deleteGroupResponse.json();
+          if (!deleteGroupData.success) cleanupErrors.push(new Error('Failed to delete created tab group'));
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+
+        if (assertionsPassed) expect(cleanupErrors).toEqual([]);
+      }
+    });
+
     it('should create session with default working directory', async () => {
       const response = await fetch(`${baseUrl}/api/sessions`, {
         method: 'POST',

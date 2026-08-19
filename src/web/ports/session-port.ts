@@ -4,10 +4,15 @@
  */
 
 import type { Session } from '../../session.js';
+import type { TabLayoutSnapshot } from '../../tab-layout-service.js';
+
+export interface SessionCreationOptions {
+  tabGroupId?: string;
+}
 
 export interface SessionPort {
   readonly sessions: ReadonlyMap<string, Session>;
-  addSession(session: Session): Promise<void>;
+  addSession(session: Session, options?: SessionCreationOptions): Promise<TabLayoutSnapshot>;
   cleanupSession(sessionId: string, killMux?: boolean, reason?: string): Promise<void>;
   setupSessionListeners(session: Session): Promise<void>;
   persistSessionState(session: Session): void;

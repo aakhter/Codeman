@@ -541,7 +541,7 @@
       pendingRecoveryBase = null;
       authoritative = normalizedLayout(layout);
       optimistic = normalizedLayout(authoritative);
-      apply(optimistic, { authoritative: true, placements });
+      apply(optimistic, { authoritative: true, authoritativeLayout: authoritative, placements });
     };
     const flush = async () => {
       timer = null;
@@ -583,6 +583,7 @@
             optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
             apply(optimistic, {
               authoritative: true,
+              authoritativeLayout: authoritative,
               placements: response.placements,
               committedOperations: batch,
             });
@@ -617,6 +618,7 @@
         optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
         apply(optimistic, {
           authoritative: true,
+          authoritativeLayout: authoritative,
           placements: response.placements,
           committedOperations: batch,
         });
@@ -699,7 +701,12 @@
           optimistic = normalizedLayout(next);
           report('Tab layout changed; your pending edit was discarded.');
         }
-        apply(optimistic, { authoritative: true, external: true, placements: meta.placements });
+        apply(optimistic, {
+          authoritative: true,
+          authoritativeLayout: authoritative,
+          external: true,
+          placements: meta.placements,
+        });
         if (pending.length) queue();
         return true;
       },

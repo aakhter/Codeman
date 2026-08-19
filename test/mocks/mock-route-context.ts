@@ -10,6 +10,7 @@
 import { vi } from 'vitest';
 import { MockSession, createMockSession } from './mock-session.js';
 import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
+import type { SessionCreationOptions } from '../../src/web/ports/session-port.js';
 
 /**
  * Creates a mock context that satisfies all port interfaces.
@@ -33,8 +34,15 @@ export function createMockRouteContext(options?: {
   return {
     // -- SessionPort --
     sessions,
-    addSession: vi.fn(async (s: MockSession) => {
+    addSession: vi.fn(async (s: MockSession, _options?: SessionCreationOptions) => {
       sessions.set(s.id, s);
+      const layout = {
+        version: 0,
+        groups: [],
+        ungrouped: [{ kind: 'session' as const, id: s.id }],
+        updatedAt: '1970-01-01T00:00:00.000Z',
+      };
+      return { layout, placements: [] };
     }),
     tabLayouts: {
       get: vi.fn(),
