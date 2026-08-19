@@ -503,6 +503,7 @@
     }
     const focusRefs = Array.isArray(projection?.focusRefs) ? projection.focusRefs : [];
     const focusCollapsed = projection?.focusCollapsed === true;
+    const searchActive = projection?.searchActive === true;
     const focusContent = focusCollapsed
       ? ''
       : focusRefs
@@ -515,8 +516,11 @@
             return rendered;
           })
           .join('');
+    const focusToggle = searchActive
+      ? '<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="Focus search results" aria-expanded="true" aria-disabled="true" disabled><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>'
+      : `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleFocusGroupCollapsed()"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`;
     const focus = focusRefs.length
-      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}"><button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleFocusGroupCollapsed()"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button><span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
+      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}">${focusToggle}<span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
       : '';
     let index = 0;
     const groups = sections
@@ -534,10 +538,13 @@
           })
           .join('');
         const headerId = section.id === null ? '' : `tab-group-header-${sectionIndex}`;
+        const groupToggle = searchActive
+          ? `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id || '')}" aria-label="${escapeHtml(name)} search results" aria-expanded="true" aria-disabled="true" disabled><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`
+          : `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id || '')}" aria-label="${section.collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(name)}" aria-expanded="${section.collapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`;
         const header =
           section.id === null
             ? `<div class="tab-layout-ungrouped-header" role="treeitem" tabindex="-1"><span class="tab-layout-group-name">${escapeHtml(name)}</span><span class="tab-layout-group-count">${section.count ?? section.refs.length}</span></div>`
-            : `<div class="tab-layout-group-header" role="treeitem" tabindex="-1" aria-labelledby="${escapeHtml(headerId)}" aria-expanded="${section.collapsed ? 'false' : 'true'}"><button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id)}" aria-label="${section.collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(name)}" aria-expanded="${section.collapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button><span id="${escapeHtml(headerId)}" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>${escapeHtml(name)}</span><span class="tab-layout-group-count">${section.count ?? section.refs.length}</span><button type="button" tabindex="-1" class="tab-layout-group-drag-handle" aria-label="Move ${escapeHtml(name)}" data-tab-group-drag="${escapeHtml(section.id)}">&#x2630;</button><button type="button" tabindex="-1" class="tab-layout-group-menu" aria-label="Actions for ${escapeHtml(name)}" aria-haspopup="menu" aria-expanded="false" onclick="app.openTabGroupMenu(event, this.closest('.tab-layout-group-header').querySelector('[data-tab-group-header]').dataset.tabGroupHeader)">&#x22EF;</button></div>`;
+            : `<div class="tab-layout-group-header" role="treeitem" tabindex="-1" aria-labelledby="${escapeHtml(headerId)}" aria-expanded="${section.collapsed ? 'false' : 'true'}">${groupToggle}<span id="${escapeHtml(headerId)}" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>${escapeHtml(name)}</span><span class="tab-layout-group-count">${section.count ?? section.refs.length}</span><button type="button" tabindex="-1" class="tab-layout-group-drag-handle" aria-label="Move ${escapeHtml(name)}" data-tab-group-drag="${escapeHtml(section.id)}">&#x2630;</button><button type="button" tabindex="-1" class="tab-layout-group-menu" aria-label="Actions for ${escapeHtml(name)}" aria-haspopup="menu" aria-expanded="false" onclick="app.openTabGroupMenu(event, this.closest('.tab-layout-group-header').querySelector('[data-tab-group-header]').dataset.tabGroupHeader)">&#x22EF;</button></div>`;
         const label =
           section.id === null ? `aria-label="${escapeHtml(name)}"` : `aria-labelledby="${escapeHtml(headerId)}"`;
         const members = section.collapsed

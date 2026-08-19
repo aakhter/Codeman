@@ -134,6 +134,10 @@ describe('vertical tab rail wiring (COD-286)', () => {
     expect(applyTabOrientationBody()).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);
   });
 
+  it('clears an active vertical-rail search before horizontal rendering', () => {
+    expect(applyTabOrientationBody()).toMatch(/orientation\s*!==\s*'vertical'[\s\S]*_clearTabRailSessionSearchState/);
+  });
+
   it('is applied on load alongside the other tab settings', () => {
     expect(appJs).toContain('applyTabOrientation');
     expect(settingsJs).toContain('this.applyTabOrientation');

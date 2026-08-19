@@ -3047,6 +3047,10 @@ Object.assign(CodemanApp.prototype, {
           })
         : 'horizontal';
 
+    if (orientation !== 'vertical' && this._tabRailSessionSearch) {
+      this._clearTabRailSessionSearchState?.({ render: false });
+    }
+
     const root = document.documentElement;
     const previous = root.getAttribute('data-tab-orientation') || 'horizontal';
     root.setAttribute('data-tab-orientation', orientation);
