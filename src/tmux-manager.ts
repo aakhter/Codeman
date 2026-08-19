@@ -1196,6 +1196,11 @@ export function buildRespawnPaneCommand(options: {
   return `${options.tmuxCommand} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${options.muxName}" bash -c ${shellescape(launchCommand)}`;
 }
 
+/** Prepend a resolved CLI directory without allowing its characters to be reinterpreted by the login shell. */
+export function buildCliPathExport(directory: string): string {
+  return `export PATH=${shellescape(directory)}:"$PATH" && `;
+}
+
 /** Keep the controlled Claude resume fallback in its shell; only the final successful leg replaces it. */
 function buildLocalAgentExecCommand(mode: SessionMode, command: string): string {
   const legs = command.split(' || ');
@@ -2190,27 +2195,27 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private buildPathExport(mode: SessionMode): { pathExport: string; dir: string | null } {
     if (mode === 'claude') {
       const dir = findClaudeDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
     }
     if (mode === 'opencode') {
       const dir = resolveOpenCodeDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
     }
     if (mode === 'codex') {
       const dir = resolveCodexDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
     }
     if (mode === 'gemini') {
       const dir = resolveGeminiDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
     }
     if (mode === 'antigravity') {
       const dir = resolveAntigravityDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
     }
     if (mode === 'pi') {
       const dir = resolvePiDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
     }
     return { pathExport: '', dir: null };
   }

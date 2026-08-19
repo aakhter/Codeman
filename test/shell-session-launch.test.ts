@@ -16,7 +16,12 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { buildLocalPaneCommand, buildRespawnPaneCommand, buildSpawnCommand } from '../src/tmux-manager.js';
+import {
+  buildCliPathExport,
+  buildLocalPaneCommand,
+  buildRespawnPaneCommand,
+  buildSpawnCommand,
+} from '../src/tmux-manager.js';
 import { loginShellArgs, resolveLocalShell } from '../src/utils/shell-resolver.js';
 
 describe('resolveLocalShell', () => {
@@ -101,6 +106,30 @@ describe('loginShellArgs (#209 login flags, allowlisted)', () => {
       const out = execFileSync('/bin/sh', ['-c', `${shell} -i -l -c 'echo ok' 2>/dev/null`], { encoding: 'utf8' });
       expect(out).toContain('ok');
     }
+  });
+});
+
+describe('COD-334 resolved CLI PATH escaping', () => {
+  const directories = [
+    '/tmp/cli path/bin',
+    "/tmp/cli'path/bin",
+    '/tmp/$(printf should-not-run)/bin',
+    '/tmp/`printf should-not-run`/bin',
+    '/tmp/cli"path/bin',
+  ];
+  const shellescape = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+  it.each(directories)('preserves the exact resolved directory %s as one PATH segment', (directory) => {
+    const pathExport = buildCliPathExport(directory);
+    expect(pathExport).toBe(`export PATH=${shellescape(directory)}:"$PATH" && `);
+
+    const basePath = '/controlled/base/bin';
+    const resolvedPath = execFileSync('/bin/bash', ['-c', `${pathExport}printf '%s' "$PATH"`], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: basePath },
+    });
+    expect(resolvedPath).toBe(`${directory}:${basePath}`);
+    expect(resolvedPath.match(/should-not-run/g)?.length ?? 0).toBe(directory.match(/should-not-run/g)?.length ?? 0);
   });
 });
 
