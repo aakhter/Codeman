@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Add predictive echo and typing-lag instrumentation for OpenCode, harden agent CLI discovery through login shells, derive source titles from selected filenames, and add live session-name search to the resizable vertical tab rail with collapsed-group discovery and state restoration.
+- Add predictive echo and typing-lag instrumentation for OpenCode, harden agent CLI discovery through login shells, allow code-file source uploads and derive source titles from selected filenames, and add live session-name search to the resizable vertical tab rail with collapsed-group discovery and state restoration.
 
 ## 1.19.10
 
