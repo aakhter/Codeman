@@ -49,6 +49,13 @@ const remoteStore = vi.hoisted(() => ({
   }>,
   tmuxCheck: { ok: true, tmuxPath: '/usr/bin/tmux' } as { ok: boolean; tmuxPath?: string; error?: string },
 }));
+const cliAvailability = vi.hoisted(() => ({
+  opencode: true,
+  codex: true,
+  gemini: true,
+  antigravity: true,
+  pi: true,
+}));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
   return { ...actual, execFile, spawn };
@@ -64,6 +71,31 @@ vi.mock('../../src/remote-hosts.js', async (orig) => {
   };
 });
 vi.mock('../../src/web/heic-jpeg-converter.js', () => ({ convertHeicToJpeg: heicConvert }));
+vi.mock('../../src/utils/opencode-cli-resolver.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/utils/opencode-cli-resolver.js')>()),
+  isOpenCodeAvailable: vi.fn(() => cliAvailability.opencode),
+  getOpenCodeNotFoundMessage: vi.fn(() => 'OpenCode resolver diagnostic'),
+}));
+vi.mock('../../src/utils/codex-cli-resolver.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/utils/codex-cli-resolver.js')>()),
+  isCodexAvailable: vi.fn(() => cliAvailability.codex),
+  getCodexNotFoundMessage: vi.fn(() => 'Codex resolver diagnostic'),
+}));
+vi.mock('../../src/utils/gemini-cli-resolver.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/utils/gemini-cli-resolver.js')>()),
+  isGeminiAvailable: vi.fn(() => cliAvailability.gemini),
+  getGeminiNotFoundMessage: vi.fn(() => 'Gemini resolver diagnostic'),
+}));
+vi.mock('../../src/utils/antigravity-cli-resolver.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/utils/antigravity-cli-resolver.js')>()),
+  isAntigravityAvailable: vi.fn(() => cliAvailability.antigravity),
+  getAntigravityNotFoundMessage: vi.fn(() => 'Antigravity resolver diagnostic'),
+}));
+vi.mock('../../src/utils/pi-cli-resolver.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/utils/pi-cli-resolver.js')>()),
+  isPiAvailable: vi.fn(() => cliAvailability.pi),
+  getPiNotFoundMessage: vi.fn(() => 'Pi resolver diagnostic'),
+}));
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
@@ -131,6 +163,13 @@ describe('session-routes', () => {
     remoteStore.hosts = [];
     remoteStore.cases = [];
     remoteStore.tmuxCheck = { ok: true, tmuxPath: '/usr/bin/tmux' };
+    Object.assign(cliAvailability, {
+      opencode: true,
+      codex: true,
+      gemini: true,
+      antigravity: true,
+      pi: true,
+    });
   });
 
   afterEach(async () => {
@@ -2573,6 +2612,45 @@ and effort involved in moving workloads.
       expect(res.statusCode).toBe(200);
       const created = harness.ctx.addSession.mock.calls.at(-1)?.[0];
       expect(created?.checkpointEnabled).toBe(true);
+    });
+
+    it.each([
+      ['opencode', 'OpenCode resolver diagnostic'],
+      ['codex', 'Codex resolver diagnostic'],
+      ['gemini', 'Gemini resolver diagnostic'],
+      ['antigravity', 'Antigravity resolver diagnostic'],
+      ['pi', 'Pi resolver diagnostic'],
+    ] as const)('returns the exact %s resolver diagnostic for a local create preflight', async (mode, diagnostic) => {
+      cliAvailability[mode] = false;
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { workingDir: process.env.HOME, mode },
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, error: diagnostic });
+      expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    });
+
+    it('skips local CLI availability preflight for a remote create', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' }];
+      cliAvailability.codex = false;
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'gpu-work', mode: 'codex', name: 'Remote Codex' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data.session).toMatchObject({
+        mode: 'codex',
+        workingDir: '/home/ubuntu/work',
+        remote: expect.objectContaining({ hostId: 'gpu-box' }),
+      });
     });
 
     it('creates session from a remote case without local stat validation', async () => {
