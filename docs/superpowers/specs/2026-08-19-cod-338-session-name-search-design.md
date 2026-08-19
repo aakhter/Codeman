@@ -8,11 +8,11 @@
 
 The live Codeman vertical navigation has no visible search control. With sessions distributed across Focus, named groups, collapsed groups, and Ungrouped, finding a session requires scanning the list and manually opening sections.
 
-The checkout contains an older generic sidebar-filter path, but the requested feature is not visible in the live UI. Treat that code only as possible scaffolding. The implementation is complete only when the search is visible and works in the running application.
+The screenshot shows the resizable vertical tab rail (`#tabRail`). The checkout's older generic filter belongs to a different optional session-sidebar layout (`#sessionSidebar`), so it is not an existing filter on the requested surface. Treat that code only as a possible source of reusable styling or lifecycle lessons. The implementation is complete only when search is visible and works in the running vertical tab rail.
 
 ## User Experience
 
-Add a session-name search field at the top of the expanded vertical navigation, before Focus and all other sections.
+Add a session-name search field at the top of the vertical tab rail, before Focus and all other sections. Show it only when tab orientation is vertical; do not add it to the horizontal header strip.
 
 Typing filters immediately using a case-insensitive substring match against each displayed session name. A non-empty query produces a grouped projection of the full session collection:
 
@@ -25,15 +25,15 @@ Typing filters immediately using a case-insensitive substring match against each
 
 The search field includes an explicit clear button marked with an × and an accessible `Clear session search` label. The button appears only for a non-empty query. Activating it clears the query, keeps keyboard focus in the search field, and restores the ordinary navigation.
 
-Search is transient. It is not stored across reloads. Collapsing the entire sidebar or switching back to the horizontal session list clears the search so an invisible query can never continue hiding rows.
+Search is transient. It is not stored across reloads. Switching tab orientation back to horizontal clears the search so an invisible query can never continue hiding rows. Existing behavior in the separate optional session-sidebar layout remains unchanged unless a small shared helper can be reused without altering that surface.
 
 ## State and Rendering
 
-The query belongs to the vertical-navigation controller as transient client state. Normalize it with `trim().toLocaleLowerCase()` (or the project's established equivalent) for matching, while preserving the entered value in the input.
+The query belongs to the vertical-tab-rail controller as transient client state, separate from the optional session sidebar's `_sidebarFilter`. Normalize it with `trim().toLocaleLowerCase()` (or the project's established equivalent) for matching, while preserving the entered value in the input.
 
 Filtering must happen against the complete canonical session projection, not only against rows currently present in the DOM. This is required because collapsed groups do not render all of their session rows. During an active search, derive a filtered projection that contains only matching session references and the headers needed to preserve their context.
 
-Search must not mutate persisted Focus or group-collapse state. Matched groups paint as expanded for the filtered projection, but their disclosure controls do not change saved state while search is active. Clearing the query rebuilds the ordinary projection from the still-authoritative stored collapse state. If the implementation reuses the dormant DOM-filter code, it must first correct these projection and state-boundary limitations; a second independent filter path must not be added.
+Search must not mutate persisted Focus or group-collapse state. Matched groups paint as expanded for the filtered projection, but their disclosure controls do not change saved state while search is active. Clearing the query rebuilds the ordinary projection from the still-authoritative stored collapse state. The optional session-sidebar DOM filter cannot satisfy this requirement because it sees only already-rendered rows; do not redirect the task to that unrelated control.
 
 Sessions remain selectable and expose their normal row actions. Renames, additions, removals, regrouping, Focus changes, and live session updates reapply the active query to the new canonical state without stale results or visible flicker.
 
@@ -53,7 +53,7 @@ Sessions remain selectable and expose their normal row actions. Renames, additio
 - Duplicate names all remain visible.
 - A query that matches only a session in a collapsed group still shows that group and session.
 - Webview rows and other non-session entries do not match a session-name query and are hidden while it is active.
-- Closing or changing the navigation layout cannot leave an unreachable active filter.
+- Switching out of vertical tab orientation cannot leave an unreachable active filter.
 
 ## Verification
 
@@ -69,14 +69,14 @@ DOM-level regression coverage must prove:
 - match counts and the no-results state;
 - explicit clear-button visibility, accessible name, focus behavior, and full restoration;
 - live reapplication after add, rename, remove, regroup, and Focus changes;
-- query clearing when the sidebar becomes unreachable.
+- query clearing when the vertical rail becomes unreachable.
 
 A real-browser check must exercise typing, selecting a result from a formerly collapsed group, clearing, and confirming that the original collapsed/expanded structure returns. The worker must also verify the control in the running Codeman instance because the checkout's dormant filter code is not evidence that the live feature exists.
 
 ## Self-Review
 
 - No placeholders or deferred decisions remain.
-- The design distinguishes the live UI from dormant checkout code.
+- The design distinguishes the requested vertical tab rail from the separate optional session-sidebar layout.
 - Matching scope is session display names only.
 - Group preservation, Focus duplication, counts, no-results behavior, clear behavior, and collapse restoration are explicit.
 - The work is a single frontend feature with focused regression coverage; no backend or persistence changes are required.
