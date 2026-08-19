@@ -794,7 +794,11 @@ function makeInteractionApp() {
   (globalThis as any).CSS ||= { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '\\$&') };
   const app = Object.create(CodemanApp.prototype) as Record<string, any>;
   document.documentElement.setAttribute('data-tab-orientation', 'vertical');
-  document.body.innerHTML = '<div id="sessionTabs"></div>';
+  document.body.innerHTML = `
+    <input id="tabRailSessionSearch" aria-label="Search sessions">
+    <button id="tabRailSessionSearchClear" aria-label="Clear session search" hidden></button>
+    <div id="tabRailSessionSearchEmpty" hidden>No sessions match</div>
+    <div id="sessionTabs"></div>`;
   app.$ = (id: string) => document.getElementById(id);
   app.sessions = new Map([
     ['parent', { id: 'parent', name: 'Parent' }],
@@ -809,10 +813,12 @@ function makeInteractionApp() {
   app.tabLayoutVersion = 4;
   app.tabLayoutReadOnly = false;
   app.collapsedTabGroupIds = new Set();
+  app.focusTabGroupCollapsed = false;
   app._tabCollapseStorageFailed = false;
   app._legacySessionOrder = [];
   app._tabLayoutFirstPaintPending = false;
   app._lastTabStructureKey = null;
+  app._tabRailSessionSearch = '';
   app._inlineRenameActive = false;
   app._tabLayoutManaged = true;
   app._tabPointerHandlersBound = false;
@@ -838,6 +844,150 @@ function makeInteractionApp() {
   app.showToast = vi.fn();
   return app;
 }
+
+function makeSessionSearchApp() {
+  const app = makeInteractionApp();
+  app.sessions = new Map([
+    ['alpha', { id: 'alpha', name: 'Alpha API' }],
+    ['roadmap', { id: 'roadmap', name: 'Roadmap' }],
+    ['review', { id: 'review', name: 'API Review' }],
+    ['duplicate', { id: 'duplicate', name: 'Alpha Copy' }],
+  ]);
+  app.activeSessionId = 'alpha';
+  app.webviews = new Map([['web', { id: 'web', name: 'API dashboard', url: 'https://example.test' }]]);
+  app.webviewOrder = ['web'];
+  app.tabLayout = {
+    version: 7,
+    updatedAt: '2026-08-19T00:00:00.000Z',
+    groups: [
+      { id: 'engineering', name: 'engineering', refs: [{ kind: 'session', id: 'alpha', focus: true }] },
+      {
+        id: 'planning',
+        name: 'planning',
+        refs: [
+          { kind: 'session', id: 'roadmap' },
+          { kind: 'session', id: 'review' },
+        ],
+      },
+    ],
+    ungrouped: [
+      { kind: 'webview', id: 'web' },
+      { kind: 'session', id: 'duplicate' },
+    ],
+  };
+  app.collapsedTabGroupIds = new Set(['planning']);
+  localStorage.setItem('codeman:tab-groups-collapsed', '["planning"]');
+  return app;
+}
+
+function canonicalSessionNames() {
+  return [...document.querySelectorAll<HTMLElement>('.session-tab[data-id] .tab-name')].map(
+    (element) => element.textContent
+  );
+}
+
+describe('COD-338 vertical rail session-name search', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('matches displayed names case-insensitively across collapsed groups without mutating collapse state', () => {
+    const app = makeSessionSearchApp();
+
+    app.setTabRailSessionSearch('aPi');
+
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'API Review']);
+    expect([...document.querySelectorAll('.tab-layout-group-name')].map((element) => element.textContent)).toEqual([
+      'Focus',
+      'engineering',
+      'planning',
+    ]);
+    expect([...document.querySelectorAll('.tab-layout-group-count')].map((element) => element.textContent)).toEqual([
+      '1',
+      '1',
+      '1',
+    ]);
+    expect(document.querySelector('[data-webview-id="web"]')).toBeNull();
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['planning']));
+    expect(localStorage.getItem('codeman:tab-groups-collapsed')).toBe('["planning"]');
+    expect(document.querySelector('[data-tab-group-header="planning"]')?.getAttribute('aria-expanded')).toBe('true');
+    expect((document.querySelector('[data-tab-group-header="planning"]') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('treats whitespace as empty, keeps duplicate names in order, and reports no results', () => {
+    const app = makeSessionSearchApp();
+    app.setTabRailSessionSearch('   ');
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'Alpha Copy']);
+    expect(document.querySelector('[data-webview-id="web"]')).not.toBeNull();
+
+    app.sessions.get('duplicate').name = 'Alpha API';
+    app.setTabRailSessionSearch('alpha');
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'Alpha API']);
+    expect((document.getElementById('tabRailSessionSearchClear') as HTMLButtonElement).hidden).toBe(false);
+
+    app.setTabRailSessionSearch('missing');
+    expect(canonicalSessionNames()).toEqual([]);
+    expect(document.querySelector('.tab-layout-group')).toBeNull();
+    expect((document.getElementById('tabRailSessionSearchEmpty') as HTMLElement).hidden).toBe(false);
+  });
+
+  it('clears explicitly, restores the ordinary collapsed projection, and returns focus to the input', () => {
+    const app = makeSessionSearchApp();
+    const input = document.getElementById('tabRailSessionSearch') as HTMLInputElement;
+    input.value = 'review';
+    app.setTabRailSessionSearch(input.value);
+    expect(canonicalSessionNames()).toEqual(['API Review']);
+
+    app.clearTabRailSessionSearch();
+
+    expect(input.value).toBe('');
+    expect(document.activeElement).toBe(input);
+    expect((document.getElementById('tabRailSessionSearchClear') as HTMLButtonElement).hidden).toBe(true);
+    expect((document.getElementById('tabRailSessionSearchEmpty') as HTMLElement).hidden).toBe(true);
+    expect(document.querySelector('[data-id="review"]')).toBeNull();
+    expect(document.querySelector('[data-tab-group-header="planning"]')?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('reapplies the active query after rename, add, remove, regroup, and Focus changes', () => {
+    const app = makeSessionSearchApp();
+    app.setTabRailSessionSearch('api');
+
+    app.sessions.get('roadmap').name = 'API Roadmap';
+    app._fullRenderSessionTabs();
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'API Roadmap', 'API Review']);
+
+    app.sessions.set('new', { id: 'new', name: 'API Notes' });
+    app.tabLayout.ungrouped.push({ kind: 'session', id: 'new' });
+    app._fullRenderSessionTabs();
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'API Roadmap', 'API Review', 'API Notes']);
+
+    app.sessions.delete('review');
+    app._fullRenderSessionTabs();
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'API Roadmap', 'API Notes']);
+
+    app.tabLayout.groups[1].refs = app.tabLayout.groups[1].refs.filter((ref: Ref) => ref.id !== 'roadmap');
+    app.tabLayout.groups[0].refs.push({ kind: 'session', id: 'roadmap' });
+    app.tabLayout.groups[0].refs[1] = { ...app.tabLayout.groups[0].refs[1], focus: true };
+    app._fullRenderSessionTabs();
+    expect(canonicalSessionNames()).toEqual(['Alpha API', 'API Roadmap', 'API Notes']);
+    expect(document.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
+    expect([...document.querySelectorAll('.tab-layout-group-name')].map((element) => element.textContent)).toEqual([
+      'Focus',
+      'engineering',
+      'Ungrouped',
+    ]);
+  });
+
+  it('does not persist collapse changes through search-context headers', () => {
+    const app = makeSessionSearchApp();
+    app.setTabRailSessionSearch('api');
+
+    expect(app.toggleTabGroupCollapsed('planning')).toBe(false);
+    expect(app.toggleFocusGroupCollapsed(true)).toBe(false);
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['planning']));
+    expect(app.focusTabGroupCollapsed).toBe(false);
+    expect(localStorage.getItem('codeman:tab-groups-collapsed')).toBe('["planning"]');
+    expect(localStorage.getItem('codeman:focus-group-collapsed')).toBeNull();
+  });
+});
 
 function enableRealSemanticEditing(app: Record<string, any>) {
   app._tabLayoutEditCoordinator = null;

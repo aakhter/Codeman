@@ -36,6 +36,15 @@
   - That drift was a silent hole, not a tidiness problem: a file excluded from CI and added to no runner is tested by NOTHING, and every command stays green, because vitest counts "no files matched" as success. `test/test-suite-partition.test.ts` now fails if any test file is reachable by no runner or by two.
   - ⚠️ A file filter must match its runner: `npm test -- test/mobile/keyboard.test.ts` matches nothing and exits green having run zero tests, because the gate excludes that path. Use `npm run test:mobile -- <file>`. Documented in CLAUDE.md, and the one place that recommended the old form was corrected.
   - Docs synced: CLAUDE.md, AGENTS.md, .github/CONTRIBUTING.md, both READMEs, and two ci.yml comments that claimed only `test/mobile/**` was excluded (it is three suites, and 5 Playwright files rather than 3).
+## 1.19.10
+
+### Patch Changes
+
+- Add atomic creation of new sessions inside an existing tab group, including API validation, lineage propagation, reconnect-safe layout projection, and grouped-launch UI actions.
+
+  Harden the Approvals Inbox and tab-alert propagation across reconnects and disabled-inbox clients, with regression coverage for permission and idle hook state.
+
+  Require positive Codex rendered-pane evidence before declaring a completed turn ready for input. Working, unknown, and unavailable frames now remain active, while verified composers and coherent choice dialogs trigger the input-needed state.
 
 ## 1.19.9
 

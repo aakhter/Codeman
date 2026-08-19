@@ -51,6 +51,18 @@ export interface PredictionState {
   anchor: { row: number; col: number } | null;
 }
 
+export interface PredictiveEchoDebugState {
+  counts: Record<string, number>;
+  anchorHoldCount: number;
+  anchorHoldTotalMs: number;
+  anchorHoldMaxMs: number;
+  anchorHoldAvgMs: number;
+  lastAnchorHoldMs: number | null;
+  currentHoldMs: number | null;
+  totalPredictCalls: number;
+  totalSuppressed: number;
+}
+
 interface PredictionRecord {
   seq: number;
   char: string;
@@ -69,7 +81,7 @@ const DEFAULT_OPTIONS = {
   zIndex: 7,
   underlinePredictions: false,
   ttlMs: 1000,
-  maxPending: 32,
+  maxPending: 64,
   cursorGraceMs: 150,
   edgeMarginCells: 4,
 } as const;
@@ -88,6 +100,17 @@ export class PredictiveEchoAddon implements XtermAddon {
   private _confirmedTotal = 0;
   private _droppedTotal = 0;
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null;
+  // ── Phase 1 instrumentation (COD-331): gate-miss counters + anchorHold timing ──
+  // Zero runtime cost when not inspected (counters are integers, no I/O). Exposed
+  // via get debugState for window.codemanEchoDebug when ?debugEcho is set.
+  private _debugCounts = new Map<string, number>();
+  private _debugAnchorHoldStart: number | null = null;
+  private _debugAnchorHoldCount = 0;
+  private _debugAnchorHoldTotalMs = 0;
+  private _debugAnchorHoldMaxMs = 0;
+  private _debugLastHoldMs: number | null = null;
+  private _debugTotalCalls = 0;
+  private _debugTotalSuppressed = 0;
   /** Anchor hold: set after an unpredicted wire edit (backspace into echoed
    *  text, any cleared input, an IME text commit). While held, new
    *  predictions are suppressed: the displayed cursor is stale until the
@@ -97,6 +120,22 @@ export class PredictiveEchoAddon implements XtermAddon {
    *  predictChar pass (which runs before the display could catch up). */
   private _anchorHold = false;
   private _reconcileScheduled = false;
+  private _armDebugAnchorHold(): void {
+    if (this._debugAnchorHoldStart !== null) return;
+    this._debugAnchorHoldStart = performance.now();
+    this._debugAnchorHoldCount++;
+  }
+  private _releaseDebugAnchorHold(): void {
+    if (this._debugAnchorHoldStart === null) return;
+    const ms = performance.now() - this._debugAnchorHoldStart;
+    this._debugLastHoldMs = ms;
+    this._debugAnchorHoldTotalMs += ms;
+    if (ms > this._debugAnchorHoldMaxMs) this._debugAnchorHoldMaxMs = ms;
+    this._debugAnchorHoldStart = null;
+  }
+  private _incDebug(reason: string): void {
+    this._debugCounts.set(reason, (this._debugCounts.get(reason) || 0) + 1);
+  }
   private _disposables: Array<{ dispose(): void }> = [];
   private _predictWhen: ((terminal: XtermTerminal) => boolean) | null;
   private _options: Required<Omit<PredictiveEchoOptions, 'foregroundColor' | 'backgroundColor' | 'predictWhen'>> &
@@ -149,6 +188,7 @@ export class PredictiveEchoAddon implements XtermAddon {
             this._reconcileScheduled = true;
             queueMicrotask(() => {
               this._reconcileScheduled = false;
+              if (this._anchorHold) this._releaseDebugAnchorHold();
               this._anchorHold = false; // a parse pass ran: the display caught up
               this._safeReconcile();
             });
@@ -191,26 +231,71 @@ export class PredictiveEchoAddon implements XtermAddon {
    */
   predictChar(ch: string): boolean {
     try {
+      this._debugTotalCalls++;
       this._reconcile();
-      if (this._anchorHold) return false; // display has not caught up with a wire edit
+      if (this._anchorHold) {
+        this._debugTotalSuppressed++;
+        this._incDebug('anchorHold');
+        return false;
+      }
 
       const t = this._terminal;
-      if (!t || !this._container) return false;
+      if (!t || !this._container) {
+        this._debugTotalSuppressed++;
+        this._incDebug(!t ? 'no-terminal' : 'no-container');
+        return false;
+      }
       const dims = getCellDimensions(t);
-      if (!dims) return false;
+      if (!dims) {
+        this._debugTotalSuppressed++;
+        this._incDebug('no-dims');
+        return false;
+      }
       const buf = t.buffer.active;
-      if (typeof buf.cursorX !== 'number' || typeof buf.cursorY !== 'number') return false;
-      if (buf.viewportY !== buf.baseY) return false;
-      if (this._predictWhen && this._predictWhen(t) === false) return false;
+      if (typeof buf.cursorX !== 'number' || typeof buf.cursorY !== 'number') {
+        this._debugTotalSuppressed++;
+        this._incDebug('no-cursor');
+        return false;
+      }
+      if (buf.viewportY !== buf.baseY) {
+        this._debugTotalSuppressed++;
+        this._incDebug('scrolled');
+        return false;
+      }
+      if (this._predictWhen && this._predictWhen(t) === false) {
+        this._debugTotalSuppressed++;
+        this._incDebug('predictWhen:false');
+        return false;
+      }
 
       const cps = Array.from(ch);
-      if (cps.length !== 1) return false;
+      if (cps.length !== 1) {
+        this._debugTotalSuppressed++;
+        this._incDebug('multi-codepoint');
+        return false;
+      }
       const cp = cps[0].codePointAt(0)!;
-      if (cp < 0x20 || cp === 0x7f) return false;
+      if (cp < 0x20 || cp === 0x7f) {
+        this._debugTotalSuppressed++;
+        this._incDebug(cp === 0x7f ? 'is-del' : 'control');
+        return false;
+      }
       const w = charCellWidth(t, cps[0]);
-      if (w !== 1 && w !== 2) return false;
-      if (w === 2 && !this._hasGetCell()) return false; // ASCII fallback misaligns on wide cols
-      if (this._outstanding.length >= this._options.maxPending) return false;
+      if (w !== 1 && w !== 2) {
+        this._debugTotalSuppressed++;
+        this._incDebug('bad-width');
+        return false;
+      }
+      if (w === 2 && !this._hasGetCell()) {
+        this._debugTotalSuppressed++;
+        this._incDebug('wide-no-getCell');
+        return false;
+      }
+      if (this._outstanding.length >= this._options.maxPending) {
+        this._debugTotalSuppressed++;
+        this._incDebug('maxPending');
+        return false;
+      }
 
       if (this._outstanding.length === 0) {
         this._anchor = { row: buf.cursorY, col: buf.cursorX };
@@ -220,7 +305,11 @@ export class PredictiveEchoAddon implements XtermAddon {
       const last = this._outstanding[this._outstanding.length - 1];
       const offset = last ? last.offsetCells + last.width : 0;
       const col = anchor.col + offset;
-      if (col + w > t.cols - this._options.edgeMarginCells) return false;
+      if (col + w > t.cols - this._options.edgeMarginCells) {
+        this._debugTotalSuppressed++;
+        this._incDebug('edgeMargin');
+        return false;
+      }
 
       const rec: PredictionRecord = {
         seq: this._seq++,
@@ -261,6 +350,8 @@ export class PredictiveEchoAddon implements XtermAddon {
         // \x7f goes to the wire and will delete ECHOED text: the cursor is
         // about to move in a way we cannot see yet
         this._anchorHold = true;
+        this._armDebugAnchorHold();
+        this._incDebug('backspace-into-echoed');
         return false;
       }
       removePredictionSpan(this._spans, rec.seq);
@@ -276,7 +367,10 @@ export class PredictiveEchoAddon implements XtermAddon {
    *  cursor effect is unknown until the next parsed write. */
   clearPredictions(): void {
     try {
+      if (!this._anchorHold) this._armDebugAnchorHold();
+      else if (this._debugAnchorHoldStart === null) this._armDebugAnchorHold();
       this._anchorHold = true;
+      if (this._outstanding.length > 0) this._incDebug('clearPredictions:' + this._outstanding.length);
       this._droppedTotal += this._outstanding.length;
       this._outstanding = [];
       clearAllSpans(this._spans);
@@ -289,6 +383,7 @@ export class PredictiveEchoAddon implements XtermAddon {
   /** Manual reconcile pass, for consumers without onWriteParsed. By contract
    *  it is called after writes parsed, so it also releases the anchor hold. */
   reconcile(): void {
+    if (this._anchorHold) this._releaseDebugAnchorHold();
     this._anchorHold = false;
     this._safeReconcile();
   }
@@ -316,6 +411,35 @@ export class PredictiveEchoAddon implements XtermAddon {
     };
   }
 
+  get debugState(): PredictiveEchoDebugState {
+    const counts: Record<string, number> = {};
+    for (const [k, v] of this._debugCounts) counts[k] = v;
+    const avg = this._debugAnchorHoldCount > 0 ? this._debugAnchorHoldTotalMs / this._debugAnchorHoldCount : 0;
+    const currentHoldMs = this._debugAnchorHoldStart !== null ? performance.now() - this._debugAnchorHoldStart : null;
+    return {
+      counts,
+      anchorHoldCount: this._debugAnchorHoldCount,
+      anchorHoldTotalMs: Math.round(this._debugAnchorHoldTotalMs),
+      anchorHoldMaxMs: Math.round(this._debugAnchorHoldMaxMs),
+      anchorHoldAvgMs: Math.round(avg),
+      lastAnchorHoldMs: this._debugLastHoldMs !== null ? Math.round(this._debugLastHoldMs) : null,
+      currentHoldMs: currentHoldMs !== null ? Math.round(currentHoldMs) : null,
+      totalPredictCalls: this._debugTotalCalls,
+      totalSuppressed: this._debugTotalSuppressed,
+    };
+  }
+
+  resetDebugState(): void {
+    this._debugCounts.clear();
+    this._debugAnchorHoldStart = null;
+    this._debugAnchorHoldCount = 0;
+    this._debugAnchorHoldTotalMs = 0;
+    this._debugAnchorHoldMaxMs = 0;
+    this._debugLastHoldMs = null;
+    this._debugTotalCalls = 0;
+    this._debugTotalSuppressed = 0;
+  }
+
   // ─── Reconciliation ───────────────────────────────────────────────
 
   private _safeReconcile(): void {
@@ -332,6 +456,7 @@ export class PredictiveEchoAddon implements XtermAddon {
     if (this._outstanding.length === 0) return; // streaming cost: one boolean
     const buf = t.buffer.active;
     if (buf.viewportY !== buf.baseY) {
+      this._incDebug('reconcile:scrolled');
       this.clearPredictions(); // user scrolled up
       return;
     }
@@ -345,6 +470,7 @@ export class PredictiveEchoAddon implements XtermAddon {
     if (buf.cursorY !== anchor.row) {
       this._cursorOffRowSince ??= now;
       if (now - this._cursorOffRowSince > this._options.cursorGraceMs) {
+        this._incDebug('reconcile:offRow');
         this.clearPredictions();
         return;
       }
@@ -389,11 +515,15 @@ export class PredictiveEchoAddon implements XtermAddon {
         rec.mismatches = 0;
       }
     }
-    if (dropFrom !== -1) this._dropFrom(dropFrom);
+    if (dropFrom !== -1) {
+      this._incDebug('reconcile:mismatchDrop:' + dropFrom);
+      this._dropFrom(dropFrom);
+    }
 
     // TTL: the first stale record drops itself and everything after it.
     for (let i = 0; i < this._outstanding.length; i++) {
       if (now - this._outstanding[i].sentAt > this._options.ttlMs) {
+        this._incDebug('reconcile:ttlDrop');
         this._dropFrom(i);
         break;
       }

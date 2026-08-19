@@ -10,4 +10,4 @@ export type {
   PromptPosition,
   CellDimensions,
 } from './types.js';
-export type { PredictiveEchoOptions, PredictionState } from './predictive-echo-addon.js';
+export type { PredictiveEchoOptions, PredictionState, PredictiveEchoDebugState } from './predictive-echo-addon.js';

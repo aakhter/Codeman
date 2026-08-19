@@ -386,49 +386,60 @@ export function registerSystemRoutes(
   // ========== Claude ==========
 
   app.get('/api/claude/status', async () => {
-    const { isClaudeAvailable, findClaudeDir } = await import('../../utils/claude-cli-resolver.js');
+    const { findClaudeDir, getClaudeNotFoundMessage } = await import('../../utils/claude-cli-resolver.js');
+    const path = findClaudeDir();
     return {
-      available: isClaudeAvailable(),
-      path: findClaudeDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getClaudeNotFoundMessage() } : {}),
     };
   });
 
   // ========== OpenCode ==========
 
   app.get('/api/opencode/status', async () => {
-    const { isOpenCodeAvailable, resolveOpenCodeDir } = await import('../../utils/opencode-cli-resolver.js');
+    const { resolveOpenCodeDir, getOpenCodeNotFoundMessage } = await import('../../utils/opencode-cli-resolver.js');
+    const path = resolveOpenCodeDir();
     return {
-      available: isOpenCodeAvailable(),
-      path: resolveOpenCodeDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getOpenCodeNotFoundMessage() } : {}),
     };
   });
 
   // ========== Codex ===
   app.get('/api/codex/status', async () => {
-    const { isCodexAvailable, resolveCodexDir } = await import('../../utils/codex-cli-resolver.js');
+    const { resolveCodexDir, getCodexNotFoundMessage } = await import('../../utils/codex-cli-resolver.js');
+    const path = resolveCodexDir();
     return {
-      available: isCodexAvailable(),
-      path: resolveCodexDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getCodexNotFoundMessage() } : {}),
     };
   });
 
   // ========== Gemini ==========
 
   app.get('/api/gemini/status', async () => {
-    const { isGeminiAvailable, resolveGeminiDir } = await import('../../utils/gemini-cli-resolver.js');
+    const { resolveGeminiDir, getGeminiNotFoundMessage } = await import('../../utils/gemini-cli-resolver.js');
+    const path = resolveGeminiDir();
     return {
-      available: isGeminiAvailable(),
-      path: resolveGeminiDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getGeminiNotFoundMessage() } : {}),
     };
   });
 
   // ========== Antigravity ==========
 
   app.get('/api/antigravity/status', async () => {
-    const { isAntigravityAvailable, resolveAntigravityDir } = await import('../../utils/antigravity-cli-resolver.js');
+    const { resolveAntigravityDir, getAntigravityNotFoundMessage } =
+      await import('../../utils/antigravity-cli-resolver.js');
+    const path = resolveAntigravityDir();
     return {
-      available: isAntigravityAvailable(),
-      path: resolveAntigravityDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getAntigravityNotFoundMessage() } : {}),
     };
   });
 
@@ -439,21 +450,26 @@ export function registerSystemRoutes(
   // is not the coding agent. Surfacing path + version makes a misresolution
   // diagnosable from the UI instead of presenting as "the mode just doesn't work".
   app.get('/api/pi/status', async () => {
-    const { isPiAvailable, resolvePiDir, getPiCliVersion } = await import('../../utils/pi-cli-resolver.js');
+    const { resolvePiDir, getPiCliVersion, getPiNotFoundMessage } = await import('../../utils/pi-cli-resolver.js');
+    const path = resolvePiDir();
     return {
-      available: isPiAvailable(),
-      path: resolvePiDir(),
-      version: getPiCliVersion(),
+      available: path !== null,
+      path,
+      version: path === null ? null : getPiCliVersion(),
+      ...(path === null ? { error: getPiNotFoundMessage() } : {}),
     };
   });
 
   // Legacy alias kept so an older cached frontend keeps working after the
   // agy -> antigravity rename (session-ui.js still probes /api/agy/status).
   app.get('/api/agy/status', async () => {
-    const { isAntigravityAvailable, resolveAntigravityDir } = await import('../../utils/antigravity-cli-resolver.js');
+    const { resolveAntigravityDir, getAntigravityNotFoundMessage } =
+      await import('../../utils/antigravity-cli-resolver.js');
+    const path = resolveAntigravityDir();
     return {
-      available: isAntigravityAvailable(),
-      path: resolveAntigravityDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getAntigravityNotFoundMessage() } : {}),
     };
   });
 

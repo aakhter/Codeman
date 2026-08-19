@@ -582,6 +582,79 @@ body {
   z-index: 11;
 }
 
+.tab-rail-session-search {
+  display: none;
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.5rem 0.25rem;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail-session-search {
+  display: flex;
+}
+
+.tab-rail-session-search-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.4rem 1.8rem 0.4rem 0.55rem;
+  border: 1px solid var(--control-border);
+  border-radius: var(--btn-radius);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.tab-rail-session-search-input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.tab-rail-session-search-input:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tab-rail-session-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 0.7rem;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  transform: translateY(-38%);
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tab-rail-session-search-clear:hover,
+.tab-rail-session-search-clear:focus-visible {
+  background: var(--control-bg-hover);
+  color: var(--text);
+}
+
+.tab-rail-session-search-clear[hidden] {
+  display: none;
+}
+
+.tab-rail-session-search-empty {
+  display: none;
+  flex: 0 0 auto;
+  padding: 0.65rem 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail-session-search-empty:not([hidden]) {
+  display: block;
+}
+
 /* COD-299 — the visible rule is deliberately narrow. The full-height 16px hit
    target plus keyboard controls make it easy to acquire without covering the
    center of the active tab's compact action button or a terminal character. */

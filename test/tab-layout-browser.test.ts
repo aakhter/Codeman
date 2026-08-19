@@ -153,6 +153,62 @@ describe('COD-306 browser projection', () => {
     expect(h.project(focused, { ...options, orientation: 'horizontal' }).focusRefs).toEqual([]);
   });
 
+  it('filters an expanded projection to matching sessions while preserving grouped order and canonical metadata', () => {
+    const h = loadHelper();
+    const searchable = layout();
+    searchable.groups[0].id = 'core';
+    searchable.groups[0].refs[0] = { ...searchable.groups[0].refs[0], focus: true };
+    const projection = h.project(searchable, {
+      liveSessionIds: ['s1', 's2', 's3', 's4'],
+      openWebviewIds: ['w1', 'w2'],
+      orientation: 'vertical',
+    });
+
+    const filtered = h.filterSessionProjection(projection, ['s2', 's4']);
+
+    expect(filtered.visibleRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'session', id: 's4' },
+    ]);
+    expect(filtered.sections.map(({ id, count, collapsed }: any) => ({ id, count, collapsed }))).toEqual([
+      { id: 'core', count: 1, collapsed: false },
+      { id: null, count: 1, collapsed: false },
+    ]);
+    expect(filtered.focusRefs).toEqual([{ kind: 'session', id: 's2' }]);
+    expect(filtered.matchCount).toBe(2);
+    expect(filtered.searchActive).toBe(true);
+    expect(filtered.sessionOrder).toEqual(projection.sessionOrder);
+    expect(filtered.completeRefs).toEqual(projection.completeRefs);
+    expect(filtered.hiddenTabGroupByRef).toEqual({});
+  });
+
+  it('removes webviews and empty sections and keeps duplicate Focus placement for an empty-safe match set', () => {
+    const h = loadHelper();
+    const searchable = layout();
+    searchable.groups[0].refs[0] = { ...searchable.groups[0].refs[0], focus: true };
+    const projection = h.project(searchable, {
+      liveSessionIds: ['s1', 's2', 's3', 's4'],
+      openWebviewIds: ['w1', 'w2'],
+      orientation: 'vertical',
+      focusCollapsed: true,
+    });
+
+    const filtered = h.filterSessionProjection(projection, ['s2']);
+    expect(filtered.visibleRefs).toEqual([{ kind: 'session', id: 's2' }]);
+    expect(filtered.focusRefs).toEqual([{ kind: 'session', id: 's2' }]);
+    expect(filtered.sections).toHaveLength(1);
+    expect(filtered.sections[0].refs).toEqual([{ kind: 'session', id: 's2' }]);
+    expect(filtered.sections[0].refIndices).toEqual([0]);
+    expect(filtered.focusCollapsed).toBe(false);
+    expect(filtered.matchCount).toBe(1);
+
+    const empty = h.filterSessionProjection(projection, []);
+    expect(empty.sections).toEqual([]);
+    expect(empty.focusRefs).toEqual([]);
+    expect(empty.visibleRefs).toEqual([]);
+    expect(empty.matchCount).toBe(0);
+  });
+
   it('optimistically sets and clears Focus while preserving it through ordinary edits', () => {
     const h = loadHelper();
     const initial = layout();

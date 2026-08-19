@@ -13,8 +13,10 @@ import {
   buildCodexCommand,
   buildRemoteKillCommand,
   buildRemoteLaunchCommand,
+  buildSpawnCommand,
   buildLocalPaneCommand,
   buildNofileLimitCommand,
+  cliNotFoundMessage,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -23,7 +25,11 @@ import {
   readTmuxCodexProviderEnvironment,
   resolveActivePaneTarget,
   resolveTmuxPaneTarget,
+  selectLaunchCommand,
+  wrapSpawnCommandWithNice,
 } from '../src/tmux-manager.js';
+import type { SessionMode } from '../src/types.js';
+import { loginShellArgs, resolveLocalShell } from '../src/utils/index.js';
 import { execSync, exec } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { REMOTE_LOGIN_SHELL_RESOLVE } from '../src/remote-hosts.js';
@@ -972,7 +978,8 @@ describe('TmuxManager (unit)', () => {
           ([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane ')
         );
         expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abc12345"`);
-        expect(respawnCall?.[0]).toContain('cd \\"/mnt/gdrive/project with spaces\\" &&');
+        expect(respawnCall?.[0]).toContain("bash -c 'cd '\\''");
+        expect(respawnCall?.[0]).toContain('/mnt/gdrive/project with spaces');
       } finally {
         nonTestManager.destroy();
       }
@@ -1004,7 +1011,8 @@ describe('TmuxManager (unit)', () => {
           .mocked(currentExec)
           .mock.calls.find(([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane '));
         expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abcd1234"`);
-        expect(respawnCall?.[0]).toContain('cd \\"/mnt/gdrive/project\\" &&');
+        expect(respawnCall?.[0]).toContain("bash -c 'cd '\\''");
+        expect(respawnCall?.[0]).toContain('/mnt/gdrive/project');
       } finally {
         nonTestManager.destroy();
       }
@@ -1298,23 +1306,38 @@ describe('isUsableWorkingDir', () => {
 });
 
 describe('COD-276 buildLocalPaneCommand', () => {
-  it('routes agent modes through the user login shell so the CLI inherits user env', () => {
-    const out = buildLocalPaneCommand({
-      mode: 'opencode',
-      pathExport: 'export PATH="/u/.opencode/bin:$PATH" && ',
-      envExports: ['export CODEMAN_MUX=1'],
-      cmd: 'opencode --model sonnet',
-    });
-    expect(out).toContain(buildNofileLimitCommand());
-    // login-shell re-exec wrapper: <shell> -i -l -c with Codeman env after the profile
-    expect(out).toContain('exec');
-    expect(out).toContain('-i -l -c ');
-    expect(out).toContain(
-      'export PATH="/u/.opencode/bin:$PATH" && export CODEMAN_MUX=1 && exec opencode --model sonnet'
-    );
-    // pathExport trailing ' && ' is normalized for the inner command
-    expect(out).not.toContain('" &&   &&');
-  });
+  const agentCases: Array<{ mode: Exclude<SessionMode, 'shell'>; path: string; command: string }> = [
+    { mode: 'claude', path: '/u/.claude/local', command: 'claude --session-id abc' },
+    { mode: 'opencode', path: '/u/.opencode/bin', command: 'opencode --model sonnet' },
+    { mode: 'codex', path: '/u/.npm-global/bin', command: 'codex --model o3' },
+    { mode: 'gemini', path: '/u/.local/bin', command: 'gemini --model pro' },
+    { mode: 'antigravity', path: '/u/.antigravity/bin', command: 'agy --model pro' },
+    { mode: 'pi', path: '/u/.pi/bin', command: 'pi --model sonnet' },
+  ];
+
+  it.each(agentCases)(
+    'routes $mode through the resolved login shell with ordered exports',
+    ({ mode, path, command }) => {
+      const pathExport = `export PATH="${path}:$PATH"`;
+      const out = buildLocalPaneCommand({
+        mode,
+        pathExport: `${pathExport} && `,
+        envExports: ['export CODEMAN_MUX=1', 'export CODEMAN_SESSION_ID=abc'],
+        cmd: command,
+      });
+      const shell = resolveLocalShell();
+      expect(out).toContain(buildNofileLimitCommand());
+      expect(out).toContain(shell);
+      expect(out).toContain(`${loginShellArgs(shell)} -c `);
+      expect(out).toContain(
+        `${pathExport} && export CODEMAN_MUX=1 && export CODEMAN_SESSION_ID=abc && exec ${command}`
+      );
+      expect(out.indexOf(pathExport)).toBeLessThan(out.indexOf('export CODEMAN_MUX=1'));
+      expect(out.indexOf('export CODEMAN_MUX=1')).toBeLessThan(out.indexOf(`exec ${command}`));
+      // pathExport trailing ' && ' is normalized for the inner command
+      expect(out).not.toContain('" &&   &&');
+    }
+  );
 
   it('leaves shell mode unchanged', () => {
     const out = buildLocalPaneCommand({
@@ -1324,5 +1347,99 @@ describe('COD-276 buildLocalPaneCommand', () => {
       cmd: '$SHELL',
     });
     expect(out).toBe(`${buildNofileLimitCommand()} && export CODEMAN_MUX=1 && $SHELL`);
+  });
+
+  it('nices both controlled Claude resume legs and execs only the final fallback', () => {
+    const base = buildSpawnCommand({
+      mode: 'claude',
+      sessionId: 'new-session',
+      resumeSessionId: 'aaaa-bbbb',
+      claudeCliVersion: null,
+    });
+    const command = wrapSpawnCommandWithNice(base, { enabled: true, niceValue: 7 });
+    expect(command).toBe(
+      'nice -n 7 claude --dangerously-skip-permissions --resume "aaaa-bbbb" || ' +
+        'nice -n 7 claude --dangerously-skip-permissions --session-id "new-session"'
+    );
+
+    const launch = buildLocalPaneCommand({ mode: 'claude', pathExport: '', envExports: [], cmd: command });
+    expect(launch).toContain(
+      'nice -n 7 claude --dangerously-skip-permissions --resume "aaaa-bbbb" || ' +
+        'exec nice -n 7 claude --dangerously-skip-permissions --session-id "new-session"'
+    );
+  });
+});
+
+describe('COD-334 launch transport selection', () => {
+  function builders() {
+    const localResolver = vi.fn();
+    const localBuilder = vi.fn(() => 'local-command');
+    return {
+      localResolver,
+      localBuilder,
+      local: vi.fn(() => {
+        localResolver();
+        return localBuilder();
+      }),
+      remote: vi.fn(() => 'remote-command'),
+      docker: vi.fn(() => 'docker-command'),
+    };
+  }
+
+  it('invokes only the local builder for a local launch', () => {
+    const build = builders();
+    expect(selectLaunchCommand({ local: build.local })).toBe('local-command');
+    expect(build.local).toHaveBeenCalledOnce();
+    expect(build.localResolver).toHaveBeenCalledOnce();
+    expect(build.localBuilder).toHaveBeenCalledOnce();
+    expect(build.remote).not.toHaveBeenCalled();
+    expect(build.docker).not.toHaveBeenCalled();
+  });
+
+  it('invokes only the remote builder for a remote launch', () => {
+    const build = builders();
+    expect(selectLaunchCommand({ local: build.local, remote: build.remote })).toBe('remote-command');
+    expect(build.local).not.toHaveBeenCalled();
+    expect(build.localResolver).not.toHaveBeenCalled();
+    expect(build.localBuilder).not.toHaveBeenCalled();
+    expect(build.remote).toHaveBeenCalledOnce();
+    expect(build.docker).not.toHaveBeenCalled();
+  });
+
+  it('invokes only the Docker builder and gives it precedence', () => {
+    const build = builders();
+    expect(selectLaunchCommand({ local: build.local, remote: build.remote, docker: build.docker })).toBe(
+      'docker-command'
+    );
+    expect(build.local).not.toHaveBeenCalled();
+    expect(build.localResolver).not.toHaveBeenCalled();
+    expect(build.localBuilder).not.toHaveBeenCalled();
+    expect(build.remote).not.toHaveBeenCalled();
+    expect(build.docker).toHaveBeenCalledOnce();
+  });
+});
+
+describe('COD-334 cliNotFoundMessage', () => {
+  type AgentCliMode = Exclude<SessionMode, 'shell'>;
+  const installHints = {
+    claude: 'Claude CLI not found. Install it with: curl -fsSL https://claude.ai/install.sh | bash',
+    opencode: 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
+    codex: 'Codex CLI not found. Install with: npm install -g @openai/codex',
+    gemini: 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli',
+    antigravity: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
+    pi: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
+  } satisfies Record<AgentCliMode, string>;
+  const agentMessages = Object.entries(installHints) as Array<[AgentCliMode, string]>;
+
+  it.each(agentMessages)('maps %s to its detailed wrapper message', (mode, installHint) => {
+    const message = cliNotFoundMessage(mode);
+    expect(message.split('\n')[0]).toBe(installHint);
+    expect(message).toContain('\nServer PATH: ');
+    expect(message).toContain('\nLogin shell: ');
+    expect(message).toContain('\nChecked directories: ');
+  });
+
+  it('rejects shell mode explicitly', () => {
+    expect(() => cliNotFoundMessage('shell')).toThrow('No external CLI error exists for shell mode');
   });
 });

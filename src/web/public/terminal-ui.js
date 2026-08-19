@@ -20,6 +20,30 @@
     console.log(`[mobile][${label}] innerHeight=${window.innerHeight} vv.h=${vv?.height} vv.scale=${vv?.scale} appHeight=${getComputedStyle(document.documentElement).getPropertyValue('--app-height')} dvh=${window.innerHeight}`);
   }
 
+  // ── COD-331 Phase 1 instrumentation ──
+  // Enabled via ?debugEcho, ?debugMobile already covers scroll, or localStorage codeman:debugEcho=1.
+  // Zero cost when disabled (one boolean check per keystroke). When enabled,
+  // counts every classifyPredictInput outcome + anchorHold timing via
+  // _predictiveEcho.debugState + window.codemanEchoDebug helpers.
+  const DEBUG_ECHO =
+    (typeof URLSearchParams !== 'undefined' && typeof location !== 'undefined'
+      ? new URLSearchParams(location.search).has('debugEcho')
+      : false) ||
+    (function () {
+      try {
+        return localStorage.getItem('codeman:debugEcho') === '1';
+      } catch {
+        return false;
+      }
+    })();
+  function debugEchoLog() {
+    if (!DEBUG_ECHO) return;
+    try {
+      // eslint-disable-next-line no-console
+      console.log.apply(console, ['[echo-debug]'].concat([].slice.call(arguments)));
+    } catch {}
+  }
+
   const TERMINAL_QUERY_RESPONSE_PATTERN = /^\x1b\[[\?>=]?[\d;]*[cnR]$/;
   const TERMINAL_OSC_RESPONSE_PATTERN = /^\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\)$/;
   // Pointer and focus reports xterm emits through onData on the terminal's OWN
@@ -108,21 +132,33 @@
   // and wrapped continuation rows (2-space indent) do NOT match — that is
   // the ghost eliminator: no prediction is ever painted there.
   const CODEX_COMPOSER_ROW_RE = /^› /;
+  // OpenCode (Bubble Tea) composer signature: the input row contains "┃" (U+2503 heavy vertical)
+  // — measured on opencode 1.18.18, see harness2: row is "  ┃ ..." with cursor at the bar.
+  // Unlike Codex, there is no fixed prefix; any line containing ┃ is the composer.
+  const OPENCODE_COMPOSER_RE = /\u2503/;
 
   // Classify onData for the predictive echo hook. Terminal query responses
   // never reach this (suppressed earlier in onData); bracketed pastes, nav
   // keys and mouse reports all start with ESC => 'clear'.
+  // Instrumented for COD-331: counts stored on window.CodemanTerminalInput._debugClassify
+  const _debugClassifyCounts = { char: 0, backspace: 0, clear: 0, text: 0, total: 0 };
   function classifyPredictInput(data) {
     const cps = Array.from(data); // astral-safe
+    let kind;
     if (cps.length === 1) {
       const cp = cps[0].codePointAt(0);
-      if (cp === 0x7f) return 'backspace';
-      if (cp >= 0x20) return 'char'; // incl. a single astral emoji
-      return 'clear'; // \r \n \t \x03, bare ESC, ...
-    }
-    if (data.charCodeAt(0) === 0x1b) return 'clear'; // ESC seq: nav, paste, mouse SGR
-    if (data.charCodeAt(0) >= 0x20) return 'text'; // multi-char printable (plain paste,
-    return 'clear'; //   ZWJ emoji cluster): wire only, no visual
+      if (cp === 0x7f) kind = 'backspace';
+      else if (cp >= 0x20) kind = 'char'; // incl. a single astral emoji
+      else kind = 'clear'; // \r \n \t \x03, bare ESC, ...
+    } else if (data.charCodeAt(0) === 0x1b) kind = 'clear'; // ESC seq: nav, paste, mouse SGR
+    else if (data.charCodeAt(0) >= 0x20) kind = 'text'; // multi-char printable (plain paste,
+    else kind = 'clear'; //   ZWJ emoji cluster): wire only, no visual
+    // instrumentation — unconditional cheap increment, no I/O unless debugEcho
+    try {
+      _debugClassifyCounts.total++;
+      _debugClassifyCounts[kind]++;
+    } catch {}
+    return kind;
   }
 
   // Predictive-echo gate: predict only while the cursor sits on the codex
@@ -132,6 +168,16 @@
       const buf = terminal.buffer.active;
       const line = buf.getLine(buf.baseY + buf.cursorY);
       return !!line && CODEX_COMPOSER_ROW_RE.test(line.translateToString(true));
+    } catch {
+      return false;
+    }
+  }
+  // OpenCode composer row: any line containing "┃" (U+2503) is the Bubble Tea input row.
+  function isOpencodeComposerRow(terminal) {
+    try {
+      const buf = terminal.buffer.active;
+      const line = buf.getLine(buf.baseY + buf.cursorY);
+      return !!line && OPENCODE_COMPOSER_RE.test(line.translateToString(true));
     } catch {
       return false;
     }
@@ -201,7 +247,9 @@
     isComposerNavKey,
     classifyPredictInput,
     isCodexComposerRow,
+    isOpencodeComposerRow,
     CODEX_COMPOSER_ROW_RE,
+    OPENCODE_COMPOSER_RE,
     BRACKETED_PASTE_START,
     USER_SCROLL_STICKY_SUPPRESS_MS,
     TOUCH_COMPAT_MOUSE_SUPPRESS_MS,
@@ -213,11 +261,28 @@
     TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM,
     MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR,
     MOBILE_KEYBOARD_DISMISS_TAP_SLOP,
+    _debugClassifyCounts,
   };
   global.CODEMAN_XTERM_THEMES = CODEMAN_XTERM_THEMES;
   global.codemanCurrentXtermTheme = currentXtermTheme;
   global.codemanCurrentSkinIsLight = currentSkinIsLight;
 })(window);
+
+// COD-331 Phase 1 shared helper — visible to CodemanApp.prototype methods (outside the IIFE above)
+function _isDebugEchoEnabled() {
+  try {
+    if (typeof URLSearchParams !== 'undefined' && typeof location !== 'undefined' && new URLSearchParams(location.search).has('debugEcho')) return true;
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('codeman:debugEcho') === '1') return true;
+  } catch {}
+  return false;
+}
+function _debugEchoLogOuter() {
+  if (!_isDebugEchoEnabled()) return;
+  try {
+    // eslint-disable-next-line no-console
+    console.log.apply(console, ['[echo-debug]'].concat([].slice.call(arguments)));
+  } catch {}
+}
 
 Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
@@ -849,6 +914,34 @@ Object.assign(CodemanApp.prototype, {
         if (this.forceFixTyping) return this.forceFixTyping();
         return false;
       };
+    }
+
+    // ── COD-331 Phase 1: echo-debug global (mirrors codemanFixTyping pattern) ──
+    // Usage: ?debugEcho in URL or localStorage codeman:debugEcho=1 enables verbose logs.
+    // In console: codemanEchoDebug() → dumps state, codemanEchoDebug.reset() → clears.
+    // App helper: app.getEchoDebugState() / app.dumpEchoDebugState() / app.resetEchoDebugState()
+    if (!window.codemanEchoDebug) {
+      const self = this;
+      const fn = function () {
+        return self.dumpEchoDebugState ? self.dumpEchoDebugState() : self.getEchoDebugState?.();
+      };
+      fn.get = () => (self.getEchoDebugState ? self.getEchoDebugState() : null);
+      fn.reset = () => (self.resetEchoDebugState ? self.resetEchoDebugState() : null);
+      fn.dump = fn;
+      fn.enable = () => {
+        try { localStorage.setItem('codeman:debugEcho', '1'); } catch {}
+        // eslint-disable-next-line no-console
+        console.log('[echo-debug] enabled — reload or add ?debugEcho for verbose per-key logs');
+        return true;
+      };
+      fn.disable = () => {
+        try { localStorage.removeItem('codeman:debugEcho'); } catch {}
+        // eslint-disable-next-line no-console
+        console.log('[echo-debug] disabled');
+        return true;
+      };
+      window.codemanEchoDebug = fn;
+      if (_isDebugEchoEnabled()) _debugEchoLogOuter('echo-debug enabled (flag ?debugEcho or localStorage). Try codemanEchoDebug() in console.');
     }
 
     // On mobile Safari, delay initial fit() to allow layout to settle
@@ -3953,38 +4046,15 @@ Object.assign(CodemanApp.prototype, {
 
     // Swap prompt finder based on session mode
     if (this._localEchoOverlay && session) {
-      if (session.mode === 'opencode') {
-        // OpenCode (Bubble Tea TUI): find the ┃ border on the cursor's row.
-        // The input area is "┃  <text>" — the ┃ is the anchor, offset 3 skips "┃  ".
-        // We use the cursor row (cursorY) to find the right line, then scan for ┃.
-        this._localEchoOverlay.setPrompt({
-          type: 'custom',
-          offset: 3,
-          find: (terminal) => {
-            try {
-              const buf = terminal.buffer.active;
-              const row = buf.cursorY;
-              const line = buf.getLine(buf.viewportY + row);
-              if (!line) return null;
-              const text = line.translateToString(true);
-              const idx = text.indexOf('\u2503'); // ┃ (BOX DRAWINGS HEAVY VERTICAL)
-              if (idx >= 0) return { row, col: idx };
-              return null;
-            } catch {
-              return null;
-            }
-          },
-        });
-      } else if (session.mode === 'shell' || session.mode === 'codex') {
+      if (session.mode === 'shell') {
         // Shell mode: the shell provides its own PTY echo so the overlay isn't needed.
-        // Codex mode: the composer is fully interactive per keystroke. Typing
-        // "/" pops a live-filtering command picker (issue #222), the composer
-        // grows and rewraps as it fills (#220), pastes are bracketed (#219)
-        // and arrows/history edit server-side state (#218). Buffering
-        // keystrokes until Enter starves all of that, so codex sessions use
-        // plain PTY echo like shell — visually augmented by the predictive
-        // write-through echo (see _localEchoPolicy below and the onData hook).
-        // Disable the buffer overlay by clearing any pending text.
+        this._localEchoOverlay.clear();
+        this._localEchoEnabled = false;
+      } else if (session.mode === 'codex' || session.mode === 'opencode') {
+        // Codex / OpenCode: composers are fully interactive per keystroke (codex:
+        // "/" picker #222, rewrap #220, paste #219, arrows #218; opencode: Bubble Tea
+        // input with ┃). Buffering until Enter starves them, so both use plain PTY echo
+        // augmented by predictive write-through (see _localEchoPolicy below). Disable buffer overlay.
         this._localEchoOverlay.clear();
         this._localEchoEnabled = false;
       } else {
@@ -4018,17 +4088,33 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
-    // Per-session echo policy: 'buffer' (overlay), 'predict' (codex
+    // Per-session echo policy: 'buffer' (overlay), 'predict' (codex/opencode
     // write-through, see the onData predict hook), 'off'. _localEchoEnabled
-    // keeps its exact historical values above (false for codex/shell), so
+    // keeps its exact historical values above (false for codex/shell/opencode), so
     // every existing consumer is unchanged; this field is purely additive.
     let policy = 'off';
     if (session && echoEnabled) {
-      if (session.mode === 'codex') policy = 'predict';
+      if (session.mode === 'codex' || session.mode === 'opencode') policy = 'predict';
       else if (session.mode !== 'shell') policy = 'buffer';
     }
+    // COD-331 instrumentation: count policy transitions and log when debugEcho
+    if (this._localEchoPolicy !== policy && _isDebugEchoEnabled()) {
+      _debugEchoLogOuter(`policy ${this._localEchoPolicy || 'off'} → ${policy} mode=${session?.mode || 'none'}`);
+    }
     this._localEchoPolicy = policy;
+    // COD-331 Phase 2: wire correct composer gate for predictive sessions
+    if (this._predictiveEcho?.setPredictWhen) {
+      if (session?.mode === 'opencode') {
+        this._predictiveEcho.setPredictWhen((t) => window.CodemanTerminalInput.isOpencodeComposerRow(t));
+      } else if (session?.mode === 'codex') {
+        this._predictiveEcho.setPredictWhen((t) => window.CodemanTerminalInput.isCodexComposerRow(t));
+      }
+    }
     if (policy !== 'predict') this._predictiveEcho?.clearPredictions();
+    // lazy-init echo debug counters for this app instance
+    if (!this._echoDebugCounts) {
+      this._echoDebugCounts = { predictHit: 0, predictMiss: 0, totalOnData: 0 };
+    }
   },
 
   /**
@@ -4040,13 +4126,26 @@ Object.assign(CodemanApp.prototype, {
   _predictHookOnData(data) {
     if (this._localEchoPolicy !== 'predict' || !this._predictiveEcho) return;
     try {
+      if (this._echoDebugCounts) this._echoDebugCounts.totalOnData++;
       const kind = window.CodemanTerminalInput.classifyPredictInput(data);
-      if (kind === 'char') this._predictiveEcho.predictChar(data);
-      else if (kind === 'backspace') this._predictiveEcho.predictBackspace();
+      let ok = false;
+      if (kind === 'char') ok = this._predictiveEcho.predictChar(data);
+      else if (kind === 'backspace') ok = this._predictiveEcho.predictBackspace();
       // 'clear' AND 'text' (plain paste, IME word commits) both change the
       // composer in ways the display has not shown yet: clear the run and let
       // the addon's anchor hold suppress prediction until the echo catches up
-      else this._predictiveEcho.clearPredictions();
+      else {
+        this._predictiveEcho.clearPredictions();
+        ok = false;
+      }
+      if (this._echoDebugCounts) {
+        if (ok) this._echoDebugCounts.predictHit++;
+        else this._echoDebugCounts.predictMiss++;
+      }
+      if (_isDebugEchoEnabled() && !ok) {
+        // throttle: only log suppressed chars, not every hit
+        _debugEchoLogOuter(`predict suppressed kind=${kind} char=${JSON.stringify(data)} debug=`, this._predictiveEcho.debugState?.counts || {});
+      }
     } catch {
       /* predictions must never block the wire */
     }
@@ -4181,6 +4280,50 @@ Object.assign(CodemanApp.prototype, {
     // 6. Re-sync echo state
     try { this._updateLocalEchoState?.(); } catch {}
     return true;
+  },
+
+  // ── COD-331 Phase 1: echo-debug helpers (window.codemanEchoDebug) ──
+  getEchoDebugState() {
+    const addon = this._predictiveEcho;
+    const classify = (typeof window !== 'undefined' && window.CodemanTerminalInput?._debugClassifyCounts) || null;
+    const addonState = addon?.state || null;
+    const addonDebug = addon?.debugState || null;
+    const appCounts = this._echoDebugCounts || null;
+    const diag = this.getTypingDiag ? this.getTypingDiag() : null;
+    const hit = appCounts?.predictHit || 0;
+    const miss = appCounts?.predictMiss || 0;
+    const hitRate = hit + miss > 0 ? (hit / (hit + miss)).toFixed(3) : null;
+    return {
+      timestamp: Date.now(),
+      diag,
+      classify: classify ? { ...classify } : null,
+      appCounts: appCounts ? { ...appCounts, hitRate } : null,
+      addonState,
+      addonDebug,
+    };
+  },
+
+  resetEchoDebugState() {
+    try {
+      const c = window.CodemanTerminalInput?._debugClassifyCounts;
+      if (c) { c.char = 0; c.backspace = 0; c.clear = 0; c.text = 0; c.total = 0; }
+    } catch {}
+    try { this._predictiveEcho?.resetDebugState?.(); } catch {}
+    if (this._echoDebugCounts) { this._echoDebugCounts.predictHit = 0; this._echoDebugCounts.predictMiss = 0; this._echoDebugCounts.totalOnData = 0; }
+    if (_isDebugEchoEnabled()) _debugEchoLogOuter('echo debug state reset');
+    return this.getEchoDebugState();
+  },
+
+  dumpEchoDebugState() {
+    const s = this.getEchoDebugState();
+    // eslint-disable-next-line no-console
+    console.log('[echo-debug] state:', JSON.stringify(s, null, 2));
+    if (s.addonDebug?.counts) {
+      const sorted = Object.entries(s.addonDebug.counts).sort((a,b)=>b[1]-a[1]);
+      // eslint-disable-next-line no-console
+      console.table(sorted.map(([reason,count])=>({reason,count})));
+    }
+    return s;
   },
 
   /**

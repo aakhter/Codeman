@@ -16,14 +16,74 @@ import {
 describe('UPLOAD_ALLOWED_EXTENSIONS', () => {
   it('contains exactly the supported document extensions', () => {
     expect([...UPLOAD_ALLOWED_EXTENSIONS].sort()).toEqual(
-      ['docx', 'markdown', 'md', 'pdf', 'pptx', 'txt', 'xlsx'].sort()
+      [
+        'docx',
+        'markdown',
+        'md',
+        'pdf',
+        'pptx',
+        'txt',
+        'xlsx',
+        'py',
+        'js',
+        'ts',
+        'jsx',
+        'tsx',
+        'json',
+        'yaml',
+        'yml',
+        'toml',
+        'ini',
+        'cfg',
+        'conf',
+        'sh',
+        'bash',
+        'zsh',
+        'go',
+        'rs',
+        'java',
+        'c',
+        'cpp',
+        'h',
+        'hpp',
+        'cs',
+        'rb',
+        'php',
+        'swift',
+        'kt',
+        'scala',
+        'sql',
+        'html',
+        'css',
+        'csv',
+      ].sort()
     );
   });
 });
 
 describe('isAllowedUploadExtension', () => {
   it('accepts allowed extensions case-insensitively', () => {
-    for (const ext of ['pdf', 'PDF', 'docx', 'Pptx', 'xlsx', 'XLSX', 'md', 'markdown', 'txt']) {
+    for (const ext of [
+      'pdf',
+      'PDF',
+      'docx',
+      'Pptx',
+      'xlsx',
+      'XLSX',
+      'md',
+      'markdown',
+      'txt',
+      'py',
+      'PY',
+      'js',
+      'JS',
+      'ts',
+      'json',
+      'yaml',
+      'html',
+      'css',
+      'csv',
+    ]) {
       expect(isAllowedUploadExtension(ext)).toBe(true);
     }
   });
@@ -35,7 +95,7 @@ describe('isAllowedUploadExtension', () => {
   });
 
   it('rejects unsupported / unknown extensions', () => {
-    for (const ext of ['exe', 'png', 'js', 'zip', 'doc', 'ppt', 'xls', '']) {
+    for (const ext of ['exe', 'png', 'zip', 'doc', 'ppt', 'xls', '']) {
       expect(isAllowedUploadExtension(ext)).toBe(false);
     }
   });

@@ -16,7 +16,12 @@ import type { SessionPort } from '../ports/session-port.js';
 import { findSessionOrFail, parseBody } from '../route-helpers.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { SessionSourceAddSchema } from '../schemas.js';
-import { documentMagicMatchesExt, isAllowedUploadExtension, sanitizeUploadFilename } from '../document-upload.js';
+import {
+  documentMagicMatchesExt,
+  isAllowedUploadExtension,
+  sanitizeUploadFilename,
+  UPLOAD_ALLOWED_EXTENSIONS,
+} from '../document-upload.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 
 // Per-(IP, sessionId) token bucket for source uploads. Distinct from the
@@ -239,7 +244,7 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: SessionPort): vo
       reply.code(415);
       return createErrorResponse(
         ApiErrorCode.INVALID_INPUT,
-        `Unsupported file type: ${ext || '(none)'}. Allowed: pdf, docx, pptx, xlsx, md, markdown, txt`
+        `Unsupported file type: ${ext || '(none)'}. Allowed: ${[...UPLOAD_ALLOWED_EXTENSIONS].join(', ')}`
       );
     }
 
