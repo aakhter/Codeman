@@ -126,7 +126,6 @@ export function createProductionCliResolverHost(options: ProductionCliResolverHo
     },
     findInLoginShell: (binary) => {
       if (!SAFE_BINARY_NAME.test(binary)) return null;
-      if (process.env.VITEST && !options.runCommand) return null;
       const candidate = parseLoginShellResult(run(shellPath, [...shellArgs, '-c', loginShellCommand(binary)]), binary);
       return candidate && isExecutableFile(candidate) ? candidate : null;
     },

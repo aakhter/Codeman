@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -189,6 +189,38 @@ describe('formatCliNotFoundMessage', () => {
 });
 
 describe('createProductionCliResolverHost', () => {
+  it('contains no ambient VITEST branch in the production resolver source', () => {
+    const source = readFileSync(new URL('../src/utils/cli-executable-resolver.ts', import.meta.url), 'utf8');
+
+    expect(source).not.toContain('process.env.VITEST');
+  });
+
+  it("resolves through the injected login-shell runner when VITEST is 'false'", () => {
+    const hadVitest = Object.hasOwn(process.env, 'VITEST');
+    const previousVitest = process.env.VITEST;
+    process.env.VITEST = 'false';
+    try {
+      const runCommand = vi.fn(() => `${BEGIN_MARKER}\n/home/u/.nvm/bin/codex\n${END_MARKER}`);
+      const productionHost = createProductionCliResolverHost({
+        processPath: '',
+        shellPath: '/bin/bash',
+        shellArgs: ['-i', '-l'],
+        runCommand,
+        isExecutableFile: () => true,
+      });
+      const resolver = createCliExecutableResolver({ binary: 'codex', searchDirs: [] }, productionHost);
+
+      expect(resolver.resolve()).toMatchObject({
+        binaryPath: '/home/u/.nvm/bin/codex',
+        source: 'login-shell',
+      });
+      expect(runCommand).toHaveBeenCalledTimes(1);
+    } finally {
+      if (hadVitest) process.env.VITEST = previousVitest;
+      else delete process.env.VITEST;
+    }
+  });
+
   it('searches the captured process PATH directly in directory order without running a command', () => {
     const runCommand = vi.fn(() => '');
     const isExecutableFile = vi.fn((path: string) => path === '/second/bin/codex');
