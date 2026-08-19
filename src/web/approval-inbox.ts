@@ -14,8 +14,9 @@
  * - Module-level singleton in the style of `session-wait-registry.ts`: no
  *   `Session` import, no IO; the server injects emit callbacks (`onPending`/
  *   `onUpdated`/`onResolved`), which keeps this unit-testable and cycle-free.
- * - Items are in-memory only. A server restart drops them; the next prompt
- *   re-fires the hook. Claude-mode sessions only (hooks fire for nothing else).
+ * - Items are in-memory only. A server restart drops them; the next prompt or
+ *   detected Codex turn-end creates another item. Claude prompts are hook-fed;
+ *   Codex idle prompts are session-transition-fed.
  * - Answer flow is take-then-write: `take()` removes the item BEFORE keystrokes
  *   are sent so a double-tap cannot double-send; `restore()` re-inserts on a
  *   failed write unless a newer prompt arrived meanwhile.
@@ -30,6 +31,7 @@
  */
 
 import { stripAnsi } from '../utils/index.js';
+import type { SessionMode } from '../types.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,8 @@ export interface ApprovalItem {
   sessionId: string;
   sessionName: string;
   kind: ApprovalKind;
+  /** CLI mode that produced the prompt; lets clients localize generated labels. */
+  mode?: SessionMode;
   createdAt: number;
   /** Sanitized hook fields (already bounded by sanitizeHookData). */
   toolName?: string;
@@ -89,6 +93,7 @@ interface NotePromptArgs {
   sessionId: string;
   sessionName: string;
   kind: ApprovalKind;
+  mode?: SessionMode;
   toolName?: string;
   toolSummary?: string;
   message?: string;
@@ -218,6 +223,7 @@ export class ApprovalInbox {
       sessionId: args.sessionId,
       sessionName: args.sessionName,
       kind: args.kind,
+      mode: args.mode,
       createdAt: Date.now(),
       toolName: args.toolName,
       toolSummary: args.toolSummary,
@@ -253,6 +259,9 @@ export class ApprovalInbox {
   verifyStillAnswerable(id: string): boolean {
     const item = this.getById(id);
     if (!item) return false;
+    // Idle prompts have no dialog shape to verify. A very fast terminal-side
+    // Codex turn can therefore leave one stale until the working poller fires,
+    // the session exits, or the 12h TTL expires.
     if (item.kind === 'idle' || !item.options) return true;
     const capture = this.captures.get(item.sessionId);
     if (!capture) return true;

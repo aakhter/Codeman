@@ -141,6 +141,12 @@ export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.j
 
 export type ResizeViewportType = 'mobile' | 'tablet' | 'desktop';
 
+export type SessionIdleReason = 'turn-end' | 'initial-ready' | 'shell-ready';
+
+export interface SessionIdleInfo {
+  reason: SessionIdleReason;
+}
+
 /** Line buffer flush interval (100ms) - forces processing of partial lines */
 const LINE_BUFFER_FLUSH_INTERVAL = 100;
 
@@ -2883,7 +2889,7 @@ export class Session extends EventEmitter {
       this._isWorking = false;
       this._status = 'idle';
       this._lastPromptTime = Date.now();
-      this.emit('idle');
+      this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
     }
   }
 
@@ -3095,7 +3101,7 @@ export class Session extends EventEmitter {
       this._shellIdleTimer = null;
       this._status = 'idle';
       this._isWorking = false;
-      this.emit('idle');
+      this.emit('idle', { reason: 'shell-ready' } satisfies SessionIdleInfo);
     }, 500);
   }
 
@@ -3244,6 +3250,10 @@ export class Session extends EventEmitter {
 
   private _resetBuffers(): void {
     this._status = 'busy';
+    // A Session object can be restarted after its PTY exits. Do not carry a
+    // latched working frame from the previous process into the new startup
+    // quiet window, where it would be misclassified as a completed turn.
+    this._isWorking = false;
     this._terminalBuffer.clear();
     this._textOutput.clear();
     this._errorBuffer = '';
@@ -3352,7 +3362,7 @@ export class Session extends EventEmitter {
         this._isWorking = false;
         this._status = 'idle';
         this._lastPromptTime = Date.now();
-        this.emit('idle');
+        this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
       }
     }, EXTERNAL_CLI_IDLE_DELAY_MS);
   }

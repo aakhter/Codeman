@@ -1688,6 +1688,7 @@ export class WebServer extends EventEmitter {
   /** Build the deps object for session listener wiring. */
   private buildSessionListenerDeps() {
     return {
+      mux: this.mux,
       broadcast: this.broadcast.bind(this),
       batchTerminalData: this.batchTerminalData.bind(this),
       batchTaskUpdate: this.batchTaskUpdate.bind(this),

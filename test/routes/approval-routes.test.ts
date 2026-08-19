@@ -238,6 +238,26 @@ describe('approval routes', () => {
     expect(session.writeBuffer).toEqual(['continue with the plan please\r']);
   });
 
+  it('accepts a text answer for a Codex turn-end idle item', async () => {
+    session.mode = 'codex';
+    const item = approvalInbox.notePrompt({
+      sessionId: SESSION_ID,
+      sessionName: 'Codex session',
+      kind: 'idle',
+      mode: 'codex',
+      capture: () => '› ready for another prompt',
+    });
+
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/approvals/${item.id}/answer`,
+      payload: { action: 'text', text: 'continue' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(session.writeBuffer).toEqual(['continue\r']);
+  });
+
   it('text answers on dialog items are rejected', async () => {
     await postHook(harness, 'elicitation_dialog', {});
     const [item] = await listApprovals(harness);
