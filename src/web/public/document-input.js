@@ -21,7 +21,47 @@ Object.assign(CodemanApp.prototype, {
   // Frontend copy of the server's UPLOAD_ALLOWED_EXTENSIONS (document-upload.ts).
   // Kept in sync with the <input accept> string below; used by the terminal
   // drag/drop splitter in image-input.js to pick documents out of a mixed drop.
-  _documentUploadExtensions: ['pdf', 'docx', 'pptx', 'xlsx', 'md', 'markdown', 'txt'],
+  _documentUploadExtensions: [
+    'pdf',
+    'docx',
+    'pptx',
+    'xlsx',
+    'md',
+    'markdown',
+    'txt',
+    'py',
+    'js',
+    'ts',
+    'jsx',
+    'tsx',
+    'json',
+    'yaml',
+    'yml',
+    'toml',
+    'ini',
+    'cfg',
+    'conf',
+    'sh',
+    'bash',
+    'zsh',
+    'go',
+    'rs',
+    'java',
+    'c',
+    'cpp',
+    'h',
+    'hpp',
+    'cs',
+    'rb',
+    'php',
+    'swift',
+    'kt',
+    'scala',
+    'sql',
+    'html',
+    'css',
+    'csv',
+  ],
 
   // True when a dropped/selected File has an allowlisted document extension.
   // Extension-based (not MIME) because browsers report inconsistent types for
@@ -45,7 +85,7 @@ Object.assign(CodemanApp.prototype, {
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
-      input.accept = '.pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt';
+      input.accept = '.pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.sh,.bash,.zsh,.go,.rs,.java,.c,.cpp,.h,.hpp,.cs,.rb,.php,.swift,.kt,.scala,.sql,.html,.css,.csv';
       input.style.display = 'none';
       input.addEventListener('change', () => {
         // Snapshot into a stable array BEFORE resetting value: input.files is a
