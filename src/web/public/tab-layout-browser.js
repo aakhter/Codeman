@@ -413,6 +413,39 @@
     };
   }
 
+  function filterSessionProjection(projection, matchingSessionIds) {
+    const matches = new Set(asIds(matchingSessionIds));
+    const keep = (ref) => ref?.kind === 'session' && matches.has(ref.id);
+    const sections = (Array.isArray(projection?.sections) ? projection.sections : [])
+      .map((section) => {
+        const refs = [];
+        const refIndices = [];
+        (Array.isArray(section.refs) ? section.refs : []).forEach((ref, index) => {
+          if (!keep(ref)) return;
+          refs.push({ kind: ref.kind, id: ref.id });
+          refIndices.push(section.refIndices?.[index] ?? index);
+        });
+        return { ...section, refs, refIndices, count: refs.length, collapsed: false };
+      })
+      .filter((section) => section.refs.length > 0);
+    const visibleRefs = (Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [])
+      .filter(keep)
+      .map((ref) => ({ kind: ref.kind, id: ref.id }));
+    const focusRefs = (Array.isArray(projection?.focusRefs) ? projection.focusRefs : [])
+      .filter(keep)
+      .map((ref) => ({ kind: ref.kind, id: ref.id }));
+    return {
+      ...projection,
+      visibleRefs,
+      focusRefs,
+      focusCollapsed: false,
+      sections,
+      hiddenTabGroupByRef: {},
+      searchActive: true,
+      matchCount: new Set([...visibleRefs, ...focusRefs].map((ref) => ref.id)).size,
+    };
+  }
+
   function projectFallback(options = {}) {
     const legacy = stableIds(options.legacySessionOrder);
     const live = stableIds(options.liveSessionIds);
@@ -760,6 +793,7 @@
 
   global.CodemanTabLayout = {
     project,
+    filterSessionProjection,
     projectFallback,
     collapsedHash,
     structureKey,
