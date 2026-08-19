@@ -58,6 +58,7 @@ function loadSessionLaunchHarness(
     location?: 'local' | 'remote' | 'docker';
     tabCount?: string;
     shellCount?: string;
+    status?: { available: boolean; error?: string };
   } = {}
 ) {
   const location = options.location ?? 'local';
@@ -84,7 +85,7 @@ function loadSessionLaunchHarness(
       requests.push({ url, method: init.method ?? 'GET', body });
       if (url === '/api/cases/launch-case') return { json: async () => ({ success: true, data: caseData }) };
       if (/^\/api\/(opencode|codex|gemini|antigravity|pi)\/status$/.test(url)) {
-        return { json: async () => ({ success: true, data: { available: true } }) };
+        return { json: async () => ({ success: true, data: options.status ?? { available: true } }) };
       }
       if (url === '/api/sessions' || url === '/api/quick-start') {
         nextSession += 1;
@@ -204,6 +205,66 @@ describe('Run launch synchronization', () => {
     ['runAntigravity', 'local', '/api/quick-start'],
     ['runPi', 'local', '/api/quick-start'],
   ] as const;
+  const statusProbedModes = [
+    [
+      'runOpenCode',
+      '/api/opencode/status',
+      'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
+    ],
+    ['runCodex', '/api/codex/status', 'Codex CLI not found. Install with: npm install -g @openai/codex'],
+    ['runGemini', '/api/gemini/status', 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli'],
+    [
+      'runAntigravity',
+      '/api/antigravity/status',
+      'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
+    ],
+    [
+      'runPi',
+      '/api/pi/status',
+      'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
+    ],
+  ] as const;
+
+  it.each(statusProbedModes)(
+    '%s reports the server resolver diagnostic and does not quick-start',
+    async (method, statusUrl) => {
+      const diagnostic = 'server resolver diagnostic\nServer PATH: /service/bin\nLogin shell: /bin/bash -l';
+      const { app, requests } = loadSessionLaunchHarness({ status: { available: false, error: diagnostic } });
+      app._reportSessionLaunchError = vi.fn();
+
+      await app[method]();
+
+      expect(app._reportSessionLaunchError).toHaveBeenCalledWith(false, diagnostic);
+      expect(requests.map((request) => request.url)).toEqual([statusUrl]);
+    }
+  );
+
+  it.each(statusProbedModes)(
+    '%s retains its static install hint when the server omits error',
+    async (method, statusUrl, hint) => {
+      const { app, requests } = loadSessionLaunchHarness({ status: { available: false } });
+      app._reportSessionLaunchError = vi.fn();
+
+      await app[method]();
+
+      expect(app._reportSessionLaunchError).toHaveBeenCalledWith(false, hint);
+      expect(requests.map((request) => request.url)).toEqual([statusUrl]);
+    }
+  );
+
+  it.each(
+    statusProbedModes.flatMap(([method]) => [
+      [method, 'remote'],
+      [method, 'docker'],
+    ])
+  )('%s skips its local status probe for a %s case and quick-starts', async (method, location) => {
+    const { app, requests } = loadSessionLaunchHarness({ location });
+
+    await app[method]();
+
+    expect(requests.map((request) => request.url)).toEqual(['/api/quick-start']);
+    expect(requests[0]).toMatchObject({ method: 'POST', body: { caseName: 'launch-case' } });
+  });
 
   it.each(dispatchedModes)('forwards the same narrow launch options to %s', async (mode, method) => {
     const { app } = loadRunModeHarness();

@@ -16,7 +16,12 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { buildSpawnCommand } from '../src/tmux-manager.js';
+import {
+  buildCliPathExport,
+  buildLocalPaneCommand,
+  buildRespawnPaneCommand,
+  buildSpawnCommand,
+} from '../src/tmux-manager.js';
 import { loginShellArgs, resolveLocalShell } from '../src/utils/shell-resolver.js';
 
 describe('resolveLocalShell', () => {
@@ -104,6 +109,30 @@ describe('loginShellArgs (#209 login flags, allowlisted)', () => {
   });
 });
 
+describe('COD-334 resolved CLI PATH escaping', () => {
+  const directories = [
+    '/tmp/cli path/bin',
+    "/tmp/cli'path/bin",
+    '/tmp/$(printf should-not-run)/bin',
+    '/tmp/`printf should-not-run`/bin',
+    '/tmp/cli"path/bin',
+  ];
+  const shellescape = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+  it.each(directories)('preserves the exact resolved directory %s as one PATH segment', (directory) => {
+    const pathExport = buildCliPathExport(directory);
+    expect(pathExport).toBe(`export PATH=${shellescape(directory)}:"$PATH" && `);
+
+    const basePath = '/controlled/base/bin';
+    const resolvedPath = execFileSync('/bin/bash', ['-c', `${pathExport}printf '%s' "$PATH"`], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: basePath },
+    });
+    expect(resolvedPath).toBe(`${directory}:${basePath}`);
+    expect(resolvedPath.match(/should-not-run/g)?.length ?? 0).toBe(directory.match(/should-not-run/g)?.length ?? 0);
+  });
+});
+
 describe('shell-mode spawn command (issue #208)', () => {
   const originalShell = process.env.SHELL;
 
@@ -134,13 +163,56 @@ describe('shell-mode spawn command (issue #208)', () => {
 
   it('produces a launch command that parses after the outer sh -c expansion layer', () => {
     const cmd = buildSpawnCommand({ mode: 'shell', sessionId: 'abc123de-0000-0000-0000-000000000000' });
-    // Mirrors tmux-manager: `… bash -c ${JSON.stringify(launchCmd)}` handed to `sh -c`.
-    const launchCmd = `cd ${JSON.stringify('/tmp')} && export CODEMAN_MUX=1 && ${cmd}`;
-    const outer = `bash -n -c ${JSON.stringify(launchCmd)}`;
+    const outer = buildRespawnPaneCommand({
+      tmuxCommand: 'tmux',
+      muxName: 'codeman-abc123de',
+      workingDir: '/tmp',
+      launchCommand: `export CODEMAN_MUX=1 && ${cmd}`,
+      local: true,
+    }).replace('tmux respawn-pane -k -c /tmp -t "codeman-abc123de" bash -c', 'bash -n -c');
 
     // `bash -n` parses without executing: exits 0 on the fix, 2 with the dangling `&&`.
     const result = execFileSync('/bin/sh', ['-c', `${outer}; echo "rc=$?"`], { encoding: 'utf8' });
     expect(result).toContain('rc=0');
     expect(result).not.toContain('unexpected end of file');
+  });
+
+  it('preserves literal PATH and safely quotes a local working directory at the final respawn boundary', () => {
+    const workingDir = "/tmp/project dir/it's safe";
+    const launchCommand = buildLocalPaneCommand({
+      mode: 'claude',
+      pathExport: 'export PATH="/resolved/bin:$PATH" && ',
+      envExports: ['export CODEMAN_MUX=1'],
+      cmd: 'printf agent',
+    });
+    const respawn = buildRespawnPaneCommand({
+      tmuxCommand: 'tmux',
+      muxName: 'codeman-abc123de',
+      workingDir,
+      launchCommand,
+      local: true,
+    });
+    const outerArgument = respawn.slice(respawn.indexOf(' bash -c ') + ' bash -c '.length);
+    const recovered = execFileSync('/bin/sh', ['-c', `printf '%s' ${outerArgument}`], { encoding: 'utf8' });
+
+    expect(recovered).toContain(`cd '/tmp/project dir/it'\\''s safe' && `);
+    expect(recovered).toContain('export PATH="/resolved/bin:$PATH"');
+    expect(recovered).not.toContain(process.env.PATH ?? '__unset_server_path__');
+    expect(() => execFileSync('/bin/sh', ['-n', '-c', recovered])).not.toThrow();
+  });
+
+  it('runs the fallback when the first controlled agent command fails', () => {
+    const launch = buildLocalPaneCommand({
+      mode: 'claude',
+      pathExport: '',
+      envExports: [],
+      cmd: `false || printf 'fallback-ran'`,
+    });
+    expect(
+      execFileSync('/bin/sh', ['-c', launch], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+    ).toContain('fallback-ran');
   });
 });

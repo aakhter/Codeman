@@ -1103,7 +1103,7 @@ Object.assign(CodemanApp.prototype, {
         if (!status.available) {
           this._reportSessionLaunchError(
             ownsLaunchTerminal,
-            'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash'
+            status.error || 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash'
           );
           return;
         }
@@ -1164,7 +1164,7 @@ Object.assign(CodemanApp.prototype, {
         if (!status.available) {
           this._reportSessionLaunchError(
             ownsLaunchTerminal,
-            'Codex CLI not found. Install with: npm install -g @openai/codex'
+            status.error || 'Codex CLI not found. Install with: npm install -g @openai/codex'
           );
           return;
         }
@@ -1226,7 +1226,8 @@ Object.assign(CodemanApp.prototype, {
         if (!status.available) {
           this._reportSessionLaunchError(
             ownsLaunchTerminal,
-            'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
+            status.error ||
+              'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
           );
           return;
         }
@@ -1283,7 +1284,7 @@ Object.assign(CodemanApp.prototype, {
         if (!status.available) {
           this._reportSessionLaunchError(
             ownsLaunchTerminal,
-            'Gemini CLI not found. Install with: npm install -g @google/gemini-cli'
+            status.error || 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli'
           );
           return;
         }
@@ -1349,7 +1350,8 @@ Object.assign(CodemanApp.prototype, {
         if (!status.available) {
           this._reportSessionLaunchError(
             ownsLaunchTerminal,
-            'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+            status.error ||
+              'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
           );
           return;
         }
