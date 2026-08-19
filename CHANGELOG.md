@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.19.9
+
+### Patch Changes
+
+- e0cab9b: Add Codex turn-end prompts to the Approvals Inbox with answer support, localized mode labels, shared pane capture, live tab and mobile alerts, actionless push notifications, restart-safe working-state detection, and same-turn flap suppression.
+
 ## 1.19.8
 
 ### Patch Changes
