@@ -631,13 +631,13 @@ git commit -m "fix(web): COD-334 surface CLI resolution diagnostics"
 
 - Modify: `docs/architecture-invariants.md`
 - Modify: `docs/superpowers/specs/2026-08-19-cod-334-login-shell-cli-resolution-design.md`
-- Create: `docs/superpowers/plans/2026-08-19-cod-334-login-shell-cli-resolution.md`
+- Modify: `docs/superpowers/plans/2026-08-19-cod-334-login-shell-cli-resolution.md`
 
-- [ ] **Step 1: Add the architecture invariant**
+- [x] **Step 1: Add the architecture invariant**
 
 Under “External CLI modes,” document that local availability and local launch share this order: service PATH → agent common directories → interactive login shell; accepted paths are prepended after profile loading; only successes cache; Pi validates every candidate; remote/Docker remain environment-local.
 
-- [ ] **Step 2: Run the focused behavior bundle**
+- [x] **Step 2: Run the focused behavior bundle**
 
 Run:
 
@@ -647,7 +647,7 @@ npm test -- test/cli-executable-resolver.test.ts test/antigravity-cli-resolver.t
 
 Expected: every named file passes. If subprocess tests receive sandbox `EPERM`, rerun this same focused command with the required subprocess permission; do not alter tests to hide the failure.
 
-- [ ] **Step 3: Run static and build gates**
+- [x] **Step 3: Run static and build gates**
 
 Run:
 
@@ -663,7 +663,7 @@ git diff --check
 
 Expected: every command exits zero. Existing documented build warnings may remain only if byte-for-byte unrelated to COD-334.
 
-- [ ] **Step 4: Perform a real minimal-PATH functional check**
+- [x] **Step 4: Perform a real minimal-PATH functional check**
 
 Run a child Node/tsx process with a deliberately minimal `PATH` that omits the actual NVM bin while `HOME` and `SHELL`
 still point at the real user profile. Assert:
@@ -676,7 +676,7 @@ If a full isolated instance is also safe, use `CODEMAN_INSTANCE=cod334-verify`, 
 non-production port, terminate only its exact PID, and confirm the port is released. Otherwise the controlled child proof
 is sufficient. Do not restart or deploy production.
 
-- [ ] **Step 5: Commit documentation and any verification-only test adjustments**
+- [x] **Step 5: Commit documentation and any verification-only test adjustments**
 
 ```bash
 git add -- docs/architecture-invariants.md docs/superpowers/specs/2026-08-19-cod-334-login-shell-cli-resolution-design.md docs/superpowers/plans/2026-08-19-cod-334-login-shell-cli-resolution.md
@@ -686,3 +686,13 @@ git commit -m "docs: COD-334 record shared CLI discovery invariant"
 - [ ] **Step 6: Prepare Jira evidence**
 
 Record the RED failure, GREEN focused tests, static/build results, isolated functional proof, branch name, and final commit hash in COD-334. Keep the issue In Progress until independent review and landing are complete.
+
+## Verification evidence
+
+Verified candidate `a4ccedd85c0f03146cf37fde55ad987ce7939dbf` on branch
+`cod-334-login-shell-cli-resolution`. The initial sandbox bundle recorded 495 passing tests and 19 `EPERM` failures; the
+identical permitted rerun passed 10 files and 514/514 tests. Typecheck, lint, frontend syntax (39/39), lockfile validation,
+targeted Prettier, build, and `git diff --check` all passed; the build emitted only the pre-existing duplicate Chinese
+`Idle` warning. With minimal `PATH=/usr/bin:/bin`, the real login shell resolved
+`/home/aakhter/.nvm/versions/node/v22.22.1/bin`; the final launch kept that same directory as its first `PATH` entry and
+preserved the outer quoting. No production restart/deploy or tmux instance was started.

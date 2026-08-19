@@ -118,7 +118,7 @@ quick-start route can return its own detailed error.
 
 ## Testing
 
-Focused Vitest coverage will prove:
+Focused Vitest coverage proves:
 
 - a CLI available only through a synthetic interactive login shell is resolved;
 - server `PATH` and common-directory candidates keep their precedence;
@@ -126,26 +126,26 @@ Focused Vitest coverage will prove:
 - failures are not cached while successes are;
 - Pi still rejects a non-agent `pi` candidate and accepts a semver-reporting candidate;
 - every local agent mode uses the login-shell pane wrapper;
-- missing-CLI errors include the server `PATH`, login shell, checked directories, and the existing install hint; and
-- unavailable status responses expose that bounded error and each browser launcher displays it;
+- missing-CLI errors include the server `PATH`, login shell, checked directories, and the existing install hint;
+- unavailable status responses expose that bounded error and each browser launcher displays it; and
 - existing route/status and tmux-manager behavior remains green.
 
-Functional verification runs a child Node/tsx process with a deliberately minimal server `PATH` that omits the user's real
-NVM bin, while retaining the real `HOME` and `SHELL`. It imports the worktree Codex resolver, confirms the real Codex
-directory is recovered through the login shell, and inspects the controlled local-pane/final-shell layering to confirm the
-resolved path survives unchanged. An isolated Codeman instance is optional only when it can be run without production
-tmux, socket, data, or port collision. Production deployment is outside COD-334 unless separately authorized.
+Functional verification ran a child Node/tsx process with a deliberately minimal server `PATH` that omitted the user's real
+NVM bin while retaining the real `HOME` and `SHELL`. It imported the worktree Codex resolver, confirmed the real Codex
+directory was recovered through the login shell, and inspected the controlled local-pane/final-shell layering to confirm
+the resolved path survived unchanged. No isolated Codeman instance was needed, and no production tmux, socket, data, port,
+or deployment was touched.
 
-## Files Expected to Change
+## Files Changed
 
-- Create `src/utils/cli-executable-resolver.ts` for shared resolution and diagnostics.
-- Create `test/cli-executable-resolver.test.ts` for resolver behavior.
-- Modify the six files under `src/utils/*-cli-resolver.ts` to delegate to the shared core.
-- Modify `src/tmux-manager.ts` for all-mode login-shell launch and shared diagnostic errors.
-- Modify `src/web/routes/session-routes.ts` to use shared diagnostic errors.
-- Modify `src/web/routes/system-routes.ts` and `src/web/public/session-ui.js` to carry those errors through status preflight.
-- Extend focused resolver, route, browser-launcher, and tmux-manager tests.
-- Update `docs/architecture-invariants.md` with the discovery/launch invariant.
+- Added `src/utils/cli-executable-resolver.ts` for shared resolution and diagnostics.
+- Added `test/cli-executable-resolver.test.ts` for resolver behavior.
+- Modified the six files under `src/utils/*-cli-resolver.ts` to delegate to the shared core.
+- Modified `src/tmux-manager.ts` for all-mode login-shell launch and shared diagnostic errors.
+- Modified `src/web/routes/session-routes.ts` to use shared diagnostic errors.
+- Modified `src/web/routes/system-routes.ts` and `src/web/public/session-ui.js` to carry those errors through status preflight.
+- Extended focused resolver, route, browser-launcher, and tmux-manager tests.
+- Updated `docs/architecture-invariants.md` with the discovery/launch invariant.
 
 ## Rollout and Compatibility
 
