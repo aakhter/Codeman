@@ -1,32 +1,24 @@
 import { resolve } from 'node:path';
-import { configDefaults, defineConfig } from 'vitest/config';
-import { chromiumInstalled } from '../test/mobile/helpers/browser-available.js';
+import { defineConfig } from 'vitest/config';
 
 const root = resolve(import.meta.dirname, '..');
 
-// COD-99: a fresh worktree has the `playwright` package but no browser binary, so the
-// `test/mobile/**` suite (real Chromium via helpers/browser.ts) errors ~280× on a bare
-// `npm test`. When the binary is absent, exclude that suite with a clear message instead —
-// the same thing CI (`vitest.ci.config.ts`) already does — so a browser-less run is clean.
-// Install the browser (`npx playwright install chromium`) to run the mobile suite.
-const skipMobile = !chromiumInstalled();
-if (skipMobile) {
-  console.warn(
-    '[vitest] Playwright Chromium not installed — excluding test/mobile/** (browser suite). ' +
-      'Run `npx playwright install chromium` to enable the mobile tests.'
-  );
-}
-
+/**
+ * EVERY test in the repo, including the ones that cannot pass on an arbitrary
+ * machine — `npm run test:all`. Reach for it when you want the complete picture
+ * and are prepared to read past environmental failures.
+ *
+ * This is NOT what `npm test` runs. On a machine without chromium, a free port
+ * or per-machine PNG baselines this config fails ~87 tests on a clean master,
+ * which makes it useless as a pass/fail signal: the default gate is
+ * config/vitest.ci.config.ts, and the suites it leaves out each have their own
+ * runner (`test:browser`, `test:perf`, `test:mobile`). See config/test-suites.ts.
+ */
 export default defineConfig({
-  // A `@vitest-environment jsdom` file runs under Vite's CLIENT environment
-  // (Vitest 4 maps jsdom -> client), which browser-externalizes `node:*`. These
-  // are Node tests that want a DOM, and the shared test/setup.ts builds a temp
-  // HOME out of node:fs/os/path, so that rewrite killed EVERY jsdom file in the
-  // repo before it collected a test: the externalized id round-trips to the bare
-  // specifier `node:` and throws ERR_UNKNOWN_BUILTIN_MODULE. Resolving them as
-  // genuinely external loads them natively instead. `enforce: 'pre'` is what
-  // makes this win — it has to run before vite's own browser-external resolver.
-  // Keep in sync with config/vitest.ci.config.ts. Guard: test/jsdom-environment.test.ts.
+  // Vite externalizes `node:` builtins for any test declaring a non-node
+  // environment, which breaks the readFileSync-based frontend tests that build
+  // their own JSDOM window (they fail with "No such built-in module: node:").
+  // Marking them external here keeps those files runnable under both configs.
   plugins: [
     {
       name: 'codeman:node-builtins-in-client',
@@ -42,7 +34,6 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['test/**/*.test.ts'],
-    exclude: [...configDefaults.exclude, ...(skipMobile ? ['test/mobile/**'] : [])],
     setupFiles: ['./test/setup.ts'],
     // Run test files sequentially to respect mux session limits
     // Individual tests within files still run in parallel where safe

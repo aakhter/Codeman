@@ -1624,8 +1624,10 @@ export class RespawnController extends EventEmitter {
         const prompt = this.config.kickstartPrompt!;
         this.logAction('command', `Sending kickstart: "${prompt.substring(0, 40)}..."`);
         await this.session.writeViaMux(prompt + '\r'); // \r triggers key.return in Ink/Claude CLI
-        // COD-51: stop() may have run during the await; re-check before reviving the state machine.
-        // Uses the public getter so TS doesn't narrow `_state` across the await (it can't see the mutation).
+        // COD-51: stop() may have run during the await; re-check before reviving the
+        // state machine. Reads the public getter, not `_state`: TypeScript narrows
+        // `_state` across the await from the guard above and cannot see that stop()
+        // mutated it, so the comparison would be flagged as impossible.
         if (this.state === 'stopped') return;
         this.emit('stepSent', 'kickstart', prompt);
         this.setState('waiting_kickstart');
@@ -2836,7 +2838,10 @@ export class RespawnController extends EventEmitter {
         const input = updatePrompt + '\r'; // \r triggers Enter in Ink/Claude CLI
         this.logAction('command', `Sending: "${updatePrompt.substring(0, 50)}..."`);
         await this.session.writeViaMux(input);
-        // COD-51: stop() may have run during the await; re-check before reviving the state machine.
+        // COD-51: stop() may have run during the await; re-check before reviving the
+        // state machine. Reads the public getter, not `_state`: TypeScript narrows
+        // `_state` across the await from the guard above and cannot see that stop()
+        // mutated it, so the comparison would be flagged as impossible.
         if (this.state === 'stopped') return;
         this.emit('stepSent', 'update', updatePrompt);
         this.setState('waiting_update');
@@ -2865,7 +2870,10 @@ export class RespawnController extends EventEmitter {
         if (this._state === 'stopped') return;
         this.logAction('command', 'Sending: /clear');
         await this.session.writeViaMux('/clear\r'); // \r triggers Enter in Ink/Claude CLI
-        // COD-51: stop() may have run during the await; re-check before reviving the state machine.
+        // COD-51: stop() may have run during the await; re-check before reviving the
+        // state machine. Reads the public getter, not `_state`: TypeScript narrows
+        // `_state` across the await from the guard above and cannot see that stop()
+        // mutated it, so the comparison would be flagged as impossible.
         if (this.state === 'stopped') return;
         this.emit('stepSent', 'clear', '/clear');
         this.setState('waiting_clear');
@@ -2909,7 +2917,10 @@ export class RespawnController extends EventEmitter {
         if (this._state === 'stopped') return;
         this.logAction('command', 'Sending: /init');
         await this.session.writeViaMux('/init\r'); // \r triggers Enter in Ink/Claude CLI
-        // COD-51: stop() may have run during the await; re-check before reviving the state machine.
+        // COD-51: stop() may have run during the await; re-check before reviving the
+        // state machine. Reads the public getter, not `_state`: TypeScript narrows
+        // `_state` across the await from the guard above and cannot see that stop()
+        // mutated it, so the comparison would be flagged as impossible.
         if (this.state === 'stopped') return;
         this.emit('stepSent', 'init', '/init');
         this.setState('waiting_init');
