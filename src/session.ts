@@ -271,7 +271,7 @@ export function classifyCodexRenderedState(frame: string | null | undefined): Co
   const plain = frame.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n').replace(ANSI_ESCAPE_PATTERN_FULL, '');
   if (detectCodexCheckpointWorkingFrame(plain)) return 'working';
   if (/^\s*›(?:\s|$)/m.test(plain)) return 'input-ready';
-  if (/^\s*[›❯]\s*1\.\s+[^\n]*(?:\n[^\n]*){0,3}\n\s*2\.(?:\s|$)/m.test(plain)) return 'input-ready';
+  if (/^\s*[›❯]\s*1[.)]\s+[^\n]*(?:\n[^\n]*){0,3}\n\s*2[.)](?:\s|$)/m.test(plain)) return 'input-ready';
   return 'unknown';
 }
 

@@ -43,6 +43,11 @@ describe('Codex rendered state classification', () => {
     expect(classifyCodexRenderedState('Allow this command?\n❯ 1. Yes\n  2. No')).toBe('input-ready');
   });
 
+  it('recognizes parenthesized numbered choices as input-ready', () => {
+    expect(classifyCodexRenderedState('Allow this command?\n› 1) Yes\n  2) No')).toBe('input-ready');
+    expect(classifyCodexRenderedState('Allow this command?\n❯ 1) Yes\n  2) No')).toBe('input-ready');
+  });
+
   it('returns unknown for plain tool output and absent frames', () => {
     expect(classifyCodexRenderedState('Read package.json\nCompleted in 12ms')).toBe('unknown');
     expect(classifyCodexRenderedState(null)).toBe('unknown');
