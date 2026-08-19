@@ -1,7 +1,8 @@
 # COD-338: Vertical Navigation Session-Name Search
 
-**Jira:** COD-338  
-**Date:** 2026-08-19  
+**Jira:** COD-338
+
+**Date:** 2026-08-19
 **Status:** Approved by delegated self-review
 
 ## Problem
