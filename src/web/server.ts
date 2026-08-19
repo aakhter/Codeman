@@ -2433,11 +2433,13 @@ export class WebServer extends EventEmitter {
     // Pre-inbox these buttons rendered and did nothing; stripping them when
     // the feature is off is the honest shape. Cheap: the settings read is
     // cached (~2s TTL) and only taken for events that carry approval parts.
+    const approvalsInboxOnly = data.approvalsInboxOnly === true;
     let approvalsEnabled = false;
-    if (template.actions || typeof data.approvalId === 'string') {
+    if (approvalsInboxOnly || template.actions || typeof data.approvalId === 'string') {
       const settings = await this.readSettings();
       approvalsEnabled = settings.approvalsInboxEnabled === true;
     }
+    if (approvalsInboxOnly && !approvalsEnabled) return;
 
     const vapidKeys = this.pushStore.getVapidKeys();
     webpush.setVapidDetails('mailto:codeman@localhost', vapidKeys.publicKey, vapidKeys.privateKey);

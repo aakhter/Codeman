@@ -97,11 +97,6 @@ interface SessionListenerDeps {
  * Call `attachSessionListeners()` after to wire them to the session.
  */
 export function createSessionListeners(session: Session, deps: SessionListenerDeps): SessionListenerRefs {
-  // Distinguish a genuine next turn from a rendered-frame working/idle flap.
-  // `lastSubmitAt` changes on Enter; it survives acknowledgement and the
-  // working listener's resolution of the visible item.
-  let lastIdleApprovalSubmitAt: number | undefined;
-
   return {
     // ─── Terminal Output ─────────────────────────────────────
 
@@ -254,7 +249,7 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       }
     },
 
-    /** Broadcasts `session:idle` — Claude finished processing, waiting for input */
+    /** Broadcasts `session:idle` — the agent finished processing and is waiting for input */
     idle: (info) => {
       sessionWaits.notifySignal(session.id, 'idle');
       // Codex has no hook equivalent, so only a confirmed working -> idle
@@ -265,7 +260,6 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
         approvalsAvailableForMode(session.mode) &&
         session.mode !== 'claude' &&
         info?.reason === 'turn-end' &&
-        lastIdleApprovalSubmitAt !== session.lastSubmitAt &&
         approvalInbox.getForSession(session.id)?.kind !== 'idle'
       ) {
         const item = approvalInbox.notePrompt({
@@ -275,11 +269,13 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
           mode: session.mode,
           capture: buildPaneCapture(session, deps.mux),
         });
-        lastIdleApprovalSubmitAt = session.lastSubmitAt;
         deps.sendPushNotifications(SseEvent.HookIdlePrompt, {
           sessionId: session.id,
           sessionName: session.name,
           approvalId: item.id,
+          // Claude's hook notification predates the inbox; this inferred
+          // per-turn notification is itself an opt-in inbox surface.
+          approvalsInboxOnly: true,
         });
       }
       deps.broadcast(SseEvent.SessionIdle, { id: session.id });
