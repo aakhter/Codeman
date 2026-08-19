@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CreateSessionSchema, QuickStartSchema } from '../src/web/schemas.js';
 import { buildSpawnCommand } from '../src/tmux-manager.js';
 import { defaultDockerCommandForMode } from '../src/docker-hosts.js';
@@ -8,6 +8,98 @@ import {
   buildRemoteCliVersionProbeCommand,
 } from '../src/remote-hosts.js';
 import { isExternalCliMode, isAltScreenStripMode } from '../src/session.js';
+import { createPiResolverForTest, getPiNotFoundMessage } from '../src/utils/pi-cli-resolver.js';
+import type { CliResolverHost } from '../src/utils/cli-executable-resolver.js';
+
+function createPiResolverHost(
+  options: {
+    processPathCandidate?: string | null;
+    loginShellCandidate?: string | null;
+    existingPaths?: string[];
+  } = {}
+): CliResolverHost {
+  const existingPaths = new Set(options.existingPaths ?? []);
+  return {
+    processPath: '/usr/bin',
+    shellPath: '/bin/bash',
+    shellArgs: ['-l'],
+    findOnProcessPath: () => options.processPathCandidate ?? null,
+    findInLoginShell: () => options.loginShellCandidate ?? null,
+    exists: (path) => existingPaths.has(path),
+  };
+}
+
+describe('Pi CLI resolution', () => {
+  it('rejects generic and common pi candidates before accepting login-shell Pi with its version', () => {
+    const servicePathCandidate = '/usr/bin/pi';
+    const commonCandidate = '/usr/local/bin/pi';
+    const loginShellCandidate = '/home/u/.nvm/bin/pi';
+    const versionProbe = vi.fn((path: string) => (path === loginShellCandidate ? '0.84.1' : null));
+    const resolver = createPiResolverForTest(
+      createPiResolverHost({
+        processPathCandidate: servicePathCandidate,
+        loginShellCandidate,
+        existingPaths: [servicePathCandidate, commonCandidate, loginShellCandidate],
+      }),
+      versionProbe
+    );
+
+    expect(resolver.resolve()).toEqual({
+      binaryPath: loginShellCandidate,
+      directory: '/home/u/.nvm/bin',
+      source: 'login-shell',
+      metadata: '0.84.1',
+    });
+    expect(versionProbe).toHaveBeenCalledWith(servicePathCandidate);
+    expect(versionProbe).toHaveBeenCalledWith(commonCandidate);
+    expect(versionProbe).toHaveBeenCalledWith(loginShellCandidate);
+  });
+
+  it('returns null when every existing Pi candidate fails identity validation', () => {
+    const servicePathCandidate = '/usr/bin/pi';
+    const commonCandidate = '/usr/local/bin/pi';
+    const loginShellCandidate = '/home/u/.nvm/bin/pi';
+    const versionProbe = vi.fn(() => null);
+    const resolver = createPiResolverForTest(
+      createPiResolverHost({
+        processPathCandidate: servicePathCandidate,
+        loginShellCandidate,
+        existingPaths: [servicePathCandidate, commonCandidate, loginShellCandidate],
+      }),
+      versionProbe
+    );
+
+    expect(resolver.resolve()).toBeNull();
+    expect(versionProbe).toHaveBeenCalledWith(servicePathCandidate);
+    expect(versionProbe).toHaveBeenCalledWith(commonCandidate);
+    expect(versionProbe).toHaveBeenCalledWith(loginShellCandidate);
+  });
+
+  it('caches an accepted Pi resolution and its validated version', () => {
+    const loginShellCandidate = '/home/u/.nvm/bin/pi';
+    const versionProbe = vi.fn(() => '0.84.1');
+    const resolver = createPiResolverForTest(
+      createPiResolverHost({
+        loginShellCandidate,
+        existingPaths: [loginShellCandidate],
+      }),
+      versionProbe
+    );
+
+    const first = resolver.resolve();
+    const second = resolver.resolve();
+
+    expect(first?.metadata).toBe('0.84.1');
+    expect(second).toBe(first);
+    expect(versionProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds shared diagnostics after the existing Pi install guidance', () => {
+    expect(getPiNotFoundMessage()).toMatch(
+      /^Pi CLI not found\. Install with: npm install -g --ignore-scripts @earendil-works\/pi-coding-agent\nServer PATH: .+\nLogin shell: .+\nChecked directories: .+$/
+    );
+  });
+});
 
 describe('Pi mode schemas', () => {
   it('accepts Pi session creation config', () => {

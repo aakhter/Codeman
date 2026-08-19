@@ -15,11 +15,15 @@
  * @module utils/pi-cli-resolver
  */
 
-import { execFileSync, execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { EXEC_TIMEOUT_MS } from '../config/exec-timeout.js';
+import {
+  createCliExecutableResolver,
+  formatCliNotFoundMessage,
+  type CliResolverHost,
+} from './cli-executable-resolver.js';
 
 /** Common directories where the Pi CLI binary may be installed */
 const PI_SEARCH_DIRS = [
@@ -45,10 +49,7 @@ const PI_SEARCH_DIRS = [
  */
 export const PI_VERSION_REGEX = /(?:^|\s)(\d+\.\d+\.\d+)/;
 
-/** Cached directory containing the pi binary (empty string = searched but not found) */
-let _piDir: string | null = null;
-/** Cached version string reported by the resolved binary (empty string = probed, unusable) */
-let _piVersion: string | null = null;
+const PI_NOT_FOUND = 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent';
 
 /**
  * Run `pi --version` on a candidate path and return the trimmed version when it
@@ -77,6 +78,29 @@ function probePiVersion(binPath: string): string | null {
   return null;
 }
 
+type PiVersionProbe = (binPath: string) => string | null;
+
+function createPiResolver(host?: CliResolverHost, versionProbe: PiVersionProbe = probePiVersion) {
+  return createCliExecutableResolver<string>(
+    {
+      binary: 'pi',
+      searchDirs: PI_SEARCH_DIRS,
+      validateCandidate: (binPath) => {
+        const version = versionProbe(binPath);
+        return version ? { accepted: true, metadata: version } : { accepted: false };
+      },
+    },
+    host
+  );
+}
+
+/** Creates an isolated Pi wrapper around an injected resolver host and version probe. */
+export function createPiResolverForTest(host: CliResolverHost, versionProbe: PiVersionProbe) {
+  return createPiResolver(host, versionProbe);
+}
+
+const piResolver = createPiResolver();
+
 /**
  * Finds the directory containing a verified `pi` binary.
  * Checks `which pi` first, then falls back to common install locations. Every
@@ -86,46 +110,7 @@ function probePiVersion(binPath: string): string | null {
  * @returns Directory path, or null if not found
  */
 export function resolvePiDir(): string | null {
-  if (_piDir !== null) return _piDir || null;
-
-  const accept = (binPath: string): string | null => {
-    // Under vitest the probe never runs, so existence alone decides (keeps the
-    // suites hermetic and matches how the sibling resolvers behave there).
-    if (process.env.VITEST) {
-      _piDir = dirname(binPath);
-      _piVersion = '';
-      return _piDir;
-    }
-    const version = probePiVersion(binPath);
-    if (!version) return null;
-    _piDir = dirname(binPath);
-    _piVersion = version;
-    return _piDir;
-  };
-
-  try {
-    const result = execSync('which pi', {
-      encoding: 'utf-8',
-      timeout: EXEC_TIMEOUT_MS,
-    }).trim();
-    if (result && existsSync(result)) {
-      const dir = accept(result);
-      if (dir) return dir;
-    }
-  } catch {
-    // pi not in PATH, will check common locations
-  }
-
-  for (const dir of PI_SEARCH_DIRS) {
-    const binPath = join(dir, 'pi');
-    if (!existsSync(binPath)) continue;
-    const accepted = accept(binPath);
-    if (accepted) return accepted;
-  }
-
-  _piDir = '';
-  _piVersion = '';
-  return null;
+  return piResolver.resolve()?.directory ?? null;
 }
 
 /**
@@ -135,12 +120,15 @@ export function isPiAvailable(): boolean {
   return resolvePiDir() !== null;
 }
 
+export function getPiNotFoundMessage(): string {
+  return formatCliNotFoundMessage(PI_NOT_FOUND, piResolver.diagnostics());
+}
+
 /**
  * Version reported by the resolved `pi` binary, or null when pi is unavailable
  * (or when the probe was skipped, i.e. under vitest). Surfaced through
  * `GET /api/pi/status` so a misresolution is diagnosable from the UI.
  */
 export function getPiCliVersion(): string | null {
-  resolvePiDir();
-  return _piVersion || null;
+  return piResolver.resolve()?.metadata ?? null;
 }
