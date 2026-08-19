@@ -3,9 +3,31 @@
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { createAntigravityResolverForTest } from '../src/utils/antigravity-cli-resolver.js';
-import type { CliResolverHost } from '../src/utils/cli-executable-resolver.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createAntigravityResolverForTest, isAntigravityAvailable } from '../src/utils/antigravity-cli-resolver.js';
+import type { CliResolution, CliResolverHost } from '../src/utils/cli-executable-resolver.js';
+
+const availabilityResolution = vi.hoisted(() => ({ current: null as CliResolution | null }));
+
+vi.mock('../src/utils/cli-executable-resolver.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/cli-executable-resolver.js')>();
+  return {
+    ...actual,
+    createCliExecutableResolver: (options: { binary: string; searchDirs: string[] }, host?: CliResolverHost) =>
+      host
+        ? actual.createCliExecutableResolver(options, host)
+        : {
+            resolve: () => availabilityResolution.current,
+            diagnostics: () => ({
+              binary: options.binary,
+              processPath: '/service/bin',
+              shellPath: '/bin/zsh',
+              shellArgs: ['-l'],
+              searchDirs: [...options.searchDirs],
+            }),
+          },
+  };
+});
 
 function createHost(
   options: {
@@ -27,6 +49,10 @@ function createHost(
 }
 
 describe('Antigravity CLI resolver', () => {
+  beforeEach(() => {
+    availabilityResolution.current = null;
+  });
+
   it('resolves agy from the service PATH', () => {
     const binaryPath = '/service/bin/agy';
     const resolver = createAntigravityResolverForTest(
@@ -67,5 +93,19 @@ describe('Antigravity CLI resolver', () => {
     expect(resolver.resolve()).toBeNull();
     expect(resolver.resolve()?.binaryPath).toBe(binaryPath);
     expect(resolver.resolve()?.binaryPath).toBe(binaryPath);
+  });
+
+  it('reports the public wrapper as available when agy resolves', () => {
+    availabilityResolution.current = {
+      binaryPath: '/service/bin/agy',
+      directory: '/service/bin',
+      source: 'process-path',
+    };
+
+    expect(isAntigravityAvailable()).toBe(true);
+  });
+
+  it('reports the public wrapper as unavailable when agy does not resolve', () => {
+    expect(isAntigravityAvailable()).toBe(false);
   });
 });
