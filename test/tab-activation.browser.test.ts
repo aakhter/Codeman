@@ -324,6 +324,7 @@ describe('COD-316 full-row tab activation in Chromium', () => {
       }
       const control = webview.locator(selector);
       expect(await control.isVisible()).toBe(true);
+      await expect.poll(() => control.evaluate((element) => Number(getComputedStyle(element).opacity))).toBe(1);
       await control.click();
       expect(await page.evaluate(() => (window as any).__action)).toBe(expected);
       expect(await page.evaluate(() => (window as any).__activation)).toBeNull();

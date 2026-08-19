@@ -141,6 +141,12 @@ export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.j
 
 export type ResizeViewportType = 'mobile' | 'tablet' | 'desktop';
 
+export type SessionIdleReason = 'turn-end' | 'initial-ready' | 'shell-ready';
+
+export interface SessionIdleInfo {
+  reason: SessionIdleReason;
+}
+
 /** Line buffer flush interval (100ms) - forces processing of partial lines */
 const LINE_BUFFER_FLUSH_INTERVAL = 100;
 
@@ -229,6 +235,16 @@ export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): 
     // and sometimes unit-less "Working (31 • …)" (COD-175 prod screenshot), so
     // only anchor on "Working (<digits>" plus the interrupt hint in-parens.
     return /\bWorking \(\d+[^)\n]*esc to interrupt\)/.test(data);
+  }
+  if (mode === 'opencode') {
+    // Opencode Bubble Tea TUI — see OPENCODE_WORKING_LINE_PATTERN for
+    // rationale. Any single hit proves working; absence proves nothing.
+    // Import is cycle-free (same file) — inline to avoid cross-module import.
+    if (/\besc to interrupt\b/i.test(data)) return true;
+    if (/\bWorking\b/.test(data)) return true;
+    if (/…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/.test(data)) return true;
+    if (SPINNER_PATTERN.test(data)) return true;
+    return false;
   }
   return false;
 }
@@ -2765,7 +2781,15 @@ export class Session extends EventEmitter {
     // quiet-window timer, which is what ends the turn when frames stop — hence
     // the branch rather than two independent ifs.
     if (detectExternalCliWorkingFrame(data, this.mode)) this._noteExternalWorkingFrame();
-    else if (SPINNER_PATTERN.test(data)) this._markWorking();
+    else if (SPINNER_PATTERN.test(data)) {
+      // For external CLIs the spinner must also re-arm the quiet-window
+      // timer — otherwise the session latches busy forever because only
+      // _noteExternalWorkingFrame arms the idle timer (observed on
+      // idle opencode panes that emit a stray braille char in their
+      // Bubble Tea chrome).
+      if (isExternalCliMode(this.mode)) this._noteExternalWorkingFrame();
+      else this._markWorking();
+    }
 
     // Activity fallback: current Claude Code animates `✻ Actualizing…` instead of a
     // braille spinner, so the fast path above misses entire turns, and matching the
@@ -2865,7 +2889,7 @@ export class Session extends EventEmitter {
       this._isWorking = false;
       this._status = 'idle';
       this._lastPromptTime = Date.now();
-      this.emit('idle');
+      this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
     }
   }
 
@@ -3077,7 +3101,7 @@ export class Session extends EventEmitter {
       this._shellIdleTimer = null;
       this._status = 'idle';
       this._isWorking = false;
-      this.emit('idle');
+      this.emit('idle', { reason: 'shell-ready' } satisfies SessionIdleInfo);
     }, 500);
   }
 
@@ -3226,6 +3250,10 @@ export class Session extends EventEmitter {
 
   private _resetBuffers(): void {
     this._status = 'busy';
+    // A Session object can be restarted after its PTY exits. Do not carry a
+    // latched working frame from the previous process into the new startup
+    // quiet window, where it would be misclassified as a completed turn.
+    this._isWorking = false;
     this._terminalBuffer.clear();
     this._textOutput.clear();
     this._errorBuffer = '';
@@ -3334,7 +3362,7 @@ export class Session extends EventEmitter {
         this._isWorking = false;
         this._status = 'idle';
         this._lastPromptTime = Date.now();
-        this.emit('idle');
+        this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
       }
     }, EXTERNAL_CLI_IDLE_DELAY_MS);
   }

@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   SessionWaitRegistry,
   WaitCapacityError,
+  approvalsAvailableForMode,
   hooksAvailableForMode,
   parseWaitSignals,
   resolveWaitSignals,
@@ -114,6 +115,20 @@ describe('hooksAvailableForMode', () => {
   it('is false for every external CLI mode', () => {
     for (const mode of ['opencode', 'codex', 'gemini', 'antigravity'] as const) {
       expect(hooksAvailableForMode(mode)).toBe(false);
+    }
+  });
+});
+
+describe('approvalsAvailableForMode', () => {
+  it('accepts Claude and Codex without widening hook-only wait support', () => {
+    expect(approvalsAvailableForMode('claude')).toBe(true);
+    expect(approvalsAvailableForMode('codex')).toBe(true);
+    expect(hooksAvailableForMode('codex')).toBe(false);
+  });
+
+  it('rejects modes that do not have approval ingestion', () => {
+    for (const mode of ['shell', 'opencode', 'gemini', 'antigravity', 'pi'] as const) {
+      expect(approvalsAvailableForMode(mode)).toBe(false);
     }
   });
 });

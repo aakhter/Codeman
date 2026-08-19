@@ -729,8 +729,8 @@ describe('Codex idle transition (COD-175)', () => {
   }
 
   it('clears isWorking and emits idle after working frames stop', () => {
-    const idleEvents: number[] = [];
-    session.on('idle', () => idleEvents.push(Date.now()));
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     feed('• Working (2s • esc to interrupt)');
     expect(session.isWorking).toBe(true);
@@ -748,6 +748,26 @@ describe('Codex idle transition (COD-175)', () => {
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
     expect(idleEvents.length).toBe(1);
+    expect(idleEvents[0]).toEqual({ reason: 'turn-end' });
+  });
+
+  it('clears stale working state before labeling a restarted CLI as initially ready', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+    const internals = session as unknown as {
+      _resetBuffers(): void;
+      _armExternalCliIdleTimer(): void;
+    };
+
+    feed('• Working (2s • esc to interrupt)');
+    expect(session.isWorking).toBe(true);
+
+    internals._resetBuffers();
+    expect(session.isWorking).toBe(false);
+    internals._armExternalCliIdleTimer();
+    vi.advanceTimersByTime(6_000);
+
+    expect(idleEvents).toEqual([{ reason: 'initial-ready' }]);
   });
 
   it('re-enters working on the next turn after going idle', () => {
@@ -825,8 +845,8 @@ describe('COD-181 remote working-frame poller', () => {
   });
 
   it('flips to idle via the quiet window once the Working line disappears', () => {
-    const idleEvents: number[] = [];
-    session.on('idle', () => idleEvents.push(Date.now()));
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
     vi.advanceTimersByTime(4_200);
@@ -837,6 +857,7 @@ describe('COD-181 remote working-frame poller', () => {
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
     expect(idleEvents.length).toBe(1);
+    expect(idleEvents[0]).toEqual({ reason: 'turn-end' });
   });
 
   it('never flips busy from an idle frame', () => {

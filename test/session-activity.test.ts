@@ -141,8 +141,8 @@ describe('Session interactive idle detection', () => {
   it('goes idle once the pane falls silent', () => {
     vi.useFakeTimers();
     const session = new Session({ workingDir: '/tmp', mode: 'claude' });
-    const events: string[] = [];
-    session.on('idle', () => events.push('idle'));
+    const events: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => events.push(info ?? {}));
 
     for (let i = 0; i < 5; i++) {
       feed(session, COMPOSER_REPAINT);
@@ -153,7 +153,7 @@ describe('Session interactive idle detection', () => {
     // Turn over: nothing more is emitted.
     vi.advanceTimersByTime(IDLE_SILENCE_MS + 1000);
 
-    expect(events).toEqual(['idle']);
+    expect(events).toEqual([{ reason: 'turn-end' }]);
     expect(session.status).toBe('idle');
   });
 
