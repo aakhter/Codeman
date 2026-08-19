@@ -1,5 +1,11 @@
 # xterm-zerolag-input
 
+## 0.3.1
+
+### Patch Changes
+
+- Add predictive echo and typing-lag instrumentation for OpenCode, harden agent CLI discovery through login shells, derive source titles from selected filenames, and add live session-name search to the resizable vertical tab rail with collapsed-group discovery and state restoration.
+
 ## 0.3.0
 
 ### Minor Changes
