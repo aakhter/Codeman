@@ -52,6 +52,10 @@ describe('Codex rendered state classification', () => {
     expect(classifyCodexRenderedState('Allow this command?\n  1. Yes\n❯ 2. No')).toBe('input-ready');
   });
 
+  it('recognizes a multi-option dialog after selection moves to option 3', () => {
+    expect(classifyCodexRenderedState('Choose a scope:\n  1. File\n  2. Folder\n❯ 3. Workspace')).toBe('input-ready');
+  });
+
   it('returns unknown for plain tool output and absent frames', () => {
     expect(classifyCodexRenderedState('Read package.json\nCompleted in 12ms')).toBe('unknown');
     expect(classifyCodexRenderedState(null)).toBe('unknown');

@@ -265,14 +265,41 @@ export function detectCodexCheckpointWorkingFrame(data: string): boolean {
 
 export type CodexRenderedState = 'working' | 'input-ready' | 'unknown';
 
+const CODEX_NUMBERED_CHOICE_LINE_PATTERN = /^\s*([›❯])?\s*([1-6])[.)](?:\s|$)/;
+
+function hasCodexNumberedChoiceBlock(frame: string): boolean {
+  const lines = frame.split(NEWLINE_SPLIT_PATTERN);
+  for (let start = 0; start < lines.length; start++) {
+    const firstOption = lines[start].match(CODEX_NUMBERED_CHOICE_LINE_PATTERN);
+    if (firstOption?.[2] !== '1') continue;
+
+    let expectedOption = 1;
+    let optionCount = 0;
+    let selectionVisible = false;
+    let previousOptionLine = start - 1;
+    for (let lineIndex = start; lineIndex < lines.length && expectedOption <= 6; lineIndex++) {
+      if (lineIndex - previousOptionLine > 4) break;
+      const option = lines[lineIndex].match(CODEX_NUMBERED_CHOICE_LINE_PATTERN);
+      if (!option) continue;
+      if (Number(option[2]) !== expectedOption) break;
+
+      optionCount++;
+      selectionVisible ||= Boolean(option[1]);
+      previousOptionLine = lineIndex;
+      expectedOption++;
+      if (optionCount >= 2 && selectionVisible) return true;
+    }
+  }
+  return false;
+}
+
 export function classifyCodexRenderedState(frame: string | null | undefined): CodexRenderedState {
   if (!frame) return 'unknown';
 
   const plain = frame.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n').replace(ANSI_ESCAPE_PATTERN_FULL, '');
   if (detectCodexCheckpointWorkingFrame(plain)) return 'working';
   if (/^\s*›(?:\s|$)/m.test(plain)) return 'input-ready';
-  if (/^\s*[›❯]\s*1[.)]\s+[^\n]*(?:\n[^\n]*){0,3}\n\s*2[.)](?:\s|$)/m.test(plain)) return 'input-ready';
-  if (/^\s*1[.)]\s+[^\n]*(?:\n[^\n]*){0,3}\n\s*[›❯]\s*2[.)](?:\s|$)/m.test(plain)) return 'input-ready';
+  if (hasCodexNumberedChoiceBlock(plain)) return 'input-ready';
   return 'unknown';
 }
 
