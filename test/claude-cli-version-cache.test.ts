@@ -14,17 +14,60 @@
  * The probe itself can't run under vitest (it would spawn a real `claude`), so
  * these drive the cache policy directly with an injected probe and clock.
  */
+import { delimiter } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   claudeVersionRetryDelayMs,
+  getAugmentedPath,
   getClaudeCliVersion,
   resolveClaudeCliVersion,
   type ClaudeVersionProbeState,
 } from '../src/utils/claude-cli-resolver.js';
+import type { CliResolution } from '../src/utils/cli-executable-resolver.js';
+
+const claudeResolution = vi.hoisted(() => ({ current: null as CliResolution | null }));
+
+vi.mock('../src/utils/cli-executable-resolver.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/cli-executable-resolver.js')>();
+  return {
+    ...actual,
+    createCliExecutableResolver: (options: { binary: string; searchDirs: string[] }) => ({
+      resolve: () => claudeResolution.current,
+      diagnostics: () => ({
+        binary: options.binary,
+        processPath: '/service/bin',
+        shellPath: '/bin/zsh',
+        shellArgs: ['-l'],
+        searchDirs: [...options.searchDirs],
+      }),
+    }),
+  };
+});
 
 const freshState = (): ClaudeVersionProbeState => ({ failures: 0, lastFailureAt: 0 });
 
 describe('claude --version probe caching', () => {
+  it('does not cache an unmodified PATH after discovery misses', () => {
+    const originalPath = process.env.PATH;
+    const servicePath = ['/service/bin', '/usr/bin'].join(delimiter);
+    process.env.PATH = servicePath;
+    claudeResolution.current = null;
+
+    try {
+      expect(getAugmentedPath()).toBe(servicePath);
+
+      claudeResolution.current = {
+        binaryPath: '/profile/bin/claude',
+        directory: '/profile/bin',
+        source: 'login-shell',
+      };
+      expect(getAugmentedPath()).toBe(['/profile/bin', servicePath].join(delimiter));
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
   it('probes once on success and never spawns again', () => {
     const state = freshState();
     const probe = vi.fn(() => '2.1.223');

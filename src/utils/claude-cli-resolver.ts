@@ -81,7 +81,9 @@ export function getAugmentedPath(): string {
   const currentPath = process.env.PATH || '';
   const claudeDir = findClaudeDir();
 
-  if (claudeDir && !currentPath.split(delimiter).includes(claudeDir)) {
+  if (!claudeDir) return currentPath;
+
+  if (!currentPath.split(delimiter).includes(claudeDir)) {
     _augmentedPath = `${claudeDir}${delimiter}${currentPath}`;
     return _augmentedPath;
   }
