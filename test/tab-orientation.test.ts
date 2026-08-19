@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
+import { JSDOM } from 'jsdom';
 
 const indexHtml = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
 const stylesCss = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
@@ -80,6 +81,30 @@ describe('vertical tab rail wiring (COD-286)', () => {
     expect(indexHtml.indexOf('<main class="main">')).toBeLessThan(indexHtml.indexOf('id="tabRail"'));
   });
 
+  it('places an accessible session search before the moved vertical tab list', () => {
+    const document = new JSDOM(indexHtml).window.document;
+    const rail = document.getElementById('tabRail');
+    const search = document.getElementById('tabRailSessionSearch');
+    const clear = document.getElementById('tabRailSessionSearchClear');
+    const tabs = document.getElementById('sessionTabs');
+
+    expect(search).not.toBeNull();
+    expect(search?.closest('#tabRail')).toBe(rail);
+    expect(search?.getAttribute('aria-label')).toBe('Search sessions');
+    expect(clear?.tagName).toBe('BUTTON');
+    expect(clear?.getAttribute('aria-label')).toBe('Clear session search');
+    expect(applyTabOrientationBody()).toContain('rail.appendChild(tabsEl)');
+    expect(rail?.compareDocumentPosition(search as Node) & 16).toBeTruthy();
+    expect(tabs?.closest('#tabRail')).toBeNull();
+  });
+
+  it('shows the search wrapper only for the vertical tab orientation', () => {
+    expect(stylesCss).toMatch(/\.tab-rail-session-search\s*\{[\s\S]*?display:\s*none/);
+    expect(stylesCss).toMatch(
+      /html\[data-tab-orientation='vertical'\]\s+\.tab-rail-session-search\s*\{[\s\S]*?display:\s*flex/
+    );
+  });
+
   it('offers an orientation picker in App Settings', () => {
     expect(indexHtml).toContain('id="appSettingsTabOrientation"');
     expect(indexHtml).toContain('<option value="horizontal">');
@@ -107,6 +132,10 @@ describe('vertical tab rail wiring (COD-286)', () => {
 
   it('re-fits the terminal when the orientation changes', () => {
     expect(applyTabOrientationBody()).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);
+  });
+
+  it('clears an active vertical-rail search before horizontal rendering', () => {
+    expect(applyTabOrientationBody()).toMatch(/orientation\s*!==\s*'vertical'[\s\S]*_clearTabRailSessionSearchState/);
   });
 
   it('is applied on load alongside the other tab settings', () => {

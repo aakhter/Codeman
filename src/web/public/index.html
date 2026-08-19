@@ -367,6 +367,30 @@
            MOVES the one #sessionTabs strip in here (never clones it) when the
            orientation setting is vertical, so every tab behaviour keeps working. -->
       <div class="tab-rail" id="tabRail">
+        <div class="tab-rail-session-search" id="tabRailSessionSearchWrap">
+          <input
+            id="tabRailSessionSearch"
+            class="tab-rail-session-search-input"
+            type="search"
+            placeholder="Search sessions"
+            aria-label="Search sessions"
+            autocomplete="off"
+            spellcheck="false"
+            oninput="app.setTabRailSessionSearch(this.value)"
+          />
+          <button
+            id="tabRailSessionSearchClear"
+            class="tab-rail-session-search-clear"
+            type="button"
+            aria-label="Clear session search"
+            title="Clear session search"
+            onclick="app.clearTabRailSessionSearch()"
+            hidden
+          >&times;</button>
+        </div>
+        <div id="tabRailSessionSearchEmpty" class="tab-rail-session-search-empty" role="status" hidden>
+          No sessions match
+        </div>
         <div
           class="tab-rail-resize-handle"
           id="tabRailResizeHandle"

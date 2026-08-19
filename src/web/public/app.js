@@ -548,6 +548,7 @@ class CodemanApp {
     this.tabLayoutReadOnly = true;
     this.collapsedTabGroupIds = new Set();
     this.focusTabGroupCollapsed = false;
+    this._tabRailSessionSearch = '';
     this._tabCollapseStorageFailed = false;
     this._visibleTabRefs = [];
     this._tabLayoutManaged = true;
@@ -5676,25 +5677,72 @@ class CodemanApp {
     return document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
   }
 
+  _tabRailSessionSearchNeedle() {
+    return String(this._tabRailSessionSearch || '').trim().toLocaleLowerCase();
+  }
+
+  _isTabRailSessionSearchActive() {
+    return this._tabOrientation() === 'vertical' && this._tabRailSessionSearchNeedle().length > 0;
+  }
+
+  setTabRailSessionSearch(value = '') {
+    this._tabRailSessionSearch = String(value);
+    const input = document.getElementById('tabRailSessionSearch');
+    if (input && input.value !== this._tabRailSessionSearch) input.value = this._tabRailSessionSearch;
+    this._lastTabStructureKey = null;
+    this._fullRenderSessionTabs();
+  }
+
+  _clearTabRailSessionSearchState(options = {}) {
+    this._tabRailSessionSearch = '';
+    const input = document.getElementById('tabRailSessionSearch');
+    if (input) input.value = '';
+    this._updateTabRailSessionSearchControls();
+    this._lastTabStructureKey = null;
+    if (options.render !== false) this._fullRenderSessionTabs();
+    if (options.restoreFocus === true) input?.focus();
+  }
+
+  clearTabRailSessionSearch() {
+    this._clearTabRailSessionSearchState({ restoreFocus: true });
+  }
+
+  _updateTabRailSessionSearchControls(projection) {
+    const active = this._isTabRailSessionSearchActive();
+    const clear = document.getElementById('tabRailSessionSearchClear');
+    const empty = document.getElementById('tabRailSessionSearchEmpty');
+    if (clear) clear.hidden = !active;
+    if (empty) empty.hidden = !(active && projection?.matchCount === 0);
+  }
+
   _projectTabLayout() {
     const deferredCreatedSessionIds = this._deferredCreatedSessionIds || new Set();
+    const orientation = this._tabOrientation();
+    const searchActive = orientation === 'vertical' && this._tabRailSessionSearchNeedle().length > 0;
     const options = {
       liveSessionIds: [...this.sessions.keys()].filter((id) => !deferredCreatedSessionIds.has(id)),
       legacySessionOrder: this._legacySessionOrder,
       openWebviewIds: [...(this.webviewOrder || [])].filter((id) => this.webviews?.has(id)),
-      collapsedGroupIds: [...this.collapsedTabGroupIds],
+      collapsedGroupIds: searchActive ? [] : [...this.collapsedTabGroupIds],
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
-      orientation: this._tabOrientation(),
-      focusCollapsed: this.focusTabGroupCollapsed,
+      orientation,
+      focusCollapsed: searchActive ? false : this.focusTabGroupCollapsed,
     };
-    return this.tabLayout
+    const projection = this.tabLayout
       ? window.CodemanTabLayout.project(this.tabLayout, options)
       : window.CodemanTabLayout.projectFallback({
           legacySessionOrder: this._legacySessionOrder,
           liveSessionIds: options.liveSessionIds,
           openWebviewIds: options.openWebviewIds,
         });
+    if (!searchActive) return projection;
+    const needle = this._tabRailSessionSearchNeedle();
+    const matchingSessionIds = options.liveSessionIds.filter((id) => {
+      const session = this.sessions.get(id);
+      return session && this.getSessionName(session).toLocaleLowerCase().includes(needle);
+    });
+    return window.CodemanTabLayout.filterSessionProjection(projection, matchingSessionIds);
   }
 
   _releaseDeferredCreatedSessions(layout) {
@@ -5824,6 +5872,7 @@ class CodemanApp {
   }
 
   toggleTabGroupCollapsed(groupId, forceCollapsed) {
+    if (this._isTabRailSessionSearchActive()) return false;
     if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
     const next = new Set(this.collapsedTabGroupIds);
     const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
@@ -5841,6 +5890,7 @@ class CodemanApp {
   }
 
   toggleFocusGroupCollapsed(forceCollapsed) {
+    if (this._isTabRailSessionSearchActive()) return false;
     const shouldCollapse = forceCollapsed === undefined ? !this.focusTabGroupCollapsed : forceCollapsed === true;
     const storage = this._getTabCollapseStorage();
     const saved = storage
@@ -6698,6 +6748,7 @@ class CodemanApp {
     this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
     const projection = this._refreshTabProjection();
+    this._updateTabRailSessionSearchControls(projection);
     const structureKey = this._tabStructureKey(projection);
 
     // Sidebar rows are always tall (name + folder) and never wrap. Re-assert it
