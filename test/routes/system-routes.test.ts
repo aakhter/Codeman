@@ -1010,6 +1010,30 @@ describe('system-routes', () => {
       });
       expect(resolveDir).toHaveBeenCalledTimes(1);
     });
+
+    it('keeps the legacy agy alias coherent when Antigravity is unavailable', async () => {
+      mockedResolveAntigravityDir.mockReturnValue(null);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/agy/status' });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({
+        available: false,
+        path: null,
+        error: 'Antigravity resolver diagnostic',
+      });
+      expect(mockedResolveAntigravityDir).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the legacy agy alias coherent when Antigravity is available', async () => {
+      mockedResolveAntigravityDir.mockReturnValue('/usr/local/bin');
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/agy/status' });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ available: true, path: '/usr/local/bin' });
+      expect(mockedResolveAntigravityDir).toHaveBeenCalledTimes(1);
+    });
   });
 
   // ========== GET /api/execution/model-config ==========

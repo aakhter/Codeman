@@ -49,6 +49,16 @@ const remoteStore = vi.hoisted(() => ({
   }>,
   tmuxCheck: { ok: true, tmuxPath: '/usr/bin/tmux' } as { ok: boolean; tmuxPath?: string; error?: string },
 }));
+const dockerStore = vi.hoisted(() => ({
+  hosts: [] as Array<{ id: string; label: string; engine: 'docker'; image: string }>,
+  cases: [] as Array<{
+    name: string;
+    type: 'docker';
+    hostId: string;
+    hostWorkspacePath: string;
+    containerWorkdir?: string;
+  }>,
+}));
 const cliAvailability = vi.hoisted(() => ({
   opencode: true,
   codex: true,
@@ -68,6 +78,14 @@ vi.mock('../../src/remote-hosts.js', async (orig) => {
     readRemoteHosts: vi.fn(async () => remoteStore.hosts),
     readRemoteCases: vi.fn(async () => remoteStore.cases),
     checkRemoteTmuxAvailable: vi.fn(async () => remoteStore.tmuxCheck),
+  };
+});
+vi.mock('../../src/docker-hosts.js', async (orig) => {
+  const actual = await orig<typeof import('../../src/docker-hosts.js')>();
+  return {
+    ...actual,
+    readDockerHosts: vi.fn(async () => dockerStore.hosts),
+    readDockerCases: vi.fn(async () => dockerStore.cases),
   };
 });
 vi.mock('../../src/web/heic-jpeg-converter.js', () => ({ convertHeicToJpeg: heicConvert }));
@@ -99,6 +117,11 @@ vi.mock('../../src/utils/pi-cli-resolver.js', async (orig) => ({
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
+import { isOpenCodeAvailable } from '../../src/utils/opencode-cli-resolver.js';
+import { isCodexAvailable } from '../../src/utils/codex-cli-resolver.js';
+import { isGeminiAvailable } from '../../src/utils/gemini-cli-resolver.js';
+import { isAntigravityAvailable } from '../../src/utils/antigravity-cli-resolver.js';
+import { isPiAvailable } from '../../src/utils/pi-cli-resolver.js';
 
 interface LocalHarness {
   app: FastifyInstance;
@@ -158,10 +181,14 @@ describe('session-routes', () => {
   beforeEach(async () => {
     remoteStore.hosts = [];
     remoteStore.cases = [];
+    dockerStore.hosts = [];
+    dockerStore.cases = [];
     harness = await createEnvelopeHarness(registerSessionRoutes);
     // Reset remote store so tests start with empty hosts/cases and a passing tmux probe
     remoteStore.hosts = [];
     remoteStore.cases = [];
+    dockerStore.hosts = [];
+    dockerStore.cases = [];
     remoteStore.tmuxCheck = { ok: true, tmuxPath: '/usr/bin/tmux' };
     Object.assign(cliAvailability, {
       opencode: true,
@@ -2690,6 +2717,74 @@ and effort involved in moving workloads.
         remotePath: '/home/ubuntu/work',
         commands: { codex: 'exec case-codex' },
       });
+    });
+
+    const externalQuickStartModes = [
+      ['opencode', 'OpenCode resolver diagnostic', isOpenCodeAvailable],
+      ['codex', 'Codex resolver diagnostic', isCodexAvailable],
+      ['gemini', 'Gemini resolver diagnostic', isGeminiAvailable],
+      ['antigravity', 'Antigravity resolver diagnostic', isAntigravityAvailable],
+      ['pi', 'Pi resolver diagnostic', isPiAvailable],
+    ] as const;
+
+    it.each(externalQuickStartModes)(
+      'returns the exact %s resolver diagnostic for a local quick-start preflight',
+      async (mode, diagnostic) => {
+        cliAvailability[mode] = false;
+
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName: 'missing-local-case', mode },
+        });
+
+        expect(res.statusCode).toBe(422);
+        expect(JSON.parse(res.body)).toMatchObject({ success: false, error: diagnostic });
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(
+      externalQuickStartModes.flatMap(([mode, , probe]) => [
+        [mode, 'remote', probe],
+        [mode, 'docker', probe],
+      ])
+    )('skips the local %s resolver probe for a %s quick-start', async (mode, location, probe) => {
+      cliAvailability[mode] = false;
+      const caseName = `${location}-${mode}`;
+      const expectedPath = `/work/${caseName}`;
+      if (location === 'remote') {
+        remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+        remoteStore.cases = [{ name: caseName, type: 'remote', hostId: 'gpu-box', remotePath: expectedPath }];
+      } else {
+        dockerStore.hosts = [
+          { id: 'docker-local', label: 'Docker Local', engine: 'docker', image: 'codeman/agent:base' },
+        ];
+        dockerStore.cases = [
+          {
+            name: caseName,
+            type: 'docker',
+            hostId: 'docker-local',
+            hostWorkspacePath: expectedPath,
+          },
+        ];
+      }
+      const startInteractive = vi.spyOn(Session.prototype, 'startInteractive').mockResolvedValue(undefined);
+
+      try {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName, mode },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body).data.casePath).toBe(expectedPath);
+        expect(probe).not.toHaveBeenCalled();
+        expect(startInteractive).toHaveBeenCalledTimes(1);
+      } finally {
+        startInteractive.mockRestore();
+      }
     });
 
     it('COD-179: passes the creating browser dims through to Session initialDims', async () => {

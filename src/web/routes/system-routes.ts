@@ -463,10 +463,13 @@ export function registerSystemRoutes(
   // Legacy alias kept so an older cached frontend keeps working after the
   // agy -> antigravity rename (session-ui.js still probes /api/agy/status).
   app.get('/api/agy/status', async () => {
-    const { isAntigravityAvailable, resolveAntigravityDir } = await import('../../utils/antigravity-cli-resolver.js');
+    const { resolveAntigravityDir, getAntigravityNotFoundMessage } =
+      await import('../../utils/antigravity-cli-resolver.js');
+    const path = resolveAntigravityDir();
     return {
-      available: isAntigravityAvailable(),
-      path: resolveAntigravityDir(),
+      available: path !== null,
+      path,
+      ...(path === null ? { error: getAntigravityNotFoundMessage() } : {}),
     };
   });
 

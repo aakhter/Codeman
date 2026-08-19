@@ -252,6 +252,20 @@ describe('Run launch synchronization', () => {
     }
   );
 
+  it.each(
+    statusProbedModes.flatMap(([method]) => [
+      [method, 'remote'],
+      [method, 'docker'],
+    ])
+  )('%s skips its local status probe for a %s case and quick-starts', async (method, location) => {
+    const { app, requests } = loadSessionLaunchHarness({ location });
+
+    await app[method]();
+
+    expect(requests.map((request) => request.url)).toEqual(['/api/quick-start']);
+    expect(requests[0]).toMatchObject({ method: 'POST', body: { caseName: 'launch-case' } });
+  });
+
   it.each(dispatchedModes)('forwards the same narrow launch options to %s', async (mode, method) => {
     const { app } = loadRunModeHarness();
     const launchOptions = { count: 1, tabGroupId: 'work' };
