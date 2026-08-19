@@ -47,6 +47,7 @@ import {
   type PaneInfo,
   type ClaudeMode,
   type SessionMode,
+  type NiceConfig,
   type OpenCodeConfig,
   type CodexConfig,
   type GeminiConfig,
@@ -89,6 +90,7 @@ import {
   getGeminiNotFoundMessage,
   getAntigravityNotFoundMessage,
   getPiNotFoundMessage,
+  assertNever,
 } from './utils/index.js';
 import type {
   TerminalMultiplexer,
@@ -1123,14 +1125,19 @@ export function buildSpawnCommand(options: {
 
 /** Whether a mode launches an external agent CLI whose env must be inherited. */
 function isAgentCliMode(mode: SessionMode): boolean {
-  return (
-    mode === 'claude' ||
-    mode === 'opencode' ||
-    mode === 'codex' ||
-    mode === 'gemini' ||
-    mode === 'antigravity' ||
-    mode === 'pi'
-  );
+  switch (mode) {
+    case 'claude':
+    case 'opencode':
+    case 'codex':
+    case 'gemini':
+    case 'antigravity':
+    case 'pi':
+      return true;
+    case 'shell':
+      return false;
+    default:
+      return assertNever(mode);
+  }
 }
 
 /** Detailed resolver diagnostics for an external agent CLI that could not be found. */
@@ -1149,9 +1156,53 @@ export function cliNotFoundMessage(mode: SessionMode): string {
     case 'pi':
       return getPiNotFoundMessage();
     case 'shell':
-    default:
       throw new Error('No external CLI error exists for shell mode');
+    default:
+      return assertNever(mode);
   }
+}
+
+/** Apply process priority to both legs of the controlled Claude resume fallback. */
+export function wrapSpawnCommandWithNice(command: string, config: NiceConfig): string {
+  const legs = command.split(' || ');
+  if (legs.length === 2 && legs.every((leg) => leg.startsWith('claude '))) {
+    return legs.map((leg) => wrapWithNice(leg, config)).join(' || ');
+  }
+  return wrapWithNice(command, config);
+}
+
+/** Select exactly one transport builder without evaluating callbacks for discarded transports. */
+export function selectLaunchCommand(options: {
+  local: () => string;
+  remote?: () => string;
+  docker?: () => string;
+}): string {
+  if (options.docker) return options.docker();
+  if (options.remote) return options.remote();
+  return options.local();
+}
+
+/** Build the final tmux respawn command while preserving launch text through the outer server shell. */
+export function buildRespawnPaneCommand(options: {
+  tmuxCommand: string;
+  muxName: string;
+  workingDir: string;
+  launchCommand: string;
+  local: boolean;
+}): string {
+  const launchCommand = options.local
+    ? `cd ${shellescape(options.workingDir)} && ${options.launchCommand}`
+    : options.launchCommand;
+  return `${options.tmuxCommand} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${options.muxName}" bash -c ${shellescape(launchCommand)}`;
+}
+
+/** Keep the controlled Claude resume fallback in its shell; only the final successful leg replaces it. */
+function buildLocalAgentExecCommand(mode: SessionMode, command: string): string {
+  const legs = command.split(' || ');
+  if (mode === 'claude' && legs.length === 2) {
+    return `${legs[0]} || exec ${legs[1]}`;
+  }
+  return `exec ${command}`;
 }
 
 /**
@@ -1175,7 +1226,8 @@ export function buildLocalPaneCommand(opts: {
     const loginArgs = loginShellArgs(shell);
     // Run Codeman's path/export AFTER the profile so Codeman-controlled values still
     // win; the trailing exec keeps the pane PID as the agent CLI itself.
-    const body = [opts.pathExport.replace(/ && $/, ''), ...opts.envExports, `exec ${opts.cmd}`]
+    const agentCommand = buildLocalAgentExecCommand(opts.mode, opts.cmd);
+    const body = [opts.pathExport.replace(/ && $/, ''), ...opts.envExports, agentCommand]
       .filter((s) => s.trim().length > 0)
       .join(' && ');
     return `${nofile} && exec ${shellescape(shell)}${loginArgs} -c ${shellescape(body)}`;
@@ -2249,63 +2301,66 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return session;
     }
 
-    // Resolve CLI binary directory based on mode
-    const { pathExport, dir: cliDir } = this.buildPathExport(mode);
-    if (isAgentCliMode(mode) && !cliDir) {
-      throw new Error(cliNotFoundMessage(mode));
-    }
+    const local = !remote && !docker;
 
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
     // live desired state (toggle + proxy health) right before spawn so a down proxy
     // leaves codex on the direct chatgpt.com path.
-    if (mode === 'codex') {
+    if (local && mode === 'codex') {
       await reconcileCodexHeadroomPatch();
     }
 
-    const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
-    const headroomRouted =
-      mode === 'claude'
+    const headroomClaudeUrl = local ? await resolveHeadroomClaudeBaseUrl(mode) : undefined;
+    const headroomRouted = local
+      ? mode === 'claude'
         ? headroomClaudeUrl !== undefined
         : mode === 'codex'
           ? await resolveHeadroomRouted('codex')
-          : undefined;
-    const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
-
-    const baseCmd = buildSpawnCommand({
-      mode,
-      sessionId,
-      model,
-      claudeMode,
-      allowedTools,
-      openCodeConfig,
-      codexConfig,
-      geminiConfig,
-      antigravityConfig,
-      piConfig,
-      resumeSessionId,
-      effort,
-      sessionName: name,
-    });
-
-    const config = niceConfig || DEFAULT_NICE_CONFIG;
-    const cmd = wrapWithNice(baseCmd, config);
+          : undefined
+      : undefined;
 
     try {
-      // Build the full command to run inside tmux
-      const localFullCmd = buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
-      const fullCmd = docker
-        ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
-        : remote
-          ? buildRemoteSessionCommand(mode, remote, sessionId, {
-              codexConfig,
-              openCodeConfig,
-              geminiConfig,
-              antigravityConfig,
-              claudeMode,
-              allowedTools,
-              historyLimit,
-            })
-          : localFullCmd;
+      const fullCmd = selectLaunchCommand({
+        local: () => {
+          const { pathExport, dir } = this.buildPathExport(mode);
+          if (isAgentCliMode(mode) && !dir) {
+            throw new Error(cliNotFoundMessage(mode));
+          }
+          const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
+          const baseCmd = buildSpawnCommand({
+            mode,
+            sessionId,
+            model,
+            claudeMode,
+            allowedTools,
+            openCodeConfig,
+            codexConfig,
+            geminiConfig,
+            antigravityConfig,
+            piConfig,
+            resumeSessionId,
+            effort,
+            sessionName: name,
+          });
+          const cmd = wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
+          return buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
+        },
+        remote: remote
+          ? () =>
+              buildRemoteSessionCommand(mode, remote, sessionId, {
+                codexConfig,
+                openCodeConfig,
+                geminiConfig,
+                antigravityConfig,
+                claudeMode,
+                allowedTools,
+                historyLimit,
+              })
+          : undefined,
+        docker: docker
+          ? () => buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
+          : undefined,
+      });
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
@@ -2368,17 +2423,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Replace the shell with the actual command (no echo in terminal). Keep
       // pane launch in /tmp, then cd inside bash against the current mount table.
-      // COD-282: remote/docker launchCmd contains `$`, `$(...)` and `${...}` (REMOTE_LOGIN_SHELL_RESOLVE, $HOME, $login_shell)
-      // that must NOT be expanded by the local `bash -c "..."` outer layer. JSON.stringify wraps in double quotes
-      // where `$()` still expands even inside single quotes inside the double quotes, corrupting the remote
-      // command to `login_shell=""` / `exec ""` (exit 126). Use single-quote shellescape for remote/docker so `$`
-      // stays literal until the remote shell evaluates it; local shells have no `$` and keep JSON.stringify for
-      // backwards compat with existing tests.
-      const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      const outerShellArg = remote || docker ? shellescape(launchCmd) : JSON.stringify(launchCmd);
-      await execAsync(`${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${outerShellArg}`, {
-        timeout: EXEC_TIMEOUT_MS,
-      });
+      await execAsync(
+        buildRespawnPaneCommand({
+          tmuxCommand: this.tmux(),
+          muxName,
+          workingDir,
+          launchCommand: fullCmd,
+          local,
+        }),
+        { timeout: EXEC_TIMEOUT_MS }
+      );
 
       // Wait for tmux session to be queryable
       await new Promise((resolve) => setTimeout(resolve, TMUX_CREATION_WAIT_MS));
@@ -2555,56 +2609,61 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return null;
     }
 
-    // Resolve CLI binary directory based on mode
-    const { pathExport } = this.buildPathExport(mode);
+    const local = !remote && !docker;
 
     // COD-254: Codex routing lives in the shared config.toml patch. Reconcile it
     // before calculating this respawn's snapshot or launching its replacement,
     // so the persisted/UI state matches the process that actually starts.
-    if (mode === 'codex') {
+    if (local && mode === 'codex') {
       await reconcileCodexHeadroomPatch();
     }
 
-    const headroomClaudeUrl = await resolveHeadroomClaudeBaseUrl(mode);
-    const headroomRouted =
-      mode === 'claude'
+    const headroomClaudeUrl = local ? await resolveHeadroomClaudeBaseUrl(mode) : undefined;
+    const headroomRouted = local
+      ? mode === 'claude'
         ? headroomClaudeUrl !== undefined
         : mode === 'codex'
           ? await resolveHeadroomRouted('codex')
-          : undefined;
-    const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
-
-    const baseCmd = buildSpawnCommand({
-      mode,
-      sessionId,
-      model,
-      claudeMode,
-      allowedTools,
-      openCodeConfig,
-      codexConfig,
-      geminiConfig,
-      antigravityConfig,
-      piConfig,
-      resumeSessionId,
-      effort,
-      sessionName: name,
+          : undefined
+      : undefined;
+    const fullCmd = selectLaunchCommand({
+      local: () => {
+        const { pathExport } = this.buildPathExport(mode);
+        const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
+        const baseCmd = buildSpawnCommand({
+          mode,
+          sessionId,
+          model,
+          claudeMode,
+          allowedTools,
+          openCodeConfig,
+          codexConfig,
+          geminiConfig,
+          antigravityConfig,
+          piConfig,
+          resumeSessionId,
+          effort,
+          sessionName: name,
+        });
+        const cmd = wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
+        return buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
+      },
+      remote: remote
+        ? () =>
+            buildRemoteSessionCommand(mode, remote, sessionId, {
+              codexConfig,
+              openCodeConfig,
+              geminiConfig,
+              antigravityConfig,
+              claudeMode,
+              allowedTools,
+              historyLimit,
+            })
+        : undefined,
+      docker: docker
+        ? () => buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
+        : undefined,
     });
-    const config = niceConfig || DEFAULT_NICE_CONFIG;
-    const cmd = wrapWithNice(baseCmd, config);
-    const localFullCmd = buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
-    const fullCmd = docker
-      ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
-      : remote
-        ? buildRemoteSessionCommand(mode, remote, sessionId, {
-            codexConfig,
-            openCodeConfig,
-            geminiConfig,
-            antigravityConfig,
-            claudeMode,
-            allowedTools,
-            historyLimit,
-          })
-        : localFullCmd;
 
     try {
       // For OpenCode: set sensitive env vars via tmux setenv before respawn
@@ -2628,11 +2687,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         /* Non-critical — keeps existing tmux history-limit */
       });
 
-      // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
-      const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;
-      const outerShellArg2 = remote || docker ? shellescape(launchCmd) : JSON.stringify(launchCmd);
       await execAsync(
-        `${this.tmux()} respawn-pane -k -c ${TMUX_LAUNCH_CWD} -t "${muxName}" bash -c ${outerShellArg2}`,
+        buildRespawnPaneCommand({
+          tmuxCommand: this.tmux(),
+          muxName,
+          workingDir,
+          launchCommand: fullCmd,
+          local,
+        }),
         {
           timeout: EXEC_TIMEOUT_MS,
         }

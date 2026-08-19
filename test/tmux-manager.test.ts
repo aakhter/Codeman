@@ -13,6 +13,7 @@ import {
   buildCodexCommand,
   buildRemoteKillCommand,
   buildRemoteLaunchCommand,
+  buildSpawnCommand,
   buildLocalPaneCommand,
   buildNofileLimitCommand,
   cliNotFoundMessage,
@@ -24,6 +25,8 @@ import {
   readTmuxCodexProviderEnvironment,
   resolveActivePaneTarget,
   resolveTmuxPaneTarget,
+  selectLaunchCommand,
+  wrapSpawnCommandWithNice,
 } from '../src/tmux-manager.js';
 import type { SessionMode } from '../src/types.js';
 import { loginShellArgs, resolveLocalShell } from '../src/utils/index.js';
@@ -975,7 +978,8 @@ describe('TmuxManager (unit)', () => {
           ([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane ')
         );
         expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abc12345"`);
-        expect(respawnCall?.[0]).toContain('cd \\"/mnt/gdrive/project with spaces\\" &&');
+        expect(respawnCall?.[0]).toContain("bash -c 'cd '\\''");
+        expect(respawnCall?.[0]).toContain('/mnt/gdrive/project with spaces');
       } finally {
         nonTestManager.destroy();
       }
@@ -1007,7 +1011,8 @@ describe('TmuxManager (unit)', () => {
           .mocked(currentExec)
           .mock.calls.find(([cmd]) => typeof cmd === 'string' && cmd.includes(' respawn-pane '));
         expect(respawnCall?.[0]).toContain(`tmux -L 'codeman' respawn-pane -k -c /tmp -t "codeman-abcd1234"`);
-        expect(respawnCall?.[0]).toContain('cd \\"/mnt/gdrive/project\\" &&');
+        expect(respawnCall?.[0]).toContain("bash -c 'cd '\\''");
+        expect(respawnCall?.[0]).toContain('/mnt/gdrive/project');
       } finally {
         nonTestManager.destroy();
       }
@@ -1343,6 +1348,75 @@ describe('COD-276 buildLocalPaneCommand', () => {
     });
     expect(out).toBe(`${buildNofileLimitCommand()} && export CODEMAN_MUX=1 && $SHELL`);
   });
+
+  it('nices both controlled Claude resume legs and execs only the final fallback', () => {
+    const base = buildSpawnCommand({
+      mode: 'claude',
+      sessionId: 'new-session',
+      resumeSessionId: 'aaaa-bbbb',
+      claudeCliVersion: null,
+    });
+    const command = wrapSpawnCommandWithNice(base, { enabled: true, niceValue: 7 });
+    expect(command).toBe(
+      'nice -n 7 claude --dangerously-skip-permissions --resume "aaaa-bbbb" || ' +
+        'nice -n 7 claude --dangerously-skip-permissions --session-id "new-session"'
+    );
+
+    const launch = buildLocalPaneCommand({ mode: 'claude', pathExport: '', envExports: [], cmd: command });
+    expect(launch).toContain(
+      'nice -n 7 claude --dangerously-skip-permissions --resume "aaaa-bbbb" || ' +
+        'exec nice -n 7 claude --dangerously-skip-permissions --session-id "new-session"'
+    );
+  });
+});
+
+describe('COD-334 launch transport selection', () => {
+  function builders() {
+    const localResolver = vi.fn();
+    const localBuilder = vi.fn(() => 'local-command');
+    return {
+      localResolver,
+      localBuilder,
+      local: vi.fn(() => {
+        localResolver();
+        return localBuilder();
+      }),
+      remote: vi.fn(() => 'remote-command'),
+      docker: vi.fn(() => 'docker-command'),
+    };
+  }
+
+  it('invokes only the local builder for a local launch', () => {
+    const build = builders();
+    expect(selectLaunchCommand({ local: build.local })).toBe('local-command');
+    expect(build.local).toHaveBeenCalledOnce();
+    expect(build.localResolver).toHaveBeenCalledOnce();
+    expect(build.localBuilder).toHaveBeenCalledOnce();
+    expect(build.remote).not.toHaveBeenCalled();
+    expect(build.docker).not.toHaveBeenCalled();
+  });
+
+  it('invokes only the remote builder for a remote launch', () => {
+    const build = builders();
+    expect(selectLaunchCommand({ local: build.local, remote: build.remote })).toBe('remote-command');
+    expect(build.local).not.toHaveBeenCalled();
+    expect(build.localResolver).not.toHaveBeenCalled();
+    expect(build.localBuilder).not.toHaveBeenCalled();
+    expect(build.remote).toHaveBeenCalledOnce();
+    expect(build.docker).not.toHaveBeenCalled();
+  });
+
+  it('invokes only the Docker builder and gives it precedence', () => {
+    const build = builders();
+    expect(selectLaunchCommand({ local: build.local, remote: build.remote, docker: build.docker })).toBe(
+      'docker-command'
+    );
+    expect(build.local).not.toHaveBeenCalled();
+    expect(build.localResolver).not.toHaveBeenCalled();
+    expect(build.localBuilder).not.toHaveBeenCalled();
+    expect(build.remote).not.toHaveBeenCalled();
+    expect(build.docker).toHaveBeenCalledOnce();
+  });
 });
 
 describe('COD-334 cliNotFoundMessage', () => {
@@ -1365,8 +1439,7 @@ describe('COD-334 cliNotFoundMessage', () => {
     expect(message).toContain('\nChecked directories: ');
   });
 
-  it('rejects shell and unknown modes explicitly', () => {
+  it('rejects shell mode explicitly', () => {
     expect(() => cliNotFoundMessage('shell')).toThrow('No external CLI error exists for shell mode');
-    expect(() => cliNotFoundMessage('unknown' as SessionMode)).toThrow('No external CLI error exists for shell mode');
   });
 });
