@@ -30,6 +30,23 @@ function createPiResolverHost(
 }
 
 describe('Pi CLI resolution', () => {
+  it('accepts an existing candidate under Vitest when using the hermetic default probe', () => {
+    const servicePathCandidate = '/usr/bin/pi';
+    const resolver = createPiResolverForTest(
+      createPiResolverHost({
+        processPathCandidate: servicePathCandidate,
+        existingPaths: [servicePathCandidate],
+      })
+    );
+
+    expect(resolver.resolve()).toEqual({
+      binaryPath: servicePathCandidate,
+      directory: '/usr/bin',
+      source: 'process-path',
+      metadata: undefined,
+    });
+  });
+
   it('rejects generic and common pi candidates before accepting login-shell Pi with its version', () => {
     const servicePathCandidate = '/usr/bin/pi';
     const commonCandidate = '/usr/local/bin/pi';

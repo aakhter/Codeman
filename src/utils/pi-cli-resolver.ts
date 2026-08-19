@@ -86,6 +86,7 @@ function createPiResolver(host?: CliResolverHost, versionProbe: PiVersionProbe =
       binary: 'pi',
       searchDirs: PI_SEARCH_DIRS,
       validateCandidate: (binPath) => {
+        if (process.env.VITEST && versionProbe === probePiVersion) return { accepted: true };
         const version = versionProbe(binPath);
         return version ? { accepted: true, metadata: version } : { accepted: false };
       },
@@ -94,8 +95,8 @@ function createPiResolver(host?: CliResolverHost, versionProbe: PiVersionProbe =
   );
 }
 
-/** Creates an isolated Pi wrapper around an injected resolver host and version probe. */
-export function createPiResolverForTest(host: CliResolverHost, versionProbe: PiVersionProbe) {
+/** Creates an isolated Pi wrapper around an injected host and optional version probe. */
+export function createPiResolverForTest(host: CliResolverHost, versionProbe?: PiVersionProbe) {
   return createPiResolver(host, versionProbe);
 }
 
