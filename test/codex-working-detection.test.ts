@@ -865,7 +865,7 @@ describe('Codex idle transition (COD-175)', () => {
 
 describe('COD-181 remote working-frame poller', () => {
   let session: Session;
-  let frame: string;
+  let frame: string | null;
 
   const WORKING_FRAME =
     '\x1b[1m•\x1b[0m \x1b[1mWorking\x1b[0m (3m 12s • esc to interrupt) · 1 background terminal running\r\n' +
@@ -954,6 +954,21 @@ describe('COD-181 remote working-frame poller', () => {
     frame = WORKING_FRAME;
     vi.advanceTimersByTime(2_100);
     frame = 'tool output with no current Codex UI';
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(session.isWorking).toBe(true);
+    expect(session.status).toBe('busy');
+    expect(idleEvents).toEqual([]);
+  });
+
+  it('stays busy across quiet windows when pane capture is unavailable', () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+
+    frame = WORKING_FRAME;
+    vi.advanceTimersByTime(2_100);
+    frame = null;
 
     vi.advanceTimersByTime(20_000);
 
