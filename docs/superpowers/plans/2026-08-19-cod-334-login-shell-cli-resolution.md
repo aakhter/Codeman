@@ -4,7 +4,7 @@
 
 **Goal:** Make all six local agent CLIs resolve and launch through the logged-in user's interactive login-shell environment, with actionable missing-executable diagnostics.
 
-**Architecture:** Add one injectable resolver factory that checks the server PATH, known directories, then the same resolved interactive login shell used by tmux panes. Keep each existing agent resolver API as a compatibility wrapper, retain Pi's version validation, route every local agent pane through the login-shell wrapper, and pass bounded diagnostics through status, create, and quick-start errors.
+**Architecture:** Add one injectable resolver factory that scans the captured server PATH, checks known directories, then probes the same resolved interactive login shell used by tmux panes. Keep each existing agent resolver API as a compatibility wrapper, retain production-strict Pi version validation, route every local agent pane through the login-shell wrapper, and pass bounded diagnostics coherently through status, create/quick-start, and browser errors. Remote and Docker command selection stays lazy and never invokes local probes.
 
 **Tech Stack:** TypeScript ESM/NodeNext, Node `execFileSync`, Fastify, browser JavaScript, Vitest, tmux.
 
@@ -38,6 +38,7 @@
 ### Task 1: Build the shared executable resolver with RED-first pure tests
 
 **Files:**
+
 - Create: `src/utils/cli-executable-resolver.ts`
 - Create: `test/cli-executable-resolver.test.ts`
 
@@ -100,7 +101,8 @@ describe('createCliExecutableResolver', () => {
       {
         binary: 'pi',
         searchDirs: [],
-        validateCandidate: (path) => (path.includes('.npm') ? { accepted: true, metadata: '0.84.1' } : { accepted: false }),
+        validateCandidate: (path) =>
+          path.includes('.npm') ? { accepted: true, metadata: '0.84.1' } : { accepted: false },
       },
       h
     );
@@ -119,7 +121,9 @@ describe('createCliExecutableResolver', () => {
 
   it('rejects unsafe binary names and relative or nonexistent results', () => {
     const h = host({ findInLoginShell: vi.fn(() => 'relative/codex'), exists: vi.fn(() => false) });
-    expect(() => createCliExecutableResolver({ binary: 'codex;id', searchDirs: [] }, h)).toThrow('Unsafe CLI binary name');
+    expect(() => createCliExecutableResolver({ binary: 'codex;id', searchDirs: [] }, h)).toThrow(
+      'Unsafe CLI binary name'
+    );
     expect(createCliExecutableResolver({ binary: 'codex', searchDirs: [] }, h).resolve()).toBeNull();
   });
 });
@@ -149,12 +153,16 @@ Expected: FAIL because `src/utils/cli-executable-resolver.ts` does not exist.
 
 - [ ] **Step 3: Implement the injectable factory and production adapter**
 
+The final production adapter scans the captured `PATH` directly, accepts only executable regular files, and parses the
+login-shell result only between fixed begin/end tags with an absolute path whose basename matches the requested binary.
+The abbreviated helpers in the sketch below stand for those tagged build/parse functions.
+
 Create `src/utils/cli-executable-resolver.ts` with these exported contracts and behavior:
 
 ```ts
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { EXEC_TIMEOUT_MS } from '../config/exec-timeout.js';
 import { loginShellArgs, resolveLocalShell } from './shell-resolver.js';
 
@@ -194,17 +202,20 @@ export interface CliExecutableResolver<T = undefined> {
   diagnostics(): CliResolutionDiagnostics;
 }
 
-function lastAbsoluteLine(output: string): string | null {
-  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (isAbsolute(lines[index])) return lines[index];
+function isExecutableRegularFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
-  return null;
 }
 
 export function createProductionCliResolverHost(): CliResolverHost {
   const shellPath = resolveLocalShell();
   const shellArgs = loginShellArgs(shellPath).trim().split(/\s+/).filter(Boolean);
+  const processPath = process.env.PATH ?? '';
   const run = (file: string, args: string[]) => {
     try {
       return execFileSync(file, args, {
@@ -217,15 +228,21 @@ export function createProductionCliResolverHost(): CliResolverHost {
     }
   };
   return {
-    processPath: process.env.PATH ?? '',
+    processPath,
     shellPath,
     shellArgs,
-    findOnProcessPath: (binary) => lastAbsoluteLine(run('which', [binary])),
-    findInLoginShell: (binary) => {
-      if (process.env.VITEST) return null;
-      return lastAbsoluteLine(run(shellPath, [...shellArgs, '-c', `command -v -- ${binary}`]));
+    findOnProcessPath: (binary) => {
+      for (const directory of processPath.split(delimiter).filter(Boolean)) {
+        const candidate = join(directory, binary);
+        if (isAbsolute(candidate) && isExecutableRegularFile(candidate)) return candidate;
+      }
+      return null;
     },
-    exists: existsSync,
+    findInLoginShell: (binary) => {
+      const output = run(shellPath, [...shellArgs, '-c', taggedLoginShellCommand(binary)]);
+      return parseTaggedLoginShellResult(output, binary);
+    },
+    exists: isExecutableRegularFile,
   };
 }
 
@@ -268,9 +285,26 @@ export function createCliExecutableResolver<T = undefined>(
 }
 
 export function formatCliNotFoundMessage(base: string, diagnostics: CliResolutionDiagnostics): string {
-  const shell = [diagnostics.shellPath, ...diagnostics.shellArgs].join(' ');
-  const dirs = diagnostics.searchDirs.length > 0 ? diagnostics.searchDirs.join(', ') : '(none)';
-  return `${base}\nServer PATH: ${diagnostics.processPath || '(empty)'}\nLogin shell: ${shell}\nChecked directories: ${dirs}`;
+  const bounded = (value: string, emptyMarker: string) => {
+    const flattened = Array.from(value, (character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x1f ||
+        (codePoint >= 0x7f && codePoint <= 0x9f) ||
+        codePoint === 0x2028 ||
+        codePoint === 0x2029
+        ? ' '
+        : character;
+    })
+      .join('')
+      .replace(/ +/g, ' ')
+      .trim();
+    if (!flattened) return emptyMarker;
+    return flattened.length <= 1024 ? flattened : `${flattened.slice(0, 1023)}…`;
+  };
+  const processPath = bounded(diagnostics.processPath, '(empty)');
+  const shell = bounded([diagnostics.shellPath, ...diagnostics.shellArgs].join(' '), '(none)');
+  const dirs = bounded(diagnostics.searchDirs.join(', '), '(none)');
+  return `${base}\nServer PATH: ${processPath}\nLogin shell: ${shell}\nChecked directories: ${dirs}`;
 }
 ```
 
@@ -294,6 +328,7 @@ git commit -m "fix(core): COD-334 add login-shell CLI resolver"
 ### Task 2: Migrate Claude, OpenCode, Codex, Gemini, and Antigravity wrappers
 
 **Files:**
+
 - Modify: `src/utils/claude-cli-resolver.ts`
 - Modify: `src/utils/opencode-cli-resolver.ts`
 - Modify: `src/utils/codex-cli-resolver.ts`
@@ -381,6 +416,7 @@ git commit -m "fix(core): COD-334 share agent CLI discovery"
 ### Task 3: Preserve Pi identity validation on the shared discovery path
 
 **Files:**
+
 - Modify: `src/utils/pi-cli-resolver.ts`
 - Modify: `test/pi-mode.test.ts`
 
@@ -424,7 +460,6 @@ function createResolver(host?: CliResolverHost, versionProbe = probePiVersion) {
       binary: 'pi',
       searchDirs: PI_SEARCH_DIRS,
       validateCandidate: (path) => {
-        if (process.env.VITEST && versionProbe === probePiVersion) return { accepted: true };
         const version = versionProbe(path);
         return version ? { accepted: true, metadata: version } : { accepted: false };
       },
@@ -434,7 +469,7 @@ function createResolver(host?: CliResolverHost, versionProbe = probePiVersion) {
 }
 ```
 
-Make `resolvePiDir()` return the accepted directory, `getPiCliVersion()` return accepted metadata or null, and `getPiNotFoundMessage()` use the shared formatter with the existing install hint. Export `createPiResolverForTest` for the focused injected test.
+Make `resolvePiDir()` return the accepted directory, `getPiCliVersion()` return accepted metadata or null, and `getPiNotFoundMessage()` use the shared formatter with the existing install hint. Export `createPiResolverForTest` for the focused injected test. Do not add a `VITEST` or other environment bypass: production Pi identity validation applies to every candidate, and tests stay hermetic through injection.
 
 - [ ] **Step 4: Run Pi and dependency consistency tests**
 
@@ -454,6 +489,7 @@ git commit -m "fix(pi): COD-334 resolve validated CLI through login shell"
 ### Task 4: Apply login-shell launch and detailed preflight errors to all modes
 
 **Files:**
+
 - Modify: `src/utils/index.ts`
 - Modify: `src/tmux-manager.ts`
 - Modify: `test/tmux-manager.test.ts`
@@ -490,6 +526,11 @@ Expected: the new parameterized test fails for `claude` and `pi`, and the diagno
 
 Change `isAgentCliMode()` to include all six modes. Re-export each resolver's not-found formatter through `src/utils/index.ts`, then add an exhaustive `cliNotFoundMessage(mode)` switch in `src/tmux-manager.ts`. Replace the six hard-coded `throw new Error(...)` branches with the helper. Keep shell mode outside the helper and throw `new Error('No external CLI error exists for shell mode')` in the switch default.
 
+Final hardening from review: build the PATH prefix with `shellescape(directory)` plus literal `"$PATH"`, shell-escape the
+complete local launch when it becomes the final outer `bash -c` argument, and select local/remote/Docker builders lazily.
+Preserve Claude's compound `resume || new-session` fallback: apply nice to both legs and `exec` only the fallback leg so
+the control operator remains active.
+
 - [ ] **Step 4: Run focused launch tests and verify GREEN**
 
 Run: `npm test -- test/tmux-manager.test.ts test/shell-session-launch.test.ts test/pi-mode.test.ts`
@@ -508,6 +549,7 @@ git commit -m "fix(session): COD-334 align preflight and login-shell launch"
 ### Task 5: Carry diagnostic errors through status, routes, and browser launchers
 
 **Files:**
+
 - Modify: `src/web/routes/system-routes.ts`
 - Modify: `src/web/routes/session-routes.ts`
 - Modify: `src/web/public/session-ui.js`
@@ -586,6 +628,7 @@ git commit -m "fix(web): COD-334 surface CLI resolution diagnostics"
 ### Task 6: Document the invariant and verify the complete change
 
 **Files:**
+
 - Modify: `docs/architecture-invariants.md`
 - Modify: `docs/superpowers/specs/2026-08-19-cod-334-login-shell-cli-resolution-design.md`
 - Create: `docs/superpowers/plans/2026-08-19-cod-334-login-shell-cli-resolution.md`
@@ -599,7 +642,7 @@ Under “External CLI modes,” document that local availability and local launc
 Run:
 
 ```bash
-npm test -- test/cli-executable-resolver.test.ts test/antigravity-cli-resolver.test.ts test/claude-cli-version-cache.test.ts test/pi-mode.test.ts test/tmux-manager.test.ts test/shell-session-launch.test.ts test/routes/system-routes.test.ts test/run-mode-ui.test.ts test/render-index-html.test.ts
+npm test -- test/cli-executable-resolver.test.ts test/antigravity-cli-resolver.test.ts test/claude-cli-version-cache.test.ts test/pi-mode.test.ts test/tmux-manager.test.ts test/shell-session-launch.test.ts test/routes/system-routes.test.ts test/routes/session-routes.test.ts test/run-mode-ui.test.ts test/render-index-html.test.ts
 ```
 
 Expected: every named file passes. If subprocess tests receive sandbox `EPERM`, rerun this same focused command with the required subprocess permission; do not alter tests to hide the failure.
@@ -613,7 +656,7 @@ npm run typecheck
 npm run lint
 npm run check:frontend-syntax
 npm run check:lockfile
-npx prettier --check src/utils/cli-executable-resolver.ts src/utils/claude-cli-resolver.ts src/utils/opencode-cli-resolver.ts src/utils/codex-cli-resolver.ts src/utils/gemini-cli-resolver.ts src/utils/antigravity-cli-resolver.ts src/utils/pi-cli-resolver.ts src/utils/index.ts src/tmux-manager.ts src/web/routes/system-routes.ts src/web/routes/session-routes.ts src/web/public/session-ui.js test/cli-executable-resolver.test.ts test/antigravity-cli-resolver.test.ts test/pi-mode.test.ts test/tmux-manager.test.ts test/routes/system-routes.test.ts test/run-mode-ui.test.ts docs/architecture-invariants.md docs/superpowers/specs/2026-08-19-cod-334-login-shell-cli-resolution-design.md docs/superpowers/plans/2026-08-19-cod-334-login-shell-cli-resolution.md
+npx prettier --check src/tmux-manager.ts src/utils/antigravity-cli-resolver.ts src/utils/claude-cli-resolver.ts src/utils/cli-executable-resolver.ts src/utils/codex-cli-resolver.ts src/utils/gemini-cli-resolver.ts src/utils/index.ts src/utils/opencode-cli-resolver.ts src/utils/pi-cli-resolver.ts src/web/public/session-ui.js src/web/routes/session-routes.ts src/web/routes/system-routes.ts test/antigravity-cli-resolver.test.ts test/claude-cli-version-cache.test.ts test/cli-executable-resolver.test.ts test/pi-mode.test.ts test/routes/session-routes.test.ts test/routes/system-routes.test.ts test/run-mode-ui.test.ts test/shell-session-launch.test.ts test/tmux-manager.test.ts docs/architecture-invariants.md docs/superpowers/specs/2026-08-19-cod-334-login-shell-cli-resolution-design.md docs/superpowers/plans/2026-08-19-cod-334-login-shell-cli-resolution.md
 npm run build
 git diff --check
 ```
@@ -622,13 +665,16 @@ Expected: every command exits zero. Existing documented build warnings may remai
 
 - [ ] **Step 4: Perform a real minimal-PATH functional check**
 
-Using a temporary home and fake executable, start only the isolated verification instance. The temporary profile must add the fake CLI directory while the server `PATH` omits it. Assert:
+Run a child Node/tsx process with a deliberately minimal `PATH` that omits the actual NVM bin while `HOME` and `SHELL`
+still point at the real user profile. Assert:
 
-1. the relevant `/api/<agent>/status` response reports `available: true` and the fake directory;
-2. the local pane command resolves through the login shell; and
-3. an unavailable fake name produces diagnostics containing the minimal server PATH and resolved shell.
+1. the worktree Codex resolver returns the actual Codex directory through the login shell; and
+2. `buildLocalPaneCommand()` plus `buildRespawnPaneCommand()` (or an equivalent harmless controlled invocation) preserve
+   the resolved PATH through profile loading and the final outer shell layer.
 
-Use `mktemp -d` for the temporary home, a distinct `CODEMAN_INSTANCE=cod334-verify`, distinct data directory/socket, and a non-production port. Terminate only the exact isolated process PID/process group and confirm the port is released. Do not restart or deploy production.
+If a full isolated instance is also safe, use `CODEMAN_INSTANCE=cod334-verify`, distinct `/tmp` data/socket paths and a
+non-production port, terminate only its exact PID, and confirm the port is released. Otherwise the controlled child proof
+is sufficient. Do not restart or deploy production.
 
 - [ ] **Step 5: Commit documentation and any verification-only test adjustments**
 
