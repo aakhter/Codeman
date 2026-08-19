@@ -1,9 +1,25 @@
-import { describe, expect, it, vi } from 'vitest';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EXEC_TIMEOUT_MS } from '../src/config/exec-timeout.js';
 import {
   createCliExecutableResolver,
+  createProductionCliResolverHost,
   formatCliNotFoundMessage,
   type CliResolverHost,
 } from '../src/utils/cli-executable-resolver.js';
+
+const BEGIN_MARKER = '__CODEMAN_CLI_RESOLVE_BEGIN__';
+const END_MARKER = '__CODEMAN_CLI_RESOLVE_END__';
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function host(overrides: Partial<CliResolverHost> = {}): CliResolverHost {
   return {
@@ -151,5 +167,121 @@ describe('formatCliNotFoundMessage', () => {
     expect(message).toBe('Missing CLI\nServer PATH: (empty)\nLogin shell: (none)\nChecked directories: (none)');
     expect(message).not.toContain('HOME=');
     expect(message).not.toContain('TOKEN=');
+  });
+
+  it('flattens control characters and bounds every diagnostic field', () => {
+    const pathological = `first\r\nforged label: value\u0000${'x'.repeat(10_000)}`;
+    const message = formatCliNotFoundMessage('Missing CLI', {
+      binary: 'codex',
+      processPath: pathological,
+      shellPath: pathological,
+      shellArgs: [pathological],
+      searchDirs: [pathological, pathological],
+    });
+    const lines = message.split('\n');
+
+    expect(lines).toHaveLength(4);
+    expect(lines[1]).toMatch(/^Server PATH: first forged label: value x+…$/);
+    expect(lines[2]).toMatch(/^Login shell: first forged label: value x+…$/);
+    expect(lines[3]).toMatch(/^Checked directories: first forged label: value x+…$/);
+    expect(lines.slice(1).every((line) => line.length <= 1_050)).toBe(true);
+  });
+});
+
+describe('createProductionCliResolverHost', () => {
+  it('searches the captured process PATH directly in directory order without running a command', () => {
+    const runCommand = vi.fn(() => '');
+    const isExecutableFile = vi.fn((path: string) => path === '/second/bin/codex');
+    const productionHost = createProductionCliResolverHost({
+      processPath: '/first/bin:/second/bin:/third/bin',
+      shellPath: '/bin/bash',
+      shellArgs: ['-i', '-l'],
+      runCommand,
+      isExecutableFile,
+    });
+
+    expect(productionHost.findOnProcessPath('codex')).toBe('/second/bin/codex');
+    expect(isExecutableFile).toHaveBeenNthCalledWith(1, '/first/bin/codex');
+    expect(isExecutableFile).toHaveBeenNthCalledWith(2, '/second/bin/codex');
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it('accepts only executable regular files with the production predicate', () => {
+    const root = mkdtempSync(join(tmpdir(), 'codeman-cli-resolver-'));
+    temporaryDirectories.push(root);
+    const executableDirectory = join(root, 'executable');
+    const plainDirectory = join(root, 'plain');
+    const directoryCandidate = join(root, 'directory');
+    mkdirSync(executableDirectory);
+    mkdirSync(plainDirectory);
+    mkdirSync(directoryCandidate);
+    writeFileSync(join(executableDirectory, 'codex'), '#!/bin/sh\n');
+    chmodSync(join(executableDirectory, 'codex'), 0o755);
+    writeFileSync(join(plainDirectory, 'codex'), '#!/bin/sh\n');
+    mkdirSync(join(directoryCandidate, 'codex'));
+    const productionHost = createProductionCliResolverHost({
+      processPath: [directoryCandidate, plainDirectory, executableDirectory].join(':'),
+      shellPath: '/bin/bash',
+      shellArgs: ['-i', '-l'],
+    });
+
+    expect(productionHost.findOnProcessPath('codex')).toBe(join(executableDirectory, 'codex'));
+  });
+
+  it('uses the resolved shell, allowlisted args, tagged command, and bounded timeout', () => {
+    const runCommand = vi.fn(() =>
+      ['/profile/absolute-noise', BEGIN_MARKER, '/home/u/.nvm/bin/codex', END_MARKER, '/exit-trap/absolute-noise'].join(
+        '\n'
+      )
+    );
+    const productionHost = createProductionCliResolverHost({
+      processPath: '',
+      shellPath: '/usr/bin/fish',
+      shellArgs: ['-i', '-l'],
+      runCommand,
+      isExecutableFile: () => true,
+    });
+
+    expect(productionHost.findInLoginShell('codex')).toBe('/home/u/.nvm/bin/codex');
+    expect(runCommand).toHaveBeenCalledWith(
+      '/usr/bin/fish',
+      ['-i', '-l', '-c', `printf '%s\\n' '${BEGIN_MARKER}'; command -v -- codex; printf '%s\\n' '${END_MARKER}'`],
+      {
+        encoding: 'utf8',
+        timeout: EXEC_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+  });
+
+  it.each([
+    ['mismatched basename', `${BEGIN_MARKER}\n/opt/bin/not-codex\n${END_MARKER}`],
+    ['missing begin marker', `/opt/bin/codex\n${END_MARKER}`],
+    ['missing end marker', `${BEGIN_MARKER}\n/opt/bin/codex`],
+    ['absolute output outside markers', `/profile/codex\n${BEGIN_MARKER}\nrelative/codex\n${END_MARKER}\n/exit/codex`],
+  ])('rejects malformed tagged shell output: %s', (_name, output) => {
+    const productionHost = createProductionCliResolverHost({
+      processPath: '',
+      shellPath: '/bin/bash',
+      shellArgs: ['-i', '-l'],
+      runCommand: () => output,
+      isExecutableFile: () => true,
+    });
+
+    expect(productionHost.findInLoginShell('codex')).toBeNull();
+  });
+
+  it('returns null when the shell command throws', () => {
+    const productionHost = createProductionCliResolverHost({
+      processPath: '',
+      shellPath: '/bin/bash',
+      shellArgs: ['-i', '-l'],
+      runCommand: () => {
+        throw new Error('exit 1');
+      },
+      isExecutableFile: () => true,
+    });
+
+    expect(productionHost.findInLoginShell('codex')).toBeNull();
   });
 });

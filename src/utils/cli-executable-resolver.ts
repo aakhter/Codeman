@@ -1,8 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { accessSync, constants, statSync } from 'node:fs';
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { EXEC_TIMEOUT_MS } from '../config/exec-timeout.js';
 import { loginShellArgs, resolveLocalShell } from './shell-resolver.js';
+
+const SAFE_BINARY_NAME = /^[a-z0-9][a-z0-9._-]*$/i;
+const LOGIN_SHELL_BEGIN_MARKER = '__CODEMAN_CLI_RESOLVE_BEGIN__';
+const LOGIN_SHELL_END_MARKER = '__CODEMAN_CLI_RESOLVE_END__';
+/** Maximum rendered length of each bounded diagnostic field, excluding its label. */
+const DIAGNOSTIC_FIELD_MAX_LENGTH = 1024;
 
 export type CliResolutionSource = 'process-path' | 'common-directory' | 'login-shell';
 
@@ -40,23 +46,63 @@ export interface CliExecutableResolver<T = undefined> {
   diagnostics(): CliResolutionDiagnostics;
 }
 
-function lastAbsoluteLine(output: string): string | null {
-  const lines = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (isAbsolute(lines[index])) return lines[index];
+export interface CliResolverCommandOptions {
+  encoding: 'utf8';
+  timeout: number;
+  stdio: ['ignore', 'pipe', 'ignore'];
+}
+
+export type CliResolverCommandRunner = (file: string, args: string[], options: CliResolverCommandOptions) => string;
+
+export interface ProductionCliResolverHostOptions {
+  processPath?: string;
+  shellPath?: string;
+  shellArgs?: string[];
+  runCommand?: CliResolverCommandRunner;
+  isExecutableFile?: (path: string) => boolean;
+}
+
+function isExecutableRegularFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseLoginShellResult(output: string, binary: string): string | null {
+  const lines = output.split(/\r?\n/).map((line) => line.trim());
+  const begin = lines.indexOf(LOGIN_SHELL_BEGIN_MARKER);
+  if (begin === -1) return null;
+  const end = lines.indexOf(LOGIN_SHELL_END_MARKER, begin + 1);
+  if (end === -1) return null;
+
+  for (const candidate of lines.slice(begin + 1, end)) {
+    if (isAbsolute(candidate) && basename(candidate) === binary) return candidate;
   }
   return null;
 }
 
-export function createProductionCliResolverHost(): CliResolverHost {
-  const shellPath = resolveLocalShell();
-  const shellArgs = loginShellArgs(shellPath).trim().split(/\s+/).filter(Boolean);
+function loginShellCommand(binary: string): string {
+  return [
+    `printf '%s\\n' '${LOGIN_SHELL_BEGIN_MARKER}'`,
+    `command -v -- ${binary}`,
+    `printf '%s\\n' '${LOGIN_SHELL_END_MARKER}'`,
+  ].join('; ');
+}
+
+export function createProductionCliResolverHost(options: ProductionCliResolverHostOptions = {}): CliResolverHost {
+  const shellPath = options.shellPath ?? resolveLocalShell();
+  const shellArgs = options.shellArgs ?? loginShellArgs(shellPath).trim().split(/\s+/).filter(Boolean);
+  const processPath = options.processPath ?? process.env.PATH ?? '';
+  const isExecutableFile = options.isExecutableFile ?? isExecutableRegularFile;
+  const runCommand: CliResolverCommandRunner =
+    options.runCommand ?? ((file, args, commandOptions) => execFileSync(file, args, commandOptions));
   const run = (file: string, args: string[]): string => {
     try {
-      return execFileSync(file, args, {
+      return runCommand(file, args, {
         encoding: 'utf8',
         timeout: EXEC_TIMEOUT_MS,
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -67,15 +113,24 @@ export function createProductionCliResolverHost(): CliResolverHost {
   };
 
   return {
-    processPath: process.env.PATH ?? '',
+    processPath,
     shellPath,
-    shellArgs,
-    findOnProcessPath: (binary) => lastAbsoluteLine(run('which', [binary])),
-    findInLoginShell: (binary) => {
-      if (process.env.VITEST) return null;
-      return lastAbsoluteLine(run(shellPath, [...shellArgs, '-c', `command -v -- ${binary}`]));
+    shellArgs: [...shellArgs],
+    findOnProcessPath: (binary) => {
+      if (!SAFE_BINARY_NAME.test(binary)) return null;
+      for (const directory of processPath.split(delimiter).filter(Boolean)) {
+        const candidate = join(directory, binary);
+        if (isAbsolute(candidate) && isExecutableFile(candidate)) return candidate;
+      }
+      return null;
     },
-    exists: existsSync,
+    findInLoginShell: (binary) => {
+      if (!SAFE_BINARY_NAME.test(binary)) return null;
+      if (process.env.VITEST && !options.runCommand) return null;
+      const candidate = parseLoginShellResult(run(shellPath, [...shellArgs, '-c', loginShellCommand(binary)]), binary);
+      return candidate && isExecutableFile(candidate) ? candidate : null;
+    },
+    exists: isExecutableFile,
   };
 }
 
@@ -87,7 +142,7 @@ export function createCliExecutableResolver<T = undefined>(
   },
   host: CliResolverHost = createProductionCliResolverHost()
 ): CliExecutableResolver<T> {
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(options.binary)) {
+  if (!SAFE_BINARY_NAME.test(options.binary)) {
     throw new Error(`Unsafe CLI binary name: ${options.binary}`);
   }
 
@@ -129,8 +184,26 @@ export function createCliExecutableResolver<T = undefined>(
   };
 }
 
+function sanitizeDiagnosticField(value: string, emptyMarker: string): string {
+  const flattened = Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const isControl = codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+    return isControl || codePoint === 0x2028 || codePoint === 0x2029 ? ' ' : character;
+  })
+    .join('')
+    .replace(/ +/g, ' ')
+    .trim();
+  if (!flattened) return emptyMarker;
+  if (flattened.length <= DIAGNOSTIC_FIELD_MAX_LENGTH) return flattened;
+  return `${flattened.slice(0, DIAGNOSTIC_FIELD_MAX_LENGTH - 1)}…`;
+}
+
 export function formatCliNotFoundMessage(base: string, diagnostics: CliResolutionDiagnostics): string {
-  const shell = [diagnostics.shellPath, ...diagnostics.shellArgs].filter(Boolean).join(' ') || '(none)';
-  const dirs = diagnostics.searchDirs.length > 0 ? diagnostics.searchDirs.join(', ') : '(none)';
-  return `${base}\nServer PATH: ${diagnostics.processPath || '(empty)'}\nLogin shell: ${shell}\nChecked directories: ${dirs}`;
+  const processPath = sanitizeDiagnosticField(diagnostics.processPath, '(empty)');
+  const shell = sanitizeDiagnosticField(
+    [diagnostics.shellPath, ...diagnostics.shellArgs].filter(Boolean).join(' '),
+    '(none)'
+  );
+  const dirs = sanitizeDiagnosticField(diagnostics.searchDirs.join(', '), '(none)');
+  return `${base}\nServer PATH: ${processPath}\nLogin shell: ${shell}\nChecked directories: ${dirs}`;
 }
