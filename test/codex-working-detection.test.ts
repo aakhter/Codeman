@@ -56,6 +56,26 @@ describe('Codex rendered state classification', () => {
     expect(classifyCodexRenderedState('Choose a scope:\n  1. File\n  2. Folder\n❯ 3. Workspace')).toBe('input-ready');
   });
 
+  it('does not treat a lone selected numbered option as a composer', () => {
+    expect(classifyCodexRenderedState('› 1. Yes')).toBe('unknown');
+  });
+
+  it('does not recognize choice blocks with empty option labels', () => {
+    expect(classifyCodexRenderedState('Allow this command?\n  1.\n❯ 2.')).toBe('unknown');
+  });
+
+  it('does not recognize non-consecutive numbered choices', () => {
+    expect(classifyCodexRenderedState('Choose one:\n  1. First\n❯ 3. Third')).toBe('unknown');
+  });
+
+  it('does not recognize menus with more than six options', () => {
+    expect(
+      classifyCodexRenderedState(
+        'Choose one:\n❯ 1. One\n  2. Two\n  3. Three\n  4. Four\n  5. Five\n  6. Six\n  7. Seven'
+      )
+    ).toBe('unknown');
+  });
+
   it('returns unknown for plain tool output and absent frames', () => {
     expect(classifyCodexRenderedState('Read package.json\nCompleted in 12ms')).toBe('unknown');
     expect(classifyCodexRenderedState(null)).toBe('unknown');

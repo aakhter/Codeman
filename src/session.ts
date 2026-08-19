@@ -265,7 +265,8 @@ export function detectCodexCheckpointWorkingFrame(data: string): boolean {
 
 export type CodexRenderedState = 'working' | 'input-ready' | 'unknown';
 
-const CODEX_NUMBERED_CHOICE_LINE_PATTERN = /^\s*([›❯])?\s*([1-6])[.)](?:\s|$)/;
+const CODEX_COMPOSER_LINE_PATTERN = /^[ \t]*›(?![ \t]*\d+[.)](?:[ \t]|$))(?:[ \t]|$)/m;
+const CODEX_NUMBERED_CHOICE_LINE_PATTERN = /^\s*([›❯])?\s*(\d+)[.)](?:[ \t]+(\S(?:.*\S)?))?[ \t]*$/;
 
 function hasCodexNumberedChoiceBlock(frame: string): boolean {
   const lines = frame.split(NEWLINE_SPLIT_PATTERN);
@@ -277,18 +278,22 @@ function hasCodexNumberedChoiceBlock(frame: string): boolean {
     let optionCount = 0;
     let selectionVisible = false;
     let previousOptionLine = start - 1;
-    for (let lineIndex = start; lineIndex < lines.length && expectedOption <= 6; lineIndex++) {
+    let coherent = true;
+    for (let lineIndex = start; lineIndex < lines.length; lineIndex++) {
       if (lineIndex - previousOptionLine > 4) break;
       const option = lines[lineIndex].match(CODEX_NUMBERED_CHOICE_LINE_PATTERN);
       if (!option) continue;
-      if (Number(option[2]) !== expectedOption) break;
+      if (Number(option[2]) !== expectedOption || !option[3]) {
+        coherent = false;
+        break;
+      }
 
       optionCount++;
       selectionVisible ||= Boolean(option[1]);
       previousOptionLine = lineIndex;
       expectedOption++;
-      if (optionCount >= 2 && selectionVisible) return true;
     }
+    if (coherent && optionCount >= 2 && optionCount <= 6 && selectionVisible) return true;
   }
   return false;
 }
@@ -298,7 +303,7 @@ export function classifyCodexRenderedState(frame: string | null | undefined): Co
 
   const plain = frame.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n').replace(ANSI_ESCAPE_PATTERN_FULL, '');
   if (detectCodexCheckpointWorkingFrame(plain)) return 'working';
-  if (/^\s*›(?:\s|$)/m.test(plain)) return 'input-ready';
+  if (CODEX_COMPOSER_LINE_PATTERN.test(plain)) return 'input-ready';
   if (hasCodexNumberedChoiceBlock(plain)) return 'input-ready';
   return 'unknown';
 }
