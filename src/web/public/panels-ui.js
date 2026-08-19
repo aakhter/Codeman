@@ -307,6 +307,7 @@ Object.assign(CodemanApp.prototype, {
   openSources() {
     const modal = document.getElementById('sourcesModal');
     if (modal) modal.classList.add('active');
+    this._wireSourcesFilePicker();
     this.updateSourceFormFields();
     this.loadSources();
   },
@@ -314,6 +315,73 @@ Object.assign(CodemanApp.prototype, {
   closeSources() {
     const modal = document.getElementById('sourcesModal');
     if (modal) modal.classList.remove('active');
+  },
+
+  _wireSourcesFilePicker() {
+    if (this._sourcesPickerWired) return;
+    const picker = document.getElementById('sourcesFilePicker');
+    const titleEl = document.getElementById('sourcesTitle');
+    if (!picker) return;
+    this._sourcesPickerWired = true;
+    picker.addEventListener('change', () => {
+      this._onSourcesFilePicked();
+      this.updateSourceFormFields();
+    });
+    if (titleEl) {
+      if (!titleEl.dataset) titleEl.dataset = {};
+      titleEl.addEventListener('input', () => {
+        const ds = titleEl.dataset;
+        if (!ds) return;
+        if (ds.autoFilled === '1') {
+          const cur = titleEl.value;
+          const expected = ds.autoFilledValue || '';
+          if (cur !== expected) {
+            delete ds.autoFilled;
+            delete ds.autoFilledValue;
+          }
+          if (cur.trim() === '') {
+            delete ds.autoFilled;
+            delete ds.autoFilledValue;
+          }
+        }
+      });
+    }
+  },
+
+  _onSourcesFilePicked() {
+    const picker = document.getElementById('sourcesFilePicker');
+    const titleEl = document.getElementById('sourcesTitle');
+    if (!picker || !titleEl) return;
+    if (!titleEl.dataset) titleEl.dataset = {};
+    const file = picker.files && picker.files[0];
+    if (!file || !file.name) {
+      if (titleEl.dataset.autoFilled === '1') {
+        titleEl.value = '';
+        delete titleEl.dataset.autoFilled;
+        delete titleEl.dataset.autoFilledValue;
+      }
+      return;
+    }
+    const segments = file.name.split(/[/\\]/);
+    let base = '';
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i].trim();
+      if (seg && seg !== '.' && seg !== '..') {
+        base = seg;
+        break;
+      }
+    }
+    // Strip control chars and lingering separators, mirror sanitizeUploadFilename client-side
+    base = base.replace(/[\x00-\x1f\x7f/\\]/g, '').trim();
+    if (!base) base = 'file';
+    if (base.length > 500) base = base.slice(0, 500);
+    const cur = titleEl.value.trim();
+    const isAuto = titleEl.dataset.autoFilled === '1';
+    if (cur === '' || isAuto) {
+      titleEl.value = base;
+      titleEl.dataset.autoFilled = '1';
+      titleEl.dataset.autoFilledValue = base;
+    }
   },
 
   updateSourceFormFields() {
@@ -326,6 +394,12 @@ Object.assign(CodemanApp.prototype, {
     if (pathRow) pathRow.classList.toggle('sources-field-row--hidden', type !== 'file');
     if (uploadRow) uploadRow.classList.toggle('sources-field-row--hidden', type !== 'file');
     if (contentRow) contentRow.classList.toggle('sources-field-row--hidden', type !== 'highlight');
+    const titleEl = document.getElementById('sourcesTitle');
+    const picker = document.getElementById('sourcesFilePicker');
+    if (titleEl) {
+      const hasFile = type === 'file' && !!(picker && picker.files && picker.files.length > 0);
+      titleEl.required = !hasFile;
+    }
   },
 
   async loadSources() {
@@ -403,8 +477,16 @@ Object.assign(CodemanApp.prototype, {
       const json = await res.json();
       if (json.success) {
         if (fileInput) fileInput.value = '';
-        document.getElementById('sourcesTitle').value = '';
-        this.loadSources();
+        const tEl = document.getElementById('sourcesTitle');
+        if (tEl) {
+          tEl.value = '';
+          if (tEl.dataset) {
+            delete tEl.dataset.autoFilled;
+            delete tEl.dataset.autoFilledValue;
+          }
+        }
+        if (typeof this.updateSourceFormFields === 'function') this.updateSourceFormFields();
+        if (typeof this.loadSources === 'function') this.loadSources();
       }
     } catch {
       // silent — network error
@@ -437,12 +519,24 @@ Object.assign(CodemanApp.prototype, {
       });
       const json = await res.json();
       if (json.success) {
-        document.getElementById('sourcesTitle').value = '';
-        document.getElementById('sourcesUrl').value = '';
-        document.getElementById('sourcesPath').value = '';
+        const tEl2 = document.getElementById('sourcesTitle');
+        if (tEl2) {
+          tEl2.value = '';
+          if (tEl2.dataset) {
+            delete tEl2.dataset.autoFilled;
+            delete tEl2.dataset.autoFilledValue;
+          }
+        }
+        const urlEl = document.getElementById('sourcesUrl');
+        if (urlEl) urlEl.value = '';
+        const pathEl = document.getElementById('sourcesPath');
+        if (pathEl) pathEl.value = '';
         const content = document.getElementById('sourcesContent');
         if (content) content.value = '';
-        this.loadSources();
+        const picker2 = document.getElementById('sourcesFilePicker');
+        if (picker2) picker2.value = '';
+        if (typeof this.updateSourceFormFields === 'function') this.updateSourceFormFields();
+        if (typeof this.loadSources === 'function') this.loadSources();
       }
     } catch {
       // silent — network error
