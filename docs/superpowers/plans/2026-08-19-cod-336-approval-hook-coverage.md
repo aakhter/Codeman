@@ -13,6 +13,7 @@
 ### Task 1: Add the focused approvals UI regression
 
 **Files:**
+
 - Create: `test/approvals-ui-hook-propagation.test.ts`
 - Verify unchanged: `src/web/public/approvals-ui.js`
 
@@ -120,6 +121,7 @@ Expected: 1 file and 2 tests PASS; `git diff -- src/web/public/approvals-ui.js` 
 ### Task 2: Verify and land the test-only change
 
 **Files:**
+
 - Test: `test/approvals-ui-hook-propagation.test.ts`
 - Verify: `test/session-listener-wiring.test.ts`
 
@@ -146,9 +148,9 @@ Expected: all commands exit 0. Existing documented build warnings may remain unc
 
 - [ ] **Step 3: Review the final diff**
 
-Run: `git diff --check && git status --short && git diff --stat`
+Run: `git diff --check && git status --short && git diff --stat && git diff --stat local...HEAD`
 
-Expected: only the new test, design, and plan are changed; production source is clean.
+Expected: status shows only the new test and this plan correction; the branch diff contains only the committed design and plan; production source is clean. After the next commit, `git diff --stat local...HEAD` also includes the test.
 
 - [ ] **Step 4: Commit**
 
