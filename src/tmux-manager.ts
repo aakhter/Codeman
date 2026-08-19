@@ -83,6 +83,12 @@ import {
   resolvePiDir,
   resolveLocalShell,
   loginShellArgs,
+  getClaudeNotFoundMessage,
+  getOpenCodeNotFoundMessage,
+  getCodexNotFoundMessage,
+  getGeminiNotFoundMessage,
+  getAntigravityNotFoundMessage,
+  getPiNotFoundMessage,
 } from './utils/index.js';
 import type {
   TerminalMultiplexer,
@@ -1117,7 +1123,35 @@ export function buildSpawnCommand(options: {
 
 /** Whether a mode launches an external agent CLI whose env must be inherited. */
 function isAgentCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity';
+  return (
+    mode === 'claude' ||
+    mode === 'opencode' ||
+    mode === 'codex' ||
+    mode === 'gemini' ||
+    mode === 'antigravity' ||
+    mode === 'pi'
+  );
+}
+
+/** Detailed resolver diagnostics for an external agent CLI that could not be found. */
+export function cliNotFoundMessage(mode: SessionMode): string {
+  switch (mode) {
+    case 'claude':
+      return getClaudeNotFoundMessage();
+    case 'opencode':
+      return getOpenCodeNotFoundMessage();
+    case 'codex':
+      return getCodexNotFoundMessage();
+    case 'gemini':
+      return getGeminiNotFoundMessage();
+    case 'antigravity':
+      return getAntigravityNotFoundMessage();
+    case 'pi':
+      return getPiNotFoundMessage();
+    case 'shell':
+    default:
+      throw new Error('No external CLI error exists for shell mode');
+  }
 }
 
 /**
@@ -2217,27 +2251,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     // Resolve CLI binary directory based on mode
     const { pathExport, dir: cliDir } = this.buildPathExport(mode);
-    if (mode === 'claude' && !cliDir) {
-      throw new Error('Claude CLI not found. Install it with: curl -fsSL https://claude.ai/install.sh | bash');
-    }
-    if (mode === 'opencode' && !cliDir) {
-      throw new Error('OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash');
-    }
-    if (mode === 'codex' && !cliDir) {
-      throw new Error('Codex CLI not found. Install with: npm install -g @openai/codex');
-    }
-    if (mode === 'gemini' && !cliDir) {
-      throw new Error('Gemini CLI not found. Install with: npm install -g @google/gemini-cli');
-    }
-    if (mode === 'antigravity' && !cliDir) {
-      throw new Error(
-        'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
-      );
-    }
-    if (mode === 'pi' && !cliDir) {
-      throw new Error(
-        'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
-      );
+    if (isAgentCliMode(mode) && !cliDir) {
+      throw new Error(cliNotFoundMessage(mode));
     }
 
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
