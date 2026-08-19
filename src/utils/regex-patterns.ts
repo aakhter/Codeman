@@ -78,6 +78,18 @@ export const SPINNER_PATTERN = /[⠋⠙⠹⠸⠼⠴⠦⠧]/;
  */
 export const CLAUDE_WORKING_LINE_PATTERN = /…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b|esc to interrupt/;
 
+/**
+ * Opencode TUI working status patterns.
+ * The Bubble Tea TUI renders an elapsed timer + interrupt hint while a turn
+ * runs. Unlike codex, it does not reliably emit the braille spinner, so we
+ * anchor on stable substrings that survive SGR stripping:
+ * - `esc to interrupt` — strongest signal, always inside the status footer
+ * - `Working` — generic fallback (covers unit-less shapes + locale variants)
+ * - ellipsis + elapsed timer (`… (12s`) — same shape as Claude, observed in
+ *   opencode status area `~27s · 275.9k tokens` family
+ */
+export const OPENCODE_WORKING_LINE_PATTERN = /esc to interrupt|\bWorking\b|…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/i;
+
 export const SAFE_PATH_PATTERN = /^[\p{L}\p{N}_/\-. ~]+$/u;
 
 /**
