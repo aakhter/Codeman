@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.19.7
+
+### Patch Changes
+
+- Fix desktop tab and terminal interaction regressions: replace ambiguous tab hamburger drag handles with grip affordances; make F2 inline renames repaint immediately, remain usable in compact rails, preserve group editors, and serialize overlapping saves; keep vertical console placement and tab-list accessibility synchronized; adapt Session Options to narrow viewports; and unblock CJK input while agent output is active.
+
 ## 1.19.6
 
 ### Patch Changes

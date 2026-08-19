@@ -926,6 +926,48 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name {
   line-height: 1.25;
 }
 
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name.tab-name-renaming {
+  display: flex;
+  align-items: center;
+  min-width: 4rem;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-info:has(.tab-name-renaming) {
+  min-width: 4rem;
+}
+
+html[data-tab-orientation='vertical'].tab-rail-compact
+  .tab-rail
+  .session-tab:has(.tab-name-renaming)
+  :is(
+    .tab-ref-drag-handle,
+    .tab-mode,
+    .tab-detached-badge,
+    .tab-focus-marker,
+    .tab-badge,
+    .tab-subagent-badge,
+    .tab-ultracode-badge,
+    .tab-actions
+  ) {
+  display: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-prefix {
+  flex: 0 1 auto;
+  min-width: 2rem;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 4rem !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tab-rail,
   .tab-rail-resize-handle::after {
@@ -2599,7 +2641,11 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
 }
 
 .session-tab .tab-more {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  pointer-events: none;
   width: 1.75rem;
   height: 1.5rem;
   padding: 0;
@@ -2613,17 +2659,16 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
 
 .session-tab:hover > .tab-actions > .tab-more,
 .session-tab:focus-within > .tab-actions > .tab-more,
+.session-tab.active > .tab-actions > .tab-more,
 .tab-focus-shortcut > .tab-actions > .tab-more {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 @media (pointer: coarse) {
   .session-tab > .tab-actions > .tab-more {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    visibility: visible;
+    pointer-events: auto;
   }
 }
 
@@ -2637,9 +2682,8 @@ html[data-tab-orientation='vertical'].tab-rail-compact .session-tab .tab-actions
 }
 
 html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active .tab-more {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .session-tab .tab-more:hover,
@@ -7979,38 +8023,6 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 .context-setting-header .checkbox-inline span {
   font-weight: 500;
-}
-
-/* COD-88: The Session Options modal is the tallest on the Context tab. On
-   tablet+ widths, widen it and flow the Context tab into two columns so it
-   needs far less vertical scrolling (mobile stays single-column). The .modal-lg
-   class on the modal-content already caps height at 85vh with a scrollable body
-   so nothing clips off-screen at any width. */
-@media (min-width: 680px) {
-  #sessionOptionsModal .modal-content.modal-lg {
-    max-width: min(92vw, 720px);
-  }
-  #sessionOptionsModal #context-tab {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.25rem 1rem;
-    align-items: start;
-  }
-  /* Section headers, the token-management card group, and full-width switch
-     rows span both columns; simple form rows pack two-up. */
-  #sessionOptionsModal #context-tab .form-section-header,
-  #sessionOptionsModal #context-tab .context-settings-grid,
-  #sessionOptionsModal #context-tab .form-row-switch {
-    grid-column: 1 / -1;
-  }
-  /* Token-management cards sit side by side rather than stacked. */
-  #sessionOptionsModal #context-tab .context-settings-grid {
-    flex-direction: row;
-  }
-  #sessionOptionsModal #context-tab .context-settings-grid .context-setting {
-    flex: 1;
-    min-width: 0;
-  }
 }
 
 .context-setting-header .input-suffix-sm {
@@ -19300,6 +19312,13 @@ html[data-tab-orientation='vertical'] .home-sessions {
   padding: 0 22px 22px;
 }
 
+#sessionOptionsModal #context-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.25rem 1rem;
+  align-items: start;
+}
+
 #sessionOptionsModal .set-section {
   padding-top: 18px;
 }
@@ -19364,6 +19383,22 @@ html[data-tab-orientation='vertical'] .home-sessions {
 #sessionOptionsModal .set-check input {
   width: 15px;
   height: 15px;
+}
+
+@media (min-width: 1200px) {
+  #sessionOptionsModal .modal-content.modal-lg {
+    max-width: min(1120px, 96vw);
+    width: min(1120px, 96vw);
+  }
+
+  #sessionOptionsModal #context-tab {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #sessionOptionsModal #context-tab > .set-section-head,
+  #sessionOptionsModal #context-tab > .set-section-blurb {
+    grid-column: 1 / -1;
+  }
 }
 
 /* ── callout ──────────────────────────────────────────────────────────────
