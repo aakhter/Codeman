@@ -1,5 +1,17 @@
 # aicodeman
 
+## 1.19.8
+
+### Patch Changes
+
+- Fix opencode sessions showing busy when idle (COD-330)
+
+  Idle opencode panes (e.g. w2-tcc) rendered the green pulsing busy indicator (tab-status.busy) even though the TUI was idle. detectExternalCliWorkingFrame only matched codex (\`Working (Ns • esc to interrupt)\`), so the 2s captureActivePaneBuffer poller was a no-op for opencode. The braille spinner fast-path called \_markWorking without re-arming the 5s EXTERNAL_CLI_IDLE_DELAY_MS quiet-window timer, so a stray spinner char in Bubble Tea chrome latched busy forever. Restored sessions also relied solely on that timer.
+
+  Fix: extend detectExternalCliWorkingFrame for opencode to match esc to interrupt / Working / ellipsis timer / spinner, add OPENCODE_WORKING_LINE_PATTERN, and route spinner for external CLIs through \_noteExternalWorkingFrame to re-arm the quiet window. Poller now correctly drives busy/idle via 2s poll re-arming 5s window.
+
+  Files: src/session.ts, src/utils/regex-patterns.ts, test/opencode-working-detection.test.ts (12 new tests).
+
 ## 1.19.7
 
 ### Patch Changes
