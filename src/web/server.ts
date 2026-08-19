@@ -928,7 +928,7 @@ export class WebServer extends EventEmitter {
       // `ServerResponse` to a `FastifyReply`, so it is `reply.header()` here and
       // NOT `res.setHeader()`. A v9-style body throws TypeError on every static
       // request, which is every page load. See the v10.0.0 release notes.
-      setHeaders: (reply, path) => {
+      setHeaders: (reply: any, path: string) => {
         // ⚠️ That same change ALSO flipped precedence, and silently. Under v9 this
         // callback wrote to the raw response and Fastify's staged reply headers then
         // overwrote it, so a route that set its own Cache-Control before .sendFile()
