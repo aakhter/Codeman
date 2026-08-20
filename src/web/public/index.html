@@ -2036,11 +2036,12 @@
                   </div>
                   <div class="set-row has-field" data-search="session sidebar name font size text">
                     <div class="set-row-text">
-                      <span class="set-row-label">Session Name Font Size</span>
+                      <span class="set-row-label" id="appSettingsSessionSidebarFontSizeLabel">Session Name Font Size</span>
                       <span class="set-row-desc">Adjust only session names in the vertical sidebar.</span>
                     </div>
                     <label class="set-range-field" for="appSettingsSessionSidebarFontSize">
                       <input type="range" id="appSettingsSessionSidebarFontSize" min="11" max="18" step="1" value="14"
+                        aria-labelledby="appSettingsSessionSidebarFontSizeLabel"
                         oninput="document.getElementById('appSettingsSessionSidebarFontSizeValue').textContent=this.value+' px'">
                       <output id="appSettingsSessionSidebarFontSizeValue" for="appSettingsSessionSidebarFontSize">14 px</output>
                     </label>

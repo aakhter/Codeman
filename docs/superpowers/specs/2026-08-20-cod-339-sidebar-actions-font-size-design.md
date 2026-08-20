@@ -29,4 +29,3 @@ unchanged.
 - Validate the strict settings schema at the 11/18 boundaries and reject out-of-range, fractional, and string values.
 - Use a real Chromium geometry test to prove a compact title/action gap, long-name truncation, and font-size scope.
 - Run focused Vitest, browser, static, build, and realistic Codeman smoke checks before merge and deployment.
-

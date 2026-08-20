@@ -128,6 +128,46 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
     expect(gap).toBeLessThanOrEqual(6);
   });
 
+  it('keeps collapsed-rail actions as direct tab children', async () => {
+    const parentClass = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller._sidebarCollapsedOverride = true;
+      controller._fullRenderSessionTabs();
+      const actions = document.querySelector('.session-tab[data-id="short"] .tab-actions');
+      controller._sidebarCollapsedOverride = false;
+      controller._fullRenderSessionTabs();
+      return actions?.parentElement?.className;
+    });
+    expect(parentClass).toContain('session-tab');
+  });
+
+  it('keeps detached status after the immediate title/action cluster', async () => {
+    const childClasses = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.detachedSessions.add('short');
+      controller._fullRenderSessionTabs();
+      const row = document.querySelector('.session-tab[data-id="short"] .tab-name-row')!;
+      const classes = [...row.children].map((element) => element.className);
+      controller.detachedSessions.delete('short');
+      controller._fullRenderSessionTabs();
+      return classes;
+    });
+    expect(childClasses.indexOf('tab-actions')).toBe(childClasses.indexOf('tab-name') + 1);
+    expect(childClasses.indexOf('tab-detached-badge')).toBeGreaterThan(childClasses.indexOf('tab-actions'));
+  });
+
+  it('keeps an incrementally-added subagent badge outside the name row', async () => {
+    const parentClass = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.renderSubagentTabBadge = () =>
+        '<span class="tab-subagent-badge"><span class="subagent-label">AGENT</span></span>';
+      controller.minimizedSubagents.set('short', new Map([['agent', {}]]));
+      controller._renderSessionTabsImmediate();
+      return document.querySelector('.session-tab[data-id="short"] .tab-subagent-badge')?.parentElement?.className;
+    });
+    expect(parentClass).toContain('session-tab');
+  });
+
   it('truncates a long name before the fixed action cluster without row overflow', async () => {
     await page.evaluate(() => {
       const controller = (window as any).__cod339Controller;

@@ -23,11 +23,14 @@ describe('COD-339 session sidebar UX contract', () => {
   });
 
   it('places one existing action cluster inside the name row only for sidebar layouts', () => {
-    expect(app).toContain('const inlineSidebarActions = this.isSessionSidebarActive();');
+    expect(app).toContain(
+      'const inlineSidebarActions = this.isSessionSidebarActive() && !this.isSessionSidebarCollapsed();'
+    );
     expect(app).toContain('const tabActionsHtml =');
     expect(app).toContain("${inlineSidebarActions ? tabActionsHtml : ''}");
     expect(app).toContain("${inlineSidebarActions ? '' : tabActionsHtml}");
     expect(app.match(/class="tab-actions"/g)).toHaveLength(1);
+    expect(app).toContain("tab.querySelector(':scope > .tab-actions')");
 
     expect(styles).toMatch(
       /html\[data-session-list="sidebar"\] \.session-sidebar \.tab-name-row,[\s\S]*?\{[^}]*min-width: 0;/
@@ -40,6 +43,7 @@ describe('COD-339 session sidebar UX contract', () => {
   it('wires a device-scoped 11–18px range through load, save, defaults, apply and first paint', () => {
     expect(html).toContain('id="appSettingsSessionSidebarFontSize"');
     expect(html).toContain('id="appSettingsSessionSidebarFontSizeValue"');
+    expect(html).toContain('aria-labelledby="appSettingsSessionSidebarFontSizeLabel"');
     expect(html).toMatch(/id="appSettingsSessionSidebarFontSize"[^>]*min="11"[^>]*max="18"[^>]*step="1"/);
     expect(html).toContain('sessionSidebarFontSize');
     expect(html).toContain('--session-sidebar-name-font-size');
