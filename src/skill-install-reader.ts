@@ -222,6 +222,46 @@ export async function readSources(configDir?: string): Promise<SkillSource[]> {
 
 // ---- buildCatalog helpers ----
 
+/**
+ * Match one path segment against a glob segment in which `*` is the only metacharacter.
+ *
+ * Deliberately NOT a compiled RegExp (COD-342). Translating each `*` to its own `[^/]*` put
+ * several ambiguous quantifiers side by side, so a segment carrying many of them backtracked
+ * catastrophically — 12 wildcards against a 32-character name measured at 79 seconds, and this
+ * runs per candidate file with no await in the loop, which wedges the whole event loop rather
+ * than one request. It also left `?` out of the escape set, so `?` acted as a RegExp quantifier
+ * (`ab?*` matched `ab`) and a leading `?` threw `SyntaxError: Nothing to repeat`.
+ *
+ * The greedy two-pointer scan below carries a single backtrack anchor, so it is bounded by
+ * O(pattern x value) with no exponential path, and every character other than `*` is compared
+ * literally.
+ */
+function matchSegment(pattern: string, value: string): boolean {
+  let p = 0;
+  let v = 0;
+  let starP = -1;
+  let starV = 0;
+  while (v < value.length) {
+    if (p < pattern.length && pattern[p] === value[v]) {
+      p++;
+      v++;
+    } else if (p < pattern.length && pattern[p] === '*') {
+      starP = p;
+      starV = v;
+      p++;
+    } else if (starP !== -1) {
+      // Last `*` absorbs one more character and we resume just after it.
+      p = starP + 1;
+      starV++;
+      v = starV;
+    } else {
+      return false;
+    }
+  }
+  while (p < pattern.length && pattern[p] === '*') p++;
+  return p === pattern.length;
+}
+
 /** Check whether relPath matches a glob pattern (supports * per segment, no **). */
 function matchGlob(pattern: string, relPath: string): boolean {
   const pat = pattern.split('/');
@@ -229,8 +269,7 @@ function matchGlob(pattern: string, relPath: string): boolean {
   if (pat.length !== rel.length) return false;
   return pat.every((seg, i) => {
     if (!seg.includes('*')) return seg === rel[i];
-    const re = new RegExp('^' + seg.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
-    return re.test(rel[i]);
+    return matchSegment(seg, rel[i] ?? '');
   });
 }
 
