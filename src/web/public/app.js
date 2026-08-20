@@ -5953,6 +5953,19 @@ class CodemanApp {
     return layout === 'sidebar' || layout === 'sidebar-rich' ? layout : 'header';
   }
 
+  resolveSessionSidebarFontSize(value) {
+    const size = Number(value);
+    return Number.isInteger(size) && size >= 11 && size <= 18 ? size : 14;
+  }
+
+  applySessionSidebarFontSize(settings = null) {
+    const resolvedSettings = settings ?? this.loadAppSettingsFromStorage();
+    const size = this.resolveSessionSidebarFontSize(resolvedSettings?.sessionSidebarFontSize);
+    const root = document.documentElement;
+    root.style.setProperty('--session-sidebar-name-font-size', `${size}px`);
+    return size;
+  }
+
   /**
    * Reads the APPLIED layout off <html>, not the settings blob: this is called
    * per dragover event and per tab in render loops, and getSessionListLayout()
@@ -6056,11 +6069,13 @@ class CodemanApp {
    */
   applySessionListLayout() {
     const mode = this.getSessionListLayout();
+    this.applySessionSidebarFontSize();
     // 'sidebar' and 'sidebar-rich' are the same column; only row detail differs.
     const sidebar = mode === 'sidebar' || mode === 'sidebar-rich';
     const collapsed = this.isSessionSidebarCollapsed();
     const prevMode = document.documentElement.dataset.sessionList;
     const prevDetail = document.documentElement.dataset.sidebarDetail;
+    const prevCollapsed = document.documentElement.dataset.sidebar;
     const tabsEl = document.getElementById('sessionTabs');
     const headerHost = document.getElementById('sessionTabsHost');
     const sidebarList = document.getElementById('sessionSidebarList');
@@ -6136,7 +6151,8 @@ class CodemanApp {
     const layoutChanged =
       prevMode !== document.documentElement.dataset.sessionList ||
       prevDetail !== document.documentElement.dataset.sidebarDetail;
-    if (layoutChanged && prevTall === this._tallTabsEnabled) {
+    const collapseChanged = prevCollapsed !== document.documentElement.dataset.sidebar;
+    if ((layoutChanged || collapseChanged) && prevTall === this._tallTabsEnabled) {
       this._fullRenderSessionTabs();
     }
     // tabs-auto-wrap is measured, not derived from settings — updateTabOverflowMode()
@@ -6758,9 +6774,11 @@ class CodemanApp {
           // Need to add badge - insert before the action-icon overlay so the
           // badge stays a direct child of the tab (outside .tab-actions)
           const badgeHtml = this.renderSubagentTabBadge(id, minimizedAgents);
-          const actionsEl = tab.querySelector('.tab-actions');
+          const actionsEl = tab.querySelector(':scope > .tab-actions');
           if (actionsEl) {
             actionsEl.insertAdjacentHTML('beforebegin', badgeHtml);
+          } else {
+            tab.insertAdjacentHTML('beforeend', badgeHtml);
           }
         } else if (minimizedCount === 0 && subagentBadgeEl) {
           // Count went to 0 - remove badge
@@ -7092,6 +7110,9 @@ class CodemanApp {
         ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}"`
         : '';
 
+      const inlineSidebarActions = this.isSessionSidebarActive() && !this.isSessionSidebarCollapsed();
+      const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>`;
+
       parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
@@ -7102,6 +7123,7 @@ class CodemanApp {
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
               <span class="tab-name" data-session-id="${escapeHtml(id)}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
+              ${inlineSidebarActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
             ${placementBadge}
@@ -7112,7 +7134,7 @@ class CodemanApp {
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
-          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>
+          ${inlineSidebarActions ? '' : tabActionsHtml}
         </div>`);
       renderedRefs.push(ref);
       _tabIdx++;

@@ -1023,6 +1023,8 @@ export const SettingsUpdateSchema = z
      * on data-sidebar-detail. See applySessionListLayout() in app.js.
      */
     sessionListLayout: z.enum(['header', 'sidebar', 'sidebar-rich']).optional(),
+    /** Session-name text size in the vertical sidebar. Display key (per-device). */
+    sessionSidebarFontSize: z.number().int().min(11).max(18).optional(),
     // COD-286: session tabs across the top vs a vertical rail beside the terminal.
     // Declared here (like tabTwoRows) so it persists server-side and can seed a
     // fresh device; it is still PER-DEVICE by client policy — settings-ui.js lists
