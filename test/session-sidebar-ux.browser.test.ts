@@ -2,7 +2,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 
 const publicDir = resolve(import.meta.dirname, '../src/web/public');
@@ -10,6 +10,7 @@ const styles = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
 const constants = readFileSync(resolve(publicDir, 'constants.js'), 'utf8');
 const tabLayout = readFileSync(resolve(publicDir, 'tab-layout-browser.js'), 'utf8');
 const appSource = readFileSync(resolve(publicDir, 'app.js'), 'utf8');
+const tabRailResize = readFileSync(resolve(publicDir, 'tab-rail-resize.js'), 'utf8');
 
 describe('COD-339 sidebar actions and session-name font size in Chromium', () => {
   let browser: Browser;
@@ -47,6 +48,8 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
         tabLayout +
         '\n' +
         appSource +
+        '\n' +
+        tabRailResize +
         '\nwindow.CodemanApp = CodemanApp;',
     });
     await page.evaluate(() => {
@@ -103,13 +106,33 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       controller.updateConnectionLines = () => undefined;
       controller.applyTabWrapSettings = () => undefined;
       controller.applySidebarFilter = () => undefined;
-      controller.loadAppSettingsFromStorage = () => ({ sessionListLayout: 'sidebar' });
+      controller.__cod339Settings = { sessionListLayout: 'sidebar', sessionSidebarFontSize: 14 };
+      controller.loadAppSettingsFromStorage = () => controller.__cod339Settings;
       controller.getDefaultSettings = () => ({});
       controller._applyTabEntrances = () => undefined;
       controller._scrollActiveTabIntoView = () => undefined;
       controller._tallTabsEnabled = false;
       controller._fullRenderSessionTabs();
       (window as any).__cod339Controller = controller;
+    });
+  });
+
+  beforeEach(async () => {
+    await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'sidebar', sessionSidebarFontSize: 14 };
+      controller._sidebarCollapsedOverride = false;
+      controller.activeSessionId = 'short';
+      controller.detachedSessions.clear();
+      controller.minimizedSubagents.clear();
+      controller.renderSubagentTabBadge = () => '';
+      document.documentElement.dataset.sessionList = 'sidebar';
+      document.documentElement.dataset.sidebar = 'expanded';
+      document.documentElement.dataset.tabOrientation = 'horizontal';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller._lastTabStructureKey = null;
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
     });
   });
 
@@ -212,5 +235,102 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       }, size);
       expect(result).toEqual({ name: `${size}px`, project: '14px' });
     }
+  });
+
+  it('keeps actions beside names and applies session-name sizing in the expanded vertical rail', async () => {
+    await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = {
+        sessionListLayout: 'header',
+        tabOrientation: 'vertical',
+        sessionSidebarFontSize: 11,
+      };
+      document.documentElement.dataset.sessionList = 'header';
+      document.documentElement.dataset.sidebar = 'expanded';
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+    });
+
+    const shortTab = page.locator('.session-tab[data-id="short"]');
+    expect
+      .soft(await shortTab.locator('.tab-actions').evaluate((element) => element.parentElement?.className))
+      .toContain('tab-name-row');
+    const shortGap = await shortTab.evaluate((element) => {
+      const name = element.querySelector('.tab-name')!.getBoundingClientRect();
+      const actions = element.querySelector('.tab-actions')!.getBoundingClientRect();
+      return actions.left - name.right;
+    });
+    expect.soft(shortGap).toBeGreaterThanOrEqual(0);
+    expect.soft(shortGap).toBeLessThanOrEqual(6);
+
+    const longMetrics = await page.locator('.session-tab[data-id="long"]').evaluate((element) => {
+      const name = element.querySelector('.tab-name') as HTMLElement;
+      const actions = element.querySelector('.tab-actions')!.getBoundingClientRect();
+      return {
+        nameRight: name.getBoundingClientRect().right,
+        actionsLeft: actions.left,
+      };
+    });
+    expect.soft(longMetrics.nameRight).toBeLessThanOrEqual(longMetrics.actionsLeft);
+
+    for (const size of [11, 18]) {
+      const fontSize = await page.evaluate((value) => {
+        const controller = (window as any).__cod339Controller;
+        controller.__cod339Settings.sessionSidebarFontSize = value;
+        controller.applySessionSidebarFontSize();
+        return getComputedStyle(document.querySelector('.tab-rail .session-tab .tab-name')!).fontSize;
+      }, size);
+      expect.soft(fontSize).toBe(`${size}px`);
+    }
+  });
+
+  it('keeps actions as a direct tab child in the horizontal header', async () => {
+    const parentClass = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'header', tabOrientation: 'horizontal' };
+      document.documentElement.dataset.tabOrientation = 'horizontal';
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+      return document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+    });
+    expect(parentClass).toContain('session-tab');
+    expect(parentClass).not.toContain('tab-name-row');
+  });
+
+  it('keeps actions as a direct tab child in the compact vertical rail', async () => {
+    const parentClass = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'header', tabOrientation: 'vertical' };
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.add('tab-rail-compact');
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+      return document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+    });
+    expect(parentClass).toContain('session-tab');
+    expect(parentClass).not.toContain('tab-name-row');
+  });
+
+  it('rebuilds action placement when the vertical rail crosses the compact threshold', async () => {
+    const parentClasses = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'header', tabOrientation: 'vertical' };
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+      const full = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      controller._setTabRailWidth(220);
+      const compact = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      controller._setTabRailWidth(300);
+      const expanded = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      return { full, compact, expanded };
+    });
+    expect.soft(parentClasses.full).toContain('tab-name-row');
+    expect.soft(parentClasses.compact).toContain('session-tab');
+    expect.soft(parentClasses.compact).not.toContain('tab-name-row');
+    expect.soft(parentClasses.expanded).toContain('tab-name-row');
   });
 });

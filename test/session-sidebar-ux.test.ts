@@ -12,6 +12,15 @@ const settingsUi = readFileSync(resolve(publicDir, 'settings-ui.js'), 'utf8');
 const styles = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
 const i18n = readFileSync(resolve(publicDir, 'i18n.js'), 'utf8');
 
+function expectSessionNameFontRule(selector: string) {
+  const normalizedStyles = styles.replaceAll('"', "'");
+  const matchingRule = [...normalizedStyles.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(
+    ([, selectors, declarations]) =>
+      selectors.includes(selector) && declarations.includes('font-size: var(--session-sidebar-name-font-size, 14px);')
+  );
+  expect(matchingRule).toBeDefined();
+}
+
 describe('COD-339 session sidebar UX contract', () => {
   it('accepts only integer session-name sizes from 11 through 18 pixels', () => {
     for (const value of [11, 14, 18]) {
@@ -22,16 +31,17 @@ describe('COD-339 session sidebar UX contract', () => {
     }
   });
 
-  it('places one existing action cluster inside the name row only for sidebar layouts', () => {
-    expect(app).toContain(
-      'const inlineSidebarActions = this.isSessionSidebarActive() && !this.isSessionSidebarCollapsed();'
-    );
+  it('resolves one existing action cluster through the shared inline-placement helper', () => {
+    expect(app).toContain('shouldInlineSessionActions()');
+    expect(app).toContain('const inlineSessionActions = this.shouldInlineSessionActions();');
     expect(app).toContain('const tabActionsHtml =');
-    expect(app).toContain("${inlineSidebarActions ? tabActionsHtml : ''}");
-    expect(app).toContain("${inlineSidebarActions ? '' : tabActionsHtml}");
+    expect(app).toContain("${inlineSessionActions ? tabActionsHtml : ''}");
+    expect(app).toContain("${inlineSessionActions ? '' : tabActionsHtml}");
     expect(app.match(/class="tab-actions"/g)).toHaveLength(1);
     expect(app).toContain("tab.querySelector(':scope > .tab-actions')");
+  });
 
+  it('keeps the sidebar name-row and action-cluster flex constraints', () => {
     expect(styles).toMatch(
       /html\[data-session-list="sidebar"\] \.session-sidebar \.tab-name-row,[\s\S]*?\{[^}]*min-width: 0;/
     );
@@ -58,9 +68,11 @@ describe('COD-339 session sidebar UX contract', () => {
     expect(app).toContain("root.style.setProperty('--session-sidebar-name-font-size', `${size}px`);");
     expect(app).toContain('this.applySessionSidebarFontSize();');
 
-    expect(styles).toMatch(
-      /html\[data-session-list="sidebar"\] \.session-sidebar \.tab-name \{[^}]*font-size: var\(--session-sidebar-name-font-size, 14px\);/s
-    );
+    expectSessionNameFontRule("html[data-session-list='sidebar'] .session-sidebar .tab-name");
+  });
+
+  it('applies the session-name font variable to the vertical tab rail', () => {
+    expectSessionNameFontRule("html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name");
   });
 
   it('labels and translates the session-name-only scope', () => {
