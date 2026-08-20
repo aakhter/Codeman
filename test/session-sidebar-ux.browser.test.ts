@@ -2,7 +2,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 
 const publicDir = resolve(import.meta.dirname, '../src/web/public');
@@ -10,6 +10,7 @@ const styles = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
 const constants = readFileSync(resolve(publicDir, 'constants.js'), 'utf8');
 const tabLayout = readFileSync(resolve(publicDir, 'tab-layout-browser.js'), 'utf8');
 const appSource = readFileSync(resolve(publicDir, 'app.js'), 'utf8');
+const tabRailResize = readFileSync(resolve(publicDir, 'tab-rail-resize.js'), 'utf8');
 
 describe('COD-339 sidebar actions and session-name font size in Chromium', () => {
   let browser: Browser;
@@ -47,6 +48,8 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
         tabLayout +
         '\n' +
         appSource +
+        '\n' +
+        tabRailResize +
         '\nwindow.CodemanApp = CodemanApp;',
     });
     await page.evaluate(() => {
@@ -103,13 +106,33 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       controller.updateConnectionLines = () => undefined;
       controller.applyTabWrapSettings = () => undefined;
       controller.applySidebarFilter = () => undefined;
-      controller.loadAppSettingsFromStorage = () => ({ sessionListLayout: 'sidebar' });
+      controller.__cod339Settings = { sessionListLayout: 'sidebar', sessionSidebarFontSize: 14 };
+      controller.loadAppSettingsFromStorage = () => controller.__cod339Settings;
       controller.getDefaultSettings = () => ({});
       controller._applyTabEntrances = () => undefined;
       controller._scrollActiveTabIntoView = () => undefined;
       controller._tallTabsEnabled = false;
       controller._fullRenderSessionTabs();
       (window as any).__cod339Controller = controller;
+    });
+  });
+
+  beforeEach(async () => {
+    await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'sidebar', sessionSidebarFontSize: 14 };
+      controller._sidebarCollapsedOverride = false;
+      controller.activeSessionId = 'short';
+      controller.detachedSessions.clear();
+      controller.minimizedSubagents.clear();
+      controller.renderSubagentTabBadge = () => '';
+      document.documentElement.dataset.sessionList = 'sidebar';
+      document.documentElement.dataset.sidebar = 'expanded';
+      document.documentElement.dataset.tabOrientation = 'horizontal';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller._lastTabStructureKey = null;
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
     });
   });
 
@@ -212,5 +235,135 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       }, size);
       expect(result).toEqual({ name: `${size}px`, project: '14px' });
     }
+  });
+
+  it('keeps actions beside names and applies session-name sizing in the expanded vertical rail', async () => {
+    await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = {
+        sessionListLayout: 'header',
+        tabOrientation: 'vertical',
+        sessionSidebarFontSize: 11,
+      };
+      document.documentElement.dataset.sessionList = 'header';
+      document.documentElement.dataset.sidebar = 'expanded';
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+    });
+
+    const shortTab = page.locator('.session-tab[data-id="short"]');
+    expect
+      .soft(await shortTab.locator('.tab-actions').evaluate((element) => element.parentElement?.className))
+      .toContain('tab-name-row');
+    const shortGap = await shortTab.evaluate((element) => {
+      const name = element.querySelector('.tab-name')!.getBoundingClientRect();
+      const actions = element.querySelector('.tab-actions')!.getBoundingClientRect();
+      return actions.left - name.right;
+    });
+    expect.soft(shortGap).toBeGreaterThanOrEqual(0);
+    expect.soft(shortGap).toBeLessThanOrEqual(6);
+
+    const longMetrics = await page.locator('.session-tab[data-id="long"]').evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.activeSessionId = 'long';
+      controller._fullRenderSessionTabs();
+      const longTab = document.querySelector('.session-tab[data-id="long"]')!;
+      const name = longTab.querySelector('.tab-name') as HTMLElement;
+      // Pin width truncation independently of the rail's normal two-line wrapping.
+      name.style.whiteSpace = 'nowrap';
+      const actions = longTab.querySelector('.tab-actions')!;
+      const lastVisibleAction = [...actions.children]
+        .filter((child) => {
+          const control = child as HTMLElement;
+          const style = getComputedStyle(control);
+          return style.display !== 'none' && style.visibility !== 'hidden' && control.getBoundingClientRect().width > 0;
+        })
+        .at(-1) as HTMLElement;
+      const nameRect = name.getBoundingClientRect();
+      const actionsRect = actions.getBoundingClientRect();
+      const rowRect = longTab.getBoundingClientRect();
+      return {
+        nameClientWidth: name.clientWidth,
+        nameScrollWidth: name.scrollWidth,
+        nameRight: nameRect.right,
+        actionsLeft: actionsRect.left,
+        lastVisibleActionRight: lastVisibleAction.getBoundingClientRect().right,
+        rowRight: rowRect.right,
+      };
+    });
+    expect.soft(longMetrics.nameScrollWidth).toBeGreaterThan(longMetrics.nameClientWidth);
+    expect.soft(longMetrics.nameRight).toBeLessThanOrEqual(longMetrics.actionsLeft);
+    expect.soft(longMetrics.lastVisibleActionRight).toBeLessThanOrEqual(longMetrics.rowRight + 0.5);
+
+    const nonNameBaseline = await page.evaluate(() => ({
+      groupHeading: getComputedStyle(document.querySelector('.tab-layout-group-name')!).fontSize,
+      groupCount: getComputedStyle(document.querySelector('.tab-layout-group-count')!).fontSize,
+    }));
+
+    for (const size of [11, 18]) {
+      const computedSizes = await page.evaluate((value) => {
+        const controller = (window as any).__cod339Controller;
+        controller.__cod339Settings.sessionSidebarFontSize = value;
+        controller.applySessionSidebarFontSize();
+        return {
+          name: getComputedStyle(document.querySelector('.tab-rail .session-tab .tab-name')!).fontSize,
+          groupHeading: getComputedStyle(document.querySelector('.tab-layout-group-name')!).fontSize,
+          groupCount: getComputedStyle(document.querySelector('.tab-layout-group-count')!).fontSize,
+        };
+      }, size);
+      expect.soft(computedSizes.name).toBe(`${size}px`);
+      expect.soft(computedSizes.groupHeading).toBe(nonNameBaseline.groupHeading);
+      expect.soft(computedSizes.groupCount).toBe(nonNameBaseline.groupCount);
+    }
+  });
+
+  it('keeps actions as a direct tab child in the horizontal header', async () => {
+    const parentClass = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'header', tabOrientation: 'horizontal' };
+      document.documentElement.dataset.tabOrientation = 'horizontal';
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+      return document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+    });
+    expect(parentClass).toContain('session-tab');
+    expect(parentClass).not.toContain('tab-name-row');
+  });
+
+  it('keeps actions as a direct tab child in the compact vertical rail', async () => {
+    const parentClass = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'header', tabOrientation: 'vertical' };
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.add('tab-rail-compact');
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+      return document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+    });
+    expect(parentClass).toContain('session-tab');
+    expect(parentClass).not.toContain('tab-name-row');
+  });
+
+  it('rebuilds action placement when the vertical rail crosses the compact threshold', async () => {
+    const parentClasses = await page.evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings = { sessionListLayout: 'header', tabOrientation: 'vertical' };
+      document.documentElement.dataset.tabOrientation = 'vertical';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+      const full = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      controller._setTabRailWidth(220);
+      const compact = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      controller._setTabRailWidth(300);
+      const expanded = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      return { full, compact, expanded };
+    });
+    expect.soft(parentClasses.full).toContain('tab-name-row');
+    expect.soft(parentClasses.compact).toContain('session-tab');
+    expect.soft(parentClasses.compact).not.toContain('tab-name-row');
+    expect.soft(parentClasses.expanded).toContain('tab-name-row');
   });
 });

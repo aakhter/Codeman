@@ -19838,7 +19838,15 @@ html[data-session-list="sidebar"] .session-sidebar .tab-name {
   font-size: var(--session-sidebar-name-font-size, 14px);
 }
 
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name {
+  font-size: var(--session-sidebar-name-font-size, 14px);
+}
+
 html[data-session-list="sidebar"] .session-sidebar .tab-actions {
+  flex-shrink: 0;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-row > .tab-actions {
   flex-shrink: 0;
 }
 

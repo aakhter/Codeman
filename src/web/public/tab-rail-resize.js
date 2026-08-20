@@ -64,7 +64,10 @@ Object.assign(CodemanApp.prototype, {
     const effectiveMax = policy.resolveWidth({ width: policy.MAX_WIDTH, ...bounds });
     const root = document.documentElement;
     root.style.setProperty('--tab-rail-width', `${resolved}px`);
-    root.classList.toggle('tab-rail-compact', resolved < 240);
+    const wasCompact = root.classList.contains('tab-rail-compact');
+    const compact = resolved < 240;
+    root.classList.toggle('tab-rail-compact', compact);
+    if (wasCompact !== compact) this._fullRenderSessionTabs?.();
     const handle = document.getElementById('tabRailResizeHandle');
     if (handle) {
       handle.setAttribute('aria-valuemax', String(effectiveMax));
