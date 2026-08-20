@@ -265,24 +265,57 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
     expect.soft(shortGap).toBeGreaterThanOrEqual(0);
     expect.soft(shortGap).toBeLessThanOrEqual(6);
 
-    const longMetrics = await page.locator('.session-tab[data-id="long"]').evaluate((element) => {
-      const name = element.querySelector('.tab-name') as HTMLElement;
-      const actions = element.querySelector('.tab-actions')!.getBoundingClientRect();
+    const longMetrics = await page.locator('.session-tab[data-id="long"]').evaluate(() => {
+      const controller = (window as any).__cod339Controller;
+      controller.activeSessionId = 'long';
+      controller._fullRenderSessionTabs();
+      const longTab = document.querySelector('.session-tab[data-id="long"]')!;
+      const name = longTab.querySelector('.tab-name') as HTMLElement;
+      // Pin width truncation independently of the rail's normal two-line wrapping.
+      name.style.whiteSpace = 'nowrap';
+      const actions = longTab.querySelector('.tab-actions')!;
+      const lastVisibleAction = [...actions.children]
+        .filter((child) => {
+          const control = child as HTMLElement;
+          const style = getComputedStyle(control);
+          return style.display !== 'none' && style.visibility !== 'hidden' && control.getBoundingClientRect().width > 0;
+        })
+        .at(-1) as HTMLElement;
+      const nameRect = name.getBoundingClientRect();
+      const actionsRect = actions.getBoundingClientRect();
+      const rowRect = longTab.getBoundingClientRect();
       return {
-        nameRight: name.getBoundingClientRect().right,
-        actionsLeft: actions.left,
+        nameClientWidth: name.clientWidth,
+        nameScrollWidth: name.scrollWidth,
+        nameRight: nameRect.right,
+        actionsLeft: actionsRect.left,
+        lastVisibleActionRight: lastVisibleAction.getBoundingClientRect().right,
+        rowRight: rowRect.right,
       };
     });
+    expect.soft(longMetrics.nameScrollWidth).toBeGreaterThan(longMetrics.nameClientWidth);
     expect.soft(longMetrics.nameRight).toBeLessThanOrEqual(longMetrics.actionsLeft);
+    expect.soft(longMetrics.lastVisibleActionRight).toBeLessThanOrEqual(longMetrics.rowRight + 0.5);
+
+    const nonNameBaseline = await page.evaluate(() => ({
+      groupHeading: getComputedStyle(document.querySelector('.tab-layout-group-name')!).fontSize,
+      groupCount: getComputedStyle(document.querySelector('.tab-layout-group-count')!).fontSize,
+    }));
 
     for (const size of [11, 18]) {
-      const fontSize = await page.evaluate((value) => {
+      const computedSizes = await page.evaluate((value) => {
         const controller = (window as any).__cod339Controller;
         controller.__cod339Settings.sessionSidebarFontSize = value;
         controller.applySessionSidebarFontSize();
-        return getComputedStyle(document.querySelector('.tab-rail .session-tab .tab-name')!).fontSize;
+        return {
+          name: getComputedStyle(document.querySelector('.tab-rail .session-tab .tab-name')!).fontSize,
+          groupHeading: getComputedStyle(document.querySelector('.tab-layout-group-name')!).fontSize,
+          groupCount: getComputedStyle(document.querySelector('.tab-layout-group-count')!).fontSize,
+        };
       }, size);
-      expect.soft(fontSize).toBe(`${size}px`);
+      expect.soft(computedSizes.name).toBe(`${size}px`);
+      expect.soft(computedSizes.groupHeading).toBe(nonNameBaseline.groupHeading);
+      expect.soft(computedSizes.groupCount).toBe(nonNameBaseline.groupCount);
     }
   });
 
