@@ -18495,6 +18495,27 @@ html[data-tab-orientation='vertical'] .home-sessions {
   display: none !important;
 }
 
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+  width: min(220px, 44vw);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field output {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-note,
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-notes,
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-progress {
@@ -19741,8 +19762,20 @@ html[data-session-list="sidebar"] .session-sidebar .tab-info {
   min-width: 0;
 }
 
+html[data-session-list="sidebar"] .session-sidebar .tab-name-row,
 html[data-session-list="sidebar"] .session-sidebar .tab-name {
+  min-width: 0;
   max-width: none;
+}
+
+html[data-session-list="sidebar"] .session-sidebar .tab-name {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  font-size: var(--session-sidebar-name-font-size, 14px);
+}
+
+html[data-session-list="sidebar"] .session-sidebar .tab-actions {
+  flex-shrink: 0;
 }
 
 /* Reveal-on-hover reads badly on a 40px-tall full-width row, so keep the row

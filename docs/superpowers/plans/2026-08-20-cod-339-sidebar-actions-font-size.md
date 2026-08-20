@@ -13,6 +13,8 @@
 ### Task 1: Pin the approved behavior with failing tests
 
 **Files:**
+
+- Modify: `config/test-suites.ts`
 - Create: `test/session-sidebar-ux.test.ts`
 - Create: `test/session-sidebar-ux.browser.test.ts`
 
@@ -43,6 +45,7 @@ Expected: FAIL because the approved markup and sidebar font-size variable are ab
 ### Task 2: Implement inline sidebar actions
 
 **Files:**
+
 - Modify: `src/web/public/app.js`
 - Modify: `src/web/public/styles.css`
 
@@ -66,6 +69,7 @@ Expected: action-placement assertions pass; font-setting assertions remain RED.
 ### Task 3: Add the persisted session-name-only font setting
 
 **Files:**
+
 - Modify: `src/web/schemas.ts`
 - Modify: `src/web/public/index.html`
 - Modify: `src/web/public/settings-ui.js`
@@ -105,6 +109,7 @@ Expected: the real Chromium geometry and font-scope assertions PASS.
 ### Task 4: Release note and verification
 
 **Files:**
+
 - Create: `.changeset/cod-339-sidebar-actions-font-size.md`
 
 - [ ] **Step 1: Add the patch changeset**
@@ -133,4 +138,3 @@ Stage only the plan/spec, production files, focused tests, and COD-339 changeset
 After review fixes and fresh verification, merge the feature branch into `local`, push `origin/local`, run the standard
 Codeman deployment workflow, verify `codeman-web` active plus repeated HTTP 200 responses on port 3002, and verify the
 actual production browser geometry/settings persistence before moving COD-339 to Done.
-
