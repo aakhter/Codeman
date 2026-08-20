@@ -6075,6 +6075,7 @@ class CodemanApp {
     const collapsed = this.isSessionSidebarCollapsed();
     const prevMode = document.documentElement.dataset.sessionList;
     const prevDetail = document.documentElement.dataset.sidebarDetail;
+    const prevCollapsed = document.documentElement.dataset.sidebar;
     const tabsEl = document.getElementById('sessionTabs');
     const headerHost = document.getElementById('sessionTabsHost');
     const sidebarList = document.getElementById('sessionSidebarList');
@@ -6150,7 +6151,8 @@ class CodemanApp {
     const layoutChanged =
       prevMode !== document.documentElement.dataset.sessionList ||
       prevDetail !== document.documentElement.dataset.sidebarDetail;
-    if (layoutChanged && prevTall === this._tallTabsEnabled) {
+    const collapseChanged = prevCollapsed !== document.documentElement.dataset.sidebar;
+    if ((layoutChanged || collapseChanged) && prevTall === this._tallTabsEnabled) {
       this._fullRenderSessionTabs();
     }
     // tabs-auto-wrap is measured, not derived from settings — updateTabOverflowMode()

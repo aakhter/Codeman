@@ -23,7 +23,7 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
         <head><style>${styles}</style></head>
         <body>
           <main class="main" style="height:760px">
-            <aside class="session-sidebar" style="display:flex;width:300px;flex:0 0 300px">
+            <aside id="sessionSidebar" class="session-sidebar" style="display:flex;width:300px;flex:0 0 300px">
               <div id="projectHeading" style="font-size:14px">cisco</div>
               <div class="session-sidebar-list" id="sessionSidebarList">
                 <div class="session-tabs" id="sessionTabs"></div>
@@ -101,6 +101,10 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       controller.cancelHideSubagentDropdown = () => undefined;
       controller.updateTabOverflowMode = () => undefined;
       controller.updateConnectionLines = () => undefined;
+      controller.applyTabWrapSettings = () => undefined;
+      controller.applySidebarFilter = () => undefined;
+      controller.loadAppSettingsFromStorage = () => ({ sessionListLayout: 'sidebar' });
+      controller.getDefaultSettings = () => ({});
       controller._applyTabEntrances = () => undefined;
       controller._scrollActiveTabIntoView = () => undefined;
       controller._tallTabsEnabled = false;
@@ -128,17 +132,18 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
     expect(gap).toBeLessThanOrEqual(6);
   });
 
-  it('keeps collapsed-rail actions as direct tab children', async () => {
-    const parentClass = await page.evaluate(() => {
+  it('rebuilds action placement through the production collapse and expand path', async () => {
+    const parentClasses = await page.evaluate(() => {
       const controller = (window as any).__cod339Controller;
-      controller._sidebarCollapsedOverride = true;
-      controller._fullRenderSessionTabs();
-      const actions = document.querySelector('.session-tab[data-id="short"] .tab-actions');
       controller._sidebarCollapsedOverride = false;
-      controller._fullRenderSessionTabs();
-      return actions?.parentElement?.className;
+      controller.toggleSessionSidebar();
+      const collapsed = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      controller.toggleSessionSidebar();
+      const expanded = document.querySelector('.session-tab[data-id="short"] .tab-actions')?.parentElement?.className;
+      return { collapsed, expanded };
     });
-    expect(parentClass).toContain('session-tab');
+    expect(parentClasses.collapsed).toContain('session-tab');
+    expect(parentClasses.expanded).toContain('tab-name-row');
   });
 
   it('keeps detached status after the immediate title/action cluster', async () => {
