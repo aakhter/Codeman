@@ -81,6 +81,12 @@ describe('App Settings authoritative checkpoint gate', () => {
     app._updatePushUI = () => {};
     app._refreshHeadroomStatus = () => {};
     app.renderShortcutSettingsList = () => {};
+    // Lives in app.js, which this harness does not load; openAppSettings uses the
+    // return value, so a bare no-op would only move the failure downstream.
+    app.resolveSessionSidebarFontSize = (value: unknown) => {
+      const size = Number(value);
+      return Number.isInteger(size) && size >= 11 && size <= 18 ? size : 14;
+    };
     app.renderAuthoringActions = () => {};
     app.loadModelConfigForSettings = () => {};
     app._initUpdatesSection = () => {};
