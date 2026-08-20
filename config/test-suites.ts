@@ -34,6 +34,7 @@ export const BROWSER_TEST_GLOBS = [
   'test/file-browser-session-preview.browser.test.ts',
   'test/file-preview-source-download.browser.test.ts',
   'test/session-options-responsive.browser.test.ts',
+  'test/session-sidebar-ux.browser.test.ts',
   'test/spreadsheet-preview.browser.test.ts',
   'test/tab-activation.browser.test.ts',
   'test/tab-focus-smart-group.browser.test.ts',
