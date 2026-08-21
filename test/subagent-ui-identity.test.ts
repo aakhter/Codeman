@@ -26,6 +26,8 @@ beforeAll(() => {
     read('entrance-animations.js') +
     '\n' +
     read('ultracode-panel.js') +
+    '\n' +
+    read('ultracode-windows.js') +
     '\n;globalThis.__SubagentIdentityApp = CodemanApp;';
   const previousInterval = window.setInterval;
   window.setInterval = (() => 0) as typeof window.setInterval;
@@ -479,5 +481,52 @@ describe('secondary opaque identity consumers', () => {
     }
     expect(html).not.toContain('openUltracodeAgentWindow');
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves colliding ultracode window and minimized labels by exact key without key leakage', () => {
+    const app = makeApp();
+    app.workflowRunDetails = new Map([
+      [
+        'run-1',
+        {
+          agents: [
+            { agentKey: 'opaque-first-secret', agentId: 'same-id', label: 'First label' },
+            { agentKey: 'opaque-second-secret', agentId: 'same-id', name: 'Second name' },
+            { agentKey: 'opaque-display-secret', agentId: 'display-id' },
+            { agentKey: 'opaque-neutral-secret' },
+          ],
+        },
+      ],
+    ]);
+    app.workflowRuns = new Map([['run-1', { runId: 'run-1', sessionUuid: 'claude-session' }]]);
+    app.makeWindowDraggable = () => ({});
+    app.applyWindowEntrance = vi.fn();
+    app._fullRenderSessionTabs = vi.fn();
+
+    for (const key of [
+      'opaque-first-secret',
+      'opaque-second-secret',
+      'opaque-display-secret',
+      'opaque-neutral-secret',
+    ]) {
+      app.createUltracodeAgentWindow(key, 'run-1');
+    }
+
+    expect([...document.querySelectorAll('.ultracode-agent-window .uw-name')].map((node) => node.textContent)).toEqual([
+      'First label',
+      'Second name',
+      'display-id',
+      'Agent',
+    ]);
+
+    for (const key of [...app.ultracodeAgentWindows.keys()]) app.minimizeUltracodeAgentWindowToTab(key);
+    const host = document.createElement('div');
+    host.innerHTML = app.renderUltracodeTabBadge('tab-a');
+    expect(host.textContent).toContain('First label');
+    expect(host.textContent).toContain('Second name');
+    expect(host.textContent).toContain('display-id');
+    expect(host.textContent).toContain('Agent');
+    expect(host.textContent).not.toContain('opaque-first-secret');
+    expect(host.textContent).not.toContain('opaque-neutral-secret');
   });
 });
