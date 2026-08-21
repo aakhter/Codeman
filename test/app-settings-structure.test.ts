@@ -152,27 +152,22 @@ describe('App Settings modal structure', () => {
   });
 });
 
-describe('Case Settings default group structure', () => {
-  it('keeps accessible desktop and mobile default-group controls wired to the shared handler', () => {
-    for (const [popoverId, selectId, mobile] of [
-      ['caseSettingsPopover', 'caseDefaultGroup', 'false'],
-      ['caseSettingsPopoverMobile', 'caseDefaultGroupMobile', 'true'],
-    ]) {
-      const popover = html.match(new RegExp(`id="${popoverId}"([\\s\\S]*?)<\\/div>`))?.[1] ?? '';
-      expect(popover).toContain('class="case-setting-field"');
-      expect(popover).toContain('Default session group');
-      expect(popover).toContain(`for="${selectId}"`);
-      expect(popover).toContain(`id="${selectId}"`);
-      expect(popover).toContain(`onchange="app.onCaseDefaultGroupChanged(${mobile})"`);
-      expect(popover).toContain('<option value="">Ungrouped</option>');
-      expect(popover).toContain('Place future sessions for this case in this group');
-    }
+describe('Case Management default group structure', () => {
+  it('keeps one accessible default-group control in the Edit Case surface', () => {
+    expect(html).toContain('id="caseEditDefaultGroupRow"');
+    expect(html).toContain('for="caseEditDefaultGroup"');
+    expect(html).toContain('id="caseEditDefaultGroup"');
+    expect(html).toContain('<option value="">Ungrouped</option>');
+    expect(html).toContain('Place future sessions for this case in this group');
+    expect(html).not.toContain('id="caseDefaultGroup"');
+    expect(html).not.toContain('id="caseDefaultGroupMobile"');
   });
 
-  it('keeps both popovers on the same server-authoritative controller path', () => {
-    expect(sessionUi).toContain('_caseDefaultGroupControls()');
-    expect(sessionUi).toContain('async loadCaseDefaultGroup(caseName)');
-    expect(sessionUi).toContain('async onCaseDefaultGroupChanged(isMobile)');
-    expect(sessionUi).toContain('this.loadCaseDefaultGroup(caseName)');
+  it('loads the Edit Case control from the server and saves it through the case update', () => {
+    expect(sessionUi).toContain('async loadCaseEditDefaultGroup(caseName)');
+    expect(sessionUi).toContain('this.loadCaseEditDefaultGroup(name)');
+    expect(sessionUi).toContain('const defaultGroupId = this._caseEditDefaultGroupId()');
+    expect(sessionUi).toContain('updatePayload = { ...updatePayload, defaultGroupId }');
+    expect(sessionUi).not.toContain('async onCaseDefaultGroupChanged(isMobile)');
   });
 });
