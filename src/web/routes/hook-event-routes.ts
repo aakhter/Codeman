@@ -68,7 +68,10 @@ export function registerHookEventRoutes(
       const prevClaudeSessionId = session?.claudeSessionId;
       session?.adoptClaudeSessionStartId(data.session_id);
       if (session) {
-        if (data.session_id !== prevClaudeSessionId) ctx.agentActivity.identityChanged(session);
+        if (data.session_id !== prevClaudeSessionId) {
+          approvalInbox.resolveForSession(sessionId, 'resolved_in_terminal', ['idle']);
+          ctx.agentActivity.identityChanged(session);
+        }
         ctx.persistSessionState(session);
       }
       // Docker sessions: keep the case's resume seed following the LIVE

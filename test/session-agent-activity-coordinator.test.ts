@@ -405,6 +405,65 @@ describe('session agent activity coordinator', () => {
       expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
     });
 
+    it('quarantines a failed older idle decision behind a newer completed stop', () => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = session();
+      coordinator.attachSession(target);
+      const delayedIdle = coordinator.allocateEvent(target, 'idle_prompt');
+      const stop = coordinator.allocateEvent(target, 'stop');
+      coordinator.completeEvent(target, stop);
+
+      expect(coordinator.decisionForFailedReconciliation(target, delayedIdle)).toMatchObject({
+        presentToHuman: false,
+        quarantined: true,
+      });
+    });
+
+    it('keeps permission and elicitation independent from older idle ordering', () => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = session();
+      coordinator.attachSession(target);
+      const olderIdle = coordinator.allocateEvent(target, 'idle_prompt');
+      expect(
+        coordinator.decisionForFailedReconciliation(target, coordinator.allocateEvent(target, 'permission'))
+      ).toMatchObject({ presentToHuman: true, quarantined: false });
+      expect(
+        coordinator.decisionForFailedReconciliation(target, coordinator.allocateEvent(target, 'elicitation'))
+      ).toMatchObject({ presentToHuman: true, quarantined: false });
+      expect(coordinator.decisionForFailedReconciliation(target, olderIdle)).toMatchObject({
+        presentToHuman: true,
+        quarantined: false,
+      });
+    });
+
+    it('allows fresh exact process proof to revive a quarantined composite key', async () => {
+      let evidence = {
+        observation: 'live' as AgentObservation,
+        semanticRevision: 1,
+        exactWatcherCount: 1,
+        exactWatcherAgentKeys: ['project/conversation/agent'],
+        observedWatcherAgentKeys: ['project/conversation/agent'],
+        currentFrame: frameEvidence('negative'),
+        processReason: 'no_matching_process' as const,
+      };
+      const coordinator = new SessionAgentActivityCoordinator({ inspect: async () => evidence });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.onWatcherSnapshot(target, evidence.exactWatcherAgentKeys, 1);
+      const stop = coordinator.allocateEvent(target, 'stop');
+      const result = await coordinator.reconcileForEvent(target, stop);
+      const reconciliation = coordinator.reconciliationForEvent(target, stop, result);
+      coordinator.decisionForEvent(target, stop, { reconciliation });
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+
+      evidence = { ...evidence, semanticRevision: 2, processReason: 'matching_process' };
+      coordinator.commitEvidence(target, evidence);
+      expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+      expect(coordinator.filterWatcherAgentKeys(target, evidence.observedWatcherAgentKeys)).toEqual([
+        'project/conversation/agent',
+      ]);
+    });
+
     it('fails open for a current human prompt but fails safe for autonomy under uncertainty', () => {
       const coordinator = new SessionAgentActivityCoordinator();
       const target = session();

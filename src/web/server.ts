@@ -804,14 +804,35 @@ export class WebServer extends EventEmitter {
   }
 
   private allocateAgentActivityEvent(session: Session, kind: HookKind, externalSourceSequence?: number): ActivityEvent {
-    return this.agentActivityCoordinator.allocateEvent(this.activityAdapter(session), kind, externalSourceSequence);
+    const adapter = this.activityAdapters.get(session);
+    if (adapter) return this.agentActivityCoordinator.allocateEvent(adapter, kind, externalSourceSequence);
+    return {
+      sessionId: session.id,
+      identityGeneration: -1,
+      trackingGeneration: -1,
+      sequence: Number.MAX_SAFE_INTEGER,
+      kind,
+      externalSourceSequence,
+    };
   }
 
   private decideAgentActivityEvent(
     session: Session,
     event: ActivityEvent
   ): ActivityDecision | Promise<ActivityDecision> {
-    const adapter = this.activityAdapter(session);
+    const adapter = this.activityAdapters.get(session);
+    if (!adapter) {
+      return {
+        event,
+        settleEndedEarly: false,
+        presentToHuman: true,
+        autonomyBlocked: false,
+        quarantined: false,
+        ambiguous: false,
+        observation: 'not_observable',
+        liveEvidence: null,
+      };
+    }
     if (
       event.kind === 'permission' ||
       event.kind === 'elicitation' ||
@@ -831,20 +852,21 @@ export class WebServer extends EventEmitter {
         // invalidated while awaiting. Automation remains blocked by the projection.
       }
       try {
-        this.agentActivityCoordinator.abandonEvent(adapter, event);
+        return this.agentActivityCoordinator.decisionForFailedReconciliation(adapter, event);
       } catch {
-        // A timed-out consumer may already have retired the event.
+        // Identity replacement or detachment makes the original receipt stale.
+        // Never let that stale failure cross the newer generation's barrier.
+        return {
+          event,
+          settleEndedEarly: false,
+          presentToHuman: false,
+          autonomyBlocked: true,
+          quarantined: true,
+          ambiguous: true,
+          observation: 'unknown',
+          liveEvidence: null,
+        };
       }
-      return {
-        event,
-        settleEndedEarly: false,
-        presentToHuman: event.kind !== 'raw_idle',
-        autonomyBlocked: this.agentActivityCoordinator.isAutonomyBlocked(adapter),
-        quarantined: false,
-        ambiguous: true,
-        observation: 'unknown',
-        liveEvidence: null,
-      };
     })();
   }
 
@@ -974,11 +996,12 @@ export class WebServer extends EventEmitter {
 
   private async inspectAgentActivity(project: ObservableSessionProject, signal: AbortSignal): Promise<AgentEvidence> {
     const snapshot = subagentWatcher.getSemanticSnapshot(project.projectHash, project.claudeSessionId);
+    const observedWatcherAgentKeys = snapshot.agents
+      .filter((agent) => agent.status === 'active' || agent.status === 'idle')
+      .map((agent) => agent.agentKey);
     const exactWatcherAgentKeys = this.agentActivityCoordinator.filterWatcherAgentKeys(
       project.session,
-      snapshot.agents
-        .filter((agent) => agent.status === 'active' || agent.status === 'idle')
-        .map((agent) => agent.agentKey)
+      observedWatcherAgentKeys
     );
     const exactWatcherCount = exactWatcherAgentKeys.length;
     const identity: ObservableClaudeIdentity = {
@@ -1015,6 +1038,7 @@ export class WebServer extends EventEmitter {
       semanticRevision: snapshot.revision,
       exactWatcherCount,
       exactWatcherAgentKeys,
+      observedWatcherAgentKeys,
       processReason:
         process.status === 'positive' ? 'matching_process' : process.status === 'negative' ? process.reason : undefined,
       currentFrame:
@@ -1042,7 +1066,8 @@ export class WebServer extends EventEmitter {
         claudeSessionId: info.sessionId,
         claudeRuntimeVersion: this.localClaudeRuntimeVersion,
       },
-      LOCAL_PROCESS_INSPECTION_SOURCE
+      this.agentProcessInspectionSource,
+      { matcherRegistry: this.agentProcessMatcherRegistry }
     );
     if (result.status === 'positive') return result.agentIds.includes(info.agentId) ? 'live' : 'unknown';
     if (result.status === 'negative' && result.reason === 'no_matching_process') return 'not_live';

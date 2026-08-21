@@ -27,6 +27,9 @@ function internals(server: WebServer) {
     cachedLightState: unknown;
     cachedSessionsList: unknown;
     sessions: Map<string, Session>;
+    activityAdapters: Map<Session, unknown>;
+    runSummaryTrackers: Map<string, { recordHookEvent(event: string, data: Record<string, unknown>): void }>;
+    inspectSubagentLiveness(info: Readonly<SubagentInfo>): Promise<'live' | 'not_live' | 'unknown'>;
     app: FastifyInstance;
     setupRoutes(): Promise<void>;
     mux: { capturePaneText?: (muxName: string) => string | null };
@@ -209,6 +212,119 @@ describe('WebServer agent activity ownership', () => {
     });
     expect(result.events).toContain(SseEvent.HookSuppressed);
     expect(result.events).not.toContain(SseEvent.HookStop);
+  });
+
+  it('uses the injected process evidence contract for watcher liveness checks', async () => {
+    const matcherRegistry: ProcessProofMatcherRegistry = new Map([
+      ['9.9.9-test', { capability: 'exact_role', match: () => ({ matched: false }) }],
+    ]);
+    const processSource: ProcessInspectionSource = {
+      listPids: async () => [123],
+      readCmdline: async () => 'claude\0',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: '9.9.9-test',
+      matcherRegistry,
+      source: processSource,
+    });
+    const state = internals(server);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    const session = new Session({ id: 'liveness-injected', workingDir: '/tmp/liveness-injected', mode: 'claude' });
+    await state.createRouteContext().addSession(session);
+    const info = {
+      agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), session.claudeSessionId!, 'agent'),
+      agentId: 'agent',
+      projectHash: claudeProjectHash(session.workingDir),
+      sessionId: session.claudeSessionId!,
+      filePath: '/tmp/agent.jsonl',
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    } satisfies SubagentInfo;
+
+    expect(await state.inspectSubagentLiveness(info)).toBe('not_live');
+    await server.stop();
+  });
+
+  it('keeps installed Claude without an exact-role signature conservative for watcher liveness', async () => {
+    const processSource: ProcessInspectionSource = {
+      listPids: async () => [123],
+      readCmdline: async () => 'claude\0',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: '2.1.237',
+      source: processSource,
+    });
+    const state = internals(server);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    const session = new Session({
+      id: 'liveness-conservative',
+      workingDir: '/tmp/liveness-conservative',
+      mode: 'claude',
+    });
+    await state.createRouteContext().addSession(session);
+    const info = {
+      agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), session.claudeSessionId!, 'agent'),
+      agentId: 'agent',
+      projectHash: claudeProjectHash(session.workingDir),
+      sessionId: session.claudeSessionId!,
+      filePath: '/tmp/agent.jsonl',
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    } satisfies SubagentInfo;
+
+    expect(await state.inspectSubagentLiveness(info)).toBe('unknown');
+    await server.stop();
+  });
+
+  it('falls back to legacy hook handling without recreating activity state after detach', async () => {
+    const server = new WebServer(0, false, true);
+    const state = internals(server);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    await state.setupRoutes();
+    const ctx = state.createRouteContext();
+    const session = new Session({ id: 'detached-hook', workingDir: '/tmp/detached-hook', mode: 'claude' });
+    await ctx.addSession(session);
+    ctx.agentActivity.detachSession(session);
+    expect(state.sessions.get(session.id)).toBe(session);
+    expect(state.activityAdapters.has(session)).toBe(false);
+    const tracker = { recordHookEvent: vi.fn(), stop: vi.fn() };
+    state.runSummaryTrackers.set(session.id, tracker);
+    const notifySignal = vi.spyOn(sessionWaits, 'notifySignal');
+    state.sse.broadcast = vi.fn();
+
+    const stop = await state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'stop', sessionId: session.id, data: { message: 'late stop' } },
+    });
+    const idle = await state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'idle_prompt', sessionId: session.id, data: { message: 'late idle' } },
+    });
+
+    expect([stop.statusCode, idle.statusCode]).toEqual([200, 200]);
+    expect(notifySignal).toHaveBeenCalledWith(session.id, 'stop');
+    expect(tracker.recordHookEvent).toHaveBeenCalledWith('stop', expect.objectContaining({ message: 'late stop' }));
+    expect(state.sse.broadcast.mock.calls.map(([event]) => event)).toEqual(
+      expect.arrayContaining([SseEvent.HookStop, SseEvent.HookIdlePrompt])
+    );
+    expect(state.activityAdapters.has(session)).toBe(false);
+    await server.stop();
   });
 
   it('quarantines delayed watcher evidence after a capability-complete negative stop and accepts a new revision', async () => {

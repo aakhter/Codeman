@@ -124,6 +124,66 @@ describe('hook-event-routes', () => {
       expect(session.activityProjection?.activityStatus).toBe('checking_agents');
     });
 
+    it('clears only an old-generation idle approval on authoritative identity replacement', async () => {
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+        claudeSessionId: string;
+        adoptClaudeSessionStartId(id: string): void;
+      };
+      session.claudeSessionId = 'old-generation';
+      session.adoptClaudeSessionStartId = (id) => {
+        session.claudeSessionId = id;
+      };
+      approvalInbox.notePrompt({
+        sessionId: harness.ctx._sessionId,
+        sessionName: 'old',
+        kind: 'idle',
+        sourceSequence: 8,
+      });
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: {
+          event: 'session_start',
+          sessionId: harness.ctx._sessionId,
+          data: { session_id: 'new-generation', source: 'new' },
+        },
+      });
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+
+      harness.ctx.agentActivity.allocateEvent.mockReturnValue({ sequence: 1, kind: 'stop' });
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: null },
+      });
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+    });
+
+    it.each(['permission', 'question'] as const)(
+      'preserves a pending %s approval across identity replacement',
+      async (kind) => {
+        const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+          claudeSessionId: string;
+          adoptClaudeSessionStartId(id: string): void;
+        };
+        session.claudeSessionId = 'old-generation';
+        session.adoptClaudeSessionStartId = (id) => {
+          session.claudeSessionId = id;
+        };
+        approvalInbox.notePrompt({ sessionId: harness.ctx._sessionId, sessionName: 'old', kind, sourceSequence: 8 });
+        await harness.app.inject({
+          method: 'POST',
+          url: '/api/hook-event',
+          payload: {
+            event: 'session_start',
+            sessionId: harness.ctx._sessionId,
+            data: { session_id: `new-${kind}`, source: 'new' },
+          },
+        });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).toMatchObject({ kind, sourceSequence: 8 });
+      }
+    );
+
     it('returns the checkpoint run id for a new-mode request', async () => {
       const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
         checkpointEnabled: boolean;

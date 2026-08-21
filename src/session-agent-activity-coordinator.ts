@@ -63,6 +63,8 @@ export interface AgentEvidence {
   processReason?: 'matching_process' | 'no_registered_role_signature' | 'no_matching_process';
   exactWatcherCount?: number;
   exactWatcherAgentKeys?: readonly string[];
+  /** Raw exact watcher keys before this coordinator's completion quarantine is applied. */
+  observedWatcherAgentKeys?: readonly string[];
   currentFrame?: Readonly<{
     source: 'tmux_visible_frame';
     status: 'positive' | 'negative' | 'unavailable';
@@ -144,6 +146,7 @@ interface SessionRecord {
   quarantinedAgentKeys: Set<string>;
   allocatedEvents: Map<number, ActivityEvent>;
   retiredEvents: Map<number, ActivityEvent>;
+  failedReconciliationEvents: Set<number>;
   activeEventConsumers: Map<number, number>;
   retireWhenInactive: Set<number>;
   eventReconciliations: Map<number, EventReconciliation>;
@@ -350,6 +353,7 @@ export class SessionAgentActivityCoordinator {
       quarantinedAgentKeys: new Set(),
       allocatedEvents: new Map(),
       retiredEvents: new Map(),
+      failedReconciliationEvents: new Set(),
       activeEventConsumers: new Map(),
       retireWhenInactive: new Set(),
       eventReconciliations: new Map(),
@@ -389,6 +393,7 @@ export class SessionAgentActivityCoordinator {
     record.quarantinedAgentKeys.clear();
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
+    record.failedReconciliationEvents.clear();
     record.activeEventConsumers.clear();
     record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
@@ -406,6 +411,7 @@ export class SessionAgentActivityCoordinator {
     record.decisionToken += 1;
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
+    record.failedReconciliationEvents.clear();
     record.activeEventConsumers.clear();
     record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
@@ -464,24 +470,32 @@ export class SessionAgentActivityCoordinator {
   commitEvidence(session: CoordinatorSession, evidence: AgentEvidence): void {
     const record = this.requireRecord(session);
     if (!record.tracking) return;
-    const effectiveWatcherAgentKeys = evidence.exactWatcherAgentKeys
-      ? this.filterWatcherAgentKeys(session, evidence.exactWatcherAgentKeys)
+    const exactProcessLive = evidence.observation === 'live' && evidence.processReason === 'matching_process';
+    const observedWatcherAgentKeys = evidence.observedWatcherAgentKeys ?? evidence.exactWatcherAgentKeys;
+    const initiallyEffectiveWatcherAgentKeys = observedWatcherAgentKeys
+      ? this.filterWatcherAgentKeys(session, observedWatcherAgentKeys)
       : undefined;
     if (
-      evidence.exactWatcherAgentKeys &&
-      evidence.exactWatcherAgentKeys.length > 0 &&
-      effectiveWatcherAgentKeys?.length === 0
+      !exactProcessLive &&
+      observedWatcherAgentKeys &&
+      observedWatcherAgentKeys.length > 0 &&
+      initiallyEffectiveWatcherAgentKeys?.length === 0
     ) {
-      this.onWatcherSnapshot(session, evidence.exactWatcherAgentKeys, evidence.semanticRevision);
+      this.onWatcherSnapshot(session, observedWatcherAgentKeys, evidence.semanticRevision);
       return;
     }
     if (!this.acceptSemanticRevision(record, evidence.semanticRevision)) return;
+    if (exactProcessLive) {
+      for (const agentKey of observedWatcherAgentKeys ?? []) record.quarantinedAgentKeys.delete(agentKey);
+    }
+    const effectiveWatcherAgentKeys = observedWatcherAgentKeys
+      ? this.filterWatcherAgentKeys(session, observedWatcherAgentKeys)
+      : undefined;
     record.processReason = evidence.processReason;
-    const exactProcessLive = evidence.observation === 'live' && evidence.processReason === 'matching_process';
-    if (evidence.exactWatcherCount !== undefined || evidence.exactWatcherAgentKeys !== undefined) {
+    if (evidence.exactWatcherCount !== undefined || observedWatcherAgentKeys !== undefined) {
       const effectiveCount = effectiveWatcherAgentKeys?.length ?? evidence.exactWatcherCount ?? 0;
-      if (evidence.exactWatcherAgentKeys) {
-        this.onWatcherSnapshot(session, evidence.exactWatcherAgentKeys, evidence.semanticRevision);
+      if (observedWatcherAgentKeys) {
+        this.onWatcherSnapshot(session, observedWatcherAgentKeys, evidence.semanticRevision);
       } else {
         this.onWatcherCount(session, effectiveCount, evidence.semanticRevision);
       }
@@ -724,6 +738,9 @@ export class SessionAgentActivityCoordinator {
           if (remaining === 0) {
             const retirementRequested = record.retireWhenInactive.has(event.sequence);
             if (retirementRequested || (result === false && !hasSuccessfulOwnership)) {
+              if (result === false && !retirementRequested) {
+                record.failedReconciliationEvents.add(event.sequence);
+              }
               this.retireEvent(record, event);
             }
           }
@@ -779,11 +796,45 @@ export class SessionAgentActivityCoordinator {
 
   abandonEvent(session: CoordinatorSession, event: ActivityEvent): void {
     const record = this.requireEvent(session, event);
+    record.failedReconciliationEvents.delete(event.sequence);
     this.retireEvent(record, event);
+  }
+
+  /**
+   * Fail open for a current human-facing hook after inspection failure while
+   * retaining the receipt's ordering and generation barriers.
+   */
+  decisionForFailedReconciliation(session: CoordinatorSession, event: ActivityEvent): ActivityDecision {
+    const record = this.requireEvent(session, event);
+    const immediate = event.kind === 'permission' || event.kind === 'elicitation';
+    const failedReceipt = record.failedReconciliationEvents.delete(event.sequence);
+    const replayed = record.retiredEvents.get(event.sequence) === event && !failedReceipt;
+    const quarantined =
+      replayed ||
+      (!immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence));
+    if (!immediate && !replayed) {
+      record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
+    }
+    const observable = record.observation !== 'not_observable';
+    const autonomyBlocked = this.isAutonomyBlocked(session);
+    const decision: ActivityDecision = {
+      event,
+      settleEndedEarly: false,
+      presentToHuman: !replayed && (immediate || (!quarantined && (event.kind !== 'raw_idle' || !autonomyBlocked))),
+      autonomyBlocked,
+      quarantined,
+      ambiguous: observable,
+      observation: observable ? 'unknown' : 'not_observable',
+      liveEvidence: null,
+      processReason: record.processReason,
+    };
+    this.retireEvent(record, event);
+    return decision;
   }
 
   completeEvent(session: CoordinatorSession, event: ActivityEvent): void {
     const record = this.requireEvent(session, event);
+    record.failedReconciliationEvents.delete(event.sequence);
     if (event.kind !== 'permission' && event.kind !== 'elicitation') {
       record.completionWatermark = Math.max(record.completionWatermark, event.sequence);
     }
@@ -834,6 +885,7 @@ export class SessionAgentActivityCoordinator {
     input: ActivityDecisionInput = {}
   ): ActivityDecision {
     const record = this.requireEvent(session, event);
+    record.failedReconciliationEvents.delete(event.sequence);
     const reconciliation = input.reconciliation;
     const reconciliationIsFresh =
       !!reconciliation &&
@@ -1000,6 +1052,7 @@ export class SessionAgentActivityCoordinator {
       const oldest = record.retiredEvents.keys().next().value as number | undefined;
       if (oldest === undefined) break;
       record.retiredEvents.delete(oldest);
+      record.failedReconciliationEvents.delete(oldest);
     }
   }
 
