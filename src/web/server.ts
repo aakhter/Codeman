@@ -724,7 +724,7 @@ export class WebServer extends EventEmitter {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
       addSession: async (session: Session, options: SessionCreationOptions = {}) => {
-        return this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options.tabGroupId, () => {
+        return this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options, () => {
           this.sessions.set(session.id, session);
           return () => {
             if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);

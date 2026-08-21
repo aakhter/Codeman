@@ -4,11 +4,11 @@
  * auto-clear, auto-compact, image watcher, flicker filter, and logout.
  */
 
-import { FastifyInstance, type FastifyReply } from 'fastify';
+import { FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { join, dirname, extname, basename, posix as pathPosix } from 'node:path';
+import { join, dirname, extname, basename, resolve, posix as pathPosix } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
@@ -147,6 +147,41 @@ import {
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
 const CODEMAN_CONFIG_DIR = getDataDir();
+const INFERABLE_LOCAL_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
+
+const canonicalExistingPath = (value: string): string | undefined => {
+  try {
+    return realpathSync(resolve(value));
+  } catch {
+    return undefined;
+  }
+};
+
+/** Infer only exact local cases already visible through the authenticated case-list model. */
+const inferAccessibleLocalCaseName = async (req: FastifyRequest, workingDir: string): Promise<string | undefined> => {
+  const canonicalWorkingDir = canonicalExistingPath(workingDir);
+  if (!canonicalWorkingDir) return undefined;
+  const user = getAuthUser(req);
+
+  // A Docker workspace may be a real host directory, but it is not a local-case launch.
+  const dockerCases = await readDockerCases(CODEMAN_CONFIG_DIR);
+  if (dockerCases.some((item) => canonicalExistingPath(item.hostWorkspacePath) === canonicalWorkingDir)) {
+    return undefined;
+  }
+
+  const canonicalCasesDir = canonicalExistingPath(resolveCasesDir(user));
+  if (canonicalCasesDir && dirname(canonicalWorkingDir) === canonicalCasesDir) {
+    const name = basename(canonicalWorkingDir);
+    if (INFERABLE_LOCAL_CASE_NAME.test(name)) return name;
+  }
+
+  // The v1 linked-case registry is ownerless, matching case-routes: admin-only in multi-user mode.
+  if (!isAdmin(req)) return undefined;
+  const linkedCases = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
+  return Object.entries(linkedCases).find(
+    ([name, path]) => INFERABLE_LOCAL_CASE_NAME.test(name) && canonicalExistingPath(path) === canonicalWorkingDir
+  )?.[0];
+};
 
 // Pre-compiled regex for terminal buffer cleaning (avoids per-request compilation)
 // eslint-disable-next-line no-control-regex
@@ -820,7 +855,9 @@ export function registerSessionRoutes(
       remote = toAttachedSessionRemote(host, remoteSessionName, workingDir);
     } else if (body.caseName) {
       const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
-      const remoteCase = remoteCases.find((item) => item.name === body.caseName);
+      const remoteCase = remoteCases.find(
+        (item) => item.name === body.caseName && canAccessOwned(getAuthUser(req), item.owner)
+      );
       if (remoteCase) {
         const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
         if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
@@ -833,9 +870,11 @@ export function registerSessionRoutes(
         }
         workingDir = remoteCase.remotePath;
         remote = toSessionRemote(host, remoteCase);
-      } else {
+      } else if (!body.workingDir) {
         const linkedCases = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
-        workingDir = linkedCases[body.caseName] || validatePathWithinBase(body.caseName, CASES_DIR) || workingDir;
+        const linkedCase = isAdmin(req) ? linkedCases[body.caseName] : undefined;
+        const managedCasesDir = isAdmin(req) ? CASES_DIR : resolveCasesDir(getAuthUser(req));
+        workingDir = linkedCase || validatePathWithinBase(body.caseName, managedCasesDir) || workingDir;
       }
     }
 
@@ -864,6 +903,9 @@ export function registerSessionRoutes(
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir does not exist');
       }
     }
+
+    const placementCaseName =
+      body.caseName ?? (body.workingDir && !remote ? await inferAccessibleLocalCaseName(req, workingDir) : undefined);
 
     // envOverrides flow through Session → tmux setenv (ephemeral, per-session).
     //
@@ -1078,9 +1120,14 @@ export function registerSessionRoutes(
       parentSessionId: resolveParentSessionId(ctx, req, body.parentSessionId, owner),
     });
 
-    const tabLayoutSnapshot = body.tabGroupId
-      ? await ctx.addSession(session, { tabGroupId: body.tabGroupId })
-      : await ctx.addSession(session);
+    const creationOptions = {
+      ...(placementCaseName ? { caseName: placementCaseName } : {}),
+      ...(body.tabGroupId ? { tabGroupId: body.tabGroupId } : {}),
+    };
+    const tabLayoutSnapshot =
+      Object.keys(creationOptions).length > 0
+        ? await ctx.addSession(session, creationOptions)
+        : await ctx.addSession(session);
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
@@ -1099,7 +1146,9 @@ export function registerSessionRoutes(
     ctx.broadcast(SseEvent.SessionCreated, lightState);
     return {
       session: lightState,
-      ...(body.tabGroupId ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements } : {}),
+      ...(body.tabGroupId || tabLayoutSnapshot.placementSource === 'case-default'
+        ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements }
+        : {}),
     };
   });
 
@@ -3327,9 +3376,10 @@ export function registerSessionRoutes(
       }
     }
 
-    const tabLayoutSnapshot = tabGroupId
-      ? await ctx.addSession(session, { tabGroupId })
-      : await ctx.addSession(session);
+    const tabLayoutSnapshot = await ctx.addSession(session, {
+      caseName,
+      ...(tabGroupId ? { tabGroupId } : {}),
+    });
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
@@ -3413,7 +3463,9 @@ export function registerSessionRoutes(
         sessionId: session.id,
         casePath: resolvedCasePath,
         caseName,
-        ...(tabGroupId ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements } : {}),
+        ...(tabGroupId || tabLayoutSnapshot.placementSource === 'case-default'
+          ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements }
+          : {}),
       };
     } catch (err) {
       // Clean up session on error to prevent orphaned resources

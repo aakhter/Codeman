@@ -13,6 +13,7 @@ import path from 'node:path';
 import { WebServer } from '../src/web/server.js';
 import { TmuxManager } from '../src/tmux-manager.js';
 import { createUser, invalidateUsersCache } from '../src/user-store.js';
+import { StateStore } from '../src/state-store.js';
 
 vi.spyOn(TmuxManager, 'isTmuxAvailable').mockReturnValue(true);
 
@@ -198,5 +199,51 @@ describe('admin case-folder API', () => {
     // Deleting it again 404s.
     const gone = await fetch(url('/api/admin/users/kim/cases/proj1'), { method: 'DELETE', headers: adminNoBody });
     expect(gone.status).toBe(404);
+  });
+
+  it('clears the exact user-owned default after a successful admin case deletion', async () => {
+    const casePath = path.join(spacesDir, 'joe', 'cases', 'cleanup-case');
+    await fs.mkdir(casePath, { recursive: true });
+    const rmSpy = vi.spyOn(fs, 'rm');
+    const deleteDefaultSpy = vi.spyOn(StateStore.prototype, 'deleteCaseDefaultGroup');
+    try {
+      const res = await fetch(url('/api/admin/users/joe/cases/cleanup-case'), {
+        method: 'DELETE',
+        headers: adminNoBody,
+      });
+
+      expect(res.status).toBe(200);
+      expect(rmSpy).toHaveBeenCalledTimes(1);
+      expect(rmSpy).toHaveBeenCalledWith(casePath, { recursive: true, force: true });
+      expect(deleteDefaultSpy).toHaveBeenCalledTimes(1);
+      expect(deleteDefaultSpy).toHaveBeenCalledWith('joe', 'cleanup-case');
+      expect(rmSpy.mock.invocationCallOrder[0]).toBeLessThan(deleteDefaultSpy.mock.invocationCallOrder[0]);
+    } finally {
+      deleteDefaultSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+  });
+
+  it('does not clear the default when admin case removal fails', async () => {
+    const casePath = path.join(spacesDir, 'joe', 'cases', 'cleanup-fails');
+    await fs.mkdir(casePath, { recursive: true });
+    const rmSpy = vi.spyOn(fs, 'rm').mockRejectedValueOnce(new Error('synthetic removal failure'));
+    const deleteDefaultSpy = vi.spyOn(StateStore.prototype, 'deleteCaseDefaultGroup');
+    try {
+      const res = await fetch(url('/api/admin/users/joe/cases/cleanup-fails'), {
+        method: 'DELETE',
+        headers: adminNoBody,
+      });
+
+      expect(res.status).toBe(500);
+      expect(rmSpy).toHaveBeenCalledTimes(1);
+      expect(rmSpy).toHaveBeenCalledWith(casePath, { recursive: true, force: true });
+      expect(deleteDefaultSpy).not.toHaveBeenCalled();
+      await expect(fs.stat(casePath)).resolves.toBeTruthy();
+    } finally {
+      deleteDefaultSpy.mockRestore();
+      rmSpy.mockRestore();
+      await fs.rm(casePath, { recursive: true, force: true });
+    }
   });
 });

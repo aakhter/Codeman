@@ -78,7 +78,6 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
       totalFiles: 1,
       totalDirectories: 1,
       truncated: false,
-      mode: 'tree',
       lazy: true,
     });
     expect(listRemoteWorkspaceDirectory).toHaveBeenCalledWith(REMOTE, 'src');

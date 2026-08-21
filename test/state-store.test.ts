@@ -141,6 +141,59 @@ describe('StateStore', () => {
     });
   });
 
+  describe('case default groups', () => {
+    it('distinguishes unset defaults from intentional Ungrouped values per owner', () => {
+      const store = new StateStore(testFilePath);
+
+      expect(store.getCaseDefaultGroup('alice', 'nzbdav')).toBeUndefined();
+
+      store.setCaseDefaultGroup('alice', 'nzbdav', 'group-nzbdav');
+      store.setCaseDefaultGroup('bob', 'nzbdav', null);
+
+      expect(store.getCaseDefaultGroup('alice', 'nzbdav')).toBe('group-nzbdav');
+      expect(store.getCaseDefaultGroup('bob', 'nzbdav')).toBeNull();
+    });
+
+    it('moves a default when its case is renamed and removes it when the case is deleted', () => {
+      const store = new StateStore(testFilePath);
+      store.setCaseDefaultGroup('alice', 'nzbdav', 'group-nzbdav');
+
+      store.renameCaseDefaultGroup('alice', 'nzbdav', 'nzbdav-next');
+
+      expect(store.getCaseDefaultGroup('alice', 'nzbdav')).toBeUndefined();
+      expect(store.getCaseDefaultGroup('alice', 'nzbdav-next')).toBe('group-nzbdav');
+
+      store.deleteCaseDefaultGroup('alice', 'nzbdav-next');
+
+      expect(store.getCaseDefaultGroup('alice', 'nzbdav-next')).toBeUndefined();
+    });
+
+    it('treats prototype-collision owner and case names as ordinary record keys', () => {
+      const store = new StateStore(testFilePath);
+      store.setCaseDefaultGroup('seed-owner', 'seed-case', 'seed-group');
+
+      expect(store.getCaseDefaultGroup('constructor', 'toString')).toBeUndefined();
+      expect(store.getCaseDefaultGroup('seed-owner', 'constructor')).toBeUndefined();
+
+      store.setCaseDefaultGroup('__proto__', 'constructor', 'group-prototype');
+      store.setCaseDefaultGroup('constructor', '__proto__', null);
+
+      expect(store.getCaseDefaultGroup('__proto__', 'constructor')).toBe('group-prototype');
+      expect(store.getCaseDefaultGroup('constructor', '__proto__')).toBeNull();
+
+      store.renameCaseDefaultGroup('__proto__', 'constructor', '__proto__');
+
+      expect(store.getCaseDefaultGroup('__proto__', 'constructor')).toBeUndefined();
+      expect(store.getCaseDefaultGroup('__proto__', '__proto__')).toBe('group-prototype');
+
+      store.deleteCaseDefaultGroup('__proto__', '__proto__');
+      store.deleteCaseDefaultGroup('constructor', '__proto__');
+
+      expect(store.getCaseDefaultGroup('__proto__', '__proto__')).toBeUndefined();
+      expect(store.getCaseDefaultGroup('constructor', '__proto__')).toBeUndefined();
+    });
+  });
+
   describe('demoteOrRemoveSession and pinned cleanup (COD-142)', () => {
     it('should preserve a pinned session as a stopped record on kill', () => {
       const store = new StateStore(testFilePath);

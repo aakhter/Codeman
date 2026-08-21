@@ -653,6 +653,41 @@ function sortSessionsByActivity(rows) {
   return (Array.isArray(rows) ? rows.slice() : []).sort(compareSessionActivity);
 }
 
+// Terminal font stack — the single source for every xterm surface (the main
+// terminal in terminal-ui.js, the log-viewer terminal in panels-ui.js).
+// "Symbols Nerd Font Mono" is a bundled icons-only webfont (fonts/ +
+// @font-face in styles.css): browsers fall back PER GLYPH, so Nerd Font
+// prompt icons (powerline segments, folder/git glyphs from p10k, starship,
+// oh-my-posh) render even though the text fonts carry no private-use-area
+// symbols — while all readable text keeps coming from the text fonts.
+const TERMINAL_FONT_DEFAULT_STACK =
+  '"Fira Code", "Cascadia Code", "JetBrains Mono", "SF Mono", Monaco, "Symbols Nerd Font Mono", monospace';
+
+/**
+ * Resolve the xterm fontFamily from the per-device `terminalFontFamily`
+ * setting. A user-set family (or comma-separated list) is PREPENDED to the
+ * built-in stack, never a replacement — the symbols fallback and a final
+ * `monospace` must survive whatever the user types. Blank input yields the
+ * default. Unquoted names that need quoting for CSS (spaces, digits leading,
+ * etc.) are quoted; embedded quotes are stripped rather than escaped, since
+ * a font name cannot contain them anyway.
+ */
+function resolveTerminalFontFamily(custom) {
+  const raw = typeof custom === 'string' ? custom.trim() : '';
+  if (!raw) return TERMINAL_FONT_DEFAULT_STACK;
+  const families = raw
+    .split(',')
+    .map((f) => f.trim().replace(/^["']|["']$/g, '').replace(/["']/g, '').trim())
+    .filter(Boolean)
+    // Drop generic families the user may append — the default stack already
+    // ends in `monospace`, and a duplicate earlier entry would shadow the
+    // symbols fallback behind it.
+    .filter((f) => !/^(monospace|serif|sans-serif|system-ui)$/i.test(f))
+    .map((f) => (/^[A-Za-z][A-Za-z0-9-]*$/.test(f) ? f : `"${f}"`));
+  if (!families.length) return TERMINAL_FONT_DEFAULT_STACK;
+  return `${families.join(', ')}, ${TERMINAL_FONT_DEFAULT_STACK}`;
+}
+
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -699,6 +734,10 @@ if (typeof window !== 'undefined') {
     anchor: sessionActivityAnchor,
     compare: compareSessionActivity,
     sort: sortSessionsByActivity,
+  };
+  window.CodemanTerminalFont = {
+    DEFAULT_STACK: TERMINAL_FONT_DEFAULT_STACK,
+    resolve: resolveTerminalFontFamily,
   };
 }
 
@@ -1180,7 +1219,112 @@ function previewsInFileViewer(filePath) {
   return FILE_PREVIEW_EXTENSIONS.has(ext);
 }
 
+
+/**
+ * The LOGICAL line a terminal row belongs to — the rows it spans, its text as one
+ * string, and a two-way map between that string and terminal cells.
+ *
+ * One definition, two consumers: the link provider matches its patterns over this
+ * text (`registerFilePathLinkProvider`) and touch selection measures words and
+ * whole lines with it (`_touchSelectionLogicalLine`). They MUST agree — a link that
+ * spans a wrap and a "Line" that stops at the screen edge is the same bug twice.
+ *
+ * Two kinds of continuation, and handling only the first is not enough:
+ *
+ *   1. **Soft wrap** — the emulator ran out of columns and flags the next row
+ *      `isWrapped`. It inserts nothing, so the row's text is joined verbatim.
+ *   2. **Hard wrap** — the program wrapped the text itself and emitted a real
+ *      newline, so nothing is flagged. A row that fills the last column is taken
+ *      as continuing into the next; that is the only trace a hard wrap leaves.
+ *
+ * ⚠️ A hard-wrapped continuation may carry the program's own INDENT, and joining
+ * that verbatim puts whitespace in the middle of the token being stitched. That is
+ * why an agent's numbered list —
+ *
+ *     1. https://github.com/users/someone/packages/container/p
+ *        ackage/thing
+ *
+ * — opened only `…/container/p`: the URL pattern stops at the space the indent
+ * contributed. So the leading whitespace of a HARD continuation is dropped, and
+ * `colStart` on that segment records how much, keeping the cell mapping exact. A
+ * soft continuation keeps its leading whitespace, since the terminal never adds
+ * any and it is therefore real content.
+ *
+ * ⚠️ Only the final row is trimmed. Continuation rows are read UNTRIMMED so each
+ * contributes exactly `cols` cells; trimming one would shift every later offset.
+ *
+ * The row span is bounded by `maxRows` (12 by default): this runs on every hover,
+ * and a screenful of full-width output would otherwise re-scan the viewport each
+ * time.
+ *
+ * @param {{getLine: (row: number) => any, length: number}} buffer xterm buffer.
+ * @param {number} row 0-based ABSOLUTE buffer row to expand around.
+ * @param {number} cols Terminal width.
+ * @param {number} [maxRows] Row-span bound.
+ * @returns {{startRow: number, endRow: number, text: string,
+ *            offsetToCell: (offset: number) => {row: number, col: number},
+ *            cellToOffset: (row: number, col: number) => number} | null}
+ *          0-based rows and columns throughout; null when the row does not exist.
+ */
+function terminalLogicalLine(buffer, row, cols, maxRows) {
+  if (!buffer || typeof buffer.getLine !== 'function') return null;
+  const width = Math.max(1, cols || 1);
+  const bound = Math.max(1, maxRows || 12);
+  const lineAt = (r) => (r >= 0 ? buffer.getLine(r) : undefined);
+  if (!lineAt(row)) return null;
+
+  const continuesPrevious = (r) => {
+    if (r <= 0) return false;
+    if (lineAt(r)?.isWrapped) return true;
+    const prev = lineAt(r - 1);
+    return !!prev && (prev.translateToString(true) || '').length >= width;
+  };
+
+  let startRow = row;
+  while (startRow > 0 && row - startRow < bound && continuesPrevious(startRow)) startRow--;
+  let endRow = row;
+  const length = Number.isFinite(buffer.length) ? buffer.length : endRow + 1;
+  while (endRow + 1 < length && endRow - startRow < bound && continuesPrevious(endRow + 1)) endRow++;
+
+  const segments = [];
+  let text = '';
+  for (let r = startRow; r <= endRow; r++) {
+    const line = lineAt(r);
+    if (!line) break;
+    let rowText = line.translateToString(r === endRow) || '';
+    let colStart = 0;
+    if (r > startRow && !line.isWrapped) {
+      const indent = rowText.length - rowText.replace(/^\s+/, '').length;
+      colStart = indent;
+      rowText = rowText.slice(indent);
+    }
+    segments.push({ row: r, textStart: text.length, colStart, length: rowText.length });
+    text += rowText;
+  }
+
+  const offsetToCell = (offset) => {
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i];
+      if (offset >= seg.textStart || i === 0) {
+        return { row: seg.row, col: seg.colStart + (offset - seg.textStart) };
+      }
+    }
+    return { row: startRow, col: offset };
+  };
+
+  const cellToOffset = (targetRow, targetCol) => {
+    for (const seg of segments) {
+      if (seg.row !== targetRow) continue;
+      return seg.textStart + Math.max(0, targetCol - seg.colStart);
+    }
+    return -1;
+  };
+
+  return { startRow, endRow, text, offsetToCell, cellToOffset };
+}
+
 if (typeof window !== 'undefined') {
   window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
   window.CodemanFilePaths = { absoluteFilePathPattern, previewsInFileViewer, FILE_PREVIEW_EXTENSIONS };
+  window.CodemanTerminalLines = { terminalLogicalLine };
 }

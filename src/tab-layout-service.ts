@@ -43,7 +43,10 @@ export interface TabLayoutSessionLike {
 }
 
 interface TabLayoutServiceDeps {
-  store: Pick<StateStore, 'getTabLayout' | 'setTabLayout' | 'getSessions' | 'getSessionOrder'>;
+  store: Pick<
+    StateStore,
+    'getTabLayout' | 'setTabLayout' | 'getSessions' | 'getSessionOrder' | 'getCaseDefaultGroup' | 'setCaseDefaultGroup'
+  >;
   sessions: ReadonlyMap<string, TabLayoutSessionLike>;
   readWebviews(): Promise<readonly TabLayoutWebviewRecord[]>;
   broadcast(event: string, data: unknown): void;
@@ -73,7 +76,14 @@ export type TabLayoutSemanticOperation =
 export type TabLayoutSnapshot = {
   layout: TabLayout;
   placements: ReturnType<typeof describeTabPlacements>;
+  /** Internal creation hint used by routes to return the first authoritative render. */
+  placementSource?: 'case-default';
 };
+
+export interface SessionPlacementHints {
+  tabGroupId?: string;
+  caseName?: string;
+}
 
 export type RegisterTabLayoutSession = () => void | (() => void);
 
@@ -461,7 +471,7 @@ export class TabLayoutService {
   async sessionCreated(
     owner: string,
     sessionId: string,
-    tabGroupId?: string,
+    options: SessionPlacementHints = {},
     register?: RegisterTabLayoutSession
   ): Promise<TabLayoutSnapshot> {
     return this.withOwner(owner, async () => {
@@ -470,7 +480,41 @@ export class TabLayoutService {
         rollback = register?.();
         const { base, candidate, metadata } = await this.reconcileUnlocked(owner);
         let next = candidate;
-        const targetGroup = tabGroupId ? candidate.groups.find((group) => group.id === tabGroupId) : undefined;
+        let placementSource: TabLayoutSnapshot['placementSource'];
+        const explicitGroup = options.tabGroupId
+          ? candidate.groups.find((group) => group.id === options.tabGroupId)
+          : undefined;
+        const createdMetadata = metadata.find((item) => item.kind === 'session' && item.id === sessionId);
+        const candidateSessionIds = new Set(
+          [...candidate.groups.flatMap((group) => group.refs), ...candidate.ungrouped]
+            .filter((ref) => ref.kind === 'session')
+            .map((ref) => ref.id)
+        );
+        const eligibleParent = createdMetadata?.parentSessionId
+          ? metadata.some(
+              (item) =>
+                item.kind === 'session' &&
+                item.id === createdMetadata.parentSessionId &&
+                item.ownerValid &&
+                item.visible &&
+                candidateSessionIds.has(item.id)
+            )
+          : false;
+        let defaultGroup: (typeof candidate.groups)[number] | undefined;
+        if (options.caseName) {
+          const defaultGroupId = this.deps.store.getCaseDefaultGroup(owner, options.caseName);
+          if (typeof defaultGroupId === 'string') {
+            defaultGroup = candidate.groups.find((group) => group.id === defaultGroupId);
+            if (!defaultGroup) {
+              this.deps.store.setCaseDefaultGroup(owner, options.caseName, null);
+            }
+          }
+        }
+        let targetGroup = explicitGroup;
+        if (!targetGroup && !eligibleParent && defaultGroup) {
+          targetGroup = defaultGroup;
+          placementSource = 'case-default';
+        }
 
         if (targetGroup) {
           const target = { kind: 'session' as const, id: sessionId };
@@ -508,9 +552,22 @@ export class TabLayoutService {
           const destinationIndex = targetGroup.refs.length - removedFromTarget;
           try {
             next = moveRef(candidate, target, { groupId: targetGroup.id, index: destinationIndex }, metadata);
+            if (placementSource === 'case-default') {
+              const withoutCreatedPlacement = (ref: TabRef): TabRef => {
+                if (ref.kind !== 'session' || ref.id !== sessionId || ref.placement === undefined) return ref;
+                const { placement: _placement, ...rest } = ref;
+                return rest;
+              };
+              next = {
+                ...next,
+                groups: next.groups.map((group) => ({ ...group, refs: group.refs.map(withoutCreatedPlacement) })),
+                ungrouped: next.ungrouped.map(withoutCreatedPlacement),
+              };
+            }
           } catch (error) {
             if (!(error instanceof TabLayoutValidationError)) throw error;
             next = candidate;
+            placementSource = undefined;
           }
         }
 
@@ -520,7 +577,7 @@ export class TabLayoutService {
           this.deps.store.setTabLayout(owner, layout);
           this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: layout.version, layout, placements });
         }
-        return { layout, placements };
+        return { layout, placements, ...(placementSource ? { placementSource } : {}) };
       } catch (error) {
         rollback?.();
         throw error;

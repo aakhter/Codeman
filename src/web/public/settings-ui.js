@@ -388,6 +388,7 @@ Object.assign(CodemanApp.prototype, {
     this.loadTunnelStatus();
     document.getElementById('appSettingsLocalEcho').checked = settings.localEchoEnabled ?? MobileDetection.isTouchDevice();
     document.getElementById('appSettingsLiveMirror').checked = settings.liveMirrorEnabled ?? defaults.liveMirrorEnabled ?? true;
+    document.getElementById('appSettingsTerminalFont').value = settings.terminalFontFamily || '';
     document.getElementById('appSettingsTerminalWheelLocal').checked =
       settings.terminalWheelLocalScrollback ?? defaults.terminalWheelLocalScrollback ?? false;
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
@@ -2187,6 +2188,7 @@ Object.assign(CodemanApp.prototype, {
       tunnelEnabled: document.getElementById('appSettingsTunnelEnabled').checked,
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
       liveMirrorEnabled: document.getElementById('appSettingsLiveMirror').checked,
+      terminalFontFamily: document.getElementById('appSettingsTerminalFont').value.trim(),
       terminalWheelLocalScrollback: document.getElementById('appSettingsTerminalWheelLocal').checked,
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
@@ -2255,6 +2257,7 @@ Object.assign(CodemanApp.prototype, {
     localStorage.setItem('codeman-scrollback', String(settings.terminalScrollbackLines));
     this._updateLocalEchoState();
     this._applyLiveMirrorSetting?.(settings.liveMirrorEnabled); // COD-187
+    this.applyTerminalFontFamily?.(settings.terminalFontFamily);
 
     // A real OFF→ON flip of the WebGL toggle retires the GPU-stall auto-fallback
     // marker so the next reload actually re-tries WebGL. Only the transition
@@ -2408,6 +2411,9 @@ Object.assign(CodemanApp.prototype, {
       showFileViewerButton: _fvb,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
+      // Per-device by nature (the font must exist on the device) and absent
+      // from SettingsUpdateSchema (.strict()) — sending it would 400 the PUT.
+      terminalFontFamily: _tff,
       // Per-device header/toolbar button toggles — client-only, and absent from
       // SettingsUpdateSchema (.strict()), so sending them would 400 the PUT.
       showSessionButton: _ssb,
@@ -3332,6 +3338,7 @@ Object.assign(CodemanApp.prototype, {
           'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
+          'terminalFontFamily',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',

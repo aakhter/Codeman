@@ -340,6 +340,10 @@
 
     // Input settings
     Input: '输入',
+    Font: '字体',
+    'Terminal font': '终端字体',
+    'Prepended to the built-in stack, so fallbacks (including bundled Nerd Font symbols) keep working. Must be installed on this device. Leave empty for the default.':
+      '置于内置字体栈之前，回退字体（包括内置的 Nerd Font 图标）仍然生效。需已安装在本设备上。留空使用默认值。',
     'Local Echo': '本地回显',
     'CJK Input': '中日韩输入',
     'Extended Keyboard Bar': '扩展键盘栏',
@@ -514,6 +518,11 @@
     'Respawn Blocked': '重生已阻止',
     'Task Complete': '任务完成',
     'Copied to clipboard': '已复制到剪贴板',
+    // Terminal touch-selection bar (long-press to select). The bar is a sibling of
+    // `.xterm`, not a descendant, so SKIP_SELECTOR does not cover it and these apply.
+    Copy: '复制',
+    Line: '整行',
+    'Clear selection': '清除选择',
     'Failed to copy': '复制失败',
     'Checking…': '正在检查…',
     'Starting…': '正在启动…',

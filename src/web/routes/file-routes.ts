@@ -1299,7 +1299,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
             totalFiles: entries.filter((entry) => entry.type === 'file').length,
             totalDirectories: entries.filter((entry) => entry.type === 'directory').length,
             truncated: false,
-            mode: 'tree' as const,
             lazy: true,
           },
         };
@@ -1522,7 +1521,6 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         totalFiles,
         totalDirectories,
         truncated,
-        mode: 'tree' as const,
       },
     };
   });

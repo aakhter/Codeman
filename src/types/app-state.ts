@@ -117,6 +117,8 @@ export interface AppState {
   sessionOrder?: string[];
   /** Owner-scoped authoritative grouped tab layouts. */
   tabLayouts?: Record<string, TabLayout>;
+  /** Owner-and-case scoped default session group. null means intentional Ungrouped. */
+  caseDefaultGroups?: Record<string, Record<string, string | null>>;
   /** Cron-style scheduled jobs, keyed by job ID. */
   cronJobs?: Record<string, CronJob>;
   /** Scheduled job run history, keyed by run ID. */

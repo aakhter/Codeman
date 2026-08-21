@@ -223,4 +223,27 @@ describe('StateStore tabLayouts allowlist', () => {
     expect(JSON.parse(readFileSync(file, 'utf8')).tabLayouts).toEqual({ alice: layout });
     expect(new StateStore(file).getTabLayout('alice')).toEqual(layout);
   });
+
+  it('persists and reloads owner-and-case default groups across a restart', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codeman-case-default-group-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'state.json');
+
+    const store = new StateStore(file);
+    store.setCaseDefaultGroup('alice', 'nzbdav', 'group-nzbdav');
+    store.setCaseDefaultGroup('bob', 'nzbdav', null);
+    store.setCaseDefaultGroup('__proto__', 'constructor', 'group-prototype');
+    store.flush();
+
+    const persistedDefaults = JSON.parse(readFileSync(file, 'utf8')).caseDefaultGroups;
+    expect(persistedDefaults.alice).toEqual({ nzbdav: 'group-nzbdav' });
+    expect(persistedDefaults.bob).toEqual({ nzbdav: null });
+    expect(Object.hasOwn(persistedDefaults, '__proto__')).toBe(true);
+    expect(persistedDefaults.__proto__).toEqual({ constructor: 'group-prototype' });
+
+    const reloaded = new StateStore(file);
+    expect(reloaded.getCaseDefaultGroup('alice', 'nzbdav')).toBe('group-nzbdav');
+    expect(reloaded.getCaseDefaultGroup('bob', 'nzbdav')).toBeNull();
+    expect(reloaded.getCaseDefaultGroup('__proto__', 'constructor')).toBe('group-prototype');
+  });
 });
