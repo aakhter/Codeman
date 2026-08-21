@@ -170,4 +170,10 @@ describe('Case Management default group structure', () => {
     expect(sessionUi).toContain('updatePayload = { ...updatePayload, defaultGroupId }');
     expect(sessionUi).not.toContain('async onCaseDefaultGroupChanged(isMobile)');
   });
+
+  it('opens Docker cases in the Docker Edit Case panel before loading the shared control', () => {
+    expect(sessionUi).toContain("this.caseEditOriginalLocation === 'docker'");
+    expect(sessionUi).toContain("this.switchCaseModalTab('case-docker')");
+    expect(sessionUi).toContain("originalLocation === 'docker'");
+  });
 });

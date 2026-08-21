@@ -3845,6 +3845,17 @@ Object.assign(CodemanApp.prototype, {
       const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
       if (remoteDiscoverSection) remoteDiscoverSection.classList.add('hidden');
       this.switchCaseModalTab('case-remote');
+    } else if (this.caseEditOriginalLocation === 'docker') {
+      const docker = caseInfo.docker || {};
+      document.getElementById('dockerCaseName').value = caseInfo.name || '';
+      document.getElementById('dockerWorkspacePath').value = docker.path || '';
+      document.getElementById('dockerHostId').value = docker.hostId || '';
+      document.getElementById('dockerImage').value = docker.image || '';
+      document.getElementById('dockerNetwork').value = docker.network || 'bridge';
+      for (const id of ['dockerWorkspacePath', 'dockerHostId', 'dockerImage', 'dockerNetwork']) {
+        document.getElementById(id).disabled = true;
+      }
+      this.switchCaseModalTab('case-docker');
     } else if (this.caseEditOriginalLocation === 'linked-local' || caseInfo.linked) {
       document.getElementById('linkCaseName').value = caseInfo.name || '';
       document.getElementById('linkCasePath').value = caseInfo.path || '';
@@ -3954,6 +3965,17 @@ Object.assign(CodemanApp.prototype, {
         }
 
         updatePayload = { name: nextName, hostId, remotePath, commands };
+      } else if (originalLocation === 'docker') {
+        nextName = document.getElementById('dockerCaseName').value.trim();
+        if (!nextName) {
+          this.showToast('Please enter a case name', 'error');
+          return;
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+          this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+          return;
+        }
+        updatePayload = { name: nextName };
       } else if (originalLocation === 'linked-local') {
         nextName = document.getElementById('linkCaseName').value.trim();
         const path = document.getElementById('linkCasePath').value.trim();

@@ -15,10 +15,19 @@ describe('COD-343 Case Management default groups in Chromium', () => {
   let browser: Browser;
   let page: Page;
   let rejectLoad = false;
+  let updateBodies: unknown[];
 
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
+    await page.route('**/api/cases/sandbox', async (route: Route) => {
+      updateBodies.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: {} }),
+      });
+    });
     await page.route('**/api/cases/*/default-group', async (route: Route) => {
       if (rejectLoad) {
         await route.fulfill({
@@ -38,7 +47,11 @@ describe('COD-343 Case Management default groups in Chromium', () => {
 
   beforeEach(async () => {
     rejectLoad = false;
+    updateBodies = [];
     await page.setContent(`<!doctype html><html><head><base href="http://codeman.test/"></head><body>
+      <div id="createCaseModal"><button class="set-rail-item"></button></div>
+      <input id="dockerCaseName"><input id="dockerWorkspacePath"><input id="dockerHostId"><input id="dockerImage">
+      <select id="dockerNetwork"><option value="bridge">bridge</option></select>
       <div id="caseEditDefaultGroupRow" class="hidden">
         <select id="caseEditDefaultGroup" disabled><option value="">Ungrouped</option></select>
       </div>
@@ -49,6 +62,8 @@ describe('COD-343 Case Management default groups in Chromium', () => {
     await page.evaluate(() => {
       const app = (window as any).__app;
       app.caseEditOriginalName = 'nzbdav';
+      app.resetCaseModalFields = () => {};
+      app.switchCaseModalTab = (tab: string) => (app.selectedCaseModalTab = tab);
       (window as any).__toasts = [];
       app.showToast = (message: string, kind: string) => ((window as any).__toasts ??= []).push({ message, kind });
     });
@@ -86,5 +101,42 @@ describe('COD-343 Case Management default groups in Chromium', () => {
     expect(await page.evaluate(() => (window as any).__toasts)).toEqual([
       expect.objectContaining({ kind: 'error', message: expect.stringContaining('Load rejected') }),
     ]);
+  });
+
+  it('opens a Docker case on its Docker edit panel before loading the shared default group', async () => {
+    await page.evaluate(() => {
+      const app = (window as any).__app;
+      app.cases = [
+        {
+          name: 'sandbox',
+          location: 'docker',
+          docker: { path: '/srv/sandbox', hostId: 'local', image: 'codeman/agent:base', network: 'bridge' },
+        },
+      ];
+      return app.editCase('sandbox');
+    });
+
+    await expect.poll(() => page.locator('#caseEditDefaultGroup').isEnabled()).toBe(true);
+    expect(await page.evaluate(() => (window as any).__app.selectedCaseModalTab)).toBe('case-docker');
+    expect(await page.locator('#dockerCaseName').inputValue()).toBe('sandbox');
+    expect(await page.locator('#dockerWorkspacePath').isDisabled()).toBe(true);
+  });
+
+  it('saves the Edit Case selection with the normal case update request', async () => {
+    await page.evaluate(() => {
+      const app = (window as any).__app;
+      app.caseEditOriginalName = 'sandbox';
+      app.caseEditOriginalLocation = 'docker';
+      (document.getElementById('dockerCaseName') as HTMLInputElement).value = 'sandbox';
+      app.closeCreateCaseModal = () => {};
+      app.loadQuickStartCases = async () => {};
+      app.saveLastUsedCase = async () => {};
+    });
+    await page.evaluate(() => (window as any).__app.loadCaseEditDefaultGroup('sandbox'));
+    await expect.poll(() => page.locator('#caseEditDefaultGroup').isEnabled()).toBe(true);
+    await page.selectOption('#caseEditDefaultGroup', 'group-nzbdav');
+    await page.evaluate(() => (window as any).__app.updateCase());
+
+    await expect.poll(() => updateBodies).toEqual([{ name: 'sandbox', defaultGroupId: 'group-nzbdav' }]);
   });
 });
