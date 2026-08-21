@@ -26,7 +26,7 @@ import type { ProcessInspectionSource } from '../src/subagent-process-inspector.
 import { approvalInbox } from '../src/web/approval-inbox.js';
 import { SseEvent } from '../src/web/sse-events.js';
 import { WebServer, subagentConversationIdForCleanup } from '../src/web/server.js';
-import { sessionWaits } from '../src/web/session-wait-registry.js';
+import { SessionWaitRegistry, sessionWaits } from '../src/web/session-wait-registry.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -309,13 +309,30 @@ describe('background-agent wait integration', () => {
     await ctx.addSession(parent);
     ctx.setupSessionListeners(parent);
     state.sse.broadcast = vi.fn();
-    const notifySignal = vi.spyOn(sessionWaits, 'notifySignal');
+    // WebServer owns the process singleton in production. Use a fresh concrete
+    // registry as the consumer so earlier server-shutdown tests cannot leave its
+    // one-way shutdown latch set, and forward the real producer call into it.
+    const waitRegistry = new SessionWaitRegistry();
+    const notifySignal = vi
+      .spyOn(sessionWaits, 'notifySignal')
+      .mockImplementation((sessionId, signal) => waitRegistry.notifySignal(sessionId, signal));
 
     snapshot = { revision: 1, agents: [finalAgent] };
     subagentWatcher.emit('subagent:discovered', finalAgent);
     expect(parent.activityProjection.activityStatus).toBe('waiting_agents');
     state.sse.broadcast.mockClear();
     notifySignal.mockClear();
+    const waiterDelivered = vi.fn();
+    const idleWait = waitRegistry
+      .waitForSignal(parent.id, {
+        until: ['idle'],
+        timeoutMs: FINAL_AGENT_SETTLE_MS * 4,
+      })
+      .then((result) => {
+        waiterDelivered(result);
+        return result;
+      });
+    expect(waitRegistry.signalWaiterCount(parent.id)).toBe(1);
 
     const completed = { ...finalAgent, status: 'completed' as const };
     snapshot = { revision: 2, agents: [] };
@@ -326,6 +343,15 @@ describe('background-agent wait integration', () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(parent.activityProjection.activityStatus).toBe('idle');
+    await expect(idleWait).resolves.toMatchObject({
+      signal: 'idle',
+      timedOut: false,
+      immediate: false,
+      ended: false,
+      aborted: false,
+    });
+    expect(waiterDelivered).toHaveBeenCalledTimes(1);
+    expect(waitRegistry.signalWaiterCount(parent.id)).toBe(0);
     expect(notifySignal.mock.calls.filter(([id, signal]) => id === parent.id && signal === 'idle')).toHaveLength(1);
     expect(
       state.sse.broadcast.mock.calls.filter(
@@ -336,6 +362,8 @@ describe('background-agent wait integration', () => {
     await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS * 2);
     subagentWatcher.emit('subagent:completed', completed);
     await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS);
+    expect(waiterDelivered).toHaveBeenCalledTimes(1);
+    expect(waitRegistry.signalWaiterCount(parent.id)).toBe(0);
     expect(notifySignal.mock.calls.filter(([id, signal]) => id === parent.id && signal === 'idle')).toHaveLength(1);
     expect(
       state.sse.broadcast.mock.calls.filter(
