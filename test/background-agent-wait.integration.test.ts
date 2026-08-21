@@ -19,6 +19,7 @@ import {
   type CoordinatorSession,
   type ObservableSessionProject,
 } from '../src/session-agent-activity-coordinator.js';
+import { RespawnController } from '../src/respawn-controller.js';
 import { Session } from '../src/session.js';
 import { subagentWatcher, type SubagentInfo } from '../src/subagent-watcher.js';
 import type { ProcessInspectionSource } from '../src/subagent-process-inspector.js';
@@ -35,10 +36,13 @@ function deferred<T>() {
 
 function internals(server: WebServer) {
   return server as unknown as {
-    app: { inject(options: Record<string, unknown>): Promise<{ statusCode: number }> };
+    app: {
+      inject(options: Record<string, unknown>): Promise<{ statusCode: number; json(): unknown }>;
+    };
     setupRoutes(): Promise<void>;
     createRouteContext(): {
       addSession(session: Session): Promise<unknown>;
+      setupSessionListeners(session: Session): void;
       getSessionStateWithRespawn(session: Session): Record<string, unknown>;
       agentActivity: {
         detachSession(session: Session): void;
@@ -124,6 +128,74 @@ afterEach(async () => {
 });
 
 describe('background-agent wait integration', () => {
+  it('resolves restored and newly attached server sessions from checking to exact live on reconnect', async () => {
+    const server = new WebServer(0, false, true);
+    activeServers.add(server);
+    const state = internals(server);
+    await state.setupRoutes();
+    const ctx = state.createRouteContext();
+    ctx.agentActivity.setTrackingEnabled(false);
+
+    const restored = new Session({ id: 'restored-parent', workingDir: '/tmp/cod350-restore', mode: 'claude' });
+    restored.adoptClaudeSessionId('restored-conversation');
+    setRawIdle(restored);
+    const fresh = new Session({ id: 'fresh-parent', workingDir: '/tmp/cod350-fresh', mode: 'claude' });
+    fresh.adoptClaudeSessionId('fresh-conversation');
+    setRawIdle(fresh);
+    const evidence = new Map([
+      [restored.claudeSessionId!, [agent(restored, 'restored-agent')]],
+      [fresh.claudeSessionId!, [agent(fresh, 'fresh-agent')]],
+    ]);
+    const reconciliations = new Map<string, ReturnType<typeof deferred<SubagentInfo[]>>>();
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockImplementation((_projectHash, conversationId) => {
+      let pending = reconciliations.get(conversationId);
+      if (!pending) {
+        pending = deferred<SubagentInfo[]>();
+        reconciliations.set(conversationId, pending);
+      }
+      return pending.promise;
+    });
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockImplementation((_projectHash, conversationId) => ({
+      revision: 1,
+      agents: evidence.get(conversationId) ?? [],
+    }));
+
+    await ctx.addSession(restored);
+    expect(restored.activityProjection.activityStatus).toBe('idle');
+    ctx.agentActivity.setTrackingEnabled(true);
+    expect(restored.activityProjection.activityStatus).toBe('checking_agents');
+    await vi.waitFor(() => expect(reconciliations.has(restored.claudeSessionId!)).toBe(true));
+    reconciliations.get(restored.claudeSessionId!)!.resolve(evidence.get(restored.claudeSessionId!)!);
+    await vi.waitFor(() => expect(restored.activityProjection.activityStatus).toBe('waiting_agents'));
+
+    const addingFresh = ctx.addSession(fresh);
+    await vi.waitFor(() => expect(reconciliations.has(fresh.claudeSessionId!)).toBe(true));
+    expect(fresh.activityProjection.activityStatus).toBe('checking_agents');
+    expect(state.sessions.has(fresh.id)).toBe(false);
+    reconciliations.get(fresh.claudeSessionId!)!.resolve(evidence.get(fresh.claudeSessionId!)!);
+    await addingFresh;
+    expect(fresh.activityProjection.activityStatus).toBe('waiting_agents');
+
+    // A reconnect reads the canonical server serialization, not a browser-local
+    // reconstruction of watcher state.
+    const reconnect = await state.app.inject({ method: 'GET', url: '/api/sessions' });
+    expect(reconnect.statusCode).toBe(200);
+    const rows = (reconnect.json() as { data: Array<Record<string, unknown>> }).data;
+    expect(rows.find((row) => row.id === restored.id)).toMatchObject({
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+      activityStatusSince: expect.any(Number),
+    });
+    expect(rows.find((row) => row.id === fresh.id)).toMatchObject({
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+      activityStatusSince: expect.any(Number),
+    });
+
+    await server.stop();
+    activeServers.delete(server);
+  });
+
   it('models the screenshot without turning exact live agents into a human approval or autonomous idle', async () => {
     const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
       runtimeVersion: '2.1.237',
@@ -153,6 +225,7 @@ describe('background-agent wait integration', () => {
     const ctx = state.createRouteContext();
     await ctx.addSession(parent);
     await ctx.addSession(peer);
+    ctx.setupSessionListeners(parent);
     (parent as unknown as { _muxSession: { muxName: string } })._muxSession = { muxName: 'cod350-parent-mux' };
     setRawIdle(parent);
     setRawIdle(peer);
@@ -218,6 +291,97 @@ describe('background-agent wait integration', () => {
     revision += 1;
     await server.stop();
     activeServers.delete(server);
+  });
+
+  it('publishes one natural derived-idle edge when the final watcher agent settles', async () => {
+    vi.useFakeTimers();
+    const server = new WebServer(0, false, true);
+    activeServers.add(server);
+    const state = internals(server);
+    const ctx = state.createRouteContext();
+    const parent = new Session({ id: 'natural-settle', workingDir: '/tmp/cod350-natural-settle', mode: 'claude' });
+    parent.adoptClaudeSessionId('natural-settle-conversation');
+    setRawIdle(parent);
+    const finalAgent = agent(parent, 'final-agent');
+    let snapshot = { revision: 0, agents: [] as SubagentInfo[] };
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockImplementation(() => snapshot);
+    await ctx.addSession(parent);
+    ctx.setupSessionListeners(parent);
+    state.sse.broadcast = vi.fn();
+    const notifySignal = vi.spyOn(sessionWaits, 'notifySignal');
+
+    snapshot = { revision: 1, agents: [finalAgent] };
+    subagentWatcher.emit('subagent:discovered', finalAgent);
+    expect(parent.activityProjection.activityStatus).toBe('waiting_agents');
+    state.sse.broadcast.mockClear();
+    notifySignal.mockClear();
+
+    const completed = { ...finalAgent, status: 'completed' as const };
+    snapshot = { revision: 2, agents: [] };
+    subagentWatcher.emit('subagent:completed', completed);
+    await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS - 1);
+    expect(parent.activityProjection.activityStatus).toBe('waiting_agents');
+    expect(notifySignal).not.toHaveBeenCalledWith(parent.id, 'idle');
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(parent.activityProjection.activityStatus).toBe('idle');
+    expect(notifySignal.mock.calls.filter(([id, signal]) => id === parent.id && signal === 'idle')).toHaveLength(1);
+    expect(
+      state.sse.broadcast.mock.calls.filter(
+        ([event, payload]) => event === SseEvent.SessionIdle && (payload as { id?: string }).id === parent.id
+      )
+    ).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS * 2);
+    subagentWatcher.emit('subagent:completed', completed);
+    await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS);
+    expect(notifySignal.mock.calls.filter(([id, signal]) => id === parent.id && signal === 'idle')).toHaveLength(1);
+    expect(
+      state.sse.broadcast.mock.calls.filter(
+        ([event, payload]) => event === SseEvent.SessionIdle && (payload as { id?: string }).id === parent.id
+      )
+    ).toHaveLength(1);
+
+    await server.stop();
+    activeServers.delete(server);
+  });
+
+  it('blocks actual hook and heuristic respawn cycles until agent observation is none', async () => {
+    vi.useFakeTimers();
+    const session = new Session({ id: 'respawn-parent', workingDir: '/tmp/cod350-respawn', mode: 'claude' });
+    setRawIdle(session);
+    (session as unknown as { _pid: number })._pid = 237;
+    const controller = new RespawnController(session, {
+      completionConfirmMs: 50,
+      noOutputTimeoutMs: 500,
+      idleTimeoutMs: 500,
+      aiIdleCheckEnabled: false,
+      adaptiveTimingEnabled: false,
+    });
+    const cycleStarted = vi.fn();
+    controller.on('respawnCycleStarted', cycleStarted);
+    controller.start();
+
+    session.setActivityProjection({ activityStatus: 'waiting_agents', activityStatusSince: Date.now() });
+    controller.signalIdlePrompt();
+    expect(cycleStarted).not.toHaveBeenCalled();
+    expect(controller.getDetectionStatus()).toMatchObject({
+      idlePromptReceived: false,
+      completionMessageDetected: false,
+    });
+
+    session.setActivityProjection({ activityStatus: 'checking_agents', activityStatusSince: Date.now() });
+    session.emit('terminal', 'Worked for 1s\n❯');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(cycleStarted).not.toHaveBeenCalled();
+    expect(controller.state).toBe('watching');
+    expect(controller.getDetectionStatus().completionMessageDetected).toBe(false);
+
+    session.setActivityProjection({ activityStatus: 'idle', activityStatusSince: null });
+    controller.signalIdlePrompt();
+    expect(cycleStarted).toHaveBeenCalledTimes(1);
+    controller.stop();
   });
 
   it('settles final completion once, cancels on parent output, and lets fresh exact-zero events end grace', async () => {
@@ -295,6 +459,77 @@ describe('background-agent wait integration', () => {
     });
     expect(derivedIdle).toHaveBeenCalledTimes(2);
     coordinator.cleanup();
+  });
+
+  it('aborts an in-flight inspection on the actual PTY-exit listener without late projection publication', async () => {
+    const processRead = deferred<number[]>();
+    let inspectionSignal: AbortSignal | undefined;
+    const processSource: ProcessInspectionSource = {
+      listPids: (signal) => {
+        inspectionSignal = signal;
+        return processRead.promise;
+      },
+      readCmdline: async () => '',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: '2.1.237',
+      source: processSource,
+    });
+    activeServers.add(server);
+    const state = internals(server);
+    state.mux.capturePaneText = vi.fn(() => visibleWaitingFrame(1));
+    await state.setupRoutes();
+    const ctx = state.createRouteContext();
+    const session = new Session({ id: 'pty-exit-parent', workingDir: '/tmp/cod350-pty-exit', mode: 'claude' });
+    session.adoptClaudeSessionId('pty-exit-conversation');
+    setRawIdle(session);
+    const liveAgent = agent(session, 'exit-agent');
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [liveAgent] });
+    await ctx.addSession(session);
+    ctx.setupSessionListeners(session);
+    (session as unknown as { _muxSession: { muxName: string } })._muxSession = { muxName: 'cod350-exit-mux' };
+    subagentWatcher.emit('subagent:discovered', liveAgent);
+    expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+    state.sse.broadcast = vi.fn();
+
+    const hook = state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'idle_prompt', sessionId: session.id, data: null },
+    });
+    await vi.waitFor(() => expect(inspectionSignal).toBeDefined());
+
+    // This is the real Session event wired by WebServer.setupSessionListeners;
+    // it is not a direct coordinator detach shortcut.
+    session.emit('exit', 0);
+    expect(inspectionSignal?.aborted).toBe(true);
+    expect(state.activityAdapters.has(session)).toBe(false);
+    const sessionUpdatesAtExit = state.sse.broadcast.mock.calls.filter(
+      ([event, payload]) => event === SseEvent.SessionUpdated && (payload as { id?: string }).id === session.id
+    ).length;
+    const lightCacheAfterExit = { data: { exit: true }, timestamp: Date.now() };
+    const listCacheAfterExit = { data: [{ id: session.id }], timestamp: Date.now() };
+    state.cachedLightState = lightCacheAfterExit;
+    state.cachedSessionsList = listCacheAfterExit;
+
+    processRead.resolve([237]);
+    expect((await hook).statusCode).toBe(200);
+    await Promise.resolve();
+    expect(session.activityProjection).toEqual({ activityStatus: 'idle', activityStatusSince: null });
+    expect(state.cachedLightState).toBe(lightCacheAfterExit);
+    expect(state.cachedSessionsList).toBe(listCacheAfterExit);
+    expect(
+      state.sse.broadcast.mock.calls.filter(
+        ([event, payload]) => event === SseEvent.SessionUpdated && (payload as { id?: string }).id === session.id
+      )
+    ).toHaveLength(sessionUpdatesAtExit);
+
+    await server.stop();
+    activeServers.delete(server);
   });
 
   it('gates startup, reconnect, restored sessions, and rejects every late lifecycle result', async () => {
