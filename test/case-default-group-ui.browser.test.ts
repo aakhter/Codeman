@@ -139,4 +139,17 @@ describe('COD-343 Case Management default groups in Chromium', () => {
 
     await expect.poll(() => updateBodies).toEqual([{ name: 'sandbox', defaultGroupId: 'group-nzbdav' }]);
   });
+
+  it('reenables Docker configuration fields after closing an edited Docker case', async () => {
+    await page.evaluate(() => {
+      for (const id of ['dockerWorkspacePath', 'dockerHostId', 'dockerImage', 'dockerNetwork']) {
+        (document.getElementById(id) as HTMLInputElement | HTMLSelectElement).disabled = true;
+      }
+      (window as any).__app.resetCaseEditState();
+    });
+
+    for (const id of ['dockerWorkspacePath', 'dockerHostId', 'dockerImage', 'dockerNetwork']) {
+      expect(await page.locator(`#${id}`).isEnabled()).toBe(true);
+    }
+  });
 });

@@ -2563,6 +2563,10 @@ Object.assign(CodemanApp.prototype, {
     if (title) title.textContent = 'Add Case';
     const remoteHostId = document.getElementById('remoteHostId');
     if (remoteHostId) remoteHostId.disabled = false;
+    for (const id of ['dockerWorkspacePath', 'dockerHostId', 'dockerImage', 'dockerNetwork']) {
+      const field = document.getElementById(id);
+      if (field) field.disabled = false;
+    }
     const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
     if (remoteDiscoverSection) remoteDiscoverSection.classList.remove('hidden');
   },
