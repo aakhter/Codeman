@@ -23,6 +23,12 @@ function approvalKindToHook(kind) {
   return kind === 'permission' ? 'permission_prompt' : kind === 'question' ? 'elicitation_dialog' : 'idle_prompt';
 }
 
+function hasSameKindReplacement(approvals, item) {
+  return [...(approvals?.values() || [])].some(
+    (candidate) => candidate.id !== item.id && candidate.sessionId === item.sessionId && candidate.kind === item.kind
+  );
+}
+
 Object.assign(CodemanApp.prototype, {
   /** Synced setting, default OFF, opt-in via App Settings → Panels. */
   approvalsInboxEnabled() {
@@ -82,11 +88,13 @@ Object.assign(CodemanApp.prototype, {
   _onApprovalUpdated(item) {
     if (!item || !item.id) return;
     // Acknowledged elsewhere (this user opened the session on another device):
-    // spend the tab alert UNCONDITIONALLY, for the same reason
+    // spend the matching tab alert even when the inbox is disabled, for the same reason
     // _onApprovalResolved does: with the inbox setting OFF the item was never
     // stored in `this.approvals`, yet seedApprovals armed its alert, so gating
     // this on a map hit would strand a yellow tab on every other device.
-    if (item.acknowledgedAt) this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+    if (item.acknowledgedAt && !hasSameKindReplacement(this.approvals, item)) {
+      this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+    }
     if (!this.approvals?.has(item.id)) return;
     this.approvals.set(item.id, item);
     this.renderApprovals();
@@ -94,13 +102,16 @@ Object.assign(CodemanApp.prototype, {
 
   _onApprovalResolved(info) {
     if (!info || !info.id) return;
-    // Clear the matching tab alert UNCONDITIONALLY: the inbox resolves on more
+    // Clear the matching tab alert even when the inbox is disabled: the inbox resolves on more
     // signals than the hook handlers do (superseded, expired, answered from
     // another device), clearPendingHooks is a no-op when nothing is set, and
     // with the inbox setting OFF the item was never stored in `this.approvals`
     // even though seedApprovals armed the alert — gating the clear on a map hit
-    // would strand that alert forever.
-    this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
+    // would strand that alert forever. A newer same-kind item wins a stale
+    // acknowledgement/resolution race and keeps its alert armed.
+    if (!hasSameKindReplacement(this.approvals, info)) {
+      this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
+    }
     if (this.approvals?.delete(info.id)) this.renderApprovals();
   },
 

@@ -141,6 +141,7 @@ function makeInitApp() {
   app.updateAttachmentHistoryCountFromSession = vi.fn();
   app.updateCost = vi.fn();
   app.renderSessionTabs = vi.fn();
+  app.renderMuxSessions = vi.fn();
   app.seedApprovals = vi.fn();
   app.startSystemStatsPolling = vi.fn();
   app.stopSystemStatsPolling = vi.fn();
@@ -186,6 +187,148 @@ const initData = {
   sessionOrder: ['s1', 's2', 's3'],
   scheduledRuns: [],
 };
+
+function makeActivityEventApp() {
+  const app = makeApp();
+  app.renderSessionTabs = vi.fn();
+  app.renderMuxSessions = vi.fn();
+  app.updateCost = vi.fn();
+  app.updateAttachmentHistoryCountFromSession = vi.fn();
+  app.updateSubagentParentNames = vi.fn();
+  app.recheckOrphanSubagents = vi.fn();
+  app.sendPendingCtrlL = vi.fn();
+  app._updateLocalEchoState = vi.fn();
+  app._isTuiSession = vi.fn(() => false);
+  app._notifySession = vi.fn();
+  app.pendingHooks = new Map();
+  app.idleTimers = new Map();
+  app.respawnStatus = {};
+  app.notificationManager = { preferences: { stuckThresholdMs: 60_000 } };
+  app._wsSessionId = null;
+  app._wsReady = false;
+  return app;
+}
+
+describe('session activity event reconciliation', () => {
+  it('merges an activity-only update without replacing session data or raw status and refreshes every status surface', () => {
+    const app = makeActivityEventApp();
+    const original = app.sessions.get('s1');
+
+    app._onSessionUpdated({ id: 's1', activityStatus: 'waiting_agents', activityStatusSince: 1234 });
+
+    expect(app.sessions.get('s1')).toMatchObject({
+      id: 's1',
+      name: 'One',
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+      activityStatusSince: 1234,
+    });
+    expect(app.sessions.get('s1')).toBe(original);
+    expect(app.renderSessionTabs).toHaveBeenCalledOnce();
+    expect(app.renderMuxSessions).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a full session update so absent legacy fields cannot survive', () => {
+    const app = makeActivityEventApp();
+    app.sessions.get('s1').legacyOnly = true;
+
+    app._onSessionUpdated({
+      id: 's1',
+      name: 'Renamed',
+      status: 'idle',
+      activityStatus: 'idle',
+      activityStatusSince: null,
+    });
+
+    expect(app.sessions.get('s1')).toMatchObject({ name: 'Renamed', status: 'idle', activityStatus: 'idle' });
+    expect(app.sessions.get('s1')).not.toHaveProperty('legacyOnly');
+  });
+
+  it.each(['waiting_agents', 'checking_agents'])(
+    '%s idle evidence cancels a stuck timer without creating local idle semantics',
+    (activityStatus) => {
+      vi.useFakeTimers();
+      const app = makeActivityEventApp();
+      const existingTimer = setTimeout(() => {}, 60_000);
+      const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+      app.idleTimers.set('s1', existingTimer);
+
+      app._onSessionIdle({ id: 's1', status: 'idle', activityStatus, activityStatusSince: 1234 });
+
+      expect(clearSpy).toHaveBeenCalledWith(existingTimer);
+      expect(app.idleTimers.has('s1')).toBe(false);
+      expect(app.sendPendingCtrlL).not.toHaveBeenCalled();
+      expect(app._updateLocalEchoState).not.toHaveBeenCalled();
+    }
+  );
+
+  it('arms genuine derived idle once and does not replace the timer on repeated events', () => {
+    vi.useFakeTimers();
+    const app = makeActivityEventApp();
+    app.sessions.get('s1').status = 'busy';
+
+    app._onSessionIdle({ id: 's1', status: 'idle', activityStatus: 'idle', activityStatusSince: null });
+    const firstTimer = app.idleTimers.get('s1');
+    app._onSessionIdle({ id: 's1', status: 'idle', activityStatus: 'idle', activityStatusSince: null });
+
+    expect(firstTimer).toBeDefined();
+    expect(app.idleTimers.get('s1')).toBe(firstTimer);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('clears stale waiting activity on working, terminal output, and exit events', () => {
+    const app = makeActivityEventApp();
+    const session = app.sessions.get('s1');
+    session.status = 'idle';
+    session.activityStatus = 'waiting_agents';
+    session.activityStatusSince = 1234;
+
+    app._onSessionWorking({ id: 's1', status: 'busy' });
+    expect(session).toMatchObject({ status: 'busy', activityStatus: 'busy', activityStatusSince: null });
+
+    session.activityStatus = 'checking_agents';
+    session.activityStatusSince = 2345;
+    app._onSessionTerminal({ id: 's1', data: 'output' });
+    expect(session).toMatchObject({ activityStatus: 'busy', activityStatusSince: null });
+    expect(session).not.toHaveProperty('data');
+
+    session.activityStatus = 'waiting_agents';
+    session.activityStatusSince = 3456;
+    app._onSessionExit({ id: 's1', code: 0 });
+    expect(session).toMatchObject({ status: 'stopped', activityStatus: 'stopped', activityStatusSince: null });
+    expect(session).not.toHaveProperty('code');
+  });
+
+  it('ignores an incremental activity event for an unknown session', () => {
+    const app = makeActivityEventApp();
+
+    app._onSessionTerminal({ id: 'missing', data: 'late output' });
+
+    expect(app.sessions.has('missing')).toBe(false);
+    expect(app.renderSessionTabs).not.toHaveBeenCalled();
+    expect(app.renderMuxSessions).not.toHaveBeenCalled();
+  });
+
+  it('reconnect hydration replaces stale activity and clears fields omitted by a legacy snapshot', () => {
+    const app = makeInitApp();
+    app.sessions.get('s1').activityStatus = 'waiting_agents';
+    app.sessions.get('s1').activityStatusSince = 1234;
+
+    app.handleInit({
+      ...initData,
+      sessions: initData.sessions.map((session) =>
+        session.id === 's2'
+          ? { ...session, activityStatus: 'checking_agents', activityStatusSince: 5678 }
+          : { ...session }
+      ),
+    });
+
+    expect(app.sessions.get('s1')).not.toHaveProperty('activityStatus');
+    expect(app.sessions.get('s1')).not.toHaveProperty('activityStatusSince');
+    expect(app.sessions.get('s2')).toMatchObject({ activityStatus: 'checking_agents', activityStatusSince: 5678 });
+    app._tabLayoutCoordinator?.dispose();
+  });
+});
 
 beforeEach(() => {
   (globalThis as any).CSS = { escape: (value: string) => value };

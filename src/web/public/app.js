@@ -2051,8 +2051,115 @@ class CodemanApp {
     this.handleInit(data);
   }
 
+  /**
+   * Merge one server activity event into the cached session without deriving a
+   * new raw status from the presentation-only waiting/checking states. This is
+   * the single browser transition path for snapshots and incremental events.
+   */
+  _applySessionActivityEvent(data, transition = 'updated', refresh = true) {
+    const incoming = data?.session || data;
+    if (!incoming?.id) return null;
+
+    let session = this.sessions.get(incoming.id);
+    const existed = !!session;
+    if (!session && transition !== 'created' && transition !== 'hydrate' && transition !== 'updated') return null;
+    if (!session) session = { id: incoming.id };
+    const previousStatus = session.status;
+    const previousActivityStatus = session.activityStatus;
+    const previousActivityStatusSince = session.activityStatusSince;
+
+    const activityOnlyUpdate =
+      transition === 'updated' &&
+      Object.keys(incoming).every((key) => key === 'id' || key === 'activityStatus' || key === 'activityStatusSince');
+    if (transition === 'updated' && existed && !activityOnlyUpdate) session = { id: incoming.id };
+
+    if (transition === 'created' || transition === 'hydrate' || transition === 'updated') {
+      Object.assign(session, incoming);
+    } else {
+      for (const key of ['status', 'activityStatus', 'activityStatusSince']) {
+        if (Object.prototype.hasOwnProperty.call(incoming, key)) session[key] = incoming[key];
+      }
+    }
+
+    const hasStatus = Object.prototype.hasOwnProperty.call(incoming, 'status');
+    const hasActivityStatus = Object.prototype.hasOwnProperty.call(incoming, 'activityStatus');
+    const hasActivitySince = Object.prototype.hasOwnProperty.call(incoming, 'activityStatusSince');
+    const clearsDerived = transition === 'working' || transition === 'output' || transition === 'restart' || transition === 'exit';
+
+    if (clearsDerived) {
+      if (!hasStatus) {
+        if (transition === 'working' || transition === 'restart') session.status = 'busy';
+        else if (transition === 'exit') session.status = 'stopped';
+      }
+      session.activityStatus = session.status;
+      session.activityStatusSince = null;
+    } else if (transition === 'idle') {
+      const isAgentWait = incoming.activityStatus === 'waiting_agents' || incoming.activityStatus === 'checking_agents';
+      if (!hasStatus && !isAgentWait) session.status = 'idle';
+      if (!hasActivityStatus) {
+        delete session.activityStatus;
+        delete session.activityStatusSince;
+      } else if (!hasActivitySince) {
+        session.activityStatusSince = null;
+      }
+    } else if (!hasActivityStatus && (transition === 'created' || transition === 'hydrate' || hasStatus)) {
+      // A legacy/full snapshot without derived fields replaces older client
+      // state; it must not leave a waiting claim from the previous connection.
+      delete session.activityStatus;
+      delete session.activityStatusSince;
+    } else if (hasActivityStatus && !hasActivitySince) {
+      session.activityStatusSince = null;
+    }
+
+    this.sessions.set(incoming.id, session);
+
+    const effectiveStatus = session.activityStatus || session.status;
+    const timer = this.idleTimers?.get(incoming.id);
+    if (
+      effectiveStatus === 'waiting_agents' ||
+      effectiveStatus === 'checking_agents' ||
+      transition === 'working' ||
+      transition === 'output' ||
+      transition === 'restart' ||
+      transition === 'exit'
+    ) {
+      if (timer) clearTimeout(timer);
+      this.idleTimers?.delete(incoming.id);
+    } else if (transition === 'idle' && effectiveStatus === 'idle' && !timer && !this.respawnStatus?.[incoming.id]?.enabled) {
+      const threshold = this.notificationManager?.preferences?.stuckThresholdMs || 600000;
+      this.idleTimers?.set(
+        incoming.id,
+        setTimeout(() => {
+          this._notifySession(
+            incoming.id,
+            'warning',
+            'session-stuck',
+            'Session Idle',
+            `Idle for ${Math.round(threshold / 60000)}+ minutes`
+          );
+          this.idleTimers.delete(incoming.id);
+        }, threshold)
+      );
+    }
+
+    const activityChanged =
+      !existed ||
+      previousStatus !== session.status ||
+      previousActivityStatus !== session.activityStatus ||
+      previousActivityStatusSince !== session.activityStatusSince;
+    if (refresh && (activityChanged || transition === 'created' || transition === 'updated')) {
+      this._refreshSessionActivitySurfaces();
+    }
+    return session;
+  }
+
+  _refreshSessionActivitySurfaces() {
+    this.renderSessionTabs();
+    this.renderMuxSessions?.();
+  }
+
   _onSessionCreated(data) {
-    this.sessions.set(data.id, data);
+    this._applySessionActivityEvent(data, 'created', false);
     this.updateAttachmentHistoryCountFromSession?.(data);
     const visibilityDeferred =
       this._tabLayoutEditCoordinator?.hasPending() &&
@@ -2073,21 +2180,19 @@ class CodemanApp {
     // A spawned session's lineage arc draws in with the tab. Keyed the same way
     // session-lineage.js tags its paths; a no-op unless a line-entrance theme is on.
     if (data.parentSessionId) this.markConnectionLineEntering?.('lineage:' + data.id);
-    this.renderSessionTabs();
+    this._refreshSessionActivitySurfaces();
     this.updateCost();
-    // COD-97: keep the Monitor's mux list in sync with the open tabs.
-    this.renderMuxSessions();
     // Start stats polling when first session appears
     if (this.sessions.size === 1) this.startSystemStatsPolling();
   }
 
   _onSessionUpdated(data) {
-    const session = data.session || data;
-    const oldSession = this.sessions.get(session.id);
-    const claudeSessionIdJustSet = session.claudeSessionId && (!oldSession || !oldSession.claudeSessionId);
-    this.sessions.set(session.id, session);
+    const incoming = data.session || data;
+    const oldSession = this.sessions.get(incoming.id);
+    const claudeSessionIdJustSet = incoming.claudeSessionId && (!oldSession || !oldSession.claudeSessionId);
+    const session = this._applySessionActivityEvent(incoming, 'updated');
+    if (!session) return;
     this.updateAttachmentHistoryCountFromSession?.(session);
-    this.renderSessionTabs();
     this.updateCost();
     // Update tokens display if this is the active session
     if (session.id === this.activeSessionId && session.tokens) {
@@ -2154,6 +2259,9 @@ class CodemanApp {
   }
 
   _onSessionTerminal(data) {
+    // Terminal output invalidates any older waiting/checking projection even
+    // when this tab is not active and therefore has no renderer work below.
+    this._applySessionActivityEvent(data, 'output');
     if (data.id === this.activeSessionId) {
       // COD-187: while frozen in the history view, live output is dropped —
       // the exit-time frame refetch shows the final state. Flag it so the
@@ -3643,10 +3751,8 @@ class CodemanApp {
 
   _onSessionExit(data) {
     if (this._wsSessionId === data.id) this._disconnectWs();
-    const session = this.sessions.get(data.id);
+    const session = this._applySessionActivityEvent(data, 'exit');
     if (session) {
-      session.status = 'stopped';
-      this.renderSessionTabs();
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
     }
     // Notify on unexpected exit (non-zero code)
@@ -3656,10 +3762,12 @@ class CodemanApp {
   }
 
   _onSessionIdle(data) {
-    const session = this.sessions.get(data.id);
+    const session = this._applySessionActivityEvent(data, 'idle');
+    const effectiveStatus = session?.activityStatus || session?.status;
     if (session) {
-      session.status = 'idle';
-      this.renderSessionTabs();
+      // waiting/checking is a server-owned agent transition, not a local idle
+      // edge: no Ctrl+L, local-echo flip, reconcile, or stuck timer.
+      if (effectiveStatus === 'waiting_agents' || effectiveStatus === 'checking_agents') return;
       this.sendPendingCtrlL(data.id);
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
     }
@@ -3677,34 +3785,17 @@ class CodemanApp {
         this._reconcileForeignResize(data.id);
       }, TUI_REDRAW_SETTLE_MS);
     }
-    // Start stuck detection timer (only if no respawn running)
-    if (!this.respawnStatus[data.id]?.enabled) {
-      const threshold = this.notificationManager?.preferences?.stuckThresholdMs || 600000;
-      clearTimeout(this.idleTimers.get(data.id));
-      this.idleTimers.set(data.id, setTimeout(() => {
-        this._notifySession(data.id, 'warning', 'session-stuck', 'Session Idle', `Idle for ${Math.round(threshold / 60000)}+ minutes`);
-        this.idleTimers.delete(data.id);
-      }, threshold));
-    }
   }
 
   _onSessionWorking(data) {
-    const session = this.sessions.get(data.id);
+    const session = this._applySessionActivityEvent(data, 'working');
     if (session) {
-      session.status = 'busy';
       // Only clear tab alert if no pending hooks (permission_prompt, elicitation_dialog, etc.)
       if (!this.pendingHooks.has(data.id)) {
         this.tabAlerts.delete(data.id);
       }
-      this.renderSessionTabs();
       this.sendPendingCtrlL(data.id);
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
-    }
-    // Clear stuck detection timer
-    const timer = this.idleTimers.get(data.id);
-    if (timer) {
-      clearTimeout(timer);
-      this.idleTimers.delete(data.id);
     }
   }
 
@@ -4843,7 +4934,7 @@ class CodemanApp {
     this._resetAllAppState();
 
     data.sessions.forEach(s => {
-      this.sessions.set(s.id, s);
+      this._applySessionActivityEvent(s, 'hydrate', false);
       this.updateAttachmentHistoryCountFromSession?.(s);
       // Load ralph state from session data (only if not explicitly closed by user)
       if ((s.ralphLoop || s.ralphTodos) && !this.ralphClosedSessions.has(s.id)) {
@@ -4919,7 +5010,7 @@ class CodemanApp {
     }
 
     this.updateCost();
-    this.renderSessionTabs();
+    this._refreshSessionActivitySurfaces();
 
     // Approvals Inbox: re-seed pending prompts from the server so alerts
     // survive reloads and SSE reconnects (methods in approvals-ui.js).

@@ -51,10 +51,9 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _onHookStop(data) {
-    // Clear all pending hooks when Claude finishes responding
-    if (data.sessionId) {
-      this.clearPendingHooks(data.sessionId);
-    }
+    // Do not clear prompt state here: a stop can arrive before a newer
+    // permission/question hook. The sequenced server approval:resolved event
+    // owns the matching clear.
     this._notifySession(data.sessionId, 'info', 'hook-stop', 'Response Complete', data.reason || 'Claude has finished responding');
   },
 
