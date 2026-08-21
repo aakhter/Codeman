@@ -3845,9 +3845,9 @@ export class Session extends EventEmitter {
    * input could disappear while the caller believed it had been delivered.
    */
   write(data: string): boolean {
-    this._trackSubmit(data);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
+    this._trackSubmit(data);
     return true;
   }
 
@@ -3945,13 +3945,15 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
-    this._trackSubmit(data);
     if (this._mux && this._muxSession) {
-      return this._mux.sendInput(this.id, data);
+      const delivered = await this._mux.sendInput(this.id, data);
+      if (delivered) this._trackSubmit(data);
+      return delivered;
     }
     // Fallback to PTY write
     if (this.ptyProcess) {
       this.ptyProcess.write(data);
+      this._trackSubmit(data);
       return true;
     }
     return false;
@@ -3988,18 +3990,19 @@ export class Session extends EventEmitter {
       this._checkpointCodexFreshBaselineIds =
         baselineId && !baselineIds.includes(baselineId) ? [...baselineIds, baselineId] : baselineIds;
       this._checkpointCodexFreshTransitionArmed = true;
-    } else {
-      this._trackSubmit(data);
     }
     if (this._isStopped || (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)) {
       return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
     }
     if (this._mux && this._muxSession) {
-      // Codex fresh-thread commands intentionally do not update lastSubmitAt:
-      // they are not viewer-history prompts. They still invalidate any idle
-      // decision once the command reaches the transport boundary.
-      if (isCodexFreshThread) this._terminalActivityEpoch++;
       const result = await this._mux.sendCheckpointCommand(this.id, data);
+      if (result.ok) {
+        // Codex fresh-thread commands intentionally do not update lastSubmitAt:
+        // they are not viewer-history prompts, but successful delivery still
+        // invalidates pending idle decisions.
+        if (isCodexFreshThread) this._terminalActivityEpoch++;
+        else this._trackSubmit(data);
+      }
       if (isClear && !result.ok) {
         this._checkpointAwaitingInstantClear = false;
         this._checkpointInstantClearBaseline = null;
@@ -4011,6 +4014,7 @@ export class Session extends EventEmitter {
     if (this.mode === 'claude' && this.ptyProcess) {
       try {
         this.ptyProcess.write(data);
+        this._trackSubmit(data);
         return { ok: true, attempt: 1 };
       } catch (err) {
         if (isClear) {

@@ -13,9 +13,14 @@
 import { describe, it, expect } from 'vitest';
 import { Session } from '../src/session.js';
 
+function installSuccessfulPty(session: Session): void {
+  (session as unknown as { ptyProcess: { write(data: string): void } }).ptyProcess = { write: () => {} };
+}
+
 describe('session submit anchor', () => {
   it('records the pane Enter and carries it into persisted state', () => {
     const session = new Session({ workingDir: '/tmp' });
+    installSuccessfulPty(session);
     expect(session.lastSubmitAt).toBe(0);
     expect(session.toState().lastSubmitAt).toBeUndefined();
 
@@ -39,6 +44,7 @@ describe('session submit anchor', () => {
 
   it('restores the anchor from persisted state on boot recovery', () => {
     const submitted = new Session({ workingDir: '/tmp' });
+    installSuccessfulPty(submitted);
     submitted.write('prompt\r');
     const persisted = submitted.toState();
 
