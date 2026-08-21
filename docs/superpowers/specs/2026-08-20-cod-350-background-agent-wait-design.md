@@ -124,14 +124,20 @@ Environment entries and arguments are parsed as NUL-delimited structured tokens,
 `--flag=value` forms, never substring-searched. Supported fields, flags, executables, and role signatures must be
 established by fixtures from the Claude versions Codeman supports. An unreadable process table or an unrecognized
 identity format is `unknown`, not a guessed match; a successful complete inspection with no exact match is a negative
-result. When a supported Claude version exposes an exact agent ID, it may additionally bind the process to an
+result. Process capability is explicit: Claude Code 2.1.237 exposes no verified background-agent process-role
+signature, so its complete readable scan returns `negative/no_registered_role_signature`. That reason means only that
+exact process proof is unavailable; it is not semantic proof that no background agent exists and cannot erase stronger
+exact watcher or current-frame evidence. Only `negative/no_matching_process` from a supported version with a registered
+positive-capable matcher is authoritative process absence. When a supported Claude version exposes an exact agent ID,
+it may additionally bind the process to an
 `agentKey`; otherwise aggregate proof means only “at least one background agent for this project/conversation is live”
 and must not mark every semantic agent record individually alive.
 
 Scrollback, raw-buffer fallbacks, quoted text, stale markers, mismatched counts, and unrecognized variants are not
-semantic evidence. A `stop` is stricter: only exact positive live-process evidence may suppress its completion
-presentation. Recent transcript modification or a pane marker alone is insufficient because both can outlive the
-final agent process.
+semantic evidence. Exact watcher live evidence plus an exact matching current-frame count remains sufficient to
+suppress `idle_prompt` and raw-idle presentation when process proof capability is unavailable. A `stop` is stricter:
+only exact positive live-process evidence may suppress its completion presentation. Recent transcript modification or
+a pane marker alone is insufficient because both can outlive the final agent process.
 
 Reconciliation uses a bounded shared scheduler with per-session single-flight/coalescing and a default concurrency of
 four. Background startup/retry work may occupy at most three slots, reserving one for foreground raw-idle/hook
@@ -167,17 +173,21 @@ When an `idle_prompt` or `stop` is suppressed as background-agent presentation:
 - the legacy `hook:idle_prompt`/`hook:stop` SSE event is not emitted, so older browsers do not recreate the bug by
   ignoring a new suppression flag.
 
-An unsuppressed stop remains authoritative for human-facing completion presentation. When exact reconciliation
-successfully inspects the supported process sources and finds no match, the stop also clears the derived waiting claim
-for that identity generation and quarantines weaker sidecar/file evidence observed at or before the stop. A quarantined
+An unsuppressed stop remains authoritative for human-facing completion presentation. When exact reconciliation returns
+capability-complete `negative/no_matching_process` for a supported version with a registered positive matcher, the stop
+also clears the derived waiting claim for that identity generation and quarantines weaker sidecar/file evidence
+observed at or before the stop. `negative/no_registered_role_signature` leaves stronger watcher/frame-derived live
+state intact and cannot by itself establish semantic `none`; without stronger evidence the observation remains live or
+unknown. An independent exact watcher reconciliation that establishes zero live records, including verified completion
+and the final-agent settle, still converges to `none` and delivers the derived idle edge exactly once. A quarantined
 agent cannot resurrect waiting through a delayed final transcript write; it needs renewed positive process evidence,
 while a genuinely new composite agent may establish a new wait immediately.
 
-If the stop is unsuppressed only because reconciliation is unreadable or times out, completion presentation still fails
-open but autonomous availability remains fail-safe. The observation stays `unknown`, or retains a stronger existing
-`live` projection, until retry; it is not falsely converted to `none`. This can intentionally show a completion notice
-while still labeling the session **CHECKING AGENTS** or **WAITING ON AGENTS**: the former is a human notification, while
-the latter is the conservative automation/activity state.
+If the stop is unsuppressed because reconciliation is unreadable, times out, or has no registered positive-proof
+capability, completion presentation still fails open but autonomous availability remains fail-safe. The observation
+stays `unknown`, or retains a stronger existing `live` projection, until retry; it is not falsely converted to `none`.
+This can intentionally show a completion notice while still labeling the session **CHECKING AGENTS** or **WAITING ON
+AGENTS**: the former is a human notification, while the latter is the conservative automation/activity state.
 
 Stop, `idle_prompt`, raw-idle, permission, and elicitation events all receive a value from one monotonic coordinator
 event sequence scoped to the Codeman session and Claude identity generation. Approval items store their source sequence.
@@ -238,6 +248,8 @@ Focused unit, route, and browser tests will cover:
 
 - exact project/session isolation, same-directory parallel sessions, duplicate bare agent IDs, and canonical paths;
 - process-backed, sidecar-only/in-process, internal, nested, unsupported, ambiguous, and overflow cases;
+- Claude Code 2.1.237 no-signature negative without false semantic clearing, frame-backed idle-prompt/raw-idle
+  suppression, and unsuppressed stop with retained autonomous blocking;
 - idle_prompt and stop suppression, raw stop delivery, new diagnostic SSE routing, stale approval cleanup, and old-client
   compatibility;
 - discovery/final-completion races, delayed hooks, final transcript flushes, terminal output during refresh, session

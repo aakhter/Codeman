@@ -126,16 +126,21 @@ Before writing parser fixtures, inspect the installed Claude version and capture
 arguments, cwd/process tree, sidecar/transcript, and visible-frame shapes from a real local background-agent run. Never
 commit prompts, credentials, usernames, or unrelated environment values. Reduce the evidence to the minimum allowlisted
 field/role/renderer fixtures needed by the tests. If the supported build exposes no authoritative process-role or
-current-frame signature, stop and return to the design gate rather than inventing a synthetic-only signature. Use the
+current-frame signature, stop and return to the design gate rather than inventing a synthetic-only signature. The
+design-gate evidence for installed Claude Code 2.1.237 established a verified current-frame renderer but no verified
+background-agent process-role signature. Proceed with the frame-backed idle path and a reasoned no-signature process
+result; do not invent a positive process fixture. Use the
 `session-bridge` skill for any disposable Codeman-managed Claude evidence session and clean up only that exact session.
 
 **Step 1: Write failing evidence tests**
 
 For process inspection, cover NUL-delimited environment/argument parsing, verified `--flag value` and `--flag=value`
-forms, exact conversation matching, cwd device/inode matching, supported executable/agent-role signature, and parent
-process exclusion. Include negative fixtures for substring collisions, the `CODEMAN_MUX` parent, matching-session hook
-helpers, and generic inherited Claude children. Unreadable process data must be unknown; a complete scan with no exact
-match must be negative; abort must reject late results.
+forms, exact conversation matching, cwd device/inode matching, and parent process exclusion. Include negative fixtures
+for substring collisions, the `CODEMAN_MUX` parent, matching-session hook helpers, and generic inherited Claude
+children. A complete readable 2.1.237 scan returns reasoned `negative/no_registered_role_signature`, which cannot be
+used as semantic absence; do not add a synthetic positive matcher. Unreadable process data must be unknown; a future
+positive-capable registered matcher with no exact match returns `negative/no_matching_process`; abort must reject late
+results.
 
 For pane evidence, accept only a source-tagged current visible tmux frame with an anchored bottom-region Claude
 background-agent renderer and matching positive count. Reject raw-buffer fallback, scrollback, quoted text, stale
@@ -151,12 +156,19 @@ Expected: failures because existing liveness uses substring matching and has no 
 
 **Step 3: Implement the isolated evidence services**
 
-Return `positive | negative | unknown` from the pure process inspector. Define an `ObservableClaudeIdentity` input that
-contains the authoritative Session identity, `workingDir`, project hash, and Claude conversation ID; the inspector does
-not own or discover that registry. Keep aggregate proof scoped to the exact project and conversation; do not mark every
-semantic agent individually alive unless the supported process signature exposes an exact agent ID. Make child-process
-and filesystem reads abortable where supported and always ignore late aborted results. Defer watcher/coordinator wiring
-to Task 6, after the observable registry exists.
+Return reasoned `positive | negative | unknown` evidence from the pure process inspector, including explicit matcher
+capability and the distinct `no_registered_role_signature`/`no_matching_process` negative reasons. Define an
+`ObservableClaudeIdentity` input containing the authoritative Session identity, `workingDir`, project hash, Claude
+conversation ID, and authoritative installed Claude runtime version. Inject a process-proof capability/matcher registry
+keyed by that version. WebServer resolves the version once from the same configured local Claude executable used to
+launch sessions and supplies it through the coordinator registry; the inspector does not discover identity or infer a
+version from renderer text or generic process argv. An absent, unknown, or unrecognized version has no registered proof
+capability and returns `negative/no_registered_role_signature`, never a guessed matcher. Keep aggregate proof scoped to
+the exact project and conversation; do not mark every semantic agent individually alive unless the supported process
+signature exposes an exact agent ID. Make child-process and filesystem reads abortable where supported and always
+ignore late aborted results. A no-signature negative is only absence of process proof and never converts stronger
+watcher/frame evidence to semantic `none`; independent exact watcher zero plus final settle still does. Defer
+watcher/coordinator wiring to Task 6, after the observable registry exists.
 
 **Step 4: Run GREEN tests and commit**
 
@@ -191,7 +203,8 @@ specific failure, implement the minimum GREEN slice, rerun, and only then add th
 8. Scheduler concurrency four, at most three background jobs, reserved foreground capacity, bounded three-job priority
    burst, FIFO order, and no starvation.
 9. Final-agent settle using `IDLE_SILENCE_MS`, output cancellation, new-agent supersession, exact-zero early end, and
-   stale timer rejection.
+   stale timer rejection. Include the installed-build convergence path: no-signature plus initially unknown remains
+   blocked, then an independent exact watcher zero and final settle reaches `none` and emits one derived idle edge.
 10. Cleanup of queue consumers, retries, quarantines, watermarks, and settle timers.
 
 **Step 2: Run the RED test file**
@@ -297,8 +310,10 @@ separately from the Claude conversation ID used by agent visualization. Prove th
 event and a peer owner's event is filtered.
 
 Wire the Task 3 inspector here using the coordinator's `ObservableClaudeIdentity` registry; neither watcher nor inspector
-may guess `workingDir`. Replace the watcher's substring liveness path and test positive/negative/unknown propagation from
-the injected identity provider.
+may guess `workingDir`. Replace the watcher's substring liveness path and test positive, capability-complete negative,
+no-signature negative, and unknown propagation from the injected identity provider. Prove a no-signature negative cannot
+erase stronger exact watcher live state. Resolve the authoritative installed Claude version once from the configured
+local executable; unknown/unrecognized versions select no matcher and are never inferred from renderer text or argv.
 
 Add explicit integration cases for terminal output, input submission, and working transitions. Each must advance the
 Session activity epoch, notify the coordinator, cancel final-agent settle when required, recompute projection, and
@@ -356,14 +371,19 @@ git commit -m "feat(server): COD-350 publish coordinated agent activity"
 
 **Step 1: Write RED hook and ordering tests**
 
-Cover process-backed stop suppression; process-backed or exact visible-frame idle-prompt suppression; sidecar-only stop
-fall-through; timeout/read-error human fail-open plus autonomy fail-safe; immediate raw stop waiter delivery; and the
-complete `hook:suppressed` payload/routing. Assert suppression emits no legacy hook event, push, approval, pending-hook
-effect, response-complete effect, or respawn signal, while the run summary still records the raw hook.
+Cover exact visible-frame idle-prompt suppression and the installed 2.1.237 no-signature stop path: stop falls through,
+the raw stop waiter resolves, stronger exact watcher state remains `waiting_agents`, and automation stays blocked.
+Retain process-backed stop suppression only as a contract activated when a future authoritative supported fixture is
+registered; do not fake a positive fixture. Also cover sidecar-only stop fall-through, timeout/read-error human fail-open
+plus autonomy fail-safe, immediate raw stop waiter delivery, and the complete `hook:suppressed` payload/routing. Assert
+suppression emits no legacy hook event, push, approval, pending-hook effect, response-complete effect, or respawn signal,
+while the run summary still records the raw hook.
 
 Add source sequence to Approval items. Prove stop resolves only older/equal items; delayed idle prompt/raw idle cannot
 commit after a newer completion watermark; permission and elicitation remain immediate; discovery clears only idle-kind
-items; and a delayed final file write cannot escape stop quarantine.
+items; and a delayed final file write cannot escape stop quarantine after capability-complete
+`negative/no_matching_process`. Conversely, a 2.1.237 no-signature stop must not quarantine or erase an existing exact
+watcher live record.
 
 **Step 2: Write RED idle/wait tests**
 
@@ -561,6 +581,10 @@ git commit -m "refactor(ui): COD-350 key agents by composite identity"
 Model the screenshot: raw idle plus two exact live agents must produce `activityStatus: waiting_agents`, no idle Approval,
 no waiting-for-input/response-complete push, no idle waiter completion, and no respawn/auto-op eligibility. A second
 same-directory conversation must remain unaffected.
+
+Use the installed-build path explicitly: exact watcher count plus the source-tagged current Claude 2.1.237 frame
+suppresses false idle presentation even though process inspection returns `negative/no_registered_role_signature`.
+Prove that a stop remains human-visible while the stronger watcher state retains autonomous blocking.
 
 Add final completion settle followed by parent output, exact-zero stop during settle, reconnect/startup unknown-to-live,
 and deletion/identity/tracking/server-shutdown races while reconciliation is queued.
