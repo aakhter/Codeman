@@ -86,6 +86,7 @@ Object.assign(CodemanApp.prototype, {
     for (const item of fetched) {
       const current = [...this.approvals.values()].find((candidate) => candidate.sessionId === item.sessionId);
       const changedAfterStart = (this._approvalSessionRevisions.get(item.sessionId) || 0) > startRevision;
+      if (!current && changedAfterStart) continue;
       if (current && changedAfterStart) {
         if (current.id === item.id) continue;
         if (!approvalEventDisposition(this.approvals, item, false).applies) continue;
@@ -240,7 +241,11 @@ Object.assign(CodemanApp.prototype, {
   async dismissApproval(id) {
     await this._apiJson(`/api/approvals/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: {} });
     // The SSE resolved event also lands; delete now for instant feedback.
-    if (this.approvals?.delete(id)) this.renderApprovals();
+    const item = this.approvals?.get(id);
+    if (this.approvals?.delete(id)) {
+      this._markApprovalMutation(item?.sessionId);
+      this.renderApprovals();
+    }
   },
 
   openApprovalSession(id) {

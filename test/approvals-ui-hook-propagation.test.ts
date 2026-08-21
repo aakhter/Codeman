@@ -427,6 +427,49 @@ describe('sequence-safe hook and approval resolution', () => {
     expect([...app.approvals.keys()]).toEqual(['fetched']);
   });
 
+  it.each([true, false])('does not resurrect an approval resolved during seed when inbox enabled is %s', async (on) => {
+    const app = makeApp() as ApprovalsApp & Record<string, any>;
+    const staleRequest = deferred<any>();
+    app._apiJson = vi
+      .fn()
+      .mockReturnValueOnce(staleRequest.promise)
+      .mockResolvedValueOnce({
+        approvals: [{ id: 'next', sessionId: 'session-1', kind: 'idle', sourceSequence: 30 }],
+      });
+    app.approvalsInboxEnabled = () => on;
+    app.approvals.set('old', { id: 'old', sessionId: 'session-1', kind: 'idle', sourceSequence: 20 });
+
+    const staleSeed = app.seedApprovals();
+    app._onApprovalResolved({ id: 'old', sessionId: 'session-1', kind: 'idle', sourceSequence: 20 });
+    staleRequest.resolve({
+      approvals: [{ id: 'old', sessionId: 'session-1', kind: 'idle', sourceSequence: 20 }],
+    });
+    await staleSeed;
+
+    expect(app.approvals.has('old')).toBe(false);
+
+    await app.seedApprovals();
+    expect([...app.approvals.keys()]).toEqual(['next']);
+  });
+
+  it('records a local dismiss as a seed tombstone until the authoritative resolution arrives', async () => {
+    const app = makeApp() as ApprovalsApp & Record<string, any>;
+    const staleRequest = deferred<any>();
+    app._apiJson = vi.fn((path: string) =>
+      path === '/api/approvals' ? staleRequest.promise : Promise.resolve({ ok: true })
+    );
+    app.approvals.set('old', { id: 'old', sessionId: 'session-1', kind: 'idle', sourceSequence: 20 });
+
+    const staleSeed = app.seedApprovals();
+    await app.dismissApproval('old');
+    staleRequest.resolve({
+      approvals: [{ id: 'old', sessionId: 'session-1', kind: 'idle', sourceSequence: 20 }],
+    });
+    await staleSeed;
+
+    expect(app.approvals.has('old')).toBe(false);
+  });
+
   it('orders browser clears from the actual inbox resolution and acknowledgement payloads', () => {
     const emitResolution = (sourceSequence: number) => {
       const inbox = new ApprovalInbox();

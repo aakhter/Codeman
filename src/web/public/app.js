@@ -2174,13 +2174,15 @@ class CodemanApp {
   }
 
   _onSessionParked(data) {
-    if (data?.id) this._applySessionActivityEvent(data, 'parked');
+    const session = data?.id ? this._applySessionActivityEvent(data, 'parked') : null;
     this._onSessionListMaybeChanged?.();
+    return session;
   }
 
   _onSessionResumed(data) {
-    if (data?.id) this._applySessionActivityEvent(data, 'resumed');
+    const session = data?.id ? this._applySessionActivityEvent(data, 'resumed') : null;
     this._onSessionListMaybeChanged?.();
+    return session;
   }
 
   _onSessionRestarted(data) {
