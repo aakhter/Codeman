@@ -1398,9 +1398,14 @@ export class SubagentWatcher extends EventEmitter {
     if (existingInfo) {
       try {
         const newStat = await statAsync(filePath);
+        const wasSemanticallyLive = this.liveAgentKeys.has(context.agentKey);
         existingInfo.lastActivityAt = Date.now();
         existingInfo.fileSize = newStat.size;
         existingInfo.status = 'active';
+        if (!wasSemanticallyLive) {
+          this.liveAgentKeys.add(context.agentKey);
+          this.emitSemanticRevision(existingInfo.projectHash, existingInfo.sessionId, 'resumed');
+        }
       } catch {
         // Stat failed
       }

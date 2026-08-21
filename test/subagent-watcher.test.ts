@@ -303,6 +303,42 @@ describe('SubagentWatcher', () => {
       expect(watcher.getSubagent(key)?.filePath).toBe(transcript);
     });
 
+    it('restores the semantic live index when completed transcript activity resumes', async () => {
+      const key = await registerMeta('-work-shared', 'conversation-a', 'resumed');
+      const transcript = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-resumed.jsonl';
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 100,
+      });
+      mockCreateInterface.mockImplementation(() => {
+        const rl = createMockRl();
+        queueMicrotask(() => rl.emit('close'));
+        return rl;
+      });
+      await (
+        watcher as unknown as {
+          registerAgentFile(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentFile(transcript, '-work-shared', 'conversation-a');
+      await flushAsyncScan();
+      await watcher.killSubagent(key);
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toEqual([]);
+
+      const revisions = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      await (watcher as unknown as { handleFileChange(path: string): Promise<void> }).handleFileChange(transcript);
+
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toEqual([
+        expect.objectContaining({ agentKey: key, status: 'active' }),
+      ]);
+      expect(revisions).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'resumed', agents: [expect.objectContaining({ agentKey: key })] })
+      );
+    });
+
     it('targeted reconciliation bypasses startup age filtering', async () => {
       const old = new Date(Date.now() - 8 * 60 * 60 * 1000);
       mockReaddirSync.mockImplementation((path: string) => {
