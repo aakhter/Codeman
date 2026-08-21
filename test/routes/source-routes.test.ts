@@ -2,6 +2,9 @@
  * TDD route tests for COD-65 GET/POST/DELETE /api/sessions/:id/sources.
  */
 import { describe, it, expect } from 'vitest';
+import fs from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createRouteTestHarness } from './_route-test-utils.js';
 import { registerSourceRoutes } from '../../src/web/routes/source-routes.js';
 
@@ -22,6 +25,75 @@ describe('source routes', () => {
       const { app } = await createRouteTestHarness(registerSourceRoutes);
       const res = await app.inject({ method: 'GET', url: '/api/sessions/no-such-session/sources' });
       expect(res.statusCode).toBe(404);
+    });
+
+    it('discovers source files from the workspace and retains non-file metadata', async () => {
+      const { app, ctx } = await createRouteTestHarness(registerSourceRoutes);
+      const workdir = await fs.mkdtemp(join(tmpdir(), 'codeman-source-routes-'));
+      ctx._session.workingDir = workdir;
+      await fs.mkdir(join(workdir, '.codeman-sources'));
+      await fs.writeFile(join(workdir, '.codeman-sources', 'unregistered.pdf'), '%PDF-1.4');
+      await fs.writeFile(join(workdir, '.codeman-sources', 'sibling.pdf'), '%PDF-1.4');
+
+      try {
+        await app.inject({
+          method: 'POST',
+          url: `/api/sessions/${SESSION_ID}/sources`,
+          payload: { type: 'url', title: 'MDN Docs', url: 'https://developer.mozilla.org' },
+        });
+        await app.inject({
+          method: 'POST',
+          url: `/api/sessions/${SESSION_ID}/sources`,
+          payload: { type: 'highlight', title: 'Key excerpt', content: 'Keep this.' },
+        });
+
+        const response = await app.inject({ method: 'GET', url: `/api/sessions/${SESSION_ID}/sources` });
+        const sources = JSON.parse(response.body).data.sources;
+
+        expect(sources).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'file',
+              title: 'unregistered.pdf',
+              relativePath: '.codeman-sources/unregistered.pdf',
+            }),
+            expect.objectContaining({ type: 'url', title: 'MDN Docs' }),
+            expect.objectContaining({ type: 'highlight', title: 'Key excerpt' }),
+          ])
+        );
+      } finally {
+        await app.close();
+        await fs.rm(workdir, { recursive: true, force: true });
+      }
+    });
+
+    it('deletes the selected filesystem source without deleting sibling files', async () => {
+      const { app, ctx } = await createRouteTestHarness(registerSourceRoutes);
+      const workdir = await fs.mkdtemp(join(tmpdir(), 'codeman-source-routes-'));
+      ctx._session.workingDir = workdir;
+      await fs.mkdir(join(workdir, '.codeman-sources'));
+      await fs.writeFile(join(workdir, '.codeman-sources', 'delete-me.pdf'), '%PDF-1.4');
+      await fs.writeFile(join(workdir, '.codeman-sources', 'keep-me.pdf'), '%PDF-1.4');
+
+      try {
+        const listed = await app.inject({ method: 'GET', url: `/api/sessions/${SESSION_ID}/sources` });
+        const source = JSON.parse(listed.body).data.sources.find(
+          (item: { title: string }) => item.title === 'delete-me.pdf'
+        );
+        const response = await app.inject({
+          method: 'DELETE',
+          url: `/api/sessions/${SESSION_ID}/sources/${source.id}`,
+        });
+
+        expect(response.statusCode).toBe(200);
+        await expect(fs.stat(join(workdir, '.codeman-sources', 'delete-me.pdf'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fs.stat(join(workdir, '.codeman-sources', 'keep-me.pdf'))).resolves.toBeDefined();
+      } finally {
+        await app.close();
+        await fs.rm(workdir, { recursive: true, force: true });
+      }
     });
   });
 

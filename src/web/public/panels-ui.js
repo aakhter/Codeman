@@ -425,11 +425,9 @@ Object.assign(CodemanApp.prototype, {
   updateSourceFormFields() {
     const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
     const urlRow = document.getElementById('sourcesUrlRow');
-    const pathRow = document.getElementById('sourcesPathRow');
     const uploadRow = document.getElementById('sourcesUploadRow');
     const contentRow = document.getElementById('sourcesContentRow');
     if (urlRow) urlRow.classList.toggle('sources-field-row--hidden', type !== 'url');
-    if (pathRow) pathRow.classList.toggle('sources-field-row--hidden', type !== 'file');
     if (uploadRow) uploadRow.classList.toggle('sources-field-row--hidden', type !== 'file');
     if (contentRow) contentRow.classList.toggle('sources-field-row--hidden', type !== 'highlight');
     const titleEl = document.getElementById('sourcesTitle');
@@ -541,12 +539,11 @@ Object.assign(CodemanApp.prototype, {
     const sessionId = this.activeSessionId;
     if (!sessionId) return;
     const type = document.getElementById('sourcesTypeSelect')?.value || 'url';
+    if (type === 'file') return;
     const title = document.getElementById('sourcesTitle')?.value?.trim() || '';
     if (!title) return;
     const body = { type, title };
     if (type === 'url') body.url = document.getElementById('sourcesUrl')?.value?.trim() || undefined;
-    else if (type === 'file')
-      body.relativePath = document.getElementById('sourcesPath')?.value?.trim() || undefined;
     else if (type === 'highlight')
       body.content = document.getElementById('sourcesContent')?.value?.trim() || undefined;
     try {
@@ -567,8 +564,6 @@ Object.assign(CodemanApp.prototype, {
         }
         const urlEl = document.getElementById('sourcesUrl');
         if (urlEl) urlEl.value = '';
-        const pathEl = document.getElementById('sourcesPath');
-        if (pathEl) pathEl.value = '';
         const content = document.getElementById('sourcesContent');
         if (content) content.value = '';
         const picker2 = document.getElementById('sourcesFilePicker');
