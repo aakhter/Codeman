@@ -846,7 +846,8 @@ Object.assign(CodemanApp.prototype, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            ...(isRemoteCase ? { caseName } : { workingDir }),
+            caseName,
+            ...(!isRemoteCase ? { workingDir } : {}),
             name,
             ...(hasEnvOverrides ? { envOverrides } : {}),
             ...(effort ? { effort } : {}),
@@ -1031,7 +1032,8 @@ Object.assign(CodemanApp.prototype, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            ...(isRemoteCase ? { caseName } : { workingDir }),
+            caseName,
+            ...(!isRemoteCase ? { workingDir } : {}),
             mode: 'shell',
             name,
             ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),

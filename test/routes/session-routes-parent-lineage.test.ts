@@ -113,9 +113,9 @@ describe('POST /api/sessions parentSessionId', () => {
       now: () => '2026-08-16T12:00:00.000Z',
     });
     harness.ctx.tabLayouts = service as never;
-    harness.ctx.addSession = (async (session: any) => {
+    harness.ctx.addSession = (async (session: any, options = {}) => {
       harness.ctx.sessions.set(session.id, session);
-      await service.sessionCreated('@single', session.id);
+      return service.sessionCreated('@single', session.id, options);
     }) as never;
 
     const childResponse = await harness.app.inject({

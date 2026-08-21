@@ -335,6 +335,37 @@ describe('Run launch synchronization', () => {
   });
 
   it.each(creationPaths)(
+    '%s includes the selected case name in its %s creation request',
+    async (method, location, endpoint) => {
+      const { app, requests } = loadSessionLaunchHarness({ location });
+
+      await app[method]({ count: 1 });
+
+      const creationRequests = requests.filter((request) => request.url === endpoint && request.method === 'POST');
+      expect(creationRequests).toHaveLength(1);
+      expect(creationRequests[0].body.caseName).toBe('launch-case');
+    }
+  );
+
+  it.each(['runClaude', 'runShell'] as const)(
+    '%s sends both the selected case and resolved working directory for local creation',
+    async (method) => {
+      const { app, requests } = loadSessionLaunchHarness({ location: 'local' });
+
+      await app[method]({ count: 1 });
+
+      const creationRequests = requests.filter(
+        (request) => request.url === '/api/sessions' && request.method === 'POST'
+      );
+      expect(creationRequests).toHaveLength(1);
+      expect(creationRequests[0].body).toMatchObject({
+        caseName: 'launch-case',
+        workingDir: '/tmp/launch-case',
+      });
+    }
+  );
+
+  it.each(creationPaths)(
     '%s omits tabGroupId from its %s creation request when launch options are absent',
     async (method, location, endpoint) => {
       const { app, requests } = loadSessionLaunchHarness({ location });

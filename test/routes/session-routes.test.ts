@@ -17,7 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyMultipart from '@fastify/multipart';
@@ -28,6 +28,8 @@ import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { Session } from '../../src/session.js';
 import { writeHooksConfig } from '../../src/hooks-config.js';
 import type { TabLayout } from '../../src/tab-layout.js';
+import { dataPath } from '../../src/config/instance.js';
+import { CASES_DIR } from '../../src/web/route-helpers.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
@@ -215,6 +217,8 @@ describe('session-routes', () => {
 
   describe('session creation tab placement', () => {
     it('returns the authoritative layout for a targeted session creation', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'nzbdav', type: 'remote', hostId: 'gpu-box', remotePath: '/srv/nzbdav' }];
       harness.ctx.addSession.mockResolvedValueOnce({
         layout: authoritativeTabLayout,
         placements: authoritativeTabPlacements,
@@ -223,13 +227,144 @@ describe('session-routes', () => {
       const response = await harness.app.inject({
         method: 'POST',
         url: '/api/sessions',
-        payload: { mode: 'shell', tabGroupId: 'work' },
+        payload: { caseName: 'nzbdav', mode: 'shell', tabGroupId: 'work' },
       });
 
       expect(response.statusCode).toBe(200);
-      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { tabGroupId: 'work' });
+      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), {
+        caseName: 'nzbdav',
+        tabGroupId: 'work',
+      });
       expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
       expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+    });
+
+    it('returns the authoritative layout when the case default placed a standard session', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'nzbdav', type: 'remote', hostId: 'gpu-box', remotePath: '/srv/nzbdav' }];
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+        placementSource: 'case-default',
+      });
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'nzbdav', mode: 'shell' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'nzbdav' });
+      expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+      expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+    });
+
+    it('infers a managed local case from an exact workingDir-only creation', async () => {
+      const caseName = 'working-dir-managed';
+      const workingDir = join(CASES_DIR, caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+        placementSource: 'case-default',
+      });
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { workingDir, mode: 'shell' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+      expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+      expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+    });
+
+    it('infers an owner-accessible linked local case from an exact workingDir-only creation', async () => {
+      const caseName = 'working-dir-linked';
+      const linkedDir = await mkdtemp(join(tmpdir(), 'codeman-linked-case-'));
+      const linkedCasesFile = dataPath('linked-cases.json');
+      await mkdir(dirname(linkedCasesFile), { recursive: true });
+      await writeFile(linkedCasesFile, JSON.stringify({ [caseName]: linkedDir }));
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+        placementSource: 'case-default',
+      });
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { workingDir: linkedDir, mode: 'shell' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+        expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+        expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+      } finally {
+        await rm(linkedCasesFile, { force: true });
+        await rm(linkedDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not infer a case from an arbitrary repository with the same basename', async () => {
+      const caseName = 'basename-only';
+      await mkdir(join(CASES_DIR, caseName), { recursive: true });
+      const arbitraryParent = await mkdtemp(join(tmpdir(), 'codeman-arbitrary-repo-'));
+      const arbitraryRepo = join(arbitraryParent, caseName);
+      await mkdir(arbitraryRepo);
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { workingDir: arbitraryRepo, mode: 'shell' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session));
+        expect(harness.ctx.addSession.mock.calls.at(-1)).toHaveLength(1);
+        expect(JSON.parse(response.body).data).not.toHaveProperty('tabLayout');
+      } finally {
+        await rm(arbitraryParent, { recursive: true, force: true });
+      }
+    });
+
+    it('does not infer a case from a child directory beneath a managed case', async () => {
+      const childDir = join(CASES_DIR, 'managed-parent', 'child');
+      await mkdir(childDir, { recursive: true });
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { workingDir: childDir, mode: 'shell' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session));
+      expect(harness.ctx.addSession.mock.calls.at(-1)).toHaveLength(1);
+      expect(JSON.parse(response.body).data).not.toHaveProperty('tabLayout');
+    });
+
+    it('does not infer a local case from a registered Docker workspace path', async () => {
+      const dockerWorkspace = join(CASES_DIR, 'docker-workspace');
+      await mkdir(dockerWorkspace, { recursive: true });
+      dockerStore.cases = [
+        { name: 'docker-workspace', type: 'docker', hostId: 'docker-local', hostWorkspacePath: dockerWorkspace },
+      ];
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { workingDir: dockerWorkspace, mode: 'shell' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session));
+      expect(harness.ctx.addSession.mock.calls.at(-1)).toHaveLength(1);
+      expect(JSON.parse(response.body).data).not.toHaveProperty('tabLayout');
     });
 
     it('keeps an ordinary session creation response and addSession call unchanged', async () => {
@@ -264,6 +399,8 @@ describe('session-routes', () => {
     });
 
     it('returns the authoritative layout for a targeted quick-start', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'nzbdav', type: 'remote', hostId: 'gpu-box', remotePath: '/srv/nzbdav' }];
       const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
       harness.ctx.addSession.mockResolvedValueOnce({
         layout: authoritativeTabLayout,
@@ -273,11 +410,39 @@ describe('session-routes', () => {
         const response = await harness.app.inject({
           method: 'POST',
           url: '/api/quick-start',
-          payload: { mode: 'shell', tabGroupId: 'work' },
+          payload: { caseName: 'nzbdav', mode: 'shell', tabGroupId: 'work' },
         });
 
         expect(response.statusCode).toBe(200);
-        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { tabGroupId: 'work' });
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), {
+          caseName: 'nzbdav',
+          tabGroupId: 'work',
+        });
+        expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+        expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+      } finally {
+        startShell.mockRestore();
+      }
+    });
+
+    it('returns the authoritative layout when the case default placed a quick-start session', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu', commands: {} }];
+      remoteStore.cases = [{ name: 'nzbdav', type: 'remote', hostId: 'gpu-box', remotePath: '/srv/nzbdav' }];
+      const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+        placementSource: 'case-default',
+      });
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName: 'nzbdav', mode: 'shell' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'nzbdav' });
         expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
         expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
       } finally {
@@ -295,8 +460,7 @@ describe('session-routes', () => {
         });
 
         expect(response.statusCode).toBe(200);
-        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session));
-        expect(harness.ctx.addSession.mock.calls.at(-1)).toHaveLength(1);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'testcase' });
         expect(JSON.parse(response.body).data).not.toHaveProperty('tabLayout');
         expect(JSON.parse(response.body).data).not.toHaveProperty('tabPlacements');
       } finally {
