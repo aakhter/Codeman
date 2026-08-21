@@ -6308,7 +6308,7 @@ class CodemanApp {
    */
   _sidebarRichPillLabel(state) {
     if (state === 'waiting_agents' || state === 'checking_agents') {
-      return window.CodemanSessionActivity?.resolve({ status: 'idle', activityStatus: state }).compactLabel.toLowerCase();
+      return window.CodemanSessionActivity?.resolve({ status: 'idle', activityStatus: state }).compactLabel || state;
     }
     return {
       needs: 'needs you',

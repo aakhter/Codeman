@@ -70,8 +70,6 @@ const HOME_SESSIONS_PILL_LABEL = {
   error: 'error',
   waiting: 'waiting',
   working: 'working',
-  waiting_agents: 'agents',
-  checking_agents: 'checking',
   idle: 'idle',
   done: 'done',
 };
@@ -225,6 +223,7 @@ Object.assign(CodemanApp.prototype, {
         if (!session) return null;
         const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
         const state = this._mobileOverviewState(session, this.pendingHooks?.get(ref.id));
+        const activity = window.CodemanSessionActivity?.resolve(session);
         const mode = session.mode || 'claude';
         return {
           kind: 'session',
@@ -240,9 +239,12 @@ Object.assign(CodemanApp.prototype, {
           caseName: matched ? matched.name : '',
           dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
           state,
-          activityStatus: window.CodemanSessionActivity?.resolve(session).effectiveStatus || session.status || 'idle',
+          activityStatus: activity?.effectiveStatus || session.status || 'idle',
           activityStatusSince: Number(session.activityStatusSince) || 0,
-          pill: HOME_SESSIONS_PILL_LABEL[state] || state,
+          pill:
+            state === 'waiting_agents' || state === 'checking_agents'
+              ? activity?.compactLabel || state
+              : HOME_SESSIONS_PILL_LABEL[state] || state,
           // Epoch ms, straight off the session payload; formatting happens at
           // render time so the clock below can redo it without a re-render.
           createdAt: Number(session.createdAt) || 0,

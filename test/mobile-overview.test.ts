@@ -78,8 +78,8 @@ describe('mobile overview model', () => {
       ],
     });
     expect(model.current.slice(0, 2).map((row: any) => [row.id, row.state, row.pill, row.since?.at])).toEqual([
-      ['waiting', 'waiting_agents', 'agents', 1000],
-      ['checking', 'checking_agents', 'checking', 2000],
+      ['waiting', 'waiting_agents', 'AGENTS', 1000],
+      ['checking', 'checking_agents', 'CHECKING', 2000],
     ]);
     expect(model.current.find((row: any) => row.id === 'legacy')).toMatchObject({ state: 'idle', pill: 'idle' });
     const rendered = app._buildMobileOverviewRow(model.current[0]);

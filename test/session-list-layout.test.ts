@@ -609,7 +609,8 @@ describe('rich session sidebar', () => {
       activityStatus: 'checking_agents',
       activityStatusSince: 4321,
     });
-    expect(row).toMatchObject({ state: 'checking_agents', pill: 'checking', since: { at: 4321 } });
+    expect(row).toMatchObject({ state: 'checking_agents', pill: 'CHECKING', since: { at: 4321 } });
+    expect(app._sidebarRichPillLabel('waiting_agents')).toBe('AGENTS');
   });
   /**
    * The row model is built from mobile-overview.js helpers, which the harness

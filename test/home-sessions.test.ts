@@ -100,7 +100,7 @@ describe('home sessions column: model', () => {
       pendingHooks: new Map(),
     });
     const row = app.buildHomeSessionRows()[0];
-    expect(row).toMatchObject({ state: 'waiting_agents', pill: 'agents', since: { at: 1234 } });
+    expect(row).toMatchObject({ state: 'waiting_agents', pill: 'AGENTS', since: { at: 1234 } });
     expect(app._buildHomeSessionRow(row).dataset.activityStatus).toBe('waiting_agents');
   });
 
@@ -118,8 +118,10 @@ describe('home sessions column: model', () => {
       pendingHooks: new Map(),
     });
     const ids = () => app.buildHomeSessionRows().map((row: any) => row.id);
+    const pills = () => app.buildHomeSessionRows().map((row: any) => row.pill);
 
     expect(ids()).toEqual(['old-check', 'young-check']);
+    expect(pills()).toEqual(['CHECKING', 'CHECKING']);
     sessions.get('young-check').lastActivityAt = 50_000;
     sessions.get('old-check').lastActivityAt = 10;
     expect(ids()).toEqual(['old-check', 'young-check']);
