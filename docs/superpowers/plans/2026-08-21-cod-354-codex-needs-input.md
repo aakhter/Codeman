@@ -4,64 +4,57 @@
 
 **Goal:** Restore one durable Codex idle approval and yellow/orange tab alert after a real zero-agent turn without weakening COD-350 live-agent suppression.
 
-**Architecture:** Treat output received after a Codex session has already reached raw `idle` as TUI repaint, so it cannot invalidate the event-bound zero-agent inspection; explicit input and a real working transition still advance the terminal epoch. At the activity decision boundary, route a fresh exact-zero Codex `raw_idle` decision through the existing listener commit path while keeping Claude and live-agent settlement behavior unchanged.
+**Architecture:** Codex adapters are intentionally outside the Claude-only watcher/process inspection path, so terminal output must leave them `not_observable` instead of promoting them to an `unknown` state that can never reconcile. Preserve normal timer, event, and terminal-epoch invalidation, then let the existing synchronous Codex `raw_idle` listener path commit the approval while keeping Claude and live-agent settlement behavior unchanged.
 
 **Tech Stack:** TypeScript ESM, Vitest fake timers and route/listener integration tests, Fastify/SSE approval inbox, Playwright browser tests, esbuild.
 
 ---
 
-### Task 1: Preserve the Codex turn-end evidence fence across idle repaint output
+### Task 1: Preserve non-observable Codex state across terminal output
 
 **Files:**
 
-- Modify: `src/session.ts`
-- Test: `test/session-agent-activity-contract.test.ts`
+- Modify: `src/session-agent-activity-coordinator.ts`
+- Test: `test/session-agent-activity-coordinator.test.ts`
 
-- [ ] **Step 1: Write the failing idle-repaint contract test**
+- [x] **Step 1: Write the failing non-observable Codex regression**
 
-Add a test that creates a Codex `Session`, puts it into raw idle after a working transition, calls `_handleTerminalOutput()` with a repaint frame, and asserts that `terminalActivityEpoch` does not change. In the same test, deliver `write('next turn\r')` through a stub PTY and assert that the epoch advances, proving real input still fences stale decisions.
+Add local and remote Codex coordinator tests showing that `onTerminalOutput()` retains `not_observable`, raw idle remains directly deliverable, and observable Claude output still becomes `unknown/checking_agents`.
 
 ```ts
-it('does not let idle Codex repaint output invalidate a completed turn', () => {
-  const session = new Session({ workingDir: '/tmp', mode: 'codex' });
-  const access = contractAccess(session);
-  access._markWorking();
-  access._status = 'idle';
-  access._isWorking = false;
-  const idleEpoch = session.terminalActivityEpoch;
-  access._handleTerminalOutput('idle composer repaint');
-  expect(session.terminalActivityEpoch).toBe(idleEpoch);
-  access.ptyProcess = { write: vi.fn() };
-  expect(session.write('next turn\r')).toBe(true);
-  expect(session.terminalActivityEpoch).toBe(idleEpoch + 1);
+coordinator.onTerminalOutput(target);
+expect(coordinator.project(target).activityStatus).toBe('idle');
+expect(coordinator.decisionForRawIdle(target)).toMatchObject({
+  presentToHuman: true,
+  autonomyBlocked: false,
+  observation: 'not_observable',
 });
 ```
 
-- [ ] **Step 2: Run the contract test and verify RED**
+- [x] **Step 2: Run the coordinator/listener tests and verify RED**
 
-Run: `npm test -- test/session-agent-activity-contract.test.ts`
+Run: `npm test -- test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/background-agent-wait.integration.test.ts`
 
-Expected: FAIL because `_handleTerminalOutput()` currently advances the terminal epoch for an idle Codex repaint.
+Observed: 3 intended failures because local Codex, remote Codex, and the real coordinator-to-listener path remained `checking_agents` or lacked an approval.
 
-- [ ] **Step 3: Implement the narrow repaint rule**
+- [x] **Step 3: Implement the narrow coordinator rule**
 
-In `_handleTerminalOutput()`, preserve the existing invalidation for Claude, non-idle Codex output, explicit submissions, and working transitions. Skip only the epoch increment and `terminalActivity` emission when `mode === 'codex'` and raw status is already `idle`.
+In `onTerminalOutput()`, preserve settle, receipt, decision-token, and inspection invalidation. For a non-observable Codex adapter, restore `not_observable` and return instead of entering an unresolvable `unknown` state.
 
 ```ts
-const idleCodexRepaint = this.mode === 'codex' && this._status === 'idle';
-if (!idleCodexRepaint) {
-  this._terminalActivityEpoch++;
-  this.emit('terminalActivity');
+if (session.mode === 'codex' && !this.isObservable(session)) {
+  this.setRecordObservation(record, 'not_observable');
+  return;
 }
 ```
 
-- [ ] **Step 4: Run the contract test and verify GREEN**
+- [x] **Step 4: Run the focused tests and verify GREEN**
 
-Run: `npm test -- test/session-agent-activity-contract.test.ts`
+Run: `npm test -- test/session-agent-activity-contract.test.ts test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/background-agent-wait.integration.test.ts`
 
-Expected: all tests pass.
+Observed: 125/125 tests pass.
 
-### Task 2: Deliver fresh exact-zero Codex raw-idle through the approval path
+### Task 2: Deliver the real Codex raw-idle through the approval path
 
 **Files:**
 
@@ -71,13 +64,11 @@ Expected: all tests pass.
 - Test: `test/session-listener-wiring.test.ts`
 - Test: `test/background-agent-wait.integration.test.ts`
 
-- [ ] **Step 1: Write failing coordinator and listener regressions**
+- [x] **Step 1: Write failing coordinator and listener regressions**
 
-Add a coordinator test that starts a Codex session with live watcher evidence, receives a current zero watcher snapshot, allocates `raw_idle`, reconciles exact zero, and expects one decision with `presentToHuman: true`, `autonomyBlocked: false`, and direct listener delivery rather than a derived-only settlement. Add controls proving a live process/frame remains suppressed, a stale terminal epoch is rejected, and the equivalent Claude exact-zero behavior is unchanged.
+Add a listener regression that uses a real `SessionAgentActivityCoordinator`, sends real terminal output through the `Session`, and verifies one `turn-end` creates exactly one Codex idle approval and one `session:idle` broadcast. Keep the existing startup `initial-ready` and Claude suppression controls.
 
-Add a listener test whose async decision represents the fresh exact-zero Codex outcome and assert exactly one idle approval with the event source sequence plus the existing `session:idle` broadcast.
-
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -85,27 +76,29 @@ Run:
 npm test -- test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/background-agent-wait.integration.test.ts
 ```
 
-Expected: the new Codex direct-delivery assertions fail while existing live-agent and Claude controls pass.
+Observed: the new reachable Codex assertions fail while existing Claude controls pass.
 
-- [ ] **Step 3: Implement the minimal decision-boundary change**
+- [x] **Step 3: Implement the minimal activity-boundary change**
 
-When `decisionForEvent()` receives fresh exact-zero evidence for a Codex `raw_idle`, settle the record to `none` without publishing the derived-idle callback, and expose the decision as direct delivery so `commitRawIdle()` remains the single approval/broadcast path. Keep `stop`, `idle_prompt`, Claude `raw_idle`, stale reconciliation, live process evidence, and visible-frame evidence on their current paths.
+Keep non-observable Codex out of `unknown`, so the existing synchronous `decisionForEvent()` and unchanged `commitRawIdle()` remain the single approval/broadcast path. Keep Claude reconciliation, `stop`, `idle_prompt`, stale reconciliation, live process evidence, and visible-frame evidence unchanged.
 
-The implementation must keep all freshness checks already enforced by `reconciliationForEvent()`:
+The implementation must run after the existing invalidation operations:
 
 ```ts
-const directCodexRawIdle =
-  event.kind === 'raw_idle' && session.mode === 'codex' && reconciliationIsFresh && exactWatcherCount === 0;
+record.decisionToken += 1;
+record.eventReconciliations.clear();
+record.reconciliationResults.clear();
+this.abortInspection(record);
 ```
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the same three-file command. Expected: all tests pass with no unhandled errors.
 
-- [ ] **Step 5: Commit the behavioral fix**
+- [x] **Step 5: Commit the behavioral fix**
 
 ```bash
-git add src/session.ts src/session-agent-activity-coordinator.ts src/web/session-listener-wiring.ts test/session-agent-activity-contract.test.ts test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/background-agent-wait.integration.test.ts
+git add src/session-agent-activity-coordinator.ts test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/background-agent-wait.integration.test.ts
 git commit -m "fix(activity): COD-354 restore Codex needs-input alerts"
 ```
 
@@ -117,7 +110,7 @@ git commit -m "fix(activity): COD-354 restore Codex needs-input alerts"
 - Modify: `docs/superpowers/plans/2026-08-21-cod-354-codex-needs-input.md`
 - Test: existing focused approval/browser tests selected after `rg` confirms the relevant filenames
 
-- [ ] **Step 1: Add the patch changeset**
+- [x] **Step 1: Add the patch changeset**
 
 ```md
 ---
@@ -127,12 +120,12 @@ git commit -m "fix(activity): COD-354 restore Codex needs-input alerts"
 Restore Codex needs-input approvals and tab alerts after zero-agent turns while preserving live-agent suppression.
 ```
 
-- [ ] **Step 2: Run the complete scoped regression and static gates**
+- [x] **Step 2: Run the complete scoped regression and static gates**
 
 Run only explicit files, never bare `npm test`:
 
 ```bash
-npm test -- test/session-agent-activity-contract.test.ts test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/session-agent-activity-server.test.ts test/background-agent-wait.integration.test.ts test/approvals-api.test.ts
+npm test -- test/session-agent-activity-contract.test.ts test/session-agent-activity-coordinator.test.ts test/session-listener-wiring.test.ts test/session-agent-activity-server.test.ts test/background-agent-wait.integration.test.ts test/routes/approval-routes.test.ts test/approvals-ui-hook-propagation.test.ts
 npm run typecheck
 npm run lint
 npm run format:check

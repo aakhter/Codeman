@@ -17,43 +17,48 @@ state machine.
 
 ## Chosen Approach
 
-Add a bounded Codex turn-end fallback at the activity-decision boundary. A confirmed Codex `working -> idle` event may
-recover normal idle delivery when all of the following are true:
+Restore the existing non-observable Codex turn-end path at the activity-coordination boundary. Codex sessions are not
+routed through the Claude conversation watcher or Claude process inspection: local, remote, and Docker Codex adapters
+therefore start as `not_observable`. A confirmed Codex `working -> idle` event may recover normal idle delivery when all
+of the following are true:
 
 1. the event is `raw_idle` with reason `turn-end`;
 2. the session mode is `codex`;
-3. authoritative watcher/team evidence contains zero effective agents;
-4. there is no affirmative process or visible-frame evidence of a live agent; and
-5. the bounded zero-agent confirmation belongs to the current session identity, terminal epoch, and event sequence.
+3. the adapter is not eligible for Claude watcher/process evidence and remains `not_observable`;
+4. no watcher/process result has classified the session as live; and
+5. normal identity, terminal epoch, and event ordering fences are preserved.
 
-Repeated terminal frames may restart inspection, but they cannot postpone a current, authoritative zero-agent result
-forever. Once the bounded confirmation succeeds, the existing `commitRawIdle()` path runs unchanged. That path creates
-the idle approval, broadcasts `session:idle`, and lets the existing browser state machine render and persist the
-yellow needs-input alert.
+Repeated terminal frames still invalidate timers and event-bound evidence, but they must not promote a non-observable
+Codex adapter to `unknown`, because no Codex inspection can ever resolve that state. The adapter returns to
+`not_observable`, and the existing synchronous `commitRawIdle()` path runs unchanged. That path creates the idle
+approval, broadcasts `session:idle`, and lets the existing browser state machine render and persist the yellow
+needs-input alert.
 
 ## Rejected Approaches
 
-- Bypass activity coordination for every Codex idle event. This is small but reintroduces false alerts while Codex
-  subagents are genuinely active.
+- Route Codex through Claude's conversation watcher. Codex has no Claude conversation identity, so this would create
+  synthetic evidence and couple unrelated runtime protocols.
 - Create the alert in browser code from `status=idle`. This duplicates server truth, does not survive reload reliably,
   and leaves `/api/approvals` and other devices inconsistent.
-- Disable subagent tracking for Codex. This loses useful `waiting_agents` presentation and weakens automation safety.
+- Mark every unknown session non-observable. This would weaken real Claude watcher/process uncertainty and reintroduce
+  false alerts while observable Claude background agents are active.
 
 ## Data Flow and Boundaries
 
 `Session` continues emitting a reasoned raw idle event. `SessionAgentActivityCoordinator` continues owning agent
 evidence, identity fencing, and bounded settlement. `session-listener-wiring` remains the only component that commits a
-Codex inferred idle approval. The correction exposes enough decision information to distinguish bounded authoritative
-zero from genuinely live or unresolved evidence; it does not inspect watcher internals in the UI or listener layer.
+Codex inferred idle approval. The correction keeps non-observable Codex state out of the Claude-only unresolved
+inspection state; it does not inspect watcher internals in the UI or listener layer.
 
-Explicit permission and elicitation events remain immediate and continue to outrank derived activity. A live agent
-keeps `waiting_agents`; genuinely uncertain evidence may remain `checking_agents` during the bounded check. Only the
-current zero-agent Codex turn-end receives the fallback.
+Explicit permission and elicitation events remain immediate and continue to outrank derived activity. Observable
+Claude sessions with live agents keep `waiting_agents`; genuinely uncertain Claude evidence may remain
+`checking_agents` during the bounded check. Only a current Codex turn-end uses the non-observable direct path.
 
 ## Failure and Race Handling
 
-- Stale zero-agent results from an earlier identity, terminal epoch, semantic revision, or event sequence are ignored.
-- New affirmative agent evidence cancels or invalidates the fallback.
+- Stale results from an earlier identity, terminal epoch, semantic revision, or event sequence are ignored.
+- New terminal activity still cancels timers, invalidates receipts, and aborts inspection before Codex returns to
+  `not_observable`.
 - A later terminal frame cannot resurrect a retired raw-idle event.
 - Inspection errors do not fabricate zero-agent evidence.
 - Restored sessions receive the same bounded behavior without treating startup quiet as a completed turn.
@@ -62,9 +67,10 @@ current zero-agent Codex turn-end receives the fallback.
 
 Test-driven coverage will prove:
 
-- repeated Codex idle TUI frames with authoritative zero agents eventually commit one turn-end idle approval;
+- repeated Codex idle TUI frames cannot strand a non-observable adapter in `checking_agents` and one turn-end commits
+  one idle approval;
 - restored and remote Codex sessions recover the alert after a real turn, but not on startup;
-- live Codex subagents still suppress false idle approvals and project `waiting_agents`;
+- observable Claude live-agent evidence still suppresses false idle approvals and projects `waiting_agents`;
 - Claude behavior is byte-for-behavior unchanged across idle, permission, elicitation, and agent-wait cases;
 - stale identity/epoch/revision evidence cannot release a newer event;
 - `/api/approvals` seeds the same alert in a second browser context; and
