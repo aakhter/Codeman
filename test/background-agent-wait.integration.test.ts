@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/mux-factory.js', () => ({
@@ -32,6 +35,22 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => (resolve = done));
   return { promise, resolve };
+}
+
+function trackedDeferred<T>() {
+  let finish!: (value: T) => void;
+  let resolved = false;
+  const promise = new Promise<T>((done) => (finish = done));
+  return {
+    promise,
+    resolve(value: T) {
+      resolved = true;
+      finish(value);
+    },
+    get resolved() {
+      return resolved;
+    },
+  };
 }
 
 function internals(server: WebServer) {
@@ -111,6 +130,13 @@ const noRoleProcessSource: ProcessInspectionSource = {
 };
 
 const activeServers = new Set<WebServer>();
+const ownedWorkingDirs = new Set<string>();
+
+function ownedWorkingDir(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'cod350-background-wait-'));
+  ownedWorkingDirs.add(directory);
+  return directory;
+}
 
 afterEach(async () => {
   for (const server of activeServers) {
@@ -122,6 +148,8 @@ afterEach(async () => {
     }
   }
   activeServers.clear();
+  for (const directory of ownedWorkingDirs) rmSync(directory, { recursive: true, force: true });
+  ownedWorkingDirs.clear();
   for (const item of approvalInbox.listPending()) approvalInbox.resolveForSession(item.sessionId, 'dismissed');
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -136,10 +164,10 @@ describe('background-agent wait integration', () => {
     const ctx = state.createRouteContext();
     ctx.agentActivity.setTrackingEnabled(false);
 
-    const restored = new Session({ id: 'restored-parent', workingDir: '/tmp/cod350-restore', mode: 'claude' });
+    const restored = new Session({ id: 'restored-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
     restored.adoptClaudeSessionId('restored-conversation');
     setRawIdle(restored);
-    const fresh = new Session({ id: 'fresh-parent', workingDir: '/tmp/cod350-fresh', mode: 'claude' });
+    const fresh = new Session({ id: 'fresh-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
     fresh.adoptClaudeSessionId('fresh-conversation');
     setRawIdle(fresh);
     const evidence = new Map([
@@ -207,7 +235,7 @@ describe('background-agent wait integration', () => {
     state.mux.capturePaneText = vi.fn(() => visibleWaitingFrame(2));
     await state.setupRoutes();
 
-    const parent = new Session({ id: 'codeman-parent', workingDir: '/tmp/cod350-shared', mode: 'claude' });
+    const parent = new Session({ id: 'codeman-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
     parent.adoptClaudeSessionId('parent-conversation');
     const peer = new Session({ id: 'codeman-peer', workingDir: parent.workingDir, mode: 'claude' });
     peer.adoptClaudeSessionId('peer-conversation');
@@ -299,7 +327,7 @@ describe('background-agent wait integration', () => {
     activeServers.add(server);
     const state = internals(server);
     const ctx = state.createRouteContext();
-    const parent = new Session({ id: 'natural-settle', workingDir: '/tmp/cod350-natural-settle', mode: 'claude' });
+    const parent = new Session({ id: 'natural-settle', workingDir: ownedWorkingDir(), mode: 'claude' });
     parent.adoptClaudeSessionId('natural-settle-conversation');
     setRawIdle(parent);
     const finalAgent = agent(parent, 'final-agent');
@@ -377,7 +405,7 @@ describe('background-agent wait integration', () => {
 
   it('blocks actual hook and heuristic respawn cycles until agent observation is none', async () => {
     vi.useFakeTimers();
-    const session = new Session({ id: 'respawn-parent', workingDir: '/tmp/cod350-respawn', mode: 'claude' });
+    const session = new Session({ id: 'respawn-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
     setRawIdle(session);
     (session as unknown as { _pid: number })._pid = 237;
     const controller = new RespawnController(session, {
@@ -437,7 +465,7 @@ describe('background-agent wait integration', () => {
       id: 'settle-parent',
       status: 'idle',
       mode: 'claude',
-      workingDir: '/tmp/cod350-settle',
+      workingDir: ownedWorkingDir(),
       claudeSessionId: 'settle-conversation',
       terminalActivityEpoch: 0,
       setActivityProjection() {},
@@ -511,7 +539,7 @@ describe('background-agent wait integration', () => {
     state.mux.capturePaneText = vi.fn(() => visibleWaitingFrame(1));
     await state.setupRoutes();
     const ctx = state.createRouteContext();
-    const session = new Session({ id: 'pty-exit-parent', workingDir: '/tmp/cod350-pty-exit', mode: 'claude' });
+    const session = new Session({ id: 'pty-exit-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
     session.adoptClaudeSessionId('pty-exit-conversation');
     setRawIdle(session);
     const liveAgent = agent(session, 'exit-agent');
@@ -560,86 +588,244 @@ describe('background-agent wait integration', () => {
     activeServers.delete(server);
   });
 
-  it('gates startup, reconnect, restored sessions, and rejects every late lifecycle result', async () => {
-    vi.useFakeTimers();
-    const pending = Array.from({ length: 6 }, () => deferred<AgentEvidence>());
-    const inspectionSignals: AbortSignal[] = [];
-    let inspection = 0;
-    const inspect = vi.fn((_project: ObservableSessionProject, signal: AbortSignal) => {
-      const current = pending[inspection++];
-      inspectionSignals.push(signal);
-      signal.addEventListener('abort', () => undefined, { once: true });
-      return current.promise;
+  it('aborts an in-flight inspection on actual server deletion before stale evidence can publish', async () => {
+    const processRead = deferred<number[]>();
+    let inspectionSignal: AbortSignal | undefined;
+    const processSource: ProcessInspectionSource = {
+      listPids: (signal) => {
+        inspectionSignal = signal;
+        return processRead.promise;
+      },
+      readCmdline: async () => '',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: '2.1.237',
+      source: processSource,
     });
-    // In WebServer this callback invalidates both light-state caches and emits
-    // the session:updated SSE. Treat it as the externally visible mutation seam.
+    activeServers.add(server);
+    const state = internals(server);
+    state.mux.capturePaneText = vi.fn(() => visibleWaitingFrame(1));
+    await state.setupRoutes();
+    const ctx = state.createRouteContext();
+    const session = new Session({ id: 'delete-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
+    session.adoptClaudeSessionId('delete-conversation');
+    setRawIdle(session);
+    const liveAgent = agent(session, 'delete-agent');
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [liveAgent] });
+    vi.spyOn(subagentWatcher, 'killSubagentsForSession').mockResolvedValue([]);
+    await ctx.addSession(session);
+    ctx.setupSessionListeners(session);
+    (session as unknown as { _muxSession: { muxName: string } })._muxSession = { muxName: 'cod350-delete-mux' };
+    subagentWatcher.emit('subagent:discovered', liveAgent);
+    state.sse.broadcast = vi.fn();
+
+    const hook = state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'idle_prompt', sessionId: session.id, data: null },
+    });
+    await vi.waitFor(() => expect(inspectionSignal).toBeDefined());
+
+    const deleting = state.cleanupSession(session.id, true, 'integration-race');
+    expect(inspectionSignal?.aborted).toBe(true);
+    expect(state.activityAdapters.has(session)).toBe(false);
+    await deleting;
+    expect(state.sessions.has(session.id)).toBe(false);
+    const sessionUpdatesAtDeletion = state.sse.broadcast.mock.calls.filter(
+      ([event, payload]) => event === SseEvent.SessionUpdated && (payload as { id?: string }).id === session.id
+    ).length;
+    const lightCache = { data: { deletion: true }, timestamp: Date.now() };
+    const listCache = { data: [{ id: session.id }], timestamp: Date.now() };
+    state.cachedLightState = lightCache;
+    state.cachedSessionsList = listCache;
+
+    // Release the old source only after the deletion boundary has committed;
+    // server shutdown/global coordinator cleanup has not happened yet.
+    processRead.resolve([237]);
+    expect((await hook).statusCode).toBe(200);
+
+    expect(state.cachedLightState).toBe(lightCache);
+    expect(state.cachedSessionsList).toBe(listCache);
+    expect(
+      state.sse.broadcast.mock.calls.filter(
+        ([event, payload]) => event === SseEvent.SessionUpdated && (payload as { id?: string }).id === session.id
+      )
+    ).toHaveLength(sessionUpdatesAtDeletion);
+
+    await server.stop();
+    activeServers.delete(server);
+  });
+
+  it('rejects an old identity inspection before accepting fresh-generation evidence', async () => {
+    vi.useFakeTimers();
+    const inspections: Array<{
+      gate: ReturnType<typeof trackedDeferred<AgentEvidence>>;
+      signal: AbortSignal;
+    }> = [];
+    const publishProjection = vi.fn();
+    const coordinator = new SessionAgentActivityCoordinator({
+      inspect: (_project: ObservableSessionProject, signal: AbortSignal) => {
+        const gate = trackedDeferred<AgentEvidence>();
+        const inspection = { gate, signal };
+        inspections.push(inspection);
+        return gate.promise;
+      },
+      onProjectionChanged: publishProjection,
+    });
+    const target: CoordinatorSession & { claudeSessionId: string | null } = {
+      id: 'identity-boundary',
+      status: 'idle',
+      mode: 'claude',
+      workingDir: ownedWorkingDir(),
+      claudeSessionId: 'old-conversation',
+      terminalActivityEpoch: 0,
+      setActivityProjection() {},
+    };
+    coordinator.attachSession(target);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inspections).toHaveLength(1);
+
+    const old = inspections[0];
+    target.claudeSessionId = 'new-conversation';
+    coordinator.identityChanged(target);
+    expect(old.signal.aborted).toBe(true);
+    const publicationsAfterIdentity = publishProjection.mock.calls.length;
+    old.gate.resolve({
+      observation: 'live',
+      semanticRevision: 0,
+      exactWatcherCount: 1,
+      exactWatcherAgentKeys: ['old-key'],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(coordinator.project(target).activityStatus).toBe('checking_agents');
+    expect(publishProjection).toHaveBeenCalledTimes(publicationsAfterIdentity);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inspections).toHaveLength(2);
+    const fresh = inspections[1];
+    fresh.gate.resolve({
+      observation: 'live',
+      semanticRevision: 0,
+      exactWatcherCount: 1,
+      exactWatcherAgentKeys: ['new-key'],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+    expect(inspections.every((inspection) => inspection.gate.resolved)).toBe(true);
+    coordinator.cleanup();
+  });
+
+  it('rejects disabled-tracking work and accepts only a fresh reconciliation after re-enable', async () => {
+    vi.useFakeTimers();
+    const inspections: Array<{
+      gate: ReturnType<typeof trackedDeferred<AgentEvidence>>;
+      signal: AbortSignal;
+    }> = [];
+    const publishProjection = vi.fn();
+    const coordinator = new SessionAgentActivityCoordinator({
+      inspect: (_project, signal) => {
+        const gate = trackedDeferred<AgentEvidence>();
+        const inspection = { gate, signal };
+        inspections.push(inspection);
+        return gate.promise;
+      },
+      onProjectionChanged: publishProjection,
+    });
+    const target: CoordinatorSession = {
+      id: 'tracking-boundary',
+      status: 'idle',
+      mode: 'claude',
+      workingDir: ownedWorkingDir(),
+      claudeSessionId: 'tracking-conversation',
+      terminalActivityEpoch: 0,
+      setActivityProjection() {},
+    };
+    coordinator.attachSession(target);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inspections).toHaveLength(1);
+
+    const old = inspections[0];
+    coordinator.trackingDisabled(target);
+    expect(old.signal.aborted).toBe(true);
+    expect(coordinator.project(target).activityStatus).toBe('idle');
+    const publicationsAfterDisable = publishProjection.mock.calls.length;
+    old.gate.resolve({
+      observation: 'live',
+      semanticRevision: 0,
+      exactWatcherCount: 1,
+      exactWatcherAgentKeys: ['disabled-key'],
+    });
+    await Promise.resolve();
+    expect(coordinator.project(target).activityStatus).toBe('idle');
+    expect(publishProjection).toHaveBeenCalledTimes(publicationsAfterDisable);
+
+    coordinator.trackingEnabled(target);
+    expect(coordinator.project(target).activityStatus).toBe('checking_agents');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inspections).toHaveLength(2);
+    const fresh = inspections[1];
+    fresh.gate.resolve({
+      observation: 'live',
+      semanticRevision: 0,
+      exactWatcherCount: 1,
+      exactWatcherAgentKeys: ['enabled-key'],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+    expect(inspections.every((inspection) => inspection.gate.resolved)).toBe(true);
+    coordinator.cleanup();
+  });
+
+  it('cancels both in-flight and queued work on coordinator shutdown without creating dead deferreds', async () => {
+    vi.useFakeTimers();
+    const gate = trackedDeferred<AgentEvidence>();
+    let inFlightSignal: AbortSignal | undefined;
+    const inspect = vi.fn((_project, signal: AbortSignal) => {
+      inFlightSignal = signal;
+      return gate.promise;
+    });
     const publishProjection = vi.fn();
     const coordinator = new SessionAgentActivityCoordinator({
       inspect,
       scheduler: new BoundedActivityScheduler(2, 1),
       onProjectionChanged: publishProjection,
     });
-    const projectionWrites = new Map<string, ReturnType<typeof vi.fn>>();
-    const makeSession = (
-      id: string
-    ): CoordinatorSession & { claudeSessionId: string | null; terminalActivityEpoch: number } => ({
+    const makeTarget = (id: string): CoordinatorSession => ({
       id,
       status: 'idle',
       mode: 'claude',
-      workingDir: '/tmp/cod350-lifecycle',
+      workingDir: ownedWorkingDir(),
       claudeSessionId: `${id}-conversation`,
       terminalActivityEpoch: 0,
-      setActivityProjection: (projection) => projectionWrites.get(id)?.(projection),
+      setActivityProjection() {},
     });
-    const sessions = ['delete', 'exit', 'identity', 'tracking', 'shutdown', 'restored'].map(makeSession);
-    for (const item of sessions) projectionWrites.set(item.id, vi.fn());
-    for (const item of sessions) coordinator.attachSession(item);
-    expect(sessions.map((item) => coordinator.project(item).activityStatus)).toEqual(Array(6).fill('checking_agents'));
+    const inFlight = makeTarget('shutdown-inflight');
+    const queued = makeTarget('shutdown-queued');
+    coordinator.attachSession(inFlight);
+    coordinator.attachSession(queued);
     await vi.advanceTimersByTimeAsync(0);
     expect(inspect).toHaveBeenCalledTimes(1);
-
-    // One background inspection is in flight and the rest are queued. Every lifecycle
-    // invalidation must fence both categories before their old evidence lands.
-    coordinator.detachSession(sessions[0]);
-    coordinator.detachSession(sessions[1]);
-    await Promise.resolve();
-    sessions[2].claudeSessionId = 'identity-new-conversation';
-    coordinator.identityChanged(sessions[2]);
-    coordinator.trackingDisabled(sessions[3]);
-    expect(coordinator.project(sessions[3]).activityStatus).toBe('idle');
-
-    // A restored session is legacy while tracking is disabled, then fail-safe
-    // checking immediately on reconnect until exact live evidence arrives.
-    coordinator.trackingDisabled(sessions[5]);
-    expect(coordinator.project(sessions[5]).activityStatus).toBe('idle');
-    coordinator.trackingEnabled(sessions[5]);
-    expect(coordinator.project(sessions[5]).activityStatus).toBe('checking_agents');
+    expect(inFlightSignal).toBeDefined();
 
     coordinator.cleanup();
-    expect(inspectionSignals.length).toBeGreaterThanOrEqual(1);
-    expect(inspectionSignals.every((signal) => signal.aborted)).toBe(true);
-    const publishCountAtShutdown = publishProjection.mock.calls.length;
-    const writesAtShutdown = new Map(
-      [...projectionWrites].map(([id, write]) => [id, write.mock.calls.length] as const)
-    );
-    for (const item of pending) {
-      item.resolve({
-        observation: 'live',
-        semanticRevision: 99,
-        exactWatcherCount: 1,
-        exactWatcherAgentKeys: ['late-key'],
-      });
-    }
+    expect(inFlightSignal?.aborted).toBe(true);
+    const publicationsAtShutdown = publishProjection.mock.calls.length;
+    gate.resolve({
+      observation: 'live',
+      semanticRevision: 0,
+      exactWatcherCount: 1,
+      exactWatcherAgentKeys: ['late-shutdown-key'],
+    });
     await vi.runAllTimersAsync();
-    expect(publishProjection).toHaveBeenCalledTimes(publishCountAtShutdown);
-    for (const [id, write] of projectionWrites) {
-      expect(write).toHaveBeenCalledTimes(writesAtShutdown.get(id)!);
-    }
-    expect(coordinator.project(sessions[0]).activityStatus).toBe('idle');
-    expect(coordinator.project(sessions[1]).activityStatus).toBe('idle');
-    expect(coordinator.project(sessions[2]).activityStatus).toBe('idle');
-    expect(coordinator.project(sessions[3]).activityStatus).toBe('idle');
-    expect(coordinator.project(sessions[4]).activityStatus).toBe('idle');
-    expect(coordinator.project(sessions[5]).activityStatus).toBe('idle');
+    expect(gate.resolved).toBe(true);
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(publishProjection).toHaveBeenCalledTimes(publicationsAtShutdown);
+    expect(coordinator.project(inFlight).activityStatus).toBe('idle');
+    expect(coordinator.project(queued).activityStatus).toBe('idle');
   });
 });
