@@ -550,7 +550,7 @@ describe('background-agent wait integration', () => {
     vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
     vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [liveAgent] });
     await ctx.addSession(session);
-    ctx.setupSessionListeners(session);
+    await ctx.setupSessionListeners(session);
     (session as unknown as { _muxSession: { muxName: string } })._muxSession = { muxName: 'cod350-exit-mux' };
     subagentWatcher.emit('subagent:discovered', liveAgent);
     expect(session.activityProjection.activityStatus).toBe('waiting_agents');

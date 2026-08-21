@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
+import { SessionAgentActivityCoordinator } from '../src/session-agent-activity-coordinator.js';
 import { createSessionListeners } from '../src/web/session-listener-wiring.js';
 import { SseEvent } from '../src/web/sse-events.js';
 import { approvalInbox } from '../src/web/approval-inbox.js';
@@ -174,6 +175,33 @@ describe('session listener wiring', () => {
 });
 
 describe('Codex Approvals Inbox idle wiring', () => {
+  it('commits one Codex turn-end after terminal output through the real activity coordinator', () => {
+    const session = new Session({ id: 'wiring-codex-real-coordinator', workingDir: '/tmp', mode: 'codex' });
+    (session as unknown as { _status: 'idle' })._status = 'idle';
+    const coordinator = new SessionAgentActivityCoordinator();
+    coordinator.attachSession(session);
+    const deps = listenerDeps();
+    deps.agentActivity.terminalActivity.mockImplementation(() => coordinator.onTerminalOutput(session));
+    deps.agentActivity.allocateEvent.mockImplementation((_session, kind) => coordinator.allocateEvent(session, kind));
+    deps.agentActivity.decideEvent.mockImplementation((_session, event) =>
+      coordinator.decisionForEvent(session, event)
+    );
+    const refs = createSessionListeners(session, deps as never);
+    session.on('terminalActivity', refs.terminalActivity);
+    session.on('terminal', refs.terminal);
+    const initialEpoch = session.terminalActivityEpoch;
+
+    (session as unknown as { _handleTerminalOutput(data: string): void })._handleTerminalOutput(
+      'idle composer repaint'
+    );
+    refs.idle({ reason: 'turn-end' });
+
+    expect(session.terminalActivityEpoch).toBe(initialEpoch + 1);
+    expect(approvalInbox.getForSession(session.id)).toMatchObject({ kind: 'idle', mode: 'codex', sourceSequence: 1 });
+    expect(deps.broadcast).toHaveBeenCalledTimes(1);
+    expect(deps.broadcast).toHaveBeenCalledWith(SseEvent.SessionIdle, { id: session.id });
+  });
+
   it.each([
     { mode: 'codex', reason: 'turn-end', creates: true },
     { mode: 'codex', reason: 'initial-ready', creates: false },
