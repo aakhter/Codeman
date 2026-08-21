@@ -855,7 +855,9 @@ export function registerSessionRoutes(
       remote = toAttachedSessionRemote(host, remoteSessionName, workingDir);
     } else if (body.caseName) {
       const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
-      const remoteCase = remoteCases.find((item) => item.name === body.caseName);
+      const remoteCase = remoteCases.find(
+        (item) => item.name === body.caseName && canAccessOwned(getAuthUser(req), item.owner)
+      );
       if (remoteCase) {
         const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
         if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');

@@ -49,6 +49,7 @@ const remoteStore = vi.hoisted(() => ({
     hostId: string;
     remotePath: string;
     commands?: Record<string, string>;
+    owner?: string;
   }>,
   tmuxCheck: { ok: true, tmuxPath: '/usr/bin/tmux' } as { ok: boolean; tmuxPath?: string; error?: string },
 }));
@@ -119,6 +120,7 @@ vi.mock('../../src/utils/pi-cli-resolver.js', async (orig) => ({
 }));
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
+import { checkRemoteTmuxAvailable as checkRemoteTmuxProbe } from '../../src/remote-hosts.js';
 import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
 import { isOpenCodeAvailable } from '../../src/utils/opencode-cli-resolver.js';
 import { isCodexAvailable } from '../../src/utils/codex-cli-resolver.js';
@@ -358,6 +360,101 @@ describe('session-routes', () => {
         expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
         expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
         expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it('does not let another owner remote case shadow a regular-user local UI launch', async () => {
+      const username = 'alicecollision';
+      const cleanup = await useRegularUserHarness(username);
+      const caseName = 'shared-name';
+      const workingDir = join(resolveCasesDir({ username, role: 'user' }), caseName);
+      await mkdir(workingDir, { recursive: true });
+      remoteStore.hosts = [{ id: 'bob-host', label: 'Bob host', host: '10.0.0.52', username: 'bob' }];
+      remoteStore.cases = [
+        {
+          name: caseName,
+          type: 'remote',
+          hostId: 'bob-host',
+          remotePath: '/srv/bob/shared-name',
+          owner: 'bob',
+        },
+      ];
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+        placementSource: 'case-default',
+      });
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, workingDir, mode: 'claude', name: `w1-${caseName}` },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(checkRemoteTmuxProbe).not.toHaveBeenCalled();
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.workingDir).toBe(workingDir);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+        expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+        expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it('keeps an ownerless legacy remote case accessible in single-user mode', async () => {
+      remoteStore.hosts = [{ id: 'legacy-host', label: 'Legacy host', host: '10.0.0.53', username: 'legacy' }];
+      remoteStore.cases = [
+        {
+          name: 'legacy-remote',
+          type: 'remote',
+          hostId: 'legacy-host',
+          remotePath: '/srv/legacy/work',
+        },
+      ];
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'legacy-remote', mode: 'claude' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(checkRemoteTmuxProbe).toHaveBeenCalledOnce();
+      const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+      expect(created.workingDir).toBe('/srv/legacy/work');
+      expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'legacy-remote' });
+    });
+
+    it('still resolves a regular users own remote case', async () => {
+      const username = 'aliceownedremote';
+      const cleanup = await useRegularUserHarness(username);
+      const remotePath = join(resolveCasesDir({ username, role: 'user' }), 'remote-compatible-path');
+      remoteStore.hosts = [{ id: 'alice-host', label: 'Alice host', host: '10.0.0.54', username: 'alice' }];
+      remoteStore.cases = [
+        {
+          name: 'alice-remote',
+          type: 'remote',
+          hostId: 'alice-host',
+          remotePath,
+          owner: username,
+        },
+      ];
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName: 'alice-remote', mode: 'claude' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(checkRemoteTmuxProbe).toHaveBeenCalledOnce();
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.workingDir).toBe(remotePath);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'alice-remote' });
       } finally {
         await cleanup();
       }
