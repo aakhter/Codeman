@@ -31,6 +31,7 @@ export const BROWSER_TEST_GLOBS = [
   // this array passes locally and dies in CI with
   // "browserType.launch: Executable doesn't exist" (COD-293, then COD-299 one
   // commit later, which is why it is enforced rather than remembered).
+  'test/case-default-group-ui.browser.test.ts',
   'test/file-browser-session-preview.browser.test.ts',
   'test/file-preview-source-download.browser.test.ts',
   'test/session-options-responsive.browser.test.ts',

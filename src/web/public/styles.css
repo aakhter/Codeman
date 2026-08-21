@@ -6233,6 +6233,18 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   font-size: 0.6rem;
 }
 
+.case-settings-popover .case-setting-field,
+.case-settings-popover-mobile .case-setting-field {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.case-setting-field select {
+  min-width: 180px;
+  max-width: 100%;
+}
+
 /* Case Management List (Manage tab) */
 .case-manage-list {
   display: flex;
