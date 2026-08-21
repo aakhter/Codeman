@@ -712,21 +712,26 @@ export class WebServer extends EventEmitter {
     if (!this.activityTrackingEnabled || session.remote || session.docker || !session.claudeSessionId) return;
     const projectHash = claudeProjectHash(session.workingDir);
     const claudeSessionId = session.claudeSessionId;
-    const agents = await subagentWatcher.reconcileConversation(projectHash, claudeSessionId).catch((error: unknown) => {
-      const alreadyHandled = typeof error === 'object' && error !== null && this.watcherErrorsHandled.delete(error);
-      if (!alreadyHandled && this.agentIdentityKey(session) === this.activityIdentityKeys.get(session)) {
-        this.markWatcherReadError(projectHash, claudeSessionId);
-      }
-      return undefined;
-    });
-    if (!agents || this.agentIdentityKey(session) !== this.activityIdentityKeys.get(session)) return;
+    const reconciled = await subagentWatcher
+      .reconcileConversation(projectHash, claudeSessionId)
+      .catch((error: unknown) => {
+        const alreadyHandled = typeof error === 'object' && error !== null && this.watcherErrorsHandled.delete(error);
+        if (!alreadyHandled && this.agentIdentityKey(session) === this.activityIdentityKeys.get(session)) {
+          this.markWatcherReadError(projectHash, claudeSessionId);
+        }
+        return undefined;
+      });
+    if (!reconciled || this.agentIdentityKey(session) !== this.activityIdentityKeys.get(session)) return;
     const adapter = this.activityAdapters.get(session);
     if (!adapter) return;
+    // Count and revision must come from one atomic snapshot. The reconciliation
+    // result can be stale by the time this continuation runs if discovery or
+    // completion advanced the semantic index after the filesystem scan.
     const snapshot = subagentWatcher.getSemanticSnapshot(projectHash, claudeSessionId);
     this.mutateAgentActivity(session, (currentAdapter) =>
       this.agentActivityCoordinator.onWatcherCount(
         currentAdapter,
-        agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length,
+        snapshot.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length,
         snapshot.revision
       )
     );

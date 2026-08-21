@@ -281,6 +281,125 @@ describe('WebServer agent activity ownership', () => {
     await server.stop();
   });
 
+  it('does not pair a stale reconciliation count with a newer discovery revision', async () => {
+    vi.useFakeTimers();
+    const server = new WebServer(0, false, true);
+    try {
+      const state = internals(server);
+      const ctx = state.createRouteContext() as ReturnType<typeof state.createRouteContext> & {
+        agentActivity: { setTrackingEnabled(enabled: boolean): void };
+      };
+      const reconcile = vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+      const session = new Session({ id: 'reconcile-race', workingDir: '/tmp/reconcile-race', mode: 'claude' });
+      await ctx.addSession(session);
+      ctx.agentActivity.setTrackingEnabled(false);
+
+      let finishReconcile!: (agents: SubagentInfo[]) => void;
+      reconcile.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishReconcile = resolve;
+          })
+      );
+      ctx.agentActivity.setTrackingEnabled(true);
+      const info: SubagentInfo = {
+        agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), session.claudeSessionId!, 'race-agent'),
+        agentId: 'race-agent',
+        projectHash: claudeProjectHash(session.workingDir),
+        sessionId: session.claudeSessionId!,
+        filePath: '/tmp/race-agent.jsonl',
+        startedAt: new Date().toISOString(),
+        lastActivityAt: Date.now(),
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 1,
+      };
+      vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [info] });
+
+      // Resolve the age-cutoff-free scan with its old zero, then publish a
+      // semantic discovery before the awaiting server continuation reads state.
+      finishReconcile([]);
+      subagentWatcher.emit('subagent:discovered', info);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+      await vi.advanceTimersByTimeAsync(2501);
+      expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+    } finally {
+      try {
+        await server.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it('does not pair a stale reconciliation live count with a newer completion revision', async () => {
+    vi.useFakeTimers();
+    const server = new WebServer(0, false, true);
+    try {
+      const state = internals(server);
+      const ctx = state.createRouteContext() as ReturnType<typeof state.createRouteContext> & {
+        agentActivity: { setTrackingEnabled(enabled: boolean): void };
+      };
+      const reconcile = vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+      const session = new Session({ id: 'completion-race', workingDir: '/tmp/completion-race', mode: 'claude' });
+      await ctx.addSession(session);
+      const info: SubagentInfo = {
+        agentKey: serializeSubagentKey(
+          claudeProjectHash(session.workingDir),
+          session.claudeSessionId!,
+          'completion-agent'
+        ),
+        agentId: 'completion-agent',
+        projectHash: claudeProjectHash(session.workingDir),
+        sessionId: session.claudeSessionId!,
+        filePath: '/tmp/completion-agent.jsonl',
+        startedAt: new Date().toISOString(),
+        lastActivityAt: Date.now(),
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 1,
+      };
+      const snapshot = vi
+        .spyOn(subagentWatcher, 'getSemanticSnapshot')
+        .mockReturnValue({ revision: 1, agents: [info] });
+      subagentWatcher.emit('subagent:discovered', info);
+      expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+      ctx.agentActivity.setTrackingEnabled(false);
+
+      let finishReconcile!: (agents: SubagentInfo[]) => void;
+      reconcile.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishReconcile = resolve;
+          })
+      );
+      ctx.agentActivity.setTrackingEnabled(true);
+      snapshot.mockReturnValue({ revision: 2, agents: [] });
+
+      // The scan still reports the old live record, but semantic completion
+      // advances to an exact zero before the awaiting continuation commits.
+      finishReconcile([info]);
+      subagentWatcher.emit('subagent:completed', { ...info, status: 'completed' });
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2501);
+
+      expect(session.activityProjection.activityStatus).toBe(session.status);
+      expect(session.activityProjection.activityStatus).not.toBe('waiting_agents');
+    } finally {
+      try {
+        await server.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
   it.each(['EACCES', 'EIO'])('keeps %s exact reconciliation unknown rather than committing zero', async (code) => {
     const server = new WebServer(0, false, true);
     const state = internals(server);
