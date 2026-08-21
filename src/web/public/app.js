@@ -643,10 +643,12 @@ class CodemanApp {
     this.ralphStates = new Map(); // Map<sessionId, { loop, todos }>
 
     // Subagent (Claude Code background agent) tracking
-    this.subagents = new Map(); // Map<agentId, SubagentInfo>
-    this.subagentActivity = new Map(); // Map<agentId, activity[]> - recent tool calls/progress
-    this.subagentToolResults = new Map(); // Map<agentId, Map<toolUseId, result>> - tool results by toolUseId
-    this.activeSubagentId = null; // Currently selected subagent for detail view
+    this.subagents = new Map(); // Map<agentKey, SubagentInfo>
+    this.subagentActivity = new Map(); // Map<agentKey, activity[]> - recent tool calls/progress
+    this.subagentToolResults = new Map(); // Map<agentKey, Map<toolUseId, result>> - tool results by toolUseId
+    this.activeSubagentKey = null; // Currently selected opaque agentKey for detail view
+    this._subagentIdentityDiagnostics = new Set();
+    this._subagentCompletionTimers = new Map(); // Map<agentKey, timeout[]>
     this.subagentPanelVisible = false;
 
     // Ultracode / Workflow run visualization (master-detail tab)
@@ -659,12 +661,12 @@ class CodemanApp {
     this.ultracodeWindowsClosed = new Set(); // runIds the user explicitly dismissed (don't re-pop)
     this.ultracodeWindowCloseTimers = new Map(); // runId -> auto-close timeout
     this.ultracodeWindowZIndex = 1000;
-    this.subagentWindows = new Map(); // Map<agentId, { element, position }>
+    this.subagentWindows = new Map(); // Map<agentKey, { element, position }>
     this.subagentWindowZIndex = ZINDEX_SUBAGENT_BASE;
-    this.minimizedSubagents = new Map(); // Map<sessionId, Set<agentId>> - minimized to tab
+    this.minimizedSubagents = new Map(); // Map<sessionId, Set<agentKey>> - minimized to tab
     this._subagentHideTimeout = null; // Timeout for hover-based dropdown hide
 
-    // PERSISTENT parent associations - agentId -> sessionId
+    // PERSISTENT parent associations - agentKey -> sessionId
     // This is the SINGLE SOURCE OF TRUTH for which tab an agent window connects to.
     // Once set, never recalculated. Persisted to localStorage and server.
     this.subagentParentMap = new Map();
@@ -676,7 +678,7 @@ class CodemanApp {
 
     // Teammate tmux pane terminals (Agent Teams feature)
     this.teammatePanesByName = new Map(); // Map<name, { paneTarget, sessionId, color }>
-    this.teammateTerminals = new Map(); // Map<agentId, { terminal, fitAddon, paneTarget, sessionId, resizeObserver }>
+    this.teammateTerminals = new Map(); // Map<agentKey|paneWindowKey, terminal state>
 
     this.terminalBufferCache = new Map(); // Map<sessionId, string> — client-side cache for instant tab re-visits (max 20)
 
@@ -4863,8 +4865,18 @@ class CodemanApp {
     // Clear parent name cache (prevents stale session name entries accumulating)
     if (this._parentNameCache) this._parentNameCache.clear();
     // Clear subagent activity/results maps (prevents leaks if data.subagents is missing)
+    this.subagents.clear();
     this.subagentActivity.clear();
     this.subagentToolResults.clear();
+    this.subagentParentMap.clear();
+    this.minimizedSubagents.clear();
+    this.activeSubagentKey = null;
+    for (const timer of this._subagentWindowRenderTimeouts?.values() || []) clearTimeout(timer);
+    this._subagentWindowRenderTimeouts?.clear();
+    for (const timers of this._subagentCompletionTimers.values()) {
+      for (const timer of timers) clearTimeout(timer);
+    }
+    this._subagentCompletionTimers.clear();
     // Clear ultracode workflow run state (re-seeded from data.workflowRuns below)
     if (this.workflowRuns) this.workflowRuns.clear();
     if (this.workflowRunDetails) this.workflowRunDetails.clear();
@@ -5060,11 +5072,26 @@ class CodemanApp {
 
     // Load subagents - clear all related maps to prevent memory leaks on reconnect
     if (data.subagents) {
+      for (const timer of this._subagentWindowRenderTimeouts?.values() || []) clearTimeout(timer);
+      this._subagentWindowRenderTimeouts?.clear();
+      for (const timers of this._subagentCompletionTimers.values()) {
+        for (const timer of timers) clearTimeout(timer);
+      }
+      this._subagentCompletionTimers.clear();
       this.subagents.clear();
       this.subagentActivity.clear();
       this.subagentToolResults.clear();
+      this.minimizedSubagents.clear();
+      this.activeSubagentKey = null;
+      const legacyIdCounts = new Map();
       data.subagents.forEach(s => {
-        this.subagents.set(s.agentId, s);
+        if (!s.agentKey && s.agentId) legacyIdCounts.set(s.agentId, (legacyIdCounts.get(s.agentId) || 0) + 1);
+      });
+      data.subagents.forEach(s => {
+        const agentKey = s.agentKey || (legacyIdCounts.get(s.agentId) === 1 ? s.agentId : null);
+        if (!agentKey) return;
+        if (!s.agentKey) s.agentKey = agentKey;
+        this.subagents.set(agentKey, s);
       });
       this.renderSubagentPanel();
 
@@ -5074,22 +5101,22 @@ class CodemanApp {
       this.subagentParentMap.clear();
       this.loadSubagentParentMap().then(() => {
         // Apply stored parent associations to agents
-        for (const [agentId, sessionId] of this.subagentParentMap) {
-          const agent = this.subagents.get(agentId);
+        for (const [agentKey, sessionId] of this.subagentParentMap) {
+          const agent = this.subagents.get(agentKey);
           if (agent && this.sessions.has(sessionId)) {
             agent.parentSessionId = sessionId;
             const session = this.sessions.get(sessionId);
             if (session) {
               agent.parentSessionName = this.getSessionName(session);
             }
-            this.subagents.set(agentId, agent);
+            this.subagents.set(agentKey, agent);
           }
         }
 
         // Now try to find parents for any agents that don't have one yet
-        for (const [agentId] of this.subagents) {
-          if (!this.subagentParentMap.has(agentId)) {
-            this.findParentSessionForSubagent(agentId);
+        for (const [agentKey] of this.subagents) {
+          if (!this.subagentParentMap.has(agentKey)) {
+            this.findParentSessionForSubagent(agentKey);
           }
         }
 

@@ -18,16 +18,21 @@ const standardPhone = REPRESENTATIVE_DEVICES['standard-phone']; // iPhone 14 Pro
  * Inject a mock subagent window into the page DOM.
  * Registers it with app.subagentWindows if the app object is available.
  */
-async function injectMockSubagentWindow(page: Page, id: string, _index: number): Promise<void> {
+async function injectMockSubagentWindow(
+  page: Page,
+  agentKey: string,
+  _index: number,
+  agentId = agentKey
+): Promise<void> {
   await page.evaluate(
-    ({ windowId }) => {
+    ({ windowKey, displayId }) => {
       const el = document.createElement('div');
       el.className = 'subagent-window';
-      el.dataset.agentId = windowId;
+      el.dataset.agentKey = windowKey;
       el.innerHTML = `
       <div class="subagent-header">
         <span class="agent-icon">A</span>
-        <span class="agent-id">${windowId}</span>
+        <span class="agent-id">${displayId}</span>
         <span class="model-badge">sonnet</span>
         <span class="agent-status">active</span>
         <button class="minimize-btn">-</button>
@@ -40,14 +45,14 @@ async function injectMockSubagentWindow(page: Page, id: string, _index: number):
 
       // Register with app if available
       if ((window as any).app?.subagentWindows) {
-        (window as any).app.subagentWindows.set(windowId, {
+        (window as any).app.subagentWindows.set(windowKey, {
           element: el,
           minimized: false,
           hidden: false,
         });
       }
     },
-    { windowId: id }
+    { windowKey: agentKey, displayId: agentId }
   );
 }
 
@@ -587,14 +592,39 @@ describe('Mobile Subagent Windows', () => {
         });
         expect(count).toBe(4);
 
-        // Verify each has a unique agent-id
+        // Verify each has a unique opaque browser identity.
         const ids = await page.evaluate(() => {
           return Array.from(document.querySelectorAll('.subagent-window')).map(
-            (w) => (w as HTMLElement).dataset.agentId ?? ''
+            (w) => (w as HTMLElement).dataset.agentKey ?? ''
           );
         });
         const uniqueIds = new Set(ids);
         expect(uniqueIds.size).toBe(4);
+      } finally {
+        await context.close();
+      }
+    });
+
+    it('keeps windows with the same display ID distinct by opaque agent key', async () => {
+      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      try {
+        await page.waitForTimeout(WAIT.PAGE_SETTLE);
+        await injectMockSubagentWindow(page, 'opaque-first', 0, 'same-id');
+        await injectMockSubagentWindow(page, 'opaque-second', 1, 'same-id');
+
+        const identity = await page.evaluate(() => ({
+          mapKeys: [...((window as any).app?.subagentWindows?.keys() || [])],
+          domKeys: Array.from(document.querySelectorAll('.subagent-window')).map(
+            (node) => (node as HTMLElement).dataset.agentKey
+          ),
+          displayIds: Array.from(document.querySelectorAll('.subagent-window')).map(
+            (node) => node.querySelector('.agent-id')?.textContent
+          ),
+        }));
+
+        expect(identity.mapKeys).toEqual(expect.arrayContaining(['opaque-first', 'opaque-second']));
+        expect(identity.domKeys).toEqual(['opaque-first', 'opaque-second']);
+        expect(identity.displayIds).toEqual(['same-id', 'same-id']);
       } finally {
         await context.close();
       }

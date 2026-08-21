@@ -3238,13 +3238,13 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async clearAllSubagents() {
-    const count = this.subagents.size;
+    const count = Array.from(this.subagents.values()).filter(agent => agent.status === 'completed').length;
     if (count === 0) {
-      this.showToast('No subagents to clear', 'info');
+      this.showToast('No completed subagent history to clear', 'info');
       return;
     }
 
-    if (!confirm(`Clear all ${count} tracked subagent(s)? This removes them from the UI but does not affect running processes.`)) {
+    if (!confirm(`Clear ${count} completed subagent${count === 1 ? '' : 's'} from history? Live agents will remain.`)) {
       return;
     }
 
@@ -3252,23 +3252,59 @@ Object.assign(CodemanApp.prototype, {
       const res = await fetch('/api/subagents', { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
-        // Clear local state
-        this.subagents.clear();
-        this.subagentActivity.clear();
-        this.subagentToolResults.clear();
-        // Close any open subagent windows
-        this.cleanupAllFloatingWindows();
+        if (!Array.isArray(data.data?.remaining)) {
+          this.showToast('Failed to clear subagents: invalid server snapshot', 'error');
+          return;
+        }
+        this._reconcileSubagentSnapshot(data.data.remaining);
         // Update UI
         this.renderSubagentPanel();
         this.renderMonitorSubagents();
         this.updateSubagentBadge();
-        this.showToast(`Cleared ${data.data.cleared} subagent(s)`, 'success');
+        const cleared = data.data.cleared || 0;
+        this.showToast(`Cleared ${cleared} completed subagent${cleared === 1 ? '' : 's'}`, 'success');
       } else {
         this.showToast('Failed to clear subagents: ' + data.error, 'error');
       }
     } catch (err) {
       this.showToast('Failed to clear subagents', 'error');
     }
+  },
+
+  _reconcileSubagentSnapshot(remaining) {
+    const nextSubagents = new Map();
+    for (const record of Array.isArray(remaining) ? remaining : []) {
+      if (typeof record?.agentKey !== 'string' || record.agentKey.length === 0) continue;
+      const existing = this.subagents.get(record.agentKey);
+      if (existing) {
+        Object.assign(existing, record);
+        nextSubagents.set(record.agentKey, existing);
+      } else {
+        nextSubagents.set(record.agentKey, record);
+      }
+    }
+
+    for (const agentKey of this.subagents.keys()) {
+      if (nextSubagents.has(agentKey)) continue;
+      const renderTimer = this._subagentWindowRenderTimeouts?.get(agentKey);
+      if (renderTimer) clearTimeout(renderTimer);
+      this._subagentWindowRenderTimeouts?.delete(agentKey);
+      for (const timer of this._subagentCompletionTimers?.get(agentKey) || []) clearTimeout(timer);
+      this._subagentCompletionTimers?.delete(agentKey);
+      this.subagentActivity.delete(agentKey);
+      this.subagentToolResults.delete(agentKey);
+      this.subagentParentMap.delete(agentKey);
+      if (this.subagentWindows.has(agentKey)) this.forceCloseSubagentWindow(agentKey);
+      for (const [sessionId, minimized] of this.minimizedSubagents) {
+        minimized.delete(agentKey);
+        if (minimized.size === 0) this.minimizedSubagents.delete(sessionId);
+      }
+    }
+
+    this.subagents = nextSubagents;
+    if (this.activeSubagentKey && !nextSubagents.has(this.activeSubagentKey)) this.activeSubagentKey = null;
+    this.saveSubagentParentMap();
+    this.saveSubagentWindowStates();
   },
 
   toggleSubagentsPanel() {
@@ -3525,46 +3561,63 @@ Object.assign(CodemanApp.prototype, {
 
     // Populate the map (prune stale entries: require both session and agent to exist)
     if (mapData && typeof mapData === 'object') {
-      for (const [agentId, sessionId] of Object.entries(mapData)) {
-        if (this.sessions.has(sessionId) && this.subagents.has(agentId)) {
-          this.subagentParentMap.set(agentId, sessionId);
+      let migrationChanged = false;
+      for (const [persistedKey, sessionId] of Object.entries(mapData)) {
+        const agentKey = this._resolvePersistedSubagentKey(persistedKey);
+        if (agentKey && this.sessions.has(sessionId)) {
+          this.subagentParentMap.set(agentKey, sessionId);
+          if (agentKey !== persistedKey) migrationChanged = true;
+        } else {
+          migrationChanged = true;
         }
       }
+      if (migrationChanged) await this.saveSubagentParentMap();
     }
+  },
+
+  _resolvePersistedSubagentKey(persistedKey) {
+    if (typeof persistedKey !== 'string' || persistedKey.length === 0) return null;
+    if (this.subagents.has(persistedKey)) return persistedKey;
+    const matches = [];
+    for (const [agentKey, agent] of this.subagents) {
+      if (agent?.agentId === persistedKey) matches.push(agentKey);
+      if (matches.length > 1) return null;
+    }
+    return matches.length === 1 ? matches[0] : null;
   },
 
   /**
    * Get the parent session ID for an agent from the persistent map.
    * This is the ONLY source of truth for connection lines.
    */
-  getAgentParentSessionId(agentId) {
-    return this.subagentParentMap.get(agentId) || null;
+  getAgentParentSessionId(agentKey) {
+    return this.subagentParentMap.get(agentKey) || null;
   },
 
   /**
    * Set and persist the parent session ID for an agent.
    * Once set, this association is PERMANENT and never recalculated.
    */
-  setAgentParentSessionId(agentId, sessionId) {
-    if (!agentId || !sessionId) return;
+  setAgentParentSessionId(agentKey, sessionId) {
+    if (!agentKey || !sessionId) return;
 
     // Only set if not already set (first association wins)
-    if (this.subagentParentMap.has(agentId)) {
+    if (this.subagentParentMap.has(agentKey)) {
       return; // Already has a parent, don't override
     }
 
-    this.subagentParentMap.set(agentId, sessionId);
+    this.subagentParentMap.set(agentKey, sessionId);
     this.saveSubagentParentMap(); // Persist immediately
 
     // Also update the agent object for consistency
-    const agent = this.subagents.get(agentId);
+    const agent = this.subagents.get(agentKey);
     if (agent) {
       agent.parentSessionId = sessionId;
       const session = this.sessions.get(sessionId);
       if (session) {
         agent.parentSessionName = this.getSessionName(session);
       }
-      this.subagents.set(agentId, agent);
+      this.subagents.set(agentKey, agent);
     }
   },
 

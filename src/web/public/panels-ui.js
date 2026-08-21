@@ -29,11 +29,21 @@ const AWAY_DIGEST_SECTIONS = [
 ];
 
 Object.assign(CodemanApp.prototype, {
-  _addActivityEntry(agentId, entry, maxSize = 50) {
-    const activity = this.subagentActivity.get(agentId) || [];
+  _requireSubagentEventKey(data, eventKind) {
+    if (typeof data?.agentKey === 'string' && data.agentKey.length > 0) return data.agentKey;
+    if (!this._subagentIdentityDiagnostics) this._subagentIdentityDiagnostics = new Set();
+    if (this._subagentIdentityDiagnostics.size < 16 && !this._subagentIdentityDiagnostics.has(eventKind)) {
+      this._subagentIdentityDiagnostics.add(eventKind);
+      console.warn(`[subagents] ignored ${eventKind} event without a valid agentKey`);
+    }
+    return null;
+  },
+
+  _addActivityEntry(agentKey, entry, maxSize = 50) {
+    const activity = this.subagentActivity.get(agentKey) || [];
     activity.push(entry);
     if (activity.length > maxSize) activity.shift();
-    this.subagentActivity.set(agentId, activity);
+    this.subagentActivity.set(agentKey, activity);
   },
 
   // Tasks
@@ -132,18 +142,21 @@ Object.assign(CodemanApp.prototype, {
 
   // Subagents (Claude Code background agents)
   _onSubagentDiscovered(data) {
-    // Clear all old data for this agentId (in case of ID reuse)
-    this.subagents.set(data.agentId, data);
-    this.subagentActivity.set(data.agentId, []);
-    this.subagentToolResults.delete(data.agentId);
-    // Close any existing window for this agentId (will be reopened fresh)
-    if (this.subagentWindows.has(data.agentId)) {
-      this.forceCloseSubagentWindow(data.agentId);
+    const agentKey = this._requireSubagentEventKey(data, 'discovered');
+    if (!agentKey) return;
+    // Clear all old data for this exact identity (in case of replay/reuse).
+    this.subagents.set(agentKey, data);
+    this.subagentActivity.set(agentKey, []);
+    this.subagentToolResults.delete(agentKey);
+    for (const timer of this._subagentCompletionTimers?.get(agentKey) || []) clearTimeout(timer);
+    this._subagentCompletionTimers?.delete(agentKey);
+    if (this.subagentWindows.has(agentKey)) {
+      this.forceCloseSubagentWindow(agentKey);
     }
     this.renderSubagentPanel();
 
     // Find which Codeman session owns this subagent (direct claudeSessionId match only)
-    this.findParentSessionForSubagent(data.agentId);
+    this.findParentSessionForSubagent(agentKey);
 
     // Subagent windows are no longer auto-opened on discovery.
     // Users can open them manually from the monitor panel or via openAllActiveSubagentWindows().
@@ -154,67 +167,77 @@ Object.assign(CodemanApp.prototype, {
     });
 
     // Notify about new subagent discovery
-    const parentId = this.subagentParentMap.get(data.agentId);
+    const parentId = this.subagentParentMap.get(agentKey);
     this._notifySession(parentId || data.sessionId, 'info', 'subagent-spawn', 'Subagent Spawned', data.description || 'New background agent started');
   },
 
   _onSubagentUpdated(data) {
-    const existing = this.subagents.get(data.agentId);
+    const agentKey = this._requireSubagentEventKey(data, 'updated');
+    if (!agentKey) return;
+    const existing = this.subagents.get(agentKey);
     if (existing) {
       // Merge updated fields (especially description)
       Object.assign(existing, data);
-      this.subagents.set(data.agentId, existing);
+      this.subagents.set(agentKey, existing);
     } else {
-      this.subagents.set(data.agentId, data);
+      this.subagents.set(agentKey, data);
     }
     this.renderSubagentPanel();
     // Update floating window if open (content + header/title)
-    if (this.subagentWindows.has(data.agentId)) {
-      this.renderSubagentWindowContent(data.agentId);
-      this.updateSubagentWindowHeader(data.agentId);
+    if (this.subagentWindows.has(agentKey)) {
+      this.renderSubagentWindowContent(agentKey);
+      this.updateSubagentWindowHeader(agentKey);
     }
   },
 
   _onSubagentToolCall(data) {
-    this._addActivityEntry(data.agentId, { type: 'tool', ...data });
-    if (this.activeSubagentId === data.agentId) {
+    const agentKey = this._requireSubagentEventKey(data, 'tool_call');
+    if (!agentKey) return;
+    this._addActivityEntry(agentKey, { type: 'tool', ...data });
+    if (this.activeSubagentKey === agentKey) {
       this.renderSubagentDetail();
     }
     this.renderSubagentPanel();
     // Update floating window (debounced — tool_call events fire rapidly)
-    if (this.subagentWindows.has(data.agentId)) {
-      this.scheduleSubagentWindowRender(data.agentId);
+    if (this.subagentWindows.has(agentKey)) {
+      this.scheduleSubagentWindowRender(agentKey);
     }
   },
 
   _onSubagentProgress(data) {
-    this._addActivityEntry(data.agentId, { type: 'progress', ...data });
-    if (this.activeSubagentId === data.agentId) {
+    const agentKey = this._requireSubagentEventKey(data, 'progress');
+    if (!agentKey) return;
+    this._addActivityEntry(agentKey, { type: 'progress', ...data });
+    if (this.activeSubagentKey === agentKey) {
       this.renderSubagentDetail();
     }
     // Update floating window (debounced)
-    if (this.subagentWindows.has(data.agentId)) {
-      this.scheduleSubagentWindowRender(data.agentId);
+    if (this.subagentWindows.has(agentKey)) {
+      this.scheduleSubagentWindowRender(agentKey);
     }
   },
 
   _onSubagentMessage(data) {
-    this._addActivityEntry(data.agentId, { type: 'message', ...data });
-    if (this.activeSubagentId === data.agentId) {
+    const agentKey = this._requireSubagentEventKey(data, 'message');
+    if (!agentKey) return;
+    this._addActivityEntry(agentKey, { type: 'message', ...data });
+    if (this.activeSubagentKey === agentKey) {
       this.renderSubagentDetail();
     }
     // Update floating window (debounced)
-    if (this.subagentWindows.has(data.agentId)) {
-      this.scheduleSubagentWindowRender(data.agentId);
+    if (this.subagentWindows.has(agentKey)) {
+      this.scheduleSubagentWindowRender(agentKey);
     }
   },
 
   _onSubagentToolResult(data) {
+    const agentKey = this._requireSubagentEventKey(data, 'tool_result');
+    if (!agentKey) return;
     // Store tool result by toolUseId for later lookup (cap at 50 per agent)
-    if (!this.subagentToolResults.has(data.agentId)) {
-      this.subagentToolResults.set(data.agentId, new Map());
+    if (!this.subagentToolResults.has(agentKey)) {
+      this.subagentToolResults.set(agentKey, new Map());
     }
-    const resultsMap = this.subagentToolResults.get(data.agentId);
+    const resultsMap = this.subagentToolResults.get(agentKey);
     resultsMap.set(data.toolUseId, data);
     if (resultsMap.size > 50) {
       const oldest = resultsMap.keys().next().value;
@@ -222,59 +245,65 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Add to activity stream
-    this._addActivityEntry(data.agentId, { type: 'tool_result', ...data });
+    this._addActivityEntry(agentKey, { type: 'tool_result', ...data });
 
-    if (this.activeSubagentId === data.agentId) {
+    if (this.activeSubagentKey === agentKey) {
       this.renderSubagentDetail();
     }
     // Update floating window (debounced)
-    if (this.subagentWindows.has(data.agentId)) {
-      this.scheduleSubagentWindowRender(data.agentId);
+    if (this.subagentWindows.has(agentKey)) {
+      this.scheduleSubagentWindowRender(agentKey);
     }
   },
 
   async _onSubagentCompleted(data) {
-    const existing = this.subagents.get(data.agentId);
+    const agentKey = this._requireSubagentEventKey(data, 'completed');
+    if (!agentKey) return;
+    const existing = this.subagents.get(agentKey);
     if (existing) {
       existing.status = 'completed';
-      this.subagents.set(data.agentId, existing);
+      this.subagents.set(agentKey, existing);
     }
     this.renderSubagentPanel();
     this.updateSubagentWindows();
 
     // Auto-minimize completed subagent windows
-    if (this.subagentWindows.has(data.agentId)) {
-      const windowData = this.subagentWindows.get(data.agentId);
+    if (this.subagentWindows.has(agentKey)) {
+      const windowData = this.subagentWindows.get(agentKey);
       if (windowData && !windowData.minimized) {
-        await this.closeSubagentWindow(data.agentId); // This minimizes to tab
+        await this.closeSubagentWindow(agentKey); // This minimizes to tab
         this.saveSubagentWindowStates(); // Persist the minimized state
       }
     }
 
     // Notify about subagent completion
-    const parentId = this.subagentParentMap.get(data.agentId);
+    const parentId = this.subagentParentMap.get(agentKey);
     this._notifySession(parentId || existing?.sessionId || data.sessionId, 'info', 'subagent-complete', 'Subagent Completed', existing?.description || data.description || 'Background agent finished');
 
     // Clean up activity/tool data for completed agents after 5 minutes
     // This prevents memory leaks from long-running sessions with many subagents
-    setTimeout(() => {
-      const agent = this.subagents.get(data.agentId);
+    for (const timer of this._subagentCompletionTimers?.get(agentKey) || []) clearTimeout(timer);
+    const activityCleanupTimer = setTimeout(() => {
+      const agent = this.subagents.get(agentKey);
       // Only clean up if agent is still completed (not restarted)
       if (agent?.status === 'completed') {
-        this.subagentActivity.delete(data.agentId);
-        this.subagentToolResults.delete(data.agentId);
+        this.subagentActivity.delete(agentKey);
+        this.subagentToolResults.delete(agentKey);
       }
     }, 5 * 60 * 1000); // 5 minutes
 
     // Prune stale completed agents from main maps after 30 minutes
     // Keeps subagents/subagentParentMap from growing unbounded in 24h sessions
-    setTimeout(() => {
-      const agent = this.subagents.get(data.agentId);
-      if (agent?.status === 'completed' && !this.subagentWindows.has(data.agentId)) {
-        this.subagents.delete(data.agentId);
-        this.subagentParentMap.delete(data.agentId);
+    const historyCleanupTimer = setTimeout(() => {
+      const agent = this.subagents.get(agentKey);
+      if (agent?.status === 'completed' && !this.subagentWindows.has(agentKey)) {
+        this.subagents.delete(agentKey);
+        this.subagentParentMap.delete(agentKey);
       }
+      this._subagentCompletionTimers?.delete(agentKey);
     }, 30 * 60 * 1000); // 30 minutes
+    if (!this._subagentCompletionTimers) this._subagentCompletionTimers = new Map();
+    this._subagentCompletionTimers.set(agentKey, [activityCleanupTimer, historyCleanupTimer]);
   },
 
   // Images
@@ -1832,12 +1861,13 @@ Object.assign(CodemanApp.prototype, {
     });
 
     for (const agent of sorted) {
-      const isActive = this.activeSubagentId === agent.agentId;
+      const agentKey = agent.agentKey;
+      const isActive = this.activeSubagentKey === agentKey;
       const statusClass = agent.status === 'active' ? 'active' : agent.status === 'idle' ? 'idle' : 'completed';
-      const activity = this.subagentActivity.get(agent.agentId) || [];
+      const activity = this.subagentActivity.get(agentKey) || [];
       const lastActivity = activity[activity.length - 1];
       const lastTool = lastActivity?.type === 'tool' ? lastActivity.tool : null;
-      const hasWindow = this.subagentWindows.has(agent.agentId);
+      const hasWindow = this.subagentWindows.has(agentKey);
       const canKill = agent.status === 'active' || agent.status === 'idle';
       const modelBadge = agent.modelShort
         ? `<span class="subagent-model-badge ${escapeHtml(agent.modelShort)}">${escapeHtml(agent.modelShort)}</span>`
@@ -1849,8 +1879,9 @@ Object.assign(CodemanApp.prototype, {
       const agentIcon = teammateInfo ? `<span class="subagent-icon teammate-dot teammate-color-${teammateInfo.color}">●</span>` : '<span class="subagent-icon">🤖</span>';
       html.push(`
         <div class="subagent-item ${statusClass} ${isActive ? 'selected' : ''}${teammateInfo ? ' is-teammate' : ''}"
-             onclick="app.selectSubagent(${escapeHtml(JSON.stringify(agent.agentId))})"
-             ondblclick="app.openSubagentWindow(${escapeHtml(JSON.stringify(agent.agentId))})"
+             data-agent-key="${escapeHtml(agentKey)}"
+             onclick="app.selectSubagent(${escapeHtml(JSON.stringify(agentKey))})"
+             ondblclick="app.openSubagentWindow(${escapeHtml(JSON.stringify(agentKey))})"
              title="Double-click to open tracking window">
           <div class="subagent-header">
             ${agentIcon}
@@ -1858,8 +1889,8 @@ Object.assign(CodemanApp.prototype, {
             ${teammateBadge}
             ${modelBadge}
             <span class="subagent-status ${statusClass}">${agent.status}</span>
-            ${canKill ? `<button class="subagent-kill-btn" onclick="event.stopPropagation(); app.killSubagent(${escapeHtml(JSON.stringify(agent.agentId))})" title="Kill agent">&#x2715;</button>` : ''}
-            <button class="subagent-window-btn" onclick="event.stopPropagation(); app.${hasWindow ? 'closeSubagentWindow' : 'openSubagentWindow'}(${escapeHtml(JSON.stringify(agent.agentId))})" title="${hasWindow ? 'Close window' : 'Open in window'}">
+            ${canKill ? `<button class="subagent-kill-btn" onclick="event.stopPropagation(); app.killSubagent(${escapeHtml(JSON.stringify(agentKey))})" title="Kill agent">&#x2715;</button>` : ''}
+            <button class="subagent-window-btn" onclick="event.stopPropagation(); app.${hasWindow ? 'closeSubagentWindow' : 'openSubagentWindow'}(${escapeHtml(JSON.stringify(agentKey))})" title="${hasWindow ? 'Close window' : 'Open in window'}">
               ${hasWindow ? '✕' : '⧉'}
             </button>
           </div>
@@ -1874,8 +1905,8 @@ Object.assign(CodemanApp.prototype, {
     list.innerHTML = html.join('');
   },
 
-  selectSubagent(agentId) {
-    this.activeSubagentId = agentId;
+  selectSubagent(agentKey) {
+    this.activeSubagentKey = agentKey;
     this.renderSubagentPanel();
     this.renderSubagentDetail();
   },
@@ -1884,13 +1915,13 @@ Object.assign(CodemanApp.prototype, {
     const detail = this.$('subagentDetail');
     if (!detail) return;
 
-    if (!this.activeSubagentId) {
+    if (!this.activeSubagentKey) {
       detail.innerHTML = '<div class="subagent-empty">Select an agent to view details</div>';
       return;
     }
 
-    const agent = this.subagents.get(this.activeSubagentId);
-    const activity = this.subagentActivity.get(this.activeSubagentId) || [];
+    const agent = this.subagents.get(this.activeSubagentKey);
+    const activity = this.subagentActivity.get(this.activeSubagentKey) || [];
 
     if (!agent) {
       detail.innerHTML = '<div class="subagent-empty">Agent not found</div>';
@@ -1955,7 +1986,7 @@ Object.assign(CodemanApp.prototype, {
         <span class="subagent-id" title="${escapeHtml(agent.description || agent.agentId)}">${escapeHtml(detailTitle.length > 60 ? detailTitle.substring(0, 60) + '...' : detailTitle)}</span>
         ${modelBadge}
         <span class="subagent-status ${agent.status}">${agent.status}</span>
-        <button class="subagent-transcript-btn" onclick="app.viewSubagentTranscript(${escapeHtml(JSON.stringify(agent.agentId))})">
+        <button class="subagent-transcript-btn" onclick="app.viewSubagentTranscript(${escapeHtml(JSON.stringify(agent.agentKey))})">
           View Full Transcript
         </button>
       </div>
@@ -2036,21 +2067,21 @@ Object.assign(CodemanApp.prototype, {
     return { primary, hasMore, fullInput: fullInput || input };
   },
 
-  async killSubagent(agentId) {
+  async killSubagent(agentKey) {
     try {
-      const res = await this._apiDelete(`/api/subagents/${agentId}`);
+      const res = await this._apiDelete(`/api/subagents/${encodeURIComponent(agentKey)}`);
       const data = await res?.json();
       if (data?.success) {
         // Update local state
-        const agent = this.subagents.get(agentId);
+        const agent = this.subagents.get(agentKey);
         if (agent) {
           agent.status = 'completed';
-          this.subagents.set(agentId, agent);
+          this.subagents.set(agentKey, agent);
         }
         this.renderSubagentPanel();
         this.renderSubagentDetail();
         this.updateSubagentWindows();
-        this.showToast(`Subagent ${agentId.substring(0, 7)} killed`, 'success');
+        this.showToast(`Subagent ${agent?.agentId || 'agent'} killed`, 'success');
       } else {
         this.showToast(data.error || 'Failed to kill subagent', 'error');
       }
@@ -2060,9 +2091,9 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async viewSubagentTranscript(agentId) {
+  async viewSubagentTranscript(agentKey) {
     try {
-      const res = await fetch(`/api/subagents/${agentId}/transcript?format=formatted`);
+      const res = await fetch(`/api/subagents/${encodeURIComponent(agentKey)}/transcript?format=formatted`);
       const data = await res.json();
 
       if (!data.success) {
@@ -2071,19 +2102,20 @@ Object.assign(CodemanApp.prototype, {
       }
 
       // Show in a modal or new window
+      const displayId = this.subagents.get(agentKey)?.agentId || 'agent';
       const content = data.data.formatted.join('\n');
       const win = window.open('', '_blank', 'width=800,height=600');
       win.document.write(`
         <html>
           <head>
-            <title>Subagent ${escapeHtml(agentId)} Transcript</title>
+            <title>Subagent ${escapeHtml(displayId)} Transcript</title>
             <style>
               body { background: #1a1a2e; color: #eee; font-family: monospace; padding: 20px; }
               pre { white-space: pre-wrap; word-wrap: break-word; }
             </style>
           </head>
           <body>
-            <h2>Subagent ${escapeHtml(agentId)} Transcript (${data.data.entryCount} entries)</h2>
+            <h2>Subagent ${escapeHtml(displayId)} Transcript (${data.data.entryCount} entries)</h2>
             <pre>${escapeHtml(content)}</pre>
           </body>
         </html>
@@ -2100,7 +2132,7 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
   //
   // CRITICAL: This system tracks which TAB an agent window connects to.
-  // The association is stored in `subagentParentMap` (agentId -> sessionId).
+  // The association is stored in `subagentParentMap` (agentKey -> sessionId).
   // The sessionId IS the tab identifier (tabs have data-id="${sessionId}").
   // Once set, this association is PERMANENT and persisted across restarts.
 
@@ -2551,7 +2583,7 @@ Object.assign(CodemanApp.prototype, {
     const idEl = win.querySelector('.subagent-window-title .id');
     if (idEl) {
       const teammateInfo = this.getTeammateInfo(agent);
-      const windowTitle = teammateInfo ? teammateInfo.name : (agent.description || agentId.substring(0, 7));
+      const windowTitle = teammateInfo ? teammateInfo.name : (agent.description || agent.agentId || 'agent');
       const truncatedTitle = windowTitle.length > 50 ? windowTitle.substring(0, 50) + '...' : windowTitle;
       idEl.textContent = truncatedTitle;
     }
@@ -2574,7 +2606,7 @@ Object.assign(CodemanApp.prototype, {
     // Update full tooltip
     const titleContainer = win.querySelector('.subagent-window-title');
     if (titleContainer) {
-      titleContainer.title = agent.description || agentId;
+      titleContainer.title = agent.description || agent.agentId || 'agent';
     }
 
     // Update or add model badge
@@ -7542,7 +7574,7 @@ Object.assign(CodemanApp.prototype, {
       const desc = agent.description ? escapeHtml(agent.description.substring(0, 40)) : agent.agentId;
 
       html += `
-        <div class="process-item">
+        <div class="process-item" data-agent-key="${escapeHtml(agent.agentKey)}">
           <span class="process-mode ${statusClass}">${agent.status}</span>
           <div class="process-info">
             <div class="process-name">${modelBadge} ${desc}</div>
@@ -7552,7 +7584,7 @@ Object.assign(CodemanApp.prototype, {
             </div>
           </div>
           <div class="process-actions">
-            ${agent.status !== 'completed' ? `<button class="btn-toolbar btn-sm btn-danger" onclick="app.killSubagent(${escapeHtml(JSON.stringify(agent.agentId))})" title="Kill agent">Kill</button>` : ''}
+            ${agent.status !== 'completed' ? `<button class="btn-toolbar btn-sm btn-danger" onclick="app.killSubagent(${escapeHtml(JSON.stringify(agent.agentKey))})" title="Kill agent">Kill</button>` : ''}
           </div>
         </div>
       `;
