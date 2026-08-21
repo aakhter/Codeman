@@ -868,9 +868,11 @@ export function registerSessionRoutes(
         }
         workingDir = remoteCase.remotePath;
         remote = toSessionRemote(host, remoteCase);
-      } else {
+      } else if (!body.workingDir) {
         const linkedCases = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
-        workingDir = linkedCases[body.caseName] || validatePathWithinBase(body.caseName, CASES_DIR) || workingDir;
+        const linkedCase = isAdmin(req) ? linkedCases[body.caseName] : undefined;
+        const managedCasesDir = isAdmin(req) ? CASES_DIR : resolveCasesDir(getAuthUser(req));
+        workingDir = linkedCase || validatePathWithinBase(body.caseName, managedCasesDir) || workingDir;
       }
     }
 

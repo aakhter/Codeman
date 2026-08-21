@@ -29,7 +29,8 @@ import { Session } from '../../src/session.js';
 import { writeHooksConfig } from '../../src/hooks-config.js';
 import type { TabLayout } from '../../src/tab-layout.js';
 import { dataPath } from '../../src/config/instance.js';
-import { CASES_DIR } from '../../src/web/route-helpers.js';
+import { CASES_DIR, resolveCasesDir } from '../../src/web/route-helpers.js';
+import { createUser, invalidateUsersCache } from '../../src/user-store.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
@@ -137,7 +138,8 @@ interface LocalHarness {
  * envelopes get the conventional HTTP status from their errorCode.
  */
 async function createEnvelopeHarness(
-  registerFn: (app: FastifyInstance, ctx: MockRouteContext) => void
+  registerFn: (app: FastifyInstance, ctx: MockRouteContext) => void,
+  authUser?: { username: string; role: 'admin' | 'user' }
 ): Promise<LocalHarness> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
@@ -149,6 +151,13 @@ async function createEnvelopeHarness(
       parts: 5,
     },
   });
+
+  if (authUser) {
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.authUser = authUser;
+      done();
+    });
+  }
 
   const ctx = createMockRouteContext();
   registerFn(app, ctx);
@@ -179,6 +188,31 @@ async function createEnvelopeHarness(
 
 describe('session-routes', () => {
   let harness: LocalHarness;
+
+  const useRegularUserHarness = async (username: string, canBypassPermissions = false) => {
+    const previousMultiuser = process.env.CODEMAN_MULTIUSER;
+    const previousUserSpacesDir = process.env.CODEMAN_USER_SPACES_DIR;
+    const userSpacesDir = await mkdtemp(join(tmpdir(), 'codeman-user-spaces-'));
+    process.env.CODEMAN_MULTIUSER = '1';
+    process.env.CODEMAN_USER_SPACES_DIR = userSpacesDir;
+    await createUser({
+      username,
+      role: 'user',
+      password: 'regularpass123',
+      canBypassPermissions,
+    });
+    invalidateUsersCache();
+    await harness.app.close();
+    harness = await createEnvelopeHarness(registerSessionRoutes, { username, role: 'user' });
+    return async () => {
+      if (previousMultiuser === undefined) delete process.env.CODEMAN_MULTIUSER;
+      else process.env.CODEMAN_MULTIUSER = previousMultiuser;
+      if (previousUserSpacesDir === undefined) delete process.env.CODEMAN_USER_SPACES_DIR;
+      else process.env.CODEMAN_USER_SPACES_DIR = previousUserSpacesDir;
+      invalidateUsersCache();
+      await rm(userSpacesDir, { recursive: true, force: true });
+    };
+  };
 
   beforeEach(async () => {
     remoteStore.hosts = [];
@@ -258,6 +292,75 @@ describe('session-routes', () => {
       expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'nzbdav' });
       expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
       expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+    });
+
+    it.each([
+      ['claude', false],
+      ['shell', true],
+    ] as const)(
+      'preserves the regular-user local %s UI case path and applies the case default',
+      async (mode, canBypassPermissions) => {
+        const username = mode === 'shell' ? 'uishell' : 'uiclaude';
+        const cleanup = await useRegularUserHarness(username, canBypassPermissions);
+        const caseName = `ui-${mode}-case`;
+        const workingDir = join(resolveCasesDir({ username, role: 'user' }), caseName);
+        await mkdir(workingDir, { recursive: true });
+        harness.ctx.addSession.mockResolvedValueOnce({
+          layout: authoritativeTabLayout,
+          placements: authoritativeTabPlacements,
+          placementSource: 'case-default',
+        });
+        try {
+          const response = await harness.app.inject({
+            method: 'POST',
+            url: '/api/sessions',
+            payload: {
+              caseName,
+              workingDir,
+              mode,
+              name: `w1-${caseName}`,
+            },
+          });
+
+          expect(response.statusCode).toBe(200);
+          const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+          expect(created.workingDir).toBe(workingDir);
+          expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+          expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+          expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+        } finally {
+          await cleanup();
+        }
+      }
+    );
+
+    it('resolves a regular-user managed caseName-only launch inside the user case root', async () => {
+      const username = 'nameonlyuser';
+      const cleanup = await useRegularUserHarness(username);
+      const caseName = 'name-only-case';
+      const workingDir = join(resolveCasesDir({ username, role: 'user' }), caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.addSession.mockResolvedValueOnce({
+        layout: authoritativeTabLayout,
+        placements: authoritativeTabPlacements,
+        placementSource: 'case-default',
+      });
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'claude', name: `w1-${caseName}` },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.workingDir).toBe(workingDir);
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+        expect(JSON.parse(response.body).data.tabLayout).toEqual(authoritativeTabLayout);
+        expect(JSON.parse(response.body).data.tabPlacements).toEqual(authoritativeTabPlacements);
+      } finally {
+        await cleanup();
+      }
     });
 
     it('infers a managed local case from an exact workingDir-only creation', async () => {
