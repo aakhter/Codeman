@@ -583,6 +583,7 @@ export class Session extends EventEmitter {
   // screens' quiet ordering. Idle detection never reads it.
   private _wireActivityAt: number;
   private _wireActivitySettleUntil: number;
+  private readonly _restoredIdleAnchorAt?: number;
   private _claudeSessionId: string | null = null;
   private _claudeAuthoritativeSessionId: string | null = null;
   private _claudeSessionIdentityAdopted = false;
@@ -905,6 +906,9 @@ export class Session extends EventEmitter {
     // response viewer re-derive the live conversation without waiting for the
     // user to type again.
     this._lastSubmitAt = config.lastSubmitAt ?? 0;
+    this._restoredIdleAnchorAt = config.lastActivityAt
+      ? Math.max(config.lastActivityAt, config.lastSubmitAt ?? 0)
+      : undefined;
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;
@@ -1124,6 +1128,11 @@ export class Session extends EventEmitter {
     return this._wireActivityAt;
   }
 
+  /** Recovery-only lower bound for when a persisted raw-idle episode could begin. */
+  get restoredIdleAnchorAt(): number | undefined {
+    return this._status === 'idle' ? this._restoredIdleAnchorAt : undefined;
+  }
+
   /**
    * Stamp activity NOW. The private stamp (idle detection's "how long has the
    * pane been quiet") always moves; the wire stamp holds its restored value
@@ -1237,7 +1246,7 @@ export class Session extends EventEmitter {
     return this._terminalActivityEpoch;
   }
 
-  setActivityProjection(projection: SessionActivityProjection): void {
+  setActivityProjection(projection: SessionActivityProjection, options: { reconstructEpisode?: boolean } = {}): void {
     const isAgentActivity =
       projection.activityStatus === 'waiting_agents' || projection.activityStatus === 'checking_agents';
     const wasAgentActivity =
@@ -1246,7 +1255,7 @@ export class Session extends EventEmitter {
     this._activityProjection = {
       ...projection,
       activityStatusSince:
-        isAgentActivity && wasAgentActivity
+        isAgentActivity && wasAgentActivity && !options.reconstructEpisode
           ? this._activityProjection.activityStatusSince
           : isAgentActivity
             ? projection.activityStatusSince

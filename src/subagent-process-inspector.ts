@@ -80,15 +80,6 @@ export interface ProcessInspectionOptions {
   matcherRegistry?: ProcessProofMatcherRegistry;
 }
 
-/** Return a PID only when one process is bound to the requested exact agent identity. */
-export function selectExactSubagentPid(
-  result: Extract<ProcessInspectionResult, { status: 'positive' }>,
-  agentId: string
-): number | undefined {
-  const matches = result.exactAgentProcesses.filter((candidate) => candidate.agentId === agentId);
-  return matches.length === 1 ? matches[0].pid : undefined;
-}
-
 const EMPTY_MATCHER_REGISTRY: ProcessProofMatcherRegistry = new Map();
 class InspectionAbortedError extends Error {}
 

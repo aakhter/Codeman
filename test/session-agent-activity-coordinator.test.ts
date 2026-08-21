@@ -3,6 +3,7 @@ import {
   BoundedActivityScheduler,
   FINAL_AGENT_SETTLE_MS,
   SessionAgentActivityCoordinator,
+  deriveRestoredAgentEpisodeAnchor,
   projectAgentActivity,
   type CoordinatorSession,
 } from '../src/session-agent-activity-coordinator.js';
@@ -38,6 +39,97 @@ function frameEvidence(status: 'positive' | 'negative' | 'unavailable', rendered
 describe('session agent activity coordinator', () => {
   afterEach(() => vi.useRealTimers());
   describe('1. projection', () => {
+    it('derives a restored episode from the later raw-idle/earliest-agent anchor', () => {
+      expect(deriveRestoredAgentEpisodeAnchor(600, [400, 500])).toBe(600);
+      expect(deriveRestoredAgentEpisodeAnchor(600, [800, 900])).toBe(800);
+      expect(deriveRestoredAgentEpisodeAnchor(600, [Number.NaN])).toBe(600);
+      expect(deriveRestoredAgentEpisodeAnchor(undefined, [400])).toBeUndefined();
+    });
+
+    it('reconstructs only the first restored live transition and clamps future anchors to now', () => {
+      let now = 1000;
+      const coordinator = new SessionAgentActivityCoordinator({ now: () => now });
+      const restored = { ...session(), rawIdleAnchorAt: 600 };
+      coordinator.attachSession(restored);
+      expect(coordinator.project(restored).activityStatusSince).toBe(1000);
+
+      coordinator.commitEvidence(restored, {
+        observation: 'live',
+        semanticRevision: 1,
+        exactWatcherAgentKeys: ['agent'],
+        observedWatcherAgentKeys: ['agent'],
+        episodeAnchorAt: 700,
+      });
+      expect(coordinator.project(restored).activityStatusSince).toBe(700);
+
+      now = 2000;
+      coordinator.commitEvidence(restored, {
+        observation: 'live',
+        semanticRevision: 2,
+        exactWatcherAgentKeys: ['agent'],
+        observedWatcherAgentKeys: ['agent'],
+        episodeAnchorAt: 1500,
+      });
+      expect(coordinator.project(restored).activityStatusSince).toBe(700);
+
+      const future = { ...session(), id: 'future', rawIdleAnchorAt: 600 };
+      coordinator.attachSession(future);
+      coordinator.commitEvidence(future, {
+        observation: 'live',
+        semanticRevision: 1,
+        exactWatcherAgentKeys: ['agent'],
+        observedWatcherAgentKeys: ['agent'],
+        episodeAnchorAt: 5000,
+      });
+      expect(coordinator.project(future).activityStatusSince).toBe(2000);
+    });
+
+    it('keeps startup-now when a restored live snapshot has no reliable anchor and never rewrites fresh runtime state', () => {
+      const coordinator = new SessionAgentActivityCoordinator({ now: () => 1000 });
+      const restored = { ...session(), rawIdleAnchorAt: 600 };
+      coordinator.attachSession(restored);
+      coordinator.commitEvidence(restored, {
+        observation: 'live',
+        semanticRevision: 1,
+        exactWatcherAgentKeys: ['agent'],
+        observedWatcherAgentKeys: ['agent'],
+      });
+      expect(coordinator.project(restored).activityStatusSince).toBe(1000);
+
+      const fresh = { ...session(), id: 'fresh' };
+      coordinator.attachSession(fresh);
+      coordinator.commitEvidence(fresh, {
+        observation: 'live',
+        semanticRevision: 1,
+        exactWatcherAgentKeys: ['agent'],
+        observedWatcherAgentKeys: ['agent'],
+        episodeAnchorAt: 100,
+      });
+      expect(coordinator.project(fresh).activityStatusSince).toBe(1000);
+    });
+
+    it('waits for an exact watcher snapshot before applying restored reconstruction', () => {
+      const coordinator = new SessionAgentActivityCoordinator({ now: () => 1000 });
+      const restored = { ...session(), rawIdleAnchorAt: 600 };
+      coordinator.attachSession(restored);
+      coordinator.commitEvidence(restored, {
+        observation: 'live',
+        semanticRevision: 1,
+        processReason: 'matching_process',
+        exactProcessAgentKeys: ['agent'],
+      });
+      expect(coordinator.project(restored).activityStatusSince).toBe(1000);
+
+      coordinator.commitEvidence(restored, {
+        observation: 'live',
+        semanticRevision: 2,
+        exactWatcherAgentKeys: ['agent'],
+        observedWatcherAgentKeys: ['agent'],
+        episodeAnchorAt: 600,
+      });
+      expect(coordinator.project(restored).activityStatusSince).toBe(600);
+    });
+
     it('notifies its owner whenever evidence changes the effective projection', () => {
       const onProjectionChanged = vi.fn();
       const coordinator = new SessionAgentActivityCoordinator({ onProjectionChanged });

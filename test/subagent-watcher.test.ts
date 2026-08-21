@@ -200,7 +200,9 @@ describe('SubagentWatcher', () => {
 
     // Create new watcher for each test
     watcher = new SubagentWatcher();
-    watcher.setExactSubagentProcessProvider(vi.fn(async () => ({ status: 'verified', pid: 4242 })));
+    watcher.setExactSubagentProcessProvider(
+      vi.fn(async () => ({ status: 'atomic_terminator', terminate: async () => 'terminated' }))
+    );
   });
 
   afterEach(() => {
@@ -2088,7 +2090,7 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(100);
 
       const result = await watcher.killSubagent('killactive');
-      expect(result).toMatchObject({ status: 'killed', pid: 4242 });
+      expect(result).toMatchObject({ status: 'killed' });
       expect(completedHandler).toHaveBeenCalled();
     });
 
@@ -2098,9 +2100,9 @@ describe('SubagentWatcher', () => {
       const completed = vi.fn();
       watcher.on('subagent:semantic_revision', revisions);
       watcher.on('subagent:completed', completed);
-      watcher.setExactSubagentProcessProvider(vi.fn(async () => ({ status: 'unsupported' })));
+      watcher.setExactSubagentProcessProvider(vi.fn(async () => ({ status: 'atomic_termination_unavailable' })));
 
-      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'unsupported' });
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'atomic_termination_unavailable' });
 
       expect(watcher.getSubagent(key)?.status).toBe('active');
       expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
@@ -2109,28 +2111,46 @@ describe('SubagentWatcher', () => {
       expect(mockProcessKill).not.toHaveBeenCalled();
     });
 
-    it('signals only the pid verified for the exact selected key when display and conversation IDs collide', async () => {
+    it('invokes only the atomic terminator issued for the exact selected key when identities collide', async () => {
       const first = registerKillAgent('same');
       const second = registerKillAgent('peer');
+      const terminated = vi.fn(async () => 'terminated' as const);
       watcher.setExactSubagentProcessProvider(
-        vi.fn(async (info) => ({ status: 'verified', pid: info.agentKey === second ? 222 : 111 }))
+        vi.fn(async (info) =>
+          info.agentKey === second
+            ? { status: 'atomic_terminator', terminate: terminated }
+            : { status: 'atomic_termination_unavailable' }
+        )
       );
 
-      await expect(watcher.killSubagent(second)).resolves.toMatchObject({ status: 'killed', pid: 222 });
+      await expect(watcher.killSubagent(second)).resolves.toMatchObject({ status: 'killed' });
 
-      expect(mockProcessKill).toHaveBeenCalledWith(222, 'SIGTERM');
-      expect(mockProcessKill).not.toHaveBeenCalledWith(111, 'SIGTERM');
+      expect(terminated).toHaveBeenCalledTimes(1);
+      expect(mockProcessKill).not.toHaveBeenCalled();
       expect(watcher.getSubagent(first)?.status).toBe('active');
       expect(watcher.getSubagent(second)?.status).toBe('completed');
     });
 
     it('does not complete the exact target when signaling the verified pid fails', async () => {
       const key = registerKillAgent('same');
-      mockProcessKill.mockImplementationOnce(() => {
-        throw new Error('ESRCH');
-      });
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: async () => 'failed' }))
+      );
 
       await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'signal_failed' });
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
+    });
+
+    it('does not fall back to process.kill when an inspected pid exits or is reused before termination', async () => {
+      const key = registerKillAgent('same');
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: async () => 'stale' }))
+      );
+
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'stale_process' });
+
+      expect(mockProcessKill).not.toHaveBeenCalled();
       expect(watcher.getSubagent(key)?.status).toBe('active');
       expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
     });

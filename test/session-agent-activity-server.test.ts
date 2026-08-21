@@ -35,6 +35,9 @@ function internals(server: WebServer) {
     activityAdapters: Map<Session, CoordinatorSession>;
     runSummaryTrackers: Map<string, { recordHookEvent(event: string, data: Record<string, unknown>): void }>;
     inspectSubagentLiveness(info: Readonly<SubagentInfo>): Promise<'live' | 'not_live' | 'unknown'>;
+    inspectExactSubagentProcess(
+      info: Readonly<SubagentInfo>
+    ): Promise<{ status: 'atomic_termination_unavailable' | 'unverifiable' }>;
     inspectAgentActivity(project: ObservableSessionProject, signal: AbortSignal): Promise<AgentEvidence>;
     app: FastifyInstance;
     setupRoutes(): Promise<void>;
@@ -67,6 +70,61 @@ afterEach(() => {
 });
 
 describe('WebServer agent activity ownership', () => {
+  it('keeps future exact-pid matcher proof observation-only without an atomic terminator capability', async () => {
+    const matcherRegistry: ProcessProofMatcherRegistry = new Map([
+      [
+        'future-test-runtime',
+        {
+          capability: 'exact_role',
+          match: (_candidate, identity) => ({
+            matched: true,
+            conversationProof: {
+              source: 'argument',
+              field: '--session-id',
+              claudeSessionId: identity.claudeSessionId,
+            },
+            agentId: 'target',
+          }),
+        },
+      ],
+    ]);
+    const source: ProcessInspectionSource = {
+      listPids: async () => [4242],
+      readCmdline: async () => 'claude\0--session-id\0conversation\0',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: 'future-test-runtime',
+      matcherRegistry,
+      source,
+    });
+    const state = internals(server);
+    await state.setupRoutes();
+    const session = new Session({ id: 'atomic-proof-parent', workingDir: '/tmp', mode: 'claude' });
+    session.adoptClaudeSessionId('conversation');
+    await state.createRouteContext().addSession(session);
+    const info: SubagentInfo = {
+      agentKey: serializeSubagentKey(claudeProjectHash('/tmp'), 'conversation', 'target'),
+      agentId: 'target',
+      projectHash: claudeProjectHash('/tmp'),
+      sessionId: 'conversation',
+      filePath: '/tmp/target.jsonl',
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    };
+
+    await expect(state.inspectExactSubagentProcess(info)).resolves.toEqual({
+      status: 'atomic_termination_unavailable',
+    });
+    await server.stop();
+  });
+
   const matchingFrame = (count: number) =>
     [
       `✳ Waiting for ${count} background agents to finish`,

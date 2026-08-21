@@ -837,6 +837,43 @@ describe('system-routes', () => {
   // ========== PUT /api/subagent-parents ==========
 
   describe('PUT /api/subagent-parents', () => {
+    it('isolates parent associations by owner and exposes legacy associations only to admin', async () => {
+      const priorMode = process.env.CODEMAN_MULTIUSER;
+      process.env.CODEMAN_MULTIUSER = '1';
+      let persisted = JSON.stringify({ 'legacy-secret-key': 'legacy-tab' });
+      mockedReadFile.mockImplementation(async () => persisted as never);
+      mockedWriteFile.mockImplementation(async (_path, value) => {
+        persisted = String(value);
+      });
+      const alice = await createRouteTestHarness(registerSystemRoutes, {
+        authUser: { username: 'alice', role: 'user' },
+      });
+      const bob = await createRouteTestHarness(registerSystemRoutes, {
+        authUser: { username: 'bob', role: 'user' },
+      });
+      const admin = await createRouteTestHarness(registerSystemRoutes, {
+        authUser: { username: 'root', role: 'admin' },
+      });
+      try {
+        await alice.app.inject({
+          method: 'PUT',
+          url: '/api/subagent-parents',
+          payload: { 'alice-key': 'alice-tab' },
+        });
+        expect(JSON.parse((await bob.app.inject({ method: 'GET', url: '/api/subagent-parents' })).body)).toEqual({});
+        expect(JSON.parse((await alice.app.inject({ method: 'GET', url: '/api/subagent-parents' })).body)).toEqual({
+          'alice-key': 'alice-tab',
+        });
+        expect(JSON.parse((await admin.app.inject({ method: 'GET', url: '/api/subagent-parents' })).body)).toEqual({
+          'legacy-secret-key': 'legacy-tab',
+        });
+      } finally {
+        await Promise.all([alice.app.close(), bob.app.close(), admin.app.close()]);
+        if (priorMode === undefined) delete process.env.CODEMAN_MULTIUSER;
+        else process.env.CODEMAN_MULTIUSER = priorMode;
+      }
+    });
+
     it('saves valid parent map', async () => {
       const res = await harness.app.inject({
         method: 'PUT',
@@ -1293,7 +1330,7 @@ describe('system-routes', () => {
 
     it('kills a known agent successfully', async () => {
       mockedSubagentWatcher.getSubagent.mockReturnValue({ agentId: 'agent-1' } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'agent-1', pid: 42 });
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'agent-1' });
 
       const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/agent-1' });
       expect(res.statusCode).toBe(200);
@@ -1307,7 +1344,7 @@ describe('system-routes', () => {
         status: 'found',
         info: { agentKey: 'v1.exact', agentId: 'same', sessionId: 'conversation-a' },
       } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'v1.exact', pid: 42 });
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'v1.exact' });
 
       const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/v1.exact' });
 
@@ -1324,7 +1361,7 @@ describe('system-routes', () => {
         status: 'found',
         info: { agentKey: 'v1.only', agentId: 'legacy' },
       } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'v1.only', pid: 42 });
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'v1.only' });
 
       await harness.app.inject({ method: 'DELETE', url: '/api/subagents/legacy' });
 
@@ -1353,14 +1390,14 @@ describe('system-routes', () => {
 
     it('returns a typed safe failure when exact termination is unsupported', async () => {
       mockedSubagentWatcher.getSubagent.mockReturnValue({ agentKey: 'v1.agent', agentId: 'agent-1' } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'unsupported' });
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'atomic_termination_unavailable' });
 
       const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/agent-1' });
 
       expect(JSON.parse(res.body)).toMatchObject({
         success: false,
-        reason: 'unsupported',
-        error: expect.stringContaining('unsupported'),
+        reason: 'atomic_termination_unavailable',
+        error: expect.stringContaining('unavailable'),
       });
     });
   });

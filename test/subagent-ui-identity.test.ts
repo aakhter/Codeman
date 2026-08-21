@@ -241,13 +241,17 @@ describe('opaque subagent actions and browser identities', () => {
     app.subagents.set(key, agent(key, { status: 'active' }));
     app.showToast = vi.fn();
     app._apiDelete = vi.fn().mockResolvedValue({
-      json: async () => ({ success: false, reason: 'unsupported', error: 'Exact termination unsupported' }),
+      json: async () => ({
+        success: false,
+        reason: 'atomic_termination_unavailable',
+        error: 'Atomic exact termination unavailable',
+      }),
     });
 
     await app.killSubagent(key);
 
     expect(app.subagents.get(key)?.status).toBe('active');
-    expect(app.showToast).toHaveBeenCalledWith('Exact termination unsupported', 'error');
+    expect(app.showToast).toHaveBeenCalledWith('Atomic exact termination unavailable', 'error');
   });
 
   it('renders colliding agents with distinct opaque action and DOM identities', () => {

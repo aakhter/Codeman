@@ -67,6 +67,12 @@ describe('Session agent activity contract', () => {
     session.setActivityProjection({ activityStatus: 'waiting_agents', activityStatusSince: 200 });
     expect(session.activityProjection.activityStatusSince).toBe(100);
 
+    session.setActivityProjection(
+      { activityStatus: 'waiting_agents', activityStatusSince: 50 },
+      { reconstructEpisode: true }
+    );
+    expect(session.activityProjection.activityStatusSince).toBe(50);
+
     session.setActivityProjection({ activityStatus: 'idle', activityStatusSince: null });
     session.setActivityProjection({ activityStatus: 'checking_agents', activityStatusSince: 300 });
     expect(session.activityProjection.activityStatusSince).toBe(300);

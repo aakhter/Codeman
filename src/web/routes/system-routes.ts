@@ -1131,8 +1131,9 @@ export function registerSystemRoutes(
     const messages: Record<typeof result.status, string> = {
       not_found: 'Subagent not found',
       already_completed: 'Subagent already completed',
-      unsupported: 'Exact subagent termination is unsupported by this Claude runtime',
+      atomic_termination_unavailable: 'Atomic exact subagent termination is unavailable for this Claude runtime',
       unverifiable: 'Exact subagent process identity could not be verified',
+      stale_process: 'The exact subagent process changed before termination',
       signal_failed: 'The verified subagent process could not be terminated',
     };
     return { ...createErrorResponse(ApiErrorCode.OPERATION_FAILED, messages[result.status]), reason: result.status };

@@ -144,12 +144,22 @@ export interface SubagentToolResult {
 export type SubagentProcessLiveness = 'live' | 'not_live' | 'unknown';
 export type SubagentProcessLivenessProvider = (info: Readonly<SubagentInfo>) => Promise<SubagentProcessLiveness>;
 export type ExactSubagentProcessResult =
-  | { status: 'verified'; pid: number }
-  | { status: 'unsupported' | 'unverifiable' };
+  // The callback owns both last-moment identity validation and signaling. A
+  // numeric PID alone is deliberately never kill authorization (PID reuse).
+  | { status: 'atomic_terminator'; terminate: () => Promise<'terminated' | 'stale' | 'failed'> }
+  | { status: 'atomic_termination_unavailable' | 'unverifiable' };
 export type ExactSubagentProcessProvider = (info: Readonly<SubagentInfo>) => Promise<ExactSubagentProcessResult>;
 export type KillSubagentResult =
-  | { status: 'killed'; agentKey: string; pid: number }
-  | { status: 'not_found' | 'already_completed' | 'unsupported' | 'unverifiable' | 'signal_failed' };
+  | { status: 'killed'; agentKey: string }
+  | {
+      status:
+        | 'not_found'
+        | 'already_completed'
+        | 'atomic_termination_unavailable'
+        | 'unverifiable'
+        | 'stale_process'
+        | 'signal_failed';
+    };
 export interface SubagentWatcherErrorContext {
   projectHash: string;
   sessionId: string;
@@ -831,7 +841,7 @@ export class SubagentWatcher extends EventEmitter {
     // Already completed, nothing to kill
     if (info.status === 'completed') return { status: 'already_completed' };
 
-    if (!this.exactSubagentProcessProvider) return { status: 'unsupported' };
+    if (!this.exactSubagentProcessProvider) return { status: 'atomic_termination_unavailable' };
     let proof: ExactSubagentProcessResult;
     try {
       proof = await this.exactSubagentProcessProvider(info);
@@ -839,15 +849,18 @@ export class SubagentWatcher extends EventEmitter {
       return { status: 'unverifiable' };
     }
     if (!this.isCurrentGeneration(generation)) return { status: 'unverifiable' };
-    if (proof.status !== 'verified') return proof;
+    if (proof.status !== 'atomic_terminator') return proof;
+    let termination: 'terminated' | 'stale' | 'failed';
     try {
-      process.kill(proof.pid, 'SIGTERM');
+      termination = await proof.terminate();
     } catch {
       return { status: 'signal_failed' };
     }
+    if (termination === 'stale') return { status: 'stale_process' };
+    if (termination === 'failed') return { status: 'signal_failed' };
     if (!this.isCurrentGeneration(generation)) return { status: 'unverifiable' };
     this.markSubagentAsCompleted(info);
-    return { status: 'killed', agentKey: info.agentKey, pid: proof.pid };
+    return { status: 'killed', agentKey: info.agentKey };
   }
 
   /**

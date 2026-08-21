@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   exactFlagConversationProof,
   inspectSubagentProcesses,
-  selectExactSubagentPid,
   parseNulDelimited,
   readExactFlagValues,
   type ObservableClaudeIdentity,
@@ -57,30 +56,6 @@ describe('process input parsing', () => {
 });
 
 describe('inspectSubagentProcesses', () => {
-  it('selects only one exact target pid and ignores a wrong first process in the same conversation', () => {
-    const result = {
-      status: 'positive' as const,
-      reason: 'matching_process' as const,
-      matcherCapability: 'exact_role' as const,
-      projectHash: '-work-project',
-      claudeSessionId: 'conversation-123',
-      agentIds: ['peer', 'target'],
-      exactAgentProcesses: [
-        { agentId: 'peer', pid: 11 },
-        { agentId: 'target', pid: 22 },
-      ],
-    };
-
-    expect(selectExactSubagentPid(result, 'target')).toBe(22);
-    expect(selectExactSubagentPid(result, 'missing')).toBeUndefined();
-    expect(
-      selectExactSubagentPid(
-        { ...result, exactAgentProcesses: [...result.exactAgentProcesses, { agentId: 'target', pid: 33 }] },
-        'target'
-      )
-    ).toBeUndefined();
-  });
-
   it('does not claim a role capability for the supported 2.1.237 runtime', async () => {
     const result = await inspectSubagentProcesses(
       identity,

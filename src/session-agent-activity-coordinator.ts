@@ -15,11 +15,12 @@ export interface CoordinatorSession {
   readonly workingDir: string;
   readonly claudeSessionId: string | null;
   readonly terminalActivityEpoch: number;
+  readonly rawIdleAnchorAt?: number;
   readonly claudeRuntimeVersion?: string;
   readonly claudeRuntimeCapability?: 'exact_role' | 'none';
   readonly agentObservationSupported?: boolean;
   readonly remote?: unknown;
-  setActivityProjection(projection: SessionActivityProjection): void;
+  setActivityProjection(projection: SessionActivityProjection, options?: { reconstructEpisode?: boolean }): void;
 }
 
 export function projectAgentActivity(
@@ -41,6 +42,15 @@ export function projectAgentActivity(
     activityStatus,
     activityStatusSince: derived ? (previousDerived ? previous.activityStatusSince : now) : null,
   };
+}
+
+export function deriveRestoredAgentEpisodeAnchor(
+  rawIdleAnchorAt: number | undefined,
+  liveAgentStartedAt: readonly number[]
+): number | undefined {
+  if (!Number.isFinite(rawIdleAnchorAt)) return undefined;
+  const reliableStarts = liveAgentStartedAt.filter((value) => Number.isFinite(value));
+  return Math.max(rawIdleAnchorAt!, reliableStarts.length > 0 ? Math.min(...reliableStarts) : 0);
 }
 
 // Re-exported so the settle contract has one canonical duration.
@@ -71,6 +81,8 @@ export interface AgentEvidence {
     reason: string;
     renderedCount?: number;
   }>;
+  /** Reliable recovery-only lower bound for the current derived agent episode. */
+  episodeAnchorAt?: number;
 }
 
 export type InspectionJob = (project: ObservableSessionProject, signal: AbortSignal) => Promise<AgentEvidence>;
@@ -160,6 +172,7 @@ interface SessionRecord {
   immediateRevisionRetry: boolean;
   exactProcessLive: boolean;
   processReason?: AgentEvidence['processReason'];
+  startupReconstructionPending: boolean;
 }
 
 interface InspectionSnapshot {
@@ -363,6 +376,7 @@ export class SessionAgentActivityCoordinator {
       immediateRevisionRetry: false,
       exactProcessLive: false,
       processReason: undefined,
+      startupReconstructionPending: session.status === 'idle' && session.rawIdleAnchorAt !== undefined,
     };
     this.records.set(session.id, record);
     session.setActivityProjection(projection);
@@ -481,7 +495,7 @@ export class SessionAgentActivityCoordinator {
       observedWatcherAgentKeys.length > 0 &&
       initiallyEffectiveWatcherAgentKeys?.length === 0
     ) {
-      this.onWatcherSnapshot(session, observedWatcherAgentKeys, evidence.semanticRevision);
+      this.onWatcherSnapshot(session, observedWatcherAgentKeys, evidence.semanticRevision, evidence.episodeAnchorAt);
       return;
     }
     if (!this.acceptSemanticRevision(record, evidence.semanticRevision)) return;
@@ -495,7 +509,7 @@ export class SessionAgentActivityCoordinator {
     if (evidence.exactWatcherCount !== undefined || observedWatcherAgentKeys !== undefined) {
       const effectiveCount = effectiveWatcherAgentKeys?.length ?? evidence.exactWatcherCount ?? 0;
       if (observedWatcherAgentKeys) {
-        this.onWatcherSnapshot(session, observedWatcherAgentKeys, evidence.semanticRevision);
+        this.onWatcherSnapshot(session, observedWatcherAgentKeys, evidence.semanticRevision, evidence.episodeAnchorAt);
       } else {
         this.onWatcherCount(session, effectiveCount, evidence.semanticRevision);
       }
@@ -530,7 +544,12 @@ export class SessionAgentActivityCoordinator {
     return [...new Set(agentKeys)].filter((agentKey) => !record.quarantinedAgentKeys.has(agentKey));
   }
 
-  onWatcherSnapshot(session: CoordinatorSession, agentKeys: readonly string[], semanticRevision: number): void {
+  onWatcherSnapshot(
+    session: CoordinatorSession,
+    agentKeys: readonly string[],
+    semanticRevision: number,
+    episodeAnchorAt?: number
+  ): void {
     const record = this.requireRecord(session);
     if (!record.tracking) return;
     if (semanticRevision < record.semanticRevision) return;
@@ -542,7 +561,7 @@ export class SessionAgentActivityCoordinator {
     record.semanticRevision = semanticRevision;
     this.invalidateSettle(record);
     if (this.filterWatcherAgentKeys(session, agentKeys).length > 0) {
-      this.setRecordObservation(record, 'live');
+      this.setRecordObservation(record, 'live', false, undefined, episodeAnchorAt, true);
       return;
     }
     const generation = record.settleGeneration;
@@ -1084,7 +1103,9 @@ export class SessionAgentActivityCoordinator {
     record: SessionRecord,
     observation: AgentObservation,
     exactProcessLive = false,
-    processReason?: AgentEvidence['processReason']
+    processReason?: AgentEvidence['processReason'],
+    episodeAnchorAt?: number,
+    watcherSnapshot = false
   ): void {
     const previousProjection = record.projection;
     record.observation = observation;
@@ -1092,7 +1113,16 @@ export class SessionAgentActivityCoordinator {
     record.processReason = processReason;
     if (observation !== 'unknown' && record.retryReason !== 'evidence') this.cancelRetry(record);
     record.projection = projectAgentActivity(record.session.status, observation, record.projection, this.now());
-    record.session.setActivityProjection(record.projection);
+    const reconstruct =
+      record.startupReconstructionPending &&
+      watcherSnapshot &&
+      observation === 'live' &&
+      Number.isFinite(episodeAnchorAt);
+    if (reconstruct) {
+      record.projection.activityStatusSince = Math.min(this.now(), Math.max(0, episodeAnchorAt!));
+    }
+    if (observation === 'live' && watcherSnapshot) record.startupReconstructionPending = false;
+    record.session.setActivityProjection(record.projection, reconstruct ? { reconstructEpisode: true } : undefined);
     if (
       previousProjection.activityStatus !== record.projection.activityStatus ||
       previousProjection.activityStatusSince !== record.projection.activityStatusSince

@@ -164,7 +164,12 @@ describe('background-agent wait integration', () => {
     const ctx = state.createRouteContext();
     ctx.agentActivity.setTrackingEnabled(false);
 
-    const restored = new Session({ id: 'restored-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
+    const restored = new Session({
+      id: 'restored-parent',
+      workingDir: ownedWorkingDir(),
+      mode: 'claude',
+      lastActivityAt: 100,
+    });
     restored.adoptClaudeSessionId('restored-conversation');
     setRawIdle(restored);
     const fresh = new Session({ id: 'fresh-parent', workingDir: ownedWorkingDir(), mode: 'claude' });
@@ -212,13 +217,14 @@ describe('background-agent wait integration', () => {
     expect(rows.find((row) => row.id === restored.id)).toMatchObject({
       status: 'idle',
       activityStatus: 'waiting_agents',
-      activityStatusSince: expect.any(Number),
+      activityStatusSince: 100,
     });
     expect(rows.find((row) => row.id === fresh.id)).toMatchObject({
       status: 'idle',
       activityStatus: 'waiting_agents',
       activityStatusSince: expect.any(Number),
     });
+    expect((rows.find((row) => row.id === fresh.id)?.activityStatusSince as number) > 100).toBe(true);
 
     await server.stop();
     activeServers.delete(server);

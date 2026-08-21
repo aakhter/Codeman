@@ -130,12 +130,12 @@ import {
   type ActivityDecision,
   type ActivityEvent,
   type HookKind,
+  deriveRestoredAgentEpisodeAnchor,
 } from '../session-agent-activity-coordinator.js';
 import { getClaudeCliVersion } from '../utils/claude-cli-resolver.js';
 import { claudeProjectHash, serializeSubagentKey } from '../claude-project-identity.js';
 import {
   inspectSubagentProcesses,
-  selectExactSubagentPid,
   type ObservableClaudeIdentity,
   type ProcessInspectionSource,
   type ProcessProofMatcherRegistry,
@@ -676,6 +676,9 @@ export class WebServer extends EventEmitter {
       get terminalActivityEpoch() {
         return session.terminalActivityEpoch;
       },
+      get rawIdleAnchorAt() {
+        return session.restoredIdleAnchorAt;
+      },
       get claudeRuntimeVersion() {
         return claudeRuntimeVersion;
       },
@@ -749,14 +752,21 @@ export class WebServer extends EventEmitter {
     // result can be stale by the time this continuation runs if discovery or
     // completion advanced the semantic index after the filesystem scan.
     const snapshot = subagentWatcher.getSemanticSnapshot(projectHash, claudeSessionId);
+    const liveAgents = snapshot.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle');
     this.mutateAgentActivity(session, (currentAdapter) =>
       this.agentActivityCoordinator.onWatcherSnapshot(
         currentAdapter,
-        snapshot.agents
-          .filter((agent) => agent.status === 'active' || agent.status === 'idle')
-          .map((agent) => agent.agentKey),
-        snapshot.revision
+        liveAgents.map((agent) => agent.agentKey),
+        snapshot.revision,
+        this.restoredEpisodeAnchor(currentAdapter, liveAgents)
       )
+    );
+  }
+
+  private restoredEpisodeAnchor(adapter: CoordinatorSession, liveAgents: readonly SubagentInfo[]): number | undefined {
+    return deriveRestoredAgentEpisodeAnchor(
+      adapter.rawIdleAnchorAt,
+      liveAgents.map((agent) => Date.parse(agent.startedAt))
     );
   }
 
@@ -912,7 +922,12 @@ export class WebServer extends EventEmitter {
       .map((agent) => agent.agentKey);
     for (const session of this.sessionsForClaudeIdentity(data.projectHash, data.sessionId)) {
       this.mutateAgentActivity(session, (adapter) =>
-        this.agentActivityCoordinator.onWatcherSnapshot(adapter, liveAgentKeys, data.revision)
+        this.agentActivityCoordinator.onWatcherSnapshot(
+          adapter,
+          liveAgentKeys,
+          data.revision,
+          this.restoredEpisodeAnchor(adapter, data.agents)
+        )
       );
     }
   }
@@ -959,7 +974,12 @@ export class WebServer extends EventEmitter {
       const before = session.activityProjection;
       this.mutateAgentActivity(session, (adapter) => {
         if (liveAgentKeys.length > 0) {
-          this.agentActivityCoordinator.onWatcherSnapshot(adapter, liveAgentKeys, snapshot.revision);
+          this.agentActivityCoordinator.onWatcherSnapshot(
+            adapter,
+            liveAgentKeys,
+            snapshot.revision,
+            this.restoredEpisodeAnchor(adapter, snapshot.agents)
+          );
         } else {
           this.agentActivityCoordinator.onAgentRevision(adapter, unknownRevision);
         }
@@ -1006,6 +1026,12 @@ export class WebServer extends EventEmitter {
       observedWatcherAgentKeys
     );
     const exactWatcherCount = exactWatcherAgentKeys.length;
+    const exactWatcherKeySet = new Set(exactWatcherAgentKeys);
+    const liveAgentStarts = snapshot.agents
+      .filter((agent) => exactWatcherKeySet.has(agent.agentKey))
+      .map((agent) => Date.parse(agent.startedAt))
+      .filter((startedAt) => Number.isFinite(startedAt));
+    const episodeAnchorAt = deriveRestoredAgentEpisodeAnchor(project.session.rawIdleAnchorAt, liveAgentStarts);
     const identity: ObservableClaudeIdentity = {
       workingDir: project.workingDir,
       projectHash: project.projectHash,
@@ -1041,6 +1067,7 @@ export class WebServer extends EventEmitter {
       exactWatcherCount,
       exactWatcherAgentKeys,
       observedWatcherAgentKeys,
+      episodeAnchorAt,
       exactProcessAgentKeys:
         process.status === 'positive'
           ? process.agentIds.map((agentId) =>
@@ -1083,27 +1110,11 @@ export class WebServer extends EventEmitter {
   }
 
   private async inspectExactSubagentProcess(
-    info: Readonly<SubagentInfo>
-  ): Promise<{ status: 'verified'; pid: number } | { status: 'unsupported' | 'unverifiable' }> {
-    const matches = this.sessionsForClaudeIdentity(info.projectHash, info.sessionId);
-    if (matches.length !== 1) return { status: 'unverifiable' };
-    const session = matches[0];
-    const result = await inspectSubagentProcesses(
-      {
-        workingDir: session.workingDir,
-        projectHash: info.projectHash,
-        claudeSessionId: info.sessionId,
-        claudeRuntimeVersion: this.localClaudeRuntimeVersion,
-      },
-      this.agentProcessInspectionSource,
-      { matcherRegistry: this.agentProcessMatcherRegistry }
-    );
-    if (result.status === 'negative' && result.reason === 'no_registered_role_signature') {
-      return { status: 'unsupported' };
-    }
-    if (result.status !== 'positive') return { status: 'unverifiable' };
-    const pid = selectExactSubagentPid(result, info.agentId);
-    return pid === undefined ? { status: 'unverifiable' } : { status: 'verified', pid };
+    _info: Readonly<SubagentInfo>
+  ): Promise<{ status: 'atomic_termination_unavailable' }> {
+    // Process inspection deliberately remains observation-only. No production
+    // source currently exposes a pidfd-like atomic validate-and-signal handle.
+    return { status: 'atomic_termination_unavailable' };
   }
 
   /**
