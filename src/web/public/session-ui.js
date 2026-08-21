@@ -2526,7 +2526,7 @@ Object.assign(CodemanApp.prototype, {
     const remoteFields = [
       'remoteCaseName',
       'remoteCasePath',
-      'remoteCaseCodexCommand',
+      'remoteCaseCodexCommandCustomInput',
       'remoteHostId',
       'remoteHostAddress',
       'remoteHostUsername',
@@ -2540,6 +2540,10 @@ Object.assign(CodemanApp.prototype, {
       const el = document.getElementById(id);
       if (el) el.value = '';
     });
+    this._remoteCaseCodexCommandConfirmedSelection = 'default';
+    const codexProfile = document.getElementById('remoteCaseCodexProfile');
+    if (codexProfile) codexProfile.value = 'default';
+    this.onRemoteCaseCodexProfileChanged(true);
     const remoteHostId = document.getElementById('remoteHostId');
     if (remoteHostId) remoteHostId.disabled = false;
     const remoteHostSavedSelect = document.getElementById('remoteHostSavedSelect');
@@ -2642,6 +2646,7 @@ Object.assign(CodemanApp.prototype, {
       document.getElementById('linkCaseName').focus();
     } else if (tabName === 'case-remote') {
       void this.loadRemoteHostsForCaseModal(document.getElementById('remoteHostSavedSelect')?.value || '');
+      void this.loadCodexCommandProfiles();
       document.getElementById('remoteCaseName').focus();
     } else if (tabName === 'case-docker') {
       document.getElementById('dockerCaseName').focus();
@@ -3076,7 +3081,7 @@ Object.assign(CodemanApp.prototype, {
       || document.getElementById('remoteHostSavedSelect')?.value.trim();
     const host = document.getElementById('remoteHostAddress').value.trim();
     const username = document.getElementById('remoteHostUsername').value.trim();
-    const commands = this._readRemoteCaseCommandsFromForm();
+    const codexSelection = this._readRemoteCaseCommandsFromForm();
     // COD-107 — port + advanced SSH connection options.
     const portRaw = document.getElementById('remoteHostPort').value.trim();
     const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
@@ -3112,7 +3117,7 @@ Object.assign(CodemanApp.prototype, {
       const caseRes = await fetch('/api/cases/remote-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, hostId, remotePath, commands })
+        body: JSON.stringify({ name, hostId, remotePath, ...codexSelection })
       });
       const caseData = await caseRes.json();
       if (caseData.success) {
@@ -3688,9 +3693,22 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _readRemoteCaseCommandsFromForm() {
-    const codexCommand = document.getElementById('remoteCaseCodexCommand')?.value.trim() || '';
-    return codexCommand ? { codex: codexCommand } : {};
+    const value = document.getElementById('remoteCaseCodexProfile')?.value || 'default';
+    if (value.startsWith('profile:')) return { codexCommandSelection: { kind: 'profile', profileId: value.slice(8) } };
+    if (value === 'custom') { const command = document.getElementById('remoteCaseCodexCommandCustomInput')?.value.trim() || ''; return { codexCommandSelection: command ? { kind: 'custom', command } : { kind: 'default' } }; }
+    return { codexCommandSelection: { kind: 'default' } };
   },
+
+  _renderCodexCommandProfiles(selection = 'default') { const select = document.getElementById('remoteCaseCodexProfile'); if (!select) return; select.replaceChildren(new Option('Default', 'default')); for (const p of (this._codexCommandProfiles || []).slice().sort((a, b) => a.name.localeCompare(b.name))) select.add(new Option(p.name, `profile:${p.id}`)); select.add(new Option('Custom', 'custom')); select.value = [...select.options].some(o => o.value === selection) ? selection : 'default'; this.onRemoteCaseCodexProfileChanged(true); },
+  async loadCodexCommandProfiles(selection) { const select = document.getElementById('remoteCaseCodexProfile'); const manage = document.getElementById('manageCodexCommandProfiles'); const token = (this._codexCommandProfilesRequestToken || 0) + 1; this._codexCommandProfilesRequestToken = token; if (select) select.disabled = true; if (manage) manage.disabled = true; try { const res = await fetch('/api/codex-command-profiles'); const data = await res.json(); if (!res.ok || !data.success) throw new Error(data.error || 'Could not load Codex command profiles'); if (token !== this._codexCommandProfilesRequestToken) return; this._codexCommandProfiles = data.data?.profiles || []; this._renderCodexCommandProfiles(selection || this._remoteCaseCodexCommandConfirmedSelection || 'default'); this._remoteCaseCodexCommandConfirmedSelection = select?.value || 'default'; if (select) select.disabled = false; } catch (err) { if (token !== this._codexCommandProfilesRequestToken) return; this._renderCodexCommandProfiles(this._remoteCaseCodexCommandConfirmedSelection || 'default'); if (select) select.disabled = true; this.showToast(err.message || 'Could not load Codex command profiles', 'error'); } finally { if (token === this._codexCommandProfilesRequestToken && manage) manage.disabled = false; } },
+  onRemoteCaseCodexProfileChanged(silent = false) { const select = document.getElementById('remoteCaseCodexProfile'); if (!select) return; const profile = (this._codexCommandProfiles || []).find(p => `profile:${p.id}` === select.value); document.getElementById('remoteCaseCodexCommandCustom')?.classList.toggle('hidden', select.value !== 'custom'); const preview = document.getElementById('remoteCaseCodexProfilePreview'); if (preview) preview.value = profile?.command || (select.value === 'custom' ? document.getElementById('remoteCaseCodexCommandCustomInput')?.value || '' : ''); if (!silent) this._remoteCaseCodexCommandConfirmedSelection = select.value; },
+  async openCodexCommandProfileManager() { const modal = document.getElementById('codexCommandProfileManager'); if (!modal) return; if (this._codexCommandProfileManagerKeydown) modal.removeEventListener('keydown', this._codexCommandProfileManagerKeydown); this._codexCommandProfileManagerReturnFocus = document.activeElement; modal.classList.add('active'); this._codexCommandProfileManagerKeydown = (event) => { if (event.key === 'Escape') { event.preventDefault(); this.closeCodexCommandProfileManager(); return; } if (event.key !== 'Tab') return; const focusable = [...modal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')].filter(element => !element.closest('.hidden')); if (!focusable.length) return; const current = focusable.indexOf(document.activeElement); if (event.shiftKey && current <= 0) { event.preventDefault(); focusable[focusable.length - 1].focus(); } else if (!event.shiftKey && current === focusable.length - 1) { event.preventDefault(); focusable[0].focus(); } }; modal.addEventListener('keydown', this._codexCommandProfileManagerKeydown); document.getElementById('codexCommandProfileNew')?.focus(); await this.loadCodexCommandProfiles(); if (!modal.classList.contains('active')) return; this.renderCodexCommandProfileManager(); },
+  closeCodexCommandProfileManager() { const modal = document.getElementById('codexCommandProfileManager'); if (!modal) return; if (this._codexCommandProfileManagerKeydown) modal.removeEventListener('keydown', this._codexCommandProfileManagerKeydown); this._codexCommandProfileManagerKeydown = null; modal.classList.remove('active'); if (this._codexCommandProfileManagerReturnFocus) { this._codexCommandProfileManagerReturnFocus.disabled = false; this._codexCommandProfileManagerReturnFocus.focus?.(); } this._codexCommandProfileManagerReturnFocus = null; },
+  renderCodexCommandProfileManager() { const list = document.getElementById('codexCommandProfileList'); if (!list) return; list.replaceChildren(); for (const p of this._codexCommandProfiles || []) { const row = document.createElement('button'); row.type = 'button'; row.className = 'btn-toolbar'; row.textContent = `${p.name}${p.usage?.length ? ` — used by ${p.usage.join(', ')}` : ''}`; row.onclick = () => this.editCodexCommandProfile(p.id); list.append(row); } },
+  newCodexCommandProfile() { this._editingCodexCommandProfileId = null; document.getElementById('codexCommandProfileEditor')?.classList.remove('hidden'); document.getElementById('codexCommandProfileName').value = ''; document.getElementById('codexCommandProfileCommand').value = ''; },
+  editCodexCommandProfile(id) { const p = (this._codexCommandProfiles || []).find(x => x.id === id); if (!p) return; this._editingCodexCommandProfileId = id; document.getElementById('codexCommandProfileEditor')?.classList.remove('hidden'); document.getElementById('codexCommandProfileName').value = p.name; document.getElementById('codexCommandProfileCommand').value = p.command; },
+  async saveCodexCommandProfile() { const id = this._editingCodexCommandProfileId, name = document.getElementById('codexCommandProfileName').value.trim(), command = document.getElementById('codexCommandProfileCommand').value.trim(), save = document.getElementById('codexCommandProfileSave'); if (!name || !command) return; save.disabled = true; try { let res = await fetch(id ? `/api/codex-command-profiles/${encodeURIComponent(id)}` : '/api/codex-command-profiles', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, command }) }); let data = await res.json(); if (!data.success && data.requiresConfirmation && confirm(`This profile is used by ${data.usage.join(', ')}. Update it?`)) { res = await fetch(`/api/codex-command-profiles/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, command, confirmReferencedUpdate: true }) }); data = await res.json(); } if (!data.success) throw new Error(data.error || 'Save failed'); await this.loadCodexCommandProfiles(); this.renderCodexCommandProfileManager(); } catch (err) { this.showToast(err.message, 'error'); } finally { save.disabled = false; } },
+  async deleteCodexCommandProfile() { const id = this._editingCodexCommandProfileId; if (!id) return; try { const res = await fetch(`/api/codex-command-profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }); const data = await res.json(); if (!data.success) throw new Error(`${data.error || 'Delete failed'}${data.usage?.length ? `: Used by ${data.usage.join(', ')}` : ''}`); await this.loadCodexCommandProfiles(); this.renderCodexCommandProfileManager(); } catch (err) { this.showToast(err.message, 'error'); } },
 
   /**
    * Explicit Discover action (Decision A — never auto-runs on host select).
@@ -3830,7 +3848,9 @@ Object.assign(CodemanApp.prototype, {
       const remote = caseInfo.remote || {};
       document.getElementById('remoteCaseName').value = caseInfo.name || '';
       document.getElementById('remoteCasePath').value = remote.path || '';
-      document.getElementById('remoteCaseCodexCommand').value = remote.commands?.codex || '';
+      const selection = remote.codexCommandSelection;
+      document.getElementById('remoteCaseCodexCommandCustomInput').value = selection?.kind === 'custom' ? remote.commands?.codex || '' : '';
+      await this.loadCodexCommandProfiles(selection?.kind === 'profile' ? `profile:${selection.profileId}` : selection?.kind === 'custom' ? 'custom' : 'default');
       document.getElementById('remoteHostId').value = remote.hostId || '';
       document.getElementById('remoteHostId').disabled = true;
       document.getElementById('remoteHostAddress').value = remote.host || '';
@@ -3943,7 +3963,7 @@ Object.assign(CodemanApp.prototype, {
         const hostId = this.caseEditOriginalHostId || document.getElementById('remoteHostId').value.trim();
         const host = document.getElementById('remoteHostAddress').value.trim();
         const username = document.getElementById('remoteHostUsername').value.trim();
-        const commands = this._readRemoteCaseCommandsFromForm();
+        const codexSelection = this._readRemoteCaseCommandsFromForm();
         const portRaw = document.getElementById('remoteHostPort').value.trim();
 
         if (!nextName || !remotePath || !hostId || !host || !username) {
@@ -3968,7 +3988,7 @@ Object.assign(CodemanApp.prototype, {
           }
         }
 
-        updatePayload = { name: nextName, hostId, remotePath, commands };
+        updatePayload = { name: nextName, hostId, remotePath, ...codexSelection };
       } else if (originalLocation === 'docker') {
         nextName = document.getElementById('dockerCaseName').value.trim();
         if (!nextName) {

@@ -177,3 +177,14 @@ describe('Case Management default group structure', () => {
     expect(sessionUi).toContain("originalLocation === 'docker'");
   });
 });
+
+describe('COD-351 remote Codex command profile structure', () => {
+  it('replaces the raw override with an accessible saved-profile selection surface', () => {
+    expect(html).toContain('id="remoteCaseCodexProfile"');
+    expect(html).toContain('id="manageCodexCommandProfiles"');
+    expect(html).toContain('id="remoteCaseCodexProfilePreview"');
+    expect(html).toContain('id="remoteCaseCodexCommandCustom"');
+    expect(html).toContain('id="codexCommandProfileManager"');
+    expect(html).not.toContain('id="remoteCaseCodexCommand"');
+  });
+});

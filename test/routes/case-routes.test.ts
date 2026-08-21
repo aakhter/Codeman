@@ -111,6 +111,7 @@ const mockedRealpath = vi.mocked(fs.realpath);
 const mockedStat = vi.mocked(fs.stat);
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedWriteFile = vi.mocked(fs.writeFile);
+const mockedRename = vi.mocked(fs.rename);
 
 interface CaseRouteHarness {
   app: FastifyInstance;
@@ -287,6 +288,10 @@ describe('case-routes', () => {
       mockedWriteFile.mockImplementation(async (path, data) => {
         store.set(String(path), String(data));
       });
+      mockedRename.mockImplementation(async (from, to) => {
+        const value = store.get(String(from));
+        if (value !== undefined) store.set(String(to), value);
+      });
     }
 
     it('creates a remote host and lists it', async () => {
@@ -461,6 +466,151 @@ describe('case-routes', () => {
           path: 'ubuntu@10.0.0.42:/home/ubuntu/work',
         })
       );
+    });
+
+    it('selects saved, custom, and default Codex commands without retaining stale overrides', async () => {
+      setupRemoteConfigStore();
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue([
+        { id: 'personal-codex', name: 'Personal Codex', command: 'exec codex --profile personal' },
+      ]);
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/remote-hosts',
+        payload: { id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' },
+      });
+
+      const linked = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/remote-link',
+        payload: {
+          name: 'gpu-work',
+          hostId: 'gpu-box',
+          remotePath: '/home/ubuntu/work',
+          codexCommandSelection: { kind: 'profile', profileId: 'personal-codex' },
+        },
+      });
+      expect(JSON.parse(linked.body).data.case).toMatchObject({ codexCommandProfileId: 'personal-codex' });
+      expect(JSON.parse(linked.body).data.case.commands).toBeUndefined();
+
+      const custom = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/gpu-work',
+        payload: { codexCommandSelection: { kind: 'custom', command: ' exec codex --model o3 ' } },
+      });
+      expect(JSON.parse(custom.body).data.case.remote).toMatchObject({
+        codexCommandSelection: { kind: 'custom', commandPreview: 'exec codex --model o3' },
+      });
+      expect(JSON.parse(custom.body).data.case.remote.commands).toEqual({ codex: 'exec codex --model o3' });
+
+      const defaultSelection = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/gpu-work',
+        payload: { codexCommandSelection: { kind: 'default' } },
+      });
+      expect(JSON.parse(defaultSelection.body).data.case.remote).toMatchObject({
+        codexCommandSelection: { kind: 'default' },
+      });
+      expect(JSON.parse(defaultSelection.body).data.case.remote.commands).toBeUndefined();
+    });
+
+    it('rejects an unavailable saved Codex command profile before writing a remote case', async () => {
+      setupRemoteConfigStore();
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/remote-hosts',
+        payload: { id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' },
+      });
+      const writesBefore = mockedWriteFile.mock.calls.length;
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases/remote-link',
+        payload: {
+          name: 'gpu-work',
+          hostId: 'gpu-box',
+          remotePath: '/home/ubuntu/work',
+          codexCommandSelection: { kind: 'profile', profileId: 'foreign-profile' },
+        },
+      });
+      expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+      expect(JSON.parse(response.body)).toMatchObject({
+        errorCode: ApiErrorCode.OPERATION_FAILED,
+        error: 'Saved Codex command profile is unavailable',
+      });
+      expect(mockedWriteFile.mock.calls).toHaveLength(writesBefore);
+    });
+
+    it('uses the remote case owner profile library when an admin changes its Codex selection', async () => {
+      vi.stubEnv('CODEMAN_MULTIUSER', '1');
+      await harness.app.close();
+      harness = await createEnvelopeHarness({ username: 'root', role: 'admin' });
+      vi.clearAllMocks();
+      mockedExistsSync.mockReturnValue(false);
+      mockedReadFile.mockImplementation(async (path) => {
+        if (String(path).endsWith('remote-cases.json')) {
+          return JSON.stringify([
+            { name: 'bob-work', type: 'remote', owner: 'bob', hostId: 'gpu-box', remotePath: '/srv/bob' },
+          ]);
+        }
+        if (String(path).endsWith('remote-hosts.json')) {
+          return JSON.stringify([{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' }]);
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      harness.ctx.store.getCodexCommandProfiles.mockImplementation((owner: string) =>
+        owner === 'bob'
+          ? [{ id: 'bob-profile', name: 'Bob', command: 'exec codex --profile bob' }]
+          : [{ id: 'admin-profile', name: 'Admin', command: 'exec codex --profile admin' }]
+      );
+
+      const writesBefore = mockedWriteFile.mock.calls.length;
+      const rejected = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/bob-work',
+        payload: { codexCommandSelection: { kind: 'profile', profileId: 'admin-profile' } },
+      });
+      expect(rejected.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+      expect(JSON.parse(rejected.body)).toMatchObject({ error: 'Saved Codex command profile is unavailable' });
+      expect(mockedWriteFile.mock.calls).toHaveLength(writesBefore);
+
+      const accepted = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/bob-work',
+        payload: { codexCommandSelection: { kind: 'profile', profileId: 'bob-profile' } },
+      });
+      expect(accepted.statusCode).toBe(200);
+      expect(JSON.parse(accepted.body).data.case.remote.codexCommandSelection).toMatchObject({
+        kind: 'profile',
+        profileId: 'bob-profile',
+      });
+    });
+
+    it('rejects a Codex command selection update for Docker cases', async () => {
+      mockedReadFile.mockImplementation(async (path) => {
+        if (String(path).endsWith('docker-cases.json')) {
+          return JSON.stringify([
+            { name: 'docker-work', type: 'docker', hostId: 'docker-host', hostWorkspacePath: '/srv/docker-work' },
+          ]);
+        }
+        if (String(path).endsWith('docker-hosts.json')) {
+          return JSON.stringify([
+            { id: 'docker-host', label: 'Docker', engine: 'docker', image: 'codeman/agent:base' },
+          ]);
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const response = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/docker-work',
+        payload: { codexCommandSelection: { kind: 'default' } },
+      });
+
+      expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.INVALID_INPUT));
+      expect(JSON.parse(response.body)).toMatchObject({
+        errorCode: ApiErrorCode.INVALID_INPUT,
+        error: 'Docker case updates only support renaming',
+      });
+      expect(mockedWriteFile).not.toHaveBeenCalled();
     });
 
     it('deletes remote case metadata only', async () => {
@@ -1053,6 +1203,10 @@ describe('case-routes', () => {
       });
       mockedWriteFile.mockImplementation(async (path, data) => {
         registry.set(String(path).split('/').at(-1) ?? '', String(data));
+      });
+      mockedRename.mockImplementation(async (from, to) => {
+        const value = registry.get(String(from).split('/').at(-1) ?? '');
+        if (value !== undefined) registry.set(String(to).split('/').at(-1) ?? '', value);
       });
 
       const renamed = await harness.app.inject({

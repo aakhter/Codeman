@@ -127,6 +127,7 @@ import {
 } from '../../remote-hosts.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
 import type { SessionRemote } from '../../types.js';
+import { resolveCodexCommandSelection } from '../../codex-command-profiles.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
 import { MAX_PASTE_IMAGE_BYTES } from '../../config/buffer-limits.js';
@@ -156,6 +157,29 @@ import {
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
 const CODEMAN_CONFIG_DIR = getDataDir();
 const INFERABLE_LOCAL_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
+const SINGLE_USER_OWNER = '@single';
+
+function remoteProfileLibraryOwner(remoteCaseOwner: string | undefined, requestOwner: string | undefined): string {
+  return remoteCaseOwner ?? requestOwner ?? SINGLE_USER_OWNER;
+}
+
+function resolveRemoteCodexCommand(
+  remoteCase: Parameters<typeof toSessionRemote>[1],
+  host: Parameters<typeof toSessionRemote>[0],
+  profiles: ReturnType<ConfigPort['store']['getCodexCommandProfiles']>
+) {
+  const selection = resolveCodexCommandSelection(remoteCase, profiles, host.commands?.codex);
+  if (!selection.ok) return selection;
+  const commands = {
+    ...host.commands,
+    ...remoteCase.commands,
+    ...(selection.command !== undefined ? { codex: selection.command } : {}),
+  };
+  return {
+    ok: true as const,
+    remoteCase: { ...remoteCase, ...(Object.keys(commands).length > 0 ? { commands } : {}) },
+  };
+}
 
 const canonicalExistingPath = (value: string): string | undefined => {
   try {
@@ -873,6 +897,12 @@ export function registerSessionRoutes(
       if (remoteCase) {
         const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
         if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+        const resolved = resolveRemoteCodexCommand(
+          remoteCase,
+          host,
+          ctx.store.getCodexCommandProfiles(remoteProfileLibraryOwner(remoteCase.owner, owner))
+        );
+        if (!resolved.ok) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, resolved.error);
         // COD-104: durable remote sessions run the agent inside a remote tmux,
         // so the remote host must have tmux installed. Fail fast with a clear
         // message rather than spawning a pane that silently can't start.
@@ -881,7 +911,7 @@ export function registerSessionRoutes(
           return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error ?? 'remote tmux check failed');
         }
         workingDir = remoteCase.remotePath;
-        remote = toSessionRemote(host, remoteCase);
+        remote = toSessionRemote(host, resolved.remoteCase);
       } else if (!body.workingDir) {
         const linkedCases = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
         const linkedCase = isAdmin(req) ? linkedCases[body.caseName] : undefined;
@@ -3051,6 +3081,12 @@ export function registerSessionRoutes(
     if (remoteCase) {
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      const resolved = resolveRemoteCodexCommand(
+        remoteCase,
+        host,
+        ctx.store.getCodexCommandProfiles(remoteProfileLibraryOwner(remoteCase.owner, owner))
+      );
+      if (!resolved.ok) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, resolved.error);
 
       // Per-session config that is applied to the LOCAL tmux/CLI wrapper does not
       // cross ssh. Reject rather than pretend it worked; remote customization goes
@@ -3080,7 +3116,7 @@ export function registerSessionRoutes(
       }
 
       casePath = remoteCase.remotePath;
-      remote = toSessionRemote(host, remoteCase);
+      remote = toSessionRemote(host, resolved.remoteCase);
     } else if (dockerCase) {
       // Docker case: the CLI executes INSIDE a container via local tmux + `docker
       // exec`, so the LOCAL availability gates below don't apply. Mirror the remote

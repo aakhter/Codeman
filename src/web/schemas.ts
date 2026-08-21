@@ -568,12 +568,48 @@ const remoteWorkspacePathSchema = z
   .regex(/^\//, 'Remote path must be absolute')
   .refine((path) => !/[\0\r\n]/.test(path), 'Remote path must not contain NUL, CR, or LF');
 
+export const CodexCommandSelectionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('default') }),
+  z.object({ kind: z.literal('profile'), profileId: z.string().min(1).max(100) }),
+  z.object({ kind: z.literal('custom'), command: z.string().trim().min(1).max(300) }),
+]);
+
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
   hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
   remotePath: remoteWorkspacePathSchema,
   commands: RemoteCommandOverridesSchema.optional(),
+  codexCommandSelection: CodexCommandSelectionSchema.optional(),
 });
+
+// ========== Saved Codex Command Profiles ==========
+
+const codexCommandProfileNameSchema = z.string().trim().min(1).max(60);
+const codexCommandProfileCommandSchema = z.string().trim().min(1).max(300);
+
+export const CodexCommandProfileCreateSchema = z
+  .object({
+    name: codexCommandProfileNameSchema,
+    command: codexCommandProfileCommandSchema,
+  })
+  .strict();
+
+export const CodexCommandProfileUpdateSchema = z
+  .object({
+    name: codexCommandProfileNameSchema.optional(),
+    command: codexCommandProfileCommandSchema.optional(),
+    confirmReferencedUpdate: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => value.name !== undefined || value.command !== undefined, {
+    message: 'At least one profile field must be provided',
+  });
+
+export const CodexCommandProfileParamsSchema = z
+  .object({
+    id: z.string().trim().min(1).max(100),
+  })
+  .strict();
 
 export const UpdateCaseSchema = z
   .object({
@@ -588,6 +624,7 @@ export const UpdateCaseSchema = z
       .optional(),
     remotePath: remoteWorkspacePathSchema.optional(),
     commands: RemoteCommandOverridesSchema.optional(),
+    codexCommandSelection: CodexCommandSelectionSchema.optional(),
     defaultGroupId: z.string().min(1).max(100).nullable().optional(),
   })
   .refine(
@@ -597,6 +634,7 @@ export const UpdateCaseSchema = z
       value.hostId ||
       value.remotePath ||
       value.commands ||
+      value.codexCommandSelection ||
       value.defaultGroupId !== undefined,
     {
       message: 'At least one case parameter must be provided',

@@ -2983,10 +2983,12 @@
               </div>
               <span class="form-hint">Absolute path on the remote host. Codeman will not create or delete it.</span>
             </div>
-            <div class="form-row">
-              <label>Codex Command Override</label>
-              <input type="text" id="remoteCaseCodexCommand" placeholder="exec codx personal" autocomplete="off" autocapitalize="off" spellcheck="false">
-              <span class="form-hint">Optional per-case Codex command for this remote environment.</span>
+            <div class="form-row remote-codex-profile-row">
+              <label for="remoteCaseCodexProfile">Codex command</label>
+              <div class="remote-codex-profile-controls"><select id="remoteCaseCodexProfile" onchange="app.onRemoteCaseCodexProfileChanged()" disabled><option value="default">Default</option></select><button type="button" class="btn-toolbar btn-sm" id="manageCodexCommandProfiles" onclick="app.openCodexCommandProfileManager()">Manage</button></div>
+              <input type="text" id="remoteCaseCodexProfilePreview" readonly aria-label="Selected Codex command preview">
+              <div id="remoteCaseCodexCommandCustom" class="hidden"><label for="remoteCaseCodexCommandCustomInput">Custom command</label><input type="text" id="remoteCaseCodexCommandCustomInput" oninput="app.onRemoteCaseCodexProfileChanged(true)" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+              <span class="form-hint">Use a saved command, the host default, or a case-specific custom command.</span>
             </div>
             <!-- COD-105 — discover + attach existing remote tmux sessions this Codeman didn't create. -->
             <details class="advanced-options" id="remoteDiscoverSection">
@@ -3527,6 +3529,9 @@
         <div id="commandPaletteList" class="command-palette-list"></div>
       </div>
     </div>
+
+    <!-- Codex Command Profile Manager -->
+    <div class="modal" id="codexCommandProfileManager"><div class="modal-backdrop" onclick="app.closeCodexCommandProfileManager()"></div><div class="modal-content codex-command-profile-manager" role="dialog" aria-modal="true" aria-labelledby="codexCommandProfileManagerTitle"><div class="modal-header"><h3 id="codexCommandProfileManagerTitle">Codex command profiles</h3><button class="modal-close" onclick="app.closeCodexCommandProfileManager()" aria-label="Close">&times;</button></div><div class="modal-body"><div id="codexCommandProfileList"></div><button type="button" class="btn-toolbar" id="codexCommandProfileNew" onclick="app.newCodexCommandProfile()">New profile</button><div id="codexCommandProfileEditor" class="hidden"><label for="codexCommandProfileName">Name</label><input id="codexCommandProfileName" type="text"><label for="codexCommandProfileCommand">Command</label><input id="codexCommandProfileCommand" type="text"><button type="button" class="btn-toolbar btn-primary" id="codexCommandProfileSave" onclick="app.saveCodexCommandProfile()">Save</button><button type="button" class="btn-toolbar" id="codexCommandProfileDelete" onclick="app.deleteCodexCommandProfile()">Delete</button></div></div></div></div>
 
     <!-- Session Manager Modal -->
     <div class="modal" id="sessionManagerModal">

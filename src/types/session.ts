@@ -136,6 +136,9 @@ export interface RemoteCase {
   owner?: string;
   hostId: string;
   remotePath: string;
+  /** Selected owner-private saved Codex command profile. */
+  codexCommandProfileId?: string;
+  /** Custom or legacy command overrides. */
   commands?: Partial<Record<RemoteCommandMode, string>>;
 }
 

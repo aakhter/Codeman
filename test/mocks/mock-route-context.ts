@@ -123,6 +123,8 @@ export function createMockRouteContext(options?: {
       setCaseDefaultGroup: vi.fn(),
       renameCaseDefaultGroup: vi.fn(),
       deleteCaseDefaultGroup: vi.fn(),
+      getCodexCommandProfiles: vi.fn(() => []),
+      setCodexCommandProfiles: vi.fn(),
       getAggregateStats: vi.fn(() => ({ totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 })),
       getGlobalStats: vi.fn(() => ({ sessionsCreated: 0 })),
       getDailyStats: vi.fn(() => []),

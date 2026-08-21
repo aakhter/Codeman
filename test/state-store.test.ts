@@ -194,6 +194,37 @@ describe('StateStore', () => {
     });
   });
 
+  describe('Codex command profiles', () => {
+    it('isolates profiles by owner and clones profiles at the store boundary', () => {
+      const store = new StateStore(testFilePath);
+      const aliceProfiles = [{ id: 'personal', name: 'Personal', command: 'exec codx personal' }];
+
+      store.setCodexCommandProfiles('alice', aliceProfiles);
+      store.setCodexCommandProfiles('bob', [{ id: 'work', name: 'Work', command: 'exec codx work' }]);
+      aliceProfiles[0].name = 'Changed input';
+
+      const aliceRead = store.getCodexCommandProfiles('alice');
+      aliceRead[0].name = 'Changed output';
+
+      expect(store.getCodexCommandProfiles('alice')).toEqual([
+        { id: 'personal', name: 'Personal', command: 'exec codx personal' },
+      ]);
+      expect(store.getCodexCommandProfiles('bob')).toEqual([{ id: 'work', name: 'Work', command: 'exec codx work' }]);
+      expect(store.getCodexCommandProfiles('constructor')).toEqual([]);
+    });
+
+    it('persists profiles across restart and includes them in the serialized state', () => {
+      const store = new StateStore(testFilePath);
+      const profiles = [{ id: 'personal', name: 'Personal', command: 'exec codx personal' }];
+
+      store.setCodexCommandProfiles('alice', profiles);
+      store.flushAll();
+
+      expect(JSON.parse(readFileSync(testFilePath, 'utf-8')).codexCommandProfiles).toEqual({ alice: profiles });
+      expect(new StateStore(testFilePath).getCodexCommandProfiles('alice')).toEqual(profiles);
+    });
+  });
+
   describe('demoteOrRemoveSession and pinned cleanup (COD-142)', () => {
     it('should preserve a pinned session as a stopped record on kill', () => {
       const store = new StateStore(testFilePath);

@@ -168,6 +168,11 @@ export interface CaseInfo {
     username: string;
     path: string;
     commands?: Record<string, string>;
+    /** The persisted/default/custom Codex command choice, safe for this viewer. */
+    codexCommandSelection?:
+      | { kind: 'default' }
+      | { kind: 'custom'; commandPreview: string }
+      | { kind: 'profile'; profileId: string; name?: string; commandPreview?: string };
   };
   /** Docker case metadata for display and session creation */
   docker?: {

@@ -37,6 +37,7 @@ import {
   createInitialGlobalStats,
   TokenStats,
   TokenUsageEntry,
+  type CodexCommandProfile,
 } from './types.js';
 import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
 import { dataPath, CODEMAN_INSTANCE } from './config/instance.js';
@@ -301,6 +302,9 @@ export class StateStore {
     }
     if (this.state.caseDefaultGroups !== undefined) {
       parts.push(`"caseDefaultGroups":${JSON.stringify(this.state.caseDefaultGroups)}`);
+    }
+    if (this.state.codexCommandProfiles !== undefined) {
+      parts.push(`"codexCommandProfiles":${JSON.stringify(this.state.codexCommandProfiles)}`);
     }
     // ⚠️ This function is a hand-written ALLOWLIST, not a serializer over the
     // whole state: a key absent here is silently dropped on every save, however
@@ -752,6 +756,21 @@ export class StateStore {
     const ownerDefaults = { ...existing };
     delete ownerDefaults[caseName];
     this.state.caseDefaultGroups = { ...defaults, [owner]: ownerDefaults };
+    this.save();
+  }
+
+  /** Returns cloned owner-private Codex command profiles. */
+  getCodexCommandProfiles(owner: string): CodexCommandProfile[] {
+    const profiles = this.state.codexCommandProfiles;
+    if (!profiles || !Object.hasOwn(profiles, owner)) return [];
+
+    return profiles[owner].map((profile) => ({ ...profile }));
+  }
+
+  /** Persists cloned owner-private Codex command profiles. */
+  setCodexCommandProfiles(owner: string, profiles: CodexCommandProfile[]): void {
+    const clonedProfiles = profiles.map((profile) => ({ ...profile }));
+    this.state.codexCommandProfiles = { ...(this.state.codexCommandProfiles ?? {}), [owner]: clonedProfiles };
     this.save();
   }
 

@@ -158,6 +158,11 @@ const SAFE_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
 const DOCKER_EXPORTS_DIR = dataPath('docker-exports');
 /** Auto-created host profile for the one-click "Run in Docker" case flow. */
 const DEFAULT_DOCKER_HOST_ID = 'default';
+const SINGLE_USER_OWNER = '@single';
+
+function codexProfileOwner(owner: string | undefined): string {
+  return owner ?? SINGLE_USER_OWNER;
+}
 
 /** App version for export manifests (best-effort read of package.json). */
 const APP_VERSION = (() => {
@@ -336,6 +341,70 @@ export function registerCaseRoutes(
   app: FastifyInstance,
   ctx: EventPort & ConfigPort & SessionPort & TabLayoutPort
 ): void {
+  const selectionMetadata = (
+    remoteCase: { codexCommandProfileId?: string; commands?: Record<string, string> },
+    owner: string | undefined,
+    viewer: string | undefined
+  ) => {
+    if (remoteCase.codexCommandProfileId !== undefined) {
+      if (owner !== viewer) return { kind: 'profile' as const, profileId: remoteCase.codexCommandProfileId };
+      const profile = ctx.store
+        .getCodexCommandProfiles(codexProfileOwner(viewer))
+        .find((candidate) => candidate.id === remoteCase.codexCommandProfileId);
+      return profile
+        ? {
+            kind: 'profile' as const,
+            profileId: profile.id,
+            name: profile.name,
+            commandPreview: profile.command.slice(0, 120),
+          }
+        : { kind: 'profile' as const, profileId: remoteCase.codexCommandProfileId };
+    }
+    if (remoteCase.commands?.codex !== undefined) {
+      return { kind: 'custom' as const, commandPreview: remoteCase.commands.codex.slice(0, 120) };
+    }
+    return { kind: 'default' as const };
+  };
+
+  const applyCodexSelection = (
+    remoteCase: { codexCommandProfileId?: string; commands?: Record<string, string> },
+    selection:
+      | { kind: 'default' }
+      | { kind: 'profile'; profileId: string }
+      | { kind: 'custom'; command: string }
+      | undefined,
+    owner: string | undefined
+  ):
+    | { ok: true; value: { codexCommandProfileId?: string; commands?: Record<string, string> } }
+    | { ok: false; error: string } => {
+    if (!selection) {
+      return {
+        ok: true,
+        value: {
+          ...(remoteCase.codexCommandProfileId !== undefined
+            ? { codexCommandProfileId: remoteCase.codexCommandProfileId }
+            : {}),
+          ...(remoteCase.commands && Object.keys(remoteCase.commands).length > 0
+            ? { commands: remoteCase.commands }
+            : {}),
+        },
+      };
+    }
+    const profiles = ctx.store.getCodexCommandProfiles(codexProfileOwner(owner));
+    if (selection.kind === 'profile' && !profiles.some((profile) => profile.id === selection.profileId)) {
+      return { ok: false, error: 'Saved Codex command profile is unavailable' };
+    }
+    const { codex: _codex, ...otherCommands } = remoteCase.commands ?? {};
+    const commands = selection.kind === 'custom' ? { ...otherCommands, codex: selection.command } : otherCommands;
+    return {
+      ok: true,
+      value: {
+        ...(selection.kind === 'profile' ? { codexCommandProfileId: selection.profileId } : {}),
+        ...(Object.keys(commands).length > 0 ? { commands } : {}),
+      },
+    };
+  };
+
   async function resolveAccessibleCase(req: FastifyRequest, name: string): Promise<CaseInfo | null> {
     const user = getAuthUser(req);
     const remoteCase = (await readRemoteCases(CODEMAN_CONFIG_DIR)).find(
@@ -355,6 +424,7 @@ export function registerCaseRoutes(
           username: host.username,
           path: remoteCase.remotePath,
           commands: remoteCase.commands ?? host.commands,
+          codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, ownerFor(req)),
         },
       };
     }
@@ -473,6 +543,7 @@ export function registerCaseRoutes(
           username: host.username,
           path: remoteCase.remotePath,
           commands: remoteCase.commands ?? host.commands,
+          codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, ownerFor(req)),
         },
       };
       const existingIndex = cases.findIndex((item) => item.name === remoteCase.name);
@@ -895,7 +966,11 @@ export function registerCaseRoutes(
   });
 
   app.post('/api/cases/remote-link', async (req): Promise<ApiResponse<{ case: unknown }>> => {
-    const remoteCase = { ...parseBody(RemoteCaseLinkSchema, req.body), type: 'remote' as const, owner: ownerFor(req) };
+    const input = parseBody(RemoteCaseLinkSchema, req.body);
+    const selection = applyCodexSelection({ commands: input.commands }, input.codexCommandSelection, ownerFor(req));
+    if (!selection.ok) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, selection.error);
+    const { commands: _commands, codexCommandSelection: _codexCommandSelection, ...remoteInput } = input;
+    const remoteCase = { ...remoteInput, ...selection.value, type: 'remote' as const, owner: ownerFor(req) };
     const hosts = await readRemoteHosts(CODEMAN_CONFIG_DIR);
     const host = hosts.find((item) => item.id === remoteCase.hostId);
     if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
@@ -1444,15 +1519,28 @@ export function registerCaseRoutes(
     if (remoteCaseIndex !== -1) {
       const hostId = update.hostId ?? remoteCases[remoteCaseIndex].hostId;
       const remotePath = update.remotePath ?? remoteCases[remoteCaseIndex].remotePath;
-      const commands = update.commands ?? remoteCases[remoteCaseIndex].commands;
+      const currentRemoteCase = remoteCases[remoteCaseIndex];
+      const selected = applyCodexSelection(
+        update.commands === undefined ? currentRemoteCase : { ...currentRemoteCase, commands: update.commands },
+        update.codexCommandSelection,
+        currentRemoteCase.owner ?? ownerFor(req)
+      );
+      if (!selected.ok) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, selected.error);
+      const {
+        codexCommandProfileId: _previousProfileId,
+        commands: _previousCommands,
+        ...remoteWithoutSelection
+      } = currentRemoteCase;
+      const commands = selected.value.commands;
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
 
       const nextRemoteCase = {
-        ...remoteCases[remoteCaseIndex],
+        ...remoteWithoutSelection,
         name: nextName,
         hostId,
         remotePath,
+        ...selected.value,
         ...(commands ? { commands } : {}),
         type: 'remote' as const,
       };
@@ -1470,6 +1558,7 @@ export function registerCaseRoutes(
           username: host.username,
           path: remotePath,
           commands: commands ?? host.commands,
+          codexCommandSelection: selectionMetadata(nextRemoteCase, nextRemoteCase.owner, ownerFor(req)),
         },
       };
       persistDefaultGroupUpdate();
@@ -1481,7 +1570,7 @@ export function registerCaseRoutes(
       (item) => item.name === originalName && canAccessOwned(user, item.owner)
     );
     if (dockerCaseIndex !== -1) {
-      if (update.path || update.hostId || update.remotePath || update.commands) {
+      if (update.path || update.hostId || update.remotePath || update.commands || update.codexCommandSelection) {
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Docker case updates only support renaming');
       }
       const currentDockerCase = dockerCases[dockerCaseIndex];
