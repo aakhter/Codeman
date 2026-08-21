@@ -2276,6 +2276,9 @@ export class Session extends EventEmitter {
   }
 
   private _handleTerminalOutput(data: string): void {
+    // Invalidate idle decisions for every raw PTY chunk, including bytes held
+    // back by the sanitizer while it waits for the rest of an incomplete CSI.
+    this._terminalActivityEpoch++;
     // COD-189: shell burst tracking runs on the SHARED output path — shell
     // sessions have their own onData handlers and never pass through the
     // interactive-session hooks.
@@ -2382,7 +2385,6 @@ export class Session extends EventEmitter {
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
     this._markActivity();
-    this._terminalActivityEpoch++;
     this.emit('terminal', data);
     this.emit('output', data);
   }
@@ -3993,6 +3995,10 @@ export class Session extends EventEmitter {
       return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
     }
     if (this._mux && this._muxSession) {
+      // Codex fresh-thread commands intentionally do not update lastSubmitAt:
+      // they are not viewer-history prompts. They still invalidate any idle
+      // decision once the command reaches the transport boundary.
+      if (isCodexFreshThread) this._terminalActivityEpoch++;
       const result = await this._mux.sendCheckpointCommand(this.id, data);
       if (isClear && !result.ok) {
         this._checkpointAwaitingInstantClear = false;

@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
 import type { SessionActivityProjection } from '../src/types/session.js';
 
 type SessionContractAccess = {
   _handleTerminalOutput(data: string): void;
   _markWorking(): void;
+  _findRecentOwnedCodexConversationIds: () => Promise<string[]>;
+  _autoOps: { readonly activeCheckpointRunId: string | undefined };
+  _mux: { sendCheckpointCommand: ReturnType<typeof vi.fn> } | null;
+  _muxSession: { muxName: string } | null;
 };
 
 function contractAccess(session: Session): SessionContractAccess {
@@ -69,5 +73,57 @@ describe('Session agent activity contract', () => {
     expect(session.terminalActivityEpoch).toBe(initialEpoch + 3);
     access._markWorking();
     expect(session.terminalActivityEpoch).toBe(initialEpoch + 3);
+  });
+
+  it('advances the terminal activity epoch when output is buffered as an incomplete CSI sequence', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const initialEpoch = session.terminalActivityEpoch;
+
+    contractAccess(session)._handleTerminalOutput('\x1b[?104');
+
+    expect(session.terminalActivityEpoch).toBe(initialEpoch + 1);
+  });
+
+  it('advances the epoch for a delivered Codex checkpoint command without changing viewer submit time', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    const access = contractAccess(session);
+    const sendCheckpointCommand = vi.fn(async () => ({ ok: true as const, attempt: 1 }));
+    access._findRecentOwnedCodexConversationIds = async () => [];
+    access._mux = { sendCheckpointCommand };
+    access._muxSession = { muxName: 'codeman-checkpoint-contract' };
+    const initialEpoch = session.terminalActivityEpoch;
+
+    expect(await session.writeCheckpointViaMux('/clear\r')).toEqual({ ok: true, attempt: 1 });
+
+    expect(sendCheckpointCommand).toHaveBeenCalledOnce();
+    expect(session.terminalActivityEpoch).toBe(initialEpoch + 1);
+    expect(session.lastSubmitAt).toBe(0);
+  });
+
+  it('does not advance the epoch when a Codex checkpoint is cancelled before delivery', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    const access = contractAccess(session);
+    let resolveSnapshot!: (ids: string[]) => void;
+    access._findRecentOwnedCodexConversationIds = () =>
+      new Promise<string[]>((resolve) => {
+        resolveSnapshot = resolve;
+      });
+    let activeRunRead = 0;
+    access._autoOps = {
+      get activeCheckpointRunId() {
+        return activeRunRead++ === 0 ? 'run-before' : 'run-after';
+      },
+    };
+    const sendCheckpointCommand = vi.fn(async () => ({ ok: true as const, attempt: 1 }));
+    access._mux = { sendCheckpointCommand };
+    access._muxSession = { muxName: 'codeman-cancelled-checkpoint-contract' };
+    const initialEpoch = session.terminalActivityEpoch;
+
+    const delivery = session.writeCheckpointViaMux('/new\r');
+    resolveSnapshot([]);
+
+    expect(await delivery).toMatchObject({ ok: false, error: 'checkpoint run cancelled before delivery' });
+    expect(sendCheckpointCommand).not.toHaveBeenCalled();
+    expect(session.terminalActivityEpoch).toBe(initialEpoch);
   });
 });
