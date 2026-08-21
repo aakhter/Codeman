@@ -49,6 +49,7 @@ const remoteStore = vi.hoisted(() => ({
     hostId: string;
     remotePath: string;
     commands?: Record<string, string>;
+    codexCommandProfileId?: string;
     owner?: string;
   }>,
   tmuxCheck: { ok: true, tmuxPath: '/usr/bin/tmux' } as { ok: boolean; tmuxPath?: string; error?: string },
@@ -427,6 +428,169 @@ describe('session-routes', () => {
       const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
       expect(created.workingDir).toBe('/srv/legacy/work');
       expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName: 'legacy-remote' });
+    });
+
+    it.each([
+      {
+        selection: 'profile',
+        remoteCase: { codexCommandProfileId: 'personal-codex' },
+        profiles: [{ id: 'personal-codex', name: 'Personal', command: 'exec codex --profile personal' }],
+        expected: 'exec codex --profile personal',
+      },
+      {
+        selection: 'custom',
+        remoteCase: { commands: { codex: 'exec codex --model o3' } },
+        profiles: [],
+        expected: 'exec codex --model o3',
+      },
+      { selection: 'default', remoteCase: {}, profiles: [], expected: 'exec codex --host-default' },
+    ])(
+      'uses the $selection Codex command selection before creating a remote session',
+      async ({ remoteCase, profiles, expected }) => {
+        remoteStore.hosts = [
+          {
+            id: 'gpu-box',
+            label: 'GPU Box',
+            host: '10.0.0.42',
+            username: 'ubuntu',
+            commands: { codex: 'exec codex --host-default' },
+          },
+        ];
+        remoteStore.cases = [
+          { name: 'codex-work', type: 'remote', hostId: 'gpu-box', remotePath: '/srv/codex', ...remoteCase },
+        ];
+        harness.ctx.store.getCodexCommandProfiles.mockReturnValue(profiles);
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName: 'codex-work', mode: 'codex' },
+        });
+        expect(response.statusCode).toBe(200);
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.remote?.commands?.codex).toBe(expected);
+      }
+    );
+
+    it('fails a missing selected profile before the remote tmux probe or Session construction', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' }];
+      remoteStore.cases = [
+        {
+          name: 'missing-profile',
+          type: 'remote',
+          hostId: 'gpu-box',
+          remotePath: '/srv/codex',
+          codexCommandProfileId: 'deleted-profile',
+        },
+      ];
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        payload: { caseName: 'missing-profile', mode: 'codex' },
+      });
+      expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+      expect(JSON.parse(response.body)).toMatchObject({
+        errorCode: ApiErrorCode.OPERATION_FAILED,
+        error: 'Saved Codex command profile is unavailable',
+      });
+      expect(checkRemoteTmuxProbe).not.toHaveBeenCalled();
+      expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    });
+
+    it('fails Quick Start for a missing selected profile before the remote tmux probe or Session construction', async () => {
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' }];
+      remoteStore.cases = [
+        {
+          name: 'quick-missing-profile',
+          type: 'remote',
+          hostId: 'gpu-box',
+          remotePath: '/srv/codex',
+          codexCommandProfileId: 'deleted-profile',
+        },
+      ];
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/quick-start',
+        payload: { caseName: 'quick-missing-profile', mode: 'codex' },
+      });
+
+      expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+      expect(JSON.parse(response.body)).toMatchObject({
+        errorCode: ApiErrorCode.OPERATION_FAILED,
+        error: 'Saved Codex command profile is unavailable',
+      });
+      expect(checkRemoteTmuxProbe).not.toHaveBeenCalled();
+      expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    });
+
+    it('launches a Bob-owned selected profile when an admin creates a remote session', async () => {
+      vi.stubEnv('CODEMAN_MULTIUSER', '1');
+      await harness.app.close();
+      harness = await createEnvelopeHarness(registerSessionRoutes, { username: 'root', role: 'admin' });
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' }];
+      remoteStore.cases = [
+        {
+          name: 'bob-profile-session',
+          type: 'remote',
+          owner: 'bob',
+          hostId: 'gpu-box',
+          remotePath: '/srv/bob',
+          codexCommandProfileId: 'bob-profile',
+        },
+      ];
+      harness.ctx.store.getCodexCommandProfiles.mockImplementation((owner: string) =>
+        owner === 'bob' ? [{ id: 'bob-profile', name: 'Bob', command: 'exec codex --profile bob' }] : []
+      );
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName: 'bob-profile-session', mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.remote?.commands?.codex).toBe('exec codex --profile bob');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('launches a Bob-owned selected profile when an admin uses Quick Start', async () => {
+      vi.stubEnv('CODEMAN_MULTIUSER', '1');
+      await harness.app.close();
+      harness = await createEnvelopeHarness(registerSessionRoutes, { username: 'root', role: 'admin' });
+      remoteStore.hosts = [{ id: 'gpu-box', label: 'GPU Box', host: '10.0.0.42', username: 'ubuntu' }];
+      remoteStore.cases = [
+        {
+          name: 'bob-profile-quick',
+          type: 'remote',
+          owner: 'bob',
+          hostId: 'gpu-box',
+          remotePath: '/srv/bob',
+          codexCommandProfileId: 'bob-profile',
+        },
+      ];
+      harness.ctx.store.getCodexCommandProfiles.mockImplementation((owner: string) =>
+        owner === 'bob' ? [{ id: 'bob-profile', name: 'Bob', command: 'exec codex --profile bob' }] : []
+      );
+      const startInteractive = vi.spyOn(Session.prototype, 'startInteractive').mockResolvedValue(undefined);
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName: 'bob-profile-quick', mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const created = [...harness.ctx.sessions.values()].find((session) => session.remote?.remotePath === '/srv/bob');
+        expect(created?.remote?.commands?.codex).toBe('exec codex --profile bob');
+      } finally {
+        startInteractive.mockRestore();
+        vi.unstubAllEnvs();
+      }
     });
 
     it('still resolves a regular users own remote case', async () => {

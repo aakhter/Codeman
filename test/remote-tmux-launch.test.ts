@@ -74,6 +74,16 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).toContain('exec codx personal');
   });
 
+  it('uses an already-resolved saved profile command in the remote tmux session', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      sessionId: SESSION_ID,
+      remote: { ...baseRemote, commands: { codex: 'exec codex --profile saved-personal' } },
+    });
+
+    expect(command).toContain('exec codex --profile saved-personal');
+  });
+
   it('passes Codex bypass approvals flag to default remote Codex launches', () => {
     const command = buildRemoteLaunchCommand({
       mode: 'codex',

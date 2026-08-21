@@ -568,11 +568,18 @@ const remoteWorkspacePathSchema = z
   .regex(/^\//, 'Remote path must be absolute')
   .refine((path) => !/[\0\r\n]/.test(path), 'Remote path must not contain NUL, CR, or LF');
 
+export const CodexCommandSelectionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('default') }),
+  z.object({ kind: z.literal('profile'), profileId: z.string().min(1).max(100) }),
+  z.object({ kind: z.literal('custom'), command: z.string().trim().min(1).max(300) }),
+]);
+
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
   hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
   remotePath: remoteWorkspacePathSchema,
   commands: RemoteCommandOverridesSchema.optional(),
+  codexCommandSelection: CodexCommandSelectionSchema.optional(),
 });
 
 // ========== Saved Codex Command Profiles ==========
@@ -617,10 +624,15 @@ export const UpdateCaseSchema = z
       .optional(),
     remotePath: remoteWorkspacePathSchema.optional(),
     commands: RemoteCommandOverridesSchema.optional(),
+    codexCommandSelection: CodexCommandSelectionSchema.optional(),
   })
-  .refine((value) => value.name || value.path || value.hostId || value.remotePath || value.commands, {
-    message: 'At least one case parameter must be provided',
-  });
+  .refine(
+    (value) =>
+      value.name || value.path || value.hostId || value.remotePath || value.commands || value.codexCommandSelection,
+    {
+      message: 'At least one case parameter must be provided',
+    }
+  );
 
 export const CaseDefaultGroupSchema = z.object({
   groupId: z.string().min(1).max(100).nullable(),
