@@ -75,6 +75,13 @@ export interface TokenStats {
   lastUpdated: number;
 }
 
+/** A reusable owner-private Codex command. */
+export interface CodexCommandProfile {
+  id: string;
+  name: string;
+  command: string;
+}
+
 /**
  * Application configuration
  */
@@ -119,6 +126,8 @@ export interface AppState {
   tabLayouts?: Record<string, TabLayout>;
   /** Owner-and-case scoped default session group. null means intentional Ungrouped. */
   caseDefaultGroups?: Record<string, Record<string, string | null>>;
+  /** Owner-private reusable Codex command profiles. */
+  codexCommandProfiles?: Record<string, CodexCommandProfile[]>;
   /** Cron-style scheduled jobs, keyed by job ID. */
   cronJobs?: Record<string, CronJob>;
   /** Scheduled job run history, keyed by run ID. */
