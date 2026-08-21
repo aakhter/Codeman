@@ -285,6 +285,50 @@ describe('session agent activity coordinator', () => {
   });
 
   describe('3. synchronous unknown transitions', () => {
+    it.each([
+      { label: 'local', remote: undefined },
+      { label: 'remote', remote: { host: 'example' } },
+    ])('keeps $label Codex terminal output non-observable and directly deliverable', ({ remote }) => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = {
+        ...session(),
+        id: `codex-${remote ? 'remote' : 'local'}`,
+        mode: 'codex' as const,
+        claudeSessionId: null,
+        remote,
+      };
+      coordinator.attachSession(target);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+
+      coordinator.onTerminalOutput(target);
+
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+      expect(coordinator.decisionForRawIdle(target)).toMatchObject({
+        settleEndedEarly: false,
+        presentToHuman: true,
+        autonomyBlocked: false,
+        observation: 'not_observable',
+      });
+    });
+
+    it('keeps observable Claude output unknown and suppresses raw idle with live evidence', () => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.setObservation(target, 'none', 0);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+
+      coordinator.onTerminalOutput(target);
+      expect(coordinator.project(target).activityStatus).toBe('checking_agents');
+
+      coordinator.setObservation(target, 'live', 0);
+      expect(coordinator.decisionForRawIdle(target)).toMatchObject({
+        presentToHuman: false,
+        autonomyBlocked: true,
+        observation: 'live',
+      });
+    });
+
     it('marks startup, re-enable, and a new identity unknown before reconciliation', () => {
       const coordinator = new SessionAgentActivityCoordinator();
       const target = session() as CoordinatorSession & { claudeSessionId: string | null };

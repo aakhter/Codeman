@@ -605,6 +605,10 @@ export class SessionAgentActivityCoordinator {
     record.eventReconciliations.clear();
     record.reconciliationResults.clear();
     this.abortInspection(record);
+    if (session.mode === 'codex' && !this.isObservable(session)) {
+      this.setRecordObservation(record, 'not_observable');
+      return;
+    }
     this.setRecordObservation(record, 'unknown');
     if (this.inspect && this.isObservable(session)) this.scheduleReconcile(record, 0);
   }
