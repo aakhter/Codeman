@@ -58,6 +58,7 @@ import {
   type SessionRemote,
   type SessionSource,
   type SessionDocker,
+  type SessionActivityProjection,
 } from './types.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
 import { probeRemoteCliVersion } from './remote-hosts.js';
@@ -552,6 +553,11 @@ export class Session extends EventEmitter {
   private ptyProcess: pty.IPty | null = null;
   private _pid: number | null = null;
   private _status: SessionStatus = 'idle';
+  private _activityProjection: SessionActivityProjection = {
+    activityStatus: 'idle',
+    activityStatusSince: null,
+  };
+  private _terminalActivityEpoch = 0;
   private _currentTaskId: string | null = null;
 
   // COD-118: bound repeated non-zero interactive-PTY exits. Recorded in the
@@ -1205,6 +1211,25 @@ export class Session extends EventEmitter {
 
   get isWorking(): boolean {
     return this._isWorking;
+  }
+
+  /** Current server-derived activity. This projection is never persisted by toState(). */
+  get activityProjection(): SessionActivityProjection {
+    return { ...this._activityProjection };
+  }
+
+  /** Monotonic invalidation token for decisions based on terminal quiescence. */
+  get terminalActivityEpoch(): number {
+    return this._terminalActivityEpoch;
+  }
+
+  setActivityProjection(projection: SessionActivityProjection): void {
+    const isAgentActivity =
+      projection.activityStatus === 'waiting_agents' || projection.activityStatus === 'checking_agents';
+    this._activityProjection = {
+      ...projection,
+      activityStatusSince: isAgentActivity ? projection.activityStatusSince : null,
+    };
   }
 
   /**
@@ -2357,6 +2382,7 @@ export class Session extends EventEmitter {
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
     this._markActivity();
+    this._terminalActivityEpoch++;
     this.emit('terminal', data);
     this.emit('output', data);
   }
@@ -2895,6 +2921,7 @@ export class Session extends EventEmitter {
     if (this._isWorking) return;
     this._isWorking = true;
     this._status = 'busy';
+    this._terminalActivityEpoch++;
     this.emit('working');
     this._autoOps.notifyWorking();
   }
@@ -3318,6 +3345,7 @@ export class Session extends EventEmitter {
     if (!this._isWorking) {
       this._isWorking = true;
       this._status = 'busy';
+      this._terminalActivityEpoch++;
       this.emit('working');
       this._autoOps.notifyWorking();
     }
@@ -3837,6 +3865,7 @@ export class Session extends EventEmitter {
   private _trackSubmit(data: string): void {
     if (data.includes('\r') || data.includes('\n')) {
       this._lastSubmitAt = Date.now();
+      this._terminalActivityEpoch++;
       // Codex last-response resolution compares submit times ACROSS sessions (a
       // sibling codex pane's submit would otherwise be mistaken for this one's),
       // so codex panes additionally publish theirs to the shared map.
