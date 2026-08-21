@@ -22,6 +22,10 @@ function listenerDeps(frame = '› ready for another prompt') {
     cleanupRespawnOnExit: vi.fn(),
     getStore: vi.fn(() => ({ updateRalphState: vi.fn() })),
     registerAttachment: vi.fn(async () => undefined),
+    agentActivity: {
+      terminalActivity: vi.fn(),
+      sessionExited: vi.fn(),
+    },
     mux: { capturePaneBuffer: vi.fn(() => frame) },
   } as unknown as Parameters<typeof createSessionListeners>[1];
 }
@@ -34,6 +38,29 @@ afterEach(() => {
 });
 
 describe('session listener wiring', () => {
+  it('invalidates coordinated activity before output, working, and exit broadcasts', () => {
+    const session = new Session({ id: 'wiring-agent-activity', workingDir: '/tmp', mode: 'claude' });
+    const order: string[] = [];
+    const deps = listenerDeps();
+    deps.agentActivity.terminalActivity.mockImplementation(() => order.push('activity'));
+    deps.agentActivity.sessionExited.mockImplementation(() => order.push('exit-activity'));
+    deps.batchTerminalData.mockImplementation(() => order.push('terminal'));
+    deps.broadcast.mockImplementation((event: string) => order.push(event));
+    const refs = createSessionListeners(session, deps as never);
+
+    refs.terminalActivity();
+    refs.terminal('x');
+    expect(order.slice(0, 2)).toEqual(['activity', 'terminal']);
+
+    order.length = 0;
+    refs.working();
+    expect(order[0]).toBe('activity');
+
+    order.length = 0;
+    refs.exit(0);
+    expect(order[0]).toBe('exit-activity');
+  });
+
   it('forwards the attachment request source through registerAttachment', async () => {
     const session = new Session({ id: 'wiring-attach-source-test', workingDir: '/tmp', mode: 'codex' });
     const registerAttachment = vi.fn(async () => undefined);

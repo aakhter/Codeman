@@ -179,6 +179,11 @@ export interface CoordinatorOptions {
   clearTimeout?: typeof clearTimeout;
   inspectionDeadlineMs?: number;
   onDerivedIdle?: (session: CoordinatorSession) => void;
+  onProjectionChanged?: (
+    session: CoordinatorSession,
+    previous: SessionActivityProjection,
+    current: SessionActivityProjection
+  ) => void;
   scheduler?: BoundedActivityScheduler;
 }
 
@@ -304,6 +309,7 @@ export class SessionAgentActivityCoordinator {
   private readonly cancelTimer: typeof clearTimeout;
   private readonly inspectionDeadlineMs: number;
   private readonly onDerivedIdle?: (session: CoordinatorSession) => void;
+  private readonly onProjectionChanged?: CoordinatorOptions['onProjectionChanged'];
   private readonly scheduler: BoundedActivityScheduler;
 
   constructor(options: CoordinatorOptions = {}) {
@@ -313,6 +319,7 @@ export class SessionAgentActivityCoordinator {
     this.cancelTimer = options.clearTimeout ?? clearTimeout;
     this.inspectionDeadlineMs = options.inspectionDeadlineMs ?? 5000;
     this.onDerivedIdle = options.onDerivedIdle;
+    this.onProjectionChanged = options.onProjectionChanged;
     this.scheduler = options.scheduler ?? new BoundedActivityScheduler();
   }
 
@@ -964,6 +971,12 @@ export class SessionAgentActivityCoordinator {
     if (observation !== 'unknown' && record.retryReason !== 'evidence') this.cancelRetry(record);
     record.projection = projectAgentActivity(record.session.status, observation, record.projection, this.now());
     record.session.setActivityProjection(record.projection);
+    if (
+      previousProjection.activityStatus !== record.projection.activityStatus ||
+      previousProjection.activityStatusSince !== record.projection.activityStatusSince
+    ) {
+      this.onProjectionChanged?.(record.session, { ...previousProjection }, { ...record.projection });
+    }
     const wasDerived =
       previousProjection.activityStatus === 'waiting_agents' || previousProjection.activityStatus === 'checking_agents';
     if (wasDerived && record.projection.activityStatus === 'idle' && record.session.status === 'idle') {

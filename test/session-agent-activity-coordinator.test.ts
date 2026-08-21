@@ -28,6 +28,22 @@ function deferred<T>() {
 describe('session agent activity coordinator', () => {
   afterEach(() => vi.useRealTimers());
   describe('1. projection', () => {
+    it('notifies its owner whenever evidence changes the effective projection', () => {
+      const onProjectionChanged = vi.fn();
+      const coordinator = new SessionAgentActivityCoordinator({ onProjectionChanged });
+      const attached = session();
+      coordinator.attachSession(attached);
+      onProjectionChanged.mockClear();
+
+      coordinator.setObservation(attached, 'live', 1);
+
+      expect(onProjectionChanged).toHaveBeenCalledWith(
+        attached,
+        expect.objectContaining({ activityStatus: 'checking_agents' }),
+        expect.objectContaining({ activityStatus: 'waiting_agents' })
+      );
+    });
+
     it.each<[AgentObservation, string]>([
       ['none', 'idle'],
       ['live', 'waiting_agents'],

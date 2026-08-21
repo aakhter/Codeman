@@ -14,6 +14,22 @@ import {
 } from '../../src/services/unified-session-service.js';
 
 describe('mergeUnifiedSessions', () => {
+  it('publishes runtime-only activity from the live source without accepting persisted activity', () => {
+    const merged = mergeUnifiedSessions({
+      persisted: [{ id: 's1', status: 'idle' }],
+      live: [
+        {
+          id: 's1',
+          status: 'idle',
+          activityStatus: 'waiting_agents',
+          activityStatusSince: 123,
+        },
+      ],
+    });
+
+    expect(merged[0]).toMatchObject({ activityStatus: 'waiting_agents', activityStatusSince: 123 });
+  });
+
   it('dedupes the same sessionId across live + persisted into one item', () => {
     const merged = mergeUnifiedSessions({
       live: [{ id: 's1', status: 'working', isWorking: true }],

@@ -20,6 +20,17 @@ function contractAccess(session: Session): SessionContractAccess {
 }
 
 describe('Session agent activity contract', () => {
+  it('emits terminalActivity when delivered input advances the activity epoch', () => {
+    const session = new Session({ id: 'activity-input-event', workingDir: '/tmp', mode: 'claude' });
+    contractAccess(session).ptyProcess = { write: vi.fn() };
+    const observed = vi.fn();
+    session.on('terminalActivity', observed);
+
+    expect(session.write('continue\r')).toBe(true);
+
+    expect(observed).toHaveBeenCalledTimes(1);
+  });
+
   it('stores a runtime-only activity projection without changing raw status helpers', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'claude' });
     const projection: SessionActivityProjection = {

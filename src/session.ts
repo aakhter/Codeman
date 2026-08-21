@@ -2293,6 +2293,7 @@ export class Session extends EventEmitter {
     // Invalidate idle decisions for every raw PTY chunk, including bytes held
     // back by the sanitizer while it waits for the rest of an incomplete CSI.
     this._terminalActivityEpoch++;
+    this.emit('terminalActivity');
     // COD-189: shell burst tracking runs on the SHARED output path — shell
     // sessions have their own onData handlers and never pass through the
     // interactive-session hooks.
@@ -3882,6 +3883,7 @@ export class Session extends EventEmitter {
     if (data.includes('\r') || data.includes('\n')) {
       this._lastSubmitAt = Date.now();
       this._terminalActivityEpoch++;
+      this.emit('terminalActivity');
       // Codex last-response resolution compares submit times ACROSS sessions (a
       // sibling codex pane's submit would otherwise be mistaken for this one's),
       // so codex panes additionally publish theirs to the shared map.
@@ -4014,8 +4016,10 @@ export class Session extends EventEmitter {
         // Codex fresh-thread commands intentionally do not update lastSubmitAt:
         // they are not viewer-history prompts, but successful delivery still
         // invalidates pending idle decisions.
-        if (isCodexFreshThread) this._terminalActivityEpoch++;
-        else this._trackSubmit(data);
+        if (isCodexFreshThread) {
+          this._terminalActivityEpoch++;
+          this.emit('terminalActivity');
+        } else this._trackSubmit(data);
       }
       if (isClear && !result.ok) {
         this._checkpointAwaitingInstantClear = false;

@@ -112,9 +112,24 @@ describe('PUT /api/settings — partial body must not reset service toggles', ()
 
     expect(res.statusCode).toBe(200);
     expect(subagentWatcher.start).toHaveBeenCalledTimes(1);
+    expect(harness.ctx.agentActivity.setTrackingEnabled).toHaveBeenCalledWith(true);
+    expect(harness.ctx.agentActivity.setTrackingEnabled.mock.invocationCallOrder[0]).toBeLessThan(
+      subagentWatcher.start.mock.invocationCallOrder[0]
+    );
     // Unrelated watchers stay untouched.
     expect(imageWatcher.stop).not.toHaveBeenCalled();
     expect(workflowRunWatcher.stop).not.toHaveBeenCalled();
+  });
+
+  it('routes an explicit tracking disable through the activity coordinator', async () => {
+    const res = await harness.app.inject({
+      method: 'PUT',
+      url: '/api/settings',
+      payload: { subagentTrackingEnabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(harness.ctx.agentActivity.setTrackingEnabled).toHaveBeenCalledWith(false);
   });
 
   it('still stops a watcher when the body explicitly disables it', async () => {

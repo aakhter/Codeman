@@ -117,6 +117,26 @@ describe('GET /api/sessions/unified', () => {
     expect(body.data.total).toBeGreaterThanOrEqual(1);
   });
 
+  it('surfaces the live runtime activity projection without persisting it', async () => {
+    const ctx = makeLiveCtx();
+    const live = ctx.sessions.get('test-session-1') as unknown as {
+      activityProjection: { activityStatus: string; activityStatusSince: number | null };
+      toState(): Record<string, unknown>;
+    };
+    Object.defineProperty(live, 'activityProjection', {
+      configurable: true,
+      value: { activityStatus: 'waiting_agents', activityStatusSince: 456 },
+    });
+    expect(live.toState()).not.toHaveProperty('activityStatus');
+    harness = await createEnvelopeHarness(ctx);
+
+    const res = await harness.app.inject({ method: 'GET', url: '/api/sessions/unified' });
+
+    expect(
+      res.json().data.sessions.find((row: { sessionId: string }) => row.sessionId === 'test-session-1')
+    ).toMatchObject({ activityStatus: 'waiting_agents', activityStatusSince: 456 });
+  });
+
   it('filters with ?q=', async () => {
     harness = await createEnvelopeHarness(makeLiveCtx());
     const res = await harness.app.inject({

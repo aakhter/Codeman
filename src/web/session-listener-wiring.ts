@@ -33,9 +33,11 @@ import type { CheckpointProgress } from '../session-auto-ops.js';
 import { approvalsAvailableForMode, sessionWaits } from './session-wait-registry.js';
 import { approvalInbox } from './approval-inbox.js';
 import { buildPaneCapture } from './pane-capture.js';
+import type { AgentActivityControllerPort } from './ports/agent-activity-port.js';
 
 /** Stored listener references for session cleanup (prevents memory leaks) */
 export interface SessionListenerRefs {
+  terminalActivity: () => void;
   terminal: (data: string) => void;
   clearTerminal: () => void;
   needsRefresh: () => void;
@@ -73,6 +75,7 @@ export interface SessionListenerRefs {
 
 /** Dependencies injected by WebServer — keeps listener creation decoupled from server internals. */
 interface SessionListenerDeps {
+  agentActivity: AgentActivityControllerPort;
   mux: TerminalMultiplexer;
   broadcast(event: string, data: unknown): void;
   batchTerminalData(sessionId: string, data: string): void;
@@ -98,6 +101,9 @@ interface SessionListenerDeps {
  */
 export function createSessionListeners(session: Session, deps: SessionListenerDeps): SessionListenerRefs {
   return {
+    terminalActivity: () => {
+      deps.agentActivity.terminalActivity(session);
+    },
     // ─── Terminal Output ─────────────────────────────────────
 
     /** Batches PTY output → broadcasts `session:terminal` at 16-50ms intervals */
@@ -155,6 +161,7 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
 
     /** Broadcasts `session:exit` + `session:updated` — PTY process exited; cleans up respawn, timers, listeners */
     exit: (code) => {
+      deps.agentActivity.sessionExited(session);
       // Before anything that can throw: a caller blocked on this session must learn
       // the process died rather than sit until its timeout.
       //
@@ -228,6 +235,7 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
 
     /** Broadcasts `session:working` — Claude started processing */
     working: () => {
+      deps.agentActivity.terminalActivity(session);
       sessionWaits.notifySignal(session.id, 'working');
       // An idle-prompt inbox item means "composer is waiting"; any working
       // transition means input arrived, so the item is moot. ONLY the idle
@@ -484,6 +492,7 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
 
 /** Attach all listeners to a session. */
 export function attachSessionListeners(session: Session, refs: SessionListenerRefs): void {
+  session.on('terminalActivity', refs.terminalActivity);
   session.on('terminal', refs.terminal);
   session.on('clearTerminal', refs.clearTerminal);
   session.on('needsRefresh', refs.needsRefresh);
@@ -521,6 +530,7 @@ export function attachSessionListeners(session: Session, refs: SessionListenerRe
 
 /** Detach all listeners from a session (prevents memory leaks from closure references). */
 export function detachSessionListeners(session: Session, refs: SessionListenerRefs): void {
+  session.off('terminalActivity', refs.terminalActivity);
   session.off('terminal', refs.terminal);
   session.off('clearTerminal', refs.clearTerminal);
   session.off('needsRefresh', refs.needsRefresh);

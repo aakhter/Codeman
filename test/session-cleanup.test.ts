@@ -1,11 +1,22 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
-import { WebServer } from '../src/web/server.js';
+import { WebServer, subagentConversationIdForCleanup } from '../src/web/server.js';
+import { Session } from '../src/session.js';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
 const TEST_PORT = 3120;
 const CASES_DIR = join(homedir(), 'codeman-cases');
+
+describe('subagent cleanup identity', () => {
+  it('uses Claude conversation identity rather than the Codeman session id', () => {
+    const session = new Session({ id: 'codeman-id', workingDir: '/tmp', mode: 'claude' });
+    session.adoptClaudeSessionId('claude-conversation-id');
+
+    expect(subagentConversationIdForCleanup(session)).toBe('claude-conversation-id');
+    expect(subagentConversationIdForCleanup({ id: 'codeman-only', claudeSessionId: undefined })).toBeUndefined();
+  });
+});
 
 /**
  * Session Cleanup Tests

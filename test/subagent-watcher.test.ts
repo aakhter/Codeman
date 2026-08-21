@@ -1010,6 +1010,8 @@ describe('SubagentWatcher', () => {
     });
 
     it('should transition to completed when file becomes stale', async () => {
+      const inspectLiveness = vi.fn(async () => 'not_live' as const);
+      watcher.setProcessLivenessProvider(inspectLiveness);
       const mockRl = createMockRl();
       mockCreateInterface.mockReturnValue(mockRl);
       mockCreateReadStream.mockReturnValue({ destroy: vi.fn() });
@@ -1054,7 +1056,33 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(11000);
 
       expect(completedHandler).toHaveBeenCalled();
+      expect(inspectLiveness).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'stale' }));
       expect(watcher.getSubagents()[0].status).toBe('completed');
+    });
+
+    it('keeps stale agents live when exact process evidence is unavailable', async () => {
+      watcher.setProcessLivenessProvider(vi.fn(async () => 'unknown'));
+      const state = watcher as unknown as { agentInfo: Map<string, SubagentInfo>; liveAgentKeys: Set<string> };
+      const info: SubagentInfo = {
+        agentKey: serializeSubagentKey('-project1', 'session1', 'uncertain'),
+        agentId: 'uncertain',
+        projectHash: '-project1',
+        sessionId: 'session1',
+        filePath: '/stale/agent-uncertain.jsonl',
+        startedAt: new Date().toISOString(),
+        lastActivityAt: 0,
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 1,
+      };
+      state.agentInfo.set(info.agentKey, info);
+      state.liveAgentKeys.add(info.agentKey);
+
+      watcher.start();
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(info.status).toBe('active');
     });
   });
 
@@ -1900,6 +1928,7 @@ describe('SubagentWatcher', () => {
     });
 
     it('should return false for already completed agent', async () => {
+      watcher.setProcessLivenessProvider(vi.fn(async () => 'not_live'));
       const mockRl = createMockRl();
       mockCreateInterface.mockReturnValue(mockRl);
       mockCreateReadStream.mockReturnValue({ destroy: vi.fn() });
