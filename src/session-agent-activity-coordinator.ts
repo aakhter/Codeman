@@ -113,6 +113,16 @@ export interface ActivityEvent {
   readonly externalSourceSequence?: number;
 }
 
+export interface ActivityBookkeepingSnapshot {
+  allocatedEvents: number;
+  retiredEvents: number;
+  reconciliationResults: number;
+  eventReconciliations: number;
+  activeConsumers: number;
+}
+
+const MAX_EVENT_BOOKKEEPING = 128;
+
 interface SessionRecord {
   session: CoordinatorSession;
   identityGeneration: number;
@@ -126,11 +136,15 @@ interface SessionRecord {
   lastDecisionSequence: number;
   completionWatermark: number;
   allocatedEvents: Map<number, ActivityEvent>;
+  retiredEvents: Map<number, ActivityEvent>;
+  activeEventConsumers: Map<number, number>;
+  retireWhenInactive: Set<number>;
   eventReconciliations: Map<number, EventReconciliation>;
   reconciliationResults: Set<ReconciliationResult>;
   inFlight?: SharedInspection;
   retryAttempt: number;
   retryTimer?: ReturnType<typeof setTimeout>;
+  retryReason?: 'state' | 'evidence';
   settleTimer?: ReturnType<typeof setTimeout>;
   settleGeneration: number;
   immediateRevisionRetry: boolean;
@@ -320,6 +334,9 @@ export class SessionAgentActivityCoordinator {
       lastDecisionSequence: 0,
       completionWatermark: 0,
       allocatedEvents: new Map(),
+      retiredEvents: new Map(),
+      activeEventConsumers: new Map(),
+      retireWhenInactive: new Set(),
       eventReconciliations: new Map(),
       reconciliationResults: new Set(),
       retryAttempt: 0,
@@ -355,6 +372,9 @@ export class SessionAgentActivityCoordinator {
     record.lastDecisionSequence = 0;
     record.completionWatermark = 0;
     record.allocatedEvents.clear();
+    record.retiredEvents.clear();
+    record.activeEventConsumers.clear();
+    record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
     record.reconciliationResults.clear();
     this.abortInspection(record);
@@ -369,8 +389,12 @@ export class SessionAgentActivityCoordinator {
     record.trackingGeneration += 1;
     record.decisionToken += 1;
     record.allocatedEvents.clear();
+    record.retiredEvents.clear();
+    record.activeEventConsumers.clear();
+    record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
     record.reconciliationResults.clear();
+    this.cancelRetry(record);
     this.abortInspection(record);
     this.setRecordObservation(record, 'not_observable');
   }
@@ -448,6 +472,7 @@ export class SessionAgentActivityCoordinator {
     if (!record.tracking) return;
     if (semanticRevision < record.semanticRevision) return;
     if (semanticRevision > record.semanticRevision) {
+      this.cancelRetry(record);
       record.decisionToken += 1;
       this.abortInspection(record);
     }
@@ -486,6 +511,7 @@ export class SessionAgentActivityCoordinator {
     record.reconciliationResults.clear();
     this.abortInspection(record);
     this.setRecordObservation(record, 'unknown');
+    if (this.inspect && this.isObservable(session)) this.scheduleReconcile(record, 0);
   }
 
   project(session: CoordinatorSession): SessionActivityProjection {
@@ -523,7 +549,7 @@ export class SessionAgentActivityCoordinator {
     event: ActivityEvent,
     options: ReconcileConsumerOptions = {}
   ): Promise<ReconciliationResult | false> {
-    this.requireEvent(session, event);
+    this.requireActiveEvent(session, event);
     return this.reconcileConsumer(session, event, options);
   }
 
@@ -552,10 +578,7 @@ export class SessionAgentActivityCoordinator {
 
   private startSharedInspection(record: SessionRecord, kind: ActivityJobClass): SharedInspection | undefined {
     const session = record.session;
-    if (record.retryTimer) {
-      this.cancelTimer(record.retryTimer);
-      record.retryTimer = undefined;
-    }
+    this.cancelRetry(record);
     const project = this.projectFor(session);
     if (!project) return undefined;
 
@@ -600,10 +623,14 @@ export class SessionAgentActivityCoordinator {
         if (!this.isLiveSnapshot(snapshot) || controller.signal.aborted) return false as const;
         if (evidence.semanticRevision !== record.semanticRevision) return false as const;
         const authoritativeEvidence = Object.freeze({ ...evidence });
-        record.retryAttempt = authoritativeEvidence.observation === 'unknown' ? record.retryAttempt + 1 : 0;
+        const uncertain =
+          authoritativeEvidence.observation === 'unknown' ||
+          authoritativeEvidence.processReason === 'no_registered_role_signature';
+        record.retryAttempt = uncertain ? record.retryAttempt + 1 : 0;
+        if (!uncertain) this.cancelRetry(record);
         this.commitEvidence(session, authoritativeEvidence);
-        if (record.observation === 'unknown' && !record.settleTimer) {
-          this.scheduleReconcile(record, this.nextRetryDelay(session));
+        if (uncertain && !record.settleTimer) {
+          this.scheduleReconcile(record, this.nextRetryDelay(session), 'evidence');
         }
         return authoritativeEvidence;
       })
@@ -629,6 +656,9 @@ export class SessionAgentActivityCoordinator {
     deadlineAt: number
   ): Promise<ReconciliationResult | false> {
     const consumer = Symbol('inspection-consumer');
+    if (event) {
+      record.activeEventConsumers.set(event.sequence, (record.activeEventConsumers.get(event.sequence) ?? 0) + 1);
+    }
     shared.consumers.add(consumer);
     return new Promise<ReconciliationResult | false>((resolve) => {
       let finished = false;
@@ -637,6 +667,13 @@ export class SessionAgentActivityCoordinator {
         finished = true;
         this.cancelTimer(deadline);
         shared.consumers.delete(consumer);
+        if (event) {
+          const remaining = (record.activeEventConsumers.get(event.sequence) ?? 1) - 1;
+          if (remaining > 0) record.activeEventConsumers.set(event.sequence, remaining);
+          else record.activeEventConsumers.delete(event.sequence);
+          if (result === false || record.retireWhenInactive.has(event.sequence)) this.retireEvent(record, event);
+          this.trimBookkeeping(record);
+        }
         if (!shared.settled && shared.consumers.size === 0) shared.controller.abort();
         resolve(result);
       };
@@ -644,7 +681,7 @@ export class SessionAgentActivityCoordinator {
       void shared.promise.then((evidence) => {
         if (this.now() >= deadlineAt) return finish(false);
         if (evidence === false || !this.isLiveSnapshot(shared.snapshot)) return finish(false);
-        if (event && !this.isCurrentEvent(record, event)) return finish(false);
+        if (event && !this.isActiveEvent(record, event)) return finish(false);
         const result: ReconciliationResult = {
           event,
           identityGeneration: record.identityGeneration,
@@ -683,12 +720,16 @@ export class SessionAgentActivityCoordinator {
       externalSourceSequence,
     };
     record.allocatedEvents.set(event.sequence, event);
+    this.trimBookkeeping(record, event);
     return event;
   }
 
   completeEvent(session: CoordinatorSession, event: ActivityEvent): void {
     const record = this.requireEvent(session, event);
-    record.completionWatermark = Math.max(record.completionWatermark, event.sequence);
+    if (event.kind !== 'permission' && event.kind !== 'elicitation') {
+      record.completionWatermark = Math.max(record.completionWatermark, event.sequence);
+    }
+    this.retireEvent(record, event);
   }
 
   isAutonomyBlocked(session: CoordinatorSession): boolean {
@@ -702,7 +743,7 @@ export class SessionAgentActivityCoordinator {
     event: ActivityEvent,
     result: ReconciliationResult | false
   ): EventReconciliation {
-    const record = this.requireEvent(session, event);
+    const record = this.requireActiveEvent(session, event);
     if (!record.tracking) throw new Error('Agent tracking is disabled for this session');
     if (
       result === false ||
@@ -726,6 +767,7 @@ export class SessionAgentActivityCoordinator {
       evidence: result.evidence,
     };
     record.eventReconciliations.set(event.sequence, reconciliation);
+    this.trimBookkeeping(record, event);
     return reconciliation;
   }
 
@@ -755,7 +797,7 @@ export class SessionAgentActivityCoordinator {
     const immediate = event.kind === 'permission' || event.kind === 'elicitation';
     const quarantined =
       !immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence);
-    record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
+    if (!immediate) record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
     const ambiguous = this.isAmbiguous(record);
     const autonomyBlocked = this.isAutonomyBlocked(session);
     const freshExactProcessLive =
@@ -763,7 +805,7 @@ export class SessionAgentActivityCoordinator {
       reconciliation.evidence.observation === 'live' &&
       reconciliation.evidence.processReason === 'matching_process';
     const suppressible = record.observation === 'live' && (event.kind !== 'stop' || freshExactProcessLive);
-    return {
+    const decision: ActivityDecision = {
       event,
       settleEndedEarly,
       presentToHuman: immediate || (!quarantined && (ambiguous || !suppressible)),
@@ -790,23 +832,106 @@ export class SessionAgentActivityCoordinator {
             ? reconciliation.evidence.processReason
             : record.processReason,
     };
+    this.retireEvent(record, event);
+    this.trimBookkeeping(record);
+    return decision;
+  }
+
+  bookkeepingSnapshot(session: CoordinatorSession): ActivityBookkeepingSnapshot {
+    const record = this.requireRecord(session);
+    let activeConsumers = 0;
+    for (const count of record.activeEventConsumers.values()) activeConsumers += count;
+    return {
+      allocatedEvents: record.allocatedEvents.size,
+      retiredEvents: record.retiredEvents.size,
+      reconciliationResults: record.reconciliationResults.size,
+      eventReconciliations: record.eventReconciliations.size,
+      activeConsumers,
+    };
   }
 
   private requireEvent(session: CoordinatorSession, event: ActivityEvent): SessionRecord {
     const record = this.requireRecord(session);
-    if (!this.isCurrentEvent(record, event)) {
+    if (!this.isKnownEvent(record, event)) {
       throw new Error('Activity event is stale or was not allocated by this coordinator');
     }
     return record;
   }
 
-  private isCurrentEvent(record: SessionRecord, event: ActivityEvent): boolean {
+  private requireActiveEvent(session: CoordinatorSession, event: ActivityEvent): SessionRecord {
+    const record = this.requireRecord(session);
+    if (!this.isActiveEvent(record, event)) {
+      throw new Error('Activity event is stale or was not allocated by this coordinator');
+    }
+    return record;
+  }
+
+  private hasCurrentIdentity(record: SessionRecord, event: ActivityEvent): boolean {
     return (
       event.sessionId === record.session.id &&
       event.identityGeneration === record.identityGeneration &&
-      event.trackingGeneration === record.trackingGeneration &&
-      record.allocatedEvents.get(event.sequence) === event
+      event.trackingGeneration === record.trackingGeneration
     );
+  }
+
+  private isActiveEvent(record: SessionRecord, event: ActivityEvent): boolean {
+    return this.hasCurrentIdentity(record, event) && record.allocatedEvents.get(event.sequence) === event;
+  }
+
+  private isKnownEvent(record: SessionRecord, event: ActivityEvent): boolean {
+    return (
+      this.hasCurrentIdentity(record, event) &&
+      (record.allocatedEvents.get(event.sequence) === event || record.retiredEvents.get(event.sequence) === event)
+    );
+  }
+
+  private retireEvent(record: SessionRecord, event: ActivityEvent): void {
+    if (!this.hasCurrentIdentity(record, event)) return;
+    if ((record.activeEventConsumers.get(event.sequence) ?? 0) > 0) {
+      record.retireWhenInactive.add(event.sequence);
+      return;
+    }
+    record.retireWhenInactive.delete(event.sequence);
+    if (record.allocatedEvents.get(event.sequence) === event) record.allocatedEvents.delete(event.sequence);
+    if (record.eventReconciliations.get(event.sequence)?.event === event) {
+      record.eventReconciliations.delete(event.sequence);
+    }
+    for (const result of record.reconciliationResults) {
+      if (result.event === event) record.reconciliationResults.delete(result);
+    }
+    record.retiredEvents.delete(event.sequence);
+    record.retiredEvents.set(event.sequence, event);
+    while (record.retiredEvents.size > MAX_EVENT_BOOKKEEPING) {
+      const oldest = record.retiredEvents.keys().next().value as number | undefined;
+      if (oldest === undefined) break;
+      record.retiredEvents.delete(oldest);
+    }
+  }
+
+  private trimBookkeeping(record: SessionRecord, protectedEvent?: ActivityEvent): void {
+    while (record.allocatedEvents.size > MAX_EVENT_BOOKKEEPING) {
+      let candidate: ActivityEvent | undefined;
+      for (const event of record.allocatedEvents.values()) {
+        if (event !== protectedEvent && (record.activeEventConsumers.get(event.sequence) ?? 0) === 0) {
+          candidate = event;
+          break;
+        }
+      }
+      if (!candidate) break;
+      this.retireEvent(record, candidate);
+    }
+    while (record.reconciliationResults.size > MAX_EVENT_BOOKKEEPING) {
+      const oldest = record.reconciliationResults.values().next().value as ReconciliationResult | undefined;
+      if (!oldest) break;
+      record.reconciliationResults.delete(oldest);
+      if (oldest.event && oldest.event !== protectedEvent) this.retireEvent(record, oldest.event);
+    }
+    while (record.eventReconciliations.size > MAX_EVENT_BOOKKEEPING) {
+      const oldest = record.eventReconciliations.values().next().value;
+      if (!oldest) break;
+      record.eventReconciliations.delete(oldest.event.sequence);
+      if (oldest.event !== protectedEvent) this.retireEvent(record, oldest.event);
+    }
   }
 
   private isObservable(session: CoordinatorSession): boolean {
@@ -843,20 +968,12 @@ export class SessionAgentActivityCoordinator {
     record.observation = observation;
     record.exactProcessLive = observation === 'live' && exactProcessLive;
     record.processReason = processReason;
-    if (observation !== 'unknown' && record.retryTimer) {
-      this.cancelTimer(record.retryTimer);
-      record.retryTimer = undefined;
-    }
+    if (observation !== 'unknown' && record.retryReason !== 'evidence') this.cancelRetry(record);
     record.projection = projectAgentActivity(record.session.status, observation, record.projection, this.now());
     record.session.setActivityProjection(record.projection);
     const wasDerived =
       previousProjection.activityStatus === 'waiting_agents' || previousProjection.activityStatus === 'checking_agents';
-    if (
-      wasDerived &&
-      observation === 'none' &&
-      record.projection.activityStatus === 'idle' &&
-      record.session.status === 'idle'
-    ) {
+    if (wasDerived && record.projection.activityStatus === 'idle' && record.session.status === 'idle') {
       this.onDerivedIdle?.(record.session);
     }
   }
@@ -918,20 +1035,29 @@ export class SessionAgentActivityCoordinator {
     return true;
   }
 
-  private scheduleReconcile(record: SessionRecord, delay: number): void {
-    if (record.retryTimer) this.cancelTimer(record.retryTimer);
+  private scheduleReconcile(record: SessionRecord, delay: number, reason: 'state' | 'evidence' = 'state'): void {
+    this.cancelRetry(record);
     const session = record.session;
+    record.retryReason = reason;
     record.retryTimer = this.scheduleTimer(() => {
       record.retryTimer = undefined;
-      if (this.recordFor(session) !== record || record.observation !== 'unknown') return;
+      record.retryReason = undefined;
+      if (this.recordFor(session) !== record || !record.tracking || !this.isObservable(session)) return;
+      if (reason === 'state' && record.observation !== 'unknown') return;
       record.immediateRevisionRetry = false;
       void this.reconcile(session, 'background');
     }, delay);
   }
 
+  private cancelRetry(record: SessionRecord): void {
+    if (record.retryTimer) this.cancelTimer(record.retryTimer);
+    record.retryTimer = undefined;
+    record.retryReason = undefined;
+  }
+
   private disposeRecord(record: SessionRecord): void {
     this.abortInspection(record);
-    if (record.retryTimer) this.cancelTimer(record.retryTimer);
+    this.cancelRetry(record);
     if (record.settleTimer) this.cancelTimer(record.settleTimer);
   }
 }

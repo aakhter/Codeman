@@ -265,6 +265,21 @@ describe('session agent activity coordinator', () => {
       expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
       expect(events.map((event) => event.externalSourceSequence)).toEqual([100, 99, 98, 97, 96]);
     });
+
+    it.each(['permission', 'elicitation'] as const)(
+      'keeps an older idle decision independent from immediate %s ordering',
+      (kind) => {
+        const coordinator = new SessionAgentActivityCoordinator();
+        const target = session();
+        coordinator.attachSession(target);
+        coordinator.setObservation(target, 'none', 0);
+        const pendingIdle = coordinator.allocateEvent(target, 'idle_prompt');
+        const immediate = coordinator.decisionForHook(target, kind);
+        expect(immediate.presentToHuman).toBe(true);
+        coordinator.completeEvent(target, immediate.event);
+        expect(coordinator.decisionForEvent(target, pendingIdle).quarantined).toBe(false);
+      }
+    );
   });
 
   describe('6. bounded inspection', () => {
@@ -420,6 +435,44 @@ describe('session agent activity coordinator', () => {
       expect(coordinator.nextRetryDelay(target)).toBe(0);
       await vi.advanceTimersByTimeAsync(0);
       expect(inspect).toHaveBeenCalledTimes(5);
+    });
+
+    it('reconciles immediately after terminal output and recovers from unknown', async () => {
+      vi.useFakeTimers();
+      const inspect = vi.fn(async () => ({ observation: 'none' as const, semanticRevision: 0 }));
+      const coordinator = new SessionAgentActivityCoordinator({ inspect });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.setObservation(target, 'none', 0);
+      coordinator.onTerminalOutput(target);
+      expect(coordinator.project(target).activityStatus).toBe('checking_agents');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inspect).toHaveBeenCalledTimes(1);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+    });
+
+    it('retries uncertain no-signature evidence while preserving stronger live projection', async () => {
+      vi.useFakeTimers();
+      const evidence = [
+        {
+          observation: 'unknown' as const,
+          semanticRevision: 0,
+          processReason: 'no_registered_role_signature' as const,
+        },
+        { observation: 'none' as const, semanticRevision: 0, processReason: 'no_matching_process' as const },
+      ];
+      const inspect = vi.fn(async () => evidence.shift()!);
+      const coordinator = new SessionAgentActivityCoordinator({ inspect });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.setObservation(target, 'live', 0);
+      await coordinator.reconcile(target);
+      expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+      await vi.advanceTimersByTimeAsync(249);
+      expect(inspect).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(inspect).toHaveBeenCalledTimes(2);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
     });
   });
 
@@ -599,6 +652,33 @@ describe('session agent activity coordinator', () => {
       expect(onDerivedIdle).toHaveBeenCalledTimes(1);
     });
 
+    it('emits one effective idle edge when tracking fallback ends a visible wait', () => {
+      const onDerivedIdle = vi.fn();
+      const coordinator = new SessionAgentActivityCoordinator({ onDerivedIdle });
+      const waiting = session();
+      coordinator.attachSession(waiting);
+      coordinator.onWatcherCount(waiting, 1, 1);
+      coordinator.trackingDisabled(waiting);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(1);
+      coordinator.trackingDisabled(waiting);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(1);
+
+      const checking = { ...session(), id: 'checking', claudeSessionId: 'checking-conversation' };
+      coordinator.attachSession(checking);
+      coordinator.trackingDisabled(checking);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(2);
+
+      const busy = { ...session(), id: 'busy', claudeSessionId: 'busy-conversation' } as CoordinatorSession & {
+        status: SessionStatus;
+      };
+      coordinator.attachSession(busy);
+      coordinator.onWatcherCount(busy, 1, 1);
+      busy.status = 'busy';
+      coordinator.project(busy);
+      coordinator.trackingDisabled(busy);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(2);
+    });
+
     it('does not end grace from event kind without fresh exact-zero reconciliation', async () => {
       vi.useFakeTimers();
       const onDerivedIdle = vi.fn();
@@ -651,7 +731,7 @@ describe('session agent activity coordinator', () => {
           });
         }
         await vi.advanceTimersByTimeAsync(2500);
-        expect(onDerivedIdle).not.toHaveBeenCalled();
+        expect(onDerivedIdle).toHaveBeenCalledTimes(change === 'tracking' ? 1 : 0);
         expect(coordinator.project(target).activityStatus).toBe(change === 'tracking' ? 'idle' : 'checking_agents');
       }
     );
@@ -721,6 +801,67 @@ describe('session agent activity coordinator', () => {
       coordinator.trackingEnabled(target);
       expect(() => coordinator.decisionForEvent(target, preDisableEvent)).toThrow(/stale/);
       expect(coordinator.project(target).activityStatus).toBe('checking_agents');
+    });
+
+    it('bounds decided and abandoned successful event bookkeeping', async () => {
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: async () => ({ observation: 'none', semanticRevision: 0 }),
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.setObservation(target, 'none', 0);
+      for (let index = 0; index < 500; index += 1) coordinator.decisionForHook(target, 'idle_prompt');
+      let snapshot = coordinator.bookkeepingSnapshot(target);
+      expect(snapshot.allocatedEvents).toBeLessThanOrEqual(128);
+      expect(snapshot.retiredEvents).toBeLessThanOrEqual(128);
+
+      for (let index = 0; index < 160; index += 1) {
+        const event = coordinator.allocateEvent(target, 'idle_prompt');
+        await coordinator.reconcileForEvent(target, event);
+      }
+      snapshot = coordinator.bookkeepingSnapshot(target);
+      expect(snapshot.allocatedEvents).toBeLessThanOrEqual(128);
+      expect(snapshot.reconciliationResults).toBeLessThanOrEqual(128);
+      expect(snapshot.eventReconciliations).toBeLessThanOrEqual(128);
+    });
+
+    it('retires timed-out events without evicting active consumers', async () => {
+      vi.useFakeTimers();
+      const pending = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const coordinator = new SessionAgentActivityCoordinator({ inspect: () => pending.promise });
+      const target = session();
+      coordinator.attachSession(target);
+      const consumers: Array<Promise<unknown>> = [];
+      for (let index = 0; index < 160; index += 1) {
+        const event = coordinator.allocateEvent(target, 'idle_prompt');
+        consumers.push(coordinator.reconcileForEvent(target, event, { deadlineMs: 10 }));
+      }
+      expect(coordinator.bookkeepingSnapshot(target).activeConsumers).toBe(160);
+      await vi.advanceTimersByTimeAsync(10);
+      await Promise.all(consumers);
+      const snapshot = coordinator.bookkeepingSnapshot(target);
+      expect(snapshot.activeConsumers).toBe(0);
+      expect(snapshot.allocatedEvents).toBeLessThanOrEqual(128);
+      expect(snapshot.retiredEvents).toBeLessThanOrEqual(128);
+      expect(snapshot.reconciliationResults).toBeLessThanOrEqual(128);
+    });
+
+    it('retires completed ownership after its active inspection consumer settles', async () => {
+      const pending = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const coordinator = new SessionAgentActivityCoordinator({ inspect: () => pending.promise });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const consumer = coordinator.reconcileForEvent(target, event);
+      coordinator.completeEvent(target, event);
+      expect(coordinator.bookkeepingSnapshot(target).activeConsumers).toBe(1);
+      pending.resolve({ observation: 'none', semanticRevision: 0 });
+      await expect(consumer).resolves.not.toBe(false);
+      expect(coordinator.bookkeepingSnapshot(target)).toMatchObject({
+        activeConsumers: 0,
+        allocatedEvents: 0,
+        reconciliationResults: 0,
+      });
     });
   });
 });
