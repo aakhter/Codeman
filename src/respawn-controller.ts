@@ -2661,7 +2661,7 @@ export class RespawnController extends EventEmitter {
     if (this.session.blocksIdleAutomation) {
       this.log(`Idle confirmation rejected - agent activity blocks automation (reason was: ${reason})`);
       this.logAction('detection', 'Rejected: agent activity unavailable');
-      this.setState('watching');
+      this.cancelIdleConfirmationForAgentActivity();
       return;
     }
 

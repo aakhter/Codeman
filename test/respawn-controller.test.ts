@@ -2651,17 +2651,34 @@ describe('RespawnController Hook-Based Idle Detection', () => {
     expect(typeof controller.signalIdlePrompt).toBe('function');
   });
 
-  it.each(['waiting_agents', 'checking_agents'])('rejects hook idle confirmation while %s', (activityStatus) => {
-    Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: true });
-    const cycleStarted = vi.fn();
-    controller.on('respawnCycleStarted', cycleStarted);
-    controller.start();
+  it.each(['waiting_agents', 'checking_agents'])(
+    'clears blocked idle_prompt evidence while %s and accepts a fresh signal after activity clears',
+    () => {
+      Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: true });
+      const cycleStarted = vi.fn();
+      controller.on('respawnCycleStarted', cycleStarted);
+      controller.start();
 
-    controller.signalIdlePrompt();
+      controller.signalIdlePrompt();
 
-    expect(cycleStarted).not.toHaveBeenCalled();
-    expect(controller.state).toBe('watching');
-  });
+      expect(cycleStarted).not.toHaveBeenCalled();
+      expect(controller.state).toBe('watching');
+      expect(controller.getDetectionStatus()).toMatchObject({
+        idlePromptReceived: false,
+        idlePromptTime: null,
+        stopHookReceived: false,
+        stopHookTime: null,
+      });
+      expect(controller.getDetectionStatus().confidenceLevel).toBeLessThan(100);
+      expect(controller.getActiveTimers().map((timer) => timer.name)).not.toEqual(
+        expect.arrayContaining(['hook-confirm', 'completion-confirm', 'no-output-fallback', 'pre-filter'])
+      );
+
+      Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: false });
+      controller.signalIdlePrompt();
+      expect(cycleStarted).toHaveBeenCalledTimes(1);
+    }
+  );
 
   it('cancels an armed hook confirmation when agent activity begins and permits a later confirmation', async () => {
     vi.useFakeTimers();
@@ -2693,6 +2710,15 @@ describe('RespawnController Hook-Based Idle Detection', () => {
 
     expect(cycleStarted).not.toHaveBeenCalled();
     expect(controller.state).toBe('watching');
+    expect(controller.getDetectionStatus().completionMessageDetected).toBe(false);
+    expect(controller.getActiveTimers().map((timer) => timer.name)).not.toEqual(
+      expect.arrayContaining(['hook-confirm', 'completion-confirm', 'no-output-fallback', 'pre-filter'])
+    );
+
+    Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: false });
+    session.simulateCompletionMessage();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(cycleStarted).toHaveBeenCalledTimes(1);
   });
 
   it('should set stopHookReceived in detection status when Stop hook signaled', () => {
