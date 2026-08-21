@@ -20,7 +20,7 @@
 - Test: `test/state-store.test.ts`
 - Test: `test/tab-layout-persistence.test.ts`
 
-- [ ] **Step 1: Write failing StateStore tests**
+- [x] **Step 1: Write failing StateStore tests**
 
 Add focused cases that distinguish an unset value from intentional Ungrouped and prove owner isolation, rename/delete lifecycle, and restart persistence:
 
@@ -41,7 +41,7 @@ expect(store.getCaseDefaultGroup('alice', 'nzbdav-next')).toBeUndefined();
 
 In the persistence test, flush and reconstruct `StateStore`, then assert the serialized `caseDefaultGroups` field and reloaded accessor value.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```bash
 npm test -- test/state-store.test.ts test/tab-layout-persistence.test.ts
@@ -49,7 +49,7 @@ npm test -- test/state-store.test.ts test/tab-layout-persistence.test.ts
 
 Expected: TypeScript/runtime failures because `caseDefaultGroups` and the four accessors do not exist.
 
-- [ ] **Step 3: Add the AppState field and serialization allowlist entry**
+- [x] **Step 3: Add the AppState field and serialization allowlist entry**
 
 Add this optional backward-compatible field:
 
@@ -66,7 +66,7 @@ if (this.state.caseDefaultGroups !== undefined) {
 }
 ```
 
-- [ ] **Step 4: Add typed StateStore accessors**
+- [x] **Step 4: Add typed StateStore accessors**
 
 Route schemas enforce the case-name and group-ID bounds before these accessors are called. Clone each changed level
 before saving:
@@ -104,7 +104,7 @@ deleteCaseDefaultGroup(owner: string, caseName: string): void {
 
 Add matching mocks to `createMockRouteContext().store`.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 ```bash
 npm test -- test/state-store.test.ts test/tab-layout-persistence.test.ts
@@ -124,7 +124,7 @@ Expected: both focused files pass and the commit contains only persistence/mocks
 - Modify: `src/web/routes/case-routes.ts`
 - Test: `test/routes/case-routes.test.ts`
 
-- [ ] **Step 1: Write failing route tests**
+- [x] **Step 1: Write failing route tests**
 
 Extend the case-route harness with an owner layout containing `group-nzbdav` and `group-tcc`. Add assertions for:
 
@@ -149,7 +149,7 @@ expect(ctx.store.setCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav', 
 
 Also test unknown group rejection without a store write, inaccessible/unknown case behavior, owner scoping, stale stored-ID clearing, case rename migration, and local/remote/Docker deletion cleanup.
 
-- [ ] **Step 2: Run the route file and verify RED**
+- [x] **Step 2: Run the route file and verify RED**
 
 ```bash
 npm test -- test/routes/case-routes.test.ts
@@ -157,7 +157,7 @@ npm test -- test/routes/case-routes.test.ts
 
 Expected: 404 for the new endpoint or missing schema/store calls.
 
-- [ ] **Step 3: Add the request schema and route capability**
+- [x] **Step 3: Add the request schema and route capability**
 
 In `schemas.ts` add:
 
@@ -178,7 +178,7 @@ export function registerCaseRoutes(
 
 `TabLayoutPort` already exposes the full `TabLayoutService`; do not modify or narrow that interface.
 
-- [ ] **Step 4: Extract one accessible-case resolver**
+- [x] **Step 4: Extract one accessible-case resolver**
 
 Refactor the existing `GET /api/cases/:name` lookup into a route-local helper that returns `CaseInfo | null` for the authenticated request. It must preserve current local, linked-local, remote, Docker, admin, and multi-user behavior. Reuse it for the existing detail endpoint and both new default-group endpoints; do not duplicate ownership rules.
 
@@ -190,7 +190,7 @@ async function resolveAccessibleCase(req: FastifyRequest, name: string): Promise
 
 Invalid names still return `INVALID_INPUT`; a valid but inaccessible or absent name returns `NOT_FOUND` without disclosing foreign metadata.
 
-- [ ] **Step 5: Implement GET and PUT endpoints**
+- [x] **Step 5: Implement GET and PUT endpoints**
 
 Use the authenticated layout owner and authoritative layout:
 
@@ -208,7 +208,7 @@ return { groupId: groupId ?? null, groups };
 
 For PUT, parse `CaseDefaultGroupSchema`, reject a non-null ID absent from the current layout, persist the value, and return the same `{ groupId, groups }` shape.
 
-- [ ] **Step 6: Wire case rename and deletion**
+- [x] **Step 6: Wire case rename and deletion**
 
 After each successful local/linked/remote/Docker rename branch, call:
 
@@ -224,7 +224,7 @@ ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
 
 Do not clear/migrate before the underlying case operation succeeds.
 
-- [ ] **Step 7: Verify GREEN and commit**
+- [x] **Step 7: Verify GREEN and commit**
 
 ```bash
 npm test -- test/routes/case-routes.test.ts test/ownership-scoping.test.ts
@@ -250,7 +250,7 @@ Expected: route and ownership tests pass with no foreign-group disclosure.
 - Test: `test/routes/session-routes-parent-lineage.test.ts`
 - Test: `test/run-mode-ui.test.ts`
 
-- [ ] **Step 1: Write failing service precedence tests**
+- [x] **Step 1: Write failing service precedence tests**
 
 Extend the TabLayoutService harness store with case-default get/set spies. Cover these exact outcomes:
 
@@ -270,7 +270,7 @@ expect(locationOf(await service.get('alice'), 'child').groupId).toBe('parent-gro
 
 Assert a case-default ref is not `placement: 'manual'`, an explicit ref is manual, `null` produces Ungrouped, and a deleted default is cleared then produces Ungrouped. Retain the existing rollback and concurrent-creation cases.
 
-- [ ] **Step 2: Write failing route/client propagation tests**
+- [x] **Step 2: Write failing route/client propagation tests**
 
 In `session-routes.test.ts`, require both endpoints to call:
 
@@ -284,7 +284,7 @@ and preserve `{ caseName: 'nzbdav', tabGroupId: 'group-tcc' }` for explicit plac
 
 In `run-mode-ui.test.ts`, require local Claude and Shell bodies to contain `caseName: 'launch-case'`, and retain the existing matrix proving all seven modes plus remote/Docker routes carry the case name.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
 ```bash
 npm test -- test/tab-layout-service.test.ts test/routes/session-routes.test.ts \
@@ -293,7 +293,7 @@ npm test -- test/tab-layout-service.test.ts test/routes/session-routes.test.ts \
 
 Expected: signature/expectation failures because case identity and default resolution are not wired.
 
-- [ ] **Step 4: Replace the positional placement argument with shared typed hints**
+- [x] **Step 4: Replace the positional placement argument with shared typed hints**
 
 Define the core hint beside `TabLayoutSnapshot` in `tab-layout-service.ts`:
 
@@ -325,7 +325,7 @@ async sessionCreated(
 
 Update `server.ts` so `addSession(session, options)` forwards the whole options object inside the existing rollback registration transaction.
 
-- [ ] **Step 5: Resolve precedence under the owner lock**
+- [x] **Step 5: Resolve precedence under the owner lock**
 
 Extend the service's store dependency pick with `getCaseDefaultGroup` and `setCaseDefaultGroup` so all default reads,
 stale clears, and layout mutations occur under the same owner queue.
@@ -345,7 +345,7 @@ const placementSource = explicitGroup ? 'explicit' : targetGroup === defaultGrou
 
 If `storedDefault` is a string but `defaultGroup` is absent, clear it to `null`. Reuse the existing descendant-block move. Keep `placement: 'manual'` for explicit moves; after a default move, remove only the created ref's `placement` field while preserving its other metadata. Add optional `placementSource` to the internal snapshot so routes know when the default changed first render.
 
-- [ ] **Step 6: Pass case identity from both routes**
+- [x] **Step 6: Pass case identity from both routes**
 
 For `POST /api/sessions`, pass `body.caseName` when supplied. Browser local Claude/Shell launches must send both the selected `caseName` and their existing working-directory information, allowing the route's current case resolution/security checks to remain authoritative.
 
@@ -361,7 +361,7 @@ const tabLayoutSnapshot = await ctx.addSession(session, options);
 
 Return `tabLayout` and `tabPlacements` when `tabGroupId` was requested or `placementSource === 'case-default'`.
 
-- [ ] **Step 7: Verify GREEN and commit**
+- [x] **Step 7: Verify GREEN and commit**
 
 ```bash
 npm test -- test/tab-layout-service.test.ts test/routes/session-routes.test.ts \
@@ -387,7 +387,7 @@ Expected: all precedence, route, lineage, and mode-matrix tests pass.
 - Create: `test/case-default-group-ui.browser.test.ts`
 - Test: `test/app-settings-structure.test.ts`
 
-- [ ] **Step 1: Write the failing browser and structure tests**
+- [x] **Step 1: Write the failing browser and structure tests**
 
 Build a Playwright fixture with two groups and mocked GET/PUT responses. Assert:
 
@@ -401,7 +401,7 @@ Build a Playwright fixture with two groups and mocked GET/PUT responses. Assert:
 
 Add structural assertions for IDs `caseDefaultGroup`, `caseDefaultGroupMobile`, their labels, and the new handlers.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```bash
 npm test -- test/app-settings-structure.test.ts
@@ -410,7 +410,7 @@ npx vitest run --config config/vitest.browser.config.ts test/case-default-group-
 
 Expected: missing markup/method/control failures.
 
-- [ ] **Step 3: Add accessible desktop and mobile markup**
+- [x] **Step 3: Add accessible desktop and mobile markup**
 
 Add this control to each case-settings popover, with the mobile ID suffix on the second copy:
 
@@ -424,7 +424,7 @@ Add this control to each case-settings popover, with the mobile ID suffix on the
 <span class="form-hint">Place future sessions for this case in this group</span>
 ```
 
-- [ ] **Step 4: Implement one shared controller path**
+- [x] **Step 4: Implement one shared controller path**
 
 Add helpers in `session-ui.js` that operate on both controls:
 
@@ -449,7 +449,7 @@ _renderCaseDefaultGroupOptions(data) {
 
 Call `loadCaseDefaultGroup(caseName)` whenever either case-settings popover opens. Guard stale async responses with a monotonically increasing request token so changing cases while a request is in flight cannot paint the wrong case's groups.
 
-- [ ] **Step 5: Add scoped styling**
+- [x] **Step 5: Add scoped styling**
 
 Use the existing popover form colors and sizing:
 
@@ -469,7 +469,7 @@ Use the existing popover form colors and sizing:
 
 Do not change vertical-rail group headings, rows, or session geometry.
 
-- [ ] **Step 6: Verify GREEN and commit**
+- [x] **Step 6: Verify GREEN and commit**
 
 ```bash
 npm test -- test/app-settings-structure.test.ts test/run-mode-ui.test.ts
@@ -490,7 +490,7 @@ Expected: desktop/mobile behavior and frontend syntax pass.
 - Create: `.changeset/cod-343-default-case-group.md`
 - Modify: `docs/superpowers/plans/2026-08-21-cod-343-default-case-group.md` only to check completed boxes during execution
 
-- [ ] **Step 1: Add the patch changeset**
+- [x] **Step 1: Add the patch changeset**
 
 ```md
 ---
@@ -500,7 +500,7 @@ Expected: desktop/mobile behavior and frontend syntax pass.
 Add owner-scoped default session groups to Case Settings.
 ```
 
-- [ ] **Step 2: Run all focused regression suites**
+- [x] **Step 2: Run all focused regression suites**
 
 ```bash
 npm test -- test/state-store.test.ts test/tab-layout-persistence.test.ts \
@@ -514,7 +514,7 @@ npx vitest run --config config/vitest.browser.config.ts test/case-default-group-
 
 Expected: zero failures. Never run bare `npm test` or unscoped Vitest in a managed Codeman session.
 
-- [ ] **Step 3: Run static and production-build gates**
+- [x] **Step 3: Run static and production-build gates**
 
 ```bash
 npm run typecheck
@@ -529,7 +529,7 @@ git diff --check
 
 Record warnings separately from failures.
 
-- [ ] **Step 4: Run isolated realistic smoke**
+- [x] **Step 4: Run isolated realistic smoke**
 
 ```bash
 node /home/ubuntu/.codex/skills/codeman-prod-realistic-smoke/scripts/run-codeman-prod-smoke.mjs --skip-claude
@@ -537,7 +537,7 @@ node /home/ubuntu/.codex/skills/codeman-prod-realistic-smoke/scripts/run-codeman
 
 Record the exact summary, artifacts, console/page errors, long-scrollback result, and cleanup status.
 
-- [ ] **Step 5: Commit release metadata and plan completion**
+- [x] **Step 5: Commit release metadata and plan completion**
 
 ```bash
 git add .changeset/cod-343-default-case-group.md \
