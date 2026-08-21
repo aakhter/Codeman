@@ -150,6 +150,7 @@ interface InspectionSnapshot {
 
 interface SharedInspection {
   controller: AbortController;
+  schedulerKey: symbol;
   token: number;
   snapshot: InspectionSnapshot;
   promise: Promise<Readonly<AgentEvidence> | false>;
@@ -175,8 +176,9 @@ export interface ReconcileConsumerOptions {
 }
 
 interface ScheduledJob<T> {
-  key: string;
+  key: string | symbol;
   kind: ActivityJobClass;
+  order: number;
   run: () => Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
@@ -190,6 +192,7 @@ export class BoundedActivityScheduler {
   private running = 0;
   private runningBackground = 0;
   private consecutiveForeground = 0;
+  private nextOrder = 0;
 
   constructor(
     private readonly concurrency = 4,
@@ -197,9 +200,9 @@ export class BoundedActivityScheduler {
     private readonly foregroundBurst = 3
   ) {}
 
-  enqueue<T>(key: string, kind: ActivityJobClass, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  enqueue<T>(key: string | symbol, kind: ActivityJobClass, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const job: ScheduledJob<T> = { key, kind, run, resolve, reject, signal };
+      const job: ScheduledJob<T> = { key, kind, order: this.nextOrder++, run, resolve, reject, signal };
       (kind === 'foreground' ? this.foreground : this.background).push(job as ScheduledJob<unknown>);
       if (signal)
         signal.addEventListener('abort', () => this.cancelQueued(job as ScheduledJob<unknown>), { once: true });
@@ -207,10 +210,22 @@ export class BoundedActivityScheduler {
     });
   }
 
-  cancelKey(key: string): void {
+  cancelKey(key: string | symbol): void {
     for (const queue of [this.foreground, this.background]) {
       for (const job of [...queue]) if (job.key === key) this.cancelQueued(job);
     }
+  }
+
+  promoteQueuedToForeground(key: string | symbol): boolean {
+    const index = this.background.findIndex((job) => job.key === key);
+    if (index < 0) return false;
+    const [job] = this.background.splice(index, 1);
+    job.kind = 'foreground';
+    const insertionIndex = this.foreground.findIndex((queued) => queued.order > job.order);
+    if (insertionIndex < 0) this.foreground.push(job);
+    else this.foreground.splice(insertionIndex, 0, job);
+    this.drain();
+    return true;
   }
 
   private cancelQueued(job: ScheduledJob<unknown>): void {
@@ -522,14 +537,16 @@ export class SessionAgentActivityCoordinator {
     const deadlineMs = options.deadlineMs ?? this.inspectionDeadlineMs;
     const deadlineAt = this.now() + Math.max(0, deadlineMs);
     if (deadlineAt <= this.now()) return Promise.resolve(false);
+    const requestedKind = options.kind ?? 'foreground';
     let shared = record.inFlight;
     if (shared && (shared.controller.signal.aborted || !this.isLiveSnapshot(shared.snapshot))) {
       shared.controller.abort();
       if (record.inFlight === shared) record.inFlight = undefined;
       shared = undefined;
     }
-    shared ??= this.startSharedInspection(record, options.kind ?? 'foreground');
+    shared ??= this.startSharedInspection(record, requestedKind);
     if (!shared) return Promise.resolve(false);
+    if (requestedKind === 'foreground') this.scheduler.promoteQueuedToForeground(shared.schedulerKey);
     return this.attachInspectionConsumer(record, shared, event, deadlineAt);
   }
 
@@ -555,6 +572,7 @@ export class SessionAgentActivityCoordinator {
     };
     const shared: SharedInspection = {
       controller,
+      schedulerKey: Symbol(`inspection:${session.id}:${token}`),
       token,
       snapshot,
       consumers: new Set(),
@@ -564,7 +582,7 @@ export class SessionAgentActivityCoordinator {
     record.inFlight = shared;
     shared.promise = this.scheduler
       .enqueue(
-        session.id,
+        shared.schedulerKey,
         kind,
         () => {
           const aborted = new Promise<never>((_resolve, reject) => {
@@ -624,6 +642,7 @@ export class SessionAgentActivityCoordinator {
       };
       const deadline = this.scheduleTimer(() => finish(false), Math.max(0, deadlineAt - this.now()));
       void shared.promise.then((evidence) => {
+        if (this.now() >= deadlineAt) return finish(false);
         if (evidence === false || !this.isLiveSnapshot(shared.snapshot)) return finish(false);
         if (event && !this.isCurrentEvent(record, event)) return finish(false);
         const result: ReconciliationResult = {
@@ -876,8 +895,8 @@ export class SessionAgentActivityCoordinator {
 
   private abortInspection(record: SessionRecord): void {
     record.inFlight?.controller.abort();
+    if (record.inFlight) this.scheduler.cancelKey(record.inFlight.schedulerKey);
     record.inFlight = undefined;
-    this.scheduler.cancelKey(record.session.id);
   }
 
   private invalidateSettle(record: SessionRecord): void {

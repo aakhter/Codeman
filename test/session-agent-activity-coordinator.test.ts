@@ -464,6 +464,56 @@ describe('session agent activity coordinator', () => {
       for (const gate of gates) gate.resolve();
       await Promise.all(running);
     });
+
+    it('promotes a queued shared background inspection when its first foreground consumer attaches', async () => {
+      const scheduler = new BoundedActivityScheduler();
+      const blockers = Array.from({ length: 3 }, () => deferred<void>());
+      const occupying = blockers.map((blocker, index) =>
+        scheduler.enqueue(`background-${index}`, 'background', () => blocker.promise)
+      );
+      const evidence = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const inspect = vi.fn(() => evidence.promise);
+      const coordinator = new SessionAgentActivityCoordinator({ scheduler, inspect });
+      const target = session();
+      coordinator.attachSession(target);
+      const background = coordinator.reconcile(target, 'background', 500);
+      expect(inspect).not.toHaveBeenCalled();
+
+      const stop = coordinator.allocateEvent(target, 'stop');
+      const foreground = coordinator.reconcileForEvent(target, stop, { deadlineMs: 500 });
+      expect(inspect).toHaveBeenCalledTimes(1);
+      evidence.resolve({ observation: 'none', semanticRevision: 0 });
+      const [backgroundResult, foregroundResult] = await Promise.all([background, foreground]);
+      expect(backgroundResult).not.toBe(false);
+      expect(foregroundResult && foregroundResult.event).toBe(stop);
+      expect(inspect).toHaveBeenCalledTimes(1);
+      for (const blocker of blockers) blocker.resolve();
+      await Promise.all(occupying);
+    });
+
+    it('cancels a promoted queued inspection when all consumers detach', async () => {
+      vi.useFakeTimers();
+      const scheduler = new BoundedActivityScheduler();
+      const blockers = Array.from({ length: 4 }, () => deferred<void>());
+      const occupying = [
+        ...blockers
+          .slice(0, 3)
+          .map((blocker, index) => scheduler.enqueue(`background-${index}`, 'background', () => blocker.promise)),
+        scheduler.enqueue('foreground-occupier', 'foreground', () => blockers[3].promise),
+      ];
+      const inspect = vi.fn(async () => ({ observation: 'none' as const, semanticRevision: 0 }));
+      const coordinator = new SessionAgentActivityCoordinator({ scheduler, inspect, inspectionDeadlineMs: 30 });
+      const target = session();
+      coordinator.attachSession(target);
+      const background = coordinator.reconcile(target, 'background', 30);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const foreground = coordinator.reconcileForEvent(target, event, { kind: 'foreground', deadlineMs: 20 });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(await Promise.all([background, foreground])).toEqual([false, false]);
+      for (const blocker of blockers) blocker.resolve();
+      await Promise.all(occupying);
+      expect(inspect).not.toHaveBeenCalled();
+    });
   });
 
   describe('9. final-agent settle and installed-build evidence', () => {
