@@ -256,6 +256,32 @@ describe('session agent activity coordinator', () => {
       expect(coordinator.decisionForEvent(target, event).quarantined).toBe(true);
     });
 
+    it.each(['permission', 'elicitation'] as const)(
+      'quarantines duplicate and completed-before-decision %s events without advancing idle ordering',
+      (kind) => {
+        const coordinator = new SessionAgentActivityCoordinator();
+        const target = session();
+        coordinator.attachSession(target);
+        coordinator.setObservation(target, 'none', 0);
+        const pendingIdle = coordinator.allocateEvent(target, 'idle_prompt');
+
+        const decided = coordinator.allocateEvent(target, kind);
+        expect(coordinator.decisionForEvent(target, decided).presentToHuman).toBe(true);
+        expect(coordinator.decisionForEvent(target, decided)).toMatchObject({
+          quarantined: true,
+          presentToHuman: false,
+        });
+
+        const completed = coordinator.allocateEvent(target, kind);
+        coordinator.completeEvent(target, completed);
+        expect(coordinator.decisionForEvent(target, completed)).toMatchObject({
+          quarantined: true,
+          presentToHuman: false,
+        });
+        expect(coordinator.decisionForEvent(target, pendingIdle).quarantined).toBe(false);
+      }
+    );
+
     it('allocates one strictly increasing sequence across every event kind', () => {
       const coordinator = new SessionAgentActivityCoordinator();
       const target = session();
@@ -363,6 +389,101 @@ describe('session agent activity coordinator', () => {
       const longResult = await long;
       expect(longResult && longResult.event).toBe(longEvent);
       expect(inspect).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a same-event success valid after its shorter sibling consumer times out', async () => {
+      vi.useFakeTimers();
+      const pending = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      let signal!: AbortSignal;
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: (_project, currentSignal) => {
+          signal = currentSignal;
+          return pending.promise;
+        },
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const short = coordinator.reconcileForEvent(target, event, { deadlineMs: 20 });
+      const long = coordinator.reconcileForEvent(target, event, { deadlineMs: 100 });
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(short).resolves.toBe(false);
+      expect(signal.aborted).toBe(false);
+      pending.resolve({ observation: 'none', semanticRevision: 0 });
+      const result = await long;
+      const reconciliation = coordinator.reconciliationForEvent(target, event, result);
+      expect(coordinator.decisionForEvent(target, event, { reconciliation }).quarantined).toBe(false);
+    });
+
+    it('abandons a same-event capability only after every consumer fails', async () => {
+      vi.useFakeTimers();
+      const pending = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      let signal!: AbortSignal;
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: (_project, currentSignal) => {
+          signal = currentSignal;
+          return pending.promise;
+        },
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const first = coordinator.reconcileForEvent(target, event, { deadlineMs: 20 });
+      const last = coordinator.reconcileForEvent(target, event, { deadlineMs: 40 });
+      await vi.advanceTimersByTimeAsync(40);
+      await expect(Promise.all([first, last])).resolves.toEqual([false, false]);
+      expect(signal.aborted).toBe(true);
+      expect(coordinator.decisionForEvent(target, event)).toMatchObject({
+        quarantined: true,
+        presentToHuman: false,
+      });
+    });
+
+    it('preserves a prepared same-event reconciliation when a later sibling times out', async () => {
+      vi.useFakeTimers();
+      const later = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const inspect = vi
+        .fn()
+        .mockResolvedValueOnce({ observation: 'none' as const, semanticRevision: 0 })
+        .mockImplementationOnce(() => later.promise);
+      const coordinator = new SessionAgentActivityCoordinator({ inspect });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const successful = await coordinator.reconcileForEvent(target, event);
+      const reconciliation = coordinator.reconciliationForEvent(target, event, successful);
+
+      const sibling = coordinator.reconcileForEvent(target, event, { deadlineMs: 20 });
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(sibling).resolves.toBe(false);
+      expect(coordinator.decisionForEvent(target, event, { reconciliation })).toMatchObject({
+        quarantined: false,
+        presentToHuman: true,
+      });
+    });
+
+    it('honors explicit same-event abandonment after the final sibling detaches', async () => {
+      vi.useFakeTimers();
+      const later = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const inspect = vi
+        .fn()
+        .mockResolvedValueOnce({ observation: 'none' as const, semanticRevision: 0 })
+        .mockImplementationOnce(() => later.promise);
+      const coordinator = new SessionAgentActivityCoordinator({ inspect });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const successful = await coordinator.reconcileForEvent(target, event);
+      coordinator.reconciliationForEvent(target, event, successful);
+      const sibling = coordinator.reconcileForEvent(target, event, { deadlineMs: 20 });
+      coordinator.abandonEvent(target, event);
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(sibling).resolves.toBe(false);
+      expect(coordinator.bookkeepingSnapshot(target).allocatedEvents).toBe(0);
+      expect(coordinator.decisionForEvent(target, event)).toMatchObject({
+        quarantined: true,
+        presentToHuman: false,
+      });
     });
 
     it('charges a consumer attached to existing work from its own absolute enqueue deadline', async () => {

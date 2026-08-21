@@ -137,9 +137,8 @@ interface SessionRecord {
   completionWatermark: number;
   allocatedEvents: Map<number, ActivityEvent>;
   retiredEvents: Map<number, ActivityEvent>;
-  invalidRetiredEvents: Set<number>;
   activeEventConsumers: Map<number, number>;
-  retireWhenInactive: Map<number, 'consumed' | 'abandoned'>;
+  retireWhenInactive: Set<number>;
   eventReconciliations: Map<number, EventReconciliation>;
   reconciliationResults: Set<ReconciliationResult>;
   inFlight?: SharedInspection;
@@ -336,9 +335,8 @@ export class SessionAgentActivityCoordinator {
       completionWatermark: 0,
       allocatedEvents: new Map(),
       retiredEvents: new Map(),
-      invalidRetiredEvents: new Set(),
       activeEventConsumers: new Map(),
-      retireWhenInactive: new Map(),
+      retireWhenInactive: new Set(),
       eventReconciliations: new Map(),
       reconciliationResults: new Set(),
       retryAttempt: 0,
@@ -375,7 +373,6 @@ export class SessionAgentActivityCoordinator {
     record.completionWatermark = 0;
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
-    record.invalidRetiredEvents.clear();
     record.activeEventConsumers.clear();
     record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
@@ -393,7 +390,6 @@ export class SessionAgentActivityCoordinator {
     record.decisionToken += 1;
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
-    record.invalidRetiredEvents.clear();
     record.activeEventConsumers.clear();
     record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
@@ -675,9 +671,13 @@ export class SessionAgentActivityCoordinator {
           const remaining = (record.activeEventConsumers.get(event.sequence) ?? 1) - 1;
           if (remaining > 0) record.activeEventConsumers.set(event.sequence, remaining);
           else record.activeEventConsumers.delete(event.sequence);
-          const pendingRetirement = record.retireWhenInactive.get(event.sequence);
-          if (result === false) this.retireEvent(record, event, 'abandoned');
-          else if (pendingRetirement) this.retireEvent(record, event, pendingRetirement);
+          const hasSuccessfulOwnership = this.hasSuccessfulEventOwnership(record, event);
+          if (remaining === 0) {
+            const retirementRequested = record.retireWhenInactive.has(event.sequence);
+            if (retirementRequested || (result === false && !hasSuccessfulOwnership)) {
+              this.retireEvent(record, event);
+            }
+          }
         }
         if (!shared.settled && shared.consumers.size === 0) shared.controller.abort();
         resolve(result);
@@ -730,7 +730,7 @@ export class SessionAgentActivityCoordinator {
 
   abandonEvent(session: CoordinatorSession, event: ActivityEvent): void {
     const record = this.requireEvent(session, event);
-    this.retireEvent(record, event, 'abandoned');
+    this.retireEvent(record, event);
   }
 
   completeEvent(session: CoordinatorSession, event: ActivityEvent): void {
@@ -803,11 +803,11 @@ export class SessionAgentActivityCoordinator {
         ? this.confirmExactZero(session)
         : false;
     const immediate = event.kind === 'permission' || event.kind === 'elicitation';
-    const abandoned = record.invalidRetiredEvents.has(event.sequence);
+    const replayed = record.retiredEvents.get(event.sequence) === event;
     const quarantined =
-      abandoned ||
+      replayed ||
       (!immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence));
-    if (!immediate && !abandoned) {
+    if (!immediate && !replayed) {
       record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
     }
     const ambiguous = this.isAmbiguous(record);
@@ -820,7 +820,7 @@ export class SessionAgentActivityCoordinator {
     const decision: ActivityDecision = {
       event,
       settleEndedEarly,
-      presentToHuman: !abandoned && (immediate || (!quarantined && (ambiguous || !suppressible))),
+      presentToHuman: !replayed && (immediate || (!quarantined && (ambiguous || !suppressible))),
       autonomyBlocked,
       quarantined,
       ambiguous,
@@ -896,15 +896,18 @@ export class SessionAgentActivityCoordinator {
     );
   }
 
-  private retireEvent(
-    record: SessionRecord,
-    event: ActivityEvent,
-    reason: 'consumed' | 'abandoned' = 'consumed'
-  ): void {
+  private hasSuccessfulEventOwnership(record: SessionRecord, event: ActivityEvent): boolean {
+    if (record.eventReconciliations.get(event.sequence)?.event === event) return true;
+    for (const result of record.reconciliationResults) {
+      if (result.event === event) return true;
+    }
+    return false;
+  }
+
+  private retireEvent(record: SessionRecord, event: ActivityEvent): void {
     if (!this.hasCurrentIdentity(record, event)) return;
     if ((record.activeEventConsumers.get(event.sequence) ?? 0) > 0) {
-      const pending = record.retireWhenInactive.get(event.sequence);
-      record.retireWhenInactive.set(event.sequence, pending === 'abandoned' ? pending : reason);
+      record.retireWhenInactive.add(event.sequence);
       return;
     }
     record.retireWhenInactive.delete(event.sequence);
@@ -915,14 +918,12 @@ export class SessionAgentActivityCoordinator {
     for (const result of record.reconciliationResults) {
       if (result.event === event) record.reconciliationResults.delete(result);
     }
-    if (reason === 'abandoned') record.invalidRetiredEvents.add(event.sequence);
     record.retiredEvents.delete(event.sequence);
     record.retiredEvents.set(event.sequence, event);
     while (record.retiredEvents.size > MAX_EVENT_BOOKKEEPING) {
       const oldest = record.retiredEvents.keys().next().value as number | undefined;
       if (oldest === undefined) break;
       record.retiredEvents.delete(oldest);
-      record.invalidRetiredEvents.delete(oldest);
     }
   }
 
