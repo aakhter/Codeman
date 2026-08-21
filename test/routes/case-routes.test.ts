@@ -60,6 +60,8 @@ vi.mock('node:fs/promises', () => ({
       throw err;
     }),
     writeFile: vi.fn(async () => {}),
+    rename: vi.fn(async () => {}),
+    rm: vi.fn(async () => {}),
   },
 }));
 
@@ -121,9 +123,19 @@ interface CaseRouteHarness {
  * from src/web/server.ts) so bare handler returns become { success:true, data }
  * and returned error envelopes get mapped to a conventional HTTP status.
  */
-async function createEnvelopeHarness(): Promise<CaseRouteHarness> {
+async function createEnvelopeHarness(authUser?: {
+  username: string;
+  role: 'admin' | 'user';
+}): Promise<CaseRouteHarness> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
+
+  if (authUser) {
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.authUser = authUser;
+      done();
+    });
+  }
 
   // Uniform response envelope (matches src/web/server.ts preSerialization hook).
   app.addHook('preSerialization', (req, reply, payload: unknown, done) => {
@@ -144,6 +156,20 @@ async function createEnvelopeHarness(): Promise<CaseRouteHarness> {
   });
 
   const ctx = createMockRouteContext();
+  Object.assign(ctx.tabLayouts, {
+    getSnapshot: vi.fn(async () => ({
+      layout: {
+        version: 1,
+        groups: [
+          { id: 'group-nzbdav', name: 'nzbdav', refs: [] },
+          { id: 'group-tcc', name: 'tcc', refs: [] },
+        ],
+        ungrouped: [],
+        updatedAt: '2026-08-21T00:00:00.000Z',
+      },
+      placements: [],
+    })),
+  });
   registerCaseRoutes(app, ctx as never);
   installRouteErrorHandler(app);
   await app.ready();
@@ -168,6 +194,7 @@ describe('case-routes', () => {
 
   afterEach(async () => {
     await harness.app.close();
+    vi.unstubAllEnvs();
   });
 
   // ========== GET /api/cases ==========
@@ -805,6 +832,260 @@ describe('case-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
       expect(body.error).toContain('not found');
+    });
+  });
+
+  describe('case default group settings', () => {
+    it('returns the stored default and authoritative owner groups', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      vi.mocked(harness.ctx.store.getCaseDefaultGroup).mockReturnValue('group-nzbdav');
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/nzbdav/default-group' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual({
+        groupId: 'group-nzbdav',
+        groups: [
+          { id: 'group-nzbdav', name: 'nzbdav' },
+          { id: 'group-tcc', name: 'tcc' },
+        ],
+      });
+      expect(harness.ctx.store.getCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav');
+      expect(harness.ctx.tabLayouts.getSnapshot).toHaveBeenCalledWith('@single');
+    });
+
+    it('persists an intentional Ungrouped default', async () => {
+      mockedExistsSync.mockReturnValue(true);
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/nzbdav/default-group',
+        payload: { groupId: null },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data.groupId).toBeNull();
+      expect(harness.ctx.store.setCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav', null);
+    });
+
+    it('rejects an unknown group without writing the setting', async () => {
+      mockedExistsSync.mockReturnValue(true);
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/nzbdav/default-group',
+        payload: { groupId: 'group-missing' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
+      expect(harness.ctx.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+    });
+
+    it('returns NOT_FOUND for an absent case before reading layout metadata', async () => {
+      mockedExistsSync.mockReturnValue(false);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/absent/default-group' });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ success: false, errorCode: ApiErrorCode.NOT_FOUND });
+      expect(harness.ctx.tabLayouts.getSnapshot).not.toHaveBeenCalled();
+      expect(harness.ctx.store.getCaseDefaultGroup).not.toHaveBeenCalled();
+    });
+
+    it('does not disclose a foreign case or its group metadata', async () => {
+      vi.stubEnv('CODEMAN_MULTIUSER', '1');
+      await harness.app.close();
+      harness = await createEnvelopeHarness({ username: 'alice', role: 'user' });
+      vi.clearAllMocks();
+      mockedExistsSync.mockReturnValue(false);
+      mockedReadFile.mockImplementation(async (path) => {
+        const value = String(path);
+        if (value.endsWith('remote-cases.json')) {
+          return JSON.stringify([
+            { name: 'foreign', type: 'remote', owner: 'bob', hostId: 'secret-host', remotePath: '/secret/path' },
+          ]);
+        }
+        if (value.endsWith('remote-hosts.json')) {
+          return JSON.stringify([
+            { id: 'secret-host', label: 'Secret', host: '10.99.0.1', username: 'bob', owner: 'bob' },
+          ]);
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/foreign/default-group' });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.body).not.toContain('secret-host');
+      expect(res.body).not.toContain('10.99.0.1');
+      expect(harness.ctx.tabLayouts.getSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('uses the authenticated owner for layout and setting access', async () => {
+      vi.stubEnv('CODEMAN_MULTIUSER', '1');
+      await harness.app.close();
+      harness = await createEnvelopeHarness({ username: 'alice', role: 'user' });
+      vi.clearAllMocks();
+      mockedExistsSync.mockReturnValue(true);
+      vi.mocked(harness.ctx.store.getCaseDefaultGroup).mockReturnValue('group-tcc');
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/alice-case/default-group' });
+
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.tabLayouts.getSnapshot).toHaveBeenCalledWith('alice');
+      expect(harness.ctx.store.getCaseDefaultGroup).toHaveBeenCalledWith('alice', 'alice-case');
+    });
+
+    it('repairs a stale stored group ID to intentional Ungrouped', async () => {
+      mockedExistsSync.mockReturnValue(true);
+      vi.mocked(harness.ctx.store.getCaseDefaultGroup).mockReturnValue('deleted-group');
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases/nzbdav/default-group' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data.groupId).toBeNull();
+      expect(harness.ctx.store.setCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav', null);
+    });
+  });
+
+  describe('case default group lifecycle', () => {
+    it('migrates a managed local case default only after rename succeeds', async () => {
+      mockedExistsSync.mockImplementation((path) => String(path).endsWith('/old-local'));
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/old-local',
+        payload: { name: 'new-local' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(fs.rename).toHaveBeenCalled();
+      expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'old-local', 'new-local');
+      expect(vi.mocked(fs.rename).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(harness.ctx.store.renameCaseDefaultGroup).mock.invocationCallOrder[0]
+      );
+    });
+
+    it('clears a managed local case default only after deletion succeeds', async () => {
+      mockedExistsSync.mockReturnValue(true);
+
+      const res = await harness.app.inject({ method: 'DELETE', url: '/api/cases/old-local' });
+
+      expect(res.statusCode).toBe(200);
+      expect(fs.rm).toHaveBeenCalled();
+      expect(harness.ctx.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('@single', 'old-local');
+      expect(vi.mocked(fs.rm).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(harness.ctx.store.deleteCaseDefaultGroup).mock.invocationCallOrder[0]
+      );
+    });
+
+    it('migrates and clears linked-local case defaults after successful operations', async () => {
+      const registry = new Map<string, string>();
+      registry.set('linked-cases.json', JSON.stringify({ linked: '/projects/linked' }));
+      mockedReadFile.mockImplementation(async (path) => {
+        const value = [...registry.entries()].find(([suffix]) => String(path).endsWith(suffix))?.[1];
+        if (value !== undefined) return value;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      mockedWriteFile.mockImplementation(async (path, data) => {
+        const suffix = String(path).split('/').at(-1) ?? '';
+        registry.set(suffix, String(data));
+      });
+      mockedExistsSync.mockImplementation((path) => String(path) === '/projects/linked');
+
+      const renamed = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/linked',
+        payload: { name: 'linked-next' },
+      });
+      expect(renamed.statusCode).toBe(200);
+      expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'linked', 'linked-next');
+
+      const deleted = await harness.app.inject({ method: 'DELETE', url: '/api/cases/linked-next' });
+      expect(deleted.statusCode).toBe(200);
+      expect(harness.ctx.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('@single', 'linked-next');
+    });
+
+    it('migrates and clears remote case defaults after successful operations', async () => {
+      const registry = new Map<string, string>([
+        [
+          'remote-cases.json',
+          JSON.stringify([{ name: 'remote-old', type: 'remote', hostId: 'remote-host', remotePath: '/srv/repo' }]),
+        ],
+        [
+          'remote-hosts.json',
+          JSON.stringify([{ id: 'remote-host', label: 'Remote', host: '10.0.0.4', username: 'dev' }]),
+        ],
+      ]);
+      mockedReadFile.mockImplementation(async (path) => {
+        const value = [...registry.entries()].find(([suffix]) => String(path).endsWith(suffix))?.[1];
+        if (value !== undefined) return value;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      mockedWriteFile.mockImplementation(async (path, data) => {
+        registry.set(String(path).split('/').at(-1) ?? '', String(data));
+      });
+
+      const renamed = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/remote-old',
+        payload: { name: 'remote-next' },
+      });
+      expect(renamed.statusCode).toBe(200);
+      expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'remote-old', 'remote-next');
+
+      const deleted = await harness.app.inject({ method: 'DELETE', url: '/api/cases/remote-next' });
+      expect(deleted.statusCode).toBe(200);
+      expect(harness.ctx.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('@single', 'remote-next');
+    });
+
+    it('migrates and clears Docker case defaults after successful operations', async () => {
+      const registry = new Map<string, string>([
+        [
+          'docker-cases.json',
+          JSON.stringify([
+            {
+              name: 'docker-old',
+              type: 'docker',
+              hostId: 'docker-host',
+              hostWorkspacePath: '/srv/docker-repo',
+              containerWorkdir: '/workspace',
+            },
+          ]),
+        ],
+        [
+          'docker-hosts.json',
+          JSON.stringify([{ id: 'docker-host', label: 'Docker', engine: 'docker', image: 'codeman/agent:base' }]),
+        ],
+      ]);
+      mockedReadFile.mockImplementation(async (path) => {
+        const value = [...registry.entries()].find(([suffix]) => String(path).endsWith(suffix))?.[1];
+        if (value !== undefined) return value;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      mockedWriteFile.mockImplementation(async (path, data) => {
+        registry.set(String(path).split('/').at(-1) ?? '', String(data));
+      });
+
+      const renamed = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/docker-old',
+        payload: { name: 'docker-next' },
+      });
+      expect(renamed.statusCode).toBe(200);
+      expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'docker-old', 'docker-next');
+
+      const unsupportedUpdate = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/docker-next',
+        payload: { path: '/srv/other' },
+      });
+      expect(unsupportedUpdate.statusCode).toBe(400);
+
+      const deleted = await harness.app.inject({ method: 'DELETE', url: '/api/cases/docker-next' });
+      expect(deleted.statusCode).toBe(200);
+      expect(harness.ctx.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('@single', 'docker-next');
     });
   });
 

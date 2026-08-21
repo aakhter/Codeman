@@ -30,6 +30,7 @@ import {
   DockerExportSchema,
   DockerImportSchema,
   DockerQuickCreateSchema,
+  CaseDefaultGroupSchema,
 } from '../schemas.js';
 import { exportDockerCase, importDockerBundle, listDockerExports, exportBundleName } from '../../docker-export.js';
 import {
@@ -43,7 +44,6 @@ import type { GitRemoteProbe, GitUrlParse } from '../../git-clone.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { settingsWriteBlocker, writeHooksConfig } from '../../hooks-config.js';
 import {
-  CASES_DIR,
   canAccessOwned,
   getAuthUser,
   isAdmin,
@@ -59,8 +59,9 @@ import { isSensitivePath } from '../sensitive-path.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import type { AuthUser } from '../../types.js';
 import { SseEvent } from '../sse-events.js';
-import type { EventPort, ConfigPort, SessionPort } from '../ports/index.js';
+import type { EventPort, ConfigPort, SessionPort, TabLayoutPort } from '../ports/index.js';
 import type { FastifyRequest } from 'fastify';
+import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
 import {
   checkDockerAvailable,
@@ -331,7 +332,81 @@ async function ensureCaseImage(
   return { ok: true, imageBuilding: true };
 }
 
-export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & ConfigPort & SessionPort): void {
+export function registerCaseRoutes(
+  app: FastifyInstance,
+  ctx: EventPort & ConfigPort & SessionPort & TabLayoutPort
+): void {
+  async function resolveAccessibleCase(req: FastifyRequest, name: string): Promise<CaseInfo | null> {
+    const user = getAuthUser(req);
+    const remoteCase = (await readRemoteCases(CODEMAN_CONFIG_DIR)).find(
+      (item) => item.name === name && canAccessOwned(user, item.owner)
+    );
+    if (remoteCase) {
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+      if (!host) return null;
+      return {
+        name,
+        path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
+        hasClaudeMd: false,
+        location: 'remote',
+        remote: {
+          hostId: host.id,
+          host: host.host,
+          username: host.username,
+          path: remoteCase.remotePath,
+          commands: remoteCase.commands ?? host.commands,
+        },
+      };
+    }
+
+    const dockerCase = (await readDockerCases(CODEMAN_CONFIG_DIR)).find(
+      (item) => item.name === name && canAccessOwned(user, item.owner)
+    );
+    if (dockerCase) {
+      const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === dockerCase.hostId);
+      if (!host) return null;
+      const container = dockerCase.container ?? dockerContainerName(dockerCase.name);
+      return {
+        name,
+        path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
+        hasClaudeMd: existsSync(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
+        location: 'docker',
+        docker: {
+          hostId: host.id,
+          container,
+          image: host.image,
+          path: dockerCase.hostWorkspacePath,
+          network: host.network ?? 'bridge',
+        },
+      };
+    }
+
+    const casePath = await resolveCasePath(name, user);
+    if (!existsSync(casePath)) return null;
+    const linked = casePath !== join(resolveCasesDir(user), name);
+    return {
+      name,
+      path: casePath,
+      hasClaudeMd: existsSync(join(casePath, 'CLAUDE.md')),
+      ...(linked && { linked: true }),
+    };
+  }
+
+  const validateCaseName = (req: FastifyRequest, name: string): boolean =>
+    Boolean(validatePathWithinBase(name, resolveCasesDir(getAuthUser(req))));
+
+  const readDefaultGroupResponse = async (req: FastifyRequest, name: string) => {
+    const owner = ownerLayoutKey(ownerFor(req));
+    const snapshot = await ctx.tabLayouts.getSnapshot(owner);
+    const groups = snapshot.layout.groups.map(({ id, name: groupName }) => ({ id, name: groupName }));
+    let groupId = ctx.store.getCaseDefaultGroup(owner, name);
+    if (typeof groupId === 'string' && !groups.some((group) => group.id === groupId)) {
+      ctx.store.setCaseDefaultGroup(owner, name, null);
+      groupId = null;
+    }
+    return { groupId: groupId ?? null, groups };
+  };
+
   // ═══════════════════════════════════════════════════════════════
   // Case CRUD (list, create, link, detail, fix-plan)
   // ═══════════════════════════════════════════════════════════════
@@ -1323,29 +1398,36 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
   app.put('/api/cases/:name', async (req): Promise<ApiResponse<{ case: CaseInfo }>> => {
     const { name: originalName } = req.params as { name: string };
     const update = parseBody(UpdateCaseSchema, req.body, 'Invalid case update');
+    const user = getAuthUser(req);
+    const casesDir = resolveCasesDir(user);
+    const owner = ownerLayoutKey(ownerFor(req));
 
-    if (!validatePathWithinBase(originalName, CASES_DIR)) {
+    if (!validatePathWithinBase(originalName, casesDir)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
 
     const nextName = update.name ?? originalName;
-    if (!validatePathWithinBase(nextName, CASES_DIR)) {
+    if (!validatePathWithinBase(nextName, casesDir)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
 
     const linkedCases = await readLinkedCases();
     const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+    const dockerCases = await readDockerCases(CODEMAN_CONFIG_DIR);
     const nameExists = (candidate: string): boolean =>
       candidate !== originalName &&
       (Boolean(linkedCases[candidate]) ||
         remoteCases.some((item) => item.name === candidate) ||
-        existsSync(join(CASES_DIR, candidate)));
+        dockerCases.some((item) => item.name === candidate) ||
+        existsSync(join(casesDir, candidate)));
 
     if (nameExists(nextName)) {
       return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Case already exists');
     }
 
-    const remoteCaseIndex = remoteCases.findIndex((item) => item.name === originalName);
+    const remoteCaseIndex = remoteCases.findIndex(
+      (item) => item.name === originalName && canAccessOwned(user, item.owner)
+    );
     if (remoteCaseIndex !== -1) {
       const hostId = update.hostId ?? remoteCases[remoteCaseIndex].hostId;
       const remotePath = update.remotePath ?? remoteCases[remoteCaseIndex].remotePath;
@@ -1377,11 +1459,53 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           commands: commands ?? host.commands,
         },
       };
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: remotePath, type: 'remote-updated' });
       return { success: true, data: { case: caseInfo } };
     }
 
-    if (linkedCases[originalName]) {
+    const dockerCaseIndex = dockerCases.findIndex(
+      (item) => item.name === originalName && canAccessOwned(user, item.owner)
+    );
+    if (dockerCaseIndex !== -1) {
+      if (update.path || update.hostId || update.remotePath || update.commands) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Docker case updates only support renaming');
+      }
+      const currentDockerCase = dockerCases[dockerCaseIndex];
+      const nextDockerCase = {
+        ...currentDockerCase,
+        name: nextName,
+        container: currentDockerCase.container ?? dockerContainerName(originalName),
+      };
+      const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === nextDockerCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Docker host not found');
+      const nextDockerCases = [...dockerCases];
+      nextDockerCases[dockerCaseIndex] = nextDockerCase;
+      await writeDockerCases(CODEMAN_CONFIG_DIR, nextDockerCases);
+      const container = nextDockerCase.container ?? dockerContainerName(nextName);
+      const caseInfo: CaseInfo = {
+        name: nextName,
+        path: dockerDisplayPath({ container, path: nextDockerCase.hostWorkspacePath }),
+        hasClaudeMd: existsSync(join(nextDockerCase.hostWorkspacePath, 'CLAUDE.md')),
+        location: 'docker',
+        docker: {
+          hostId: host.id,
+          container,
+          image: host.image,
+          path: nextDockerCase.hostWorkspacePath,
+          network: host.network ?? 'bridge',
+        },
+      };
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
+      ctx.broadcast(SseEvent.CaseLinked, {
+        name: nextName,
+        path: nextDockerCase.hostWorkspacePath,
+        type: 'docker-updated',
+      });
+      return { success: true, data: { case: caseInfo } };
+    }
+
+    if (linkedCases[originalName] && (!isMultiUserMode() || isAdmin(req))) {
       const nextPath = update.path ?? linkedCases[originalName];
       if (!existsSync(nextPath)) {
         return createErrorResponse(ApiErrorCode.NOT_FOUND, `Folder not found: ${nextPath}`);
@@ -1396,18 +1520,19 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
         linked: true,
         location: 'linked-local',
       };
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: nextPath, type: 'updated' });
       return { success: true, data: { case: caseInfo } };
     }
 
-    const currentPath = join(CASES_DIR, originalName);
+    const currentPath = join(casesDir, originalName);
     if (!existsSync(currentPath)) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, `Case "${originalName}" not found`);
     }
     if (update.path) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Managed case paths cannot be changed');
     }
-    const nextPath = join(CASES_DIR, nextName);
+    const nextPath = join(casesDir, nextName);
     if (nextName !== originalName) {
       await fs.rename(currentPath, nextPath);
     }
@@ -1417,6 +1542,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       hasClaudeMd: existsSync(join(nextPath, 'CLAUDE.md')),
       location: 'local',
     };
+    ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
     ctx.broadcast(SseEvent.CaseCreated, { name: nextName, path: nextPath, type: 'updated' });
     return { success: true, data: { case: caseInfo } };
   });
@@ -1440,6 +1566,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
         CODEMAN_CONFIG_DIR,
         remoteCases.filter((item) => !(item.name === name && canAccessOwned(user, item.owner)))
       );
+      ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
       ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'remote-unlinked' });
       return { success: true, data: { name } };
     }
@@ -1451,6 +1578,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
         CODEMAN_CONFIG_DIR,
         dockerCases.filter((item) => item !== dockerCase)
       );
+      ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
       // Best-effort `docker rm -f` the per-case container (case-delete is the
       // explicit teardown that removes it; the bind-mounted workspace survives).
       const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === dockerCase.hostId);
@@ -1478,6 +1606,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       delete linkedCases[name];
       try {
         await fs.writeFile(LINKED_CASES_FILE, JSON.stringify(linkedCases, null, 2));
+        ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
         ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'unlinked' });
         return { success: true, data: { name } };
       } catch (err) {
@@ -1493,6 +1622,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
 
     try {
       await fs.rm(casePath, { recursive: true, force: true });
+      ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
       ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'deleted' });
       return { success: true, data: { name } };
     } catch (err) {
@@ -1525,72 +1655,46 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
     }
   });
 
-  app.get('/api/cases/:name', async (req) => {
+  app.get('/api/cases/:name/default-group', async (req) => {
     const { name } = req.params as { name: string };
-
-    if (!validatePathWithinBase(name, resolveCasesDir(getAuthUser(req)))) {
+    if (!validateCaseName(req, name)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
-
-    // Fold ownership INTO the match (don't early-return): a non-owned same-named remote/
-    // docker case is skipped so control falls through to the caller's own LOCAL case
-    // (remote/docker names are globally unique, local names per-user). No metadata is
-    // disclosed for a foreign case. canAccessOwned is allow-all for admins/single-user.
-    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
-    const remoteCase = remoteCases.find((item) => item.name === name && canAccessOwned(getAuthUser(req), item.owner));
-    if (remoteCase) {
-      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
-      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
-      return {
-        name,
-        path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
-        hasClaudeMd: false,
-        location: 'remote',
-        remote: {
-          hostId: host.id,
-          host: host.host,
-          username: host.username,
-          path: remoteCase.remotePath,
-          commands: remoteCase.commands ?? host.commands,
-        },
-      };
-    }
-
-    const dockerCase = (await readDockerCases(CODEMAN_CONFIG_DIR)).find(
-      (item) => item.name === name && canAccessOwned(getAuthUser(req), item.owner)
-    );
-    if (dockerCase) {
-      const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === dockerCase.hostId);
-      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Docker host not found');
-      const container = dockerCase.container ?? dockerContainerName(dockerCase.name);
-      return {
-        name,
-        path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
-        hasClaudeMd: existsSync(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
-        location: 'docker',
-        docker: {
-          hostId: host.id,
-          container,
-          image: host.image,
-          path: dockerCase.hostWorkspacePath,
-          network: host.network ?? 'bridge',
-        },
-      };
-    }
-
-    const casePath = await resolveCasePath(name, getAuthUser(req));
-
-    if (!existsSync(casePath)) {
+    if (!(await resolveAccessibleCase(req, name))) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
     }
+    return readDefaultGroupResponse(req, name);
+  });
 
-    const linked = casePath !== join(resolveCasesDir(getAuthUser(req)), name);
-    return {
-      name,
-      path: casePath,
-      hasClaudeMd: existsSync(join(casePath, 'CLAUDE.md')),
-      ...(linked && { linked: true }),
-    };
+  app.put('/api/cases/:name/default-group', async (req) => {
+    const { name } = req.params as { name: string };
+    if (!validateCaseName(req, name)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
+    }
+    if (!(await resolveAccessibleCase(req, name))) {
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+    }
+    const { groupId } = parseBody(CaseDefaultGroupSchema, req.body, 'Invalid default group');
+    const owner = ownerLayoutKey(ownerFor(req));
+    const snapshot = await ctx.tabLayouts.getSnapshot(owner);
+    const groups = snapshot.layout.groups.map(({ id, name: groupName }) => ({ id, name: groupName }));
+    if (groupId !== null && !groups.some((group) => group.id === groupId)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Default group does not exist');
+    }
+    ctx.store.setCaseDefaultGroup(owner, name, groupId);
+    return { groupId, groups };
+  });
+
+  app.get('/api/cases/:name', async (req) => {
+    const { name } = req.params as { name: string };
+    if (!validateCaseName(req, name)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
+    }
+    const caseInfo = await resolveAccessibleCase(req, name);
+    if (!caseInfo) {
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+    }
+    return caseInfo;
   });
 
   // Read @fix_plan.md from a case directory (for wizard to detect existing plans)
