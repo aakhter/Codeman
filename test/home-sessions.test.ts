@@ -90,6 +90,19 @@ function sessionMap(list: Array<Record<string, any>>) {
 }
 
 describe('home sessions column: model', () => {
+  it('uses effective agent activity for desktop rows and stable episode ages', () => {
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap([{ id: 'agents', activityStatus: 'waiting_agents', activityStatusSince: 1234 }]),
+      sessionOrder: ['agents'],
+      webviews: new Map(),
+      webviewOrder: [],
+      cases: CASES,
+      pendingHooks: new Map(),
+    });
+    const row = app.buildHomeSessionRows()[0];
+    expect(row).toMatchObject({ state: 'waiting_agents', pill: 'agents', since: { at: 1234 } });
+    expect(app._buildHomeSessionRow(row).dataset.activityStatus).toBe('waiting_agents');
+  });
   it('renders actual Home rows and badges in complete authoritative interleaved order', () => {
     const home = fakeElement();
     const app = loadHomeSessionsApp(

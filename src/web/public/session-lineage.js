@@ -86,7 +86,8 @@ Object.assign(CodemanApp.prototype, {
       if (!parentId || parentId === id || !this.sessions.has(parentId)) continue;
       const depth = seenPerParent.get(parentId) || 0;
       seenPerParent.set(parentId, depth + 1);
-      edges.push({ parentId, childId: id, depth, status: session.status || 'idle' });
+      const status = window.CodemanSessionActivity?.resolve(session).effectiveStatus || session.status || 'idle';
+      edges.push({ parentId, childId: id, depth, status });
     }
     return edges;
   },
@@ -206,11 +207,16 @@ Object.assign(CodemanApp.prototype, {
       line.setAttribute('d', geom.d);
       // The working class marches the dashes, so an active worker is visible along
       // the line itself. `status` is the CHILD's, which is the interesting end.
-      const working = edge.status === 'working' ? ' lineage-line--working' : '';
+      const active = edge.status === 'working' || edge.status === 'waiting_agents' || edge.status === 'checking_agents';
+      const working = active ? ' lineage-line--working' : '';
+      const activity =
+        edge.status === 'waiting_agents' || edge.status === 'checking_agents'
+          ? ` lineage-line--${edge.status.replaceAll('_', '-')}`
+          : '';
       // `proxied` marks an arc whose endpoint was re-anchored to the vertical
       // rail's gutter track (COD-311) rather than sitting on a tab edge.
       const proxied = parentEndpoint.proxied || childEndpoint.proxied ? ' lineage-line--proxied' : '';
-      line.setAttribute('class', 'connection-line lineage-line' + working + proxied);
+      line.setAttribute('class', 'connection-line lineage-line' + working + activity + proxied);
       // The PARENT's colour rides a CSS custom property so the stylesheet keeps owning
       // opacity, glow and dash; an empty colour leaves the --session-blue fallback.
       // Every arc out of one tab shares it — see _lineageColorFor().
@@ -230,9 +236,13 @@ Object.assign(CodemanApp.prototype, {
       // Resting radius; `lineage-dot-pulse` breathes it 3.5 → 4.5 while the child
       // works, so the two have to be changed together.
       dot.setAttribute('r', '3.5');
-      const dotWorking = edge.status === 'working' ? ' lineage-line-dot--working' : '';
+      const dotWorking = active ? ' lineage-line-dot--working' : '';
+      const dotActivity =
+        edge.status === 'waiting_agents' || edge.status === 'checking_agents'
+          ? ` lineage-line-dot--${edge.status.replaceAll('_', '-')}`
+          : '';
       const dotProxied = parentEndpoint.proxied || childEndpoint.proxied ? ' lineage-line-dot--proxied' : '';
-      dot.setAttribute('class', 'lineage-line-dot' + dotWorking + dotProxied);
+      dot.setAttribute('class', 'lineage-line-dot' + dotWorking + dotActivity + dotProxied);
       dot.setAttribute('data-child-tab', edge.childId);
       if (color) dot.style.setProperty('--lineage-color', color);
       svg.appendChild(dot);

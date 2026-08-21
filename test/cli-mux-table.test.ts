@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { formatMuxTable } from '../src/cli.js';
+import { formatMuxTable, mergeMuxActivity } from '../src/cli.js';
 
 const sampleRows = [
   {
@@ -63,6 +63,19 @@ describe('formatMuxTable', () => {
     const table = formatMuxTable(sampleRows);
     expect(table).toContain('attached');
     expect(table).toContain('detached');
+  });
+
+  it('renders effective agent activity separately from mux attachment state', () => {
+    const table = formatMuxTable([{ ...sampleRows[0], status: 'idle', activityStatus: 'waiting_agents' }]);
+    expect(table).toContain('WAITING ON AGENTS');
+    expect(table).toContain('detached');
+  });
+
+  it('joins canonical activity from the live status payload by exact session id', () => {
+    const merged = mergeMuxActivity(sampleRows, {
+      sessions: [{ id: sampleRows[0].sessionId, status: 'idle', activityStatus: 'checking_agents' }],
+    });
+    expect(formatMuxTable(merged)).toContain('CHECKING AGENTS');
   });
 
   it('falls back to a placeholder display name when name is missing', () => {

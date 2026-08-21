@@ -29,6 +29,7 @@ export interface AwayDigestSession {
   id: string;
   name?: string;
   status?: string;
+  activityStatus?: string;
   inputTokens?: number;
   outputTokens?: number;
   totalCost?: number;
@@ -280,7 +281,14 @@ function runSummarySeverity(event: RunSummaryEvent, category: AwayDigestCategory
 }
 
 function sessionToItem(session: AwayDigestSession, now: number): AwayDigestItem {
-  const isIdle = session.status === 'idle';
+  const effectiveStatus = session.activityStatus || session.status;
+  const statusLabel =
+    effectiveStatus === 'waiting_agents'
+      ? 'WAITING ON AGENTS'
+      : effectiveStatus === 'checking_agents'
+        ? 'CHECKING AGENTS'
+        : effectiveStatus;
+  const isIdle = effectiveStatus === 'idle';
   return {
     id: `status-${session.id}`,
     sessionId: session.id,
@@ -289,7 +297,7 @@ function sessionToItem(session: AwayDigestSession, now: number): AwayDigestItem 
     category: isIdle ? 'idle' : 'still_running',
     severity: isIdle ? 'info' : 'success',
     title: isIdle ? 'Session idle' : 'Session still running',
-    detail: session.status ? `Status: ${session.status}` : undefined,
+    detail: statusLabel ? `Status: ${statusLabel}` : undefined,
     source: 'status',
     link: { type: 'session', sessionId: session.id },
   };

@@ -63,6 +63,8 @@ const MOBILE_OVERVIEW_PILL_LABEL = {
   error: 'error',
   waiting: 'waiting',
   working: 'working',
+  waiting_agents: 'agents',
+  checking_agents: 'checking',
   idle: 'idle',
   done: 'done',
 };
@@ -77,6 +79,8 @@ const MOBILE_OVERVIEW_SINCE_LABEL = {
   waiting: 'waiting',
   error: 'failed',
   working: 'working',
+  waiting_agents: 'waiting',
+  checking_agents: 'checking',
   idle: 'idle',
   done: 'ended',
 };
@@ -100,11 +104,10 @@ Object.assign(CodemanApp.prototype, {
    */
   _mobileOverviewState(session, hooks) {
     if (hooks && (hooks.has('permission_prompt') || hooks.has('elicitation_dialog'))) return 'needs';
-    if (session.status === 'error') return 'error';
+    const state = window.CodemanSessionActivity?.resolve(session).overviewState || session.status || 'idle';
+    if (state === 'error') return 'error';
     if (hooks && hooks.has('idle_prompt')) return 'waiting';
-    if (session.status === 'busy') return 'working';
-    if (session.status === 'stopped') return 'done';
-    return 'idle';
+    return state;
   },
 
   /**
@@ -127,7 +130,13 @@ Object.assign(CodemanApp.prototype, {
    */
   _mobileOverviewSince(state, session) {
     const activeAt = Number(session.lastActivityAt) || 0;
-    const at = state === 'working' ? Number(session.lastSubmitAt) || activeAt : activeAt;
+    const agentAt = Number(session.activityStatusSince) || 0;
+    const at =
+      state === 'working'
+        ? Number(session.lastSubmitAt) || activeAt
+        : state === 'waiting_agents' || state === 'checking_agents'
+          ? agentAt || activeAt
+          : activeAt;
     if (!at) return null;
     return { key: MOBILE_OVERVIEW_SINCE_LABEL[state] || state, at };
   },
@@ -182,6 +191,7 @@ Object.assign(CodemanApp.prototype, {
         caseName: matched ? matched.name : '',
         dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
         state,
+        activityStatus: window.CodemanSessionActivity?.resolve(session).effectiveStatus || session.status || 'idle',
         pill: MOBILE_OVERVIEW_PILL_LABEL[state] || state,
         // Epoch ms, straight off the session payload; formatting happens at
         // render time so the clock can redo it without a re-render.
@@ -235,7 +245,7 @@ Object.assign(CodemanApp.prototype, {
 
     return {
       needsYou: inSection(['needs', 'error', 'waiting']),
-      current: inSection(['working', 'idle', 'done']),
+      current: inSection(['working', 'waiting_agents', 'checking_agents', 'idle', 'done']),
       past,
       sessionCount: rows.length,
     };
@@ -654,6 +664,9 @@ Object.assign(CodemanApp.prototype, {
     item.className = 'mobile-overview-row mobile-overview-row--' + row.state;
     item.dataset.moAction = 'session';
     item.dataset.moSession = row.id;
+    item.dataset.activityStatus = row.activityStatus || row.state;
+    const activity = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    item.setAttribute('aria-label', `${row.name}, ${activity?.ariaPhrase || row.state}`);
 
     const dot = document.createElement('span');
     dot.className = 'mobile-overview-dot mobile-overview-dot--' + row.state;

@@ -792,8 +792,10 @@ Object.assign(CodemanApp.prototype, {
       const session = this.sessions?.get?.(sessionId);
       if (!session) continue;
       const title = this.getSessionName?.(session) || session.name || session.title || sessionId.slice(0, 8);
-      const subtitleParts = [session.workingDir, session.mode, session.status].filter(Boolean);
-      const haystack = [title, session.workingDir, session.mode, session.status, sessionId].filter(Boolean).join(' ').toLowerCase();
+      const activity = globalThis.CodemanSessionActivity?.resolve(session);
+      const activityLabel = activity?.expandedLabel || session.status;
+      const subtitleParts = [session.workingDir, session.mode, activityLabel].filter(Boolean);
+      const haystack = [title, session.workingDir, session.mode, activityLabel, sessionId].filter(Boolean).join(' ').toLowerCase();
       if (needle && !haystack.includes(needle)) continue;
       sessionItems.push({
         id: `session:${sessionId}`,
@@ -7395,12 +7397,16 @@ Object.assign(CodemanApp.prototype, {
 
       // Look up rich session data by sessionId
       const session = this.sessions.get(muxSession.sessionId);
-      const status = session ? session.status : 'unknown';
+      const activity = session ? window.CodemanSessionActivity?.resolve(session) : null;
+      const status = activity?.effectiveStatus || (session ? session.status : 'unknown');
       const isWorking = session ? session.isWorking : false;
 
       // Status badge
       let statusLabel, statusClass;
-      if (status === 'idle' && !isWorking) {
+      if (status === 'waiting_agents' || status === 'checking_agents') {
+        statusLabel = activity.expandedLabel;
+        statusClass = `status-${activity.cssState}`;
+      } else if (status === 'idle' && !isWorking) {
         statusLabel = 'IDLE';
         statusClass = 'status-idle';
       } else if (status === 'busy' || isWorking) {
@@ -7458,7 +7464,7 @@ Object.assign(CodemanApp.prototype, {
 
       const sid = escapeHtml(JSON.stringify(muxSession.sessionId));
       html += `
-        <div class="process-item process-item-clickable" onclick="app.selectSession(${sid})" title="Switch to session">
+        <div class="process-item process-item-clickable" data-activity-status="${escapeHtml(status)}" onclick="app.selectSession(${sid})" title="Switch to session">
           <span class="monitor-status-badge ${statusClass}">${statusLabel}</span>
           <div class="process-info">
             <div class="process-name">${modelHtml} <span class="monitor-tab-name">${escapeHtml(labels.primary)}</span></div>

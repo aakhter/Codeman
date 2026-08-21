@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { program } from '../src/cli.js';
+import { formatSessionRows, program, summarizeStatus } from '../src/cli.js';
 
 describe('CLI Command Parsing', () => {
   describe('Command Structure', () => {
@@ -477,6 +477,15 @@ describe('CLI Command Parsing', () => {
 });
 
 describe('CLI Output Formatting', () => {
+  it('formats and counts effective agent activity from live payloads', () => {
+    const sessions = [
+      { id: 'waiting1', status: 'idle', activityStatus: 'waiting_agents', workingDir: '/repo/a' },
+      { id: 'checking', status: 'idle', activityStatus: 'checking_agents', workingDir: '/repo/b' },
+    ];
+    expect(formatSessionRows(sessions)).toContain('WAITING ON AGENTS');
+    expect(formatSessionRows(sessions)).toContain('CHECKING AGENTS');
+    expect(summarizeStatus(sessions)).toMatchObject({ waitingAgents: 1, checkingAgents: 1, idle: 0 });
+  });
   describe('Table Formatting', () => {
     interface Column {
       header: string;

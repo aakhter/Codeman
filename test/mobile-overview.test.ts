@@ -68,6 +68,23 @@ function session(over: Record<string, any>) {
 }
 
 describe('mobile overview model', () => {
+  it('renders server-effective agent activity distinctly while legacy payloads stay idle', () => {
+    const app = loadOverviewApp();
+    const model = app.buildMobileOverviewModel({
+      sessions: [
+        session({ id: 'waiting', activityStatus: 'waiting_agents', activityStatusSince: 1000 }),
+        session({ id: 'checking', activityStatus: 'checking_agents', activityStatusSince: 2000 }),
+        session({ id: 'legacy' }),
+      ],
+    });
+    expect(model.current.slice(0, 2).map((row: any) => [row.id, row.state, row.pill, row.since?.at])).toEqual([
+      ['waiting', 'waiting_agents', 'agents', 1000],
+      ['checking', 'checking_agents', 'checking', 2000],
+    ]);
+    expect(model.current.find((row: any) => row.id === 'legacy')).toMatchObject({ state: 'idle', pill: 'idle' });
+    const rendered = app._buildMobileOverviewRow(model.current[0]);
+    expect(rendered.dataset.activityStatus).toBe('waiting_agents');
+  });
   it('does not expose Map-order live sessions while the owner tab layout is pending', () => {
     const app = loadOverviewApp();
     const model = app.buildMobileOverviewModel({

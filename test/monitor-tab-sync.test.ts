@@ -237,6 +237,18 @@ describe('COD-122 Monitor rows use the tab name as the primary label', () => {
     expect(row!.querySelector('.monitor-id-agent .monitor-id-val')!.textContent).toBe('agent-xyz');
   });
 
+  it('shows the effective waiting-on-agents badge instead of raw idle', () => {
+    const app = makeApp();
+    const body = muxBody();
+    app.sessions.set('s1', { status: 'idle', activityStatus: 'waiting_agents', name: 'delegated' });
+    app.muxSessions = [{ sessionId: 's1', name: 'delegated', muxName: 'codeman-1', stats: {} }];
+    app._renderMuxSessionsImmediate();
+    const badge = body.querySelector('.monitor-status-badge')!;
+    expect(badge.textContent).toBe('WAITING ON AGENTS');
+    expect(badge.classList.contains('status-waiting-agents')).toBe(true);
+    expect(body.querySelector('.process-item')?.getAttribute('data-activity-status')).toBe('waiting_agents');
+  });
+
   it('degrades gracefully: tab name without an agent id shows only the tmux id', () => {
     const app = makeApp();
     const body = muxBody();

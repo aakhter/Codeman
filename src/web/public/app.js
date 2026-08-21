@@ -6307,6 +6307,9 @@ class CodemanApp {
    * it, both of which come from mobile-overview.js below.
    */
   _sidebarRichPillLabel(state) {
+    if (state === 'waiting_agents' || state === 'checking_agents') {
+      return window.CodemanSessionActivity?.resolve({ status: 'idle', activityStatus: state }).compactLabel.toLowerCase();
+    }
     return {
       needs: 'needs you',
       error: 'error',
@@ -6656,7 +6659,10 @@ class CodemanApp {
         // re-marks the session tab active moments after a web tab was selected,
         // leaving two tabs lit at once.
         const isActive = id === this.activeSessionId && !this.activeWebviewId;
-        const status = session.status || 'idle';
+        const activity = window.CodemanSessionActivity?.resolve(session) || {
+          effectiveStatus: session.status || 'idle', cssState: session.status || 'idle', ariaPhrase: session.status || 'idle',
+        };
+        const status = activity.effectiveStatus;
         const name = this.getSessionName(session);
         const taskStats = session.taskStats || { running: 0, total: 0 };
         const hasRunningTasks = taskStats.running > 0;
@@ -6713,9 +6719,10 @@ class CodemanApp {
 
         // Update status indicator
         const statusEl = tab.querySelector('.tab-status');
-        if (statusEl && !statusEl.classList.contains(status)) {
-          statusEl.className = `tab-status ${status}`;
+        if (statusEl && !statusEl.classList.contains(activity.cssState)) {
+          statusEl.className = `tab-status ${activity.cssState}`;
         }
+        tab.dataset.activityStatus = status;
 
         // Rich sidebar meta ("created 3d ago · working 12m" + pill). The stamps
         // themselves move on _tickSidebarRichTimes(); this is here for the parts
@@ -6759,6 +6766,7 @@ class CodemanApp {
             ? `${name}\n${session.workingDir}`
             : name;
           this._syncTabPlacementAccessibility(tab, { kind: 'session', id }, name, tooltip);
+          tab.setAttribute('aria-label', `${tab.getAttribute('aria-label') || `${name} session`}, ${activity.ariaPhrase}`);
         }
 
         // Update task badge
@@ -7086,7 +7094,10 @@ class CodemanApp {
       // See the note in the incremental path: a web tab owns the active highlight
       // while one is open, even though activeSessionId stays set.
       const isActive = id === this.activeSessionId && !this.activeWebviewId;
-      const status = session.status || 'idle';
+      const activity = window.CodemanSessionActivity?.resolve(session) || {
+        effectiveStatus: session.status || 'idle', cssState: session.status || 'idle', ariaPhrase: session.status || 'idle',
+      };
+      const status = activity.effectiveStatus;
       const name = this.getSessionName(session);
       const mode = session.mode || 'claude';
       const color = session.color || 'default';
@@ -7128,7 +7139,7 @@ class CodemanApp {
       const focusMarker = this._tabRefFocused({ kind: 'session', id })
         ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
         : '';
-      const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
+      const accessibleName = `${placement ? `${name} session, ${placement.description}` : `${name} session`}, ${activity.ariaPhrase}`;
       const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
       // Rich sidebar rows only: the home screen's created/state stamps and a
@@ -7144,12 +7155,12 @@ class CodemanApp {
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>`;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" data-activity-status="${escapeHtml(status)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
-          <span class="tab-status ${escapeHtml(status)}" aria-hidden="true"></span>
+          <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}

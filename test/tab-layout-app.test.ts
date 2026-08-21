@@ -59,6 +59,25 @@ const layout = {
   ungrouped: [{ kind: 'session', id: 's3' }],
 };
 
+describe('effective activity in session tabs', () => {
+  it('renders and incrementally updates agent activity classes, data, and accessible name', () => {
+    const app = makeApp();
+    app.activeWebviewId = null;
+    app.sessions.get('s1').activityStatus = 'waiting_agents';
+    app._fullRenderSessionTabs();
+    const tab = document.querySelector<HTMLElement>('[data-id="s1"]')!;
+    expect(tab.dataset.activityStatus).toBe('waiting_agents');
+    expect(tab.querySelector('.tab-status')?.classList.contains('waiting-agents')).toBe(true);
+    expect(tab.getAttribute('aria-label')).toContain('waiting on background agents');
+
+    app.sessions.get('s1').activityStatus = 'checking_agents';
+    app._renderSessionTabsImmediate();
+    expect(tab.dataset.activityStatus).toBe('checking_agents');
+    expect(tab.querySelector('.tab-status')?.classList.contains('checking-agents')).toBe(true);
+    expect(tab.getAttribute('aria-label')).toContain('checking background agents');
+  });
+});
+
 function makeApp() {
   const app = Object.create(CodemanApp.prototype) as Record<string, any>;
   document.documentElement.setAttribute('data-tab-orientation', 'vertical');
@@ -415,6 +434,13 @@ describe('COD-306 CodemanApp integration', () => {
     const dot = svg.querySelector('.lineage-line-dot');
     expect(dot?.classList.contains('lineage-line-dot--proxied')).toBe(true);
     expect(dot?.classList.contains('lineage-line-dot--working')).toBe(true);
+  });
+
+  it('marks lineage as active while the child waits on background agents', () => {
+    const app = makeApp();
+    app.sessions.get('s3').activityStatus = 'waiting_agents';
+    app.sessions.get('s3').parentSessionId = 's2';
+    expect(app._collectLineageEdges()[0].status).toBe('waiting_agents');
   });
 
   it('suppresses lineage when both collapse-hidden endpoints share a header', () => {

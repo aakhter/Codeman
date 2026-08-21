@@ -70,6 +70,8 @@ const HOME_SESSIONS_PILL_LABEL = {
   error: 'error',
   waiting: 'waiting',
   working: 'working',
+  waiting_agents: 'agents',
+  checking_agents: 'checking',
   idle: 'idle',
   done: 'done',
 };
@@ -238,6 +240,7 @@ Object.assign(CodemanApp.prototype, {
           caseName: matched ? matched.name : '',
           dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
           state,
+          activityStatus: window.CodemanSessionActivity?.resolve(session).effectiveStatus || session.status || 'idle',
           pill: HOME_SESSIONS_PILL_LABEL[state] || state,
           // Epoch ms, straight off the session payload; formatting happens at
           // render time so the clock below can redo it without a re-render.
@@ -451,6 +454,9 @@ Object.assign(CodemanApp.prototype, {
     item.className = 'home-sessions-row home-sessions-row--' + row.state;
     item.dataset.hsAction = 'session';
     item.dataset.hsSession = row.id;
+    item.dataset.activityStatus = row.activityStatus || row.state;
+    const activity = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    item.setAttribute('aria-label', `${row.name}, ${activity?.ariaPhrase || row.state}`);
     item.title = row.dir ? `${row.name} (${row.dir})` : row.name;
 
     // The badge is the Alt+N key for this tab, so it keeps the tab-strip index
