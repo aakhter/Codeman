@@ -119,6 +119,10 @@ export function createMockRouteContext(options?: {
       setSessionOrder: vi.fn((order: string[]) => {
         sessionOrder = order;
       }),
+      getCaseDefaultGroup: vi.fn(),
+      setCaseDefaultGroup: vi.fn(),
+      renameCaseDefaultGroup: vi.fn(),
+      deleteCaseDefaultGroup: vi.fn(),
       getAggregateStats: vi.fn(() => ({ totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 })),
       getGlobalStats: vi.fn(() => ({ sessionsCreated: 0 })),
       getDailyStats: vi.fn(() => []),

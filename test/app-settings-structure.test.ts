@@ -16,6 +16,7 @@ import { resolve } from 'node:path';
 const publicDir = resolve(import.meta.dirname, '../src/web/public');
 const html = readFileSync(resolve(publicDir, 'index.html'), 'utf8');
 const settingsUi = readFileSync(resolve(publicDir, 'settings-ui.js'), 'utf8');
+const sessionUi = readFileSync(resolve(publicDir, 'session-ui.js'), 'utf8');
 
 /** The App Settings modal markup, so assertions can't be satisfied elsewhere. */
 function settingsModal(): string {
@@ -148,5 +149,30 @@ describe('App Settings modal structure', () => {
     const adminUi = readFileSync(resolve(publicDir, 'admin-ui.js'), 'utf8');
     expect(adminUi).toContain('.set-rail-items');
     expect(adminUi).toContain('.set-doc');
+  });
+});
+
+describe('Case Settings default group structure', () => {
+  it('keeps accessible desktop and mobile default-group controls wired to the shared handler', () => {
+    for (const [popoverId, selectId, mobile] of [
+      ['caseSettingsPopover', 'caseDefaultGroup', 'false'],
+      ['caseSettingsPopoverMobile', 'caseDefaultGroupMobile', 'true'],
+    ]) {
+      const popover = html.match(new RegExp(`id="${popoverId}"([\\s\\S]*?)<\\/div>`))?.[1] ?? '';
+      expect(popover).toContain('class="case-setting-field"');
+      expect(popover).toContain('Default session group');
+      expect(popover).toContain(`for="${selectId}"`);
+      expect(popover).toContain(`id="${selectId}"`);
+      expect(popover).toContain(`onchange="app.onCaseDefaultGroupChanged(${mobile})"`);
+      expect(popover).toContain('<option value="">Ungrouped</option>');
+      expect(popover).toContain('Place future sessions for this case in this group');
+    }
+  });
+
+  it('keeps both popovers on the same server-authoritative controller path', () => {
+    expect(sessionUi).toContain('_caseDefaultGroupControls()');
+    expect(sessionUi).toContain('async loadCaseDefaultGroup(caseName)');
+    expect(sessionUi).toContain('async onCaseDefaultGroupChanged(isMobile)');
+    expect(sessionUi).toContain('this.loadCaseDefaultGroup(caseName)');
   });
 });

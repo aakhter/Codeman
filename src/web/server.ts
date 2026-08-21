@@ -1314,20 +1314,15 @@ export class WebServer extends EventEmitter {
         this.attachAgentActivity(session);
         await this.reconcileWatcherConversation(session);
         try {
-          return await this.tabLayouts.sessionCreated(
-            session.owner ?? '@single',
-            session.id,
-            options.tabGroupId,
-            () => {
-              this.sessions.set(session.id, session);
-              return () => {
-                if (this.sessions.get(session.id) === session) {
-                  this.detachAgentActivity(session);
-                  this.sessions.delete(session.id);
-                }
-              };
-            }
-          );
+          return await this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options, () => {
+            this.sessions.set(session.id, session);
+            return () => {
+              if (this.sessions.get(session.id) === session) {
+                this.detachAgentActivity(session);
+                this.sessions.delete(session.id);
+              }
+            };
+          });
         } catch (error) {
           this.detachAgentActivity(session);
           throw error;

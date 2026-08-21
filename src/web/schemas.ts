@@ -593,6 +593,10 @@ export const UpdateCaseSchema = z
     message: 'At least one case parameter must be provided',
   });
 
+export const CaseDefaultGroupSchema = z.object({
+  groupId: z.string().min(1).max(100).nullable(),
+});
+
 export const BrowseDirectoryQuerySchema = z.object({
   path: z.string().max(2000).optional(),
 });

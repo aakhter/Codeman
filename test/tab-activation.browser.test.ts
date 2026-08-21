@@ -335,6 +335,41 @@ describe('COD-316 full-row tab activation in Chromium', () => {
     }
   });
 
+  it('keeps action controls anchored under the cursor when a row is hovered', async () => {
+    // COD-324: `.tab-more` used to toggle `display: none` -> `inline-flex` on hover, so entering a
+    // row pulled the gear and close buttons 28px left (the width of the revealed button) out from
+    // under the pointer that was aiming at them. The fix reserves the box (`visibility: hidden` +
+    // `pointer-events: none`), so revealing it costs no layout. Assert the geometry, not the CSS
+    // property, so any future rewrite that reintroduces a reflow-on-hover fails here.
+    await renderLayout(page, 'horizontal');
+    const webview = page.locator('[data-webview-id="web"]');
+    await page.locator('[data-id="session"]').evaluate((element) => element.classList.remove('active'));
+    await webview.evaluate((element) => element.classList.add('active'));
+
+    await page.mouse.move(5, 5);
+    const gear = webview.locator('.tab-gear');
+    const before = await gear.boundingBox();
+    expect(before).not.toBeNull();
+    const aimPoint = {
+      x: Math.round(before!.x + before!.width / 2),
+      y: Math.round(before!.y + before!.height / 2),
+    };
+
+    await page.mouse.move(aimPoint.x, aimPoint.y);
+    await page.waitForTimeout(250);
+
+    const after = await gear.boundingBox();
+    expect(after).not.toBeNull();
+    expect(Math.abs(after!.x - before!.x)).toBeLessThanOrEqual(4);
+
+    // The property that actually matters: the point the user aimed at still belongs to the gear.
+    const stillOnGear = await page.evaluate((point) => {
+      const element = document.elementFromPoint(point.x, point.y);
+      return Boolean(element && element.closest('.tab-gear'));
+    }, aimPoint);
+    expect(stillOnGear).toBe(true);
+  });
+
   it('activates session/webview rows from real touchscreen taps while handles and controls stay separate', async () => {
     await renderLayout(touchPage, 'horizontal');
     await expectActivation(touchPage, '[data-id="session"] .tab-name', 'session:session', true);

@@ -8,7 +8,7 @@
 import { execSync, spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { homedir, platform } from 'os';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 import { createRequire } from 'module';
 
 // ============================================================================
@@ -371,14 +371,34 @@ if (!isGlobalInstall) {
 }
 
 // ----------------------------------------------------------------------------
-// 5. Install git pre-commit hook (format check)
+// 5. Install git hooks (pre-commit format check, pre-push static gate)
 // ----------------------------------------------------------------------------
+
+/**
+ * Resolve the real hooks directory. `../.git/hooks` is wrong in a worktree, where `.git`
+ * is a FILE pointing at the parent repo — and worktree-per-issue is the documented
+ * workflow here, so that is the common case rather than an edge one.
+ */
+function resolveGitHooksDir(repoRoot) {
+    try {
+        const out = execSync('git rev-parse --git-path hooks', {
+            cwd: repoRoot,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        if (!out) return null;
+        return isAbsolute(out) ? out : join(repoRoot, out);
+    } catch {
+        return null;
+    }
+}
 
 if (!isGlobalInstall) {
     try {
         const { writeFileSync, mkdirSync } = await import('fs');
-        const gitHooksDir = join(import.meta.dirname, '..', '.git', 'hooks');
-        if (existsSync(join(import.meta.dirname, '..', '.git'))) {
+        const repoRoot = join(import.meta.dirname, '..');
+        const gitHooksDir = resolveGitHooksDir(repoRoot);
+        if (gitHooksDir) {
             mkdirSync(gitHooksDir, { recursive: true });
             const hook = `#!/bin/bash
 # Auto-installed by postinstall — prevents CI format failures
@@ -394,9 +414,25 @@ fi
             const hookPath = join(gitHooksDir, 'pre-commit');
             writeFileSync(hookPath, hook, { mode: 0o755 });
             console.log(colors.green('✓ Git pre-commit hook installed (prettier check)'));
+
+            // Pre-push static gate (COD-293 / Q11 option L1). Unlike the pre-commit hook
+            // above, this one is marker-owned: a hand-written pre-push hook is left alone.
+            const { readFileSync } = await import('fs');
+            const { renderPrePushHook, planHookInstall } = await import('./git-hooks.mjs');
+            const prePushPath = join(gitHooksDir, 'pre-push');
+            const nextPrePush = renderPrePushHook();
+            const existingPrePush = existsSync(prePushPath) ? readFileSync(prePushPath, 'utf8') : null;
+            const action = planHookInstall({ existing: existingPrePush, next: nextPrePush });
+
+            if (action === 'write') {
+                writeFileSync(prePushPath, nextPrePush, { mode: 0o755 });
+                console.log(colors.green('✓ Git pre-push hook installed') + colors.dim(' (static checks, ~15s)'));
+            } else if (action === 'skip-foreign') {
+                console.log(colors.dim('  Existing pre-push hook left untouched (not Codeman-managed)'));
+            }
         }
     } catch {
-        // Non-critical — git hook is a convenience
+        // Non-critical — git hooks are a convenience
     }
 }
 

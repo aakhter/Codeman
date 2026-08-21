@@ -288,4 +288,70 @@ agents = ["agent-library/android-dev/mobile-developer"]
       expect(names).not.toContain('README');
     });
   });
+
+  // ---- glob discovery (COD-342) ----
+
+  describe('buildCatalog glob matching', () => {
+    async function globSource(name: string, glob: string, files: string[]): Promise<SkillSource> {
+      const repoPath = path.join(tmpDir, name);
+      for (const rel of files) {
+        const full = path.join(repoPath, rel);
+        await mkdir(path.dirname(full), { recursive: true });
+        await writeFile(full, '# fixture');
+      }
+      return {
+        name,
+        path: repoPath,
+        description: '',
+        available: true,
+        artifacts: { skill: { glob } },
+        bundles: {},
+      };
+    }
+
+    it('matches wildcard segments against a nested layout', async () => {
+      const src = await globSource('packs-repo', 'packs/*/*.md', [
+        'packs/review/code-review.md',
+        'packs/review/line-edit.md',
+        'packs/other/thing.md',
+        'packs/review/nested/deep.md',
+        'top.md',
+      ]);
+      const catalog = await buildCatalog([src]);
+      expect(catalog.entries.map((e) => `${e.pack}/${e.name}`).sort()).toEqual([
+        'other/thing',
+        'review/code-review',
+        'review/line-edit',
+      ]);
+    });
+
+    it('does not blow up on a segment carrying many wildcards', async () => {
+      // The RegExp implementation compiled each `*` to a separate `[^/]*`, so a segment with
+      // many of them backtracked catastrophically: 12 wildcards against a 32-character name
+      // took 79 SECONDS on this box, and this runs per candidate file inside an await-free
+      // loop — i.e. it wedges the whole event loop, not just one request.
+      const name = 'a'.repeat(28);
+      const src = await globSource('starry-repo', `${'*'.repeat(11)}x.md`, [`${name}.md`]);
+      const started = Date.now();
+      const catalog = await buildCatalog([src]);
+      const elapsed = Date.now() - started;
+      expect(catalog.entries).toEqual([]);
+      expect(elapsed).toBeLessThan(1000);
+    });
+
+    it('treats `?` as a literal character rather than a RegExp quantifier', async () => {
+      // `?` was missing from the escape set, so it survived into the compiled RegExp as a
+      // quantifier. Two consequences: `ab?*` wrongly matched `ab`, and a leading `?` threw
+      // `SyntaxError: Nothing to repeat` straight out of buildCatalog.
+      const src = await globSource('question-repo', 'packs/ab?*.md', ['packs/ab.md', 'packs/ab?cd.md']);
+      const catalog = await buildCatalog([src]);
+      expect(catalog.entries.map((e) => e.name)).toEqual(['ab?cd']);
+    });
+
+    it('does not throw when a wildcard segment starts with a regex metacharacter', async () => {
+      const src = await globSource('meta-repo', 'packs/?*.md', ['packs/?keep.md', 'packs/skip.md']);
+      const catalog = await buildCatalog([src]);
+      expect(catalog.entries.map((e) => e.name)).toEqual(['?keep']);
+    });
+  });
 });

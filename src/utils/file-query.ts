@@ -26,6 +26,8 @@
  * No fs / IO — safe to unit-test directly.
  */
 
+import { matchWildcard } from './wildcard-match.js';
+
 export type FileQueryMatcher = (name: string, relativePath: string) => boolean;
 
 // Longer than any honest file search; bounds the O(text · pattern) glob walk.
@@ -37,30 +39,7 @@ const MAX_QUERY_LENGTH = 256;
  * here so one compiled matcher serves many entries.
  */
 function globMatch(pattern: string, rawText: string): boolean {
-  const text = rawText.toLowerCase();
-  let p = 0;
-  let t = 0;
-  let starP = -1;
-  let starT = -1;
-  while (t < text.length) {
-    const pc = p < pattern.length ? pattern[p] : '';
-    if (pc === '?' || pc === text[t]) {
-      p++;
-      t++;
-    } else if (pc === '*') {
-      // Remember the star; try matching zero characters first, and on a later
-      // mismatch re-expand it one character at a time from here.
-      starP = p++;
-      starT = t;
-    } else if (starP !== -1) {
-      p = starP + 1;
-      t = ++starT;
-    } else {
-      return false;
-    }
-  }
-  while (p < pattern.length && pattern[p] === '*') p++;
-  return p === pattern.length;
+  return matchWildcard(pattern, rawText.toLowerCase(), { singleCharWildcard: true });
 }
 
 /**

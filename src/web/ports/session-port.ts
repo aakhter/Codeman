@@ -4,14 +4,12 @@
  */
 
 import type { Session } from '../../session.js';
-import type { TabLayoutSnapshot } from '../../tab-layout-service.js';
+import type { SessionPlacementHints, TabLayoutSnapshot } from '../../tab-layout-service.js';
 import type { SessionActivityProjection } from '../../types/session.js';
 
 export type SessionWireState = SessionActivityProjection & Record<string, unknown>;
 
-export interface SessionCreationOptions {
-  tabGroupId?: string;
-}
+export type SessionCreationOptions = SessionPlacementHints;
 
 export interface SessionPort {
   readonly sessions: ReadonlyMap<string, Session>;
