@@ -17,7 +17,9 @@ persisted session-status contract.
 
 - Show a distinct **WAITING ON AGENTS** state while an otherwise-idle local Claude session has live background agents.
 - Do not place that state in Approvals or notify the user that Claude needs input.
-- Keep raw hook and persisted-status compatibility for existing orchestration and API consumers.
+- Keep persisted `status` and raw `stop` wait delivery compatible for existing orchestration and API consumers. A
+  suppressed legacy hook SSE event is intentionally replaced by a diagnostic event so an older browser cannot recreate
+  the false approval or notification.
 - Prevent allocation, idle waits, respawn, stuck detection, and auto-operations from treating the session as available.
 - Remain correct across concurrent sessions, restarts, identity changes, watcher resets, stale events, and liveness
   uncertainty.
@@ -35,8 +37,8 @@ persisted session-status contract.
 
 `Session.status` remains the raw `SessionStatus` and remains the value written to persisted state. The wire state gains
 an additive, always-emitted `activityStatus` whose domain is `SessionStatus | "waiting_agents" | "checking_agents"`,
-plus `activityStatusSince`. Existing clients may continue using `status`; updated Codeman clients use the shared
-effective-activity resolver.
+plus `activityStatusSince: number | null`. Existing clients may continue using `status`; updated Codeman clients use
+the shared effective-activity resolver.
 
 Agent observation is a separate server-side dimension:
 
@@ -49,26 +51,40 @@ The effective projection is:
 
 1. Permission and elicitation prompts remain actionable and outrank derived activity in the UI.
 2. Raw error remains error.
-3. Raw busy/working remains working even when agents also exist.
+3. Raw busy remains the working presentation even when agents also exist.
 4. Raw idle plus `live` becomes `waiting_agents`.
 5. Raw idle plus `unknown` becomes `checking_agents`.
-6. Otherwise the raw stopped/idle state applies.
+6. Every raw `SessionStatus` not overridden above, including stopped and parked, passes through unchanged.
 
 `activityStatusSince` starts when the effective state enters one agent-observation episode. Transitions between
-`waiting_agents` and `checking_agents` preserve it; count and progress updates do not reset it. On restart it is
-reconstructed as the later of the reliable earliest-live-agent start and the inferred raw-idle anchor, clamped to the
-current time.
+`waiting_agents` and `checking_agents` preserve it; count and progress updates do not reset it. On restart, a positively
+live observation reconstructs it as the later of the reliable earliest-live-agent start and the inferred raw-idle
+anchor, clamped to the current time. An unknown startup observation has no reliable agent start, so its
+`checking_agents` timestamp is the time that reconciliation entered pending state rather than an old raw-idle anchor.
+The field is non-null only while `activityStatus` is `waiting_agents` or `checking_agents`; leaving that episode sets it
+to null, and existing raw-state timestamps continue to drive working/error/idle/stopped/parked presentation.
 
 The shared presentation order is:
 
 `needs` > `error` > `waiting` (genuine input) > `working` > `waiting_agents` > `checking_agents` > `idle` > `done`.
 
+This feature does not redefine parked-session UX: `activityStatus` passes through `parked`, and the overview resolver
+maps it to its existing idle presentation unless a separate parked-state change is approved. The exhaustive projection
+table must therefore distinguish wire pass-through from the existing overview label instead of silently inventing a
+new parked rank in COD-350.
+
 ## Identity and lifecycle authority
 
-Semantic correlation uses the exact canonical tuple `(projectHash, claudeSessionId, agentId)`. The server exposes a
-stable composite `agentKey` for browser maps and mutation actions while retaining `agentId` as display and backward-
-compatibility data. A mutation request using a bare duplicate `agentId` fails with an ambiguity error rather than
-acting on the wrong agent.
+Semantic correlation uses the exact canonical tuple `(projectHash, claudeSessionId, agentId)`. One shared
+Claude-compatible lexical path normalizer and project-hash function is used by launch, watcher, reconciliation, and
+tests; redundant separators, `.` segments, and trailing separators cannot produce competing identities. The project
+hash preserves the launch path's symlink spelling because that is the spelling Claude uses for its project directory;
+it is not silently replaced with an independently guessed `realpath`.
+
+The server exposes an opaque, collision-safe serialization of the tuple as stable `agentKey` for browser maps and
+mutation actions; consumers never construct it by concatenating slash-delimited strings. `agentId` remains display and
+backward-compatibility data. A mutation request using a bare duplicate `agentId` fails with an ambiguity error rather
+than acting on the wrong agent.
 
 The semantic live index is separate from completed/display history. It contains only agents correlated to currently
 live local Codeman sessions. History TTL/LRU cleanup and the manual clear endpoint cannot evict active or idle live
@@ -88,23 +104,43 @@ identity. A newly created or re-identified session enters `unknown` synchronousl
 until reconciliation for that exact object and identity generation finishes. Identities appearing during an enable
 pass receive the same per-session gate; one failed session does not block unrelated sessions.
 
-Raw Claude idle and `idle_prompt` effects also request targeted reconciliation before committing user-facing or
-automation consequences. A suppressible `idle_prompt` requires an exact live agent plus one of:
+Raw Claude idle, `idle_prompt`, and `stop` effects request targeted reconciliation before committing user-facing or
+automation consequences. Raw `stop` wait delivery remains immediate and occurs before that asynchronous decision. A
+suppressible `idle_prompt` requires an exact live agent plus one of:
 
-- exact positive process identity, parsed from NUL-delimited environment/argument tokens without substring matching;
-  or
+- exact positive aggregate process identity for the same canonical project and Claude conversation; or
 - a source-tagged current visible tmux frame whose bottom status region exactly matches Claude's background-agent
   renderer and whose positive count equals the exact live composite-agent count.
+
+Aggregate process proof requires all of the following: `/proc/<pid>/cwd` and the session working directory resolve to
+the same filesystem object (device/inode), while the watcher record independently carries the exact Claude project
+hash; an allowlisted Claude environment field or CLI flag parses to the exact `claudeSessionId`; and the process is not
+the Codeman-managed parent (`CODEMAN_MUX=1`). It must also match an allowlisted Claude background-agent process
+signature for a supported version: a verified agent-role environment/argument marker, or a verified executable plus
+subagent launch signature and process-tree relationship. Sharing only cwd and conversation identity is insufficient;
+generic hook helpers and inherited auxiliary children are negative fixtures.
+
+Environment entries and arguments are parsed as NUL-delimited structured tokens, including verified `--flag value` and
+`--flag=value` forms, never substring-searched. Supported fields, flags, executables, and role signatures must be
+established by fixtures from the Claude versions Codeman supports. An unreadable process table or an unrecognized
+identity format is `unknown`, not a guessed match; a successful complete inspection with no exact match is a negative
+result. When a supported Claude version exposes an exact agent ID, it may additionally bind the process to an
+`agentKey`; otherwise aggregate proof means only “at least one background agent for this project/conversation is live”
+and must not mark every semantic agent record individually alive.
 
 Scrollback, raw-buffer fallbacks, quoted text, stale markers, mismatched counts, and unrecognized variants are not
 semantic evidence. A `stop` is stricter: only exact positive live-process evidence may suppress its completion
 presentation. Recent transcript modification or a pane marker alone is insufficient because both can outlive the
 final agent process.
 
-Reconciliation uses a bounded shared scheduler with per-session single-flight/coalescing, a default concurrency of
-four, a reserved foreground slot, and FIFO aging so background work cannot starve. Queue wait counts against the
-foreground decision deadline. Every request owns an abortable decision token; expiry removes queued work or detaches
-the consumer, aborts process inspection when no consumers remain, and permanently rejects late results.
+Reconciliation uses a bounded shared scheduler with per-session single-flight/coalescing and a default concurrency of
+four. Background startup/retry work may occupy at most three slots, reserving one for foreground raw-idle/hook
+decisions. In work shared by the remaining slots, no more than three foreground jobs may start consecutively while
+background work is queued; the oldest background job then starts next. FIFO order applies within each class. This
+bounded-burst rule prevents an endless foreground stream from starving startup/retry work and gives fairness tests a
+measurable contract. Queue wait counts against the foreground decision deadline. Every request owns an abortable
+decision token; expiry removes queued work or detaches the consumer, aborts process inspection when no consumers remain,
+and permanently rejects late results.
 
 Async commits validate the same Session object, Claude identity generation, tracking generation, terminal activity
 epoch, semantic-index revision, and live decision token. Agent discovery/completion, terminal output, submission, or a
@@ -131,14 +167,23 @@ When an `idle_prompt` or `stop` is suppressed as background-agent presentation:
 - the legacy `hook:idle_prompt`/`hook:stop` SSE event is not emitted, so older browsers do not recreate the bug by
   ignoring a new suppression flag.
 
-An unsuppressed stop remains authoritative for completion presentation. It clears the derived waiting claim for that
-identity generation and quarantines weaker sidecar/file evidence observed at or before the stop. A quarantined agent
-cannot resurrect waiting through a delayed final transcript write; it needs renewed positive process evidence, while
-a genuinely new composite agent may establish a new wait immediately.
+An unsuppressed stop remains authoritative for human-facing completion presentation. When exact reconciliation
+successfully inspects the supported process sources and finds no match, the stop also clears the derived waiting claim
+for that identity generation and quarantines weaker sidecar/file evidence observed at or before the stop. A quarantined
+agent cannot resurrect waiting through a delayed final transcript write; it needs renewed positive process evidence,
+while a genuinely new composite agent may establish a new wait immediately.
 
-Hook effects use a per-session receive sequence. Stop resolves only approvals that existed at or before its sequence.
-A committed completion watermark prevents an older delayed `idle_prompt` or raw-idle decision from creating an
-approval after a newer stop. Permission and elicitation prompts remain independent of that watermark.
+If the stop is unsuppressed only because reconciliation is unreadable or times out, completion presentation still fails
+open but autonomous availability remains fail-safe. The observation stays `unknown`, or retains a stronger existing
+`live` projection, until retry; it is not falsely converted to `none`. This can intentionally show a completion notice
+while still labeling the session **CHECKING AGENTS** or **WAITING ON AGENTS**: the former is a human notification, while
+the latter is the conservative automation/activity state.
+
+Stop, `idle_prompt`, raw-idle, permission, and elicitation events all receive a value from one monotonic coordinator
+event sequence scoped to the Codeman session and Claude identity generation. Approval items store their source sequence.
+Stop resolves only approvals whose source sequence is at or before its own. A committed completion watermark prevents
+an older delayed `idle_prompt` or raw-idle decision from creating an approval after a newer stop. Permission and
+elicitation prompts remain independent of that watermark and never wait for reconciliation.
 
 Raw `session:idle` does not broadcast legacy idle or call `sessionWaits.notifySignal("idle")` while observation is
 `live` or `unknown`. When the final derived transition genuinely reaches idle, Codeman broadcasts one derived idle
@@ -148,10 +193,12 @@ the corresponding derived idle edge when the raw session is idle.
 
 ## Automation safety and final-agent settling
 
-One server predicate defines autonomous availability. It requires a ready observation, no live or unknown agents, and
-the appropriate raw session state. Session allocation, `SessionManager` idle selection, immediate/fresh idle waits,
-respawn confirmation, and auto-operations all use that predicate. Entering `waiting_agents` or `checking_agents`
-cancels pending respawn confirmation and client idle/stuck timers.
+One server predicate defines autonomous availability. For a supported local session, only `none` plus completed
+readiness may delegate to the appropriate raw session state; `live` and `unknown` always block. `not_observable`
+explicitly delegates to legacy raw-state availability, which is how unsupported remote/container sessions and an
+intentional tracking-disable retain existing behavior. Session allocation, `SessionManager` idle selection,
+immediate/fresh idle waits, respawn confirmation, and auto-operations all use that predicate. Entering
+`waiting_agents` or `checking_agents` cancels pending respawn confirmation and client idle/stuck timers.
 
 After the final agent completes, Codeman retains the observation episode for the existing `IDLE_SILENCE_MS` interval
 to avoid a visible idle flash before Claude synthesizes the results. Parent output clears the settle state to working;
@@ -178,7 +225,8 @@ preferences. Action prompts continue to outrank these labels.
 
 - Local timeout, read failure, or overflow: show genuine prompt/completion effects, project `checking_agents` when no
   stronger live evidence exists, block automation, and retry with bounded backoff.
-- Unsupported remote/container observation: do not claim agent awareness; retain legacy presentation and automation.
+- Unsupported remote/container observation, or intentional tracking disable: set `not_observable`, do not claim agent
+  awareness, and delegate presentation and automation availability to the legacy raw-state rules.
 - Ambiguous session identity or composite lookup: do not suppress a prompt or mutate an agent; surface a diagnostic.
 - Session deletion, PTY exit, Claude identity replacement, tracking reset, and watcher/server shutdown clear derived
   state, watermarks, quarantines, queued work, retries, settle timers, and cache entries for that generation.
@@ -199,7 +247,7 @@ Focused unit, route, and browser tests will cover:
 - idle waiter suppression and derived delivery, allocation, respawn, auto-ops, final-agent settle/cancel behavior, and
   unknown-state safety; and
 - exhaustive state resolution, ordering, timestamps, reconnect clearing, every user-facing status surface, ARIA/CSS,
-  and reduced-motion behavior.
+  reduced-motion behavior, and pass-through coverage for every `SessionStatus` member.
 
 Verification will use only focused test files, followed by typecheck, lint, formatting, lockfile validation, production
 build, and a realistic staging smoke. Production remains untouched without explicit deploy authorization.
