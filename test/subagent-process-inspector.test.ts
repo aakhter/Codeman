@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  exactFlagConversationProof,
   inspectSubagentProcesses,
   parseNulDelimited,
   readExactFlagValues,
@@ -95,7 +96,14 @@ describe('inspectSubagentProcesses', () => {
   it('requires exact conversation and cwd identity before invoking a future matcher', async () => {
     const matcher: ProcessProofMatcher = {
       capability: 'exact_role',
-      match: vi.fn(() => ({ matched: true, agentId: 'agent-7' })),
+      match: vi.fn((candidate, observableIdentity) => {
+        const conversationProof = exactFlagConversationProof(
+          candidate.argv,
+          ['--session-id', '--resume'],
+          observableIdentity.claudeSessionId
+        );
+        return conversationProof ? { matched: true, conversationProof, agentId: 'agent-7' } : { matched: false };
+      }),
     };
     const registry = new Map([['future-test-runtime', matcher]]);
     const result = await inspectSubagentProcesses(
@@ -108,7 +116,7 @@ describe('inspectSubagentProcesses', () => {
       { matcherRegistry: registry }
     );
 
-    expect(matcher.match).toHaveBeenCalledTimes(1);
+    expect(matcher.match).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       status: 'positive',
       reason: 'matching_process',
@@ -123,7 +131,16 @@ describe('inspectSubagentProcesses', () => {
     const matcher: ProcessProofMatcher = {
       capability: 'exact_role',
       // TEST_ROLE is deliberately test-only and is not a claimed Claude role signature.
-      match: vi.fn((candidate) => ({ matched: candidate.environment.get('TEST_ROLE') === 'worker' })),
+      match: vi.fn((candidate, observableIdentity) => {
+        const conversationProof = exactFlagConversationProof(
+          candidate.argv,
+          ['--session-id'],
+          observableIdentity.claudeSessionId
+        );
+        return candidate.environment.get('TEST_ROLE') === 'worker' && conversationProof
+          ? { matched: true, conversationProof }
+          : { matched: false };
+      }),
     };
     const result = await inspectSubagentProcesses(
       { ...identity, claudeRuntimeVersion: 'future-test-runtime' },
@@ -147,6 +164,68 @@ describe('inspectSubagentProcesses', () => {
     expect(matcher.match).toHaveBeenCalledTimes(2);
     expect(result.status).toBe('positive');
     expect(result.agentIds).toEqual([]);
+  });
+
+  it('lets a future matcher prove exact conversation identity from an environment-only field', async () => {
+    const matcher: ProcessProofMatcher = {
+      capability: 'exact_role',
+      // TEST_CONVERSATION_ID is deliberately test-only, not a production Claude allowlist claim.
+      match: vi.fn((candidate) => {
+        const claudeSessionId = candidate.environment.get('TEST_CONVERSATION_ID');
+        return claudeSessionId === identity.claudeSessionId
+          ? {
+              matched: true,
+              conversationProof: {
+                source: 'environment',
+                field: 'TEST_CONVERSATION_ID',
+                claudeSessionId,
+              },
+            }
+          : { matched: false };
+      }),
+    };
+    const result = await inspectSubagentProcesses(
+      { ...identity, claudeRuntimeVersion: 'future-test-runtime' },
+      source([
+        {
+          pid: 1,
+          argv: 'future-worker\0',
+          environment: 'TEST_CONVERSATION_ID=conversation-123-extra\0',
+          cwd: directoryIdentity,
+        },
+        {
+          pid: 2,
+          argv: 'future-worker\0',
+          environment: 'TEST_CONVERSATION_ID=conversation-123\0',
+          cwd: directoryIdentity,
+        },
+      ]),
+      { matcherRegistry: new Map([['future-test-runtime', matcher]]) }
+    );
+
+    expect(matcher.match).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ status: 'positive', reason: 'matching_process' });
+  });
+
+  it('rejects a matcher claim whose conversation proof is not the exact authoritative identity', async () => {
+    const matcher: ProcessProofMatcher = {
+      capability: 'exact_role',
+      match: vi.fn(() => ({
+        matched: true,
+        conversationProof: {
+          source: 'environment',
+          field: 'TEST_CONVERSATION_ID',
+          claudeSessionId: 'conversation-123-extra',
+        },
+      })),
+    };
+    const result = await inspectSubagentProcesses(
+      { ...identity, claudeRuntimeVersion: 'future-test-runtime' },
+      source([{ pid: 1, argv: 'future-worker\0', cwd: directoryIdentity }]),
+      { matcherRegistry: new Map([['future-test-runtime', matcher]]) }
+    );
+
+    expect(result).toMatchObject({ status: 'negative', reason: 'no_matching_process' });
   });
 
   it('excludes parent, helper, and generic children when the injected matcher does not prove their role', async () => {
@@ -175,7 +254,15 @@ describe('inspectSubagentProcesses', () => {
   it('excludes the Codeman-managed parent even if a future matcher would otherwise accept it', async () => {
     const matcher: ProcessProofMatcher = {
       capability: 'exact_role',
-      match: vi.fn(() => ({ matched: true, agentId: 'must-not-escape' })),
+      match: vi.fn(() => ({
+        matched: true,
+        conversationProof: {
+          source: 'argument',
+          field: '--session-id',
+          claudeSessionId: identity.claudeSessionId,
+        },
+        agentId: 'must-not-escape',
+      })),
     };
     const result = await inspectSubagentProcesses(
       { ...identity, claudeRuntimeVersion: 'future-test-runtime' },
@@ -224,7 +311,14 @@ describe('inspectSubagentProcesses', () => {
     let resolvePids!: (pids: number[]) => void;
     const matcher: ProcessProofMatcher = {
       capability: 'exact_role',
-      match: vi.fn(() => ({ matched: true })),
+      match: vi.fn(() => ({
+        matched: true,
+        conversationProof: {
+          source: 'argument',
+          field: '--session-id',
+          claudeSessionId: identity.claudeSessionId,
+        },
+      })),
     };
     const delayedSource = source([]);
     delayedSource.listPids = vi.fn(

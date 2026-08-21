@@ -25,11 +25,21 @@ export interface ProcessProofCandidate {
   environment: ReadonlyMap<string, string>;
 }
 
-export interface ProcessProofMatch {
-  matched: boolean;
-  /** Present only when the matcher proves this exact Claude agent identity. */
-  agentId?: string;
+export interface ExactConversationProof {
+  source: 'argument' | 'environment';
+  /** Version-matcher allowlisted flag or environment field. */
+  field: string;
+  claudeSessionId: string;
 }
+
+export type ProcessProofMatch =
+  | { matched: false }
+  | {
+      matched: true;
+      conversationProof: ExactConversationProof;
+      /** Present only when the matcher also proves this exact Claude agent identity. */
+      agentId?: string;
+    };
 
 export interface ProcessProofMatcher {
   capability: 'exact_role';
@@ -70,8 +80,6 @@ export interface ProcessInspectionOptions {
 }
 
 const EMPTY_MATCHER_REGISTRY: ProcessProofMatcherRegistry = new Map();
-const CONVERSATION_FLAGS = ['--session-id', '--resume'] as const;
-
 class InspectionAbortedError extends Error {}
 
 export function parseNulDelimited(value: string | Buffer): string[] {
@@ -102,6 +110,20 @@ export function readExactFlagValues(argv: readonly string[], flags: readonly str
   return values;
 }
 
+/** Build exact argument proof for a version matcher from its own allowlisted flags. */
+export function exactFlagConversationProof(
+  argv: readonly string[],
+  allowedFlags: readonly string[],
+  claudeSessionId: string
+): ExactConversationProof | undefined {
+  for (const field of allowedFlags) {
+    if (readExactFlagValues(argv, [field]).some((value) => value === claudeSessionId)) {
+      return { source: 'argument', field, claudeSessionId };
+    }
+  }
+  return undefined;
+}
+
 function parseEnvironment(value: string | Buffer): ReadonlyMap<string, string> {
   const environment = new Map<string, string>();
   for (const field of parseNulDelimited(value)) {
@@ -114,10 +136,6 @@ function parseEnvironment(value: string | Buffer): ReadonlyMap<string, string> {
 
 function sameDirectory(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
   return String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
-}
-
-function hasExactConversation(argv: readonly string[], claudeSessionId: string): boolean {
-  return readExactFlagValues(argv, CONVERSATION_FLAGS).some((value) => value === claudeSessionId);
 }
 
 function matcherFor(
@@ -185,7 +203,6 @@ export async function inspectSubagentProcesses(
       const argv = parseNulDelimited(rawArgv);
       const environment = parseEnvironment(rawEnvironment);
       if (!sameDirectory(workingDirectory, processCwd)) continue;
-      if (!hasExactConversation(argv, identity.claudeSessionId)) continue;
       if (environment.get('CODEMAN_MUX') === '1') continue;
       candidates.push({ pid, argv, environment });
     }
@@ -206,6 +223,7 @@ export async function inspectSubagentProcesses(
       if (signal?.aborted) throw new InspectionAbortedError();
       const match = matcher.match(candidate, identity);
       if (!match.matched) continue;
+      if (match.conversationProof.claudeSessionId !== identity.claudeSessionId) continue;
       matched = true;
       if (match.agentId !== undefined) agentIds.add(match.agentId);
     }
