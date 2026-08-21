@@ -748,9 +748,11 @@ export class WebServer extends EventEmitter {
     // completion advanced the semantic index after the filesystem scan.
     const snapshot = subagentWatcher.getSemanticSnapshot(projectHash, claudeSessionId);
     this.mutateAgentActivity(session, (currentAdapter) =>
-      this.agentActivityCoordinator.onWatcherCount(
+      this.agentActivityCoordinator.onWatcherSnapshot(
         currentAdapter,
-        snapshot.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length,
+        snapshot.agents
+          .filter((agent) => agent.status === 'active' || agent.status === 'idle')
+          .map((agent) => agent.agentKey),
         snapshot.revision
       )
     );
@@ -881,22 +883,26 @@ export class WebServer extends EventEmitter {
     const previousRevision = this.watcherRevisionByIdentity.get(identityKey) ?? -1;
     if (data.revision <= previousRevision) return;
     this.watcherRevisionByIdentity.set(identityKey, data.revision);
-    const count = data.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length;
+    const liveAgentKeys = data.agents
+      .filter((agent) => agent.status === 'active' || agent.status === 'idle')
+      .map((agent) => agent.agentKey);
     for (const session of this.sessionsForClaudeIdentity(data.projectHash, data.sessionId)) {
       this.mutateAgentActivity(session, (adapter) =>
-        this.agentActivityCoordinator.onWatcherCount(adapter, count, data.revision)
+        this.agentActivityCoordinator.onWatcherSnapshot(adapter, liveAgentKeys, data.revision)
       );
     }
   }
 
   private commitWatcherInfo(info: SubagentInfo, forceLive = false): void {
     const snapshot = subagentWatcher.getSemanticSnapshot(info.projectHash, info.sessionId);
-    const liveCount = snapshot.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length;
+    const liveAgentKeys = snapshot.agents
+      .filter((agent) => agent.status === 'active' || agent.status === 'idle')
+      .map((agent) => agent.agentKey);
     this.commitWatcherRevision({
       projectHash: info.projectHash,
       sessionId: info.sessionId,
       revision: Math.max(1, snapshot.revision),
-      agents: forceLive && liveCount === 0 ? [info] : snapshot.agents,
+      agents: forceLive && liveAgentKeys.length === 0 ? [info] : snapshot.agents,
     });
   }
 
@@ -920,14 +926,19 @@ export class WebServer extends EventEmitter {
     this.cachedLightState = null;
     this.cachedSessionsList = null;
     const snapshot = subagentWatcher.getSemanticSnapshot(projectHash, claudeSessionId);
-    const liveCount = snapshot.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length;
+    const liveAgentKeys = snapshot.agents
+      .filter((agent) => agent.status === 'active' || agent.status === 'idle')
+      .map((agent) => agent.agentKey);
     const identityKey = JSON.stringify([projectHash, claudeSessionId]);
     const unknownRevision = Math.max(snapshot.revision, this.watcherRevisionByIdentity.get(identityKey) ?? 0) + 1;
     for (const session of this.sessionsForClaudeIdentity(projectHash, claudeSessionId)) {
       const before = session.activityProjection;
       this.mutateAgentActivity(session, (adapter) => {
-        if (liveCount > 0) this.agentActivityCoordinator.onWatcherCount(adapter, liveCount, snapshot.revision);
-        else this.agentActivityCoordinator.onAgentRevision(adapter, unknownRevision);
+        if (liveAgentKeys.length > 0) {
+          this.agentActivityCoordinator.onWatcherSnapshot(adapter, liveAgentKeys, snapshot.revision);
+        } else {
+          this.agentActivityCoordinator.onAgentRevision(adapter, unknownRevision);
+        }
       });
       const after = session.activityProjection;
       if (before.activityStatus === after.activityStatus && before.activityStatusSince === after.activityStatusSince) {
@@ -963,9 +974,13 @@ export class WebServer extends EventEmitter {
 
   private async inspectAgentActivity(project: ObservableSessionProject, signal: AbortSignal): Promise<AgentEvidence> {
     const snapshot = subagentWatcher.getSemanticSnapshot(project.projectHash, project.claudeSessionId);
-    const exactWatcherCount = snapshot.agents.filter(
-      (agent) => agent.status === 'active' || agent.status === 'idle'
-    ).length;
+    const exactWatcherAgentKeys = this.agentActivityCoordinator.filterWatcherAgentKeys(
+      project.session,
+      snapshot.agents
+        .filter((agent) => agent.status === 'active' || agent.status === 'idle')
+        .map((agent) => agent.agentKey)
+    );
+    const exactWatcherCount = exactWatcherAgentKeys.length;
     const identity: ObservableClaudeIdentity = {
       workingDir: project.workingDir,
       projectHash: project.projectHash,
@@ -999,6 +1014,7 @@ export class WebServer extends EventEmitter {
       observation,
       semanticRevision: snapshot.revision,
       exactWatcherCount,
+      exactWatcherAgentKeys,
       processReason:
         process.status === 'positive' ? 'matching_process' : process.status === 'negative' ? process.reason : undefined,
       currentFrame:

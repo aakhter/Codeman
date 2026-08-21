@@ -327,18 +327,19 @@ describe('session agent activity coordinator', () => {
       });
     });
 
-    it('quarantines capability-complete negative stop evidence until a genuinely newer watcher revision', async () => {
+    it('quarantines exact composite keys across revisions and admits only a genuinely new key', async () => {
       let evidence = {
         observation: 'live' as AgentObservation,
         semanticRevision: 7,
         exactWatcherCount: 1,
+        exactWatcherAgentKeys: ['project-a/conversation-a/agent-1'],
         currentFrame: frameEvidence('negative'),
         processReason: 'no_matching_process' as const,
       };
       const coordinator = new SessionAgentActivityCoordinator({ inspect: async () => evidence });
       const target = session();
       coordinator.attachSession(target);
-      coordinator.onWatcherCount(target, 1, 7);
+      coordinator.onWatcherSnapshot(target, ['project-a/conversation-a/agent-1'], 7);
       const stop = coordinator.allocateEvent(target, 'stop');
       const result = await coordinator.reconcileForEvent(target, stop);
       const reconciliation = coordinator.reconciliationForEvent(target, stop, result);
@@ -348,20 +349,36 @@ describe('session agent activity coordinator', () => {
         autonomyBlocked: false,
       });
 
-      coordinator.onWatcherCount(target, 1, 7);
+      coordinator.onWatcherSnapshot(target, ['project-a/conversation-a/agent-1'], 8);
       expect(coordinator.project(target).activityStatus).toBe('idle');
       coordinator.commitEvidence(target, {
         observation: 'live',
-        semanticRevision: 7,
+        semanticRevision: 9,
         exactWatcherCount: 1,
+        exactWatcherAgentKeys: ['project-a/conversation-a/agent-1'],
         currentFrame: frameEvidence('positive', 1),
         processReason: 'no_registered_role_signature',
       });
       expect(coordinator.project(target).activityStatus).toBe('idle');
-      coordinator.onWatcherCount(target, 1, 8);
+      coordinator.onWatcherSnapshot(
+        target,
+        ['project-a/conversation-a/agent-1', 'project-a/conversation-a/agent-2'],
+        10
+      );
       expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+      expect(
+        coordinator.filterWatcherAgentKeys(target, [
+          'project-a/conversation-a/agent-1',
+          'project-a/conversation-a/agent-2',
+        ])
+      ).toEqual(['project-a/conversation-a/agent-2']);
 
-      evidence = { ...evidence, semanticRevision: 8 };
+      const otherConversation = { ...session(), id: 'other-composite', claudeSessionId: 'conversation-b' };
+      coordinator.attachSession(otherConversation);
+      coordinator.onWatcherSnapshot(otherConversation, ['project-a/conversation-b/agent-1'], 1);
+      expect(coordinator.project(otherConversation).activityStatus).toBe('waiting_agents');
+
+      evidence = { ...evidence, semanticRevision: 10 };
     });
 
     it('does not quarantine watcher-live evidence for a no-signature stop', async () => {

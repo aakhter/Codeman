@@ -213,7 +213,7 @@ describe('WebServer agent activity ownership', () => {
 
   it('quarantines delayed watcher evidence after a capability-complete negative stop and accepts a new revision', async () => {
     const negativeRegistry: ProcessProofMatcherRegistry = new Map([
-      ['9.9.9-negative', { capability: 'exact_role', match: () => ({ matched: false }) }],
+      ['2.1.237', { capability: 'exact_role', match: () => ({ matched: false }) }],
     ]);
     const negativeSource: ProcessInspectionSource = {
       listPids: async () => [321],
@@ -223,7 +223,7 @@ describe('WebServer agent activity ownership', () => {
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
     const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
-      runtimeVersion: '9.9.9-negative',
+      runtimeVersion: '2.1.237',
       matcherRegistry: negativeRegistry,
       source: negativeSource,
     });
@@ -270,9 +270,21 @@ describe('WebServer agent activity ownership', () => {
       agentId: 'new-agent',
       filePath: '/tmp/new-agent.jsonl',
     };
-    snapshot = { revision: 2, agents: [newInfo] };
+    snapshot = { revision: 2, agents: [oldInfo] };
+    subagentWatcher.emit('subagent:updated', oldInfo);
+    expect(session.activityProjection.activityStatus).toBe('idle');
+
+    snapshot = { revision: 3, agents: [oldInfo, newInfo] };
     subagentWatcher.emit('subagent:discovered', newInfo);
     expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+    state.mux.capturePaneText = vi.fn(() => matchingFrame(1));
+    state.sse.broadcast = vi.fn();
+    await state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'idle_prompt', sessionId: session.id, data: null },
+    });
+    expect(state.sse.broadcast.mock.calls.map(([event]) => event)).toContain(SseEvent.HookSuppressed);
     await server.stop();
   });
   it('attaches before visibility and always emits the runtime projection on the wire', async () => {
