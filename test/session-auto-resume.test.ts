@@ -22,6 +22,7 @@ describe('SessionAutoOps auto-resume', () => {
   let writeCommand: ReturnType<typeof vi.fn>;
   let working: boolean;
   let stopped: boolean;
+  let activityBlocked: boolean;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -31,9 +32,11 @@ describe('SessionAutoOps auto-resume', () => {
     writeCommand = vi.fn(async () => true);
     working = false;
     stopped = false;
+    activityBlocked = false;
     ops = new SessionAutoOps({
       writeCommand,
       isWorking: () => working,
+      isIdleAutomationBlocked: () => activityBlocked,
       isStopped: () => stopped,
       getTotalTokens: () => 0,
       getSessionId: () => 'test-session',
@@ -159,6 +162,39 @@ describe('SessionAutoOps auto-resume', () => {
     expect(writeCommand).not.toHaveBeenCalled();
     expect(cancelled).toHaveBeenCalledWith({ reason: 'working' });
     expect(ops.isLimitPaused).toBe(false);
+  });
+
+  it.each(['live', 'unknown'])('defers resume writes while agent activity is %s and resumes after none', async () => {
+    ops.setAutoResume(true);
+    ops.processCleanData(limitLine(10 * 60_000));
+    activityBlocked = true;
+
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + BUFFER_MS + ESC_DELAY_MS + 200);
+    expect(writeCommand).not.toHaveBeenCalled();
+    expect(ops.isLimitPaused).toBe(true);
+    expect(ops.autoResumeAt).not.toBeNull();
+
+    activityBlocked = false;
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + ESC_DELAY_MS + 200);
+    expect(writeCommand).toHaveBeenCalledWith('\x1b');
+    expect(writeCommand).toHaveBeenCalledWith('continue\r');
+  });
+
+  it('defers the delayed continue write when agent activity begins after Escape', async () => {
+    ops.setAutoResume(true);
+    ops.processCleanData(limitLine(10 * 60_000));
+
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + BUFFER_MS + 100);
+    expect(writeCommand).toHaveBeenCalledWith('\x1b');
+    activityBlocked = true;
+
+    await vi.advanceTimersByTimeAsync(ESC_DELAY_MS + 100);
+    expect(writeCommand).not.toHaveBeenCalledWith('continue\r');
+    expect(ops.isLimitPaused).toBe(true);
+
+    activityBlocked = false;
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + ESC_DELAY_MS + 100);
+    expect(writeCommand).toHaveBeenCalledWith('continue\r');
   });
 
   it('cancels the pending schedule when Claude starts working', () => {

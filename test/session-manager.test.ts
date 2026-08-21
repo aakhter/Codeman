@@ -60,6 +60,7 @@ vi.mock('../src/session.js', () => {
     _parked = false;
     mode = 'claude';
     checkpointEnabled: boolean | undefined;
+    blocksIdleAutomation = false;
     resumeSessionId: string | undefined = undefined;
     codexProviderIdentityForPersist:
       | { version: 1; credentialSource: 'restorable' | 'session-key'; codexHome?: string }
@@ -122,6 +123,10 @@ vi.mock('../src/session.js', () => {
 
     isIdle() {
       return true;
+    }
+
+    isAutonomouslyIdle() {
+      return this.isIdle() && !this.blocksIdleAutomation;
     }
 
     isBusy() {
@@ -420,6 +425,19 @@ describe('SessionManager', () => {
       const idle = manager.getIdleSessions();
 
       expect(idle).toContain(session);
+    });
+
+    it('excludes live and unknown activity but preserves legacy unobservable idle', async () => {
+      const none = await manager.createSession('/tmp/none');
+      const live = await manager.createSession('/tmp/live');
+      const unknown = await manager.createSession('/tmp/unknown');
+      const notObservable = await manager.createSession('/tmp/not-observable');
+
+      live.blocksIdleAutomation = true;
+      unknown.blocksIdleAutomation = true;
+
+      expect(manager.getIdleSessions()).toEqual(expect.arrayContaining([none, notObservable]));
+      expect(manager.getIdleSessions()).not.toEqual(expect.arrayContaining([live, unknown]));
     });
   });
 

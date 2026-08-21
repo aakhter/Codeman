@@ -1057,6 +1057,7 @@ export class Session extends EventEmitter {
         return undefined;
       },
       isWorking: () => this._isWorking,
+      isIdleAutomationBlocked: () => this.blocksIdleAutomation,
       isStopped: () => this._isStopped,
       getTotalTokens: () => this._totalInputTokens + this._totalOutputTokens,
       getSessionId: () => this.id,
@@ -1211,6 +1212,19 @@ export class Session extends EventEmitter {
 
   get isWorking(): boolean {
     return this._isWorking;
+  }
+
+  /** Agent activity or uncertainty must not be mistaken for autonomous availability. */
+  get blocksIdleAutomation(): boolean {
+    return (
+      this._activityProjection.activityStatus === 'waiting_agents' ||
+      this._activityProjection.activityStatus === 'checking_agents'
+    );
+  }
+
+  /** Raw idle plus a fail-safe server activity projection. */
+  isAutonomouslyIdle(): boolean {
+    return this.isIdle() && !this.blocksIdleAutomation;
   }
 
   /** Current server-derived activity. This projection is never persisted by toState(). */

@@ -2020,6 +2020,13 @@ export class RespawnController extends EventEmitter {
    * @param reason - What triggered this attempt (for logging)
    */
   private tryStartAiCheck(reason: string): void {
+    if (this.session.blocksIdleAutomation) {
+      this.log(`Skipping AI check - agent activity blocks idle automation (reason: ${reason})`);
+      this.logAction('detection', 'Skipped AI check: agent activity unavailable');
+      this.cancelIdleConfirmationForAgentActivity();
+      return;
+    }
+
     // P0-006: Check Session.isWorking first to skip expensive AI call if session reports working
     if (this.session.isWorking) {
       this.log(`Skipping AI check - Session reports isWorking=true (reason: ${reason})`);
@@ -2465,6 +2472,18 @@ export class RespawnController extends EventEmitter {
     this.onIdleConfirmed('idle_prompt hook (60s+ idle)');
   }
 
+  /** Cancel pending idle evidence when the activity projection becomes waiting/checking. */
+  cancelIdleConfirmationForAgentActivity(): void {
+    this.cancelTrackedTimer('hook-confirm', 'agent activity detected');
+    this.cancelTrackedTimer('completion-confirm', 'agent activity detected');
+    this.cancelTrackedTimer('no-output-fallback', 'agent activity detected');
+    this.cancelTrackedTimer('pre-filter', 'agent activity detected');
+    if (this._state === 'ai_checking') this.aiChecker.cancel();
+    this.resetHookState();
+    this.completionMessageTime = null;
+    if (this._state === 'confirming_idle' || this._state === 'ai_checking') this.setState('watching');
+  }
+
   /**
    * Start a short confirmation timer after receiving a hook signal.
    * This handles race conditions where a hook arrives but Claude immediately starts new work.
@@ -2639,6 +2658,13 @@ export class RespawnController extends EventEmitter {
    * @param reason - What triggered the confirmation
    */
   private onIdleConfirmed(reason: string): void {
+    if (this.session.blocksIdleAutomation) {
+      this.log(`Idle confirmation rejected - agent activity blocks automation (reason was: ${reason})`);
+      this.logAction('detection', 'Rejected: agent activity unavailable');
+      this.setState('watching');
+      return;
+    }
+
     // Safety check: if Session thinks it's still working, don't trigger idle
     // This catches cases where our detection missed working patterns
     if (this.session.isWorking) {

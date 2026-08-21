@@ -2640,6 +2640,7 @@ describe('RespawnController Hook-Based Idle Detection', () => {
 
   afterEach(() => {
     controller.stop();
+    vi.useRealTimers();
   });
 
   it('should expose signalStopHook method', () => {
@@ -2648,6 +2649,50 @@ describe('RespawnController Hook-Based Idle Detection', () => {
 
   it('should expose signalIdlePrompt method', () => {
     expect(typeof controller.signalIdlePrompt).toBe('function');
+  });
+
+  it.each(['waiting_agents', 'checking_agents'])('rejects hook idle confirmation while %s', (activityStatus) => {
+    Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: true });
+    const cycleStarted = vi.fn();
+    controller.on('respawnCycleStarted', cycleStarted);
+    controller.start();
+
+    controller.signalIdlePrompt();
+
+    expect(cycleStarted).not.toHaveBeenCalled();
+    expect(controller.state).toBe('watching');
+  });
+
+  it('cancels an armed hook confirmation when agent activity begins and permits a later confirmation', async () => {
+    vi.useFakeTimers();
+    const cycleStarted = vi.fn();
+    controller.on('respawnCycleStarted', cycleStarted);
+    controller.start();
+    controller.signalStopHook();
+
+    Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: true });
+    controller.cancelIdleConfirmationForAgentActivity();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(cycleStarted).not.toHaveBeenCalled();
+    expect(controller.getDetectionStatus().stopHookReceived).toBe(false);
+
+    Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: false });
+    controller.signalStopHook();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(cycleStarted).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects heuristic idle confirmation while agent availability is unknown', async () => {
+    Object.defineProperty(session, 'blocksIdleAutomation', { configurable: true, value: true });
+    const cycleStarted = vi.fn();
+    controller.on('respawnCycleStarted', cycleStarted);
+    controller.start();
+
+    session.simulateCompletionMessage();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(cycleStarted).not.toHaveBeenCalled();
+    expect(controller.state).toBe('watching');
   });
 
   it('should set stopHookReceived in detection status when Stop hook signaled', () => {
