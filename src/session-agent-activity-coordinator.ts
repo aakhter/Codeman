@@ -137,8 +137,9 @@ interface SessionRecord {
   completionWatermark: number;
   allocatedEvents: Map<number, ActivityEvent>;
   retiredEvents: Map<number, ActivityEvent>;
+  invalidRetiredEvents: Set<number>;
   activeEventConsumers: Map<number, number>;
-  retireWhenInactive: Set<number>;
+  retireWhenInactive: Map<number, 'consumed' | 'abandoned'>;
   eventReconciliations: Map<number, EventReconciliation>;
   reconciliationResults: Set<ReconciliationResult>;
   inFlight?: SharedInspection;
@@ -335,8 +336,9 @@ export class SessionAgentActivityCoordinator {
       completionWatermark: 0,
       allocatedEvents: new Map(),
       retiredEvents: new Map(),
+      invalidRetiredEvents: new Set(),
       activeEventConsumers: new Map(),
-      retireWhenInactive: new Set(),
+      retireWhenInactive: new Map(),
       eventReconciliations: new Map(),
       reconciliationResults: new Set(),
       retryAttempt: 0,
@@ -373,6 +375,7 @@ export class SessionAgentActivityCoordinator {
     record.completionWatermark = 0;
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
+    record.invalidRetiredEvents.clear();
     record.activeEventConsumers.clear();
     record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
@@ -390,6 +393,7 @@ export class SessionAgentActivityCoordinator {
     record.decisionToken += 1;
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
+    record.invalidRetiredEvents.clear();
     record.activeEventConsumers.clear();
     record.retireWhenInactive.clear();
     record.eventReconciliations.clear();
@@ -671,8 +675,9 @@ export class SessionAgentActivityCoordinator {
           const remaining = (record.activeEventConsumers.get(event.sequence) ?? 1) - 1;
           if (remaining > 0) record.activeEventConsumers.set(event.sequence, remaining);
           else record.activeEventConsumers.delete(event.sequence);
-          if (result === false || record.retireWhenInactive.has(event.sequence)) this.retireEvent(record, event);
-          this.trimBookkeeping(record);
+          const pendingRetirement = record.retireWhenInactive.get(event.sequence);
+          if (result === false) this.retireEvent(record, event, 'abandoned');
+          else if (pendingRetirement) this.retireEvent(record, event, pendingRetirement);
         }
         if (!shared.settled && shared.consumers.size === 0) shared.controller.abort();
         resolve(result);
@@ -720,8 +725,12 @@ export class SessionAgentActivityCoordinator {
       externalSourceSequence,
     };
     record.allocatedEvents.set(event.sequence, event);
-    this.trimBookkeeping(record, event);
     return event;
+  }
+
+  abandonEvent(session: CoordinatorSession, event: ActivityEvent): void {
+    const record = this.requireEvent(session, event);
+    this.retireEvent(record, event, 'abandoned');
   }
 
   completeEvent(session: CoordinatorSession, event: ActivityEvent): void {
@@ -767,7 +776,6 @@ export class SessionAgentActivityCoordinator {
       evidence: result.evidence,
     };
     record.eventReconciliations.set(event.sequence, reconciliation);
-    this.trimBookkeeping(record, event);
     return reconciliation;
   }
 
@@ -795,9 +803,13 @@ export class SessionAgentActivityCoordinator {
         ? this.confirmExactZero(session)
         : false;
     const immediate = event.kind === 'permission' || event.kind === 'elicitation';
+    const abandoned = record.invalidRetiredEvents.has(event.sequence);
     const quarantined =
-      !immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence);
-    if (!immediate) record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
+      abandoned ||
+      (!immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence));
+    if (!immediate && !abandoned) {
+      record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
+    }
     const ambiguous = this.isAmbiguous(record);
     const autonomyBlocked = this.isAutonomyBlocked(session);
     const freshExactProcessLive =
@@ -808,7 +820,7 @@ export class SessionAgentActivityCoordinator {
     const decision: ActivityDecision = {
       event,
       settleEndedEarly,
-      presentToHuman: immediate || (!quarantined && (ambiguous || !suppressible)),
+      presentToHuman: !abandoned && (immediate || (!quarantined && (ambiguous || !suppressible))),
       autonomyBlocked,
       quarantined,
       ambiguous,
@@ -833,7 +845,6 @@ export class SessionAgentActivityCoordinator {
             : record.processReason,
     };
     this.retireEvent(record, event);
-    this.trimBookkeeping(record);
     return decision;
   }
 
@@ -885,10 +896,15 @@ export class SessionAgentActivityCoordinator {
     );
   }
 
-  private retireEvent(record: SessionRecord, event: ActivityEvent): void {
+  private retireEvent(
+    record: SessionRecord,
+    event: ActivityEvent,
+    reason: 'consumed' | 'abandoned' = 'consumed'
+  ): void {
     if (!this.hasCurrentIdentity(record, event)) return;
     if ((record.activeEventConsumers.get(event.sequence) ?? 0) > 0) {
-      record.retireWhenInactive.add(event.sequence);
+      const pending = record.retireWhenInactive.get(event.sequence);
+      record.retireWhenInactive.set(event.sequence, pending === 'abandoned' ? pending : reason);
       return;
     }
     record.retireWhenInactive.delete(event.sequence);
@@ -899,38 +915,14 @@ export class SessionAgentActivityCoordinator {
     for (const result of record.reconciliationResults) {
       if (result.event === event) record.reconciliationResults.delete(result);
     }
+    if (reason === 'abandoned') record.invalidRetiredEvents.add(event.sequence);
     record.retiredEvents.delete(event.sequence);
     record.retiredEvents.set(event.sequence, event);
     while (record.retiredEvents.size > MAX_EVENT_BOOKKEEPING) {
       const oldest = record.retiredEvents.keys().next().value as number | undefined;
       if (oldest === undefined) break;
       record.retiredEvents.delete(oldest);
-    }
-  }
-
-  private trimBookkeeping(record: SessionRecord, protectedEvent?: ActivityEvent): void {
-    while (record.allocatedEvents.size > MAX_EVENT_BOOKKEEPING) {
-      let candidate: ActivityEvent | undefined;
-      for (const event of record.allocatedEvents.values()) {
-        if (event !== protectedEvent && (record.activeEventConsumers.get(event.sequence) ?? 0) === 0) {
-          candidate = event;
-          break;
-        }
-      }
-      if (!candidate) break;
-      this.retireEvent(record, candidate);
-    }
-    while (record.reconciliationResults.size > MAX_EVENT_BOOKKEEPING) {
-      const oldest = record.reconciliationResults.values().next().value as ReconciliationResult | undefined;
-      if (!oldest) break;
-      record.reconciliationResults.delete(oldest);
-      if (oldest.event && oldest.event !== protectedEvent) this.retireEvent(record, oldest.event);
-    }
-    while (record.eventReconciliations.size > MAX_EVENT_BOOKKEEPING) {
-      const oldest = record.eventReconciliations.values().next().value;
-      if (!oldest) break;
-      record.eventReconciliations.delete(oldest.event.sequence);
-      if (oldest.event !== protectedEvent) this.retireEvent(record, oldest.event);
+      record.invalidRetiredEvents.delete(oldest);
     }
   }
 

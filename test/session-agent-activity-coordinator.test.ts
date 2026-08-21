@@ -818,11 +818,12 @@ describe('session agent activity coordinator', () => {
       for (let index = 0; index < 160; index += 1) {
         const event = coordinator.allocateEvent(target, 'idle_prompt');
         await coordinator.reconcileForEvent(target, event);
+        coordinator.abandonEvent(target, event);
       }
       snapshot = coordinator.bookkeepingSnapshot(target);
-      expect(snapshot.allocatedEvents).toBeLessThanOrEqual(128);
-      expect(snapshot.reconciliationResults).toBeLessThanOrEqual(128);
-      expect(snapshot.eventReconciliations).toBeLessThanOrEqual(128);
+      expect(snapshot.allocatedEvents).toBe(0);
+      expect(snapshot.reconciliationResults).toBe(0);
+      expect(snapshot.eventReconciliations).toBe(0);
     });
 
     it('retires timed-out events without evicting active consumers', async () => {
@@ -861,6 +862,57 @@ describe('session agent activity coordinator', () => {
         activeConsumers: 0,
         allocatedEvents: 0,
         reconciliationResults: 0,
+      });
+    });
+
+    it('preserves every successful result until its owning event consumes it', async () => {
+      const pending = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const coordinator = new SessionAgentActivityCoordinator({ inspect: () => pending.promise });
+      const target = session();
+      coordinator.attachSession(target);
+      const requests = Array.from({ length: 160 }, () => {
+        const event = coordinator.allocateEvent(target, 'idle_prompt');
+        return { event, result: coordinator.reconcileForEvent(target, event) };
+      });
+      pending.resolve({ observation: 'none', semanticRevision: 0 });
+      const results = await Promise.all(requests.map(({ result }) => result));
+      expect(coordinator.bookkeepingSnapshot(target)).toMatchObject({
+        allocatedEvents: 160,
+        reconciliationResults: 160,
+      });
+      for (let index = 0; index < requests.length; index += 1) {
+        const reconciliation = coordinator.reconciliationForEvent(target, requests[index]!.event, results[index]!);
+        coordinator.decisionForEvent(target, requests[index]!.event, { reconciliation });
+      }
+      expect(coordinator.bookkeepingSnapshot(target)).toMatchObject({
+        allocatedEvents: 0,
+        reconciliationResults: 0,
+        eventReconciliations: 0,
+      });
+    });
+
+    it('keeps unattached allocated events valid until explicit abandonment', () => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = session();
+      coordinator.attachSession(target);
+      const events = Array.from({ length: 160 }, () => coordinator.allocateEvent(target, 'idle_prompt'));
+      expect(coordinator.bookkeepingSnapshot(target).allocatedEvents).toBe(160);
+      for (const event of events) coordinator.abandonEvent(target, event);
+      expect(coordinator.bookkeepingSnapshot(target)).toMatchObject({
+        allocatedEvents: 0,
+        retiredEvents: 128,
+      });
+      expect(coordinator.decisionForEvent(target, events.at(-1)!)).toMatchObject({
+        quarantined: true,
+        presentToHuman: false,
+      });
+      expect(() => coordinator.decisionForEvent(target, events[0]!)).toThrow(/stale/);
+
+      const immediate = coordinator.allocateEvent(target, 'permission');
+      coordinator.abandonEvent(target, immediate);
+      expect(coordinator.decisionForEvent(target, immediate)).toMatchObject({
+        quarantined: true,
+        presentToHuman: false,
       });
     });
   });
