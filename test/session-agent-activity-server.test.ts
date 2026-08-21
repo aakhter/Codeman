@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 
 vi.mock('../src/mux-factory.js', () => ({
   createMultiplexer: () => Object.assign(new EventEmitter(), { backend: 'tmux', destroy: vi.fn() }),
@@ -12,6 +13,7 @@ import { claudeProjectHash, serializeSubagentKey } from '../src/claude-project-i
 import { approvalInbox } from '../src/web/approval-inbox.js';
 import { SseEvent } from '../src/web/sse-events.js';
 import { sessionWaits } from '../src/web/session-wait-registry.js';
+import type { ProcessInspectionSource, ProcessProofMatcherRegistry } from '../src/subagent-process-inspector.js';
 
 function internals(server: WebServer) {
   return server as unknown as {
@@ -20,11 +22,14 @@ function internals(server: WebServer) {
     createRouteContext(): {
       addSession(session: Session): Promise<unknown>;
       getSessionStateWithRespawn(session: Session): Record<string, unknown>;
-      agentActivity: { detachSession(session: Session): void };
+      agentActivity: { detachSession(session: Session): void; terminalActivity(session: Session): void };
     };
     cachedLightState: unknown;
     cachedSessionsList: unknown;
     sessions: Map<string, Session>;
+    app: FastifyInstance;
+    setupRoutes(): Promise<void>;
+    mux: { capturePaneText?: (muxName: string) => string | null };
     sse: {
       addClient(
         reply: FastifyReply,
@@ -53,6 +58,223 @@ afterEach(() => {
 });
 
 describe('WebServer agent activity ownership', () => {
+  const matchingFrame = (count: number) =>
+    [
+      `✳ Waiting for ${count} background agents to finish`,
+      '────────',
+      '❯',
+      '────────',
+      'Opus 5 in:1 out:1 ctx:1%',
+    ].join('\n');
+
+  async function exerciseIdleHook(options: {
+    frame: string | null;
+    runtimeVersion?: string;
+    matcherRegistry?: ProcessProofMatcherRegistry;
+    processSource?: ProcessInspectionSource;
+    duringHook?: (
+      session: Session,
+      ctx: ReturnType<ReturnType<typeof internals>['createRouteContext']>
+    ) => Promise<void>;
+    event?: 'idle_prompt' | 'stop';
+  }) {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: options.runtimeVersion ?? '2.1.237',
+      matcherRegistry: options.matcherRegistry,
+      source: options.processSource,
+    });
+    const state = internals(server);
+    state.mux.capturePaneText = vi.fn(() => options.frame);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    await state.setupRoutes();
+    const ctx = state.createRouteContext();
+    const session = new Session({ id: `frame-${Math.random()}`, workingDir: '/tmp', mode: 'claude' });
+    (session as unknown as { _status: string })._status = 'idle';
+    (session as unknown as { _muxSession: { muxName: string } })._muxSession = { muxName: `mux-${session.id}` };
+    await ctx.addSession(session);
+    const info: SubagentInfo = {
+      agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), session.claudeSessionId!, 'frame-agent'),
+      agentId: 'frame-agent',
+      projectHash: claudeProjectHash(session.workingDir),
+      sessionId: session.claudeSessionId!,
+      filePath: '/tmp/frame-agent.jsonl',
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    };
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [info] });
+    subagentWatcher.emit('subagent:discovered', info);
+    state.sse.broadcast = vi.fn();
+    const responsePromise = state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: options.event ?? 'idle_prompt', sessionId: session.id, data: null },
+    });
+    await options.duringHook?.(session, ctx);
+    const response = await responsePromise;
+    const events = state.sse.broadcast.mock.calls.map(([event]) => event as string);
+    const activityStatus = session.activityProjection.activityStatus;
+    await server.stop();
+    return { response, events, activityStatus };
+  }
+
+  it('suppresses an idle hook only for a matching source-tagged current visible frame', async () => {
+    const result = await exerciseIdleHook({ frame: matchingFrame(1) });
+    expect(result.response.statusCode).toBe(200);
+    expect(result.events).toContain(SseEvent.HookSuppressed);
+    expect(result.events).not.toContain(SseEvent.HookIdlePrompt);
+  });
+
+  it.each([
+    { name: 'missing', frame: null },
+    { name: 'raw renderer without scaffold', frame: '✳ Waiting for 1 background agents to finish' },
+    {
+      name: 'scrollback renderer',
+      frame: `${matchingFrame(1)}\n${Array.from({ length: 13 }, () => 'later').join('\n')}`,
+    },
+    { name: 'count mismatch', frame: matchingFrame(2) },
+  ])('falls through watcher-only idle hooks for $name frame evidence', async ({ frame }) => {
+    const result = await exerciseIdleHook({ frame });
+    expect(result.events).toContain(SseEvent.HookIdlePrompt);
+    expect(result.events).not.toContain(SseEvent.HookSuppressed);
+    expect(result.activityStatus).toBe('waiting_agents');
+  });
+
+  it('falls through a renderer from an unsupported/stale runtime', async () => {
+    const result = await exerciseIdleHook({ frame: matchingFrame(1), runtimeVersion: '2.1.238' });
+    expect(result.events).toContain(SseEvent.HookIdlePrompt);
+    expect(result.events).not.toContain(SseEvent.HookSuppressed);
+  });
+
+  it('falls through when terminal activity makes otherwise matching frame evidence stale', async () => {
+    let inspectionStarted!: () => void;
+    let releaseInspection!: () => void;
+    const started = new Promise<void>((resolve) => (inspectionStarted = resolve));
+    const blocked = new Promise<number[]>((resolve) => (releaseInspection = () => resolve([])));
+    let inspections = 0;
+    const processSource: ProcessInspectionSource = {
+      listPids: async () => {
+        inspections += 1;
+        if (inspections === 1) return [];
+        inspectionStarted();
+        return blocked;
+      },
+      readCmdline: async () => '',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const result = await exerciseIdleHook({
+      frame: matchingFrame(1),
+      processSource,
+      duringHook: async (session, ctx) => {
+        await started;
+        ctx.agentActivity.terminalActivity(session);
+        releaseInspection();
+      },
+    });
+    expect(result.events).toContain(SseEvent.HookIdlePrompt);
+    expect(result.events).not.toContain(SseEvent.HookSuppressed);
+  });
+
+  it('accepts process corroboration only through an injected exact-role matcher contract', async () => {
+    const matcherRegistry: ProcessProofMatcherRegistry = new Map([
+      [
+        '9.9.9-test',
+        {
+          capability: 'exact_role',
+          match: (_candidate, identity) => ({
+            matched: true,
+            conversationProof: { source: 'argument', field: '--session-id', claudeSessionId: identity.claudeSessionId },
+          }),
+        },
+      ],
+    ]);
+    const processSource: ProcessInspectionSource = {
+      listPids: async () => [123],
+      readCmdline: async () => 'claude\0--session-id\0exact\0',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const result = await exerciseIdleHook({
+      frame: 'not a renderer',
+      runtimeVersion: '9.9.9-test',
+      matcherRegistry,
+      processSource,
+      event: 'stop',
+    });
+    expect(result.events).toContain(SseEvent.HookSuppressed);
+    expect(result.events).not.toContain(SseEvent.HookStop);
+  });
+
+  it('quarantines delayed watcher evidence after a capability-complete negative stop and accepts a new revision', async () => {
+    const negativeRegistry: ProcessProofMatcherRegistry = new Map([
+      ['9.9.9-negative', { capability: 'exact_role', match: () => ({ matched: false }) }],
+    ]);
+    const negativeSource: ProcessInspectionSource = {
+      listPids: async () => [321],
+      readCmdline: async () => 'claude\0',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: '9.9.9-negative',
+      matcherRegistry: negativeRegistry,
+      source: negativeSource,
+    });
+    const state = internals(server);
+    state.mux.capturePaneText = vi.fn(() => 'no renderer');
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    await state.setupRoutes();
+    const session = new Session({ id: 'negative-stop-quarantine', workingDir: '/tmp', mode: 'claude' });
+    (session as unknown as { _status: string })._status = 'idle';
+    (session as unknown as { _muxSession: { muxName: string } })._muxSession = { muxName: 'negative-stop-mux' };
+    await state.createRouteContext().addSession(session);
+    const oldInfo: SubagentInfo = {
+      agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), session.claudeSessionId!, 'old-agent'),
+      agentId: 'old-agent',
+      projectHash: claudeProjectHash(session.workingDir),
+      sessionId: session.claudeSessionId!,
+      filePath: '/tmp/old-agent.jsonl',
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    };
+    let snapshot = { revision: 1, agents: [oldInfo] };
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockImplementation(() => snapshot);
+    subagentWatcher.emit('subagent:discovered', oldInfo);
+    expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+
+    const response = await state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'stop', sessionId: session.id, data: null },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(session.activityProjection.activityStatus).toBe('idle');
+
+    subagentWatcher.emit('subagent:discovered', oldInfo);
+    expect(session.activityProjection.activityStatus).toBe('idle');
+
+    const newInfo = {
+      ...oldInfo,
+      agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), session.claudeSessionId!, 'new-agent'),
+      agentId: 'new-agent',
+      filePath: '/tmp/new-agent.jsonl',
+    };
+    snapshot = { revision: 2, agents: [newInfo] };
+    subagentWatcher.emit('subagent:discovered', newInfo);
+    expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+    await server.stop();
+  });
   it('attaches before visibility and always emits the runtime projection on the wire', async () => {
     const server = new WebServer(0, false, true);
     const state = internals(server);

@@ -62,7 +62,12 @@ export interface AgentEvidence {
   semanticRevision: number;
   processReason?: 'matching_process' | 'no_registered_role_signature' | 'no_matching_process';
   exactWatcherCount?: number;
-  currentFrame?: 'working' | 'idle_prompt' | 'other' | 'unavailable';
+  currentFrame?: Readonly<{
+    source: 'tmux_visible_frame';
+    status: 'positive' | 'negative' | 'unavailable';
+    reason: string;
+    renderedCount?: number;
+  }>;
 }
 
 export type InspectionJob = (project: ObservableSessionProject, signal: AbortSignal) => Promise<AgentEvidence>;
@@ -135,6 +140,7 @@ interface SessionRecord {
   eventSequence: number;
   lastDecisionSequence: number;
   completionWatermark: number;
+  quarantinedThroughSemanticRevision?: number;
   allocatedEvents: Map<number, ActivityEvent>;
   retiredEvents: Map<number, ActivityEvent>;
   activeEventConsumers: Map<number, number>;
@@ -340,6 +346,7 @@ export class SessionAgentActivityCoordinator {
       eventSequence: 0,
       lastDecisionSequence: 0,
       completionWatermark: 0,
+      quarantinedThroughSemanticRevision: undefined,
       allocatedEvents: new Map(),
       retiredEvents: new Map(),
       activeEventConsumers: new Map(),
@@ -378,6 +385,7 @@ export class SessionAgentActivityCoordinator {
     record.eventSequence = 0;
     record.lastDecisionSequence = 0;
     record.completionWatermark = 0;
+    record.quarantinedThroughSemanticRevision = undefined;
     record.allocatedEvents.clear();
     record.retiredEvents.clear();
     record.activeEventConsumers.clear();
@@ -419,6 +427,7 @@ export class SessionAgentActivityCoordinator {
     const record = this.requireRecord(session);
     if (!record.tracking) return false;
     if (semanticRevision <= record.semanticRevision) return false;
+    record.quarantinedThroughSemanticRevision = undefined;
     this.invalidateSettle(record);
     record.semanticRevision = semanticRevision;
     record.eventReconciliations.clear();
@@ -434,6 +443,13 @@ export class SessionAgentActivityCoordinator {
   setObservation(session: CoordinatorSession, observation: AgentObservation, semanticRevision: number): void {
     const record = this.requireRecord(session);
     if (!record.tracking) return;
+    if (
+      observation === 'live' &&
+      record.quarantinedThroughSemanticRevision !== undefined &&
+      semanticRevision <= record.quarantinedThroughSemanticRevision
+    ) {
+      return;
+    }
     if (!this.acceptSemanticRevision(record, semanticRevision)) return;
     this.setRecordObservation(record, observation);
   }
@@ -453,6 +469,12 @@ export class SessionAgentActivityCoordinator {
   commitEvidence(session: CoordinatorSession, evidence: AgentEvidence): void {
     const record = this.requireRecord(session);
     if (!record.tracking) return;
+    if (
+      record.quarantinedThroughSemanticRevision !== undefined &&
+      evidence.semanticRevision <= record.quarantinedThroughSemanticRevision
+    ) {
+      return;
+    }
     if (!this.acceptSemanticRevision(record, evidence.semanticRevision)) return;
     record.processReason = evidence.processReason;
     const exactProcessLive = evidence.observation === 'live' && evidence.processReason === 'matching_process';
@@ -477,8 +499,15 @@ export class SessionAgentActivityCoordinator {
   onWatcherCount(session: CoordinatorSession, count: number, semanticRevision: number): void {
     const record = this.requireRecord(session);
     if (!record.tracking) return;
+    if (
+      record.quarantinedThroughSemanticRevision !== undefined &&
+      semanticRevision <= record.quarantinedThroughSemanticRevision
+    ) {
+      return;
+    }
     if (semanticRevision < record.semanticRevision) return;
     if (semanticRevision > record.semanticRevision) {
+      record.quarantinedThroughSemanticRevision = undefined;
       this.cancelRetry(record);
       record.decisionToken += 1;
       this.abortInspection(record);
@@ -803,6 +832,14 @@ export class SessionAgentActivityCoordinator {
       reconciliation.semanticRevision === record.semanticRevision &&
       reconciliation.decisionToken === record.decisionToken;
     if (reconciliation) record.eventReconciliations.delete(event.sequence);
+    const capabilityCompleteNegativeStop =
+      event.kind === 'stop' && reconciliationIsFresh && reconciliation.evidence.processReason === 'no_matching_process';
+    if (capabilityCompleteNegativeStop) {
+      record.completionWatermark = Math.max(record.completionWatermark, event.sequence);
+      record.quarantinedThroughSemanticRevision = record.semanticRevision;
+      this.invalidateSettle(record);
+      this.setRecordObservation(record, 'none', false, 'no_matching_process');
+    }
     const settleEndedEarly =
       (event.kind === 'raw_idle' || event.kind === 'stop' || event.kind === 'idle_prompt') &&
       reconciliationIsFresh &&
@@ -813,7 +850,9 @@ export class SessionAgentActivityCoordinator {
     const replayed = record.retiredEvents.get(event.sequence) === event;
     const quarantined =
       replayed ||
-      (!immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence));
+      (!immediate &&
+        !capabilityCompleteNegativeStop &&
+        (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence));
     if (!immediate && !replayed) {
       record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
     }
@@ -823,11 +862,25 @@ export class SessionAgentActivityCoordinator {
       reconciliationIsFresh &&
       reconciliation.evidence.observation === 'live' &&
       reconciliation.evidence.processReason === 'matching_process';
-    const suppressible = record.observation === 'live' && (event.kind !== 'stop' || freshExactProcessLive);
+    const freshExactFrameLive =
+      reconciliationIsFresh &&
+      reconciliation.evidence.observation === 'live' &&
+      (reconciliation.evidence.exactWatcherCount ?? 0) > 0 &&
+      reconciliation.evidence.currentFrame?.source === 'tmux_visible_frame' &&
+      reconciliation.evidence.currentFrame.status === 'positive' &&
+      reconciliation.evidence.currentFrame.renderedCount === reconciliation.evidence.exactWatcherCount;
+    const suppressible =
+      record.observation === 'live' &&
+      (freshExactProcessLive || ((event.kind === 'idle_prompt' || event.kind === 'raw_idle') && freshExactFrameLive));
+    const presentToHuman =
+      !replayed &&
+      (event.kind === 'raw_idle'
+        ? !quarantined && !autonomyBlocked
+        : immediate || (!quarantined && (ambiguous || !suppressible)));
     const decision: ActivityDecision = {
       event,
       settleEndedEarly,
-      presentToHuman: !replayed && (immediate || (!quarantined && (ambiguous || !suppressible))),
+      presentToHuman,
       autonomyBlocked,
       quarantined,
       ambiguous,
@@ -1031,6 +1084,7 @@ export class SessionAgentActivityCoordinator {
   private acceptSemanticRevision(record: SessionRecord, semanticRevision: number): boolean {
     if (semanticRevision < record.semanticRevision) return false;
     if (semanticRevision === record.semanticRevision) return true;
+    record.quarantinedThroughSemanticRevision = undefined;
     this.invalidateSettle(record);
     record.semanticRevision = semanticRevision;
     record.decisionToken += 1;

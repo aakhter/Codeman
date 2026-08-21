@@ -137,6 +137,7 @@ import {
   inspectSubagentProcesses,
   type ObservableClaudeIdentity,
   type ProcessInspectionSource,
+  type ProcessProofMatcherRegistry,
 } from '../subagent-process-inspector.js';
 import { evaluateClaudeBackgroundAgentFrame } from '../claude-background-agent-frame.js';
 
@@ -390,6 +391,12 @@ function getOrCreateSelfSignedCert(): { key: string; cert: string } {
   };
 }
 
+export interface AgentProcessEvidenceOptions {
+  runtimeVersion?: string;
+  matcherRegistry?: ProcessProofMatcherRegistry;
+  source?: ProcessInspectionSource;
+}
+
 export class WebServer extends EventEmitter {
   private app: FastifyInstance;
   private sessions: Map<string, Session> = new Map();
@@ -399,7 +406,11 @@ export class WebServer extends EventEmitter {
   private readonly watcherErrorsHandled = new WeakSet<object>();
   private readonly activityMutationInProgress = new Set<string>();
   private activityTrackingEnabled = true;
-  private readonly localClaudeRuntimeVersion = getClaudeCliVersion() ?? undefined;
+  private readonly localClaudeRuntimeVersion: string | undefined;
+  /** Empty in production until a runtime-specific exact role matcher is registered. */
+  private readonly agentProcessMatcherRegistry?: ProcessProofMatcherRegistry;
+  /** Injectable evidence source keeps future exact-role matchers contract-testable. */
+  private readonly agentProcessInspectionSource: ProcessInspectionSource;
   private readonly agentActivityCoordinator: SessionAgentActivityCoordinator;
   private respawnControllers: Map<string, RespawnController> = new Map();
   private respawnTimers: Map<string, { timer: NodeJS.Timeout; endAt: number; startedAt: number }> = new Map();
@@ -492,12 +503,16 @@ export class WebServer extends EventEmitter {
     testMode: boolean = false,
     host: string = '127.0.0.1',
     titleHostname?: string,
-    allowUnauthenticatedNetwork: boolean = false
+    allowUnauthenticatedNetwork: boolean = false,
+    agentProcessEvidence: AgentProcessEvidenceOptions = {}
   ) {
     super();
     this.setMaxListeners(0);
     this.host = host;
     this.port = port;
+    this.localClaudeRuntimeVersion = agentProcessEvidence.runtimeVersion ?? getClaudeCliVersion() ?? undefined;
+    this.agentProcessMatcherRegistry = agentProcessEvidence.matcherRegistry;
+    this.agentProcessInspectionSource = agentProcessEvidence.source ?? LOCAL_PROCESS_INSPECTION_SOURCE;
     this.https = https;
     this.testMode = testMode;
     this.allowUnauthenticatedNetwork =
@@ -807,11 +822,7 @@ export class WebServer extends EventEmitter {
         const result = await this.agentActivityCoordinator.reconcileForEvent(adapter, event);
         if (result !== false) {
           const reconciliation = this.agentActivityCoordinator.reconciliationForEvent(adapter, event, result);
-          const decision = this.agentActivityCoordinator.decisionForEvent(adapter, event, { reconciliation });
-          if (event.kind === 'stop' && decision.processReason === 'no_matching_process') {
-            this.agentActivityCoordinator.completeEvent(adapter, event);
-          }
-          return decision;
+          return this.agentActivityCoordinator.decisionForEvent(adapter, event, { reconciliation });
         }
       } catch {
         // Human-facing hooks fail open when inspection timed out, errored, or was
@@ -961,7 +972,10 @@ export class WebServer extends EventEmitter {
       claudeSessionId: project.claudeSessionId,
       claudeRuntimeVersion: project.claudeRuntimeVersion,
     };
-    const process = await inspectSubagentProcesses(identity, LOCAL_PROCESS_INSPECTION_SOURCE, { signal });
+    const process = await inspectSubagentProcesses(identity, this.agentProcessInspectionSource, {
+      signal,
+      matcherRegistry: this.agentProcessMatcherRegistry,
+    });
     const session = this.sessions.get(project.session.id);
     const frameText = session?.muxName ? this.mux.capturePaneText?.(session.muxName) : null;
     const frame =
@@ -987,7 +1001,17 @@ export class WebServer extends EventEmitter {
       exactWatcherCount,
       processReason:
         process.status === 'positive' ? 'matching_process' : process.status === 'negative' ? process.reason : undefined,
-      currentFrame: frame?.status === 'positive' ? 'idle_prompt' : frameText === null ? 'unavailable' : 'other',
+      currentFrame:
+        frameText === null
+          ? { source: 'tmux_visible_frame', status: 'unavailable', reason: 'capture_unavailable' }
+          : frame
+            ? {
+                source: 'tmux_visible_frame',
+                status: frame.status,
+                reason: frame.reason,
+                ...('renderedCount' in frame && { renderedCount: frame.renderedCount }),
+              }
+            : { source: 'tmux_visible_frame', status: 'negative', reason: 'watcher_count_unavailable' },
     };
   }
 

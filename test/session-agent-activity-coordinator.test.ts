@@ -25,6 +25,15 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function frameEvidence(status: 'positive' | 'negative' | 'unavailable', renderedCount?: number) {
+  return {
+    source: 'tmux_visible_frame' as const,
+    status,
+    reason: status === 'positive' ? 'matching_visible_renderer' : 'not_current',
+    ...(renderedCount !== undefined && { renderedCount }),
+  };
+}
+
 describe('session agent activity coordinator', () => {
   afterEach(() => vi.useRealTimers());
   describe('1. projection', () => {
@@ -87,7 +96,7 @@ describe('session agent activity coordinator', () => {
 
       const duplicate = { ...session(), id: 'duplicate' };
       coordinator.attachSession(duplicate);
-      expect(coordinator.decisionForRawIdle(first)).toMatchObject({
+      expect(coordinator.decisionForHook(first, 'idle_prompt')).toMatchObject({
         presentToHuman: true,
         autonomyBlocked: true,
         ambiguous: true,
@@ -191,7 +200,7 @@ describe('session agent activity coordinator', () => {
         presentToHuman: true,
         liveEvidence: 'watcher_or_frame',
       });
-      expect(coordinator.decisionForHook(target, 'idle_prompt', 2).presentToHuman).toBe(false);
+      expect(coordinator.decisionForHook(target, 'idle_prompt', 2).presentToHuman).toBe(true);
       expect(coordinator.isAutonomyBlocked(target)).toBe(true);
 
       coordinator.commitEvidence(target, {
@@ -251,12 +260,145 @@ describe('session agent activity coordinator', () => {
       });
     });
 
+    it.each([
+      {
+        currentFrame: frameEvidence('positive', 2),
+        processReason: 'no_registered_role_signature' as const,
+        suppressed: true,
+      },
+      {
+        currentFrame: frameEvidence('negative'),
+        processReason: 'no_registered_role_signature' as const,
+        suppressed: false,
+      },
+      {
+        currentFrame: frameEvidence('unavailable'),
+        processReason: 'no_registered_role_signature' as const,
+        suppressed: false,
+      },
+      {
+        currentFrame: frameEvidence('positive', 1),
+        processReason: 'no_registered_role_signature' as const,
+        suppressed: false,
+      },
+      { currentFrame: frameEvidence('negative'), processReason: 'matching_process' as const, suppressed: true },
+    ])('requires fresh frame/process corroboration for watcher-live idle prompts: $currentFrame', async (sample) => {
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: async () => ({
+          observation: 'live',
+          semanticRevision: 0,
+          exactWatcherCount: 2,
+          currentFrame: sample.currentFrame,
+          processReason: sample.processReason,
+        }),
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const result = await coordinator.reconcileForEvent(target, event);
+      const reconciliation = coordinator.reconciliationForEvent(target, event, result);
+      expect(coordinator.decisionForEvent(target, event, { reconciliation })).toMatchObject({
+        presentToHuman: !sample.suppressed,
+        autonomyBlocked: true,
+      });
+    });
+
+    it.each([
+      { currentFrame: frameEvidence('positive', 1), presentToHuman: false },
+      { currentFrame: frameEvidence('negative'), presentToHuman: false },
+    ])('applies the same event-bound corroboration rule to raw idle: $currentFrame', async (sample) => {
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: async () => ({
+          observation: 'live',
+          semanticRevision: 0,
+          exactWatcherCount: 1,
+          currentFrame: sample.currentFrame,
+          processReason: 'no_registered_role_signature',
+        }),
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      const event = coordinator.allocateEvent(target, 'raw_idle');
+      const result = await coordinator.reconcileForEvent(target, event);
+      const reconciliation = coordinator.reconciliationForEvent(target, event, result);
+      expect(coordinator.decisionForEvent(target, event, { reconciliation })).toMatchObject({
+        presentToHuman: sample.presentToHuman,
+        autonomyBlocked: true,
+      });
+    });
+
+    it('quarantines capability-complete negative stop evidence until a genuinely newer watcher revision', async () => {
+      let evidence = {
+        observation: 'live' as AgentObservation,
+        semanticRevision: 7,
+        exactWatcherCount: 1,
+        currentFrame: frameEvidence('negative'),
+        processReason: 'no_matching_process' as const,
+      };
+      const coordinator = new SessionAgentActivityCoordinator({ inspect: async () => evidence });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.onWatcherCount(target, 1, 7);
+      const stop = coordinator.allocateEvent(target, 'stop');
+      const result = await coordinator.reconcileForEvent(target, stop);
+      const reconciliation = coordinator.reconciliationForEvent(target, stop, result);
+      expect(coordinator.decisionForEvent(target, stop, { reconciliation })).toMatchObject({
+        presentToHuman: true,
+        observation: 'none',
+        autonomyBlocked: false,
+      });
+
+      coordinator.onWatcherCount(target, 1, 7);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+      coordinator.commitEvidence(target, {
+        observation: 'live',
+        semanticRevision: 7,
+        exactWatcherCount: 1,
+        currentFrame: frameEvidence('positive', 1),
+        processReason: 'no_registered_role_signature',
+      });
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+      coordinator.onWatcherCount(target, 1, 8);
+      expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+
+      evidence = { ...evidence, semanticRevision: 8 };
+    });
+
+    it('does not quarantine watcher-live evidence for a no-signature stop', async () => {
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: async () => ({
+          observation: 'live',
+          semanticRevision: 4,
+          exactWatcherCount: 1,
+          currentFrame: frameEvidence('negative'),
+          processReason: 'no_registered_role_signature',
+        }),
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.onWatcherCount(target, 1, 4);
+      const stop = coordinator.allocateEvent(target, 'stop');
+      const result = await coordinator.reconcileForEvent(target, stop);
+      const reconciliation = coordinator.reconciliationForEvent(target, stop, result);
+      expect(coordinator.decisionForEvent(target, stop, { reconciliation })).toMatchObject({
+        presentToHuman: true,
+        observation: 'live',
+        autonomyBlocked: true,
+      });
+      expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+    });
+
     it('fails open for a current human prompt but fails safe for autonomy under uncertainty', () => {
       const coordinator = new SessionAgentActivityCoordinator();
       const target = session();
       coordinator.attachSession(target);
-      expect(coordinator.decisionForRawIdle(target)).toMatchObject({
+      expect(coordinator.decisionForHook(target, 'idle_prompt')).toMatchObject({
         presentToHuman: true,
+        autonomyBlocked: true,
+        observation: 'unknown',
+      });
+      expect(coordinator.decisionForRawIdle(target)).toMatchObject({
+        presentToHuman: false,
         autonomyBlocked: true,
         observation: 'unknown',
       });
