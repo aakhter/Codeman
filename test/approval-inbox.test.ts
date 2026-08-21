@@ -136,6 +136,16 @@ describe('normalizeCapturedFrame', () => {
 });
 
 describe('ApprovalInbox', () => {
+  it('bounds stop resolution by the hook receipt sequence', () => {
+    const inbox = new ApprovalInbox();
+    inbox.notePrompt({ sessionId: 's-seq', sessionName: 'seq', kind: 'idle', sourceSequence: 8 });
+
+    inbox.resolveForSession('s-seq', 'resolved_in_terminal', undefined, 7);
+    expect(inbox.getForSession('s-seq')).toMatchObject({ sourceSequence: 8 });
+
+    inbox.resolveForSession('s-seq', 'resolved_in_terminal', undefined, 8);
+    expect(inbox.getForSession('s-seq')).toBeUndefined();
+  });
   let inbox: ApprovalInbox;
 
   beforeEach(() => {

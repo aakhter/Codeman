@@ -372,6 +372,8 @@ export const HookStop = 'hook:stop' as const;
 export const HookTeammateIdle = 'hook:teammate_idle' as const;
 /** Claude Code hook: teammate task completed. */
 export const HookTaskCompleted = 'hook:task_completed' as const;
+/** A hook was received but its human-facing legacy effects were suppressed by exact agent activity evidence. */
+export const HookSuppressed = 'hook:suppressed' as const;
 
 // ─── Approvals Inbox ─────────────────────────────────────────────────────────
 
@@ -634,6 +636,7 @@ export const SseEvent = {
   HookStop,
   HookTeammateIdle,
   HookTaskCompleted,
+  HookSuppressed,
 
   // Approvals Inbox
   ApprovalPending,

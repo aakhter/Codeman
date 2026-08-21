@@ -60,6 +60,8 @@ export interface ApprovalItem {
   /** CLI mode that produced the prompt; lets clients localize generated labels. */
   mode?: SessionMode;
   createdAt: number;
+  /** Coordinator receipt order used to prevent older prompts surviving a newer completion. */
+  sourceSequence?: number;
   /** Sanitized hook fields (already bounded by sanitizeHookData). */
   toolName?: string;
   toolSummary?: string;
@@ -98,6 +100,7 @@ interface NotePromptArgs {
   toolSummary?: string;
   message?: string;
   cwd?: string;
+  sourceSequence?: number;
   /** Returns the raw (ANSI-bearing) pane frame, or null when unavailable. */
   capture?: () => string | null;
 }
@@ -225,6 +228,7 @@ export class ApprovalInbox {
       kind: args.kind,
       mode: args.mode,
       createdAt: Date.now(),
+      sourceSequence: args.sourceSequence,
       toolName: args.toolName,
       toolSummary: args.toolSummary,
       message: args.message,
@@ -358,10 +362,22 @@ export class ApprovalInbox {
    * transition passes `['idle']` so a mid-turn flap cannot false-clear a
    * pending permission/question dialog.
    */
-  resolveForSession(sessionId: string, resolution: ApprovalResolution, kinds?: ApprovalKind[]): void {
+  resolveForSession(
+    sessionId: string,
+    resolution: ApprovalResolution,
+    kinds?: ApprovalKind[],
+    throughSourceSequence?: number
+  ): void {
     const item = this.items.get(sessionId);
     if (!item) return;
     if (kinds && !kinds.includes(item.kind)) return;
+    if (
+      throughSourceSequence !== undefined &&
+      item.sourceSequence !== undefined &&
+      item.sourceSequence > throughSourceSequence
+    ) {
+      return;
+    }
     this.remove(item, resolution);
   }
 

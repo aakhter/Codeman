@@ -20,6 +20,8 @@ import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { registerHookEventRoutes } from '../../src/web/routes/hook-event-routes.js';
+import { sessionWaits } from '../../src/web/session-wait-registry.js';
+import { approvalInbox } from '../../src/web/approval-inbox.js';
 
 interface LocalHarness {
   app: FastifyInstance;
@@ -74,6 +76,9 @@ describe('hook-event-routes', () => {
 
   afterEach(async () => {
     await harness.app.close();
+    sessionWaits.cancelAll(harness.ctx._sessionId);
+    approvalInbox.resolveForSession(harness.ctx._sessionId, 'dismissed');
+    vi.restoreAllMocks();
   });
 
   // ========== POST /api/hook-event ==========
@@ -157,6 +162,93 @@ describe('hook-event-routes', () => {
         'hook:stop',
         expect.objectContaining({ sessionId: harness.ctx._sessionId })
       );
+    });
+
+    it('records and wakes raw stop waiters before awaiting activity evidence', async () => {
+      const order: string[] = [];
+      let finish!: (decision: Record<string, unknown>) => void;
+      const pending = new Promise<Record<string, unknown>>((resolve) => (finish = resolve));
+      harness.ctx.agentActivity.allocateEvent.mockImplementation(() => ({ sequence: 12, kind: 'stop' }));
+      harness.ctx.agentActivity.decideEvent.mockImplementation(async () => pending);
+      harness.ctx.runSummaryTrackers.set(harness.ctx._sessionId, {
+        recordHookEvent: vi.fn(() => order.push('summary')),
+      } as never);
+      const notify = vi.spyOn(sessionWaits, 'notifySignal').mockImplementation(() => {
+        order.push('waiter');
+        return 0;
+      });
+
+      const response = harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: null },
+      });
+      await vi.waitFor(() => expect(order).toEqual(['waiter', 'summary']));
+      expect(harness.ctx.broadcast).not.toHaveBeenCalled();
+      finish({ presentToHuman: true, quarantined: false, autonomyBlocked: false });
+      await response;
+      notify.mockRestore();
+    });
+
+    it('emits only hook:suppressed when exact live-agent evidence suppresses an idle prompt', async () => {
+      harness.ctx.agentActivity.allocateEvent.mockReturnValue({ sequence: 22, kind: 'idle_prompt' });
+      harness.ctx.agentActivity.decideEvent.mockResolvedValue({
+        presentToHuman: false,
+        quarantined: false,
+        autonomyBlocked: true,
+        observation: 'live',
+        liveEvidence: 'watcher_or_frame',
+      });
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'idle_prompt', sessionId: harness.ctx._sessionId, data: { message: 'waiting' } },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.broadcast).toHaveBeenCalledTimes(1);
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith(
+        'hook:suppressed',
+        expect.objectContaining({ sessionId: harness.ctx._sessionId, hookEvent: 'idle_prompt', sourceSequence: 22 })
+      );
+      expect(harness.ctx.sendPushNotifications).not.toHaveBeenCalled();
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+    });
+
+    it('keeps raw stop waiters and summaries while suppressing every legacy stop effect', async () => {
+      const receipt = { sequence: 41, kind: 'stop' };
+      const controller = { signalStopHook: vi.fn() };
+      const tracker = { recordHookEvent: vi.fn() };
+      harness.ctx.respawnControllers.set(harness.ctx._sessionId, controller as never);
+      harness.ctx.runSummaryTrackers.set(harness.ctx._sessionId, tracker as never);
+      harness.ctx.agentActivity.allocateEvent.mockReturnValue(receipt);
+      harness.ctx.agentActivity.decideEvent.mockResolvedValue({
+        presentToHuman: false,
+        quarantined: false,
+        autonomyBlocked: true,
+        observation: 'live',
+        liveEvidence: 'exact_process',
+        processReason: 'matching_process',
+      });
+      const notify = vi.spyOn(sessionWaits, 'notifySignal');
+
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: { message: 'raw stop' } },
+      });
+
+      expect(notify).toHaveBeenCalledWith(harness.ctx._sessionId, 'stop');
+      expect(tracker.recordHookEvent).toHaveBeenCalledWith('stop', expect.objectContaining({ message: 'raw stop' }));
+      expect(harness.ctx.broadcast).toHaveBeenCalledTimes(1);
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith(
+        'hook:suppressed',
+        expect.objectContaining({ hookEvent: 'stop', sourceSequence: 41, liveEvidence: 'exact_process' })
+      );
+      expect(controller.signalStopHook).not.toHaveBeenCalled();
+      expect(harness.ctx.sendPushNotifications).not.toHaveBeenCalled();
+      expect(harness.ctx.broadcastSessionStateDebounced).not.toHaveBeenCalled();
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
     });
 
     it('sends push notifications for hook events', async () => {

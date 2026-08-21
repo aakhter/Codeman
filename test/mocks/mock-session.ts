@@ -44,6 +44,10 @@ export class MockSession extends EventEmitter {
   hasLostCodexProviderCredentials = vi.fn(() => false);
   codexLastSubmitAt?: number;
   isWorking: boolean = false;
+  blocksIdleAutomation = false;
+  isAutonomouslyIdle(): boolean {
+    return this.status === 'idle' && !this.blocksIdleAutomation;
+  }
   private _activeChildProcesses: { pid: number; command: string }[] = [];
   ralphTracker: null = null;
   writeBuffer: string[] = [];

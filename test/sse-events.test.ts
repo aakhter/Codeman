@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { WebServer } from '../src/web/server.js';
+import { SseEvent } from '../src/web/sse-events.js';
 import { EventEmitter } from 'node:events';
 
 const TEST_PORT = 3107;
@@ -31,6 +32,10 @@ function parseSSEEvents(text: string): Array<{ event: string; data: unknown }> {
 
   return events;
 }
+
+it('exports the dedicated suppressed-hook event name', () => {
+  expect(SseEvent.HookSuppressed).toBe('hook:suppressed');
+});
 
 describe('SSE Events', () => {
   let server: WebServer;

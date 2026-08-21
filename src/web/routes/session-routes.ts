@@ -550,8 +550,12 @@ function waitCapacityResponse(err: WaitCapacityError): ApiResponse<never> {
  * Fixing it HERE rather than in `signalForStatus` is deliberate: liveness is not
  * derivable from `SessionStatus`, and the registry holds no `Session` reference.
  */
-function currentSignalFor(session: { pid: number | null; status: SessionStatus }, dead: boolean): WaitSignal | null {
+function currentSignalFor(
+  session: { pid: number | null; status: SessionStatus; isAutonomouslyIdle(): boolean },
+  dead: boolean
+): WaitSignal | null {
   if (dead || session.pid === null || session.pid === undefined) return 'exit';
+  if (session.status === 'idle' && !session.isAutonomouslyIdle()) return null;
   return signalForStatus(session.status);
 }
 

@@ -100,6 +100,46 @@ interface SessionListenerDeps {
  * Call `attachSessionListeners()` after to wire them to the session.
  */
 export function createSessionListeners(session: Session, deps: SessionListenerDeps): SessionListenerRefs {
+  const commitRawIdle = (info?: SessionIdleInfo, sourceSequence?: number): void => {
+    sessionWaits.notifySignal(session.id, 'idle');
+    if (
+      approvalsAvailableForMode(session.mode) &&
+      session.mode !== 'claude' &&
+      info?.reason === 'turn-end' &&
+      approvalInbox.getForSession(session.id)?.kind !== 'idle'
+    ) {
+      const item = approvalInbox.notePrompt({
+        sessionId: session.id,
+        sessionName: session.name,
+        kind: 'idle',
+        mode: session.mode,
+        sourceSequence,
+        capture: buildPaneCapture(session, deps.mux),
+      });
+      deps.sendPushNotifications(SseEvent.HookIdlePrompt, {
+        sessionId: session.id,
+        sessionName: session.name,
+        approvalId: item.id,
+        approvalsInboxOnly: true,
+      });
+    }
+    deps.broadcast(SseEvent.SessionIdle, { id: session.id });
+    deps.broadcastSessionStateDebounced(session.id);
+    const tracker = deps.getRunSummaryTracker(session.id);
+    if (tracker) {
+      tracker.recordIdle();
+      tracker.recordTokens(session.inputTokens, session.outputTokens);
+    }
+  };
+
+  const applyRawIdleDecision = (
+    info: SessionIdleInfo | undefined,
+    decision: Awaited<ReturnType<AgentActivityControllerPort['decideEvent']>>
+  ): void => {
+    if (!decision.presentToHuman || decision.settleEndedEarly) return;
+    commitRawIdle(info, decision.event?.sequence);
+  };
+
   return {
     terminalActivity: () => {
       deps.agentActivity.terminalActivity(session);
@@ -259,39 +299,20 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
 
     /** Broadcasts `session:idle` — the agent finished processing and is waiting for input */
     idle: (info) => {
-      sessionWaits.notifySignal(session.id, 'idle');
-      // Codex has no hook equivalent, so only a confirmed working -> idle
-      // transition opens an item. The 2s rendered-frame poller can miss a turn
-      // shorter than one poll interval; that accepted false negative produces
-      // neither working nor turn-end idle and therefore no inbox item.
-      if (
-        approvalsAvailableForMode(session.mode) &&
-        session.mode !== 'claude' &&
-        info?.reason === 'turn-end' &&
-        approvalInbox.getForSession(session.id)?.kind !== 'idle'
-      ) {
-        const item = approvalInbox.notePrompt({
-          sessionId: session.id,
-          sessionName: session.name,
-          kind: 'idle',
-          mode: session.mode,
-          capture: buildPaneCapture(session, deps.mux),
-        });
-        deps.sendPushNotifications(SseEvent.HookIdlePrompt, {
-          sessionId: session.id,
-          sessionName: session.name,
-          approvalId: item.id,
-          // Claude's hook notification predates the inbox; this inferred
-          // per-turn notification is itself an opt-in inbox surface.
-          approvalsInboxOnly: true,
-        });
-      }
-      deps.broadcast(SseEvent.SessionIdle, { id: session.id });
-      deps.broadcastSessionStateDebounced(session.id);
-      const tracker = deps.getRunSummaryTracker(session.id);
-      if (tracker) {
-        tracker.recordIdle();
-        tracker.recordTokens(session.inputTokens, session.outputTokens);
+      try {
+        const event = deps.agentActivity.allocateEvent(session, 'raw_idle');
+        const decision = deps.agentActivity.decideEvent(session, event);
+        if (decision instanceof Promise) {
+          void decision
+            .then((resolved) => applyRawIdleDecision(info, resolved))
+            .catch((error) => {
+              console.error(`[Server] Agent activity decision failed safe for raw idle ${session.id}:`, error);
+            });
+        } else {
+          applyRawIdleDecision(info, decision);
+        }
+      } catch (error) {
+        console.error(`[Server] Agent activity decision failed safe for raw idle ${session.id}:`, error);
       }
     },
 

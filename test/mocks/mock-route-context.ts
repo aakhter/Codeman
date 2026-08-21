@@ -75,6 +75,8 @@ export function createMockRouteContext(options?: {
       terminalActivity: vi.fn(),
       sessionExited: vi.fn(),
       setTrackingEnabled: vi.fn(),
+      allocateEvent: vi.fn((_s, kind: string) => ({ sequence: 1, kind })),
+      decideEvent: vi.fn(async () => ({ presentToHuman: true, quarantined: false, autonomyBlocked: false })),
       project: vi.fn(
         (s: MockSession & { activityProjection?: { activityStatus: string; activityStatusSince: number | null } }) =>
           s.activityProjection ?? { activityStatus: s.status, activityStatusSince: null }

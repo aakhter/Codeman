@@ -297,6 +297,18 @@ describe('POST /api/sessions/:id/input with wait', () => {
     expect(session.writeBuffer.length).toBe(before);
   });
 
+  it('a duplicate does not answer from raw idle while agent activity blocks autonomy', async () => {
+    const { app, ctx } = await harness();
+    const session = ctx.sessions.get(SESSION_ID)!;
+    session.blocksIdleAutomation = true;
+    await send(app, { input: 'first', clientId: 'blocked-duplicate', seq: 1 });
+    const pending = send(app, { input: 'first', clientId: 'blocked-duplicate', seq: 1, wait: true });
+
+    await vi.waitFor(() => expect(sessionWaits.signalWaiterCount(SESSION_ID)).toBe(1));
+    sessionWaits.notifySignal(SESSION_ID, 'stop');
+    expect((await pending).json().data.wait).toMatchObject({ signal: 'stop', immediate: false });
+  });
+
   it('a duplicate on a BUSY session answers working, not idle', async () => {
     // Previously unreachable: MockSession's status was 'working', which is not a
     // SessionStatus, so signalForStatus fell through to null and this combination

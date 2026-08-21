@@ -17,6 +17,7 @@ import { sessionWaits, hooksAvailableForMode } from '../session-wait-registry.js
 import { approvalInbox, type ApprovalKind } from '../approval-inbox.js';
 import { buildPaneCapture } from '../pane-capture.js';
 import type { SessionPort, EventPort, RespawnPort, ConfigPort, InfraPort, AgentActivityPort } from '../ports/index.js';
+import type { HookKind } from '../../session-agent-activity-coordinator.js';
 
 /** Hook events that open an Approvals Inbox item. */
 const APPROVAL_KIND_BY_EVENT: Record<string, ApprovalKind> = {
@@ -27,6 +28,13 @@ const APPROVAL_KIND_BY_EVENT: Record<string, ApprovalKind> = {
 
 /** Hook events that close a session's pending item without an inbox answer. */
 const APPROVAL_RESOLVING_EVENTS = new Set(['stop', 'elicitation_complete', 'elicitation_response']);
+
+const ACTIVITY_KIND_BY_EVENT: Partial<Record<string, Exclude<HookKind, 'raw_idle'>>> = {
+  stop: 'stop',
+  idle_prompt: 'idle_prompt',
+  permission_prompt: 'permission',
+  elicitation_dialog: 'elicitation',
+};
 
 export function registerHookEventRoutes(
   app: FastifyInstance,
@@ -75,6 +83,14 @@ export function registerHookEventRoutes(
       }
     }
 
+    const session = ctx.sessions.get(sessionId)!;
+    const safeData = sanitizeHookData(data);
+    const activityKind = ACTIVITY_KIND_BY_EVENT[event];
+    const activityEvent = activityKind ? ctx.agentActivity.allocateEvent(session, activityKind) : undefined;
+    const sourceSequence = activityEvent?.sequence;
+    const summaryTracker = ctx.runSummaryTrackers.get(sessionId);
+    if (summaryTracker && event !== 'stop') summaryTracker.recordHookEvent(event, safeData);
+
     // Wake anything blocked on `GET /api/sessions/:id/wait`. Hooks are the only
     // DEFINITIVE signals Codeman gets (`idle` is inferred from output stabilization
     // and can flap mid-turn), so these two are what an orchestrating agent should
@@ -87,13 +103,52 @@ export function registerHookEventRoutes(
     // also the cheap half of the forgery surface — a `stop` claimed for a session that
     // could never legitimately emit one is now dropped instead of steering another
     // agent's control flow.
-    const waitSession = ctx.sessions.get(sessionId);
+    const waitSession = session;
     if (waitSession && hooksAvailableForMode(waitSession.mode)) {
       if (event === 'stop') {
         sessionWaits.notifySignal(sessionId, 'stop');
+        summaryTracker?.recordHookEvent(event, safeData);
       } else if (event === 'permission_prompt' || event === 'elicitation_dialog') {
         sessionWaits.notifySignal(sessionId, 'blocked');
       }
+    }
+    // Even a mode-mismatched stop remains raw evidence in the run summary.
+    if (event === 'stop' && !hooksAvailableForMode(waitSession.mode)) summaryTracker?.recordHookEvent(event, safeData);
+
+    // Transcript discovery is identity evidence, not a human-facing legacy hook
+    // effect, so preserve it even when the prompt itself is suppressed below.
+    if (data && 'transcript_path' in data) {
+      const transcriptPath = String(data.transcript_path);
+      if (transcriptPath && isValidWorkingDir(transcriptPath)) {
+        ctx.startTranscriptWatcher(sessionId, transcriptPath);
+      }
+    }
+
+    const decision = activityEvent
+      ? await ctx.agentActivity.decideEvent(session, activityEvent)
+      : {
+          presentToHuman: true,
+          quarantined: false,
+          autonomyBlocked: false,
+          ambiguous: false,
+          observation: undefined,
+          liveEvidence: undefined,
+          processReason: undefined,
+        };
+    if (activityEvent && !decision.presentToHuman) {
+      ctx.broadcast('hook:suppressed', {
+        sessionId,
+        timestamp: Date.now(),
+        hookEvent: event,
+        sourceSequence,
+        reason: decision.quarantined ? 'stale_completion' : 'background_agents_live',
+        activityStatus: ctx.agentActivity.project(session).activityStatus,
+        observation: decision.observation,
+        liveEvidence: decision.liveEvidence,
+        processReason: decision.processReason,
+        ...safeData,
+      });
+      return {};
     }
 
     // Signal the respawn controller based on hook event type
@@ -111,17 +166,7 @@ export function registerHookEventRoutes(
       }
     }
 
-    // Start transcript watching if transcript_path is provided and safe
-    if (data && 'transcript_path' in data) {
-      const transcriptPath = String(data.transcript_path);
-      if (transcriptPath && isValidWorkingDir(transcriptPath)) {
-        ctx.startTranscriptWatcher(sessionId, transcriptPath);
-      }
-    }
-
     // Sanitize forwarded data: only include known safe fields, limit size
-    const safeData = sanitizeHookData(data);
-    const session = ctx.sessions.get(sessionId);
     const sessionName = session?.name ?? sessionId.slice(0, 8);
 
     // Approvals Inbox: prompt events open an item, dialog-closed/stop events
@@ -148,13 +193,14 @@ export function registerHookEventRoutes(
           toolSummary: typeof toolSummary === 'string' ? toolSummary : undefined,
           message: typeof safeData.message === 'string' ? safeData.message : undefined,
           cwd: typeof safeData.cwd === 'string' ? safeData.cwd : undefined,
+          sourceSequence,
           // Visible tmux frame first (it IS the dialog); raw byte-buffer tail as
           // the fallback for direct-PTY sessions and the no-op test mux.
           capture: buildPaneCapture(session, ctx.mux),
         });
         approvalId = item.id;
       } else if (APPROVAL_RESOLVING_EVENTS.has(event)) {
-        approvalInbox.resolveForSession(sessionId, 'resolved_in_terminal');
+        approvalInbox.resolveForSession(sessionId, 'resolved_in_terminal', undefined, sourceSequence);
       }
     }
 
@@ -163,6 +209,7 @@ export function registerHookEventRoutes(
       timestamp: Date.now(),
       ...safeData,
       ...(approvalId && { approvalId }),
+      ...(decision.ambiguous && { agentActivityDiagnostic: 'evidence_unavailable' }),
     });
     // Full state ride-along, same shape as the working/idle handlers: the home
     // screens rank the blocked group on lastActivityAt, and without this a
@@ -177,12 +224,6 @@ export function registerHookEventRoutes(
       ...safeData,
       ...(approvalId && { approvalId }),
     });
-
-    // Track in run summary
-    const summaryTracker = ctx.runSummaryTrackers.get(sessionId);
-    if (summaryTracker) {
-      summaryTracker.recordHookEvent(event, safeData);
-    }
 
     return {};
   });

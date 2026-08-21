@@ -25,6 +25,8 @@ function listenerDeps(frame = '› ready for another prompt') {
     agentActivity: {
       terminalActivity: vi.fn(),
       sessionExited: vi.fn(),
+      allocateEvent: vi.fn((_session, kind) => ({ sequence: 1, kind })),
+      decideEvent: vi.fn((_session, event) => ({ event, presentToHuman: true, settleEndedEarly: false })),
     },
     mux: { capturePaneBuffer: vi.fn(() => frame) },
   } as unknown as Parameters<typeof createSessionListeners>[1];
@@ -38,6 +40,37 @@ afterEach(() => {
 });
 
 describe('session listener wiring', () => {
+  it('suppresses raw idle effects while the coordinator reports live agents', async () => {
+    const session = new Session({ id: 'wiring-agent-idle-suppressed', workingDir: '/tmp', mode: 'claude' });
+    const deps = listenerDeps();
+    deps.agentActivity.decideEvent.mockResolvedValue({
+      presentToHuman: false,
+      settleEndedEarly: false,
+      autonomyBlocked: true,
+    });
+    const refs = createSessionListeners(session, deps as never);
+
+    refs.idle({ reason: 'turn-end' });
+    await Promise.resolve();
+
+    expect(deps.agentActivity.allocateEvent).toHaveBeenCalledWith(session, 'raw_idle');
+    expect(deps.broadcast).not.toHaveBeenCalledWith(SseEvent.SessionIdle, expect.anything());
+    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
+  });
+
+  it('fails safe without legacy idle effects when raw-idle reconciliation errors', async () => {
+    const session = new Session({ id: 'wiring-agent-idle-unknown', workingDir: '/tmp', mode: 'claude' });
+    const deps = listenerDeps();
+    deps.agentActivity.decideEvent.mockRejectedValue(new Error('inspection unavailable'));
+    const refs = createSessionListeners(session, deps as never);
+
+    refs.idle({ reason: 'turn-end' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deps.broadcast).not.toHaveBeenCalledWith(SseEvent.SessionIdle, expect.anything());
+  });
+
   it('invalidates coordinated activity before output, working, and exit broadcasts', () => {
     const session = new Session({ id: 'wiring-agent-activity', workingDir: '/tmp', mode: 'claude' });
     const order: string[] = [];
@@ -158,7 +191,7 @@ describe('Codex Approvals Inbox idle wiring', () => {
     const item = approvalInbox.getForSession(session.id);
     expect(Boolean(item)).toBe(creates);
     if (creates) {
-      expect(item).toMatchObject({ kind: 'idle', mode: 'codex' });
+      expect(item).toMatchObject({ kind: 'idle', mode: 'codex', sourceSequence: 1 });
       expect(item?.context).toBeTruthy();
     }
   });

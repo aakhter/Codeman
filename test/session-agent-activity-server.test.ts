@@ -11,6 +11,7 @@ import { subagentWatcher, type SubagentInfo } from '../src/subagent-watcher.js';
 import { claudeProjectHash, serializeSubagentKey } from '../src/claude-project-identity.js';
 import { approvalInbox } from '../src/web/approval-inbox.js';
 import { SseEvent } from '../src/web/sse-events.js';
+import { sessionWaits } from '../src/web/session-wait-registry.js';
 
 function internals(server: WebServer) {
   return server as unknown as {
@@ -242,6 +243,7 @@ describe('WebServer agent activity ownership', () => {
     (first as unknown as { _status: string })._status = 'idle';
     first.setActivityProjection({ activityStatus: 'checking_agents', activityStatusSince: 1 });
     state.sse.broadcast = vi.fn();
+    const notifyIdle = vi.spyOn(sessionWaits, 'notifySignal');
 
     ctx.agentActivity.setTrackingEnabled(false);
 
@@ -249,6 +251,8 @@ describe('WebServer agent activity ownership', () => {
       ([event, payload]) => event === SseEvent.SessionUpdated && (payload as { id?: string }).id === first.id
     );
     expect(idleUpdates).toHaveLength(1);
+    expect(notifyIdle.mock.calls.filter(([id, signal]) => id === first.id && signal === 'idle')).toHaveLength(1);
+    expect(state.sse.broadcast).toHaveBeenCalledWith(SseEvent.SessionIdle, { id: first.id }, undefined);
     expect(first.activityProjection).toEqual({ activityStatus: 'idle', activityStatusSince: null });
 
     subagentWatcher.emit('subagent:reset', { reason: 'stop' });

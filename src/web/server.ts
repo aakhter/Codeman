@@ -127,6 +127,9 @@ import {
   type CoordinatorSession,
   type AgentEvidence,
   type ObservableSessionProject,
+  type ActivityDecision,
+  type ActivityEvent,
+  type HookKind,
 } from '../session-agent-activity-coordinator.js';
 import { getClaudeCliVersion } from '../utils/claude-cli-resolver.js';
 import { claudeProjectHash } from '../claude-project-identity.js';
@@ -513,6 +516,7 @@ export class WebServer extends EventEmitter {
     this.mux = createMultiplexer();
     this.agentActivityCoordinator = new SessionAgentActivityCoordinator({
       inspect: (project, signal) => this.inspectAgentActivity(project, signal),
+      onDerivedIdle: (coordinatorSession) => this.commitDerivedAgentIdle(coordinatorSession.id),
       onProjectionChanged: (coordinatorSession) => {
         if (!this.activityMutationInProgress.has(coordinatorSession.id)) {
           this.activityProjectionChanged(coordinatorSession.id);
@@ -753,6 +757,19 @@ export class WebServer extends EventEmitter {
     this.broadcast(SseEvent.SessionUpdated, this.getSessionStateWithRespawn(session));
   }
 
+  private commitDerivedAgentIdle(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.isAutonomouslyIdle()) return;
+    sessionWaits.notifySignal(sessionId, 'idle');
+    this.broadcast(SseEvent.SessionIdle, { id: sessionId });
+    this.broadcastSessionStateDebounced(sessionId);
+    const tracker = this.runSummaryTrackers.get(sessionId);
+    if (tracker) {
+      tracker.recordIdle();
+      tracker.recordTokens(session.inputTokens, session.outputTokens);
+    }
+  }
+
   private mutateAgentActivity(session: Session, mutation: (adapter: CoordinatorSession) => void): void {
     const adapter = this.activityAdapters.get(session);
     if (!adapter) return;
@@ -767,6 +784,55 @@ export class WebServer extends EventEmitter {
     if (before.activityStatus !== after.activityStatus || before.activityStatusSince !== after.activityStatusSince) {
       this.activityProjectionChanged(session.id);
     }
+  }
+
+  private allocateAgentActivityEvent(session: Session, kind: HookKind, externalSourceSequence?: number): ActivityEvent {
+    return this.agentActivityCoordinator.allocateEvent(this.activityAdapter(session), kind, externalSourceSequence);
+  }
+
+  private decideAgentActivityEvent(
+    session: Session,
+    event: ActivityEvent
+  ): ActivityDecision | Promise<ActivityDecision> {
+    const adapter = this.activityAdapter(session);
+    if (
+      event.kind === 'permission' ||
+      event.kind === 'elicitation' ||
+      !this.agentActivityCoordinator.projectFor(adapter)
+    ) {
+      return this.agentActivityCoordinator.decisionForEvent(adapter, event);
+    }
+    return (async () => {
+      try {
+        const result = await this.agentActivityCoordinator.reconcileForEvent(adapter, event);
+        if (result !== false) {
+          const reconciliation = this.agentActivityCoordinator.reconciliationForEvent(adapter, event, result);
+          const decision = this.agentActivityCoordinator.decisionForEvent(adapter, event, { reconciliation });
+          if (event.kind === 'stop' && decision.processReason === 'no_matching_process') {
+            this.agentActivityCoordinator.completeEvent(adapter, event);
+          }
+          return decision;
+        }
+      } catch {
+        // Human-facing hooks fail open when inspection timed out, errored, or was
+        // invalidated while awaiting. Automation remains blocked by the projection.
+      }
+      try {
+        this.agentActivityCoordinator.abandonEvent(adapter, event);
+      } catch {
+        // A timed-out consumer may already have retired the event.
+      }
+      return {
+        event,
+        settleEndedEarly: false,
+        presentToHuman: event.kind !== 'raw_idle',
+        autonomyBlocked: this.agentActivityCoordinator.isAutonomyBlocked(adapter),
+        quarantined: false,
+        ambiguous: true,
+        observation: 'unknown',
+        liveEvidence: null,
+      };
+    })();
   }
 
   private agentIdentityKey(session: Session): string {
@@ -1173,6 +1239,8 @@ export class WebServer extends EventEmitter {
           }),
         sessionExited: this.detachAgentActivity.bind(this),
         setTrackingEnabled: this.setAgentTrackingEnabled.bind(this),
+        allocateEvent: this.allocateAgentActivityEvent.bind(this),
+        decideEvent: this.decideAgentActivityEvent.bind(this),
         project: (session: Session) => {
           const adapter = this.activityAdapters.get(session);
           return adapter
@@ -2166,6 +2234,8 @@ export class WebServer extends EventEmitter {
           }),
         sessionExited: this.detachAgentActivity.bind(this),
         setTrackingEnabled: this.setAgentTrackingEnabled.bind(this),
+        allocateEvent: this.allocateAgentActivityEvent.bind(this),
+        decideEvent: this.decideAgentActivityEvent.bind(this),
         project: (session: Session) => {
           const adapter = this.activityAdapters.get(session);
           return adapter
