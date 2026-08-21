@@ -3248,15 +3248,20 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
 
+    const clearGeneration = (this._subagentClearGeneration || 0) + 1;
+    this._subagentClearGeneration = clearGeneration;
+    const eventWatermark = new Map(this._subagentEventVersions || []);
     try {
       const res = await fetch('/api/subagents', { method: 'DELETE' });
       const data = await res.json();
+      if (clearGeneration !== this._subagentClearGeneration) return;
       if (data.success) {
         if (!Array.isArray(data.data?.remaining)) {
           this.showToast('Failed to clear subagents: invalid server snapshot', 'error');
           return;
         }
-        this._reconcileSubagentSnapshot(data.data.remaining);
+        await this._reconcileSubagentSnapshot(data.data.remaining, eventWatermark);
+        if (clearGeneration !== this._subagentClearGeneration) return;
         // Update UI
         this.renderSubagentPanel();
         this.renderMonitorSubagents();
@@ -3271,13 +3276,17 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  _reconcileSubagentSnapshot(remaining) {
+  async _reconcileSubagentSnapshot(remaining, eventWatermark = new Map(this._subagentEventVersions || [])) {
     const nextSubagents = new Map();
     for (const [agentKey, record] of this.subagents) {
-      if (record?.status !== 'completed') nextSubagents.set(agentKey, record);
+      const changedSinceRequest = (this._subagentEventVersions?.get(agentKey) || 0) !== (eventWatermark.get(agentKey) || 0);
+      if (record?.status !== 'completed' || changedSinceRequest) nextSubagents.set(agentKey, record);
     }
     for (const record of Array.isArray(remaining) ? remaining : []) {
       if (typeof record?.agentKey !== 'string' || record.agentKey.length === 0) continue;
+      const changedSinceRequest =
+        (this._subagentEventVersions?.get(record.agentKey) || 0) !== (eventWatermark.get(record.agentKey) || 0);
+      if (changedSinceRequest) continue;
       const existing = this.subagents.get(record.agentKey);
       if (existing) {
         Object.assign(existing, record);
@@ -3306,8 +3315,29 @@ Object.assign(CodemanApp.prototype, {
 
     this.subagents = nextSubagents;
     if (this.activeSubagentKey && !nextSubagents.has(this.activeSubagentKey)) this.activeSubagentKey = null;
-    this.saveSubagentParentMap();
-    this.saveSubagentWindowStates();
+    await Promise.all([this.saveSubagentParentMap(), this.saveSubagentWindowStates()]);
+  },
+
+  _reportSubagentPersistenceFailure(kind, err) {
+    if (!this._subagentIdentityDiagnostics) this._subagentIdentityDiagnostics = new Set();
+    const diagnosticKey = `persistence:${kind}`;
+    if (this._subagentIdentityDiagnostics.has(diagnosticKey)) return;
+    this._subagentIdentityDiagnostics.add(diagnosticKey);
+    console.warn(`Failed to persist subagent ${kind}:`, err);
+  },
+
+  _queueSubagentPersistence(kind, operation) {
+    if (!this._subagentPersistenceQueues) this._subagentPersistenceQueues = new Map();
+    if (!this._subagentPersistenceGenerations) this._subagentPersistenceGenerations = new Map();
+    const generation = (this._subagentPersistenceGenerations.get(kind) || 0) + 1;
+    this._subagentPersistenceGenerations.set(kind, generation);
+    const previous = this._subagentPersistenceQueues.get(kind) || Promise.resolve();
+    const queued = previous
+      .catch(() => {})
+      .then(() => operation(generation))
+      .catch(err => this._reportSubagentPersistenceFailure(kind, err));
+    this._subagentPersistenceQueues.set(kind, queued);
+    return queued;
   },
 
   toggleSubagentsPanel() {
@@ -3466,17 +3496,23 @@ Object.assign(CodemanApp.prototype, {
    * Load subagent window states from server (or localStorage fallback).
    * Called on page load to restore minimized/open window states.
    */
-  async loadSubagentWindowStates() {
+  async loadSubagentWindowStates(initGeneration = this._initGeneration) {
     let states = null;
 
     // Try server first for cross-browser sync
     try {
       const res = await fetch('/api/subagent-window-states');
+      if (initGeneration !== this._initGeneration) return null;
       if (res.ok) {
         const env = await res.json();
+        if (initGeneration !== this._initGeneration) return null;
         states = env?.success === true ? env.data : env;
         // Also update localStorage
-        localStorage.setItem('codeman-subagent-window-states', JSON.stringify(states));
+        try {
+          localStorage.setItem('codeman-subagent-window-states', JSON.stringify(states));
+        } catch (err) {
+          this._reportSubagentPersistenceFailure('window state cache', err);
+        }
       }
     } catch (err) {
       console.error('Failed to load subagent window states from server:', err);
@@ -3494,6 +3530,7 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
+    if (initGeneration !== this._initGeneration) return null;
     return states || { minimized: {}, open: [] };
   },
 
@@ -3508,43 +3545,48 @@ Object.assign(CodemanApp.prototype, {
    * Save the subagent parent map to localStorage and server.
    * Called whenever a new parent association is discovered.
    */
-  async saveSubagentParentMap() {
+  saveSubagentParentMap(initGeneration = this._initGeneration) {
     const mapData = Object.fromEntries(this.subagentParentMap);
-
-    // Save to localStorage for instant recovery
-    try {
-      localStorage.setItem('codeman-subagent-parents', JSON.stringify(mapData));
-    } catch (err) {
-      console.error('Failed to save subagent parents to localStorage:', err);
-    }
-
-    // Save to server for cross-browser/session persistence
-    try {
-      await fetch('/api/subagent-parents', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mapData)
-      });
-    } catch (err) {
-      console.error('Failed to save subagent parents to server:', err);
-    }
+    return this._queueSubagentPersistence('parents', async () => {
+      if (initGeneration !== this._initGeneration) return;
+      try {
+        localStorage.setItem('codeman-subagent-parents', JSON.stringify(mapData));
+      } catch (err) {
+        this._reportSubagentPersistenceFailure('parent cache', err);
+      }
+      try {
+        await fetch('/api/subagent-parents', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(mapData)
+        });
+      } catch (err) {
+        this._reportSubagentPersistenceFailure('parent server state', err);
+      }
+    });
   },
 
   /**
    * Load the subagent parent map from server (or localStorage fallback).
    * Called once on page load, before any agents are discovered.
    */
-  async loadSubagentParentMap() {
+  async loadSubagentParentMap(initGeneration = this._initGeneration) {
     let mapData = null;
 
     // Try server first (most authoritative)
     try {
       const res = await fetch('/api/subagent-parents');
+      if (initGeneration !== this._initGeneration) return;
       if (res.ok) {
         const env = await res.json();
+        if (initGeneration !== this._initGeneration) return;
         mapData = env?.success === true ? env.data : env;
         // Update localStorage as cache
-        localStorage.setItem('codeman-subagent-parents', JSON.stringify(mapData));
+        try {
+          localStorage.setItem('codeman-subagent-parents', JSON.stringify(mapData));
+        } catch (err) {
+          this._reportSubagentPersistenceFailure('parent cache', err);
+        }
       }
     } catch (err) {
       console.error('Failed to load subagent parents from server:', err);
@@ -3552,6 +3594,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Fallback to localStorage
     if (!mapData) {
+      if (initGeneration !== this._initGeneration) return;
       try {
         const saved = localStorage.getItem('codeman-subagent-parents');
         if (saved) {
@@ -3564,8 +3607,10 @@ Object.assign(CodemanApp.prototype, {
 
     // Populate the map (prune stale entries: require both session and agent to exist)
     if (mapData && typeof mapData === 'object') {
+      if (initGeneration !== this._initGeneration) return;
       let migrationChanged = false;
       for (const [persistedKey, sessionId] of Object.entries(mapData)) {
+        if (initGeneration !== this._initGeneration) return;
         const agentKey = this._resolvePersistedSubagentKey(persistedKey);
         if (agentKey && this.sessions.has(sessionId)) {
           this.subagentParentMap.set(agentKey, sessionId);
@@ -3574,7 +3619,7 @@ Object.assign(CodemanApp.prototype, {
           migrationChanged = true;
         }
       }
-      if (migrationChanged) await this.saveSubagentParentMap();
+      if (migrationChanged) await this.saveSubagentParentMap(initGeneration);
     }
   },
 

@@ -613,6 +613,11 @@ class CodemanApp {
     this._detachOrphanStrikes = new Map(); // id -> consecutive unanswered roll-calls (redock at 2)
 
     this._initGeneration = 0;     // dedup concurrent handleInit calls
+    this._subagentEventClock = 0;
+    this._subagentEventVersions = new Map();
+    this._subagentClearGeneration = 0;
+    this._subagentPersistenceQueues = new Map();
+    this._subagentPersistenceGenerations = new Map();
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
     // Sessions whose full tmux scrollback has already been replayed this page load
@@ -4820,10 +4825,12 @@ class CodemanApp {
 
   _replaceSubagentSnapshot(records) {
     const next = new Map();
+    this._subagentEventVersions.clear();
     for (const record of Array.isArray(records) ? records : []) {
       const agentKey = this._requireSubagentEventKey?.(record, 'snapshot');
       if (!agentKey) continue;
       next.set(agentKey, record);
+      this._touchSubagentEvent?.(agentKey);
     }
     this.subagents = next;
   }
@@ -4879,6 +4886,7 @@ class CodemanApp {
     this.subagentActivity.clear();
     this.subagentToolResults.clear();
     this.subagentParentMap.clear();
+    this._subagentEventVersions.clear();
     this.minimizedSubagents.clear();
     this.activeSubagentKey = null;
     for (const timer of this._subagentWindowRenderTimeouts?.values() || []) clearTimeout(timer);
@@ -5100,9 +5108,11 @@ class CodemanApp {
       // This ensures connection lines are drawn to the correct tabs
       // Clear the in-memory map first to ensure fresh state from storage
       this.subagentParentMap.clear();
-      this.loadSubagentParentMap().then(() => {
+      this.loadSubagentParentMap(gen).then(async () => {
+        if (gen !== this._initGeneration) return;
         // Apply stored parent associations to agents
         for (const [agentKey, sessionId] of this.subagentParentMap) {
+          if (gen !== this._initGeneration) return;
           const agent = this.subagents.get(agentKey);
           if (agent && this.sessions.has(sessionId)) {
             agent.parentSessionId = sessionId;
@@ -5116,13 +5126,14 @@ class CodemanApp {
 
         // Now try to find parents for any agents that don't have one yet
         for (const [agentKey] of this.subagents) {
+          if (gen !== this._initGeneration) return;
           if (!this.subagentParentMap.has(agentKey)) {
             this.findParentSessionForSubagent(agentKey);
           }
         }
 
         // Finally, restore window states (this opens windows with correct parent info)
-        this.restoreSubagentWindowStates();
+        await this.restoreSubagentWindowStates(gen);
       });
     }
 

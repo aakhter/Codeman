@@ -141,9 +141,16 @@ Object.assign(CodemanApp.prototype, {
 
 
   // Subagents (Claude Code background agents)
+  _touchSubagentEvent(agentKey) {
+    this._subagentEventClock = (this._subagentEventClock || 0) + 1;
+    if (!this._subagentEventVersions) this._subagentEventVersions = new Map();
+    this._subagentEventVersions.set(agentKey, this._subagentEventClock);
+  },
+
   _onSubagentDiscovered(data) {
     const agentKey = this._requireSubagentEventKey(data, 'discovered');
     if (!agentKey) return;
+    this._touchSubagentEvent(agentKey);
     // Clear all old data for this exact identity (in case of replay/reuse).
     this.subagents.set(agentKey, data);
     this.subagentActivity.set(agentKey, []);
@@ -174,6 +181,7 @@ Object.assign(CodemanApp.prototype, {
   _onSubagentUpdated(data) {
     const agentKey = this._requireSubagentEventKey(data, 'updated');
     if (!agentKey) return;
+    this._touchSubagentEvent(agentKey);
     const existing = this.subagents.get(agentKey);
     if (existing) {
       // Merge updated fields (especially description)
@@ -259,6 +267,7 @@ Object.assign(CodemanApp.prototype, {
   async _onSubagentCompleted(data) {
     const agentKey = this._requireSubagentEventKey(data, 'completed');
     if (!agentKey) return;
+    this._touchSubagentEvent(agentKey);
     const existing = this.subagents.get(agentKey);
     if (existing) {
       existing.status = 'completed';

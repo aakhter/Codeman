@@ -48,6 +48,16 @@ function agent(agentKey: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeApp() {
   const app = Object.create(CodemanApp.prototype) as Record<string, any>;
   app.subagents = new Map();
@@ -57,6 +67,12 @@ function makeApp() {
   app.subagentParentMap = new Map();
   app.minimizedSubagents = new Map();
   app.teammateTerminals = new Map();
+  app._subagentEventVersions = new Map();
+  app._subagentEventClock = 0;
+  app._subagentPersistenceQueues = new Map();
+  app._subagentPersistenceGenerations = new Map();
+  app._subagentClearGeneration = 0;
+  app._initGeneration = 1;
   app.sessions = new Map([
     ['tab-a', { id: 'tab-a', claudeSessionId: 'claude-session', name: 'A' }],
     ['tab-b', { id: 'tab-b', claudeSessionId: 'other-session', name: 'B' }],
@@ -344,6 +360,46 @@ describe('persisted opaque identity and legacy migration', () => {
 });
 
 describe('manual completed-history clear', () => {
+  it('does not let a stale clear response overwrite newer completion or discovery events', async () => {
+    const app = makeApp();
+    const completedRequest = deferred<Response>();
+    const discoveryRequest = deferred<Response>();
+    app.subagents.set('trigger', agent('trigger', { status: 'completed' }));
+    app.subagents.set('completion-race', agent('completion-race', { status: 'active', description: 'before' }));
+    app.showToast = vi.fn();
+    app.renderMonitorSubagents = vi.fn();
+    app.updateSubagentBadge = vi.fn();
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.spyOn(globalThis, 'fetch')
+      .mockReturnValueOnce(completedRequest.promise)
+      .mockReturnValueOnce(discoveryRequest.promise);
+
+    const firstClear = app.clearAllSubagents();
+    await Promise.resolve();
+    await app._onSubagentCompleted({ agentKey: 'completion-race', agentId: 'same-id' });
+    completedRequest.resolve({
+      json: async () => ({
+        success: true,
+        data: { cleared: 1, remaining: [agent('completion-race', { status: 'active', description: 'stale' })] },
+      }),
+    } as Response);
+    await firstClear;
+    expect(app.subagents.get('completion-race')).toMatchObject({ status: 'completed', description: 'before' });
+
+    app.subagents.set('trigger-2', agent('trigger-2', { status: 'completed' }));
+    const secondClear = app.clearAllSubagents();
+    await Promise.resolve();
+    app._onSubagentDiscovered(agent('completion-race', { status: 'active', description: 'new discovery' }));
+    discoveryRequest.resolve({
+      json: async () => ({
+        success: true,
+        data: { cleared: 1, remaining: [agent('completion-race', { status: 'idle', description: 'stale again' })] },
+      }),
+    } as Response);
+    await secondClear;
+    expect(app.subagents.get('completion-race')).toMatchObject({ status: 'active', description: 'new discovery' });
+  });
+
   it('counts completed history and atomically reconciles the canonical live snapshot', async () => {
     const app = makeApp();
     const liveObject = agent('opaque-live', { description: 'Before' });
@@ -422,6 +478,113 @@ describe('manual completed-history clear', () => {
     expect([...app.subagentActivity.keys()]).toEqual(['opaque-active', 'opaque-idle']);
     expect([...app.subagentParentMap.keys()]).toEqual(['opaque-active', 'opaque-idle']);
     expect([...app.subagentWindows.keys()]).toEqual(['opaque-active', 'opaque-idle']);
+  });
+
+  it('ignores an older clear response that resolves after a newer clear', async () => {
+    const app = makeApp();
+    const older = deferred<Response>();
+    const newer = deferred<Response>();
+    app.subagents.set('done', agent('done', { status: 'completed' }));
+    app.showToast = vi.fn();
+    app.renderMonitorSubagents = vi.fn();
+    app.updateSubagentBadge = vi.fn();
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+
+    const first = app.clearAllSubagents();
+    const second = app.clearAllSubagents();
+    newer.resolve({
+      json: async () => ({ success: true, data: { cleared: 1, remaining: [agent('new-live')] } }),
+    } as Response);
+    await second;
+    older.resolve({
+      json: async () => ({ success: true, data: { cleared: 1, remaining: [agent('old-live')] } }),
+    } as Response);
+    await first;
+
+    expect([...app.subagents.keys()]).toEqual(['new-live']);
+  });
+});
+
+describe('subagent reconnect generations and persistence', () => {
+  it('rejects stale parent and window restore fetches after a newer init generation', async () => {
+    const app = makeApp();
+    app.subagents.set('opaque-first', agent('opaque-first'));
+    app.subagents.set('opaque-second', agent('opaque-second'));
+    const oldParent = deferred<Response>();
+    const newParent = deferred<Response>();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockReturnValueOnce(oldParent.promise)
+      .mockReturnValueOnce(newParent.promise);
+    const storageSet = vi.spyOn(Storage.prototype, 'setItem');
+
+    app._initGeneration = 1;
+    const firstParentLoad = app.loadSubagentParentMap(1);
+    app._initGeneration = 2;
+    app.subagentParentMap.clear();
+    const secondParentLoad = app.loadSubagentParentMap(2);
+    newParent.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { 'opaque-second': 'tab-b' } }),
+    } as Response);
+    await secondParentLoad;
+    oldParent.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { 'opaque-first': 'tab-a' } }),
+    } as Response);
+    await firstParentLoad;
+    expect(Object.fromEntries(app.subagentParentMap)).toEqual({ 'opaque-second': 'tab-b' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const parentCacheWrites = storageSet.mock.calls.filter(([key]) => key === 'codeman-subagent-parents');
+    expect(parentCacheWrites).toHaveLength(1);
+    expect(parentCacheWrites[0]?.[1]).toContain('opaque-second');
+    expect(parentCacheWrites[0]?.[1]).not.toContain('opaque-first');
+
+    const oldWindows = deferred<Record<string, unknown>>();
+    const newWindows = deferred<Record<string, unknown>>();
+    app.loadSubagentWindowStates = vi
+      .fn()
+      .mockReturnValueOnce(oldWindows.promise)
+      .mockReturnValueOnce(newWindows.promise);
+    app.openSubagentWindow = vi.fn();
+    app._initGeneration = 3;
+    const firstRestore = app.restoreSubagentWindowStates(3);
+    app._initGeneration = 4;
+    const secondRestore = app.restoreSubagentWindowStates(4);
+    newWindows.resolve({ minimized: {}, open: [{ agentKey: 'opaque-second' }] });
+    await secondRestore;
+    oldWindows.resolve({ minimized: {}, open: [{ agentKey: 'opaque-first' }] });
+    await firstRestore;
+    expect(app.openSubagentWindow).toHaveBeenCalledTimes(1);
+    expect(app.openSubagentWindow).toHaveBeenCalledWith('opaque-second');
+    expect(app.saveSubagentWindowStates).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes persistence, isolates storage failures, and leaves the newest snapshot last', async () => {
+    const app = makeApp();
+    app.saveSubagentWindowStates = CodemanApp.prototype.saveSubagentWindowStates;
+    const firstPut = deferred<unknown>();
+    const put = vi.fn().mockReturnValueOnce(firstPut.promise).mockRejectedValueOnce(new Error('server unavailable'));
+    app._apiPut = put;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+
+    app.subagentWindows.set('opaque-first', { minimized: false, position: { left: '1px' } });
+    const first = app.saveSubagentWindowStates();
+    await Promise.resolve();
+    app.subagentWindows.clear();
+    app.subagentWindows.set('opaque-second', { minimized: false, position: { left: '2px' } });
+    const second = app.saveSubagentWindowStates();
+    firstPut.resolve(undefined);
+    await Promise.all([first, second]);
+
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls[1][1].open).toEqual([{ agentKey: 'opaque-second', position: { left: '2px' } }]);
+    expect(warn.mock.calls.length).toBeGreaterThan(0);
+    expect(warn.mock.calls.length).toBeLessThanOrEqual(2);
   });
 });
 

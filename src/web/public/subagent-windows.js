@@ -108,7 +108,7 @@ Object.assign(CodemanApp.prototype, {
    * Save subagent window states (minimized/open) to server for cross-browser persistence.
    * Called when a window is minimized, restored, or auto-minimized on completion.
    */
-  async saveSubagentWindowStates() {
+  saveSubagentWindowStates(initGeneration = this._initGeneration) {
     // Build state object: which agents are minimized per session
     const minimizedState = {};
     for (const [sessionId, agentIds] of this.minimizedSubagents) {
@@ -128,15 +128,19 @@ Object.assign(CodemanApp.prototype, {
 
     const windowStates = { minimized: minimizedState, open: openWindows };
 
-    // Save to localStorage for quick restore
-    localStorage.setItem('codeman-subagent-window-states', JSON.stringify(windowStates));
-
-    // Save to server for cross-browser persistence
-    try {
-      await this._apiPut('/api/subagent-window-states', windowStates);
-    } catch (err) {
-      console.error('Failed to save subagent window states to server:', err);
-    }
+    return this._queueSubagentPersistence('windows', async () => {
+      if (initGeneration !== this._initGeneration) return;
+      try {
+        localStorage.setItem('codeman-subagent-window-states', JSON.stringify(windowStates));
+      } catch (err) {
+        this._reportSubagentPersistenceFailure('window cache', err);
+      }
+      try {
+        await this._apiPut('/api/subagent-window-states', windowStates);
+      } catch (err) {
+        this._reportSubagentPersistenceFailure('window server state', err);
+      }
+    });
   },
 
   /**
@@ -144,15 +148,18 @@ Object.assign(CodemanApp.prototype, {
    * Opens windows that were open before, keeps minimized ones minimized.
    * IMPORTANT: Parent associations are loaded from subagentParentMap BEFORE this is called.
    */
-  async restoreSubagentWindowStates() {
-    const states = await this.loadSubagentWindowStates();
+  async restoreSubagentWindowStates(initGeneration = this._initGeneration) {
+    const states = await this.loadSubagentWindowStates(initGeneration);
+    if (initGeneration !== this._initGeneration || !states) return;
 
     // Restore minimized state using the PERSISTENT parent map
     // Skip old agents from previous runs to avoid confusion
     const cutoffTime = Date.now() - 10 * 60 * 1000; // 10 minutes
     for (const [savedSessionId, agentIds] of Object.entries(states.minimized || {})) {
+      if (initGeneration !== this._initGeneration) return;
       if (Array.isArray(agentIds) && agentIds.length > 0) {
         for (const persistedKey of agentIds) {
+          if (initGeneration !== this._initGeneration) return;
           const agentKey = this._resolvePersistedSubagentKey(persistedKey);
           if (!agentKey) continue;
           const agent = this.subagents.get(agentKey);
@@ -186,6 +193,7 @@ Object.assign(CodemanApp.prototype, {
     const now = Date.now();
     const maxAgeMs = 10 * 60 * 1000; // 10 minutes - don't restore windows for old agents
     for (const savedWindow of states.open || []) {
+      if (initGeneration !== this._initGeneration) return;
       const agentKey = this._resolvePersistedSubagentKey(savedWindow.agentKey || savedWindow.agentId);
       if (!agentKey) continue;
       const { position } = savedWindow;
@@ -193,6 +201,7 @@ Object.assign(CodemanApp.prototype, {
       // Only restore window if agent exists, is recent, and is still active/idle
       const agentAge = agent?.startedAt ? now - agent.startedAt : Infinity;
       if (agent && agent.status !== 'completed' && agentAge < maxAgeMs) {
+        if (initGeneration !== this._initGeneration) return;
         this.openSubagentWindow(agentKey);
         // Restore position if saved (with viewport bounds check)
         if (position) {
@@ -215,11 +224,14 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
+    if (initGeneration !== this._initGeneration) return;
     this.renderSessionTabs(); // Update tab badges
-    this.saveSubagentWindowStates(); // Persist corrected mappings
+    await this.saveSubagentWindowStates(initGeneration); // Persist corrected mappings
+    if (initGeneration !== this._initGeneration) return;
 
     // Update connection lines after all windows are restored (use rAF to ensure DOM is ready)
     requestAnimationFrame(() => {
+      if (initGeneration !== this._initGeneration) return;
       this.updateConnectionLines();
     });
   },
