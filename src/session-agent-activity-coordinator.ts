@@ -16,6 +16,8 @@ export interface CoordinatorSession {
   readonly claudeSessionId: string | null;
   readonly terminalActivityEpoch: number;
   readonly rawIdleAnchorAt?: number;
+  /** Stable underlying Session object when this coordinator receives an adapter. */
+  readonly reconstructionOwner?: object;
   readonly claudeRuntimeVersion?: string;
   readonly claudeRuntimeCapability?: 'exact_role' | 'none';
   readonly agentObservationSupported?: boolean;
@@ -326,7 +328,7 @@ export class BoundedActivityScheduler {
 
 export class SessionAgentActivityCoordinator {
   private readonly records = new Map<string, SessionRecord>();
-  private readonly restoredReconstructionConsumed = new Set<string>();
+  private readonly restoredReconstructionConsumed = new WeakSet<object>();
   private readonly inspect?: InspectionJob;
   private readonly now: () => number;
   private readonly scheduleTimer: typeof setTimeout;
@@ -380,7 +382,7 @@ export class SessionAgentActivityCoordinator {
       startupReconstructionPending:
         session.status === 'idle' &&
         session.rawIdleAnchorAt !== undefined &&
-        !this.restoredReconstructionConsumed.has(session.id),
+        !this.restoredReconstructionConsumed.has(this.reconstructionOwner(session)),
     };
     this.records.set(session.id, record);
     session.setActivityProjection(projection);
@@ -1149,7 +1151,11 @@ export class SessionAgentActivityCoordinator {
 
   private consumeStartupReconstruction(record: SessionRecord): void {
     record.startupReconstructionPending = false;
-    this.restoredReconstructionConsumed.add(record.session.id);
+    this.restoredReconstructionConsumed.add(this.reconstructionOwner(record.session));
+  }
+
+  private reconstructionOwner(session: CoordinatorSession): object {
+    return session.reconstructionOwner ?? session;
   }
 
   private isLiveSnapshot(snapshot: {

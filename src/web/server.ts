@@ -679,6 +679,9 @@ export class WebServer extends EventEmitter {
       get rawIdleAnchorAt() {
         return session.restoredIdleAnchorAt;
       },
+      get reconstructionOwner() {
+        return session;
+      },
       get claudeRuntimeVersion() {
         return claudeRuntimeVersion;
       },

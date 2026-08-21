@@ -163,14 +163,47 @@ describe('session agent activity coordinator', () => {
       coordinator.onWatcherSnapshot(toggled, ['new-agent'], 1, 100);
       expect(coordinator.project(toggled).activityStatusSince).toBe(3000);
 
-      const detached = { ...session(), id: 'detached', rawIdleAnchorAt: 100 };
+      const owner = {};
+      const detached = { ...session(), id: 'detached', rawIdleAnchorAt: 100, reconstructionOwner: owner };
       coordinator.attachSession(detached);
       coordinator.detachSession(detached);
       now = 4000;
-      const reattachedAdapter = { ...detached };
+      const reattachedAdapter = { ...detached, reconstructionOwner: owner };
       coordinator.attachSession(reattachedAdapter);
       coordinator.onWatcherSnapshot(reattachedAdapter, ['new-agent'], 1, 100);
       expect(coordinator.project(reattachedAdapter).activityStatusSince).toBe(4000);
+
+      coordinator.detachSession(reattachedAdapter);
+      const genuinelyNew = { ...session(), id: 'detached', rawIdleAnchorAt: 100, reconstructionOwner: {} };
+      coordinator.attachSession(genuinelyNew);
+      coordinator.onWatcherSnapshot(genuinelyNew, ['restored-agent'], 1, 100);
+      expect(coordinator.project(genuinelyNew).activityStatusSince).toBe(100);
+    });
+
+    it('does not retain countable session-id tombstones across bulk detach and cleanup', () => {
+      const coordinator = new SessionAgentActivityCoordinator({ now: () => 1000 });
+      for (let index = 0; index < 250; index += 1) {
+        const target = {
+          ...session(),
+          id: `recycled-${index}`,
+          rawIdleAnchorAt: 100,
+          reconstructionOwner: {},
+        };
+        coordinator.attachSession(target);
+        coordinator.onWatcherSnapshot(target, ['agent'], 1, 100);
+        coordinator.detachSession(target);
+      }
+      coordinator.cleanup();
+
+      const reusedId = {
+        ...session(),
+        id: 'recycled-0',
+        rawIdleAnchorAt: 100,
+        reconstructionOwner: {},
+      };
+      coordinator.attachSession(reusedId);
+      coordinator.onWatcherSnapshot(reusedId, ['agent'], 1, 100);
+      expect(coordinator.project(reusedId).activityStatusSince).toBe(100);
     });
 
     it('notifies its owner whenever evidence changes the effective projection', () => {
