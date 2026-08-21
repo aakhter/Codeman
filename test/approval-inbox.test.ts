@@ -146,6 +146,21 @@ describe('ApprovalInbox', () => {
     inbox.resolveForSession('s-seq', 'resolved_in_terminal', undefined, 8);
     expect(inbox.getForSession('s-seq')).toBeUndefined();
   });
+
+  it.each(['permission', 'question'] as const)(
+    'makes preserved %s ordering generation-neutral on identity replacement',
+    (kind) => {
+      const inbox = new ApprovalInbox();
+      inbox.notePrompt({ sessionId: 's-generation', sessionName: 'old', kind, sourceSequence: 8 });
+
+      inbox.resetSourceSequenceForSession('s-generation', [kind]);
+      expect(inbox.getForSession('s-generation')).toMatchObject({ kind });
+      expect(inbox.getForSession('s-generation')).not.toHaveProperty('sourceSequence');
+
+      inbox.resolveForSession('s-generation', 'resolved_in_terminal', undefined, 1);
+      expect(inbox.getForSession('s-generation')).toBeUndefined();
+    }
+  );
   let inbox: ApprovalInbox;
 
   beforeEach(() => {

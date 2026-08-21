@@ -180,7 +180,16 @@ describe('hook-event-routes', () => {
             data: { session_id: `new-${kind}`, source: 'new' },
           },
         });
-        expect(approvalInbox.getForSession(harness.ctx._sessionId)).toMatchObject({ kind, sourceSequence: 8 });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).toMatchObject({ kind });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).not.toHaveProperty('sourceSequence');
+
+        harness.ctx.agentActivity.allocateEvent.mockReturnValue({ sequence: 1, kind: 'stop' });
+        await harness.app.inject({
+          method: 'POST',
+          url: '/api/hook-event',
+          payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: null },
+        });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
       }
     );
 

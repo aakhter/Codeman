@@ -70,6 +70,7 @@ export function registerHookEventRoutes(
       if (session) {
         if (data.session_id !== prevClaudeSessionId) {
           approvalInbox.resolveForSession(sessionId, 'resolved_in_terminal', ['idle']);
+          approvalInbox.resetSourceSequenceForSession(sessionId, ['permission', 'question']);
           ctx.agentActivity.identityChanged(session);
         }
         ctx.persistSessionState(session);
@@ -90,7 +91,7 @@ export function registerHookEventRoutes(
     const safeData = sanitizeHookData(data);
     const activityKind = ACTIVITY_KIND_BY_EVENT[event];
     const activityEvent = activityKind ? ctx.agentActivity.allocateEvent(session, activityKind) : undefined;
-    const sourceSequence = activityEvent?.sequence;
+    const sourceSequence = activityEvent?.sequence || undefined;
     const summaryTracker = ctx.runSummaryTrackers.get(sessionId);
     if (summaryTracker && event !== 'stop') summaryTracker.recordHookEvent(event, safeData);
 

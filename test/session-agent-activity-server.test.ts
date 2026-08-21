@@ -8,6 +8,11 @@ vi.mock('../src/mux-factory.js', () => ({
 }));
 import { Session } from '../src/session.js';
 import { WebServer } from '../src/web/server.js';
+import type {
+  AgentEvidence,
+  CoordinatorSession,
+  ObservableSessionProject,
+} from '../src/session-agent-activity-coordinator.js';
 import { subagentWatcher, type SubagentInfo } from '../src/subagent-watcher.js';
 import { claudeProjectHash, serializeSubagentKey } from '../src/claude-project-identity.js';
 import { approvalInbox } from '../src/web/approval-inbox.js';
@@ -27,9 +32,10 @@ function internals(server: WebServer) {
     cachedLightState: unknown;
     cachedSessionsList: unknown;
     sessions: Map<string, Session>;
-    activityAdapters: Map<Session, unknown>;
+    activityAdapters: Map<Session, CoordinatorSession>;
     runSummaryTrackers: Map<string, { recordHookEvent(event: string, data: Record<string, unknown>): void }>;
     inspectSubagentLiveness(info: Readonly<SubagentInfo>): Promise<'live' | 'not_live' | 'unknown'>;
+    inspectAgentActivity(project: ObservableSessionProject, signal: AbortSignal): Promise<AgentEvidence>;
     app: FastifyInstance;
     setupRoutes(): Promise<void>;
     mux: { capturePaneText?: (muxName: string) => string | null };
@@ -290,6 +296,79 @@ describe('WebServer agent activity ownership', () => {
     await server.stop();
   });
 
+  it.each([
+    { name: 'exact agent', agentId: 'agent-a', expectedAgentIds: ['agent-a'] },
+    { name: 'conversation aggregate', agentId: undefined, expectedAgentIds: [] },
+  ])('maps $name process proof only to exact composite watcher keys', async ({ agentId, expectedAgentIds }) => {
+    const matcherRegistry: ProcessProofMatcherRegistry = new Map([
+      [
+        '9.9.9-test',
+        {
+          capability: 'exact_role',
+          match: (_candidate, identity) => ({
+            matched: true,
+            conversationProof: { source: 'argument', field: '--session-id', claudeSessionId: identity.claudeSessionId },
+            ...(agentId && { agentId }),
+          }),
+        },
+      ],
+    ]);
+    const processSource: ProcessInspectionSource = {
+      listPids: async () => [123],
+      readCmdline: async () => 'claude\0',
+      readEnviron: async () => '',
+      statProcessCwd: async () => ({ dev: 1, ino: 1 }),
+      statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
+    };
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+      runtimeVersion: '9.9.9-test',
+      matcherRegistry,
+      source: processSource,
+    });
+    const state = internals(server);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    const session = new Session({
+      id: `process-key-${agentId ?? 'aggregate'}`,
+      workingDir: '/tmp/process-key',
+      mode: 'claude',
+    });
+    await state.createRouteContext().addSession(session);
+    const projectHash = claudeProjectHash(session.workingDir);
+    const info = (id: string): SubagentInfo => ({
+      agentKey: serializeSubagentKey(projectHash, session.claudeSessionId!, id),
+      agentId: id,
+      projectHash,
+      sessionId: session.claudeSessionId!,
+      filePath: `/tmp/${id}.jsonl`,
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    });
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({
+      revision: 1,
+      agents: [info('agent-a'), info('agent-b')],
+    });
+    const adapter = state.activityAdapters.get(session)!;
+    const evidence = await state.inspectAgentActivity(
+      {
+        session: adapter,
+        workingDir: session.workingDir,
+        projectHash,
+        claudeSessionId: session.claudeSessionId!,
+        claudeRuntimeVersion: '9.9.9-test',
+      },
+      new AbortController().signal
+    );
+
+    expect(evidence.exactProcessAgentKeys).toEqual(
+      expectedAgentIds.map((id) => serializeSubagentKey(projectHash, session.claudeSessionId!, id))
+    );
+    await server.stop();
+  });
+
   it('falls back to legacy hook handling without recreating activity state after detach', async () => {
     const server = new WebServer(0, false, true);
     const state = internals(server);
@@ -306,15 +385,20 @@ describe('WebServer agent activity ownership', () => {
     const notifySignal = vi.spyOn(sessionWaits, 'notifySignal');
     state.sse.broadcast = vi.fn();
 
-    const stop = await state.app.inject({
-      method: 'POST',
-      url: '/api/hook-event',
-      payload: { event: 'stop', sessionId: session.id, data: { message: 'late stop' } },
-    });
     const idle = await state.app.inject({
       method: 'POST',
       url: '/api/hook-event',
       payload: { event: 'idle_prompt', sessionId: session.id, data: { message: 'late idle' } },
+    });
+    expect(idle.statusCode).toBe(200);
+    expect(approvalInbox.getForSession(session.id)).toMatchObject({ kind: 'idle', sourceSequence: undefined });
+    expect(state.activityAdapters.has(session)).toBe(false);
+
+    ctx.agentActivity.attachSession(session);
+    const stop = await state.app.inject({
+      method: 'POST',
+      url: '/api/hook-event',
+      payload: { event: 'stop', sessionId: session.id, data: { message: 'late stop' } },
     });
 
     expect([stop.statusCode, idle.statusCode]).toEqual([200, 200]);
@@ -323,7 +407,8 @@ describe('WebServer agent activity ownership', () => {
     expect(state.sse.broadcast.mock.calls.map(([event]) => event)).toEqual(
       expect.arrayContaining([SseEvent.HookStop, SseEvent.HookIdlePrompt])
     );
-    expect(state.activityAdapters.has(session)).toBe(false);
+    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
+    expect(state.activityAdapters.has(session)).toBe(true);
     await server.stop();
   });
 

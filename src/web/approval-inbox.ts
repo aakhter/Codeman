@@ -381,6 +381,13 @@ export class ApprovalInbox {
     this.remove(item, resolution);
   }
 
+  /** Drop an ordering token that belongs to a replaced coordinator generation. */
+  resetSourceSequenceForSession(sessionId: string, kinds: ApprovalKind[]): void {
+    const item = this.items.get(sessionId);
+    if (!item || !kinds.includes(item.kind)) return;
+    delete item.sourceSequence;
+  }
+
   /** Clear all timers (shutdown/tests). Items become inert; no events fire after this. */
   stop(): void {
     this.stopped = true;

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BoundedActivityScheduler,
+  FINAL_AGENT_SETTLE_MS,
   SessionAgentActivityCoordinator,
   projectAgentActivity,
   type CoordinatorSession,
@@ -436,32 +437,97 @@ describe('session agent activity coordinator', () => {
       });
     });
 
-    it('allows fresh exact process proof to revive a quarantined composite key', async () => {
+    it('revives only the quarantined composite key proved by fresh exact process evidence', async () => {
+      vi.useFakeTimers();
+      const agentA = 'project/conversation/agent-a';
+      const agentB = 'project/conversation/agent-b';
       let evidence = {
         observation: 'live' as AgentObservation,
         semanticRevision: 1,
-        exactWatcherCount: 1,
-        exactWatcherAgentKeys: ['project/conversation/agent'],
-        observedWatcherAgentKeys: ['project/conversation/agent'],
+        exactWatcherCount: 2,
+        exactWatcherAgentKeys: [agentA, agentB],
+        observedWatcherAgentKeys: [agentA, agentB],
+        exactProcessAgentKeys: [] as string[],
         currentFrame: frameEvidence('negative'),
         processReason: 'no_matching_process' as const,
       };
       const coordinator = new SessionAgentActivityCoordinator({ inspect: async () => evidence });
       const target = session();
       coordinator.attachSession(target);
-      coordinator.onWatcherSnapshot(target, evidence.exactWatcherAgentKeys, 1);
+      coordinator.onWatcherSnapshot(target, [agentA, agentB], 1);
       const stop = coordinator.allocateEvent(target, 'stop');
       const result = await coordinator.reconcileForEvent(target, stop);
       const reconciliation = coordinator.reconciliationForEvent(target, stop, result);
       coordinator.decisionForEvent(target, stop, { reconciliation });
       expect(coordinator.project(target).activityStatus).toBe('idle');
 
-      evidence = { ...evidence, semanticRevision: 2, processReason: 'matching_process' };
+      evidence = {
+        ...evidence,
+        semanticRevision: 2,
+        exactWatcherCount: 0,
+        exactWatcherAgentKeys: [],
+        exactProcessAgentKeys: [agentA],
+        processReason: 'matching_process',
+      };
       coordinator.commitEvidence(target, evidence);
       expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
-      expect(coordinator.filterWatcherAgentKeys(target, evidence.observedWatcherAgentKeys)).toEqual([
-        'project/conversation/agent',
-      ]);
+      expect(coordinator.filterWatcherAgentKeys(target, [agentA, agentB])).toEqual([agentA]);
+
+      coordinator.commitEvidence(target, {
+        ...evidence,
+        semanticRevision: 3,
+        exactWatcherCount: 0,
+        exactWatcherAgentKeys: [],
+        observedWatcherAgentKeys: [agentB],
+        exactProcessAgentKeys: [],
+        processReason: 'no_registered_role_signature',
+      });
+      await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+    });
+
+    it('keeps quarantined watcher keys fenced after aggregate conversation process proof', async () => {
+      vi.useFakeTimers();
+      const agentA = 'project/conversation/agent-a';
+      const agentB = 'project/conversation/agent-b';
+      let evidence = {
+        observation: 'live' as AgentObservation,
+        semanticRevision: 1,
+        exactWatcherCount: 2,
+        exactWatcherAgentKeys: [agentA, agentB],
+        observedWatcherAgentKeys: [agentA, agentB],
+        exactProcessAgentKeys: [] as string[],
+        currentFrame: frameEvidence('negative'),
+        processReason: 'no_matching_process' as const,
+      };
+      const coordinator = new SessionAgentActivityCoordinator({ inspect: async () => evidence });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.onWatcherSnapshot(target, [agentA, agentB], 1);
+      const stop = coordinator.allocateEvent(target, 'stop');
+      const result = await coordinator.reconcileForEvent(target, stop);
+      const reconciliation = coordinator.reconciliationForEvent(target, stop, result);
+      coordinator.decisionForEvent(target, stop, { reconciliation });
+
+      evidence = {
+        ...evidence,
+        semanticRevision: 2,
+        exactWatcherCount: 0,
+        exactWatcherAgentKeys: [],
+        processReason: 'matching_process',
+      };
+      coordinator.commitEvidence(target, evidence);
+      expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+      expect(coordinator.filterWatcherAgentKeys(target, [agentA, agentB])).toEqual([]);
+
+      coordinator.commitEvidence(target, {
+        ...evidence,
+        semanticRevision: 3,
+        observedWatcherAgentKeys: [agentB],
+        processReason: 'no_registered_role_signature',
+      });
+      await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS);
+      expect(coordinator.project(target).activityStatus).toBe('idle');
     });
 
     it('fails open for a current human prompt but fails safe for autonomy under uncertainty', () => {

@@ -65,6 +65,8 @@ export interface AgentEvidence {
   exactWatcherAgentKeys?: readonly string[];
   /** Raw exact watcher keys before this coordinator's completion quarantine is applied. */
   observedWatcherAgentKeys?: readonly string[];
+  /** Composite watcher keys backed by an exact agentId process proof. */
+  exactProcessAgentKeys?: readonly string[];
   currentFrame?: Readonly<{
     source: 'tmux_visible_frame';
     status: 'positive' | 'negative' | 'unavailable';
@@ -486,7 +488,7 @@ export class SessionAgentActivityCoordinator {
     }
     if (!this.acceptSemanticRevision(record, evidence.semanticRevision)) return;
     if (exactProcessLive) {
-      for (const agentKey of observedWatcherAgentKeys ?? []) record.quarantinedAgentKeys.delete(agentKey);
+      for (const agentKey of evidence.exactProcessAgentKeys ?? []) record.quarantinedAgentKeys.delete(agentKey);
     }
     const effectiveWatcherAgentKeys = observedWatcherAgentKeys
       ? this.filterWatcherAgentKeys(session, observedWatcherAgentKeys)

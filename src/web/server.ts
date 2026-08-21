@@ -132,7 +132,7 @@ import {
   type HookKind,
 } from '../session-agent-activity-coordinator.js';
 import { getClaudeCliVersion } from '../utils/claude-cli-resolver.js';
-import { claudeProjectHash } from '../claude-project-identity.js';
+import { claudeProjectHash, serializeSubagentKey } from '../claude-project-identity.js';
 import {
   inspectSubagentProcesses,
   type ObservableClaudeIdentity,
@@ -810,7 +810,7 @@ export class WebServer extends EventEmitter {
       sessionId: session.id,
       identityGeneration: -1,
       trackingGeneration: -1,
-      sequence: Number.MAX_SAFE_INTEGER,
+      sequence: 0,
       kind,
       externalSourceSequence,
     };
@@ -1039,6 +1039,12 @@ export class WebServer extends EventEmitter {
       exactWatcherCount,
       exactWatcherAgentKeys,
       observedWatcherAgentKeys,
+      exactProcessAgentKeys:
+        process.status === 'positive'
+          ? process.agentIds.map((agentId) =>
+              serializeSubagentKey(project.projectHash, project.claudeSessionId, agentId)
+            )
+          : [],
       processReason:
         process.status === 'positive' ? 'matching_process' : process.status === 'negative' ? process.reason : undefined,
       currentFrame:
