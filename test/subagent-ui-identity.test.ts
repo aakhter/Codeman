@@ -22,6 +22,10 @@ beforeAll(() => {
     read('panels-ui.js') +
     '\n' +
     read('subagent-windows.js') +
+    '\n' +
+    read('entrance-animations.js') +
+    '\n' +
+    read('ultracode-panel.js') +
     '\n;globalThis.__SubagentIdentityApp = CodemanApp;';
   const previousInterval = window.setInterval;
   window.setInterval = (() => 0) as typeof window.setInterval;
@@ -79,6 +83,22 @@ beforeEach(() => {
 });
 
 describe('opaque subagent event identity', () => {
+  it('ignores unkeyed init and reconnect records instead of synthesizing bare-ID identity', () => {
+    const app = makeApp();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    app._replaceSubagentSnapshot([
+      agent('opaque-first'),
+      { agentId: 'legacy-unique', status: 'active' },
+      { agentId: 'collision', status: 'active' },
+      { agentId: 'collision', status: 'idle' },
+    ]);
+    app._replaceSubagentSnapshot([{ agentId: 'legacy-unique', status: 'active' }]);
+
+    expect([...app.subagents.keys()]).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps colliding bare agent IDs independent across maps, updates, completion, and reparenting', async () => {
     const app = makeApp();
     const first = agent('opaque-first', { description: 'First' });
@@ -224,6 +244,21 @@ describe('opaque subagent actions and browser identities', () => {
     expect(app.minimizedSubagents.get('tab-a')).toEqual(new Set(['opaque-first', 'opaque-second']));
   });
 
+  it('uses display metadata or neutral copy for minimized agents without leaking opaque keys', () => {
+    const app = makeApp();
+    app.subagents.set('opaque-first-secret', agent('opaque-first-secret', { description: null }));
+    app.subagents.set('opaque-no-display-secret', { agentKey: 'opaque-no-display-secret', status: 'idle' });
+
+    const html = app.renderSubagentTabBadge('tab-a', new Set(['opaque-first-secret', 'opaque-no-display-secret']));
+    const host = document.createElement('div');
+    host.innerHTML = html;
+
+    expect(host.textContent).toContain('same-id');
+    expect(host.textContent).toContain('Agent');
+    expect(host.textContent).not.toContain('opaque-first-secret');
+    expect(host.textContent).not.toContain('opaque-no-display-secret');
+  });
+
   it('completion cleanup and render timers are isolated by key', async () => {
     vi.useFakeTimers();
     const app = makeApp();
@@ -366,5 +401,83 @@ describe('manual completed-history clear', () => {
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(app.showToast).toHaveBeenCalledWith('No completed subagent history to clear', 'info');
+  });
+
+  it('preserves absent active and idle records while removing absent completed history', () => {
+    const app = makeApp();
+    app.subagents.set('opaque-active', agent('opaque-active', { status: 'active' }));
+    app.subagents.set('opaque-idle', agent('opaque-idle', { status: 'idle' }));
+    app.subagents.set('opaque-done', agent('opaque-done', { status: 'completed' }));
+    for (const key of app.subagents.keys()) {
+      app.subagentActivity.set(key, [{ key }]);
+      app.subagentParentMap.set(key, 'tab-a');
+      app.subagentWindows.set(key, { element: document.createElement('div') });
+    }
+
+    app._reconcileSubagentSnapshot([]);
+
+    expect([...app.subagents.keys()]).toEqual(['opaque-active', 'opaque-idle']);
+    expect([...app.subagentActivity.keys()]).toEqual(['opaque-active', 'opaque-idle']);
+    expect([...app.subagentParentMap.keys()]).toEqual(['opaque-active', 'opaque-idle']);
+    expect([...app.subagentWindows.keys()]).toEqual(['opaque-active', 'opaque-idle']);
+  });
+});
+
+describe('secondary opaque identity consumers', () => {
+  it('attaches line entrance animation to the exact keyed connection path', () => {
+    const app = makeApp();
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const first = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const second = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    first.dataset.agentKey = 'opaque-first';
+    second.dataset.agentKey = 'opaque-second';
+    first.getTotalLength = () => 10;
+    second.getTotalLength = () => 20;
+    svg.append(first, second);
+    app._lineAnimStyle = 'draw';
+    app._lineEnterActive = new Map([['opaque-second', { startTs: performance.now() }]]);
+    app._lineAnimDuration = () => 1000;
+    (globalThis as any).CSS = { escape: (value: string) => value };
+
+    app._applyLineEntrances(svg);
+
+    expect(first.classList.contains('line-enter')).toBe(false);
+    expect(second.classList.contains('line-enter')).toBe(true);
+  });
+
+  it('uses encoded workflow agentKey URLs and keeps colliding display IDs independent', async () => {
+    const app = makeApp();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      json: async () => ({ success: true, data: { formatted: ['ok'], entryCount: 1 } }),
+    } as Response);
+
+    await app._fetchWorkflowAgentTranscript('opaque/key?first');
+    await app._fetchWorkflowAgentTranscript('opaque/key?second');
+    const firstHtml = app._workflowAgentCardHtml(
+      { agentKey: 'opaque/key?first', agentId: 'same-id', label: 'First', state: 'progress' },
+      'run-1'
+    );
+    const secondHtml = app._workflowAgentCardHtml(
+      { agentKey: 'opaque/key?second', agentId: 'same-id', label: 'Second', state: 'progress' },
+      'run-1'
+    );
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(1, '/api/subagents/opaque%2Fkey%3Ffirst/transcript?format=formatted');
+    expect(fetchSpy).toHaveBeenNthCalledWith(2, '/api/subagents/opaque%2Fkey%3Fsecond/transcript?format=formatted');
+    expect(firstHtml).toContain('opaque/key?first');
+    expect(firstHtml).not.toContain('opaque/key?second');
+    expect(secondHtml).toContain('opaque/key?second');
+    expect(secondHtml).not.toContain('opaque/key?first');
+  });
+
+  it('keeps workflow cards without agentKey inert with bounded diagnostics', () => {
+    const app = makeApp();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let html = '';
+    for (let index = 0; index < 20; index += 1) {
+      html = app._workflowAgentCardHtml({ agentId: 'same-id', label: 'Agent', state: 'progress' }, 'run-1');
+    }
+    expect(html).not.toContain('openUltracodeAgentWindow');
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

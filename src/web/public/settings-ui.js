@@ -3273,6 +3273,9 @@ Object.assign(CodemanApp.prototype, {
 
   _reconcileSubagentSnapshot(remaining) {
     const nextSubagents = new Map();
+    for (const [agentKey, record] of this.subagents) {
+      if (record?.status !== 'completed') nextSubagents.set(agentKey, record);
+    }
     for (const record of Array.isArray(remaining) ? remaining : []) {
       if (typeof record?.agentKey !== 'string' || record.agentKey.length === 0) continue;
       const existing = this.subagents.get(record.agentKey);

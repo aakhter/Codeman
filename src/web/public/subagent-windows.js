@@ -29,7 +29,7 @@ Object.assign(CodemanApp.prototype, {
     const agentItems = [];
     for (const agentId of minimizedAgents) {
       const agent = this.subagents.get(agentId);
-      const displayName = agent?.description || agentId.substring(0, 12);
+      const displayName = agent?.description || agent?.name || agent?.agentId || 'Agent';
       const truncatedName = displayName.length > 25 ? displayName.substring(0, 25) + '…' : displayName;
       const statusClass = agent?.status || 'idle';
       agentItems.push(`

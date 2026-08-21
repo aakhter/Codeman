@@ -4818,6 +4818,16 @@ class CodemanApp {
     return visibleText.length >= 3;
   }
 
+  _replaceSubagentSnapshot(records) {
+    const next = new Map();
+    for (const record of Array.isArray(records) ? records : []) {
+      const agentKey = this._requireSubagentEventKey?.(record, 'snapshot');
+      if (!agentKey) continue;
+      next.set(agentKey, record);
+    }
+    this.subagents = next;
+  }
+
   /**
    * Reset all app state maps, timers, and handlers to a clean baseline.
    * Called by handleInit() on SSE reconnect / page reload to prevent
@@ -5083,16 +5093,7 @@ class CodemanApp {
       this.subagentToolResults.clear();
       this.minimizedSubagents.clear();
       this.activeSubagentKey = null;
-      const legacyIdCounts = new Map();
-      data.subagents.forEach(s => {
-        if (!s.agentKey && s.agentId) legacyIdCounts.set(s.agentId, (legacyIdCounts.get(s.agentId) || 0) + 1);
-      });
-      data.subagents.forEach(s => {
-        const agentKey = s.agentKey || (legacyIdCounts.get(s.agentId) === 1 ? s.agentId : null);
-        if (!agentKey) return;
-        if (!s.agentKey) s.agentKey = agentKey;
-        this.subagents.set(agentKey, s);
-      });
+      this._replaceSubagentSnapshot(data.subagents);
       this.renderSubagentPanel();
 
       // Load PERSISTENT parent associations FIRST, before restoring windows
