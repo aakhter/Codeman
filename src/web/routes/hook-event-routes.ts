@@ -16,7 +16,7 @@ import { getDataDir } from '../../config/instance.js';
 import { sessionWaits, hooksAvailableForMode } from '../session-wait-registry.js';
 import { approvalInbox, type ApprovalKind } from '../approval-inbox.js';
 import { buildPaneCapture } from '../pane-capture.js';
-import type { SessionPort, EventPort, RespawnPort, ConfigPort, InfraPort } from '../ports/index.js';
+import type { SessionPort, EventPort, RespawnPort, ConfigPort, InfraPort, AgentActivityPort } from '../ports/index.js';
 
 /** Hook events that open an Approvals Inbox item. */
 const APPROVAL_KIND_BY_EVENT: Record<string, ApprovalKind> = {
@@ -30,7 +30,7 @@ const APPROVAL_RESOLVING_EVENTS = new Set(['stop', 'elicitation_complete', 'elic
 
 export function registerHookEventRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & RespawnPort & ConfigPort & InfraPort
+  ctx: SessionPort & EventPort & RespawnPort & ConfigPort & InfraPort & AgentActivityPort
 ): void {
   app.post('/api/hook-event', async (req) => {
     const { event, sessionId, data } = parseBody(HookEventSchema, req.body);
@@ -50,6 +50,29 @@ export function registerHookEventRoutes(
           })
         : { triggered: false, reason: 'not-enabled' };
       return { success: true, data: { checkpoint: result } };
+    }
+
+    // SessionStart is the authoritative startup/resume/fresh-thread identity
+    // signal. Replace the coordinator generation synchronously before transcript
+    // watching, respawn, approval, or broadcast effects can observe the old one.
+    if (event === 'session_start' && data && typeof data.session_id === 'string' && data.session_id) {
+      const session = ctx.sessions.get(sessionId);
+      const prevClaudeSessionId = session?.claudeSessionId;
+      session?.adoptClaudeSessionStartId(data.session_id);
+      if (session) {
+        if (data.session_id !== prevClaudeSessionId) ctx.agentActivity.identityChanged(session);
+        ctx.persistSessionState(session);
+      }
+      // Docker sessions: keep the case's resume seed following the LIVE
+      // conversation (post-/clear id switches), so a container stop/reboot
+      // relaunch resumes the right transcript.
+      if (session?.docker && session.claudeSessionId && session.claudeSessionId !== prevClaudeSessionId) {
+        void persistDockerCaseClaudeSessionId(
+          getDataDir(),
+          session.docker.containerName,
+          session.claudeSessionId
+        ).catch(() => {});
+      }
     }
 
     // Wake anything blocked on `GET /api/sessions/:id/wait`. Hooks are the only
@@ -93,26 +116,6 @@ export function registerHookEventRoutes(
       const transcriptPath = String(data.transcript_path);
       if (transcriptPath && isValidWorkingDir(transcriptPath)) {
         ctx.startTranscriptWatcher(sessionId, transcriptPath);
-      }
-    }
-
-    // SessionStart is the authoritative startup/resume/fresh-thread identity
-    // signal. Other hooks must not promote a legacy placeholder to an adopted
-    // identity before a genuine SessionStart arrives.
-    if (event === 'session_start' && data && typeof data.session_id === 'string' && data.session_id) {
-      const session = ctx.sessions.get(sessionId);
-      const prevClaudeSessionId = session?.claudeSessionId;
-      session?.adoptClaudeSessionStartId(data.session_id);
-      if (session) ctx.persistSessionState(session);
-      // Docker sessions: keep the case's resume seed following the LIVE
-      // conversation (post-/clear id switches), so a container stop/reboot
-      // relaunch resumes the right transcript.
-      if (session?.docker && session.claudeSessionId && session.claudeSessionId !== prevClaudeSessionId) {
-        void persistDockerCaseClaudeSessionId(
-          getDataDir(),
-          session.docker.containerName,
-          session.claudeSessionId
-        ).catch(() => {});
       }
     }
 

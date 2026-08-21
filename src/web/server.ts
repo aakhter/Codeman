@@ -76,6 +76,7 @@ import {
   type SubagentProgress,
   type SubagentMessage,
   type SubagentToolResult,
+  type SubagentWatcherErrorContext,
 } from '../subagent-watcher.js';
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
@@ -392,6 +393,7 @@ export class WebServer extends EventEmitter {
   private readonly activityAdapters = new Map<Session, CoordinatorSession>();
   private readonly activityIdentityKeys = new Map<Session, string>();
   private readonly watcherRevisionByIdentity = new Map<string, number>();
+  private readonly watcherErrorsHandled = new WeakSet<object>();
   private readonly activityMutationInProgress = new Set<string>();
   private activityTrackingEnabled = true;
   private readonly localClaudeRuntimeVersion = getClaudeCliVersion() ?? undefined;
@@ -438,7 +440,7 @@ export class WebServer extends EventEmitter {
     progress: (data: SubagentProgress) => void;
     message: (data: SubagentMessage) => void;
     completed: (info: SubagentInfo) => void;
-    error: (error: Error, agentId?: string) => void;
+    error: (error: Error, context?: string | SubagentWatcherErrorContext) => void;
     semanticRevision: (data: {
       projectHash: string;
       sessionId: string;
@@ -710,9 +712,10 @@ export class WebServer extends EventEmitter {
     if (!this.activityTrackingEnabled || session.remote || session.docker || !session.claudeSessionId) return;
     const projectHash = claudeProjectHash(session.workingDir);
     const claudeSessionId = session.claudeSessionId;
-    const agents = await subagentWatcher.reconcileConversation(projectHash, claudeSessionId).catch(() => {
-      if (this.agentIdentityKey(session) === this.activityIdentityKeys.get(session)) {
-        this.markWatcherUnknown(projectHash, claudeSessionId);
+    const agents = await subagentWatcher.reconcileConversation(projectHash, claudeSessionId).catch((error: unknown) => {
+      const alreadyHandled = typeof error === 'object' && error !== null && this.watcherErrorsHandled.delete(error);
+      if (!alreadyHandled && this.agentIdentityKey(session) === this.activityIdentityKeys.get(session)) {
+        this.markWatcherReadError(projectHash, claudeSessionId);
       }
       return undefined;
     });
@@ -819,10 +822,35 @@ export class WebServer extends EventEmitter {
     this.cachedLightState = null;
     this.cachedSessionsList = null;
     for (const session of this.sessionsForClaudeIdentity(projectHash, claudeSessionId)) {
+      const before = session.activityProjection;
       this.mutateAgentActivity(session, (adapter) => {
         const snapshot = subagentWatcher.getSemanticSnapshot(projectHash, claudeSessionId);
         this.agentActivityCoordinator.onAgentRevision(adapter, snapshot.revision + 1);
       });
+      const after = session.activityProjection;
+      if (before.activityStatus === after.activityStatus && before.activityStatusSince === after.activityStatusSince) {
+        this.activityProjectionChanged(session.id);
+      }
+    }
+  }
+
+  private markWatcherReadError(projectHash: string, claudeSessionId: string): void {
+    this.cachedLightState = null;
+    this.cachedSessionsList = null;
+    const snapshot = subagentWatcher.getSemanticSnapshot(projectHash, claudeSessionId);
+    const liveCount = snapshot.agents.filter((agent) => agent.status === 'active' || agent.status === 'idle').length;
+    const identityKey = JSON.stringify([projectHash, claudeSessionId]);
+    const unknownRevision = Math.max(snapshot.revision, this.watcherRevisionByIdentity.get(identityKey) ?? 0) + 1;
+    for (const session of this.sessionsForClaudeIdentity(projectHash, claudeSessionId)) {
+      const before = session.activityProjection;
+      this.mutateAgentActivity(session, (adapter) => {
+        if (liveCount > 0) this.agentActivityCoordinator.onWatcherCount(adapter, liveCount, snapshot.revision);
+        else this.agentActivityCoordinator.onAgentRevision(adapter, unknownRevision);
+      });
+      const after = session.activityProjection;
+      if (before.activityStatus === after.activityStatus && before.activityStatusSince === after.activityStatusSince) {
+        this.activityProjectionChanged(session.id);
+      }
     }
   }
 
@@ -940,12 +968,17 @@ export class WebServer extends EventEmitter {
         this.commitWatcherInfo(info);
         this.broadcast(SseEvent.SubagentCompleted, this.routedSubagentPayload(info));
       },
-      error: (error: Error, agentId?: string) => {
-        if (agentId) {
-          const resolved = subagentWatcher.resolveSubagentReference(agentId);
-          if (resolved.status === 'found') this.markWatcherUnknown(resolved.info.projectHash, resolved.info.sessionId);
+      error: (error: Error, context?: string | SubagentWatcherErrorContext) => {
+        this.watcherErrorsHandled.add(error);
+        if (typeof context === 'string') {
+          const resolved = subagentWatcher.resolveSubagentReference(context);
+          if (resolved.status === 'found') {
+            this.markWatcherReadError(resolved.info.projectHash, resolved.info.sessionId);
+          }
+        } else if (context) {
+          this.markWatcherReadError(context.projectHash, context.sessionId);
         }
-        console.error(`[SubagentWatcher] Error${agentId ? ` for ${agentId}` : ''}:`, error.message);
+        console.error(`[SubagentWatcher] Error${context ? ' for tracked identity' : ''}:`, error.message);
       },
       semanticRevision: (data) => this.commitWatcherRevision(data),
       reset: () => this.resetWatcherActivity(),
@@ -3033,6 +3066,10 @@ export class WebServer extends EventEmitter {
     }
 
     await this.setupRoutes();
+    // The persisted gate must be authoritative before restoration attaches any
+    // Session. Disabled tracking therefore exposes restored sessions only with
+    // their legacy/raw projection and performs no exact filesystem scans.
+    const subagentTrackingEnabled = await this.configureAgentTrackingBeforeRestore();
 
     const lifecycleLog = getLifecycleLog();
     lifecycleLog.log({ event: 'server_started', sessionId: '*' });
@@ -3180,12 +3217,10 @@ export class WebServer extends EventEmitter {
     );
 
     // Start subagent watcher for Claude Code background agent visibility (if enabled)
-    if (await this.isSubagentTrackingEnabled()) {
-      this.setAgentTrackingEnabled(true);
+    if (subagentTrackingEnabled) {
       subagentWatcher.start();
       console.log('Subagent watcher started - monitoring ~/.claude/projects for background agent activity');
     } else {
-      this.setAgentTrackingEnabled(false);
       console.log('Subagent watcher disabled by user settings');
     }
 
@@ -3228,6 +3263,12 @@ export class WebServer extends EventEmitter {
   /**
    * Check if subagent tracking is enabled in settings (default: true)
    */
+  private async configureAgentTrackingBeforeRestore(): Promise<boolean> {
+    const enabled = await this.isSubagentTrackingEnabled();
+    this.setAgentTrackingEnabled(enabled);
+    return enabled;
+  }
+
   private async isSubagentTrackingEnabled(): Promise<boolean> {
     const settingsPath = dataPath('settings.json');
     try {

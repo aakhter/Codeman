@@ -13,6 +13,8 @@ import { SseEvent } from '../src/web/sse-events.js';
 
 function internals(server: WebServer) {
   return server as unknown as {
+    configureAgentTrackingBeforeRestore(): Promise<boolean>;
+    isSubagentTrackingEnabled(): Promise<boolean>;
     createRouteContext(): {
       addSession(session: Session): Promise<unknown>;
       getSessionStateWithRespawn(session: Session): Record<string, unknown>;
@@ -130,6 +132,7 @@ describe('WebServer agent activity ownership', () => {
     state.cachedSessionsList = { data: [], timestamp: Date.now() };
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.spyOn(subagentWatcher, 'resolveSubagentReference').mockReturnValue({ status: 'found', info });
+    vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [info] });
     subagentWatcher.emit('subagent:error', new Error('tail failed'), info.agentKey);
     expect(state.cachedLightState).toBeNull();
     expect(state.cachedSessionsList).toBeNull();
@@ -163,6 +166,130 @@ describe('WebServer agent activity ownership', () => {
     const second = new Session({ id: 'activity-toggle-2', workingDir: '/tmp/activity-toggle', mode: 'claude' });
     await ctx.addSession(second);
     expect(second.activityProjection.activityStatus).toBe(second.status);
+    await server.stop();
+  });
+
+  it('applies persisted disabled tracking before restored sessions attach and reconciles all on re-enable', async () => {
+    const server = new WebServer(0, false, true);
+    const state = internals(server);
+    vi.spyOn(state, 'isSubagentTrackingEnabled').mockResolvedValue(false);
+    const reconcile = vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+
+    await state.configureAgentTrackingBeforeRestore();
+    const restored = new Session({ id: 'restored-disabled', workingDir: '/tmp/restored-disabled', mode: 'claude' });
+    const ctx = state.createRouteContext() as ReturnType<typeof state.createRouteContext> & {
+      agentActivity: { setTrackingEnabled(enabled: boolean): void };
+    };
+    await ctx.addSession(restored);
+
+    expect(restored.activityProjection.activityStatus).toBe(restored.status);
+    expect(reconcile).not.toHaveBeenCalled();
+
+    ctx.agentActivity.setTrackingEnabled(true);
+    expect(reconcile).toHaveBeenCalledWith(claudeProjectHash(restored.workingDir), restored.claudeSessionId);
+    await server.stop();
+  });
+
+  it.each(['EACCES', 'EIO'])('keeps %s exact reconciliation unknown rather than committing zero', async (code) => {
+    const server = new WebServer(0, false, true);
+    const state = internals(server);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockRejectedValue(
+      Object.assign(new Error('unreadable identity'), { code })
+    );
+    const session = new Session({ id: 'activity-unreadable', workingDir: '/tmp/unreadable', mode: 'claude' });
+
+    await state.createRouteContext().addSession(session);
+
+    expect(session.activityProjection.activityStatus).toBe('checking_agents');
+    await server.stop();
+  });
+
+  it('routes a zero-agent directory watcher error to only its exact same-directory conversation', async () => {
+    const server = new WebServer(0, false, true);
+    const state = internals(server);
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    const affected = new Session({ id: 'watch-error-a', workingDir: '/tmp/shared-watch', mode: 'claude' });
+    const peer = new Session({ id: 'watch-error-b', workingDir: '/tmp/shared-watch', mode: 'claude' });
+    affected.adoptClaudeSessionId('conversation-a');
+    peer.adoptClaudeSessionId('conversation-b');
+    await state.createRouteContext().addSession(affected);
+    await state.createRouteContext().addSession(peer);
+    const peerInfo: SubagentInfo = {
+      agentKey: serializeSubagentKey(claudeProjectHash(peer.workingDir), peer.claudeSessionId!, 'peer-agent'),
+      agentId: 'peer-agent',
+      projectHash: claudeProjectHash(peer.workingDir),
+      sessionId: peer.claudeSessionId!,
+      filePath: '/tmp/peer-agent.jsonl',
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    };
+    subagentWatcher.emit('subagent:discovered', peerInfo);
+    expect(peer.activityProjection.activityStatus).toBe('waiting_agents');
+    state.sse.broadcast = vi.fn();
+    state.cachedLightState = { data: {}, timestamp: Date.now() };
+    state.cachedSessionsList = { data: [], timestamp: Date.now() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    subagentWatcher.emit('subagent:error', Object.assign(new Error('watch EIO'), { code: 'EIO' }), {
+      projectHash: claudeProjectHash(affected.workingDir),
+      sessionId: affected.claudeSessionId!,
+    });
+
+    expect(affected.activityProjection.activityStatus).toBe('checking_agents');
+    expect(peer.activityProjection.activityStatus).toBe('waiting_agents');
+    expect(state.cachedLightState).toBeNull();
+    expect(state.cachedSessionsList).toBeNull();
+    expect(state.sse.broadcast).toHaveBeenCalledWith(
+      SseEvent.SessionUpdated,
+      expect.objectContaining({ id: affected.id, activityStatus: 'checking_agents' }),
+      undefined
+    );
+    expect(state.sse.broadcast).not.toHaveBeenCalledWith(
+      SseEvent.SessionUpdated,
+      expect.objectContaining({ id: peer.id }),
+      undefined
+    );
+    await server.stop();
+  });
+
+  it('clears the old watcher generation immediately when SessionStart replaces the Claude identity', async () => {
+    const server = new WebServer(0, false, true);
+    const state = internals(server);
+    const ctx = state.createRouteContext() as ReturnType<typeof state.createRouteContext> & {
+      agentActivity: { identityChanged(session: Session): void };
+    };
+    vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+    const session = new Session({ id: 'identity-replaced', workingDir: '/tmp/identity-replaced', mode: 'claude' });
+    session.adoptClaudeSessionId('old-conversation');
+    await ctx.addSession(session);
+    const infoFor = (conversationId: string, agentId: string): SubagentInfo => ({
+      agentKey: serializeSubagentKey(claudeProjectHash(session.workingDir), conversationId, agentId),
+      agentId,
+      projectHash: claudeProjectHash(session.workingDir),
+      sessionId: conversationId,
+      filePath: `/tmp/${agentId}.jsonl`,
+      startedAt: new Date().toISOString(),
+      lastActivityAt: Date.now(),
+      status: 'active',
+      toolCallCount: 0,
+      entryCount: 0,
+      fileSize: 1,
+    });
+    subagentWatcher.emit('subagent:discovered', infoFor('old-conversation', 'old-agent'));
+    expect(session.activityProjection.activityStatus).toBe('waiting_agents');
+
+    session.adoptClaudeSessionStartId('new-conversation');
+    ctx.agentActivity.identityChanged(session);
+    expect(session.activityProjection.activityStatus).toBe('checking_agents');
+
+    subagentWatcher.emit('subagent:discovered', infoFor('old-conversation', 'late-old-agent'));
+    expect(session.activityProjection.activityStatus).toBe('checking_agents');
+    subagentWatcher.emit('subagent:discovered', infoFor('new-conversation', 'new-agent'));
+    expect(session.activityProjection.activityStatus).toBe('waiting_agents');
     await server.stop();
   });
 });

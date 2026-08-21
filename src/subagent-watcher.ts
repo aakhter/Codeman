@@ -144,6 +144,11 @@ export interface SubagentToolResult {
 
 export type SubagentProcessLiveness = 'live' | 'not_live' | 'unknown';
 export type SubagentProcessLivenessProvider = (info: Readonly<SubagentInfo>) => Promise<SubagentProcessLiveness>;
+export interface SubagentWatcherErrorContext {
+  projectHash: string;
+  sessionId: string;
+  directory?: string;
+}
 
 // ========== Constants ==========
 
@@ -176,6 +181,10 @@ const MESSAGE_TEXT_LIMIT = 500; // Max length for message text content
 const COMMAND_DISPLAY_LENGTH = 60; // Max length for command display
 const INPUT_TRUNCATE_LENGTH = 100; // Max length for input value truncation
 const FILE_CONTENT_DEBOUNCE_MS = 100; // Debounce delay for file content updates
+
+function isMissingPathError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
 
 // ========== SubagentWatcher Class ==========
 
@@ -669,11 +678,24 @@ export class SubagentWatcher extends EventEmitter {
   async reconcileConversation(projectHash: string, claudeSessionId: string): Promise<SubagentInfo[]> {
     const generation = this.lifecycleGeneration;
     const subagentDir = join(CLAUDE_PROJECTS_DIR, projectHash, claudeSessionId, 'subagents');
-    await this.reconcileDirectory(subagentDir, projectHash, claudeSessionId, generation);
-    if (!this.isCurrentGeneration(generation)) return [];
-    await this.watchWorkflowDirs(subagentDir, projectHash, claudeSessionId, false, generation);
-    if (!this.isCurrentGeneration(generation)) return [];
-    return this.getSubagentsForIdentity(projectHash, claudeSessionId);
+    try {
+      const exists = await this.reconcileDirectory(subagentDir, projectHash, claudeSessionId, generation);
+      if (!exists || !this.isCurrentGeneration(generation)) return [];
+      await this.watchSubagentDir(subagentDir, projectHash, claudeSessionId, generation, false);
+      if (!this.isCurrentGeneration(generation)) return [];
+      await this.watchWorkflowDirs(subagentDir, projectHash, claudeSessionId, false, generation);
+      if (!this.isCurrentGeneration(generation)) return [];
+      return this.getSubagentsForIdentity(projectHash, claudeSessionId);
+    } catch (error) {
+      if (this.isCurrentGeneration(generation)) {
+        this.emit('subagent:error', error as Error, {
+          projectHash,
+          sessionId: claudeSessionId,
+          directory: subagentDir,
+        });
+      }
+      throw error;
+    }
   }
 
   private async reconcileDirectory(
@@ -681,22 +703,24 @@ export class SubagentWatcher extends EventEmitter {
     projectHash: string,
     sessionId: string,
     generation = this.lifecycleGeneration
-  ): Promise<void> {
+  ): Promise<boolean> {
     let files: string[];
     try {
       files = await readdir(dir);
-    } catch {
-      return;
+    } catch (error) {
+      if (isMissingPathError(error)) return false;
+      throw error;
     }
-    if (!this.isCurrentGeneration(generation)) return;
+    if (!this.isCurrentGeneration(generation)) return false;
     for (const file of files) {
-      if (!this.isCurrentGeneration(generation)) return;
+      if (!this.isCurrentGeneration(generation)) return false;
       if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
         await this.registerAgentFile(join(dir, file), projectHash, sessionId, false, generation);
       } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
         await this.registerAgentMeta(join(dir, file), projectHash, sessionId, false, generation);
       }
     }
+    return true;
   }
 
   /**
@@ -1258,7 +1282,8 @@ export class SubagentWatcher extends EventEmitter {
     dir: string,
     projectHash: string,
     sessionId: string,
-    generation = this.lifecycleGeneration
+    generation = this.lifecycleGeneration,
+    scanExisting = true
   ): Promise<void> {
     if (!this.isCurrentGeneration(generation)) return;
     if (this.knownSubagentDirs.has(dir)) return;
@@ -1266,20 +1291,26 @@ export class SubagentWatcher extends EventEmitter {
 
     // Register existing files (initial scan - skip old files)
     try {
-      const files = await readdir(dir);
-      if (!this.isCurrentGeneration(generation)) return;
-      for (const file of files) {
+      // Targeted reconciliation has already consumed every existing file
+      // without the startup age cutoff; it only installs the live watcher here.
+      if (scanExisting) {
+        const files = await readdir(dir);
         if (!this.isCurrentGeneration(generation)) return;
-        if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
-          await this.registerAgentFile(join(dir, file), projectHash, sessionId, true, generation);
-        } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
-          // Claude Code (2026-06) writes a `agent-{id}.meta.json` sidecar for TUI
-          // Task subagents and no longer always writes a per-agent `.jsonl` here.
-          await this.registerAgentMeta(join(dir, file), projectHash, sessionId, true, generation);
+        for (const file of files) {
+          if (!this.isCurrentGeneration(generation)) return;
+          if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
+            await this.registerAgentFile(join(dir, file), projectHash, sessionId, true, generation);
+          } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
+            // Claude Code (2026-06) writes a `agent-{id}.meta.json` sidecar for TUI
+            // Task subagents and no longer always writes a per-agent `.jsonl` here.
+            await this.registerAgentMeta(join(dir, file), projectHash, sessionId, true, generation);
+          }
         }
       }
-    } catch {
-      return;
+    } catch (error) {
+      this.knownSubagentDirs.delete(dir);
+      if (isMissingPathError(error)) return;
+      throw error;
     }
 
     // Single directory watcher handles both new files and file content changes
@@ -1322,7 +1353,11 @@ export class SubagentWatcher extends EventEmitter {
       // Store handler reference for proper cleanup
       const errorHandler = (error: Error) => {
         if (this.isCurrentGeneration(generation)) {
-          this.emit('subagent:error', error instanceof Error ? error : new Error(String(error)));
+          this.emit('subagent:error', error instanceof Error ? error : new Error(String(error)), {
+            projectHash,
+            sessionId,
+            directory: dir,
+          } satisfies SubagentWatcherErrorContext);
         }
         watcher.close();
         this.dirWatcherErrorHandlers.delete(dir);
@@ -1333,8 +1368,9 @@ export class SubagentWatcher extends EventEmitter {
       this.dirWatcherErrorHandlers.set(dir, errorHandler);
 
       this.dirWatchers.set(dir, watcher);
-    } catch {
-      // Watch failed
+    } catch (error) {
+      this.knownSubagentDirs.delete(dir);
+      if (!isMissingPathError(error)) throw error;
     }
   }
 
@@ -1360,8 +1396,9 @@ export class SubagentWatcher extends EventEmitter {
     let names: string[];
     try {
       names = await readdir(workflowsRoot);
-    } catch {
-      return; // no workflows for this session
+    } catch (error) {
+      if (isMissingPathError(error)) return; // no workflows for this session
+      throw error;
     }
     if (!this.isCurrentGeneration(generation)) return;
     for (const name of names) {
@@ -1379,7 +1416,8 @@ export class SubagentWatcher extends EventEmitter {
         } else {
           await this.reconcileDirectory(wfDir, projectHash, sessionId, generation);
         }
-      } catch {
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
         // workflow dir vanished mid-scan — skip
       }
     }

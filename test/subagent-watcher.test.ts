@@ -520,6 +520,66 @@ describe('SubagentWatcher', () => {
       expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toHaveLength(1);
     });
 
+    it('treats a missing exact directory as zero but propagates unreadable reconciliation', async () => {
+      const errors = vi.fn();
+      watcher.on('subagent:error', errors);
+      mockReaddir.mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+
+      await expect(watcher.reconcileConversation('-work-shared', 'missing-conversation')).resolves.toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+
+      mockReaddir.mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'EACCES' }));
+      await expect(watcher.reconcileConversation('-work-shared', 'denied-conversation')).rejects.toMatchObject({
+        code: 'EACCES',
+      });
+      expect(errors).toHaveBeenLastCalledWith(
+        expect.objectContaining({ code: 'EACCES' }),
+        expect.objectContaining({ projectHash: '-work-shared', sessionId: 'denied-conversation' })
+      );
+    });
+
+    it('propagates unreadable workflow reconciliation instead of reporting exact zero', async () => {
+      mockReaddir.mockImplementation(async (path: string) => {
+        if (path.endsWith('/subagents')) return [];
+        throw Object.assign(new Error('workflow I/O failure'), { code: 'EIO' });
+      });
+      const errors = vi.fn();
+      watcher.on('subagent:error', errors);
+
+      await expect(watcher.reconcileConversation('-work-shared', 'conversation-eio')).rejects.toMatchObject({
+        code: 'EIO',
+      });
+      expect(errors).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EIO' }),
+        expect.objectContaining({ projectHash: '-work-shared', sessionId: 'conversation-eio' })
+      );
+    });
+
+    it('includes the watched Claude identity when a zero-agent directory watcher errors', async () => {
+      let watchedError: ((error: Error) => void) | undefined;
+      mockWatch.mockReturnValue({
+        close: vi.fn(),
+        off: vi.fn(),
+        on: vi.fn((event: string, handler: (error: Error) => void) => {
+          if (event === 'error') watchedError = handler;
+        }),
+      });
+      mockReaddir.mockImplementation(async (path: string) => {
+        if (path.endsWith('/workflows')) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        return [];
+      });
+      const errors = vi.fn();
+      watcher.on('subagent:error', errors);
+      await watcher.reconcileConversation('-work-shared', 'conversation-watched');
+
+      watchedError?.(Object.assign(new Error('watch failed'), { code: 'EIO' }));
+
+      expect(errors).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EIO' }),
+        expect.objectContaining({ projectHash: '-work-shared', sessionId: 'conversation-watched' })
+      );
+    });
+
     it('history cleanup and manual clear retain positively live records', async () => {
       const revisions = vi.fn();
       const resets = vi.fn();

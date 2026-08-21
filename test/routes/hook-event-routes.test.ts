@@ -81,9 +81,22 @@ describe('hook-event-routes', () => {
   describe('POST /api/hook-event', () => {
     it('adopts authoritative Claude identity from managed SessionStart without restricting source', async () => {
       const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+        claudeSessionId: string;
+        activityProjection?: { activityStatus: string; activityStatusSince: number | null };
         adoptClaudeSessionStartId: ReturnType<typeof vi.fn>;
       };
-      session.adoptClaudeSessionStartId = vi.fn();
+      session.claudeSessionId = 'claude-old-262';
+      const order: string[] = [];
+      session.adoptClaudeSessionStartId = vi.fn((id: string) => {
+        session.claudeSessionId = id;
+        order.push('adopt');
+      });
+      harness.ctx.agentActivity.identityChanged.mockImplementation(() => {
+        session.activityProjection = { activityStatus: 'checking_agents', activityStatusSince: 262 };
+        order.push('identity');
+      });
+      harness.ctx.persistSessionState.mockImplementation(() => order.push('persist'));
+      harness.ctx.startTranscriptWatcher.mockImplementation(() => order.push('transcript'));
       const res = await harness.app.inject({
         method: 'POST',
         url: '/api/hook-event',
@@ -100,7 +113,10 @@ describe('hook-event-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       expect(session.adoptClaudeSessionStartId).toHaveBeenCalledWith('claude-new-262');
+      expect(harness.ctx.agentActivity.identityChanged).toHaveBeenCalledWith(session);
       expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(session);
+      expect(order.slice(0, 4)).toEqual(['adopt', 'identity', 'persist', 'transcript']);
+      expect(session.activityProjection?.activityStatus).toBe('checking_agents');
     });
 
     it('returns the checkpoint run id for a new-mode request', async () => {
