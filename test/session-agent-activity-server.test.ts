@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { FastifyReply } from 'fastify';
 
 vi.mock('../src/mux-factory.js', () => ({
   createMultiplexer: () => Object.assign(new EventEmitter(), { backend: 'tmux', destroy: vi.fn() }),
@@ -23,7 +24,25 @@ function internals(server: WebServer) {
     cachedLightState: unknown;
     cachedSessionsList: unknown;
     sessions: Map<string, Session>;
-    sse: { cleanupSessionBatches(sessionId: string): void; broadcast: ReturnType<typeof vi.fn> };
+    sse: {
+      addClient(
+        reply: FastifyReply,
+        sessionFilter: Set<string> | null,
+        isRemote: boolean,
+        clientId?: string,
+        identity?: { username: string; role: 'user' | 'admin' }
+      ): void;
+      cleanupSessionBatches(sessionId: string): void;
+      broadcast: ReturnType<typeof vi.fn>;
+    };
+  };
+}
+
+function sseClient() {
+  const writes: string[] = [];
+  return {
+    writes,
+    reply: { raw: { write: (chunk: string) => (writes.push(chunk), true) } } as unknown as FastifyReply,
   };
 }
 
@@ -138,6 +157,78 @@ describe('WebServer agent activity ownership', () => {
     expect(state.cachedSessionsList).toBeNull();
     expect(session.activityProjection.activityStatus).toBe('waiting_agents');
     await server.stop();
+  });
+
+  it('delivers coordinator-mapped subagent SSE only to its trusted owner and admins', async () => {
+    const previousMultiuser = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    const server = new WebServer(0, false, true);
+    try {
+      const state = internals(server);
+      vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
+      const aliceSession = new Session({
+        id: 'codeman-alice',
+        workingDir: '/tmp/shared-owner-routing',
+        mode: 'claude',
+      });
+      aliceSession.owner = 'alice';
+      // Deliberately collide Alice's Claude conversation ID with Bob's trusted
+      // Codeman session ID. Routing by the visualization `sessionId` would leak.
+      aliceSession.adoptClaudeSessionId('codeman-bob');
+      const bobSession = new Session({
+        id: 'codeman-bob',
+        workingDir: '/tmp/shared-owner-routing',
+        mode: 'claude',
+      });
+      bobSession.owner = 'bob';
+      bobSession.adoptClaudeSessionId('bob-conversation');
+      await state.createRouteContext().addSession(aliceSession);
+      await state.createRouteContext().addSession(bobSession);
+      const alice = sseClient();
+      const bob = sseClient();
+      const admin = sseClient();
+      state.sse.addClient(alice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+      state.sse.addClient(bob.reply, null, false, undefined, { username: 'bob', role: 'user' });
+      state.sse.addClient(admin.reply, null, false, undefined, { username: 'root', role: 'admin' });
+      const info: SubagentInfo = {
+        agentKey: serializeSubagentKey(
+          claudeProjectHash(aliceSession.workingDir),
+          aliceSession.claudeSessionId!,
+          'alice-agent'
+        ),
+        agentId: 'alice-agent',
+        projectHash: claudeProjectHash(aliceSession.workingDir),
+        sessionId: aliceSession.claudeSessionId!,
+        filePath: '/tmp/alice-agent.jsonl',
+        startedAt: new Date().toISOString(),
+        lastActivityAt: Date.now(),
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 1,
+      };
+
+      subagentWatcher.emit('subagent:discovered', info);
+
+      const subagentEvents = (writes: string[]) =>
+        writes.filter((write) => write.startsWith('event: subagent:discovered'));
+      expect(subagentEvents(alice.writes)).toHaveLength(1);
+      expect(subagentEvents(bob.writes)).toEqual([]);
+      expect(subagentEvents(admin.writes)).toEqual(subagentEvents(alice.writes));
+      const delivered = JSON.parse(subagentEvents(alice.writes)[0].split('\ndata: ')[1]) as Record<string, unknown>;
+      expect(delivered).toMatchObject({
+        sessionId: 'codeman-bob',
+        codemanSessionId: 'codeman-alice',
+        codemanOwner: 'alice',
+      });
+    } finally {
+      try {
+        await server.stop();
+      } finally {
+        if (previousMultiuser === undefined) delete process.env.CODEMAN_MULTIUSER;
+        else process.env.CODEMAN_MULTIUSER = previousMultiuser;
+      }
+    }
   });
 
   it('publishes one derived idle edge when tracking is disabled and gates sessions created while disabled', async () => {
