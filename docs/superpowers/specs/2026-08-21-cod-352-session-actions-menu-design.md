@@ -30,8 +30,11 @@ Update only the CSS visibility selectors for `.tab-more` so they recognize both 
 1. Direct-child `.session-tab > .tab-actions`, used by the horizontal header and compact vertical rail.
 2. Nested `.session-tab .tab-name-row > .tab-actions`, used by expanded vertical layouts.
 
-Keep the selectors anchored to the action cluster and trigger. Do not broadly reveal all row controls, change action markup,
-alter group-header menus, modify Focus shortcuts, or replace the existing right-click inline-rename behavior.
+Preserve the existing direct-child rules. Scope the new nested rules specifically to the expanded grouped rail and expanded
+sidebar through their existing root/layout attributes; do not create a generic descendant rule that could change a future
+horizontal layout. Keep every selector anchored to the action cluster and trigger. Do not broadly reveal all row controls,
+change action markup, alter group-header menus, modify Focus shortcuts, or replace the existing right-click inline-rename
+behavior.
 
 No new error path is required because this is a presentation-state correction. Menu actions retain their existing persistence
 and error handling.
@@ -39,12 +42,13 @@ and error handling.
 ## Testing
 
 Extend `test/session-sidebar-ux.browser.test.ts` with real Chromium assertions against the shipping HTML, JavaScript, and CSS.
-The regression test must inspect computed `visibility` and pointer reachability rather than merely asserting that `.tab-more`
-exists.
+The regression test must inspect computed `visibility` and `pointer-events`, then click the revealed trigger and assert that the
+existing action menu opens. Merely asserting that `.tab-more` exists is insufficient.
 
 Cover both expanded vertical layouts and verify the relevant states: inactive at rest, hovered, keyboard-focused, and active.
-Also verify the coarse-pointer rule matches the nested action-cluster shape. Existing tab-layout action tests remain the source
-of truth for menu contents and the Focus and Move to Group operations.
+Use a touch-enabled Playwright context to verify the coarse-pointer rule against the nested action-cluster shape without
+simulating hover. Existing tab-layout action tests remain the source of truth for menu contents and the Focus and Move to Group
+operations.
 
 Run the dedicated browser test with the browser-suite configuration, then run the focused structural tests and repository
 quality gates. Do not run the bare full test suite from the Codeman-managed session.
