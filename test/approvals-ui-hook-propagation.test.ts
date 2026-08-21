@@ -20,6 +20,7 @@ type ApprovalItem = {
   kind: 'idle' | 'permission' | 'question';
   mode?: 'codex';
   acknowledgedAt?: number;
+  sourceSequence?: number;
 };
 
 type ApprovalsApp = {
@@ -53,6 +54,10 @@ function makeApp(): ApprovalsApp {
   app.setPendingHook = vi.fn();
   app.renderApprovals = vi.fn();
   return app;
+}
+
+function approvalHook(kind: ApprovalItem['kind']) {
+  return kind === 'permission' ? 'permission_prompt' : kind === 'question' ? 'elicitation_dialog' : 'idle_prompt';
 }
 
 describe('_onApprovalPending hook propagation', () => {
@@ -111,39 +116,107 @@ describe('sequence-safe hook and approval resolution', () => {
     expect(app.clearPendingHooks).not.toHaveBeenCalledWith('session-1', 'elicitation_dialog');
   });
 
-  it('does not let a stale resolution clear a newer approval of the same kind', () => {
+  it.each(['idle', 'permission', 'question'] as const)(
+    'does not let an older %s resolution clear a newer same-kind approval',
+    (kind) => {
+      const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
+      app.clearPendingHooks = vi.fn();
+      app.approvals.set('current', {
+        id: 'current',
+        sessionId: 'session-1',
+        kind,
+        sourceSequence: 20,
+      });
+
+      app._onApprovalResolved({ id: 'different-id', sessionId: 'session-1', kind, sourceSequence: 10 });
+
+      expect(app.clearPendingHooks).not.toHaveBeenCalled();
+      expect(app.approvals.has('current')).toBe(true);
+    }
+  );
+
+  it.each(['idle', 'permission', 'question'] as const)(
+    'lets a newer %s resolution clear an older same-kind local approval',
+    (kind) => {
+      const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
+      app.clearPendingHooks = vi.fn();
+      app.approvals.set('current', {
+        id: 'current',
+        sessionId: 'session-1',
+        kind,
+        sourceSequence: 10,
+      });
+
+      app._onApprovalResolved({ id: 'different-id', sessionId: 'session-1', kind, sourceSequence: 20 });
+
+      expect(app.clearPendingHooks).toHaveBeenCalledWith('session-1', approvalHook(kind));
+      expect(app.approvals.has('current')).toBe(false);
+    }
+  );
+
+  it.each(['idle', 'permission', 'question'] as const)(
+    'does not let an older %s acknowledgement clear a newer same-kind approval',
+    (kind) => {
+      const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
+      app.clearPendingHooks = vi.fn();
+      app.approvals.set('current', {
+        id: 'current',
+        sessionId: 'session-1',
+        kind,
+        sourceSequence: 20,
+      });
+
+      app._onApprovalUpdated({
+        id: 'different-id',
+        sessionId: 'session-1',
+        kind,
+        sourceSequence: 10,
+        acknowledgedAt: 30,
+      });
+
+      expect(app.clearPendingHooks).not.toHaveBeenCalled();
+      expect(app.approvals.has('current')).toBe(true);
+    }
+  );
+
+  it.each(['idle', 'permission', 'question'] as const)(
+    'lets a newer %s acknowledgement clear and replace an older same-kind local approval',
+    (kind) => {
+      const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
+      app.clearPendingHooks = vi.fn();
+      app.approvals.set('current', {
+        id: 'current',
+        sessionId: 'session-1',
+        kind,
+        sourceSequence: 10,
+      });
+
+      app._onApprovalUpdated({
+        id: 'different-id',
+        sessionId: 'session-1',
+        kind,
+        sourceSequence: 20,
+        acknowledgedAt: 30,
+      });
+
+      expect(app.clearPendingHooks).toHaveBeenCalledWith('session-1', approvalHook(kind));
+      expect(app.approvals.has('current')).toBe(false);
+      expect(app.approvals.get('different-id')).toMatchObject({ sourceSequence: 20, acknowledgedAt: 30 });
+    }
+  );
+
+  it('uses exact item identity as the safe fallback when legacy events have no source sequence', () => {
     const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
     app.clearPendingHooks = vi.fn();
-    app.approvals.set('idle-new', {
-      id: 'idle-new',
-      sessionId: 'session-1',
-      kind: 'idle',
-    });
+    app.approvals.set('current', { id: 'current', sessionId: 'session-1', kind: 'idle' });
 
-    app._onApprovalResolved({ id: 'idle-old', sessionId: 'session-1', kind: 'idle', sourceSequence: 10 });
-
+    app._onApprovalResolved({ id: 'different-id', sessionId: 'session-1', kind: 'idle' });
     expect(app.clearPendingHooks).not.toHaveBeenCalled();
-    expect(app.approvals.has('idle-new')).toBe(true);
-  });
+    expect(app.approvals.has('current')).toBe(true);
 
-  it('does not let a stale acknowledgement clear a newer approval of the same kind', () => {
-    const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
-    app.clearPendingHooks = vi.fn();
-    app.approvals.set('idle-new', {
-      id: 'idle-new',
-      sessionId: 'session-1',
-      kind: 'idle',
-    });
-
-    app._onApprovalUpdated({
-      id: 'idle-old',
-      sessionId: 'session-1',
-      kind: 'idle',
-      acknowledgedAt: 20,
-    });
-
-    expect(app.clearPendingHooks).not.toHaveBeenCalled();
-    expect(app.approvals.has('idle-new')).toBe(true);
+    app._onApprovalResolved({ id: 'current', sessionId: 'session-1', kind: 'idle' });
+    expect(app.clearPendingHooks).toHaveBeenCalledWith('session-1', 'idle_prompt');
+    expect(app.approvals.has('current')).toBe(false);
   });
 
   it('has no legacy handler for hook:suppressed diagnostics', () => {

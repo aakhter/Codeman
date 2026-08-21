@@ -23,10 +23,21 @@ function approvalKindToHook(kind) {
   return kind === 'permission' ? 'permission_prompt' : kind === 'question' ? 'elicitation_dialog' : 'idle_prompt';
 }
 
-function hasSameKindReplacement(approvals, item) {
-  return [...(approvals?.values() || [])].some(
-    (candidate) => candidate.id !== item.id && candidate.sessionId === item.sessionId && candidate.kind === item.kind
+/** Resolve out-of-order events by their server sequence, never by ID or wall-clock time. */
+function approvalEventDisposition(approvals, item) {
+  const current = [...(approvals?.values() || [])].find(
+    (candidate) => candidate.sessionId === item.sessionId && candidate.kind === item.kind
   );
+  if (!current || current.id === item.id) return { applies: true, current };
+
+  const eventSequence =
+    typeof item.sourceSequence === 'number' && Number.isFinite(item.sourceSequence) ? item.sourceSequence : null;
+  const currentSequence =
+    typeof current.sourceSequence === 'number' && Number.isFinite(current.sourceSequence)
+      ? current.sourceSequence
+      : null;
+  const comparable = eventSequence !== null && currentSequence !== null;
+  return { applies: comparable && eventSequence >= currentSequence, current };
 }
 
 Object.assign(CodemanApp.prototype, {
@@ -87,13 +98,20 @@ Object.assign(CodemanApp.prototype, {
 
   _onApprovalUpdated(item) {
     if (!item || !item.id) return;
+    const disposition = approvalEventDisposition(this.approvals, item);
     // Acknowledged elsewhere (this user opened the session on another device):
     // spend the matching tab alert even when the inbox is disabled, for the same reason
     // _onApprovalResolved does: with the inbox setting OFF the item was never
     // stored in `this.approvals`, yet seedApprovals armed its alert, so gating
     // this on a map hit would strand a yellow tab on every other device.
-    if (item.acknowledgedAt && !hasSameKindReplacement(this.approvals, item)) {
+    if (item.acknowledgedAt && disposition.applies) {
       this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+    }
+    if (disposition.applies && disposition.current && disposition.current.id !== item.id) {
+      this.approvals.delete(disposition.current.id);
+      this.approvals.set(item.id, item);
+      this.renderApprovals();
+      return;
     }
     if (!this.approvals?.has(item.id)) return;
     this.approvals.set(item.id, item);
@@ -102,17 +120,22 @@ Object.assign(CodemanApp.prototype, {
 
   _onApprovalResolved(info) {
     if (!info || !info.id) return;
+    const disposition = approvalEventDisposition(this.approvals, info);
     // Clear the matching tab alert even when the inbox is disabled: the inbox resolves on more
     // signals than the hook handlers do (superseded, expired, answered from
     // another device), clearPendingHooks is a no-op when nothing is set, and
     // with the inbox setting OFF the item was never stored in `this.approvals`
     // even though seedApprovals armed the alert — gating the clear on a map hit
-    // would strand that alert forever. A newer same-kind item wins a stale
-    // acknowledgement/resolution race and keeps its alert armed.
-    if (!hasSameKindReplacement(this.approvals, info)) {
+    // would strand that alert forever. For different same-kind item IDs, the
+    // authoritative source sequence decides which side of the race wins.
+    if (disposition.applies) {
       this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
     }
-    if (this.approvals?.delete(info.id)) this.renderApprovals();
+    let changed = this.approvals?.delete(info.id) || false;
+    if (disposition.applies && disposition.current && disposition.current.id !== info.id) {
+      changed = this.approvals.delete(disposition.current.id) || changed;
+    }
+    if (changed) this.renderApprovals();
   },
 
   // ─── Actions ─────────────────────────────────────────────────

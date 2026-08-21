@@ -206,6 +206,9 @@ function makeActivityEventApp() {
   app.notificationManager = { preferences: { stuckThresholdMs: 60_000 } };
   app._wsSessionId = null;
   app._wsReady = false;
+  app.sessionOrder = ['s1', 's2', 's3'];
+  app.saveSessionOrder = vi.fn();
+  app.startSystemStatsPolling = vi.fn();
   return app;
 }
 
@@ -307,6 +310,20 @@ describe('session activity event reconciliation', () => {
     expect(app.sessions.has('missing')).toBe(false);
     expect(app.renderSessionTabs).not.toHaveBeenCalled();
     expect(app.renderMuxSessions).not.toHaveBeenCalled();
+  });
+
+  it('ignores an unknown activity-only update until a full create snapshot arrives', () => {
+    const app = makeActivityEventApp();
+
+    app._onSessionUpdated({ id: 'late', activityStatus: 'waiting_agents', activityStatusSince: 1234 });
+
+    expect(app.sessions.has('late')).toBe(false);
+    expect(app.renderSessionTabs).not.toHaveBeenCalled();
+    expect(app.renderMuxSessions).not.toHaveBeenCalled();
+
+    app._onSessionCreated({ id: 'late', name: 'Late arrival', status: 'idle' });
+
+    expect(app.sessions.get('late')).toMatchObject({ id: 'late', name: 'Late arrival', status: 'idle' });
   });
 
   it('reconnect hydration replaces stale activity and clears fields omitted by a legacy snapshot', () => {

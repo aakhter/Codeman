@@ -2062,7 +2062,7 @@ class CodemanApp {
 
     let session = this.sessions.get(incoming.id);
     const existed = !!session;
-    if (!session && transition !== 'created' && transition !== 'hydrate' && transition !== 'updated') return null;
+    if (!session && transition !== 'created' && transition !== 'hydrate') return null;
     if (!session) session = { id: incoming.id };
     const previousStatus = session.status;
     const previousActivityStatus = session.activityStatus;
