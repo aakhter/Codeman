@@ -753,13 +753,6 @@
                 <span>1M Opus Context</span>
               </label>
               <span class="form-hint">Use 1M token context window for new sessions</span>
-              <label class="case-setting-field" for="caseDefaultGroup">
-                <span>Default session group</span>
-                <select id="caseDefaultGroup" onchange="app.onCaseDefaultGroupChanged(false)" disabled>
-                  <option value="">Ungrouped</option>
-                </select>
-              </label>
-              <span class="form-hint">Place future sessions for this case in this group</span>
             </div>
           </div>
           <!-- Mobile-only case button + gear -->
@@ -797,13 +790,6 @@
               <span>1M Opus Context</span>
             </label>
             <span class="form-hint">Use 1M token context window</span>
-            <label class="case-setting-field" for="caseDefaultGroupMobile">
-              <span>Default session group</span>
-              <select id="caseDefaultGroupMobile" onchange="app.onCaseDefaultGroupChanged(true)" disabled>
-                <option value="">Ungrouped</option>
-              </select>
-            </label>
-            <span class="form-hint">Place future sessions for this case in this group</span>
           </div>
         </div>
 
@@ -3114,6 +3100,15 @@
               <div class="case-manage-list" id="dockerExportsList"><span class="form-hint">No exports yet. Export a docker case from its tab.</span></div>
             </div>
           </div>
+          <div class="form-row hidden" id="caseEditDefaultGroupRow">
+            <label class="case-setting-field" for="caseEditDefaultGroup">
+              <span>Default session group</span>
+              <select id="caseEditDefaultGroup" disabled>
+                <option value="">Ungrouped</option>
+              </select>
+            </label>
+            <span class="form-hint">Place future sessions for this case in this group.</span>
+          </div>
           </div>
         </div>
         <div class="form-actions set-foot">
@@ -3448,9 +3443,6 @@
             <div id="sourcesUrlRow" class="sources-field-row">
               <input type="url" id="sourcesUrl" class="sources-url-input" placeholder="https://..." maxlength="2000" autocomplete="off">
             </div>
-            <div id="sourcesPathRow" class="sources-field-row sources-field-row--hidden">
-              <input type="text" id="sourcesPath" class="sources-path-input" placeholder="relative/path/to/file.md" maxlength="1000" autocomplete="off">
-            </div>
             <div id="sourcesUploadRow" class="sources-field-row sources-field-row--hidden">
               <input type="file" id="sourcesFilePicker" class="sources-file-picker" accept=".pdf,.docx,.pptx,.xlsx,.md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.sh,.bash,.zsh,.go,.rs,.java,.c,.cpp,.h,.hpp,.cs,.rb,.php,.swift,.kt,.scala,.sql,.html,.css,.csv,.png,.jpg,.jpeg,.gif,.webp,.bmp">
               <button type="button" class="btn-toolbar btn-sm sources-upload-btn" id="sourcesUploadBtn" onclick="app.handleSourceUpload()">Upload</button>
@@ -3461,7 +3453,7 @@
             <button type="submit" class="btn-toolbar btn-sm sources-add-btn">Add</button>
           </form>
           <div class="sources-list" id="sourcesList">
-            <p class="empty-message sources-empty">No sources yet. Add a URL, file path, or highlight above.</p>
+            <p class="empty-message sources-empty">No sources yet. Add a URL, upload a file, or add a highlight above.</p>
           </div>
         </div>
       </div>

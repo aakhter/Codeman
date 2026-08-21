@@ -2440,7 +2440,6 @@ Object.assign(CodemanApp.prototype, {
       document.getElementById('caseAgentTeams').checked = settings.agentTeams;
       document.getElementById('caseOpusContext1m').checked = settings.opusContext1m;
       popover.classList.remove('hidden');
-      this.loadCaseDefaultGroup(caseName);
 
       // Close on outside click (one-shot listener)
       const closeHandler = (e) => {
@@ -2468,139 +2467,6 @@ Object.assign(CodemanApp.prototype, {
     localStorage.setItem('caseSettings_' + caseName, JSON.stringify(settings));
   },
 
-  _caseDefaultGroupControls() {
-    return [document.getElementById('caseDefaultGroup'), document.getElementById('caseDefaultGroupMobile')].filter(
-      Boolean,
-    );
-  },
-
-  _resetCaseDefaultGroupControls() {
-    for (const control of this._caseDefaultGroupControls()) {
-      const ungrouped = document.createElement('option');
-      ungrouped.value = '';
-      ungrouped.textContent = 'Ungrouped';
-      control.replaceChildren(ungrouped);
-      control.value = '';
-      delete control.dataset.confirmedValue;
-      control.disabled = true;
-    }
-  },
-
-  _renderCaseDefaultGroup(data) {
-    const groups = Array.isArray(data?.groups) ? data.groups : [];
-    const selected = typeof data?.groupId === 'string' && groups.some((group) => group.id === data.groupId)
-      ? data.groupId
-      : '';
-    for (const control of this._caseDefaultGroupControls()) {
-      const ungrouped = document.createElement('option');
-      ungrouped.value = '';
-      ungrouped.textContent = 'Ungrouped';
-      const options = groups.map((group) => {
-        const option = document.createElement('option');
-        option.value = group.id;
-        option.textContent = group.name;
-        return option;
-      });
-      control.replaceChildren(ungrouped, ...options);
-      control.value = selected;
-      control.dataset.confirmedValue = selected;
-      control.disabled = false;
-    }
-  },
-
-  async loadCaseDefaultGroup(caseName) {
-    const token = (this._caseDefaultGroupLoadToken || 0) + 1;
-    this._caseDefaultGroupLoadToken = token;
-    this._resetCaseDefaultGroupControls();
-    try {
-      const pendingSave = this._caseDefaultGroupPendingSave;
-      if (pendingSave?.caseName === caseName) {
-        try {
-          await pendingSave.promise;
-        } catch {
-          // The save path reports its own error. Reload the authoritative server value.
-        }
-        if (
-          token !== this._caseDefaultGroupLoadToken ||
-          document.getElementById('quickStartCase')?.value !== caseName
-        ) {
-          return;
-        }
-        this._resetCaseDefaultGroupControls();
-      }
-      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/default-group`);
-      const json = await res.json();
-      if (!res.ok || json.success === false) throw new Error(json.error || 'Failed to load default group');
-      if (
-        token !== this._caseDefaultGroupLoadToken ||
-        document.getElementById('quickStartCase')?.value !== caseName
-      ) {
-        return;
-      }
-      this._renderCaseDefaultGroup(json.data);
-    } catch (err) {
-      if (
-        token !== this._caseDefaultGroupLoadToken ||
-        document.getElementById('quickStartCase')?.value !== caseName
-      ) {
-        return;
-      }
-      this.showToast?.('Failed to load default session group: ' + err.message, 'error');
-    }
-  },
-
-  async onCaseDefaultGroupChanged(isMobile) {
-    const controls = this._caseDefaultGroupControls();
-    const selectedControl = document.getElementById(isMobile ? 'caseDefaultGroupMobile' : 'caseDefaultGroup');
-    const caseName = document.getElementById('quickStartCase')?.value || 'testcase';
-    if (!selectedControl) return;
-    const selected = selectedControl.value;
-    const confirmed = selectedControl.dataset.confirmedValue ?? '';
-    const token = (this._caseDefaultGroupSaveToken || 0) + 1;
-    this._caseDefaultGroupSaveToken = token;
-    this._caseDefaultGroupLoadToken = (this._caseDefaultGroupLoadToken || 0) + 1;
-    for (const control of controls) {
-      control.value = selected;
-      control.disabled = true;
-    }
-    const savePromise = (async () => {
-      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/default-group`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ groupId: selected || null }),
-      });
-      const json = await res.json();
-      if (!res.ok || json.success === false) throw new Error(json.error || 'Failed to save default group');
-      return json.data;
-    })();
-    const pendingSave = { caseName, promise: savePromise };
-    this._caseDefaultGroupPendingSave = pendingSave;
-    try {
-      const data = await savePromise;
-      if (
-        token !== this._caseDefaultGroupSaveToken ||
-        document.getElementById('quickStartCase')?.value !== caseName
-      ) {
-        return;
-      }
-      this._renderCaseDefaultGroup(data);
-    } catch (err) {
-      if (
-        token !== this._caseDefaultGroupSaveToken ||
-        document.getElementById('quickStartCase')?.value !== caseName
-      ) {
-        return;
-      }
-      for (const control of controls) {
-        control.value = confirmed;
-        control.disabled = false;
-      }
-      this.showToast?.('Failed to save default session group: ' + err.message, 'error');
-    } finally {
-      if (this._caseDefaultGroupPendingSave === pendingSave) this._caseDefaultGroupPendingSave = null;
-    }
-  },
-
   onCaseSettingChanged() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     const settings = this.getCaseSettings(caseName);
@@ -2622,7 +2488,6 @@ Object.assign(CodemanApp.prototype, {
       document.getElementById('caseAgentTeamsMobile').checked = settings.agentTeams;
       document.getElementById('caseOpusContext1mMobile').checked = settings.opusContext1m;
       popover.classList.remove('hidden');
-      this.loadCaseDefaultGroup(caseName);
 
       const closeHandler = (e) => {
         if (!popover.contains(e.target) && !e.target.classList.contains('btn-case-settings-mobile')) {
@@ -2697,10 +2562,15 @@ Object.assign(CodemanApp.prototype, {
     this.caseEditOriginalName = null;
     this.caseEditOriginalLocation = null;
     this.caseEditOriginalHostId = null;
+    this._resetCaseEditDefaultGroup();
     const title = document.getElementById('caseModalTitle');
     if (title) title.textContent = 'Add Case';
     const remoteHostId = document.getElementById('remoteHostId');
     if (remoteHostId) remoteHostId.disabled = false;
+    for (const id of ['dockerWorkspacePath', 'dockerHostId', 'dockerImage', 'dockerNetwork']) {
+      const field = document.getElementById(id);
+      if (field) field.disabled = false;
+    }
     const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
     if (remoteDiscoverSection) remoteDiscoverSection.classList.remove('hidden');
   },
@@ -3999,6 +3869,17 @@ Object.assign(CodemanApp.prototype, {
       const remoteDiscoverSection = document.getElementById('remoteDiscoverSection');
       if (remoteDiscoverSection) remoteDiscoverSection.classList.add('hidden');
       this.switchCaseModalTab('case-remote');
+    } else if (this.caseEditOriginalLocation === 'docker') {
+      const docker = caseInfo.docker || {};
+      document.getElementById('dockerCaseName').value = caseInfo.name || '';
+      document.getElementById('dockerWorkspacePath').value = docker.path || '';
+      document.getElementById('dockerHostId').value = docker.hostId || '';
+      document.getElementById('dockerImage').value = docker.image || '';
+      document.getElementById('dockerNetwork').value = docker.network || 'bridge';
+      for (const id of ['dockerWorkspacePath', 'dockerHostId', 'dockerImage', 'dockerNetwork']) {
+        document.getElementById(id).disabled = true;
+      }
+      this.switchCaseModalTab('case-docker');
     } else if (this.caseEditOriginalLocation === 'linked-local' || caseInfo.linked) {
       document.getElementById('linkCaseName').value = caseInfo.name || '';
       document.getElementById('linkCasePath').value = caseInfo.path || '';
@@ -4010,6 +3891,61 @@ Object.assign(CodemanApp.prototype, {
     }
 
     modal.classList.add('active');
+    void this.loadCaseEditDefaultGroup(name);
+  },
+
+  _resetCaseEditDefaultGroup() {
+    const row = document.getElementById('caseEditDefaultGroupRow');
+    const select = document.getElementById('caseEditDefaultGroup');
+    if (row) row.classList.add('hidden');
+    if (!select) return;
+    const ungrouped = document.createElement('option');
+    ungrouped.value = '';
+    ungrouped.textContent = 'Ungrouped';
+    select.replaceChildren(ungrouped);
+    select.value = '';
+    select.disabled = true;
+  },
+
+  _caseEditDefaultGroupId() {
+    const select = document.getElementById('caseEditDefaultGroup');
+    if (!select || select.disabled) return undefined;
+    return select.value || null;
+  },
+
+  async loadCaseEditDefaultGroup(caseName) {
+    const token = (this._caseEditDefaultGroupLoadToken || 0) + 1;
+    this._caseEditDefaultGroupLoadToken = token;
+    this._resetCaseEditDefaultGroup();
+    const row = document.getElementById('caseEditDefaultGroupRow');
+    if (row) row.classList.remove('hidden');
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/default-group`);
+      const json = await res.json();
+      if (!res.ok || json.success === false) throw new Error(json.error || 'Failed to load default group');
+      if (token !== this._caseEditDefaultGroupLoadToken || this.caseEditOriginalName !== caseName) return;
+      const select = document.getElementById('caseEditDefaultGroup');
+      if (!select) return;
+      const groups = Array.isArray(json.data?.groups) ? json.data.groups : [];
+      const selected = typeof json.data?.groupId === 'string' && groups.some((group) => group.id === json.data.groupId)
+        ? json.data.groupId
+        : '';
+      const ungrouped = document.createElement('option');
+      ungrouped.value = '';
+      ungrouped.textContent = 'Ungrouped';
+      const options = groups.map((group) => {
+        const option = document.createElement('option');
+        option.value = group.id;
+        option.textContent = group.name;
+        return option;
+      });
+      select.replaceChildren(ungrouped, ...options);
+      select.value = selected;
+      select.disabled = false;
+    } catch (err) {
+      if (token !== this._caseEditDefaultGroupLoadToken || this.caseEditOriginalName !== caseName) return;
+      this.showToast?.('Failed to load default session group: ' + err.message, 'error');
+    }
   },
 
   async updateCase() {
@@ -4053,6 +3989,17 @@ Object.assign(CodemanApp.prototype, {
         }
 
         updatePayload = { name: nextName, hostId, remotePath, ...codexSelection };
+      } else if (originalLocation === 'docker') {
+        nextName = document.getElementById('dockerCaseName').value.trim();
+        if (!nextName) {
+          this.showToast('Please enter a case name', 'error');
+          return;
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(nextName)) {
+          this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+          return;
+        }
+        updatePayload = { name: nextName };
       } else if (originalLocation === 'linked-local') {
         nextName = document.getElementById('linkCaseName').value.trim();
         const path = document.getElementById('linkCasePath').value.trim();
@@ -4077,6 +4024,13 @@ Object.assign(CodemanApp.prototype, {
         }
         updatePayload = { name: nextName };
       }
+
+      const defaultGroupId = this._caseEditDefaultGroupId();
+      if (defaultGroupId === undefined) {
+        this.showToast('Wait for the default session group to load before saving.', 'error');
+        return;
+      }
+      updatePayload = { ...updatePayload, defaultGroupId };
 
       const res = await fetch(`/api/cases/${encodeURIComponent(originalName)}`, {
         method: 'PUT',
