@@ -24,6 +24,7 @@ export const BROWSER_TEST_GLOBS = [
   'test/webgl-fallback.test.ts',
   'test/terminal-copy-shortcut.test.ts',
   'test/codex-predictive-echo.test.ts', // also needs a real codex binary
+  'test/codex-command-profiles.browser.test.ts',
   // The `.browser.test.ts` convention post-dates the five above. Membership is
   // decided by whether a file drives a real browser, NOT by its name, which is
   // why `npm run check:browser-excludes` asks `vitest list` what CI would
