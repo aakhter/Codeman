@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { evaluateClaudeBackgroundAgentFrame } from '../src/claude-background-agent-frame.js';
 
 const renderer = '✳ Waiting for 2 background agents to finish';
-const composerStatusScaffold = `────────────────
+function composerStatusScaffold(statusLine = 'Opus 5 (1M context)  in:123 out:45 ctx:67%'): string {
+  return `────────────────
 ❯
 ────────────────
-Opus 5 (1M context)  in:123 out:45 ctx:67%`;
+${statusLine}`;
+}
 
-function currentStatusScaffold(waitLine = renderer): string {
-  return `${waitLine}\n${composerStatusScaffold}`;
+function currentStatusScaffold(waitLine = renderer, statusLine = 'Opus 5 (1M context)  in:123 out:45 ctx:67%'): string {
+  return `${waitLine}\n${composerStatusScaffold(statusLine)}`;
 }
 
 function evaluate(text: string, overrides: Record<string, unknown> = {}) {
@@ -26,6 +28,18 @@ function evaluate(text: string, overrides: Record<string, unknown> = {}) {
 describe('evaluateClaudeBackgroundAgentFrame', () => {
   it('accepts the anchored 2.1.237 renderer in the current visible frame bottom region', () => {
     expect(evaluate(`\n${currentStatusScaffold()}\n`)).toEqual({
+      status: 'positive',
+      reason: 'matching_visible_renderer',
+      renderedCount: 2,
+    });
+  });
+
+  it.each([
+    'Opus 4.8 (1M context)  in:562,411 out:1,188  ctx:56%',
+    'Opus 5  in:143,699 out:669  ctx:14%',
+    'Fable 5 (1M context)  in:562,411 out:1,188  ctx:56%',
+  ])('accepts a repository-supported Claude status footer: %s', (statusLine) => {
+    expect(evaluate(currentStatusScaffold(renderer, statusLine))).toMatchObject({
       status: 'positive',
       reason: 'matching_visible_renderer',
       renderedCount: 2,
@@ -66,7 +80,7 @@ describe('evaluateClaudeBackgroundAgentFrame', () => {
   it.each([renderer, `    ${renderer}`])(
     'rejects exact renderer prose above the completion row and current status scaffold: %s',
     (text) => {
-      expect(evaluate(`${text}\n✻ Worked for 1s\n${composerStatusScaffold}`)).toMatchObject({
+      expect(evaluate(`${text}\n✻ Worked for 1s\n${composerStatusScaffold()}`)).toMatchObject({
         status: 'negative',
         reason: 'renderer_not_in_status_scaffold',
       });

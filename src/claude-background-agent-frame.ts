@@ -26,7 +26,12 @@ const BOTTOM_REGION_ROWS = 12;
 const RENDERER_PATTERN = /^\s*✳\s+Waiting for (\d+) background agents to finish\s*$/;
 const SEPARATOR_PATTERN = /^\s*─{4,}\s*$/;
 const EMPTY_COMPOSER_PATTERN = /^\s*❯\s*$/;
-const STATUS_PATTERN = /^\s*(?:Opus|Sonnet|Haiku)\s+\d+\s+\([^()\r\n]+ context\)\s+in:\S+\s+out:\S+\s+ctx:\S+\s*$/;
+const TOKEN_COUNT_PATTERN = '(?:0|[1-9]\\d{0,2}(?:,\\d{3})*)';
+const STATUS_PATTERN = new RegExp(
+  `^\\s*(?:Fable|Opus|Sonnet|Haiku)\\s+\\d+(?:\\.\\d+)?` +
+    `(?:\\s+\\(\\d+(?:\\.\\d+)?[kKmM]?\\s+context\\))?` +
+    `\\s+in:${TOKEN_COUNT_PATTERN}\\s+out:${TOKEN_COUNT_PATTERN}\\s+ctx:(?:100|[1-9]?\\d)%\\s*$`
+);
 
 function hasObservedStatusScaffold(lines: readonly string[], rendererIndex: number): boolean {
   const following = lines.slice(rendererIndex + 1).filter((line) => line.trim().length > 0);
