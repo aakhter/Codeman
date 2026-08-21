@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   exactFlagConversationProof,
   inspectSubagentProcesses,
+  selectExactSubagentPid,
   parseNulDelimited,
   readExactFlagValues,
   type ObservableClaudeIdentity,
@@ -56,6 +57,30 @@ describe('process input parsing', () => {
 });
 
 describe('inspectSubagentProcesses', () => {
+  it('selects only one exact target pid and ignores a wrong first process in the same conversation', () => {
+    const result = {
+      status: 'positive' as const,
+      reason: 'matching_process' as const,
+      matcherCapability: 'exact_role' as const,
+      projectHash: '-work-project',
+      claudeSessionId: 'conversation-123',
+      agentIds: ['peer', 'target'],
+      exactAgentProcesses: [
+        { agentId: 'peer', pid: 11 },
+        { agentId: 'target', pid: 22 },
+      ],
+    };
+
+    expect(selectExactSubagentPid(result, 'target')).toBe(22);
+    expect(selectExactSubagentPid(result, 'missing')).toBeUndefined();
+    expect(
+      selectExactSubagentPid(
+        { ...result, exactAgentProcesses: [...result.exactAgentProcesses, { agentId: 'target', pid: 33 }] },
+        'target'
+      )
+    ).toBeUndefined();
+  });
+
   it('does not claim a role capability for the supported 2.1.237 runtime', async () => {
     const result = await inspectSubagentProcesses(
       identity,
@@ -124,7 +149,30 @@ describe('inspectSubagentProcesses', () => {
       projectHash: '-work-project',
       claudeSessionId: 'conversation-123',
       agentIds: ['agent-7'],
+      exactAgentProcesses: [{ agentId: 'agent-7', pid: 3 }],
     });
+  });
+
+  it('never promotes aggregate conversation proof into exact-agent process proof', async () => {
+    const matcher: ProcessProofMatcher = {
+      capability: 'exact_role',
+      match: vi.fn((candidate, observableIdentity) => {
+        const conversationProof = exactFlagConversationProof(
+          candidate.argv,
+          ['--session-id'],
+          observableIdentity.claudeSessionId
+        );
+        return conversationProof ? { matched: true, conversationProof } : { matched: false };
+      }),
+    };
+
+    const result = await inspectSubagentProcesses(
+      { ...identity, claudeRuntimeVersion: 'future-test-runtime' },
+      source([{ pid: 99, argv: 'claude\0--session-id\0conversation-123\0', cwd: directoryIdentity }]),
+      { matcherRegistry: new Map([['future-test-runtime', matcher]]) }
+    );
+
+    expect(result).toMatchObject({ status: 'positive', agentIds: [], exactAgentProcesses: [] });
   });
 
   it('gives future matchers exact structured environment values without substring collisions', async () => {

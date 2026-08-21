@@ -723,6 +723,63 @@ describe('system-routes', () => {
   // ========== PUT /api/subagent-window-states ==========
 
   describe('PUT /api/subagent-window-states', () => {
+    it('isolates Alice and Bob while reserving legacy global state for an admin', async () => {
+      const priorMode = process.env.CODEMAN_MULTIUSER;
+      process.env.CODEMAN_MULTIUSER = '1';
+      let persisted = JSON.stringify({ minimized: { legacy: true }, open: [] });
+      mockedReadFile.mockImplementation(async () => persisted as never);
+      mockedWriteFile.mockImplementation(async (_path, value) => {
+        persisted = String(value);
+      });
+      const alice = await createRouteTestHarness(registerSystemRoutes, {
+        authUser: { username: 'alice', role: 'user' },
+      });
+      const bob = await createRouteTestHarness(registerSystemRoutes, {
+        authUser: { username: 'bob', role: 'user' },
+      });
+      const admin = await createRouteTestHarness(registerSystemRoutes, {
+        authUser: { username: 'root', role: 'admin' },
+      });
+      try {
+        expect(
+          JSON.parse((await alice.app.inject({ method: 'GET', url: '/api/subagent-window-states' })).body)
+        ).toEqual({
+          minimized: {},
+          open: [],
+        });
+        await alice.app.inject({
+          method: 'PUT',
+          url: '/api/subagent-window-states',
+          payload: { minimized: { alice: true }, open: [] },
+        });
+        expect(JSON.parse((await bob.app.inject({ method: 'GET', url: '/api/subagent-window-states' })).body)).toEqual({
+          minimized: {},
+          open: [],
+        });
+        await bob.app.inject({
+          method: 'PUT',
+          url: '/api/subagent-window-states',
+          payload: { minimized: { bob: true }, open: [] },
+        });
+        expect(
+          JSON.parse((await alice.app.inject({ method: 'GET', url: '/api/subagent-window-states' })).body)
+        ).toEqual({
+          minimized: { alice: true },
+          open: [],
+        });
+        expect(
+          JSON.parse((await admin.app.inject({ method: 'GET', url: '/api/subagent-window-states' })).body)
+        ).toEqual({
+          minimized: { legacy: true },
+          open: [],
+        });
+      } finally {
+        await Promise.all([alice.app.close(), bob.app.close(), admin.app.close()]);
+        if (priorMode === undefined) delete process.env.CODEMAN_MULTIUSER;
+        else process.env.CODEMAN_MULTIUSER = priorMode;
+      }
+    });
+
     it('saves valid window states', async () => {
       const res = await harness.app.inject({
         method: 'PUT',
@@ -1236,7 +1293,7 @@ describe('system-routes', () => {
 
     it('kills a known agent successfully', async () => {
       mockedSubagentWatcher.getSubagent.mockReturnValue({ agentId: 'agent-1' } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue(true);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'agent-1', pid: 42 });
 
       const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/agent-1' });
       expect(res.statusCode).toBe(200);
@@ -1250,7 +1307,7 @@ describe('system-routes', () => {
         status: 'found',
         info: { agentKey: 'v1.exact', agentId: 'same', sessionId: 'conversation-a' },
       } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue(true);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'v1.exact', pid: 42 });
 
       const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/v1.exact' });
 
@@ -1267,7 +1324,7 @@ describe('system-routes', () => {
         status: 'found',
         info: { agentKey: 'v1.only', agentId: 'legacy' },
       } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue(true);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'killed', agentKey: 'v1.only', pid: 42 });
 
       await harness.app.inject({ method: 'DELETE', url: '/api/subagents/legacy' });
 
@@ -1285,13 +1342,26 @@ describe('system-routes', () => {
 
     it('returns error when kill fails', async () => {
       mockedSubagentWatcher.getSubagent.mockReturnValue({ agentId: 'agent-1' } as never);
-      mockedSubagentWatcher.killSubagent.mockResolvedValue(false);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'already_completed' });
 
       const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/agent-1' });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
       expect(body.error).toContain('already completed');
+    });
+
+    it('returns a typed safe failure when exact termination is unsupported', async () => {
+      mockedSubagentWatcher.getSubagent.mockReturnValue({ agentKey: 'v1.agent', agentId: 'agent-1' } as never);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue({ status: 'unsupported' });
+
+      const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/agent-1' });
+
+      expect(JSON.parse(res.body)).toMatchObject({
+        success: false,
+        reason: 'unsupported',
+        error: expect.stringContaining('unsupported'),
+      });
     });
   });
 

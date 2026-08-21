@@ -159,6 +159,7 @@ describe('SubagentWatcher', () => {
   let mockReaddir: Mock;
   let mockStatAsync: Mock;
   let mockReadFile: Mock;
+  let mockProcessKill: Mock;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -175,6 +176,7 @@ describe('SubagentWatcher', () => {
     mockReaddir = fsPromises.readdir as Mock;
     mockStatAsync = fsPromises.stat as Mock;
     mockReadFile = fsPromises.readFile as Mock;
+    mockProcessKill = vi.spyOn(process, 'kill').mockReturnValue(true);
 
     // Default mocks - no projects exist
     mockExistsSync.mockReturnValue(false);
@@ -198,10 +200,12 @@ describe('SubagentWatcher', () => {
 
     // Create new watcher for each test
     watcher = new SubagentWatcher();
+    watcher.setExactSubagentProcessProvider(vi.fn(async () => ({ status: 'verified', pid: 4242 })));
   });
 
   afterEach(() => {
     watcher.stop();
+    mockProcessKill.mockRestore();
     vi.useRealTimers();
   });
 
@@ -1982,9 +1986,34 @@ describe('SubagentWatcher', () => {
   });
 
   describe('killSubagent', () => {
-    it('should return false for unknown agent', async () => {
+    const registerKillAgent = (agentId: string, sessionId = 'conversation-a'): string => {
+      const projectHash = '-work-shared';
+      const agentKey = serializeSubagentKey(projectHash, sessionId, agentId);
+      const info: SubagentInfo = {
+        agentKey,
+        agentId,
+        sessionId,
+        projectHash,
+        filePath: `/tmp/${agentId}.jsonl`,
+        startedAt: new Date().toISOString(),
+        lastActivityAt: Date.now(),
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 0,
+      };
+      const state = watcher as unknown as {
+        agentInfo: Map<string, SubagentInfo>;
+        liveAgentKeys: Set<string>;
+      };
+      state.agentInfo.set(agentKey, info);
+      state.liveAgentKeys.add(agentKey);
+      return agentKey;
+    };
+
+    it('returns a typed result for an unknown agent', async () => {
       const result = await watcher.killSubagent('nonexistent');
-      expect(result).toBe(false);
+      expect(result).toEqual({ status: 'not_found' });
     });
 
     it('should return false for already completed agent', async () => {
@@ -2021,7 +2050,7 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(11000);
 
       const result = await watcher.killSubagent('killcomplete');
-      expect(result).toBe(false);
+      expect(result).toEqual({ status: 'already_completed' });
     });
 
     it('should emit completed event when killing active agent', async () => {
@@ -2059,8 +2088,51 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(100);
 
       const result = await watcher.killSubagent('killactive');
-      expect(result).toBe(true);
+      expect(result).toMatchObject({ status: 'killed', pid: 4242 });
       expect(completedHandler).toHaveBeenCalled();
+    });
+
+    it('fails safely without changing liveness when exact process proof is unsupported', async () => {
+      const key = registerKillAgent('same');
+      const revisions = vi.fn();
+      const completed = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      watcher.on('subagent:completed', completed);
+      watcher.setExactSubagentProcessProvider(vi.fn(async () => ({ status: 'unsupported' })));
+
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'unsupported' });
+
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
+      expect(revisions).not.toHaveBeenCalled();
+      expect(completed).not.toHaveBeenCalled();
+      expect(mockProcessKill).not.toHaveBeenCalled();
+    });
+
+    it('signals only the pid verified for the exact selected key when display and conversation IDs collide', async () => {
+      const first = registerKillAgent('same');
+      const second = registerKillAgent('peer');
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async (info) => ({ status: 'verified', pid: info.agentKey === second ? 222 : 111 }))
+      );
+
+      await expect(watcher.killSubagent(second)).resolves.toMatchObject({ status: 'killed', pid: 222 });
+
+      expect(mockProcessKill).toHaveBeenCalledWith(222, 'SIGTERM');
+      expect(mockProcessKill).not.toHaveBeenCalledWith(111, 'SIGTERM');
+      expect(watcher.getSubagent(first)?.status).toBe('active');
+      expect(watcher.getSubagent(second)?.status).toBe('completed');
+    });
+
+    it('does not complete the exact target when signaling the verified pid fails', async () => {
+      const key = registerKillAgent('same');
+      mockProcessKill.mockImplementationOnce(() => {
+        throw new Error('ESRCH');
+      });
+
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'signal_failed' });
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
     });
   });
 

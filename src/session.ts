@@ -1240,9 +1240,17 @@ export class Session extends EventEmitter {
   setActivityProjection(projection: SessionActivityProjection): void {
     const isAgentActivity =
       projection.activityStatus === 'waiting_agents' || projection.activityStatus === 'checking_agents';
+    const wasAgentActivity =
+      this._activityProjection.activityStatus === 'waiting_agents' ||
+      this._activityProjection.activityStatus === 'checking_agents';
     this._activityProjection = {
       ...projection,
-      activityStatusSince: isAgentActivity ? projection.activityStatusSince : null,
+      activityStatusSince:
+        isAgentActivity && wasAgentActivity
+          ? this._activityProjection.activityStatusSince
+          : isAgentActivity
+            ? projection.activityStatusSince
+            : null,
     };
   }
 

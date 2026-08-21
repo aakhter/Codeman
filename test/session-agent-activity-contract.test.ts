@@ -61,6 +61,17 @@ describe('Session agent activity contract', () => {
     expect(session.activityProjection.activityStatusSince).toBeNull();
   });
 
+  it('preserves one timestamp across checking/waiting projections until leaving the derived episode', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    session.setActivityProjection({ activityStatus: 'checking_agents', activityStatusSince: 100 });
+    session.setActivityProjection({ activityStatus: 'waiting_agents', activityStatusSince: 200 });
+    expect(session.activityProjection.activityStatusSince).toBe(100);
+
+    session.setActivityProjection({ activityStatus: 'idle', activityStatusSince: null });
+    session.setActivityProjection({ activityStatus: 'checking_agents', activityStatusSince: 300 });
+    expect(session.activityProjection.activityStatusSince).toBe(300);
+  });
+
   it('does not include runtime activity fields in persisted session state', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'claude' });
     session.setActivityProjection({

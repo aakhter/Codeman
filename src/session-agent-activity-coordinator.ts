@@ -35,13 +35,11 @@ export function projectAgentActivity(
   }
 
   const derived = activityStatus === 'waiting_agents' || activityStatus === 'checking_agents';
+  const previousDerived =
+    previous?.activityStatus === 'waiting_agents' || previous?.activityStatus === 'checking_agents';
   return {
     activityStatus,
-    activityStatusSince: derived
-      ? previous?.activityStatus === activityStatus
-        ? previous.activityStatusSince
-        : now
-      : null,
+    activityStatusSince: derived ? (previousDerived ? previous.activityStatusSince : now) : null,
   };
 }
 

@@ -75,6 +75,65 @@ const SCREENSHOTS_DIR = dataPath('screenshots');
 /** Cached CPU count — doesn't change at runtime */
 const CPU_COUNT = cpus().length;
 
+interface OwnerScopedConfig<T> {
+  _codemanOwnerScoped: 1;
+  owners: Record<string, T>;
+  legacy?: T;
+}
+
+const ownerScopedWriteQueues = new Map<string, Promise<void>>();
+
+function isOwnerScopedConfig<T>(value: unknown): value is OwnerScopedConfig<T> {
+  return !!value && typeof value === 'object' && (value as { _codemanOwnerScoped?: unknown })._codemanOwnerScoped === 1;
+}
+
+async function readOwnerScopedConfig<T>(
+  filePath: string,
+  label: string,
+  fallback: T,
+  username: string,
+  admin: boolean
+): Promise<T> {
+  const stored = await readJsonConfig<unknown>(filePath, label, fallback);
+  if (!isMultiUserMode()) {
+    return isOwnerScopedConfig<T>(stored) ? (stored.legacy ?? stored.owners[username] ?? fallback) : (stored as T);
+  }
+  // Admins have their own persisted view and are the only callers allowed to
+  // consume pre-multi-user legacy state. Ordinary users never receive it.
+  if (!isOwnerScopedConfig<T>(stored)) return admin ? (stored as T) : fallback;
+  return stored.owners[username] ?? (admin && stored.legacy !== undefined ? stored.legacy : fallback);
+}
+
+async function writeOwnerScopedConfig<T>(filePath: string, label: string, value: T, username: string): Promise<void> {
+  const previous = ownerScopedWriteQueues.get(filePath) ?? Promise.resolve();
+  const operation = previous
+    .catch(() => undefined)
+    .then(async () => {
+      let stored: T | OwnerScopedConfig<T> = value;
+      if (isMultiUserMode()) {
+        const prior = await readJsonConfig<unknown>(filePath, label, undefined);
+        const scoped: OwnerScopedConfig<T> = isOwnerScopedConfig<T>(prior)
+          ? prior
+          : {
+              _codemanOwnerScoped: 1,
+              owners: {},
+              ...(prior !== undefined ? { legacy: prior as T } : {}),
+            };
+        scoped.owners[username] = value;
+        stored = scoped;
+      }
+      const dir = dirname(filePath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      await fs.writeFile(filePath, JSON.stringify(stored, null, 2));
+    });
+  ownerScopedWriteQueues.set(filePath, operation);
+  try {
+    await operation;
+  } finally {
+    if (ownerScopedWriteQueues.get(filePath) === operation) ownerScopedWriteQueues.delete(filePath);
+  }
+}
+
 function parseOptionalNumber(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === '') return undefined;
   const parsed = Number(value);
@@ -924,18 +983,22 @@ export function registerSystemRoutes(
   // ═══════════════════════════════════════════════════════════════
 
   // ========== Subagent Window State Persistence ===
-  app.get('/api/subagent-window-states', async () => {
-    return readJsonConfig(windowStatesPath, 'subagent window states', { minimized: {}, open: [] });
+  app.get('/api/subagent-window-states', async (req) => {
+    const user = getAuthUser(req);
+    return readOwnerScopedConfig(
+      windowStatesPath,
+      'subagent window states',
+      { minimized: {}, open: [] },
+      user.username,
+      user.role === 'admin'
+    );
   });
 
   app.put('/api/subagent-window-states', async (req) => {
     const states = parseBody(SubagentWindowStatesSchema, req.body, 'Invalid window states') as Record<string, unknown>;
     try {
-      const dir = dirname(windowStatesPath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      await fs.writeFile(windowStatesPath, JSON.stringify(states, null, 2));
+      const user = getAuthUser(req);
+      await writeOwnerScopedConfig(windowStatesPath, 'subagent window states', states, user.username);
       return {};
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
@@ -943,18 +1006,16 @@ export function registerSystemRoutes(
   });
 
   // ========== Subagent Parent Associations ===
-  app.get('/api/subagent-parents', async () => {
-    return readJsonConfig(parentMapPath, 'subagent parent map', {});
+  app.get('/api/subagent-parents', async (req) => {
+    const user = getAuthUser(req);
+    return readOwnerScopedConfig(parentMapPath, 'subagent parent map', {}, user.username, user.role === 'admin');
   });
 
   app.put('/api/subagent-parents', async (req) => {
     const parentMap = parseBody(SubagentParentMapSchema, req.body, 'Invalid parent map');
     try {
-      const dir = dirname(parentMapPath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      await fs.writeFile(parentMapPath, JSON.stringify(parentMap, null, 2));
+      const user = getAuthUser(req);
+      await writeOwnerScopedConfig(parentMapPath, 'subagent parent map', parentMap, user.username);
       return {};
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
@@ -1060,14 +1121,21 @@ export function registerSystemRoutes(
     }
 
     const exactReference = resolved.status === 'found' ? resolved.info.agentKey : agentId;
-    const killed = await subagentWatcher.killSubagent(exactReference);
-    if (killed) {
+    const result = await subagentWatcher.killSubagent(exactReference);
+    if (result.status === 'killed') {
       return {
         success: true,
         data: { agentKey: info.agentKey, agentId: info.agentId, status: 'killed' },
       };
     }
-    return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Subagent not found or already completed');
+    const messages: Record<typeof result.status, string> = {
+      not_found: 'Subagent not found',
+      already_completed: 'Subagent already completed',
+      unsupported: 'Exact subagent termination is unsupported by this Claude runtime',
+      unverifiable: 'Exact subagent process identity could not be verified',
+      signal_failed: 'The verified subagent process could not be terminated',
+    };
+    return { ...createErrorResponse(ApiErrorCode.OPERATION_FAILED, messages[result.status]), reason: result.status };
   });
 
   app.post('/api/subagents/cleanup', async (req, reply) => {

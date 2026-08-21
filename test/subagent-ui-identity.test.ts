@@ -235,6 +235,21 @@ describe('opaque subagent actions and browser identities', () => {
     expect(fetchSpy).toHaveBeenCalledWith('/api/subagents/opaque%2Fkey%3Fone/transcript?format=formatted');
   });
 
+  it('keeps local liveness unchanged when exact process termination is unsupported', async () => {
+    const app = makeApp();
+    const key = 'opaque-agent';
+    app.subagents.set(key, agent(key, { status: 'active' }));
+    app.showToast = vi.fn();
+    app._apiDelete = vi.fn().mockResolvedValue({
+      json: async () => ({ success: false, reason: 'unsupported', error: 'Exact termination unsupported' }),
+    });
+
+    await app.killSubagent(key);
+
+    expect(app.subagents.get(key)?.status).toBe('active');
+    expect(app.showToast).toHaveBeenCalledWith('Exact termination unsupported', 'error');
+  });
+
   it('renders colliding agents with distinct opaque action and DOM identities', () => {
     const app = makeApp();
     document.body.innerHTML = '<div id="subagentList"></div>';
@@ -395,6 +410,29 @@ describe('persisted opaque identity and legacy migration', () => {
 });
 
 describe('manual completed-history clear', () => {
+  it('removes an unchanged live record absent from the canonical remaining snapshot', async () => {
+    const app = makeApp();
+    app.subagents.set('trigger', agent('trigger', { status: 'completed' }));
+    app.subagents.set('stale-live', agent('stale-live', { status: 'active' }));
+    app.subagentActivity.set('stale-live', [{ type: 'message', text: 'stale' }]);
+    app.subagentParentMap.set('stale-live', 'tab-a');
+    app.subagentWindows.set('stale-live', { element: document.createElement('div'), minimized: false });
+    app.showToast = vi.fn();
+    app.renderMonitorSubagents = vi.fn();
+    app.updateSubagentBadge = vi.fn();
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      json: async () => ({ success: true, data: { cleared: 1, remaining: [] } }),
+    } as Response);
+
+    await app.clearAllSubagents();
+
+    expect(app.subagents.has('stale-live')).toBe(false);
+    expect(app.subagentActivity.has('stale-live')).toBe(false);
+    expect(app.subagentParentMap.has('stale-live')).toBe(false);
+    expect(app.subagentWindows.has('stale-live')).toBe(false);
+  });
+
   it('does not let a stale clear response overwrite newer completion or discovery events', async () => {
     const app = makeApp();
     const completedRequest = deferred<Response>();
@@ -496,7 +534,7 @@ describe('manual completed-history clear', () => {
     expect(app.showToast).toHaveBeenCalledWith('No completed subagent history to clear', 'info');
   });
 
-  it('preserves absent active and idle records while removing absent completed history', () => {
+  it('removes every unchanged record absent from the canonical snapshot', () => {
     const app = makeApp();
     app.subagents.set('opaque-active', agent('opaque-active', { status: 'active' }));
     app.subagents.set('opaque-idle', agent('opaque-idle', { status: 'idle' }));
@@ -509,10 +547,10 @@ describe('manual completed-history clear', () => {
 
     app._reconcileSubagentSnapshot([]);
 
-    expect([...app.subagents.keys()]).toEqual(['opaque-active', 'opaque-idle']);
-    expect([...app.subagentActivity.keys()]).toEqual(['opaque-active', 'opaque-idle']);
-    expect([...app.subagentParentMap.keys()]).toEqual(['opaque-active', 'opaque-idle']);
-    expect([...app.subagentWindows.keys()]).toEqual(['opaque-active', 'opaque-idle']);
+    expect([...app.subagents.keys()]).toEqual([]);
+    expect([...app.subagentActivity.keys()]).toEqual([]);
+    expect([...app.subagentParentMap.keys()]).toEqual([]);
+    expect([...app.subagentWindows.keys()]).toEqual([]);
   });
 
   it('ignores an older clear response that resolves after a newer clear', async () => {

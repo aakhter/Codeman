@@ -3280,7 +3280,7 @@ Object.assign(CodemanApp.prototype, {
     const nextSubagents = new Map();
     for (const [agentKey, record] of this.subagents) {
       const changedSinceRequest = (this._subagentEventVersions?.get(agentKey) || 0) !== (eventWatermark.get(agentKey) || 0);
-      if (record?.status !== 'completed' || changedSinceRequest) nextSubagents.set(agentKey, record);
+      if (changedSinceRequest) nextSubagents.set(agentKey, record);
     }
     for (const record of Array.isArray(remaining) ? remaining : []) {
       if (typeof record?.agentKey !== 'string' || record.agentKey.length === 0) continue;

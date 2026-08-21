@@ -135,6 +135,7 @@ import { getClaudeCliVersion } from '../utils/claude-cli-resolver.js';
 import { claudeProjectHash, serializeSubagentKey } from '../claude-project-identity.js';
 import {
   inspectSubagentProcesses,
+  selectExactSubagentPid,
   type ObservableClaudeIdentity,
   type ProcessInspectionSource,
   type ProcessProofMatcherRegistry,
@@ -539,6 +540,7 @@ export class WebServer extends EventEmitter {
       },
     });
     subagentWatcher.setProcessLivenessProvider((info) => this.inspectSubagentLiveness(info));
+    subagentWatcher.setExactSubagentProcessProvider((info) => this.inspectExactSubagentProcess(info));
     this.sse = new SseStreamManager(
       {
         getSessionStateWithRespawn: (sessionId) => {
@@ -1078,6 +1080,30 @@ export class WebServer extends EventEmitter {
     if (result.status === 'positive') return result.agentIds.includes(info.agentId) ? 'live' : 'unknown';
     if (result.status === 'negative' && result.reason === 'no_matching_process') return 'not_live';
     return 'unknown';
+  }
+
+  private async inspectExactSubagentProcess(
+    info: Readonly<SubagentInfo>
+  ): Promise<{ status: 'verified'; pid: number } | { status: 'unsupported' | 'unverifiable' }> {
+    const matches = this.sessionsForClaudeIdentity(info.projectHash, info.sessionId);
+    if (matches.length !== 1) return { status: 'unverifiable' };
+    const session = matches[0];
+    const result = await inspectSubagentProcesses(
+      {
+        workingDir: session.workingDir,
+        projectHash: info.projectHash,
+        claudeSessionId: info.sessionId,
+        claudeRuntimeVersion: this.localClaudeRuntimeVersion,
+      },
+      this.agentProcessInspectionSource,
+      { matcherRegistry: this.agentProcessMatcherRegistry }
+    );
+    if (result.status === 'negative' && result.reason === 'no_registered_role_signature') {
+      return { status: 'unsupported' };
+    }
+    if (result.status !== 'positive') return { status: 'unverifiable' };
+    const pid = selectExactSubagentPid(result, info.agentId);
+    return pid === undefined ? { status: 'unverifiable' } : { status: 'verified', pid };
   }
 
   /**
@@ -4069,6 +4095,7 @@ export class WebServer extends EventEmitter {
     // Stop subagent watcher
     subagentWatcher.stop();
     subagentWatcher.setProcessLivenessProvider(undefined);
+    subagentWatcher.setExactSubagentProcessProvider(undefined);
     this.agentActivityCoordinator.cleanup();
     this.activityAdapters.clear();
     this.activityIdentityKeys.clear();

@@ -56,6 +56,7 @@ export type ProcessInspectionResult =
       projectHash: string;
       claudeSessionId: string;
       agentIds: string[];
+      exactAgentProcesses: Array<{ agentId: string; pid: number }>;
     }
   | {
       status: 'negative';
@@ -77,6 +78,15 @@ export type ProcessInspectionResult =
 export interface ProcessInspectionOptions {
   signal?: AbortSignal;
   matcherRegistry?: ProcessProofMatcherRegistry;
+}
+
+/** Return a PID only when one process is bound to the requested exact agent identity. */
+export function selectExactSubagentPid(
+  result: Extract<ProcessInspectionResult, { status: 'positive' }>,
+  agentId: string
+): number | undefined {
+  const matches = result.exactAgentProcesses.filter((candidate) => candidate.agentId === agentId);
+  return matches.length === 1 ? matches[0].pid : undefined;
 }
 
 const EMPTY_MATCHER_REGISTRY: ProcessProofMatcherRegistry = new Map();
@@ -218,6 +228,7 @@ export async function inspectSubagentProcesses(
     }
 
     const agentIds = new Set<string>();
+    const exactAgentProcesses: Array<{ agentId: string; pid: number }> = [];
     let matched = false;
     for (const candidate of candidates) {
       if (signal?.aborted) throw new InspectionAbortedError();
@@ -225,7 +236,10 @@ export async function inspectSubagentProcesses(
       if (!match.matched) continue;
       if (match.conversationProof.claudeSessionId !== identity.claudeSessionId) continue;
       matched = true;
-      if (match.agentId !== undefined) agentIds.add(match.agentId);
+      if (match.agentId !== undefined) {
+        agentIds.add(match.agentId);
+        exactAgentProcesses.push({ agentId: match.agentId, pid: candidate.pid });
+      }
     }
 
     if (matched) {
@@ -235,6 +249,7 @@ export async function inspectSubagentProcesses(
         reason: 'matching_process',
         matcherCapability: 'exact_role',
         agentIds: [...agentIds],
+        exactAgentProcesses,
       };
     }
 

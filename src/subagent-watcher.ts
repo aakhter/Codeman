@@ -33,7 +33,6 @@ import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
-import { execFile } from 'node:child_process';
 import { readFile, readdir, stat as statAsync } from 'node:fs/promises';
 import { PENDING_TOOL_CALL_TTL_MS, MAX_PENDING_TOOL_CALLS, MAX_TRACKED_AGENTS } from './config/map-limits.js';
 import { STALE_DATA_MAX_AGE_MS } from './config/server-timing.js';
@@ -144,6 +143,13 @@ export interface SubagentToolResult {
 
 export type SubagentProcessLiveness = 'live' | 'not_live' | 'unknown';
 export type SubagentProcessLivenessProvider = (info: Readonly<SubagentInfo>) => Promise<SubagentProcessLiveness>;
+export type ExactSubagentProcessResult =
+  | { status: 'verified'; pid: number }
+  | { status: 'unsupported' | 'unverifiable' };
+export type ExactSubagentProcessProvider = (info: Readonly<SubagentInfo>) => Promise<ExactSubagentProcessResult>;
+export type KillSubagentResult =
+  | { status: 'killed'; agentKey: string; pid: number }
+  | { status: 'not_found' | 'already_completed' | 'unsupported' | 'unverifiable' | 'signal_failed' };
 export interface SubagentWatcherErrorContext {
   projectHash: string;
   sessionId: string;
@@ -217,6 +223,7 @@ export class SubagentWatcher extends EventEmitter {
   private fileAgentContext = new Map<string, { projectHash: string; sessionId: string; agentKey: string }>();
   private semanticRevisions = new Map<string, number>();
   private processLivenessProvider?: SubagentProcessLivenessProvider;
+  private exactSubagentProcessProvider?: ExactSubagentProcessProvider;
 
   constructor() {
     super();
@@ -225,6 +232,10 @@ export class SubagentWatcher extends EventEmitter {
 
   setProcessLivenessProvider(provider: SubagentProcessLivenessProvider | undefined): void {
     this.processLivenessProvider = provider;
+  }
+
+  setExactSubagentProcessProvider(provider: ExactSubagentProcessProvider | undefined): void {
+    this.exactSubagentProcessProvider = provider;
   }
 
   /**
@@ -808,35 +819,35 @@ export class SubagentWatcher extends EventEmitter {
   }
 
   /**
-   * Kill a subagent by its agent ID
-   * Uses cached PID first, falls back to findSubagentProcess if needed.
+   * Kill a subagent only after the server binds a fresh process proof to this
+   * exact composite agent identity. Unsupported or uncertain runtimes fail safe.
    */
-  async killSubagent(reference: string): Promise<boolean> {
+  async killSubagent(reference: string): Promise<KillSubagentResult> {
     const generation = this.lifecycleGeneration;
     const resolved = this.resolveSubagentReference(reference);
     const info = resolved.status === 'found' ? resolved.info : undefined;
-    if (!info) return false;
+    if (!info) return { status: 'not_found' };
 
     // Already completed, nothing to kill
-    if (info.status === 'completed') return false;
+    if (info.status === 'completed') return { status: 'already_completed' };
 
+    if (!this.exactSubagentProcessProvider) return { status: 'unsupported' };
+    let proof: ExactSubagentProcessResult;
     try {
-      // Always use findSubagentProcess for kill — it verifies environ/cmdline,
-      // preventing PID reuse attacks (cached PID may have been recycled by OS)
-      const pid = await this.findSubagentProcess(info.sessionId, generation);
-      if (!this.isCurrentGeneration(generation)) return false;
-      if (pid) {
-        process.kill(pid, 'SIGTERM');
-        this.markSubagentAsCompleted(info);
-        return true;
-      }
+      proof = await this.exactSubagentProcessProvider(info);
     } catch {
-      // Process may have already exited
+      return { status: 'unverifiable' };
     }
-
-    // Mark as completed even if we couldn't find the process
+    if (!this.isCurrentGeneration(generation)) return { status: 'unverifiable' };
+    if (proof.status !== 'verified') return proof;
+    try {
+      process.kill(proof.pid, 'SIGTERM');
+    } catch {
+      return { status: 'signal_failed' };
+    }
+    if (!this.isCurrentGeneration(generation)) return { status: 'unverifiable' };
     this.markSubagentAsCompleted(info);
-    return true;
+    return { status: 'killed', agentKey: info.agentKey, pid: proof.pid };
   }
 
   /**
@@ -852,74 +863,6 @@ export class SubagentWatcher extends EventEmitter {
         // Only kill subagents belonging to this specific session
         if (sessionId && agent.sessionId !== sessionId) continue;
         await this.killSubagent(agent.agentKey);
-      }
-    }
-  }
-
-  /**
-   * Find the process ID of a Claude subagent by its session ID.
-   * Searches /proc for claude processes with matching session ID in environment.
-   * Skips main Codeman-managed Claude processes (identified by CODEMAN_MUX=1).
-   * Caches the discovered PID on the matching agent info for future fast checks.
-   */
-  private async findSubagentProcess(sessionId: string, generation = this.lifecycleGeneration): Promise<number | null> {
-    try {
-      // Find all claude processes (async to avoid blocking event loop)
-      const pgrepOutput = await new Promise<string>((resolve, reject) => {
-        execFile('pgrep', ['-f', 'claude'], { encoding: 'utf8' }, (err, stdout) => {
-          if (err) return reject(err);
-          resolve(stdout);
-        });
-      });
-      const pids = pgrepOutput.trim().split('\n').filter(Boolean);
-
-      for (const pidStr of pids) {
-        if (!this.isCurrentGeneration(generation)) return null;
-        const pid = parseInt(pidStr, 10);
-        if (Number.isNaN(pid)) continue;
-
-        let environ = '';
-        try {
-          environ = await readFile(`/proc/${pid}/environ`, 'utf8');
-        } catch {
-          // Can't read this process's environ - skip
-        }
-
-        // Defense-in-depth: never kill a main Codeman-managed Claude process.
-        // Main processes have CODEMAN_MUX=1 in their environment; subagents don't.
-        if (environ.includes('CODEMAN_MUX=1')) continue;
-
-        if (environ.includes(sessionId)) {
-          // Cache PID on the matching agent
-          if (this.isCurrentGeneration(generation)) this.cacheAgentPid(sessionId, pid);
-          return pid;
-        }
-
-        try {
-          const cmdline = await readFile(`/proc/${pid}/cmdline`, 'utf8');
-          if (!this.isCurrentGeneration(generation)) return null;
-          if (cmdline.includes(sessionId)) {
-            this.cacheAgentPid(sessionId, pid);
-            return pid;
-          }
-        } catch {
-          // Can't read this process's cmdline - skip
-        }
-      }
-    } catch {
-      // pgrep returns non-zero if no matches
-    }
-    return null;
-  }
-
-  /**
-   * Store a discovered PID on the agent info with matching sessionId.
-   */
-  private cacheAgentPid(sessionId: string, pid: number): void {
-    for (const [_agentId, info] of this.agentInfo) {
-      if (info.sessionId === sessionId && (info.status === 'active' || info.status === 'idle')) {
-        info.pid = pid;
-        return;
       }
     }
   }

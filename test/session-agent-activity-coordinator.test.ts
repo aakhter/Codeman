@@ -72,12 +72,15 @@ describe('session agent activity coordinator', () => {
       ).toEqual({ activityStatus: status, activityStatusSince: null });
     });
 
-    it('keeps a symmetric episode timestamp stable and resets it when the derived state changes', () => {
+    it('keeps one timestamp across checking/waiting evidence changes and resets only after leaving derived state', () => {
       const waiting = projectAgentActivity('idle', 'live', undefined, 100);
       expect(projectAgentActivity('idle', 'live', waiting, 200).activityStatusSince).toBe(100);
       const checking = projectAgentActivity('idle', 'unknown', waiting, 300);
-      expect(checking.activityStatusSince).toBe(300);
-      expect(projectAgentActivity('idle', 'live', checking, 400).activityStatusSince).toBe(400);
+      expect(checking.activityStatusSince).toBe(100);
+      expect(projectAgentActivity('idle', 'live', checking, 400).activityStatusSince).toBe(100);
+      const idle = projectAgentActivity('idle', 'none', checking, 500);
+      expect(idle.activityStatusSince).toBeNull();
+      expect(projectAgentActivity('idle', 'unknown', idle, 600).activityStatusSince).toBe(600);
     });
   });
 
