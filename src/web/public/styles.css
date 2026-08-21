@@ -1880,6 +1880,16 @@ html[data-line-anim="packet"] .connection-line.line-enter {
 
 .session-tab .tab-status.error { background: var(--red); }
 .session-tab .tab-status.ended { background: var(--text-muted); opacity: 0.5; }
+.session-tab .tab-status.waiting-agents,
+.session-tab .tab-status.checking-agents {
+  background: var(--session-purple);
+  border: 1px solid color-mix(in srgb, var(--session-purple) 70%, var(--border));
+}
+.session-tab .tab-status.waiting-agents { animation: agent-wait-pulse 3.2s ease-in-out infinite; }
+.session-tab .tab-status.checking-agents { opacity: 0.72; }
+@keyframes agent-wait-pulse {
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--session-purple) 22%, transparent); }
+}
 
 /* Session color coding - left border indicator */
 .session-tab[data-color="red"] { border-left: 3px solid var(--session-red); }
@@ -10273,6 +10283,12 @@ kbd {
   background: rgba(239, 68, 68, 0.2);
   color: var(--red, #ef4444);
 }
+.monitor-status-badge.status-waiting-agents,
+.monitor-status-badge.status-checking-agents {
+  color: var(--session-purple);
+  border-color: color-mix(in srgb, var(--session-purple) 45%, transparent);
+  background: color-mix(in srgb, var(--session-purple) 14%, transparent);
+}
 @keyframes pulse-working {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
@@ -11227,13 +11243,14 @@ kbd {
    (4 4 on a 2.5px line reads as a dotted smudge), and `lineage-flow` marches by
    exactly two dash cycles, so it has to move with them. */
 .connection-line.lineage-line {
-  stroke: var(--lineage-color, var(--session-blue, #2b8fd9));
+  --lineage-effective-color: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  stroke: var(--lineage-effective-color);
   stroke-width: 2.5;
   stroke-dasharray: 5 5;
   stroke-linecap: round;
   opacity: 0.72;
-  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-color, var(--session-blue, #2b8fd9)))
-    drop-shadow(0 0 11px var(--lineage-color, var(--session-blue, #2b8fd9)));
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-effective-color))
+    drop-shadow(0 0 11px var(--lineage-effective-color));
 }
 
 /* ⚠ OUTSIDE the reduced-motion block below on purpose. A working child is the case
@@ -11242,6 +11259,11 @@ kbd {
 .connection-line.lineage-line--working {
   opacity: 0.95;
 }
+.connection-line.lineage-line--waiting-agents,
+.connection-line.lineage-line--checking-agents,
+.lineage-line-dot--waiting-agents,
+.lineage-line-dot--checking-agents { --lineage-activity-color: var(--session-purple); }
+.connection-line.lineage-line--checking-agents { opacity: 0.72; }
 
 .connection-line.lineage-line--proxied {
   stroke-dasharray: 2 7;
@@ -11261,10 +11283,11 @@ kbd {
 }
 
 .lineage-line-dot {
-  fill: var(--lineage-color, var(--session-blue, #2b8fd9));
+  --lineage-effective-color: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  fill: var(--lineage-effective-color);
   opacity: 0.85;
-  filter: drop-shadow(0 0 4px var(--lineage-color, var(--session-blue, #2b8fd9)))
-    drop-shadow(0 0 9px var(--lineage-color, var(--session-blue, #2b8fd9)));
+  filter: drop-shadow(0 0 4px var(--lineage-effective-color))
+    drop-shadow(0 0 9px var(--lineage-effective-color));
 }
 
 .lineage-line-dot--proxied {
@@ -11295,6 +11318,10 @@ kbd {
     opacity: 0.62;
     animation: lineage-proxy-dot-pulse 1.4s ease-in-out infinite;
   }
+  .connection-line.lineage-line--waiting-agents,
+  .lineage-line-dot--waiting-agents { animation-duration: 3.2s; }
+  .connection-line.lineage-line--checking-agents,
+  .lineage-line-dot--checking-agents { animation: none; }
 }
 
 /* Two full dash cycles, so the march loops seamlessly. Tied to `stroke-dasharray`
@@ -17849,6 +17876,13 @@ html[data-tab-orientation='vertical'] .home-sessions {
   background: var(--text-muted);
   opacity: 0.5;
 }
+.home-sessions-dot--waiting_agents,
+.home-sessions-dot--checking_agents {
+  background: var(--session-purple);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--session-purple) 20%, transparent);
+}
+.home-sessions-dot--waiting_agents { animation: agent-wait-pulse 3.2s ease-in-out infinite; }
+.home-sessions-dot--checking_agents { opacity: 0.72; }
 
 .home-sessions-dot--web {
   background: #60a5fa;
@@ -18002,6 +18036,12 @@ html[data-tab-orientation='vertical'] .home-sessions {
   background: color-mix(in srgb, var(--green) 15%, transparent);
   border-color: color-mix(in srgb, var(--green) 40%, transparent);
   color: var(--green);
+}
+.home-sessions-pill--waiting_agents,
+.home-sessions-pill--checking_agents {
+  background: color-mix(in srgb, var(--session-purple) 14%, transparent);
+  border-color: color-mix(in srgb, var(--session-purple) 42%, transparent);
+  color: var(--session-purple);
 }
 
 /* Same muting as the idle dot, one step further: the pill is a block of color,
@@ -19986,6 +20026,12 @@ html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--working {
   border-color: color-mix(in srgb, var(--green) 40%, transparent);
   color: var(--green);
 }
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--waiting_agents,
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--checking_agents {
+  background: color-mix(in srgb, var(--session-purple) 14%, transparent);
+  border-color: color-mix(in srgb, var(--session-purple) 42%, transparent);
+  color: var(--session-purple);
+}
 
 /* Muted one step further than the idle dot: the pill is a block of color, so it
    reads louder than a 9px dot at the same mix. */
@@ -20078,5 +20124,13 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 @media (prefers-reduced-motion: reduce) {
   .session-sidebar {
     transition: none;
+  }
+  .session-tab .tab-status.waiting-agents,
+  .session-tab .tab-status.checking-agents {
+    animation: none;
+  }
+  .home-sessions-dot--waiting_agents,
+  .home-sessions-dot--checking_agents {
+    animation: none;
   }
 }

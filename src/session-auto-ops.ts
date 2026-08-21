@@ -47,6 +47,7 @@ const CLEAR_COOLDOWN_MS = 5000;
  * @param action - The async action to execute once idle
  * @param isActive - Returns whether this operation is still active (not cancelled)
  * @param isWorking - Returns whether the session is currently working
+ * @param isIdleAutomationBlocked - Returns whether agent activity makes idle automation unsafe
  * @param isStopped - Returns whether the session has been stopped
  * @param retryMs - Delay between retry attempts when working
  * @param cooldownMs - Delay after action completes before calling onCooldownDone
@@ -57,6 +58,7 @@ async function executeWhenIdle(
   action: () => Promise<void>,
   isActive: () => boolean,
   isWorking: () => boolean,
+  isIdleAutomationBlocked: () => boolean,
   isStopped: () => boolean,
   retryMs: number,
   cooldownMs: number,
@@ -66,8 +68,8 @@ async function executeWhenIdle(
   if (isStopped()) return;
   if (!isActive()) return;
 
-  if (!isWorking()) {
-    if (isStopped()) return;
+  if (!isWorking() && !isIdleAutomationBlocked()) {
+    if (isStopped() || isIdleAutomationBlocked()) return;
 
     await action();
 
@@ -84,7 +86,18 @@ async function executeWhenIdle(
     if (!isStopped()) {
       setTimer(
         setTimeout(
-          () => executeWhenIdle(action, isActive, isWorking, isStopped, retryMs, cooldownMs, setTimer, onCooldownDone),
+          () =>
+            executeWhenIdle(
+              action,
+              isActive,
+              isWorking,
+              isIdleAutomationBlocked,
+              isStopped,
+              retryMs,
+              cooldownMs,
+              setTimer,
+              onCooldownDone
+            ),
           retryMs
         )
       );
@@ -202,6 +215,8 @@ interface AutoOpsCallbacks {
   getCheckpointCapabilityReason?: (mode: CheckpointMode) => string | undefined;
   /** Check if Claude is currently working */
   isWorking: () => boolean;
+  /** Check if live/uncertain agent activity makes idle automation unsafe. */
+  isIdleAutomationBlocked?: () => boolean;
   /** Check if the session has been stopped */
   isStopped: () => boolean;
   /** Get current total token count (input + output) */
@@ -441,6 +456,11 @@ export class SessionAutoOps extends EventEmitter {
       return;
     }
 
+    if (this._isIdleAutomationBlocked()) {
+      this._deferResumeForActivity();
+      return;
+    }
+
     this._resumeAttempts++;
     const attempt = this._resumeAttempts;
     this._limitPaused = false; // optimistic: a fresh limit message re-arms us
@@ -452,9 +472,25 @@ export class SessionAutoOps extends EventEmitter {
     this._resumeFollowupTimer = setTimeout(() => {
       this._resumeFollowupTimer = null;
       if (this.callbacks.isStopped()) return;
+      if (this._isIdleAutomationBlocked()) {
+        this._deferResumeForActivity();
+        return;
+      }
       void this.callbacks.writeCommand(`${RESUME_PROMPT}\r`);
       this.emit('limitResume', { attempt });
     }, RESUME_ESC_DELAY_MS);
+  }
+
+  private _deferResumeForActivity(): void {
+    if (!this._autoResumeEnabled || this.callbacks.isStopped()) return;
+    const fireAt = Date.now() + RESUME_RETRY_MS;
+    this._limitPaused = true;
+    this._autoResumeAt = fireAt;
+    this._autoResumeTimer = setTimeout(() => void this._fireResume(), RESUME_RETRY_MS);
+  }
+
+  private _isIdleAutomationBlocked(): boolean {
+    return this.callbacks.isIdleAutomationBlocked?.() ?? false;
   }
 
   private _cancelAutoResume(reason: 'disabled' | 'working' | 'stopped'): void {
@@ -600,6 +636,7 @@ export class SessionAutoOps extends EventEmitter {
   } {
     if (!this._checkpointEnabled) return { triggered: false, reason: 'not-enabled' };
     if (this.callbacks.isStopped()) return { triggered: false, reason: 'stopped' };
+    if (this._isIdleAutomationBlocked()) return { triggered: false, reason: 'activity-blocked' };
     if (this._isCompacting || this._isClearing || this._checkpointActive) {
       return { triggered: false, reason: 'busy' };
     }
@@ -677,7 +714,7 @@ export class SessionAutoOps extends EventEmitter {
       const baseline = baselineResult.observation;
 
       if (!this._ensureActive(runId, mode, step)) return;
-      const delivery = await this._deliverCheckpointCommand(`/${mode}\r`);
+      const delivery = await this._deliverCheckpointCommand(`/${mode}\r`, runId);
       if (!this._ensureActive(runId, mode, step)) return;
       if (!delivery.ok) {
         this._finishCheckpoint(runId, mode, 'failed', {
@@ -721,7 +758,7 @@ export class SessionAutoOps extends EventEmitter {
       this._transition(runId, mode, 'operation-complete', { step });
 
       if (!this._ensureActive(runId, mode, 'continue')) return;
-      const continuation = await this._deliverCheckpointCommand(`${continueText}\r`);
+      const continuation = await this._deliverCheckpointCommand(`${continueText}\r`, runId);
       if (!this._ensureActive(runId, mode, 'continue')) return;
       if (!continuation.ok) {
         this._finishCheckpoint(runId, mode, 'failed', {
@@ -757,16 +794,39 @@ export class SessionAutoOps extends EventEmitter {
   }
 
   private async _checkpointObservation(): Promise<CheckpointObservation> {
-    if (this.callbacks.getCheckpointObservation) return await this.callbacks.getCheckpointObservation();
+    if (this._isIdleAutomationBlocked()) return { ready: false, working: true, revision: 0 };
+    if (this.callbacks.getCheckpointObservation) {
+      const observation = await this.callbacks.getCheckpointObservation();
+      return this._isIdleAutomationBlocked() ? { ready: false, working: true, revision: 0 } : observation;
+    }
     // Explicit compatibility fallback for callers not yet supplying the probe.
     const working = this.callbacks.isWorking();
     return { ready: !working, working, revision: 0 };
   }
 
-  private async _deliverCheckpointCommand(command: string): Promise<CommandDeliveryResult> {
-    if (this.callbacks.writeCheckpointCommand) return this.callbacks.writeCheckpointCommand(command);
-    const ok = await this.callbacks.writeCommand(command);
-    return ok ? { ok: true, attempt: 1 } : { ok: false, stage: 'text', attempt: 1 };
+  private async _deliverCheckpointCommand(command: string, runId: string): Promise<CommandDeliveryResult> {
+    while (runId === this._checkpointRunId && this._checkpointActive && !this.callbacks.isStopped()) {
+      // Acquire the writer before the final availability check. This keeps the
+      // check immediately adjacent to the actual callback boundary, including
+      // callbacks supplied through a dynamic adapter.
+      const checkpointWriter = this.callbacks.writeCheckpointCommand;
+      if (this._isIdleAutomationBlocked()) {
+        const available = await this._waitForObservation(
+          runId,
+          () => !this._isIdleAutomationBlocked(),
+          CHECKPOINT_READY_TIMEOUT_MS
+        );
+        if (available.kind !== 'matched') {
+          return { ok: false, stage: 'text', attempt: 1, error: 'checkpoint unavailable before delivery' };
+        }
+        continue;
+      }
+
+      if (checkpointWriter) return checkpointWriter(command);
+      const ok = await this.callbacks.writeCommand(command);
+      return ok ? { ok: true, attempt: 1 } : { ok: false, stage: 'text', attempt: 1 };
+    }
+    return { ok: false, stage: 'text', attempt: 1, error: 'checkpoint run cancelled before delivery' };
   }
 
   private _waitForObservation(
@@ -931,6 +991,7 @@ export class SessionAutoOps extends EventEmitter {
               action,
               () => this._isCompacting,
               () => this.callbacks.isWorking(),
+              () => this._isIdleAutomationBlocked(),
               () => this.callbacks.isStopped(),
               AUTO_RETRY_DELAY_MS,
               COMPACT_COOLDOWN_MS,
@@ -974,6 +1035,7 @@ export class SessionAutoOps extends EventEmitter {
               action,
               () => this._isClearing,
               () => this.callbacks.isWorking(),
+              () => this._isIdleAutomationBlocked(),
               () => this.callbacks.isStopped(),
               AUTO_RETRY_DELAY_MS,
               CLEAR_COOLDOWN_MS,

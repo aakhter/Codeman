@@ -63,7 +63,25 @@ export function createMockRouteContext(options?: {
     setupSessionListeners: vi.fn(async () => {}),
     persistSessionState: vi.fn(),
     persistSessionStateNow: vi.fn(),
-    getSessionStateWithRespawn: vi.fn((s: MockSession) => s.toState()),
+    getSessionStateWithRespawn: vi.fn((s: MockSession) => ({
+      ...s.toState(),
+      activityStatus: s.status,
+      activityStatusSince: null,
+    })),
+    agentActivity: {
+      attachSession: vi.fn(),
+      detachSession: vi.fn(),
+      identityChanged: vi.fn(),
+      terminalActivity: vi.fn(),
+      sessionExited: vi.fn(),
+      setTrackingEnabled: vi.fn(),
+      allocateEvent: vi.fn((_s, kind: string) => ({ sequence: 1, kind })),
+      decideEvent: vi.fn(async () => ({ presentToHuman: true, quarantined: false, autonomyBlocked: false })),
+      project: vi.fn(
+        (s: MockSession & { activityProjection?: { activityStatus: string; activityStatusSince: number | null } }) =>
+          s.activityProjection ?? { activityStatus: s.status, activityStatusSince: null }
+      ),
+    },
 
     // -- EventPort --
     broadcast: vi.fn(),

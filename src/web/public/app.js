@@ -613,6 +613,11 @@ class CodemanApp {
     this._detachOrphanStrikes = new Map(); // id -> consecutive unanswered roll-calls (redock at 2)
 
     this._initGeneration = 0;     // dedup concurrent handleInit calls
+    this._subagentEventClock = 0;
+    this._subagentEventVersions = new Map();
+    this._subagentClearGeneration = 0;
+    this._subagentPersistenceQueues = new Map();
+    this._subagentPersistenceGenerations = new Map();
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
     // Sessions whose full tmux scrollback has already been replayed this page load
@@ -643,10 +648,12 @@ class CodemanApp {
     this.ralphStates = new Map(); // Map<sessionId, { loop, todos }>
 
     // Subagent (Claude Code background agent) tracking
-    this.subagents = new Map(); // Map<agentId, SubagentInfo>
-    this.subagentActivity = new Map(); // Map<agentId, activity[]> - recent tool calls/progress
-    this.subagentToolResults = new Map(); // Map<agentId, Map<toolUseId, result>> - tool results by toolUseId
-    this.activeSubagentId = null; // Currently selected subagent for detail view
+    this.subagents = new Map(); // Map<agentKey, SubagentInfo>
+    this.subagentActivity = new Map(); // Map<agentKey, activity[]> - recent tool calls/progress
+    this.subagentToolResults = new Map(); // Map<agentKey, Map<toolUseId, result>> - tool results by toolUseId
+    this.activeSubagentKey = null; // Currently selected opaque agentKey for detail view
+    this._subagentIdentityDiagnostics = new Set();
+    this._subagentCompletionTimers = new Map(); // Map<agentKey, timeout[]>
     this.subagentPanelVisible = false;
 
     // Ultracode / Workflow run visualization (master-detail tab)
@@ -659,12 +666,12 @@ class CodemanApp {
     this.ultracodeWindowsClosed = new Set(); // runIds the user explicitly dismissed (don't re-pop)
     this.ultracodeWindowCloseTimers = new Map(); // runId -> auto-close timeout
     this.ultracodeWindowZIndex = 1000;
-    this.subagentWindows = new Map(); // Map<agentId, { element, position }>
+    this.subagentWindows = new Map(); // Map<agentKey, { element, position }>
     this.subagentWindowZIndex = ZINDEX_SUBAGENT_BASE;
-    this.minimizedSubagents = new Map(); // Map<sessionId, Set<agentId>> - minimized to tab
+    this.minimizedSubagents = new Map(); // Map<sessionId, Set<agentKey>> - minimized to tab
     this._subagentHideTimeout = null; // Timeout for hover-based dropdown hide
 
-    // PERSISTENT parent associations - agentId -> sessionId
+    // PERSISTENT parent associations - agentKey -> sessionId
     // This is the SINGLE SOURCE OF TRUTH for which tab an agent window connects to.
     // Once set, never recalculated. Persisted to localStorage and server.
     this.subagentParentMap = new Map();
@@ -676,7 +683,7 @@ class CodemanApp {
 
     // Teammate tmux pane terminals (Agent Teams feature)
     this.teammatePanesByName = new Map(); // Map<name, { paneTarget, sessionId, color }>
-    this.teammateTerminals = new Map(); // Map<agentId, { terminal, fitAddon, paneTarget, sessionId, resizeObserver }>
+    this.teammateTerminals = new Map(); // Map<agentKey|paneWindowKey, terminal state>
 
     this.terminalBufferCache = new Map(); // Map<sessionId, string> — client-side cache for instant tab re-visits (max 20)
 
@@ -1972,11 +1979,7 @@ class CodemanApp {
       } catch {
         /* ignore malformed payload */
       }
-      if (data && data.id) {
-        const live = this.sessions.get(data.id);
-        if (live) live.status = 'parked';
-      }
-      this._onSessionListMaybeChanged();
+      this._onSessionParked(data);
     });
 
     addListener(SSE_EVENTS.SESSION_RESUMED, (e) => {
@@ -1986,11 +1989,7 @@ class CodemanApp {
       } catch {
         /* ignore malformed payload */
       }
-      if (data && data.id) {
-        const live = this.sessions.get(data.id);
-        if (live) live.status = 'active';
-      }
-      this._onSessionListMaybeChanged();
+      this._onSessionResumed(data);
     });
 
     // Liveness heartbeat. The handler is deliberately empty: the whole point
@@ -2051,8 +2050,154 @@ class CodemanApp {
     this.handleInit(data);
   }
 
+  /**
+   * Merge one server activity event into the cached session without deriving a
+   * new raw status from the presentation-only waiting/checking states. This is
+   * the single browser transition path for snapshots and incremental events.
+   */
+  _applySessionActivityEvent(data, transition = 'updated', refresh = true) {
+    const incoming = data?.session || data;
+    if (!incoming?.id) return null;
+
+    let session = this.sessions.get(incoming.id);
+    const existed = !!session;
+    if (
+      !session &&
+      transition !== 'created' &&
+      transition !== 'hydrate' &&
+      !(transition === 'updated' && this._isFullSessionSnapshot(incoming))
+    ) {
+      return null;
+    }
+    if (!session) session = { id: incoming.id };
+    const previousStatus = session.status;
+    const previousActivityStatus = session.activityStatus;
+    const previousActivityStatusSince = session.activityStatusSince;
+
+    const activityOnlyUpdate =
+      transition === 'updated' &&
+      Object.keys(incoming).every((key) => key === 'id' || key === 'activityStatus' || key === 'activityStatusSince');
+    if (transition === 'updated' && existed && !activityOnlyUpdate) session = { id: incoming.id };
+
+    if (transition === 'created' || transition === 'hydrate' || transition === 'updated') {
+      Object.assign(session, incoming);
+    } else {
+      for (const key of ['status', 'activityStatus', 'activityStatusSince']) {
+        if (Object.prototype.hasOwnProperty.call(incoming, key)) session[key] = incoming[key];
+      }
+    }
+
+    const hasStatus = Object.prototype.hasOwnProperty.call(incoming, 'status');
+    const hasActivityStatus = Object.prototype.hasOwnProperty.call(incoming, 'activityStatus');
+    const hasActivitySince = Object.prototype.hasOwnProperty.call(incoming, 'activityStatusSince');
+    const clearsDerived = ['working', 'output', 'restart', 'parked', 'resumed', 'exit'].includes(transition);
+
+    if (clearsDerived) {
+      if (!hasStatus) {
+        if (transition === 'working' || transition === 'restart') session.status = 'busy';
+        else if (transition === 'parked') session.status = 'parked';
+        else if (transition === 'resumed') session.status = 'active';
+        else if (transition === 'exit') session.status = 'stopped';
+      }
+      session.activityStatus = session.status;
+      session.activityStatusSince = null;
+    } else if (transition === 'idle') {
+      const isAgentWait = incoming.activityStatus === 'waiting_agents' || incoming.activityStatus === 'checking_agents';
+      if (!hasStatus && !isAgentWait) session.status = 'idle';
+      if (!hasActivityStatus) {
+        delete session.activityStatus;
+        delete session.activityStatusSince;
+      } else if (!hasActivitySince) {
+        session.activityStatusSince = null;
+      }
+    } else if (!hasActivityStatus && (transition === 'created' || transition === 'hydrate' || hasStatus)) {
+      // A legacy/full snapshot without derived fields replaces older client
+      // state; it must not leave a waiting claim from the previous connection.
+      delete session.activityStatus;
+      delete session.activityStatusSince;
+    } else if (hasActivityStatus && !hasActivitySince) {
+      session.activityStatusSince = null;
+    }
+
+    this.sessions.set(incoming.id, session);
+
+    const effectiveStatus = session.activityStatus || session.status;
+    const timer = this.idleTimers?.get(incoming.id);
+    if (
+      effectiveStatus === 'waiting_agents' ||
+      effectiveStatus === 'checking_agents' ||
+      transition === 'working' ||
+      transition === 'output' ||
+      transition === 'restart' ||
+      transition === 'parked' ||
+      transition === 'resumed' ||
+      transition === 'exit'
+    ) {
+      if (timer) clearTimeout(timer);
+      this.idleTimers?.delete(incoming.id);
+    } else if (transition === 'idle' && effectiveStatus === 'idle' && !timer && !this.respawnStatus?.[incoming.id]?.enabled) {
+      const threshold = this.notificationManager?.preferences?.stuckThresholdMs || 600000;
+      this.idleTimers?.set(
+        incoming.id,
+        setTimeout(() => {
+          this._notifySession(
+            incoming.id,
+            'warning',
+            'session-stuck',
+            'Session Idle',
+            `Idle for ${Math.round(threshold / 60000)}+ minutes`
+          );
+          this.idleTimers.delete(incoming.id);
+        }, threshold)
+      );
+    }
+
+    const activityChanged =
+      !existed ||
+      previousStatus !== session.status ||
+      previousActivityStatus !== session.activityStatus ||
+      previousActivityStatusSince !== session.activityStatusSince;
+    if (refresh && (activityChanged || transition === 'created' || transition === 'updated')) {
+      this._refreshSessionActivitySurfaces();
+    }
+    return session;
+  }
+
+  _refreshSessionActivitySurfaces() {
+    this.renderSessionTabs();
+    this.renderMuxSessions?.();
+  }
+
+  _isFullSessionSnapshot(session) {
+    return (
+      !!session &&
+      Object.prototype.hasOwnProperty.call(session, 'pid') &&
+      typeof session.status === 'string' &&
+      typeof session.workingDir === 'string' &&
+      Object.prototype.hasOwnProperty.call(session, 'currentTaskId') &&
+      Number.isFinite(session.createdAt) &&
+      Number.isFinite(session.lastActivityAt)
+    );
+  }
+
+  _onSessionParked(data) {
+    const session = data?.id ? this._applySessionActivityEvent(data, 'parked') : null;
+    this._onSessionListMaybeChanged?.();
+    return session;
+  }
+
+  _onSessionResumed(data) {
+    const session = data?.id ? this._applySessionActivityEvent(data, 'resumed') : null;
+    this._onSessionListMaybeChanged?.();
+    return session;
+  }
+
+  _onSessionRestarted(data) {
+    if (data?.id) this._applySessionActivityEvent(data, 'restart');
+  }
+
   _onSessionCreated(data) {
-    this.sessions.set(data.id, data);
+    this._applySessionActivityEvent(data, 'created', false);
     this.updateAttachmentHistoryCountFromSession?.(data);
     const visibilityDeferred =
       this._tabLayoutEditCoordinator?.hasPending() &&
@@ -2073,21 +2218,19 @@ class CodemanApp {
     // A spawned session's lineage arc draws in with the tab. Keyed the same way
     // session-lineage.js tags its paths; a no-op unless a line-entrance theme is on.
     if (data.parentSessionId) this.markConnectionLineEntering?.('lineage:' + data.id);
-    this.renderSessionTabs();
+    this._refreshSessionActivitySurfaces();
     this.updateCost();
-    // COD-97: keep the Monitor's mux list in sync with the open tabs.
-    this.renderMuxSessions();
     // Start stats polling when first session appears
     if (this.sessions.size === 1) this.startSystemStatsPolling();
   }
 
   _onSessionUpdated(data) {
-    const session = data.session || data;
-    const oldSession = this.sessions.get(session.id);
-    const claudeSessionIdJustSet = session.claudeSessionId && (!oldSession || !oldSession.claudeSessionId);
-    this.sessions.set(session.id, session);
+    const incoming = data.session || data;
+    const oldSession = this.sessions.get(incoming.id);
+    const claudeSessionIdJustSet = incoming.claudeSessionId && (!oldSession || !oldSession.claudeSessionId);
+    const session = this._applySessionActivityEvent(incoming, 'updated');
+    if (!session) return;
     this.updateAttachmentHistoryCountFromSession?.(session);
-    this.renderSessionTabs();
     this.updateCost();
     // Update tokens display if this is the active session
     if (session.id === this.activeSessionId && session.tokens) {
@@ -2154,6 +2297,9 @@ class CodemanApp {
   }
 
   _onSessionTerminal(data) {
+    // Terminal output invalidates any older waiting/checking projection even
+    // when this tab is not active and therefore has no renderer work below.
+    this._applySessionActivityEvent(data, 'output');
     if (data.id === this.activeSessionId) {
       // COD-187: while frozen in the history view, live output is dropped —
       // the exit-time frame refetch shows the final state. Flag it so the
@@ -3643,10 +3789,8 @@ class CodemanApp {
 
   _onSessionExit(data) {
     if (this._wsSessionId === data.id) this._disconnectWs();
-    const session = this.sessions.get(data.id);
+    const session = this._applySessionActivityEvent(data, 'exit');
     if (session) {
-      session.status = 'stopped';
-      this.renderSessionTabs();
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
     }
     // Notify on unexpected exit (non-zero code)
@@ -3656,10 +3800,12 @@ class CodemanApp {
   }
 
   _onSessionIdle(data) {
-    const session = this.sessions.get(data.id);
+    const session = this._applySessionActivityEvent(data, 'idle');
+    const effectiveStatus = session?.activityStatus || session?.status;
     if (session) {
-      session.status = 'idle';
-      this.renderSessionTabs();
+      // waiting/checking is a server-owned agent transition, not a local idle
+      // edge: no Ctrl+L, local-echo flip, reconcile, or stuck timer.
+      if (effectiveStatus === 'waiting_agents' || effectiveStatus === 'checking_agents') return;
       this.sendPendingCtrlL(data.id);
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
     }
@@ -3677,34 +3823,17 @@ class CodemanApp {
         this._reconcileForeignResize(data.id);
       }, TUI_REDRAW_SETTLE_MS);
     }
-    // Start stuck detection timer (only if no respawn running)
-    if (!this.respawnStatus[data.id]?.enabled) {
-      const threshold = this.notificationManager?.preferences?.stuckThresholdMs || 600000;
-      clearTimeout(this.idleTimers.get(data.id));
-      this.idleTimers.set(data.id, setTimeout(() => {
-        this._notifySession(data.id, 'warning', 'session-stuck', 'Session Idle', `Idle for ${Math.round(threshold / 60000)}+ minutes`);
-        this.idleTimers.delete(data.id);
-      }, threshold));
-    }
   }
 
   _onSessionWorking(data) {
-    const session = this.sessions.get(data.id);
+    const session = this._applySessionActivityEvent(data, 'working');
     if (session) {
-      session.status = 'busy';
       // Only clear tab alert if no pending hooks (permission_prompt, elicitation_dialog, etc.)
       if (!this.pendingHooks.has(data.id)) {
         this.tabAlerts.delete(data.id);
       }
-      this.renderSessionTabs();
       this.sendPendingCtrlL(data.id);
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
-    }
-    // Clear stuck detection timer
-    const timer = this.idleTimers.get(data.id);
-    if (timer) {
-      clearTimeout(timer);
-      this.idleTimers.delete(data.id);
     }
   }
 
@@ -4694,6 +4823,54 @@ class CodemanApp {
     return visibleText.length >= 3;
   }
 
+  _replaceSubagentSnapshot(records) {
+    const next = new Map();
+    this._subagentEventVersions.clear();
+    for (const record of Array.isArray(records) ? records : []) {
+      const agentKey = this._requireSubagentEventKey?.(record, 'snapshot');
+      if (!agentKey) continue;
+      next.set(agentKey, record);
+      this._touchSubagentEvent?.(agentKey);
+    }
+    this.subagents = next;
+  }
+
+  _reportSubagentRestoreFailure(err) {
+    const diagnosticKey = 'restore-chain';
+    if (!this._subagentIdentityDiagnostics) this._subagentIdentityDiagnostics = new Set();
+    if (this._subagentIdentityDiagnostics.has(diagnosticKey)) return;
+    this._subagentIdentityDiagnostics.add(diagnosticKey);
+    console.warn('[subagents] failed to restore persisted window state:', err);
+  }
+
+  async _restoreSubagentStateForInit(gen) {
+    try {
+      await this.loadSubagentParentMap(gen);
+      if (gen !== this._initGeneration) return;
+
+      for (const [agentKey, sessionId] of this.subagentParentMap) {
+        if (gen !== this._initGeneration) return;
+        const agent = this.subagents.get(agentKey);
+        if (agent && this.sessions.has(sessionId)) {
+          agent.parentSessionId = sessionId;
+          const session = this.sessions.get(sessionId);
+          if (session) agent.parentSessionName = this.getSessionName(session);
+          this.subagents.set(agentKey, agent);
+        }
+      }
+
+      for (const [agentKey] of this.subagents) {
+        if (gen !== this._initGeneration) return;
+        if (!this.subagentParentMap.has(agentKey)) this.findParentSessionForSubagent(agentKey);
+      }
+
+      if (gen !== this._initGeneration) return;
+      await this.restoreSubagentWindowStates(gen);
+    } catch (err) {
+      if (gen === this._initGeneration) this._reportSubagentRestoreFailure(err);
+    }
+  }
+
   /**
    * Reset all app state maps, timers, and handlers to a clean baseline.
    * Called by handleInit() on SSE reconnect / page reload to prevent
@@ -4741,8 +4918,19 @@ class CodemanApp {
     // Clear parent name cache (prevents stale session name entries accumulating)
     if (this._parentNameCache) this._parentNameCache.clear();
     // Clear subagent activity/results maps (prevents leaks if data.subagents is missing)
+    this.subagents.clear();
     this.subagentActivity.clear();
     this.subagentToolResults.clear();
+    this.subagentParentMap.clear();
+    this._subagentEventVersions.clear();
+    this.minimizedSubagents.clear();
+    this.activeSubagentKey = null;
+    for (const timer of this._subagentWindowRenderTimeouts?.values() || []) clearTimeout(timer);
+    this._subagentWindowRenderTimeouts?.clear();
+    for (const timers of this._subagentCompletionTimers.values()) {
+      for (const timer of timers) clearTimeout(timer);
+    }
+    this._subagentCompletionTimers.clear();
     // Clear ultracode workflow run state (re-seeded from data.workflowRuns below)
     if (this.workflowRuns) this.workflowRuns.clear();
     if (this.workflowRunDetails) this.workflowRunDetails.clear();
@@ -4843,7 +5031,7 @@ class CodemanApp {
     this._resetAllAppState();
 
     data.sessions.forEach(s => {
-      this.sessions.set(s.id, s);
+      this._applySessionActivityEvent(s, 'hydrate', false);
       this.updateAttachmentHistoryCountFromSession?.(s);
       // Load ralph state from session data (only if not explicitly closed by user)
       if ((s.ralphLoop || s.ralphTodos) && !this.ralphClosedSessions.has(s.id)) {
@@ -4919,7 +5107,7 @@ class CodemanApp {
     }
 
     this.updateCost();
-    this.renderSessionTabs();
+    this._refreshSessionActivitySurfaces();
 
     // Approvals Inbox: re-seed pending prompts from the server so alerts
     // survive reloads and SSE reconnects (methods in approvals-ui.js).
@@ -4938,42 +5126,25 @@ class CodemanApp {
 
     // Load subagents - clear all related maps to prevent memory leaks on reconnect
     if (data.subagents) {
+      for (const timer of this._subagentWindowRenderTimeouts?.values() || []) clearTimeout(timer);
+      this._subagentWindowRenderTimeouts?.clear();
+      for (const timers of this._subagentCompletionTimers.values()) {
+        for (const timer of timers) clearTimeout(timer);
+      }
+      this._subagentCompletionTimers.clear();
       this.subagents.clear();
       this.subagentActivity.clear();
       this.subagentToolResults.clear();
-      data.subagents.forEach(s => {
-        this.subagents.set(s.agentId, s);
-      });
+      this.minimizedSubagents.clear();
+      this.activeSubagentKey = null;
+      this._replaceSubagentSnapshot(data.subagents);
       this.renderSubagentPanel();
 
       // Load PERSISTENT parent associations FIRST, before restoring windows
       // This ensures connection lines are drawn to the correct tabs
       // Clear the in-memory map first to ensure fresh state from storage
       this.subagentParentMap.clear();
-      this.loadSubagentParentMap().then(() => {
-        // Apply stored parent associations to agents
-        for (const [agentId, sessionId] of this.subagentParentMap) {
-          const agent = this.subagents.get(agentId);
-          if (agent && this.sessions.has(sessionId)) {
-            agent.parentSessionId = sessionId;
-            const session = this.sessions.get(sessionId);
-            if (session) {
-              agent.parentSessionName = this.getSessionName(session);
-            }
-            this.subagents.set(agentId, agent);
-          }
-        }
-
-        // Now try to find parents for any agents that don't have one yet
-        for (const [agentId] of this.subagents) {
-          if (!this.subagentParentMap.has(agentId)) {
-            this.findParentSessionForSubagent(agentId);
-          }
-        }
-
-        // Finally, restore window states (this opens windows with correct parent info)
-        this.restoreSubagentWindowStates();
-      });
+      void this._restoreSubagentStateForInit(gen);
     }
 
     // Seed ultracode workflow runs (LEFT-pane summaries) from the snapshot
@@ -6307,6 +6478,9 @@ class CodemanApp {
    * it, both of which come from mobile-overview.js below.
    */
   _sidebarRichPillLabel(state) {
+    if (state === 'waiting_agents' || state === 'checking_agents') {
+      return window.CodemanSessionActivity?.resolve({ status: 'idle', activityStatus: state }).compactLabel || state;
+    }
     return {
       needs: 'needs you',
       error: 'error',
@@ -6656,7 +6830,10 @@ class CodemanApp {
         // re-marks the session tab active moments after a web tab was selected,
         // leaving two tabs lit at once.
         const isActive = id === this.activeSessionId && !this.activeWebviewId;
-        const status = session.status || 'idle';
+        const activity = window.CodemanSessionActivity?.resolve(session) || {
+          effectiveStatus: session.status || 'idle', cssState: session.status || 'idle', ariaPhrase: session.status || 'idle',
+        };
+        const status = activity.effectiveStatus;
         const name = this.getSessionName(session);
         const taskStats = session.taskStats || { running: 0, total: 0 };
         const hasRunningTasks = taskStats.running > 0;
@@ -6713,9 +6890,10 @@ class CodemanApp {
 
         // Update status indicator
         const statusEl = tab.querySelector('.tab-status');
-        if (statusEl && !statusEl.classList.contains(status)) {
-          statusEl.className = `tab-status ${status}`;
+        if (statusEl && !statusEl.classList.contains(activity.cssState)) {
+          statusEl.className = `tab-status ${activity.cssState}`;
         }
+        tab.dataset.activityStatus = status;
 
         // Rich sidebar meta ("created 3d ago · working 12m" + pill). The stamps
         // themselves move on _tickSidebarRichTimes(); this is here for the parts
@@ -6759,6 +6937,7 @@ class CodemanApp {
             ? `${name}\n${session.workingDir}`
             : name;
           this._syncTabPlacementAccessibility(tab, { kind: 'session', id }, name, tooltip);
+          tab.setAttribute('aria-label', `${tab.getAttribute('aria-label') || `${name} session`}, ${activity.ariaPhrase}`);
         }
 
         // Update task badge
@@ -7086,7 +7265,10 @@ class CodemanApp {
       // See the note in the incremental path: a web tab owns the active highlight
       // while one is open, even though activeSessionId stays set.
       const isActive = id === this.activeSessionId && !this.activeWebviewId;
-      const status = session.status || 'idle';
+      const activity = window.CodemanSessionActivity?.resolve(session) || {
+        effectiveStatus: session.status || 'idle', cssState: session.status || 'idle', ariaPhrase: session.status || 'idle',
+      };
+      const status = activity.effectiveStatus;
       const name = this.getSessionName(session);
       const mode = session.mode || 'claude';
       const color = session.color || 'default';
@@ -7128,7 +7310,7 @@ class CodemanApp {
       const focusMarker = this._tabRefFocused({ kind: 'session', id })
         ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
         : '';
-      const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
+      const accessibleName = `${placement ? `${name} session, ${placement.description}` : `${name} session`}, ${activity.ariaPhrase}`;
       const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
       // Rich sidebar rows only: the home screen's created/state stamps and a
@@ -7144,12 +7326,12 @@ class CodemanApp {
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>`;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" data-activity-status="${escapeHtml(status)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
-          <span class="tab-status ${escapeHtml(status)}" aria-hidden="true"></span>
+          <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
@@ -8227,7 +8409,7 @@ class CodemanApp {
               body: JSON.stringify({ clearBreaker: true }),
             });
             session.respawnBlocked = false;
-            session.status = 'busy';
+            this._onSessionRestarted({ id: sessionId });
           } catch (err) {
             console.error('Failed to restart crash-looped session:', err);
           }
@@ -8243,7 +8425,7 @@ class CodemanApp {
             : `/api/sessions/${sessionId}/interactive`;
           await fetch(endpoint, { method: 'POST' });
           // Update local session state
-          session.status = 'busy';
+          this._onSessionRestarted({ id: sessionId });
         } catch (err) {
           console.error('Failed to attach to restored session:', err);
         }

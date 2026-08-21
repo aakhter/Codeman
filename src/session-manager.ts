@@ -272,7 +272,7 @@ export class SessionManager extends EventEmitter {
 
   /** Gets all sessions currently idle (not processing). */
   getIdleSessions(): Session[] {
-    return this.getAllSessions().filter((s) => s.isIdle());
+    return this.getAllSessions().filter((s) => s.isAutonomouslyIdle());
   }
 
   /** Gets all sessions currently busy (processing). */

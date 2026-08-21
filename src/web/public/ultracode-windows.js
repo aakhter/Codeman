@@ -36,9 +36,9 @@ Object.assign(CodemanApp.prototype, {
     if (!this.ultracodeWindows) this.ultracodeWindows = new Map(); // runId -> { element, parentSessionId, dragListeners }
     if (!this.ultracodeWindowsClosed) this.ultracodeWindowsClosed = new Set(); // runIds the user dismissed
     if (!this.ultracodeWindowCloseTimers) this.ultracodeWindowCloseTimers = new Map(); // runId -> setTimeout id
-    if (!this.ultracodeAgentWindows) this.ultracodeAgentWindows = new Map(); // agentId -> { element, runId, dragListeners }
+    if (!this.ultracodeAgentWindows) this.ultracodeAgentWindows = new Map(); // agentKey -> window state
     if (!this.minimizedUltracodeRuns) this.minimizedUltracodeRuns = new Map(); // sessionId -> Set<runId> minimized to a tab
-    if (!this.minimizedUltracodeAgents) this.minimizedUltracodeAgents = new Map(); // sessionId -> Map<agentId,{runId,label}>
+    if (!this.minimizedUltracodeAgents) this.minimizedUltracodeAgents = new Map(); // sessionId -> Map<agentKey,{runId,label}>
     if (this.ultracodeWindowZIndex === undefined) this.ultracodeWindowZIndex = 1000;
   },
 
@@ -369,7 +369,7 @@ Object.assign(CodemanApp.prototype, {
     // …then minimized agent transcripts (📄).
     if (agentMap) {
       for (const [agentId, entry] of agentMap) {
-        const name = (entry && entry.label) || agentId;
+        const name = (entry && entry.label) || 'Agent';
         items.push(
           `<div class="subagent-dropdown-item" onclick="event.stopPropagation(); app.restoreUltracodeAgentFromTab(${escapeHtml(JSON.stringify(agentId))},${escapeHtml(JSON.stringify(sessionId))})" title="Click to restore transcript">` +
             `<span class="subagent-dropdown-status"></span>` +
@@ -459,7 +459,7 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
     const labelEl = info.element.querySelector('.uw-name');
-    const label = labelEl ? labelEl.textContent : agentId;
+    const label = (labelEl && labelEl.textContent) || 'Agent';
     if (!this.minimizedUltracodeAgents.has(parentSessionId))
       this.minimizedUltracodeAgents.set(parentSessionId, new Map());
     this.minimizedUltracodeAgents.get(parentSessionId).set(agentId, { runId, label });
@@ -557,7 +557,7 @@ Object.assign(CodemanApp.prototype, {
     this._ensureUltracodeWindowState();
     if (this.ultracodeAgentWindows.has(agentId)) return this.ultracodeAgentWindows.get(agentId).element;
 
-    const label = this._ultracodeAgentLabel(agentId, runId) || agentId;
+    const label = this._ultracodeAgentLabel(agentId, runId);
     const win = document.createElement('div');
     win.className = 'ultracode-window ultracode-agent-window spawning';
     win.id = `ultracode-agent-window-${agentId}`;
@@ -611,14 +611,14 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /** Resolve a human label for an agent from the run's fetched detail.agents[]. */
-  _ultracodeAgentLabel(agentId, runId) {
+  _ultracodeAgentLabel(agentKey, runId) {
     const detail = this.workflowRunDetails && runId ? this.workflowRunDetails.get(runId) : null;
     const agents = detail && Array.isArray(detail.agents) ? detail.agents : null;
     if (agents) {
-      const found = agents.find((a) => a.agentId === agentId);
-      if (found && found.label) return found.label;
+      const found = agents.find((a) => a.agentKey === agentKey);
+      if (found) return found.label || found.name || found.agentId || 'Agent';
     }
-    return null;
+    return 'Agent';
   },
 
   /** Fill an agent window's body with the fetched transcript (or a friendly empty state). */

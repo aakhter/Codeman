@@ -223,6 +223,7 @@ Object.assign(CodemanApp.prototype, {
         if (!session) return null;
         const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
         const state = this._mobileOverviewState(session, this.pendingHooks?.get(ref.id));
+        const activity = window.CodemanSessionActivity?.resolve(session);
         const mode = session.mode || 'claude';
         return {
           kind: 'session',
@@ -238,7 +239,12 @@ Object.assign(CodemanApp.prototype, {
           caseName: matched ? matched.name : '',
           dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
           state,
-          pill: HOME_SESSIONS_PILL_LABEL[state] || state,
+          activityStatus: activity?.effectiveStatus || session.status || 'idle',
+          activityStatusSince: Number(session.activityStatusSince) || 0,
+          pill:
+            state === 'waiting_agents' || state === 'checking_agents'
+              ? activity?.compactLabel || state
+              : HOME_SESSIONS_PILL_LABEL[state] || state,
           // Epoch ms, straight off the session payload; formatting happens at
           // render time so the clock below can redo it without a re-render.
           createdAt: Number(session.createdAt) || 0,
@@ -451,6 +457,11 @@ Object.assign(CodemanApp.prototype, {
     item.className = 'home-sessions-row home-sessions-row--' + row.state;
     item.dataset.hsAction = 'session';
     item.dataset.hsSession = row.id;
+    const underlying = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    const presentationStatus = underlying?.overviewState === row.state ? row.activityStatus || row.state : row.state;
+    item.dataset.activityStatus = presentationStatus;
+    const activity = window.CodemanSessionActivity?.resolve({ status: presentationStatus });
+    item.setAttribute('aria-label', `${row.name}, ${activity?.ariaPhrase || row.state}`);
     item.title = row.dir ? `${row.name} (${row.dir})` : row.name;
 
     // The badge is the Alt+N key for this tab, so it keeps the tab-strip index

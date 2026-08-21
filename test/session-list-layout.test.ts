@@ -588,6 +588,33 @@ describe('session list layout wiring', () => {
  * assertion that guards that, and it is the one to read first.
  */
 describe('rich session sidebar', () => {
+  it('themes agent activity and disables its motion for reduced-motion users', () => {
+    expect(STYLES_CSS).toContain('.tab-status.waiting-agents');
+    expect(STYLES_CSS).toContain('.tab-status.checking-agents');
+    expect(STYLES_CSS).toContain('.home-sessions-pill--waiting_agents');
+    expect(STYLES_CSS).toContain('.tab-pill--checking_agents');
+    expect(MOBILE_CSS).toContain('.mobile-overview-pill--waiting_agents');
+    expect(STYLES_CSS).toContain('var(--session-purple)');
+    expect(STYLES_CSS).toMatch(/prefers-reduced-motion: reduce[\s\S]*waiting-agents/);
+    expect(MOBILE_CSS).toContain('[data-activity-status="waiting_agents"]');
+    expect(STYLES_CSS).toContain('--lineage-activity-color: var(--session-purple)');
+    expect(STYLES_CSS).toContain('stroke: var(--lineage-effective-color)');
+    expect(STYLES_CSS).toContain('fill: var(--lineage-effective-color)');
+  });
+  it('shows effective agent activity in rich sidebar metadata', () => {
+    const { win, app } = boot({ stored: { sessionListLayout: 'sidebar-rich' } });
+    app.pendingHooks = new Map();
+    app._mobileOverviewState = (session) => (win as any).CodemanSessionActivity.resolve(session).overviewState;
+    app._mobileOverviewSince = (_state, session) => ({ key: 'checking', at: Number(session.activityStatusSince) });
+    const row = app._sidebarRichRow('s1', {
+      ...SESSION,
+      status: 'idle',
+      activityStatus: 'checking_agents',
+      activityStatusSince: 4321,
+    });
+    expect(row).toMatchObject({ state: 'checking_agents', pill: 'CHECKING', since: { at: 4321 } });
+    expect(app._sidebarRichPillLabel('waiting_agents')).toBe('AGENTS');
+  });
   /**
    * The row model is built from mobile-overview.js helpers, which the harness
    * does not eval (it would drag the whole phone overview in for three

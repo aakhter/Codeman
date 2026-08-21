@@ -40,6 +40,18 @@ import type { AttachmentDetectedType } from './tools.js';
  */
 export type SessionStatus = 'idle' | 'busy' | 'stopped' | 'error' | 'parked';
 
+/** Effective runtime activity exposed by the server without replacing raw SessionStatus. */
+export type SessionActivityStatus = SessionStatus | 'waiting_agents' | 'checking_agents';
+
+/** Server-side confidence about exactly correlated background-agent activity. */
+export type AgentObservation = 'none' | 'live' | 'unknown' | 'not_observable';
+
+/** Runtime-only agent activity derived by the server coordinator. */
+export interface SessionActivityProjection {
+  activityStatus: SessionActivityStatus;
+  activityStatusSince: number | null;
+}
+
 /**
  * Claude CLI startup permission mode.
  * - `'dangerously-skip-permissions'`: Bypass all permission prompts (default)

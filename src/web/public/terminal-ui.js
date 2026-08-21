@@ -3810,9 +3810,11 @@ Object.assign(CodemanApp.prototype, {
       }
       const ok = !!res && res.ok;
       if (ok) {
-        s.status = 'parked';
+        const sessionId = s.sessionId || s.id;
+        const canonical = this._onSessionParked({ id: sessionId });
+        if (canonical && canonical !== s) Object.assign(s, canonical);
+        else if (!canonical) Object.assign(s, { status: 'parked', activityStatus: 'parked', activityStatusSince: null });
         this.showToast('Session parked', 'success');
-        this._onSessionListMaybeChanged?.();
       } else {
         this.showToast('Park failed', 'error');
       }
@@ -3869,9 +3871,11 @@ Object.assign(CodemanApp.prototype, {
       const res = await this._apiPost(`/api/sessions/${encodeURIComponent(s.sessionId)}/resume`, {});
       const ok = !!res && res.ok;
       if (ok) {
-        s.status = 'active';
+        const sessionId = s.sessionId || s.id;
+        const canonical = this._onSessionResumed({ id: sessionId });
+        if (canonical && canonical !== s) Object.assign(s, canonical);
+        else if (!canonical) Object.assign(s, { status: 'active', activityStatus: 'active', activityStatusSince: null });
         this.showToast('Session resumed', 'success');
-        this._onSessionListMaybeChanged?.();
       } else {
         this.showToast('Resume failed', 'error');
       }

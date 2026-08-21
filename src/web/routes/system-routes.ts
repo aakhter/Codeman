@@ -50,7 +50,15 @@ import {
 import { SseEvent } from '../sse-events.js';
 import { getInstallInfo, checkForUpdate, startUpdate, getUpdateStatusForApi } from '../self-update.js';
 import { getRepositoryStatus } from '../repo-status.js';
-import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort, TabLayoutPort } from '../ports/index.js';
+import type {
+  SessionPort,
+  EventPort,
+  ConfigPort,
+  InfraPort,
+  AuthPort,
+  TabLayoutPort,
+  AgentActivityPort,
+} from '../ports/index.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
 import { AUTH_SESSION_TTL_MS } from '../../config/auth-config.js';
@@ -66,6 +74,65 @@ const SCREENSHOTS_DIR = dataPath('screenshots');
 
 /** Cached CPU count — doesn't change at runtime */
 const CPU_COUNT = cpus().length;
+
+interface OwnerScopedConfig<T> {
+  _codemanOwnerScoped: 1;
+  owners: Record<string, T>;
+  legacy?: T;
+}
+
+const ownerScopedWriteQueues = new Map<string, Promise<void>>();
+
+function isOwnerScopedConfig<T>(value: unknown): value is OwnerScopedConfig<T> {
+  return !!value && typeof value === 'object' && (value as { _codemanOwnerScoped?: unknown })._codemanOwnerScoped === 1;
+}
+
+async function readOwnerScopedConfig<T>(
+  filePath: string,
+  label: string,
+  fallback: T,
+  username: string,
+  admin: boolean
+): Promise<T> {
+  const stored = await readJsonConfig<unknown>(filePath, label, fallback);
+  if (!isMultiUserMode()) {
+    return isOwnerScopedConfig<T>(stored) ? (stored.legacy ?? stored.owners[username] ?? fallback) : (stored as T);
+  }
+  // Admins have their own persisted view and are the only callers allowed to
+  // consume pre-multi-user legacy state. Ordinary users never receive it.
+  if (!isOwnerScopedConfig<T>(stored)) return admin ? (stored as T) : fallback;
+  return stored.owners[username] ?? (admin && stored.legacy !== undefined ? stored.legacy : fallback);
+}
+
+async function writeOwnerScopedConfig<T>(filePath: string, label: string, value: T, username: string): Promise<void> {
+  const previous = ownerScopedWriteQueues.get(filePath) ?? Promise.resolve();
+  const operation = previous
+    .catch(() => undefined)
+    .then(async () => {
+      let stored: T | OwnerScopedConfig<T> = value;
+      if (isMultiUserMode()) {
+        const prior = await readJsonConfig<unknown>(filePath, label, undefined);
+        const scoped: OwnerScopedConfig<T> = isOwnerScopedConfig<T>(prior)
+          ? prior
+          : {
+              _codemanOwnerScoped: 1,
+              owners: {},
+              ...(prior !== undefined ? { legacy: prior as T } : {}),
+            };
+        scoped.owners[username] = value;
+        stored = scoped;
+      }
+      const dir = dirname(filePath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      await fs.writeFile(filePath, JSON.stringify(stored, null, 2));
+    });
+  ownerScopedWriteQueues.set(filePath, operation);
+  try {
+    await operation;
+  } finally {
+    if (ownerScopedWriteQueues.get(filePath) === operation) ownerScopedWriteQueues.delete(filePath);
+  }
+}
 
 function parseOptionalNumber(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === '') return undefined;
@@ -133,7 +200,7 @@ export function resolveSpanUrl(hostHeader: string | undefined, fallbackPort = '3
 
 export function registerSystemRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort & AgentActivityPort
 ): void {
   const windowStatesPath = dataPath('subagent-window-states.json');
   const parentMapPath = dataPath('subagent-parents.json');
@@ -786,7 +853,9 @@ export function registerSystemRoutes(
       // services to the effective stored settings instead, which also self-heals
       // drift. Same convention as the tmuxHistoryLimit block above.
       // Handle subagent tracking toggle dynamically
-      toggleService((merged.subagentTrackingEnabled as boolean) ?? true, subagentWatcher, 'Subagent watcher');
+      const subagentTrackingEnabled = (merged.subagentTrackingEnabled as boolean) ?? true;
+      if ('subagentTrackingEnabled' in settings) ctx.agentActivity.setTrackingEnabled(subagentTrackingEnabled);
+      toggleService(subagentTrackingEnabled, subagentWatcher, 'Subagent watcher');
 
       // Handle ultracode/workflow run watcher toggle dynamically (default OFF).
       // Either the docked panel OR the floating windows keep the watcher running.
@@ -914,18 +983,22 @@ export function registerSystemRoutes(
   // ═══════════════════════════════════════════════════════════════
 
   // ========== Subagent Window State Persistence ===
-  app.get('/api/subagent-window-states', async () => {
-    return readJsonConfig(windowStatesPath, 'subagent window states', { minimized: {}, open: [] });
+  app.get('/api/subagent-window-states', async (req) => {
+    const user = getAuthUser(req);
+    return readOwnerScopedConfig(
+      windowStatesPath,
+      'subagent window states',
+      { minimized: {}, open: [] },
+      user.username,
+      user.role === 'admin'
+    );
   });
 
   app.put('/api/subagent-window-states', async (req) => {
     const states = parseBody(SubagentWindowStatesSchema, req.body, 'Invalid window states') as Record<string, unknown>;
     try {
-      const dir = dirname(windowStatesPath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      await fs.writeFile(windowStatesPath, JSON.stringify(states, null, 2));
+      const user = getAuthUser(req);
+      await writeOwnerScopedConfig(windowStatesPath, 'subagent window states', states, user.username);
       return {};
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
@@ -933,18 +1006,16 @@ export function registerSystemRoutes(
   });
 
   // ========== Subagent Parent Associations ===
-  app.get('/api/subagent-parents', async () => {
-    return readJsonConfig(parentMapPath, 'subagent parent map', {});
+  app.get('/api/subagent-parents', async (req) => {
+    const user = getAuthUser(req);
+    return readOwnerScopedConfig(parentMapPath, 'subagent parent map', {}, user.username, user.role === 'admin');
   });
 
   app.put('/api/subagent-parents', async (req) => {
     const parentMap = parseBody(SubagentParentMapSchema, req.body, 'Invalid parent map');
     try {
-      const dir = dirname(parentMapPath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      await fs.writeFile(parentMapPath, JSON.stringify(parentMap, null, 2));
+      const user = getAuthUser(req);
+      await writeOwnerScopedConfig(parentMapPath, 'subagent parent map', parentMap, user.username);
       return {};
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
@@ -993,7 +1064,8 @@ export function registerSystemRoutes(
   app.get('/api/sessions/:id/subagents', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
-    const subagents = subagentWatcher.getSubagentsForSession(session.workingDir);
+    const claudeSessionId = session.claudeSessionId ?? session.id;
+    const subagents = subagentWatcher.getSubagentsForConversation(session.workingDir, claudeSessionId);
     return { success: true, data: subagents };
   });
 
@@ -1001,7 +1073,11 @@ export function registerSystemRoutes(
     // Multi-user stopgap: cross-user subagent metadata is admin-only (no-op single-user).
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     const { agentId } = req.params as { agentId: string };
-    const info = subagentWatcher.getSubagent(agentId);
+    const resolved = subagentWatcher.resolveSubagentReference(agentId);
+    if (resolved.status === 'ambiguous') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, `Subagent ID ${agentId} is ambiguous; use its agentKey`);
+    }
+    const info = resolved.status === 'found' ? resolved.info : subagentWatcher.getSubagent(agentId);
     if (!info) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, `Subagent ${agentId} not found`);
     }
@@ -1015,7 +1091,12 @@ export function registerSystemRoutes(
     const { agentId } = req.params as { agentId: string };
     const { limit, format } = req.query as { limit?: string; format?: 'raw' | 'formatted' };
     const limitNum = limit ? parseInt(limit, 10) : undefined;
-    const transcript = await subagentWatcher.getTranscript(agentId, limitNum);
+    const resolved = subagentWatcher.resolveSubagentReference(agentId);
+    if (resolved.status === 'ambiguous') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, `Subagent ID ${agentId} is ambiguous; use its agentKey`);
+    }
+    const exactReference = resolved.status === 'found' ? resolved.info.agentKey : agentId;
+    const transcript = await subagentWatcher.getTranscript(exactReference, limitNum);
 
     if (format === 'formatted') {
       const formatted = subagentWatcher.formatTranscript(transcript);
@@ -1030,16 +1111,32 @@ export function registerSystemRoutes(
     // (no-op allow-all in single-user mode).
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     const { agentId } = req.params as { agentId: string };
-    const info = subagentWatcher.getSubagent(agentId);
+    const resolved = subagentWatcher.resolveSubagentReference(agentId);
+    if (resolved.status === 'ambiguous') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, `Subagent ID ${agentId} is ambiguous; use its agentKey`);
+    }
+    const info = resolved.status === 'found' ? resolved.info : subagentWatcher.getSubagent(agentId);
     if (!info) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Subagent not found');
     }
 
-    const killed = await subagentWatcher.killSubagent(agentId);
-    if (killed) {
-      return { success: true, data: { agentId, status: 'killed' } };
+    const exactReference = resolved.status === 'found' ? resolved.info.agentKey : agentId;
+    const result = await subagentWatcher.killSubagent(exactReference);
+    if (result.status === 'killed') {
+      return {
+        success: true,
+        data: { agentKey: info.agentKey, agentId: info.agentId, status: 'killed' },
+      };
     }
-    return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Subagent not found or already completed');
+    const messages: Record<typeof result.status, string> = {
+      not_found: 'Subagent not found',
+      already_completed: 'Subagent already completed',
+      atomic_termination_unavailable: 'Atomic exact subagent termination is unavailable for this Claude runtime',
+      unverifiable: 'Exact subagent process identity could not be verified',
+      stale_process: 'The exact subagent process changed before termination',
+      signal_failed: 'The verified subagent process could not be terminated',
+    };
+    return { ...createErrorResponse(ApiErrorCode.OPERATION_FAILED, messages[result.status]), reason: result.status };
   });
 
   app.post('/api/subagents/cleanup', async (req, reply) => {
@@ -1053,7 +1150,7 @@ export function registerSystemRoutes(
     // Multi-user stopgap: clearing ALL users' subagents is a cross-user write → admin-only (no-op single-user).
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     const cleared = subagentWatcher.clearAll();
-    return { success: true, data: { cleared } };
+    return { success: true, data: { cleared, remaining: subagentWatcher.getSubagents() } };
   });
 
   // ═══════════════════════════════════════════════════════════════

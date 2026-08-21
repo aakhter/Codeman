@@ -160,6 +160,16 @@ describe('GET /api/sessions/:id/wait', () => {
     expect(body.data.wait.signal).toBe('idle');
   });
 
+  it('does not immediately report raw idle while agent activity blocks autonomy', async () => {
+    const { app, ctx } = await harness();
+    ctx.sessions.get(SESSION_ID)!.blocksIdleAutomation = true;
+    const pending = app.inject({ method: 'GET', url: `/api/sessions/${SESSION_ID}/wait` });
+
+    await vi.waitFor(() => expect(sessionWaits.signalWaiterCount(SESSION_ID)).toBe(1));
+    sessionWaits.notifySignal(SESSION_ID, 'stop');
+    expect((await pending).json().data.wait).toMatchObject({ signal: 'stop', immediate: false });
+  });
+
   it('rejects an unknown until token instead of falling back to the default', async () => {
     const { app } = await harness();
     const res = await app.inject({ method: 'GET', url: `/api/sessions/${SESSION_ID}/wait?until=stpo` });
@@ -555,6 +565,11 @@ describe('a PTY exit releases waiters that did not ask for exit', () => {
       cleanupRespawnOnExit: vi.fn(),
       getStore: vi.fn(() => ({ updateRalphState: vi.fn() })),
       registerAttachment: vi.fn(async () => {}),
+      agentActivity: {
+        sessionExited: vi.fn(),
+        allocateEvent: vi.fn((_session, kind) => ({ sequence: 1, kind })),
+        decideEvent: vi.fn(() => ({ presentToHuman: true, settleEndedEarly: false })),
+      },
       ...overrides,
     };
   }

@@ -16,6 +16,7 @@ const PUBLIC = resolve(import.meta.dirname, '../src/web/public');
 
 /** Minimal fake DOM node — enough surface for the programmatic row builders. */
 function fakeElement(): any {
+  const attributes = new Map<string, string>();
   const el: any = {
     className: '',
     type: '',
@@ -24,7 +25,12 @@ function fakeElement(): any {
     dataset: {},
     style: {},
     children: [] as any[],
-    setAttribute() {},
+    setAttribute(name: string, value: string) {
+      attributes.set(name, String(value));
+    },
+    getAttribute(name: string) {
+      return attributes.get(name) ?? null;
+    },
     appendChild(child: any) {
       el.children.push(child);
       return child;
@@ -90,6 +96,75 @@ function sessionMap(list: Array<Record<string, any>>) {
 }
 
 describe('home sessions column: model', () => {
+  it('uses effective agent activity for desktop rows and stable episode ages', () => {
+    const app = loadHomeSessionsApp({
+      sessions: sessionMap([{ id: 'agents', activityStatus: 'waiting_agents', activityStatusSince: 1234 }]),
+      sessionOrder: ['agents'],
+      webviews: new Map(),
+      webviewOrder: [],
+      cases: CASES,
+      pendingHooks: new Map(),
+    });
+    const row = app.buildHomeSessionRows()[0];
+    expect(row).toMatchObject({ state: 'waiting_agents', pill: 'AGENTS', since: { at: 1234 } });
+    expect(app._buildHomeSessionRow(row).dataset.activityStatus).toBe('waiting_agents');
+  });
+
+  it('orders checking episodes by activityStatusSince across incremental model rebuilds', () => {
+    const sessions = sessionMap([
+      { id: 'young-check', activityStatus: 'checking_agents', activityStatusSince: 8000, lastActivityAt: 100 },
+      { id: 'old-check', activityStatus: 'checking_agents', activityStatusSince: 2000, lastActivityAt: 900 },
+    ]);
+    const app = loadHomeSessionsApp({
+      sessions,
+      sessionOrder: ['young-check', 'old-check'],
+      webviews: new Map(),
+      webviewOrder: [],
+      cases: CASES,
+      pendingHooks: new Map(),
+    });
+    const ids = () => app.buildHomeSessionRows().map((row: any) => row.id);
+    const pills = () => app.buildHomeSessionRows().map((row: any) => row.pill);
+
+    expect(ids()).toEqual(['old-check', 'young-check']);
+    expect(pills()).toEqual(['CHECKING', 'CHECKING']);
+    sessions.get('young-check').lastActivityAt = 50_000;
+    sessions.get('old-check').lastActivityAt = 10;
+    expect(ids()).toEqual(['old-check', 'young-check']);
+  });
+
+  it('uses hook-winning data and ARIA until action hooks clear', () => {
+    const sessions = sessionMap([
+      { id: 'permission', name: 'Permission', activityStatus: 'waiting_agents' },
+      { id: 'elicitation', name: 'Elicitation', activityStatus: 'checking_agents' },
+      { id: 'idle-hook', name: 'Idle hook', activityStatus: 'waiting_agents' },
+    ]);
+    const app = loadHomeSessionsApp({
+      sessions,
+      sessionOrder: ['permission', 'elicitation', 'idle-hook'],
+      webviews: new Map(),
+      webviewOrder: [],
+      cases: CASES,
+      pendingHooks: new Map([
+        ['permission', new Set(['permission_prompt'])],
+        ['elicitation', new Set(['elicitation_dialog'])],
+        ['idle-hook', new Set(['idle_prompt'])],
+      ]),
+    });
+    const render = () => new Map(app.buildHomeSessionRows().map((row: any) => [row.id, app._buildHomeSessionRow(row)]));
+    const blocked = render();
+    expect(blocked.get('permission').dataset.activityStatus).toBe('needs');
+    expect(blocked.get('permission').getAttribute('aria-label')).toContain('needs your permission or input');
+    expect(blocked.get('elicitation').dataset.activityStatus).toBe('needs');
+    expect(blocked.get('idle-hook').dataset.activityStatus).toBe('waiting');
+    expect(blocked.get('idle-hook').getAttribute('aria-label')).toContain('waiting for your input');
+
+    app.pendingHooks = new Map();
+    const restored = render();
+    expect(restored.get('permission').dataset.activityStatus).toBe('waiting_agents');
+    expect(restored.get('permission').getAttribute('aria-label')).toContain('waiting on background agents');
+    expect(restored.get('elicitation').dataset.activityStatus).toBe('checking_agents');
+  });
   it('renders actual Home rows and badges in complete authoritative interleaved order', () => {
     const home = fakeElement();
     const app = loadHomeSessionsApp(

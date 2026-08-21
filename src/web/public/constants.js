@@ -592,12 +592,78 @@ const SESSION_ACTIVITY_RANK = {
   error: 1,
   waiting: 2,
   working: 3,
-  idle: 4,
-  done: 5,
+  waiting_agents: 4,
+  checking_agents: 5,
+  idle: 6,
+  done: 7,
 };
 
 /** States still in progress, where the OLDEST stamp sorts first. */
-const SESSION_ACTIVITY_OLDEST_FIRST = ['needs', 'error', 'waiting', 'working'];
+const SESSION_ACTIVITY_OLDEST_FIRST = ['needs', 'error', 'waiting', 'working', 'waiting_agents', 'checking_agents'];
+
+const AGENT_ACTIVITY_PRESENTATION = {
+  waiting_agents: {
+    compactLabel: 'AGENTS',
+    expandedLabel: 'WAITING ON AGENTS',
+    ariaPhrase: 'waiting on background agents',
+    cssState: 'waiting-agents',
+  },
+  checking_agents: {
+    compactLabel: 'CHECKING',
+    expandedLabel: 'CHECKING AGENTS',
+    ariaPhrase: 'checking background agents',
+    cssState: 'checking-agents',
+  },
+};
+
+const SESSION_ACTIVITY_ARIA = {
+  needs: 'needs your permission or input',
+  waiting: 'waiting for your input',
+  error: 'has an error',
+  working: 'working',
+  idle: 'idle',
+  done: 'done',
+};
+
+function resolveSessionActivity(session = {}) {
+  const rawStatus = session.status || 'idle';
+  const effectiveStatus = session.activityStatus || rawStatus;
+  const overviewState =
+    effectiveStatus === 'busy'
+      ? 'working'
+      : effectiveStatus === 'stopped'
+        ? 'done'
+        : effectiveStatus === 'parked'
+          ? 'idle'
+          : effectiveStatus;
+  const presentation = AGENT_ACTIVITY_PRESENTATION[effectiveStatus] || {};
+  const activeAt = Number(session.lastActivityAt) || 0;
+  const sortAnchor =
+    effectiveStatus === 'waiting_agents' || effectiveStatus === 'checking_agents'
+      ? Number(session.activityStatusSince) || activeAt
+      : overviewState === 'working'
+        ? Number(session.lastSubmitAt) || activeAt
+        : activeAt;
+  return {
+    rawStatus,
+    effectiveStatus,
+    overviewState,
+    compactLabel: presentation.compactLabel || effectiveStatus.toUpperCase(),
+    expandedLabel: presentation.expandedLabel || effectiveStatus.toUpperCase(),
+    ariaPhrase: presentation.ariaPhrase || SESSION_ACTIVITY_ARIA[effectiveStatus] || effectiveStatus.replaceAll('_', ' '),
+    cssState: presentation.cssState || effectiveStatus.replaceAll('_', '-'),
+    sortAnchor,
+  };
+}
+
+function sessionToOverviewRow(session = {}) {
+  const activity = resolveSessionActivity(session);
+  return { ...session, state: activity.overviewState, activityStatusSince: activity.sortAnchor };
+}
+
+function sessionWireSortAnchor(session = {}) {
+  return session && session.state ? sessionActivityAnchor(session) : resolveSessionActivity(session).sortAnchor;
+}
 
 /**
  * When the row entered the state it is in.
@@ -616,6 +682,9 @@ const SESSION_ACTIVITY_OLDEST_FIRST = ['needs', 'error', 'waiting', 'working'];
  */
 function sessionActivityAnchor(row) {
   const activeAt = Number(row && row.lastActivityAt) || 0;
+  if (row && (row.state === 'waiting_agents' || row.state === 'checking_agents')) {
+    return Number(row.activityStatusSince) || activeAt;
+  }
   if (row && row.state === 'working') return Number(row.lastSubmitAt) || activeAt;
   return activeAt;
 }
@@ -734,6 +803,12 @@ if (typeof window !== 'undefined') {
     anchor: sessionActivityAnchor,
     compare: compareSessionActivity,
     sort: sortSessionsByActivity,
+  };
+  window.CodemanSessionActivity = {
+    RANK: SESSION_ACTIVITY_RANK,
+    resolve: resolveSessionActivity,
+    toOverviewRow: sessionToOverviewRow,
+    sortAnchor: sessionWireSortAnchor,
   };
   window.CodemanTerminalFont = {
     DEFAULT_STACK: TERMINAL_FONT_DEFAULT_STACK,

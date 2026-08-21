@@ -18,6 +18,9 @@ import { describe, expect, it } from 'vitest';
 type Row = {
   id: string;
   state: string;
+  status?: string;
+  activityStatus?: string;
+  activityStatusSince?: number | null;
   lastActivityAt?: number;
   lastSubmitAt?: number;
   orderIndex?: number;
@@ -39,10 +42,80 @@ function loadOrderHelper() {
   ).CodemanSessionOrder;
 }
 
+function loadActivityHelper() {
+  const context = vm.createContext({ window: {}, globalThis: {} });
+  vm.runInContext(readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8'), context);
+  return (context.window as any).CodemanSessionActivity;
+}
+
 const order = loadOrderHelper();
+const activity = loadActivityHelper();
 const ids = (rows: Row[]) => order.sort(rows).map((r) => r.id);
 
 describe('session overview order: state ranking', () => {
+  it('projects wire activity through one exhaustive resolver with legacy fallback', () => {
+    const raw = ['idle', 'busy', 'stopped', 'error', 'parked'];
+    expect(raw.map((status) => activity.resolve({ status }).effectiveStatus)).toEqual(raw);
+    expect(activity.resolve({ status: 'idle', activityStatus: 'waiting_agents' })).toMatchObject({
+      effectiveStatus: 'waiting_agents',
+      overviewState: 'waiting_agents',
+      compactLabel: 'AGENTS',
+      expandedLabel: 'WAITING ON AGENTS',
+      ariaPhrase: 'waiting on background agents',
+      cssState: 'waiting-agents',
+    });
+    expect(activity.resolve({ status: 'idle', activityStatus: 'checking_agents' })).toMatchObject({
+      effectiveStatus: 'checking_agents',
+      overviewState: 'checking_agents',
+      compactLabel: 'CHECKING',
+      expandedLabel: 'CHECKING AGENTS',
+      ariaPhrase: 'checking background agents',
+      cssState: 'checking-agents',
+    });
+    expect(activity.resolve({ status: 'parked', activityStatus: 'parked' }).overviewState).toBe('idle');
+  });
+
+  it('keeps existing rank order and inserts agent states after working', () => {
+    expect(activity.RANK).toEqual({
+      needs: 0,
+      error: 1,
+      waiting: 2,
+      working: 3,
+      waiting_agents: 4,
+      checking_agents: 5,
+      idle: 6,
+      done: 7,
+    });
+  });
+
+  it('uses the stable agent episode timestamp and sorts oldest first', () => {
+    const old = activity.toOverviewRow({
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+      activityStatusSince: 1000,
+      lastActivityAt: 9000,
+    });
+    const young = activity.toOverviewRow({
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+      activityStatusSince: 5000,
+      lastActivityAt: 1000,
+    });
+    expect(activity.sortAnchor(old)).toBe(1000);
+    expect(
+      order
+        .sort([
+          { id: 'young', ...young },
+          { id: 'old', ...old },
+        ])
+        .map((row: Row) => row.id)
+    ).toEqual(['old', 'young']);
+  });
+
+  it('exposes the correct sort anchor directly for every wire payload shape', () => {
+    expect(activity.resolve({ status: 'busy', lastSubmitAt: 12, lastActivityAt: 99 }).sortAnchor).toBe(12);
+    expect(activity.sortAnchor({ status: 'idle', lastActivityAt: 44 })).toBe(44);
+  });
   it('puts everything blocked on a human above everything else', () => {
     // Red question, then a hard error, then the yellow "waiting for input"
     // prompt, then work, then whatever has stopped.

@@ -68,6 +68,7 @@ import * as fs from 'fs';
 import * as fsPromises from 'node:fs/promises';
 import { createInterface } from 'readline';
 import { execSync } from 'child_process';
+import { serializeSubagentKey } from '../src/claude-project-identity.js';
 
 /**
  * Flush the microtask queue to allow async scanForSubagents() to complete.
@@ -137,6 +138,14 @@ function createMockRl() {
   return rl;
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('SubagentWatcher', () => {
   let watcher: SubagentWatcher;
   let mockExistsSync: Mock;
@@ -150,6 +159,7 @@ describe('SubagentWatcher', () => {
   let mockReaddir: Mock;
   let mockStatAsync: Mock;
   let mockReadFile: Mock;
+  let mockProcessKill: Mock;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -166,6 +176,7 @@ describe('SubagentWatcher', () => {
     mockReaddir = fsPromises.readdir as Mock;
     mockStatAsync = fsPromises.stat as Mock;
     mockReadFile = fsPromises.readFile as Mock;
+    mockProcessKill = vi.spyOn(process, 'kill').mockReturnValue(true);
 
     // Default mocks - no projects exist
     mockExistsSync.mockReturnValue(false);
@@ -189,10 +200,14 @@ describe('SubagentWatcher', () => {
 
     // Create new watcher for each test
     watcher = new SubagentWatcher();
+    watcher.setExactSubagentProcessProvider(
+      vi.fn(async () => ({ status: 'atomic_terminator', terminate: async () => 'terminated' }))
+    );
   });
 
   afterEach(() => {
     watcher.stop();
+    mockProcessKill.mockRestore();
     vi.useRealTimers();
   });
 
@@ -233,6 +248,401 @@ describe('SubagentWatcher', () => {
       watcher.start(); // Should be no-op
 
       expect(watcher.isRunning()).toBe(true);
+    });
+  });
+
+  describe('Composite lifecycle identity', () => {
+    const registerMeta = async (
+      projectHash: string,
+      sessionId: string,
+      agentId: string,
+      mtime = new Date()
+    ): Promise<string> => {
+      const path = `/home/test/.claude/projects/${projectHash}/${sessionId}/subagents/agent-${agentId}.meta.json`;
+      mockExistsSync.mockReturnValue(false);
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: mtime,
+        mtime,
+        size: 50,
+      });
+      mockReadFileSync.mockReturnValue(JSON.stringify({ description: `Agent ${agentId} task` }));
+      await (
+        watcher as unknown as {
+          registerAgentMeta(path: string, projectHash: string, sessionId: string, initial: boolean): Promise<void>;
+        }
+      ).registerAgentMeta(path, projectHash, sessionId, false);
+      return serializeSubagentKey(projectHash, sessionId, agentId);
+    };
+
+    it('keeps identical bare IDs isolated across projects and conversations', async () => {
+      const firstKey = await registerMeta('-work-one', 'conversation-a', 'shared');
+      const secondKey = await registerMeta('-work-two', 'conversation-b', 'shared');
+
+      expect(watcher.getSubagents().map((agent) => agent.agentKey)).toEqual([firstKey, secondKey]);
+      expect(watcher.getSubagent(firstKey)?.sessionId).toBe('conversation-a');
+      expect(watcher.getSubagent(secondKey)?.sessionId).toBe('conversation-b');
+      expect(watcher.resolveSubagentReference('shared').status).toBe('ambiguous');
+      expect(watcher.updateDescription('shared', 'must not cross conversations')).toBe(false);
+    });
+
+    it('isolates parallel conversations in the same directory and returns only live exact matches', async () => {
+      await registerMeta('-work-shared', 'conversation-a', 'same');
+      const peerKey = await registerMeta('-work-shared', 'conversation-b', 'same');
+      watcher.getSubagent(serializeSubagentKey('-work-shared', 'conversation-a', 'same'))!.status = 'idle';
+      await watcher.killSubagent(peerKey);
+
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toHaveLength(1);
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-b')).toEqual([]);
+    });
+
+    it('upgrades one composite meta record when its transcript appears', async () => {
+      const key = await registerMeta('-work-shared', 'conversation-a', 'upgrade');
+      const transcript = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-upgrade.jsonl';
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 100,
+      });
+      mockCreateInterface.mockReturnValue(createMockRl());
+
+      await (
+        watcher as unknown as {
+          registerAgentFile(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentFile(transcript, '-work-shared', 'conversation-a');
+
+      expect(watcher.getSubagents()).toHaveLength(1);
+      expect(watcher.getSubagent(key)?.filePath).toBe(transcript);
+    });
+
+    it('restores the semantic live index only after a parsed transcript append', async () => {
+      const key = await registerMeta('-work-shared', 'conversation-a', 'resumed');
+      const transcript = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-resumed.jsonl';
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 100,
+      });
+      mockCreateInterface.mockImplementation(() => {
+        const rl = createMockRl();
+        queueMicrotask(() => rl.emit('close'));
+        return rl;
+      });
+      await (
+        watcher as unknown as {
+          registerAgentFile(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentFile(transcript, '-work-shared', 'conversation-a');
+      await flushAsyncScan();
+      await watcher.killSubagent(key);
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toEqual([]);
+
+      const revisions = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      mockCreateInterface.mockImplementationOnce(() => {
+        const rl = createMockRl();
+        queueMicrotask(() => {
+          rl.emit('line', createAssistantTextEntry('New agent activity'));
+          rl.emit('close');
+        });
+        return rl;
+      });
+      await (watcher as unknown as { handleFileChange(path: string): Promise<void> }).handleFileChange(transcript);
+
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toEqual([
+        expect.objectContaining({ agentKey: key, status: 'active' }),
+      ]);
+      expect(revisions).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'resumed', agents: [expect.objectContaining({ agentKey: key })] })
+      );
+    });
+
+    it('does not resurrect a completed agent for unchanged, malformed, or truncated file notifications', async () => {
+      const key = await registerMeta('-work-shared', 'conversation-a', 'spurious');
+      const transcript = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-spurious.jsonl';
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 100,
+      });
+      mockCreateInterface.mockImplementation(() => {
+        const rl = createMockRl();
+        queueMicrotask(() => rl.emit('close'));
+        return rl;
+      });
+      await (
+        watcher as unknown as {
+          registerAgentFile(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentFile(transcript, '-work-shared', 'conversation-a');
+      await flushAsyncScan();
+      await watcher.killSubagent(key);
+      const state = watcher as unknown as { filePositions: Map<string, number> };
+      state.filePositions.set(transcript, 100);
+
+      const revisions = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      for (const notification of ['unchanged', 'malformed', 'empty-entry', 'truncated']) {
+        mockStatSync.mockReturnValueOnce({
+          isDirectory: () => false,
+          birthtime: new Date(),
+          mtime: new Date(),
+          size: notification === 'truncated' ? 50 : notification === 'empty-entry' ? 130 : 100,
+        });
+        mockCreateInterface.mockImplementationOnce(() => {
+          const rl = createMockRl();
+          queueMicrotask(() => {
+            if (notification === 'malformed') rl.emit('line', 'not-json');
+            if (notification === 'empty-entry') rl.emit('line', JSON.stringify({ type: 'assistant' }));
+            rl.emit('close');
+          });
+          return rl;
+        });
+        await (watcher as unknown as { handleFileChange(path: string): Promise<void> }).handleFileChange(transcript);
+      }
+
+      expect(watcher.getSubagent(key)?.status).toBe('completed');
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toEqual([]);
+      expect(revisions).not.toHaveBeenCalled();
+    });
+
+    it('emits completion and semantic revision only once for duplicate completion signals', async () => {
+      const key = await registerMeta('-work-shared', 'conversation-a', 'duplicate-completion');
+      const info = watcher.getSubagent(key)!;
+      const completed = vi.fn();
+      const revisions = vi.fn();
+      watcher.on('subagent:completed', completed);
+      watcher.on('subagent:semantic_revision', revisions);
+
+      const internals = watcher as unknown as { markSubagentAsCompleted(info: SubagentInfo): void };
+      internals.markSubagentAsCompleted(info);
+      internals.markSubagentAsCompleted(info);
+
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(revisions).toHaveBeenCalledTimes(1);
+    });
+
+    it('prevents deferred discovery and watcher setup from committing after stop and allows a fresh restart', async () => {
+      const delayedStat = deferred<ReturnType<typeof mockStatSync>>();
+      mockStatAsync.mockImplementationOnce(() => delayedStat.promise);
+      mockReadFileSync.mockReturnValue(JSON.stringify({ description: 'Deferred agent task' }));
+      const semantic = vi.fn();
+      watcher.on('subagent:semantic_revision', semantic);
+      const metaPath = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-deferred.meta.json';
+      const pendingRegistration = (
+        watcher as unknown as {
+          registerAgentMeta(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentMeta(metaPath, '-work-shared', 'conversation-a');
+
+      watcher.stop();
+      delayedStat.resolve({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 50,
+      });
+      await pendingRegistration;
+
+      expect(watcher.getSubagents()).toEqual([]);
+      expect(watcher.getStats()).toMatchObject({ idleTimerCount: 0, dirWatcherCount: 0, filePositionsCount: 0 });
+      expect(semantic).not.toHaveBeenCalled();
+
+      const delayedRead = deferred<string[]>();
+      mockReaddir.mockImplementationOnce(() => delayedRead.promise);
+      const pendingWatch = (
+        watcher as unknown as {
+          watchSubagentDir(dir: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).watchSubagentDir('/tmp/deferred-watch', '-work-shared', 'conversation-a');
+      watcher.stop();
+      delayedRead.resolve([]);
+      await pendingWatch;
+      expect(mockWatch).not.toHaveBeenCalled();
+
+      watcher.start();
+      await (
+        watcher as unknown as {
+          registerAgentMeta(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentMeta(metaPath, '-work-shared', 'conversation-a');
+      expect(watcher.getSubagents()).toHaveLength(1);
+    });
+
+    it('ignores initial tail callbacks that finish after stop', async () => {
+      await registerMeta('-work-shared', 'conversation-a', 'late-tail');
+      const transcript = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-late-tail.jsonl';
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 100,
+      });
+      const lateRl = createMockRl();
+      mockCreateInterface.mockReturnValue(lateRl);
+      await (
+        watcher as unknown as {
+          registerAgentFile(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentFile(transcript, '-work-shared', 'conversation-a');
+      const semantic = vi.fn();
+      const messages = vi.fn();
+      watcher.on('subagent:semantic_revision', semantic);
+      watcher.on('subagent:message', messages);
+
+      lateRl.emit('line', createAssistantTextEntry('too late'));
+      watcher.stop();
+      lateRl.emit('close');
+      await flushAsyncScan();
+
+      expect(watcher.getSubagents()).toEqual([]);
+      expect(watcher.getStats()).toMatchObject({ idleTimerCount: 0, filePositionsCount: 0 });
+      expect(semantic).not.toHaveBeenCalled();
+      expect(messages).not.toHaveBeenCalled();
+    });
+
+    it('targeted reconciliation bypasses startup age filtering', async () => {
+      const old = new Date(Date.now() - 8 * 60 * 60 * 1000);
+      mockReaddirSync.mockImplementation((path: string) => {
+        if (path.endsWith('/subagents')) return ['agent-old.meta.json'];
+        return [];
+      });
+      mockStatSync.mockImplementation((path: string) => ({
+        isDirectory: () => !path.endsWith('.json'),
+        birthtime: old,
+        mtime: old,
+        size: 50,
+      }));
+      mockReadFileSync.mockReturnValue(JSON.stringify({ description: 'Still live old agent' }));
+      mockExistsSync.mockReturnValue(false);
+
+      await watcher.reconcileConversation('-work-shared', 'conversation-a');
+
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toHaveLength(1);
+    });
+
+    it('treats a missing exact directory as zero but propagates unreadable reconciliation', async () => {
+      const errors = vi.fn();
+      watcher.on('subagent:error', errors);
+      mockReaddir.mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+
+      await expect(watcher.reconcileConversation('-work-shared', 'missing-conversation')).resolves.toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+
+      mockReaddir.mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'EACCES' }));
+      await expect(watcher.reconcileConversation('-work-shared', 'denied-conversation')).rejects.toMatchObject({
+        code: 'EACCES',
+      });
+      expect(errors).toHaveBeenLastCalledWith(
+        expect.objectContaining({ code: 'EACCES' }),
+        expect.objectContaining({ projectHash: '-work-shared', sessionId: 'denied-conversation' })
+      );
+    });
+
+    it('propagates unreadable workflow reconciliation instead of reporting exact zero', async () => {
+      mockReaddir.mockImplementation(async (path: string) => {
+        if (path.endsWith('/subagents')) return [];
+        throw Object.assign(new Error('workflow I/O failure'), { code: 'EIO' });
+      });
+      const errors = vi.fn();
+      watcher.on('subagent:error', errors);
+
+      await expect(watcher.reconcileConversation('-work-shared', 'conversation-eio')).rejects.toMatchObject({
+        code: 'EIO',
+      });
+      expect(errors).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EIO' }),
+        expect.objectContaining({ projectHash: '-work-shared', sessionId: 'conversation-eio' })
+      );
+    });
+
+    it('includes the watched Claude identity when a zero-agent directory watcher errors', async () => {
+      let watchedError: ((error: Error) => void) | undefined;
+      mockWatch.mockReturnValue({
+        close: vi.fn(),
+        off: vi.fn(),
+        on: vi.fn((event: string, handler: (error: Error) => void) => {
+          if (event === 'error') watchedError = handler;
+        }),
+      });
+      mockReaddir.mockImplementation(async (path: string) => {
+        if (path.endsWith('/workflows')) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        return [];
+      });
+      const errors = vi.fn();
+      watcher.on('subagent:error', errors);
+      await watcher.reconcileConversation('-work-shared', 'conversation-watched');
+
+      watchedError?.(Object.assign(new Error('watch failed'), { code: 'EIO' }));
+
+      expect(errors).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EIO' }),
+        expect.objectContaining({ projectHash: '-work-shared', sessionId: 'conversation-watched' })
+      );
+    });
+
+    it('history cleanup and manual clear retain positively live records', async () => {
+      const revisions = vi.fn();
+      const resets = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      watcher.on('subagent:reset', resets);
+      const liveKey = await registerMeta('-work-shared', 'conversation-a', 'live');
+      const staleDoneKey = await registerMeta('-work-shared', 'conversation-a', 'stale-done');
+      await watcher.killSubagent(staleDoneKey);
+      const staleDone = watcher.getSubagent(staleDoneKey)!;
+      staleDone.lastActivityAt = Date.now() - 2 * 60 * 60 * 1000;
+
+      expect(watcher.cleanupNow()).toBe(1);
+      expect(watcher.getSubagent(liveKey)?.status).toBe('active');
+
+      const doneKey = await registerMeta('-work-shared', 'conversation-a', 'done');
+      await watcher.killSubagent(doneKey);
+
+      expect(watcher.clearAll()).toBe(1);
+      expect(watcher.getSubagent(liveKey)?.status).toBe('active');
+      expect(watcher.getSubagent(doneKey)).toBeUndefined();
+      expect(revisions.mock.calls.map(([event]) => event.revision)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+      expect(resets).toHaveBeenCalledWith({
+        reason: 'manual_clear',
+        remaining: [expect.objectContaining({ agentKey: liveKey })],
+      });
+    });
+
+    it('reports overflow as unknown only for the affected parent', async () => {
+      const overflow = vi.fn();
+      watcher.on('subagent:overflow', overflow);
+      const state = watcher as unknown as { agentInfo: Map<string, SubagentInfo> };
+      for (let i = 0; i < 500; i++) {
+        const agentKey = serializeSubagentKey('-other', 'peer', `live-${i}`);
+        state.agentInfo.set(agentKey, {
+          agentKey,
+          agentId: `live-${i}`,
+          sessionId: 'peer',
+          projectHash: '-other',
+          filePath: `/tmp/${i}`,
+          startedAt: new Date().toISOString(),
+          lastActivityAt: Date.now(),
+          status: 'active',
+          toolCallCount: 0,
+          entryCount: 0,
+          fileSize: 0,
+        });
+      }
+
+      await registerMeta('-affected', 'conversation-a', 'overflow');
+
+      expect(overflow).toHaveBeenCalledTimes(1);
+      expect(overflow.mock.calls[0][0]).toMatchObject({
+        projectHash: '-affected',
+        sessionId: 'conversation-a',
+        observation: 'unknown',
+      });
+      expect(overflow.mock.calls[0][0]).not.toMatchObject({ sessionId: 'peer' });
     });
   });
 
@@ -656,6 +1066,7 @@ describe('SubagentWatcher', () => {
         await vi.advanceTimersByTimeAsync(150);
 
         // Complete the new readline (tailFile)
+        newMockRl.emit('line', createAssistantTextEntry('New transcript activity'));
         newMockRl.emit('close');
         await vi.advanceTimersByTimeAsync(100);
 
@@ -665,6 +1076,8 @@ describe('SubagentWatcher', () => {
     });
 
     it('should transition to completed when file becomes stale', async () => {
+      const inspectLiveness = vi.fn(async () => 'not_live' as const);
+      watcher.setProcessLivenessProvider(inspectLiveness);
       const mockRl = createMockRl();
       mockCreateInterface.mockReturnValue(mockRl);
       mockCreateReadStream.mockReturnValue({ destroy: vi.fn() });
@@ -709,7 +1122,33 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(11000);
 
       expect(completedHandler).toHaveBeenCalled();
+      expect(inspectLiveness).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'stale' }));
       expect(watcher.getSubagents()[0].status).toBe('completed');
+    });
+
+    it('keeps stale agents live when exact process evidence is unavailable', async () => {
+      watcher.setProcessLivenessProvider(vi.fn(async () => 'unknown'));
+      const state = watcher as unknown as { agentInfo: Map<string, SubagentInfo>; liveAgentKeys: Set<string> };
+      const info: SubagentInfo = {
+        agentKey: serializeSubagentKey('-project1', 'session1', 'uncertain'),
+        agentId: 'uncertain',
+        projectHash: '-project1',
+        sessionId: 'session1',
+        filePath: '/stale/agent-uncertain.jsonl',
+        startedAt: new Date().toISOString(),
+        lastActivityAt: 0,
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 1,
+      };
+      state.agentInfo.set(info.agentKey, info);
+      state.liveAgentKeys.add(info.agentKey);
+
+      watcher.start();
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(info.status).toBe('active');
     });
   });
 
@@ -1549,12 +1988,38 @@ describe('SubagentWatcher', () => {
   });
 
   describe('killSubagent', () => {
-    it('should return false for unknown agent', async () => {
+    const registerKillAgent = (agentId: string, sessionId = 'conversation-a'): string => {
+      const projectHash = '-work-shared';
+      const agentKey = serializeSubagentKey(projectHash, sessionId, agentId);
+      const info: SubagentInfo = {
+        agentKey,
+        agentId,
+        sessionId,
+        projectHash,
+        filePath: `/tmp/${agentId}.jsonl`,
+        startedAt: new Date().toISOString(),
+        lastActivityAt: Date.now(),
+        status: 'active',
+        toolCallCount: 0,
+        entryCount: 0,
+        fileSize: 0,
+      };
+      const state = watcher as unknown as {
+        agentInfo: Map<string, SubagentInfo>;
+        liveAgentKeys: Set<string>;
+      };
+      state.agentInfo.set(agentKey, info);
+      state.liveAgentKeys.add(agentKey);
+      return agentKey;
+    };
+
+    it('returns a typed result for an unknown agent', async () => {
       const result = await watcher.killSubagent('nonexistent');
-      expect(result).toBe(false);
+      expect(result).toEqual({ status: 'not_found' });
     });
 
     it('should return false for already completed agent', async () => {
+      watcher.setProcessLivenessProvider(vi.fn(async () => 'not_live'));
       const mockRl = createMockRl();
       mockCreateInterface.mockReturnValue(mockRl);
       mockCreateReadStream.mockReturnValue({ destroy: vi.fn() });
@@ -1587,7 +2052,7 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(11000);
 
       const result = await watcher.killSubagent('killcomplete');
-      expect(result).toBe(false);
+      expect(result).toEqual({ status: 'already_completed' });
     });
 
     it('should emit completed event when killing active agent', async () => {
@@ -1625,8 +2090,135 @@ describe('SubagentWatcher', () => {
       await vi.advanceTimersByTimeAsync(100);
 
       const result = await watcher.killSubagent('killactive');
-      expect(result).toBe(true);
+      expect(result).toMatchObject({ status: 'killed' });
       expect(completedHandler).toHaveBeenCalled();
+    });
+
+    it('fails safely without changing liveness when exact process proof is unsupported', async () => {
+      const key = registerKillAgent('same');
+      const revisions = vi.fn();
+      const completed = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      watcher.on('subagent:completed', completed);
+      watcher.setExactSubagentProcessProvider(vi.fn(async () => ({ status: 'atomic_termination_unavailable' })));
+
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'atomic_termination_unavailable' });
+
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
+      expect(revisions).not.toHaveBeenCalled();
+      expect(completed).not.toHaveBeenCalled();
+      expect(mockProcessKill).not.toHaveBeenCalled();
+    });
+
+    it('invokes only the atomic terminator issued for the exact selected key when identities collide', async () => {
+      const first = registerKillAgent('same');
+      const second = registerKillAgent('peer');
+      const terminated = vi.fn(async () => 'terminated' as const);
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async (info) =>
+          info.agentKey === second
+            ? { status: 'atomic_terminator', terminate: terminated }
+            : { status: 'atomic_termination_unavailable' }
+        )
+      );
+
+      await expect(watcher.killSubagent(second)).resolves.toMatchObject({ status: 'killed' });
+
+      expect(terminated).toHaveBeenCalledTimes(1);
+      expect(mockProcessKill).not.toHaveBeenCalled();
+      expect(watcher.getSubagent(first)?.status).toBe('active');
+      expect(watcher.getSubagent(second)?.status).toBe('completed');
+    });
+
+    it('does not complete the exact target when signaling the verified pid fails', async () => {
+      const key = registerKillAgent('same');
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: async () => 'failed' }))
+      );
+
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'signal_failed' });
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
+    });
+
+    it('does not fall back to process.kill when an inspected pid exits or is reused before termination', async () => {
+      const key = registerKillAgent('same');
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: async () => 'stale' }))
+      );
+
+      await expect(watcher.killSubagent(key)).resolves.toEqual({ status: 'stale_process' });
+
+      expect(mockProcessKill).not.toHaveBeenCalled();
+      expect(watcher.getSubagent(key)?.status).toBe('active');
+      expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
+    });
+
+    it('fences semantic commit when the captured record completes during atomic termination', async () => {
+      const key = registerKillAgent('same');
+      const termination = deferred<'terminated'>();
+      const completed = vi.fn();
+      watcher.on('subagent:completed', completed);
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: () => termination.promise }))
+      );
+      const state = watcher as unknown as {
+        markSubagentAsCompleted(info: SubagentInfo): void;
+      };
+      const captured = watcher.getSubagent(key)!;
+
+      const killing = watcher.killSubagent(key);
+      await Promise.resolve();
+      state.markSubagentAsCompleted(captured);
+      termination.resolve('terminated');
+
+      await expect(killing).resolves.toEqual({ status: 'stale_process' });
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(watcher.getSubagent(key)?.status).toBe('completed');
+    });
+
+    it('does not mutate a replacement object rediscovered under the same composite key', async () => {
+      const key = registerKillAgent('same');
+      const termination = deferred<'terminated'>();
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: () => termination.promise }))
+      );
+      const state = watcher as unknown as {
+        agentInfo: Map<string, SubagentInfo>;
+        liveAgentKeys: Set<string>;
+      };
+      const replacement = { ...watcher.getSubagent(key)!, description: 'rediscovered replacement' };
+
+      const killing = watcher.killSubagent(key);
+      await Promise.resolve();
+      state.agentInfo.delete(key);
+      state.liveAgentKeys.delete(key);
+      state.agentInfo.set(key, replacement);
+      state.liveAgentKeys.add(key);
+      termination.resolve('terminated');
+
+      await expect(killing).resolves.toEqual({ status: 'stale_process' });
+      expect(watcher.getSubagent(key)).toBe(replacement);
+      expect(replacement.status).toBe('active');
+    });
+
+    it('does not report killed when the captured record status changes during atomic termination', async () => {
+      const key = registerKillAgent('same');
+      const termination = deferred<'terminated'>();
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: () => termination.promise }))
+      );
+      const captured = watcher.getSubagent(key)!;
+
+      const killing = watcher.killSubagent(key);
+      await Promise.resolve();
+      captured.status = 'idle';
+      termination.resolve('terminated');
+
+      await expect(killing).resolves.toEqual({ status: 'stale_process' });
+      expect(watcher.getSubagent(key)).toBe(captured);
+      expect(captured.status).toBe('idle');
     });
   });
 

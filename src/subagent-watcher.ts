@@ -33,16 +33,17 @@ import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
-import { execFile } from 'node:child_process';
 import { readFile, readdir, stat as statAsync } from 'node:fs/promises';
 import { PENDING_TOOL_CALL_TTL_MS, MAX_PENDING_TOOL_CALLS, MAX_TRACKED_AGENTS } from './config/map-limits.js';
 import { STALE_DATA_MAX_AGE_MS } from './config/server-timing.js';
 import { FILE_PEEK_BYTES } from './config/buffer-limits.js';
 import { CleanupManager, KeyedDebouncer } from './utils/index.js';
+import { claudeProjectHash, parseSubagentKey, serializeSubagentKey } from './claude-project-identity.js';
 
 // ========== Types ==========
 
 export interface SubagentInfo {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   projectHash: string;
@@ -62,6 +63,7 @@ export interface SubagentInfo {
 }
 
 export interface SubagentToolCall {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -72,6 +74,7 @@ export interface SubagentToolCall {
 }
 
 export interface SubagentProgress {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -83,6 +86,7 @@ export interface SubagentProgress {
 }
 
 export interface SubagentMessage {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -126,6 +130,7 @@ export interface SubagentTranscriptEntry {
 }
 
 export interface SubagentToolResult {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -134,6 +139,31 @@ export interface SubagentToolResult {
   preview: string; // First 500 chars of result
   contentLength: number; // Total length of result
   isError: boolean; // Whether result is an error
+}
+
+export type SubagentProcessLiveness = 'live' | 'not_live' | 'unknown';
+export type SubagentProcessLivenessProvider = (info: Readonly<SubagentInfo>) => Promise<SubagentProcessLiveness>;
+export type ExactSubagentProcessResult =
+  // The callback owns both last-moment identity validation and signaling. A
+  // numeric PID alone is deliberately never kill authorization (PID reuse).
+  | { status: 'atomic_terminator'; terminate: () => Promise<'terminated' | 'stale' | 'failed'> }
+  | { status: 'atomic_termination_unavailable' | 'unverifiable' };
+export type ExactSubagentProcessProvider = (info: Readonly<SubagentInfo>) => Promise<ExactSubagentProcessResult>;
+export type KillSubagentResult =
+  | { status: 'killed'; agentKey: string }
+  | {
+      status:
+        | 'not_found'
+        | 'already_completed'
+        | 'atomic_termination_unavailable'
+        | 'unverifiable'
+        | 'stale_process'
+        | 'signal_failed';
+    };
+export interface SubagentWatcherErrorContext {
+  projectHash: string;
+  sessionId: string;
+  directory?: string;
 }
 
 // ========== Constants ==========
@@ -145,7 +175,6 @@ const FULL_SCAN_EVERY_N_POLLS = 5; // Full directory traversal every 5th poll (5
 const LIVENESS_CHECK_MS = 10000; // Check if subagent processes are still alive every 10s
 const FILE_ALIVE_THRESHOLD_MS = 30000; // File mtime within 30s = agent alive (primary check)
 const STALE_COMPLETED_MAX_AGE_MS = STALE_DATA_MAX_AGE_MS; // Remove completed agents older than 1 hour
-const STALE_IDLE_MAX_AGE_MS = 4 * 60 * 60 * 1000; // Remove idle agents older than 4 hours
 const STARTUP_MAX_FILE_AGE_MS = 4 * 60 * 60 * 1000; // Only load files modified in last 4 hours on startup
 
 // Internal Claude Code agent patterns to filter out (not real user-initiated subagents)
@@ -169,14 +198,21 @@ const COMMAND_DISPLAY_LENGTH = 60; // Max length for command display
 const INPUT_TRUNCATE_LENGTH = 100; // Max length for input value truncation
 const FILE_CONTENT_DEBOUNCE_MS = 100; // Debounce delay for file content updates
 
+function isMissingPathError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
 // ========== SubagentWatcher Class ==========
 
 export class SubagentWatcher extends EventEmitter {
+  private lifecycleGeneration = 0;
   private filePositions = new Map<string, number>();
   private dirWatchers = new Map<string, FSWatcher>();
   // Per-file debouncer for directory watcher (replaces per-file FSWatchers)
   private fileDeb = new KeyedDebouncer(FILE_CONTENT_DEBOUNCE_MS);
   private agentInfo = new Map<string, SubagentInfo>();
+  // Semantic live index is deliberately independent of completed display history.
+  private liveAgentKeys = new Set<string>();
   private idleDeb = new KeyedDebouncer(IDLE_TIMEOUT_MS);
   private cleanup = new CleanupManager();
   private _isRunning = false;
@@ -194,11 +230,22 @@ export class SubagentWatcher extends EventEmitter {
   // Store error handlers for FSWatchers to enable proper cleanup (prevent memory leaks)
   private dirWatcherErrorHandlers = new Map<string, (error: Error) => void>();
   // Map filePath → { projectHash, sessionId } for directory watcher file-change handling
-  private fileAgentContext = new Map<string, { projectHash: string; sessionId: string }>();
+  private fileAgentContext = new Map<string, { projectHash: string; sessionId: string; agentKey: string }>();
+  private semanticRevisions = new Map<string, number>();
+  private processLivenessProvider?: SubagentProcessLivenessProvider;
+  private exactSubagentProcessProvider?: ExactSubagentProcessProvider;
 
   constructor() {
     super();
     this.setMaxListeners(50);
+  }
+
+  setProcessLivenessProvider(provider: SubagentProcessLivenessProvider | undefined): void {
+    this.processLivenessProvider = provider;
+  }
+
+  setExactSubagentProcessProvider(provider: ExactSubagentProcessProvider | undefined): void {
+    this.exactSubagentProcessProvider = provider;
   }
 
   /**
@@ -217,10 +264,18 @@ export class SubagentWatcher extends EventEmitter {
    * Mark a subagent as completed: clear PID, set status, clean up pending tool calls, emit event.
    */
   private markSubagentAsCompleted(info: SubagentInfo): void {
+    if (info.status === 'completed') return;
+    const wasSemanticallyLive = this.liveAgentKeys.delete(info.agentKey);
     info.pid = undefined;
     info.status = 'completed';
-    this.pendingToolCalls.delete(info.agentId);
+    this.pendingToolCalls.delete(info.agentKey);
+    if (!wasSemanticallyLive) return;
+    this.emitSemanticRevision(info.projectHash, info.sessionId, 'completed');
     this.emit('subagent:completed', info);
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return generation === this.lifecycleGeneration;
   }
 
   /**
@@ -250,20 +305,22 @@ export class SubagentWatcher extends EventEmitter {
    */
   private emitToolResult(
     content: { tool_use_id: string; content?: string | Array<{ type: string; text?: string }>; is_error?: boolean },
-    agentId: string,
-    sessionId: string,
+    agentKey: string,
     timestamp: string
   ): void {
+    const info = this.agentInfo.get(agentKey);
+    if (!info) return;
     const resultContent = this.extractToolResultContent(content.content);
-    const agentPendingCalls = this.pendingToolCalls.get(agentId);
+    const agentPendingCalls = this.pendingToolCalls.get(agentKey);
     const pendingCall = agentPendingCalls?.get(content.tool_use_id);
     const toolName = pendingCall?.toolName;
     // Delete after lookup to prevent memory leak
     agentPendingCalls?.delete(content.tool_use_id);
 
     const toolResult: SubagentToolResult = {
-      agentId,
-      sessionId,
+      agentKey,
+      agentId: info.agentId,
+      sessionId: info.sessionId,
       timestamp,
       toolUseId: content.tool_use_id,
       tool: toolName,
@@ -274,15 +331,39 @@ export class SubagentWatcher extends EventEmitter {
     this.emit('subagent:tool_result', toolResult);
   }
 
+  private parentKey(projectHash: string, sessionId: string): string {
+    return JSON.stringify([projectHash, sessionId]);
+  }
+
+  private emitSemanticRevision(projectHash: string, sessionId: string, reason: string): void {
+    const parentKey = this.parentKey(projectHash, sessionId);
+    const revision = (this.semanticRevisions.get(parentKey) ?? 0) + 1;
+    this.semanticRevisions.set(parentKey, revision);
+    this.emit('subagent:semantic_revision', {
+      projectHash,
+      sessionId,
+      revision,
+      reason,
+      agents: this.getSubagentsForIdentity(projectHash, sessionId),
+    });
+  }
+
+  getSemanticSnapshot(projectHash: string, sessionId: string): { revision: number; agents: SubagentInfo[] } {
+    return {
+      revision: this.semanticRevisions.get(this.parentKey(projectHash, sessionId)) ?? 0,
+      agents: this.getSubagentsForIdentity(projectHash, sessionId),
+    };
+  }
+
   /**
-   * Find the oldest inactive (non-active) agent for LRU eviction.
-   * Returns the agent ID of the oldest inactive agent, or null if all are active.
+   * Find the oldest completed history record for LRU eviction.
+   * Positively live active/idle records are never capacity-evicted.
    */
-  private findOldestInactiveAgent(): string | null {
+  private findOldestCompletedAgent(): string | null {
     let oldestId: string | null = null;
     let oldestTime = Infinity;
     for (const [id, existing] of this.agentInfo) {
-      if (existing.status !== 'active' && existing.lastActivityAt < oldestTime) {
+      if (existing.status === 'completed' && existing.lastActivityAt < oldestTime) {
         oldestTime = existing.lastActivityAt;
         oldestId = id;
       }
@@ -309,10 +390,13 @@ export class SubagentWatcher extends EventEmitter {
   start(): void {
     if (this._isRunning) return;
     this._isRunning = true;
+    const generation = ++this.lifecycleGeneration;
 
     // Initial scan (always runs immediately)
     this._pollCount = 0;
-    this.scanForSubagents().catch((err) => this.emit('subagent:error', err as Error));
+    this.scanForSubagents(generation).catch((err) => {
+      if (this.isCurrentGeneration(generation)) this.emit('subagent:error', err as Error);
+    });
 
     // Periodic scan for new subagent directories
     // Full directory traversal only every FULL_SCAN_EVERY_N_POLLS polls (~5s)
@@ -321,7 +405,9 @@ export class SubagentWatcher extends EventEmitter {
       () => {
         this._pollCount++;
         if (this._pollCount % FULL_SCAN_EVERY_N_POLLS === 0) {
-          this.scanForSubagents().catch((err) => this.emit('subagent:error', err as Error));
+          this.scanForSubagents(generation).catch((err) => {
+            if (this.isCurrentGeneration(generation)) this.emit('subagent:error', err as Error);
+          });
         }
       },
       POLL_INTERVAL_MS,
@@ -329,7 +415,7 @@ export class SubagentWatcher extends EventEmitter {
     );
 
     // Periodic liveness check for active subagents
-    this.startLivenessChecker();
+    this.startLivenessChecker(generation);
   }
 
   /**
@@ -339,11 +425,12 @@ export class SubagentWatcher extends EventEmitter {
    * Uses a 3-tier check to minimize cost:
    *   1. File mtime (stat ~0.3ms/agent) — if transcript modified recently, agent is alive
    *   2. Cached PID (/proc/{pid}/stat ~0.1ms) — if stored PID still exists, alive
-   *   3. Full pgrep scan (expensive, ~500ms) — only for agents that fail tiers 1+2
+   *   3. Server-supplied exact role inspection — only for agents that fail tiers 1+2
    */
-  private startLivenessChecker(): void {
+  private startLivenessChecker(generation: number): void {
     this.cleanup.setInterval(
       async () => {
+        if (!this.isCurrentGeneration(generation)) return;
         // Guard: prevent concurrent liveness checks (avoids duplicate completed events)
         if (this._isCheckingLiveness) return;
         this._isCheckingLiveness = true;
@@ -353,34 +440,41 @@ export class SubagentWatcher extends EventEmitter {
           const needsFullScan: SubagentInfo[] = [];
 
           for (const [_agentId, info] of this.agentInfo) {
+            if (!this.isCurrentGeneration(generation)) return;
             if (info.status !== 'active' && info.status !== 'idle') continue;
 
             // Tier 1: File mtime check (~0.3ms per agent)
-            if (await this.checkSubagentFileAlive(info)) continue;
+            const fileAlive = await this.checkSubagentFileAlive(info);
+            if (!this.isCurrentGeneration(generation)) return;
+            if (fileAlive) continue;
 
             // Tier 2: Cached PID check (~0.1ms per agent)
-            if (info.pid && (await this.checkPidAlive(info.pid))) continue;
+            const cachedPidAlive = info.pid ? await this.checkPidAlive(info.pid) : false;
+            if (!this.isCurrentGeneration(generation)) return;
+            if (cachedPidAlive) continue;
 
             // Tiers 1+2 failed — need expensive scan for this agent
             needsFullScan.push(info);
           }
 
-          // Tier 3: Full pgrep scan — only if any agents failed cheap checks
+          // Tier 3: exact, role-aware inspection supplied by the owning server.
+          // Missing/unknown capability fails safe and retains watcher-live state.
           if (needsFullScan.length > 0) {
-            const pidMap = await this.getClaudePids();
-
             for (const info of needsFullScan) {
               // Re-check status in case another check completed this agent
               if (info.status !== 'active' && info.status !== 'idle') continue;
-
-              const alive = this.checkSubagentAliveFromPidMap(info, pidMap);
-              if (!alive) {
+              const liveness = this.processLivenessProvider
+                ? await this.processLivenessProvider(info).catch(() => 'unknown' as const)
+                : 'unknown';
+              if (!this.isCurrentGeneration(generation)) return;
+              if (liveness === 'not_live') {
                 this.markSubagentAsCompleted(info);
               }
             }
           }
 
           // Periodically clean up stale completed agents (older than 24 hours)
+          if (!this.isCurrentGeneration(generation)) return;
           this.cleanupStaleAgents();
         } finally {
           this._isCheckingLiveness = false;
@@ -401,82 +495,6 @@ export class SubagentWatcher extends EventEmitter {
     } catch {
       return false;
     }
-  }
-
-  /**
-   * Run pgrep once and read /proc info for all Claude PIDs in parallel.
-   * Returns a Map of pid -> { environ, cmdline } for subagent processes only.
-   * Excludes main Codeman-managed Claude processes (CODEMAN_MUX=1).
-   * Also updates cached PIDs on tracked agents when a match is found.
-   */
-  private async getClaudePids(): Promise<Map<number, { environ: string; cmdline: string }>> {
-    const result = new Map<number, { environ: string; cmdline: string }>();
-    try {
-      const pgrepOutput = await new Promise<string>((resolve, reject) => {
-        execFile('pgrep', ['-f', 'claude'], { encoding: 'utf8' }, (err, stdout) => {
-          if (err) return reject(err);
-          resolve(stdout);
-        });
-      });
-      const pids = pgrepOutput
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map((s) => parseInt(s, 10))
-        .filter((n) => !Number.isNaN(n));
-
-      // Read /proc for all PIDs in parallel
-      await Promise.all(
-        pids.map(async (pid) => {
-          let environ = '';
-          let cmdline = '';
-          try {
-            environ = await readFile(`/proc/${pid}/environ`, 'utf8');
-          } catch {
-            /* skip */
-          }
-          try {
-            cmdline = await readFile(`/proc/${pid}/cmdline`, 'utf8');
-          } catch {
-            /* skip */
-          }
-          // Skip main Codeman-managed Claude processes — only track subagents
-          if (environ.includes('CODEMAN_MUX=1')) return;
-          if (environ || cmdline) {
-            result.set(pid, { environ, cmdline });
-          }
-        })
-      );
-
-      // Update cached PIDs on tracked agents
-      for (const [pid, procInfo] of result) {
-        for (const [_agentId, info] of this.agentInfo) {
-          if (info.status !== 'active' && info.status !== 'idle') continue;
-          if (procInfo.environ.includes(info.sessionId) || procInfo.cmdline.includes(info.sessionId)) {
-            info.pid = pid;
-            break; // Each PID belongs to at most one agent
-          }
-        }
-      }
-    } catch {
-      // pgrep returns non-zero if no matches
-    }
-    return result;
-  }
-
-  /**
-   * Check if a subagent is alive using the pre-fetched pid map (no process spawning).
-   */
-  private checkSubagentAliveFromPidMap(
-    info: SubagentInfo,
-    pidMap: Map<number, { environ: string; cmdline: string }>
-  ): boolean {
-    for (const [_pid, procInfo] of pidMap) {
-      if (procInfo.environ.includes(info.sessionId) || procInfo.cmdline.includes(info.sessionId)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /**
@@ -508,6 +526,7 @@ export class SubagentWatcher extends EventEmitter {
    * Stop watching and clean up all state
    */
   stop(): void {
+    ++this.lifecycleGeneration;
     this._isRunning = false;
 
     // Dispose poll and liveness intervals, then re-create for potential restart
@@ -535,16 +554,18 @@ export class SubagentWatcher extends EventEmitter {
     // Clear all state for clean restart
     this.filePositions.clear();
     this.agentInfo.clear();
+    this.liveAgentKeys.clear();
     this.knownSubagentDirs.clear();
     this.pendingToolCalls.clear();
     this.parentDescriptionCache.clear();
+    this.semanticRevisions.clear();
     this._pollCount = 0;
+    this.emit('subagent:reset', { reason: 'stop' });
   }
 
   /**
    * Clean up stale agents to prevent unbounded memory growth.
    * - Completed agents: removed after STALE_COMPLETED_MAX_AGE_MS (1 hour)
-   * - Idle agents: removed after STALE_IDLE_MAX_AGE_MS (4 hours)
    * Also enforces MAX_TRACKED_AGENTS limit with LRU eviction.
    * Also cleans up orphaned pending tool calls older than PENDING_TOOL_CALL_TTL_MS.
    */
@@ -558,18 +579,16 @@ export class SubagentWatcher extends EventEmitter {
       // Clean up based on status and age
       if (info.status === 'completed' && age > STALE_COMPLETED_MAX_AGE_MS) {
         agentsToDelete.add(agentId);
-      } else if (info.status === 'idle' && age > STALE_IDLE_MAX_AGE_MS) {
-        agentsToDelete.add(agentId);
       }
     }
 
     // Enforce max tracked agents limit (LRU eviction)
     const currentCount = this.agentInfo.size - agentsToDelete.size;
     if (currentCount > MAX_TRACKED_AGENTS) {
-      // Sort by lastActivityAt (oldest first) and evict oldest completed/idle agents
+      // Sort by lastActivityAt (oldest first) and evict completed display history only.
       const sortedAgents = Array.from(this.agentInfo.entries())
         .filter(([id]) => !agentsToDelete.has(id))
-        .filter(([, info]) => info.status !== 'active') // Keep active agents
+        .filter(([, info]) => info.status === 'completed')
         .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
 
       const toEvict = currentCount - MAX_TRACKED_AGENTS;
@@ -605,15 +624,17 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Remove an agent and all its associated resources.
    */
-  private removeAgent(agentId: string): void {
-    const info = this.agentInfo.get(agentId);
+  private removeAgent(agentKey: string): void {
+    const info = this.agentInfo.get(agentKey);
     if (info) {
-      this.agentInfo.delete(agentId);
-      this.pendingToolCalls.delete(agentId);
+      this.agentInfo.delete(agentKey);
+      this.liveAgentKeys.delete(agentKey);
+      this.pendingToolCalls.delete(agentKey);
       this.filePositions.delete(info.filePath);
       this.fileAgentContext.delete(info.filePath);
       this.fileDeb.cancelKey(info.filePath);
-      this.idleDeb.cancelKey(agentId);
+      this.idleDeb.cancelKey(agentKey);
+      this.emitSemanticRevision(info.projectHash, info.sessionId, 'removed');
     }
   }
 
@@ -632,12 +653,14 @@ export class SubagentWatcher extends EventEmitter {
    * Returns number of agents cleared.
    */
   clearAll(): number {
-    const count = this.agentInfo.size;
-    const agentIds = Array.from(this.agentInfo.keys());
-    for (const agentId of agentIds) {
-      this.removeAgent(agentId);
+    const completedKeys = Array.from(this.agentInfo.entries())
+      .filter(([, info]) => info.status === 'completed')
+      .map(([agentKey]) => agentKey);
+    for (const agentKey of completedKeys) {
+      this.removeAgent(agentKey);
     }
-    return count;
+    this.emit('subagent:reset', { reason: 'manual_clear', remaining: this.getLiveSubagents() });
+    return completedKeys.length;
   }
 
   /**
@@ -656,19 +679,99 @@ export class SubagentWatcher extends EventEmitter {
     return Array.from(this.agentInfo.values()).filter((info) => info.projectHash === projectHash);
   }
 
+  getLiveSubagents(): SubagentInfo[] {
+    const agents: SubagentInfo[] = [];
+    for (const agentKey of this.liveAgentKeys) {
+      const info = this.agentInfo.get(agentKey);
+      if (info && (info.status === 'active' || info.status === 'idle')) agents.push(info);
+    }
+    return agents;
+  }
+
+  private getSubagentsForIdentity(projectHash: string, sessionId: string): SubagentInfo[] {
+    return this.getLiveSubagents().filter((info) => info.projectHash === projectHash && info.sessionId === sessionId);
+  }
+
+  getSubagentsForConversation(workingDir: string, claudeSessionId: string): SubagentInfo[] {
+    return this.getSubagentsForIdentity(claudeProjectHash(workingDir), claudeSessionId);
+  }
+
+  async reconcileConversation(projectHash: string, claudeSessionId: string): Promise<SubagentInfo[]> {
+    const generation = this.lifecycleGeneration;
+    const subagentDir = join(CLAUDE_PROJECTS_DIR, projectHash, claudeSessionId, 'subagents');
+    try {
+      const exists = await this.reconcileDirectory(subagentDir, projectHash, claudeSessionId, generation);
+      if (!exists || !this.isCurrentGeneration(generation)) return [];
+      await this.watchSubagentDir(subagentDir, projectHash, claudeSessionId, generation, false);
+      if (!this.isCurrentGeneration(generation)) return [];
+      await this.watchWorkflowDirs(subagentDir, projectHash, claudeSessionId, false, generation);
+      if (!this.isCurrentGeneration(generation)) return [];
+      return this.getSubagentsForIdentity(projectHash, claudeSessionId);
+    } catch (error) {
+      if (this.isCurrentGeneration(generation)) {
+        this.emit('subagent:error', error as Error, {
+          projectHash,
+          sessionId: claudeSessionId,
+          directory: subagentDir,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async reconcileDirectory(
+    dir: string,
+    projectHash: string,
+    sessionId: string,
+    generation = this.lifecycleGeneration
+  ): Promise<boolean> {
+    let files: string[];
+    try {
+      files = await readdir(dir);
+    } catch (error) {
+      if (isMissingPathError(error)) return false;
+      throw error;
+    }
+    if (!this.isCurrentGeneration(generation)) return false;
+    for (const file of files) {
+      if (!this.isCurrentGeneration(generation)) return false;
+      if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
+        await this.registerAgentFile(join(dir, file), projectHash, sessionId, false, generation);
+      } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
+        await this.registerAgentMeta(join(dir, file), projectHash, sessionId, false, generation);
+      }
+    }
+    return true;
+  }
+
   /**
    * Get a specific subagent's info
    */
-  getSubagent(agentId: string): SubagentInfo | undefined {
-    return this.agentInfo.get(agentId);
+  resolveSubagentReference(
+    reference: string
+  ): { status: 'found'; info: SubagentInfo } | { status: 'not_found' } | { status: 'ambiguous' } {
+    if (parseSubagentKey(reference)) {
+      const info = this.agentInfo.get(reference);
+      return info ? { status: 'found', info } : { status: 'not_found' };
+    }
+    const matches = Array.from(this.agentInfo.values()).filter((info) => info.agentId === reference);
+    if (matches.length === 1) return { status: 'found', info: matches[0] };
+    if (matches.length > 1) return { status: 'ambiguous' };
+    return { status: 'not_found' };
+  }
+
+  getSubagent(reference: string): SubagentInfo | undefined {
+    const resolved = this.resolveSubagentReference(reference);
+    return resolved.status === 'found' ? resolved.info : undefined;
   }
 
   /**
    * Update a subagent's description.
    * Used to set the short description from TaskTracker when available.
    */
-  updateDescription(agentId: string, description: string): boolean {
-    const info = this.agentInfo.get(agentId);
+  updateDescription(reference: string, description: string): boolean {
+    const resolved = this.resolveSubagentReference(reference);
+    const info = resolved.status === 'found' ? resolved.info : undefined;
     if (info) {
       info.description = description;
       this.emit('subagent:updated', info);
@@ -726,32 +829,55 @@ export class SubagentWatcher extends EventEmitter {
   }
 
   /**
-   * Kill a subagent by its agent ID
-   * Uses cached PID first, falls back to findSubagentProcess if needed.
+   * Kill a subagent only after the server binds a fresh process proof to this
+   * exact composite agent identity. Unsupported or uncertain runtimes fail safe.
    */
-  async killSubagent(agentId: string): Promise<boolean> {
-    const info = this.agentInfo.get(agentId);
-    if (!info) return false;
+  async killSubagent(reference: string): Promise<KillSubagentResult> {
+    const generation = this.lifecycleGeneration;
+    const resolved = this.resolveSubagentReference(reference);
+    const info = resolved.status === 'found' ? resolved.info : undefined;
+    if (!info) return { status: 'not_found' };
 
     // Already completed, nothing to kill
-    if (info.status === 'completed') return false;
+    if (info.status === 'completed') return { status: 'already_completed' };
+    const captured = {
+      agentKey: info.agentKey,
+      agentId: info.agentId,
+      sessionId: info.sessionId,
+      projectHash: info.projectHash,
+      status: info.status,
+    };
+    const capturedRecordIsCurrent = (): boolean =>
+      this.isCurrentGeneration(generation) &&
+      this.agentInfo.get(captured.agentKey) === info &&
+      this.liveAgentKeys.has(captured.agentKey) &&
+      info.agentKey === captured.agentKey &&
+      info.agentId === captured.agentId &&
+      info.sessionId === captured.sessionId &&
+      info.projectHash === captured.projectHash &&
+      info.status === captured.status &&
+      (info.status === 'active' || info.status === 'idle');
 
+    if (!this.exactSubagentProcessProvider) return { status: 'atomic_termination_unavailable' };
+    let proof: ExactSubagentProcessResult;
     try {
-      // Always use findSubagentProcess for kill — it verifies environ/cmdline,
-      // preventing PID reuse attacks (cached PID may have been recycled by OS)
-      const pid = await this.findSubagentProcess(info.sessionId);
-      if (pid) {
-        process.kill(pid, 'SIGTERM');
-        this.markSubagentAsCompleted(info);
-        return true;
-      }
+      proof = await this.exactSubagentProcessProvider(info);
     } catch {
-      // Process may have already exited
+      return { status: 'unverifiable' };
     }
-
-    // Mark as completed even if we couldn't find the process
+    if (!capturedRecordIsCurrent()) return { status: 'stale_process' };
+    if (proof.status !== 'atomic_terminator') return proof;
+    let termination: 'terminated' | 'stale' | 'failed';
+    try {
+      termination = await proof.terminate();
+    } catch {
+      return { status: 'signal_failed' };
+    }
+    if (termination === 'stale') return { status: 'stale_process' };
+    if (termination === 'failed') return { status: 'signal_failed' };
+    if (!capturedRecordIsCurrent()) return { status: 'stale_process' };
     this.markSubagentAsCompleted(info);
-    return true;
+    return { status: 'killed', agentKey: info.agentKey };
   }
 
   /**
@@ -766,73 +892,7 @@ export class SubagentWatcher extends EventEmitter {
       if (agent.status === 'active' || agent.status === 'idle') {
         // Only kill subagents belonging to this specific session
         if (sessionId && agent.sessionId !== sessionId) continue;
-        await this.killSubagent(agent.agentId);
-      }
-    }
-  }
-
-  /**
-   * Find the process ID of a Claude subagent by its session ID.
-   * Searches /proc for claude processes with matching session ID in environment.
-   * Skips main Codeman-managed Claude processes (identified by CODEMAN_MUX=1).
-   * Caches the discovered PID on the matching agent info for future fast checks.
-   */
-  private async findSubagentProcess(sessionId: string): Promise<number | null> {
-    try {
-      // Find all claude processes (async to avoid blocking event loop)
-      const pgrepOutput = await new Promise<string>((resolve, reject) => {
-        execFile('pgrep', ['-f', 'claude'], { encoding: 'utf8' }, (err, stdout) => {
-          if (err) return reject(err);
-          resolve(stdout);
-        });
-      });
-      const pids = pgrepOutput.trim().split('\n').filter(Boolean);
-
-      for (const pidStr of pids) {
-        const pid = parseInt(pidStr, 10);
-        if (Number.isNaN(pid)) continue;
-
-        let environ = '';
-        try {
-          environ = await readFile(`/proc/${pid}/environ`, 'utf8');
-        } catch {
-          // Can't read this process's environ - skip
-        }
-
-        // Defense-in-depth: never kill a main Codeman-managed Claude process.
-        // Main processes have CODEMAN_MUX=1 in their environment; subagents don't.
-        if (environ.includes('CODEMAN_MUX=1')) continue;
-
-        if (environ.includes(sessionId)) {
-          // Cache PID on the matching agent
-          this.cacheAgentPid(sessionId, pid);
-          return pid;
-        }
-
-        try {
-          const cmdline = await readFile(`/proc/${pid}/cmdline`, 'utf8');
-          if (cmdline.includes(sessionId)) {
-            this.cacheAgentPid(sessionId, pid);
-            return pid;
-          }
-        } catch {
-          // Can't read this process's cmdline - skip
-        }
-      }
-    } catch {
-      // pgrep returns non-zero if no matches
-    }
-    return null;
-  }
-
-  /**
-   * Store a discovered PID on the agent info with matching sessionId.
-   */
-  private cacheAgentPid(sessionId: string, pid: number): void {
-    for (const [_agentId, info] of this.agentInfo) {
-      if (info.sessionId === sessionId && (info.status === 'active' || info.status === 'idle')) {
-        info.pid = pid;
-        return;
+        await this.killSubagent(agent.agentKey);
       }
     }
   }
@@ -840,8 +900,9 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Get transcript for a subagent (optionally limited to last N entries)
    */
-  async getTranscript(agentId: string, limit?: number): Promise<SubagentTranscriptEntry[]> {
-    const info = this.agentInfo.get(agentId);
+  async getTranscript(reference: string, limit?: number): Promise<SubagentTranscriptEntry[]> {
+    const resolved = this.resolveSubagentReference(reference);
+    const info = resolved.status === 'found' ? resolved.info : undefined;
     if (!info) return [];
 
     const entries: SubagentTranscriptEntry[] = [];
@@ -918,7 +979,7 @@ export class SubagentWatcher extends EventEmitter {
    * Convert working directory to Claude's project hash format
    */
   private getProjectHash(workingDir: string): string {
-    return workingDir.replace(/\//g, '-');
+    return claudeProjectHash(workingDir);
   }
 
   /**
@@ -984,10 +1045,12 @@ export class SubagentWatcher extends EventEmitter {
     sessionId: string,
     agentId: string,
     filePath: string,
-    fallbackText?: string
+    fallbackText?: string,
+    generation = this.lifecycleGeneration
   ): Promise<string | undefined> {
     // First try parent transcript (most reliable)
-    const fromParent = await this.extractDescriptionFromParentTranscript(projectHash, sessionId, agentId);
+    const fromParent = await this.extractDescriptionFromParentTranscript(projectHash, sessionId, agentId, generation);
+    if (!this.isCurrentGeneration(generation)) return undefined;
     if (fromParent) return fromParent;
 
     // Fallback: inline text (from processEntry) or file extraction
@@ -1012,7 +1075,8 @@ export class SubagentWatcher extends EventEmitter {
   private async extractDescriptionFromParentTranscript(
     projectHash: string,
     sessionId: string,
-    agentId: string
+    agentId: string,
+    generation = this.lifecycleGeneration
   ): Promise<string | undefined> {
     const cacheKey = `${projectHash}/${sessionId}`;
     const CACHE_TTL_MS = 5000;
@@ -1029,6 +1093,7 @@ export class SubagentWatcher extends EventEmitter {
       let fileSize: number;
       try {
         const fileStat = await statAsync(transcriptPath);
+        if (!this.isCurrentGeneration(generation)) return undefined;
         fileSize = fileStat.size;
       } catch {
         return undefined;
@@ -1044,6 +1109,7 @@ export class SubagentWatcher extends EventEmitter {
         stream.on('end', () => resolve(chunks.join('')));
         stream.on('error', reject);
       });
+      if (!this.isCurrentGeneration(generation)) return undefined;
       let lines = content.split('\n').filter((l) => l.trim());
       // If we started mid-file, drop the first partial line
       if (startOffset > 0 && lines.length > 0) {
@@ -1063,6 +1129,7 @@ export class SubagentWatcher extends EventEmitter {
         }
       }
 
+      if (!this.isCurrentGeneration(generation)) return undefined;
       this.parentDescriptionCache.set(cacheKey, { descriptions, timestamp: Date.now() });
       return descriptions.get(agentId);
     } catch {
@@ -1122,40 +1189,47 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Scan for all subagent directories (async to avoid blocking event loop)
    */
-  private async scanForSubagents(): Promise<void> {
+  private async scanForSubagents(generation = this.lifecycleGeneration): Promise<void> {
     try {
       await statAsync(CLAUDE_PROJECTS_DIR);
     } catch {
       return;
     }
+    if (!this.isCurrentGeneration(generation)) return;
 
     try {
       const projects = await readdir(CLAUDE_PROJECTS_DIR);
+      if (!this.isCurrentGeneration(generation)) return;
 
       for (const project of projects) {
+        if (!this.isCurrentGeneration(generation)) return;
         const projectPath = join(CLAUDE_PROJECTS_DIR, project);
 
         try {
           const st = await statAsync(projectPath);
+          if (!this.isCurrentGeneration(generation)) return;
           if (!st.isDirectory()) continue;
 
           const sessions = await readdir(projectPath);
+          if (!this.isCurrentGeneration(generation)) return;
 
           for (const session of sessions) {
             const sessionPath = join(projectPath, session);
 
             try {
               const sessionStat = await statAsync(sessionPath);
+              if (!this.isCurrentGeneration(generation)) return;
               if (!sessionStat.isDirectory()) continue;
 
               const subagentDir = join(sessionPath, 'subagents');
               try {
                 await statAsync(subagentDir);
-                await this.watchSubagentDir(subagentDir, project, session);
+                if (!this.isCurrentGeneration(generation)) return;
+                await this.watchSubagentDir(subagentDir, project, session, generation);
                 // Workflow agents nest one level deeper under subagents/workflows/{wf}/
                 // (each holds its own agent-{id}.jsonl/.meta.json) — the flat watcher
                 // above never sees them, so discover and watch each workflow dir too.
-                await this.watchWorkflowDirs(subagentDir, project, session);
+                await this.watchWorkflowDirs(subagentDir, project, session, true, generation);
               } catch {
                 // subagent dir doesn't exist - skip
               }
@@ -1168,7 +1242,7 @@ export class SubagentWatcher extends EventEmitter {
         }
       }
     } catch (error) {
-      this.emit('subagent:error', error as Error);
+      if (this.isCurrentGeneration(generation)) this.emit('subagent:error', error as Error);
     }
   }
 
@@ -1177,29 +1251,46 @@ export class SubagentWatcher extends EventEmitter {
    * Uses a single directory-level fs.watch() instead of per-file watchers.
    * On Linux, inotify IN_MODIFY fires for content changes within the directory.
    */
-  private async watchSubagentDir(dir: string, projectHash: string, sessionId: string): Promise<void> {
+  private async watchSubagentDir(
+    dir: string,
+    projectHash: string,
+    sessionId: string,
+    generation = this.lifecycleGeneration,
+    scanExisting = true
+  ): Promise<void> {
+    if (!this.isCurrentGeneration(generation)) return;
     if (this.knownSubagentDirs.has(dir)) return;
     this.knownSubagentDirs.add(dir);
 
     // Register existing files (initial scan - skip old files)
     try {
-      const files = await readdir(dir);
-      for (const file of files) {
-        if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
-          await this.registerAgentFile(join(dir, file), projectHash, sessionId, true);
-        } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
-          // Claude Code (2026-06) writes a `agent-{id}.meta.json` sidecar for TUI
-          // Task subagents and no longer always writes a per-agent `.jsonl` here.
-          await this.registerAgentMeta(join(dir, file), projectHash, sessionId, true);
+      // Targeted reconciliation has already consumed every existing file
+      // without the startup age cutoff; it only installs the live watcher here.
+      if (scanExisting) {
+        const files = await readdir(dir);
+        if (!this.isCurrentGeneration(generation)) return;
+        for (const file of files) {
+          if (!this.isCurrentGeneration(generation)) return;
+          if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
+            await this.registerAgentFile(join(dir, file), projectHash, sessionId, true, generation);
+          } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
+            // Claude Code (2026-06) writes a `agent-{id}.meta.json` sidecar for TUI
+            // Task subagents and no longer always writes a per-agent `.jsonl` here.
+            await this.registerAgentMeta(join(dir, file), projectHash, sessionId, true, generation);
+          }
         }
       }
-    } catch {
-      return;
+    } catch (error) {
+      this.knownSubagentDirs.delete(dir);
+      if (isMissingPathError(error)) return;
+      throw error;
     }
 
     // Single directory watcher handles both new files and file content changes
     try {
+      if (!this.isCurrentGeneration(generation)) return;
       const watcher = watch(dir, (_eventType, filename) => {
+        if (!this.isCurrentGeneration(generation)) return;
         // Only agent-{id}.jsonl / agent-{id}.meta.json — ignore siblings like a
         // workflow dir's journal.jsonl (would otherwise register a bogus "journal" agent).
         const isAgent = !!filename && filename.startsWith('agent-');
@@ -1210,22 +1301,23 @@ export class SubagentWatcher extends EventEmitter {
 
         // Debounce 100ms to batch rapid writes
         this.fileDeb.schedule(filePath, () => {
+          if (!this.isCurrentGeneration(generation)) return;
           if (!existsSync(filePath)) return;
 
           if (isMeta) {
             // Meta sidecar — discovery only (not a transcript; never tail it).
             if (!this.fileAgentContext.has(filePath)) {
-              this.registerAgentMeta(filePath, projectHash, sessionId).catch(() => {});
+              this.registerAgentMeta(filePath, projectHash, sessionId, false, generation).catch(() => {});
             }
             return;
           }
 
           if (this.fileAgentContext.has(filePath)) {
             // Known file — handle content change
-            this.handleFileChange(filePath).catch(() => {}); // Ignore - errors logged internally, don't crash watcher callback
+            this.handleFileChange(filePath, generation).catch(() => {}); // Ignore - errors logged internally, don't crash watcher callback
           } else {
             // New file — register it
-            this.registerAgentFile(filePath, projectHash, sessionId).catch(() => {}); // Ignore - errors logged internally, don't crash watcher callback
+            this.registerAgentFile(filePath, projectHash, sessionId, false, generation).catch(() => {}); // Ignore - errors logged internally, don't crash watcher callback
           }
         });
       });
@@ -1233,7 +1325,13 @@ export class SubagentWatcher extends EventEmitter {
       // Handle watcher errors to prevent unhandled exceptions
       // Store handler reference for proper cleanup
       const errorHandler = (error: Error) => {
-        this.emit('subagent:error', error instanceof Error ? error : new Error(String(error)));
+        if (this.isCurrentGeneration(generation)) {
+          this.emit('subagent:error', error instanceof Error ? error : new Error(String(error)), {
+            projectHash,
+            sessionId,
+            directory: dir,
+          } satisfies SubagentWatcherErrorContext);
+        }
         watcher.close();
         this.dirWatcherErrorHandlers.delete(dir);
         this.dirWatchers.delete(dir);
@@ -1243,8 +1341,9 @@ export class SubagentWatcher extends EventEmitter {
       this.dirWatcherErrorHandlers.set(dir, errorHandler);
 
       this.dirWatchers.set(dir, watcher);
-    } catch {
-      // Watch failed
+    } catch (error) {
+      this.knownSubagentDirs.delete(dir);
+      if (!isMissingPathError(error)) throw error;
     }
   }
 
@@ -1259,24 +1358,39 @@ export class SubagentWatcher extends EventEmitter {
    * and re-driven by the periodic scan, so newly created workflows are picked up
    * within one scan cycle (~5s) — the same latency as a new session's `subagents/`.
    */
-  private async watchWorkflowDirs(subagentDir: string, projectHash: string, sessionId: string): Promise<void> {
+  private async watchWorkflowDirs(
+    subagentDir: string,
+    projectHash: string,
+    sessionId: string,
+    isInitialScan = true,
+    generation = this.lifecycleGeneration
+  ): Promise<void> {
     const workflowsRoot = join(subagentDir, 'workflows');
     let names: string[];
     try {
       names = await readdir(workflowsRoot);
-    } catch {
-      return; // no workflows for this session
+    } catch (error) {
+      if (isMissingPathError(error)) return; // no workflows for this session
+      throw error;
     }
+    if (!this.isCurrentGeneration(generation)) return;
     for (const name of names) {
+      if (!this.isCurrentGeneration(generation)) return;
       // Workflow ids are directories (e.g. `wf_<id>`); skip any stray files that
       // share the root (a workflow id never carries a file extension).
       if (name.endsWith('.jsonl') || name.endsWith('.json')) continue;
       const wfDir = join(workflowsRoot, name);
       try {
         const st = await statAsync(wfDir);
+        if (!this.isCurrentGeneration(generation)) return;
         if (!st.isDirectory()) continue;
-        await this.watchSubagentDir(wfDir, projectHash, sessionId);
-      } catch {
+        if (isInitialScan) {
+          await this.watchSubagentDir(wfDir, projectHash, sessionId, generation);
+        } else {
+          await this.reconcileDirectory(wfDir, projectHash, sessionId, generation);
+        }
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
         // workflow dir vanished mid-scan — skip
       }
     }
@@ -1286,23 +1400,34 @@ export class SubagentWatcher extends EventEmitter {
    * Handle a file content change for an already-registered agent file.
    * Tails from last known position, updates info, retries description if missing.
    */
-  private async handleFileChange(filePath: string): Promise<void> {
+  private async handleFileChange(filePath: string, generation = this.lifecycleGeneration): Promise<void> {
+    if (!this.isCurrentGeneration(generation)) return;
     const context = this.fileAgentContext.get(filePath);
     if (!context) return;
 
-    const agentId = basename(filePath).replace('agent-', '').replace('.jsonl', '');
     const currentPos = this.filePositions.get(filePath) || 0;
-    const newPos = await this.tailFile(filePath, agentId, context.sessionId, currentPos);
-    this.filePositions.set(filePath, newPos);
+    const tailResult = await this.tailFile(filePath, context.agentKey, currentPos, generation);
+    if (!this.isCurrentGeneration(generation)) return;
 
     // Update info
-    const existingInfo = this.agentInfo.get(agentId);
+    const existingInfo = this.agentInfo.get(context.agentKey);
     if (existingInfo) {
+      let hasParsedAppend = false;
       try {
         const newStat = await statAsync(filePath);
-        existingInfo.lastActivityAt = Date.now();
+        if (!this.isCurrentGeneration(generation)) return;
+        hasParsedAppend = newStat.size > currentPos && tailResult.parsedEntries > 0;
+        this.filePositions.set(filePath, newStat.size < currentPos ? 0 : Math.min(tailResult.position, newStat.size));
+        const wasSemanticallyLive = this.liveAgentKeys.has(context.agentKey);
         existingInfo.fileSize = newStat.size;
-        existingInfo.status = 'active';
+        if (hasParsedAppend) {
+          existingInfo.lastActivityAt = Date.now();
+          existingInfo.status = 'active';
+          if (!wasSemanticallyLive) {
+            this.liveAgentKeys.add(context.agentKey);
+            this.emitSemanticRevision(existingInfo.projectHash, existingInfo.sessionId, 'resumed');
+          }
+        }
       } catch {
         // Stat failed
       }
@@ -1312,12 +1437,15 @@ export class SubagentWatcher extends EventEmitter {
         const extractedDescription = await this._resolveDescription(
           existingInfo.projectHash,
           existingInfo.sessionId,
-          agentId,
-          filePath
+          existingInfo.agentId,
+          filePath,
+          undefined,
+          generation
         );
+        if (!this.isCurrentGeneration(generation)) return;
         if (extractedDescription) {
           if (this.isInternalAgent(extractedDescription)) {
-            this.removeAgent(agentId);
+            this.removeAgent(context.agentKey);
             return;
           }
           existingInfo.description = extractedDescription;
@@ -1326,7 +1454,7 @@ export class SubagentWatcher extends EventEmitter {
       }
 
       // Reset idle timer
-      this.resetIdleTimer(agentId);
+      if (hasParsedAppend) this.resetIdleTimer(context.agentKey);
     }
   }
 
@@ -1342,17 +1470,20 @@ export class SubagentWatcher extends EventEmitter {
     filePath: string,
     projectHash: string,
     sessionId: string,
-    isInitialScan: boolean = false
+    isInitialScan: boolean = false,
+    generation = this.lifecycleGeneration
   ): Promise<void> {
+    if (!this.isCurrentGeneration(generation)) return;
     if (this.fileAgentContext.has(filePath)) return;
 
     const agentId = basename(filePath).replace('agent-', '').replace('.jsonl', '');
+    const agentKey = serializeSubagentKey(projectHash, sessionId, agentId);
 
     // Meta→transcript upgrade: the agent may already be registered from its
     // `.meta.json` sidecar (discovery-only — nothing to tail). Now that the real
     // `.jsonl` transcript has appeared, re-point to it and drop the stale sidecar
     // context, emitting `updated` below rather than a duplicate `discovered`.
-    const priorEntry = this.agentInfo.get(agentId);
+    const priorEntry = this.agentInfo.get(agentKey);
     const isMetaUpgrade = !!priorEntry && priorEntry.filePath.endsWith('.meta.json');
     if (isMetaUpgrade && priorEntry) {
       this.fileAgentContext.delete(priorEntry.filePath);
@@ -1366,6 +1497,7 @@ export class SubagentWatcher extends EventEmitter {
       // File was deleted between discovery and stat - skip this agent
       return;
     }
+    if (!this.isCurrentGeneration(generation)) return;
 
     // On initial scan, skip old files to avoid loading stale historical data
     if (isInitialScan) {
@@ -1376,7 +1508,10 @@ export class SubagentWatcher extends EventEmitter {
     }
 
     // Extract description - prefer reading from parent transcript (most reliable)
-    const description = await this._resolveDescription(projectHash, sessionId, agentId, filePath);
+    const description =
+      priorEntry?.description ??
+      (await this._resolveDescription(projectHash, sessionId, agentId, filePath, undefined, generation));
+    if (!this.isCurrentGeneration(generation)) return;
 
     // Skip internal Claude Code agents (e.g., suggestion mode) - not real subagents
     if (this.isInternalAgent(description)) {
@@ -1384,6 +1519,7 @@ export class SubagentWatcher extends EventEmitter {
     }
 
     const info: SubagentInfo = {
+      agentKey,
       agentId,
       sessionId,
       projectHash,
@@ -1391,36 +1527,48 @@ export class SubagentWatcher extends EventEmitter {
       startedAt: fileStat.birthtime.toISOString(),
       lastActivityAt: fileStat.mtime.getTime(),
       status: 'active',
-      toolCallCount: 0,
-      entryCount: 0,
+      toolCallCount: priorEntry?.toolCallCount ?? 0,
+      entryCount: priorEntry?.entryCount ?? 0,
       fileSize: fileStat.size,
       description,
     };
 
     // Enforce MAX_TRACKED_AGENTS during insertion — evict oldest inactive agent
-    if (this.agentInfo.size >= MAX_TRACKED_AGENTS) {
-      const oldestId = this.findOldestInactiveAgent();
+    if (!isMetaUpgrade && this.agentInfo.size >= MAX_TRACKED_AGENTS) {
+      const oldestId = this.findOldestCompletedAgent();
       if (oldestId) {
         this.removeAgent(oldestId);
+      } else {
+        this.emit('subagent:overflow', {
+          projectHash,
+          sessionId,
+          observation: 'unknown',
+          reason: 'capacity',
+        });
+        return;
       }
     }
 
     // Track file context for directory watcher change handling
-    this.fileAgentContext.set(filePath, { projectHash, sessionId });
-    this.agentInfo.set(agentId, info);
+    this.fileAgentContext.set(filePath, { projectHash, sessionId, agentKey });
+    this.agentInfo.set(agentKey, info);
+    this.liveAgentKeys.add(agentKey);
+    this.emitSemanticRevision(projectHash, sessionId, isMetaUpgrade ? 'upgraded' : 'discovered');
     this.emit(isMetaUpgrade ? 'subagent:updated' : 'subagent:discovered', info);
 
     // Read existing content
-    this.tailFile(filePath, agentId, sessionId, 0)
-      .then((position) => {
-        this.filePositions.set(filePath, position);
+    this.tailFile(filePath, agentKey, 0, generation)
+      .then((result) => {
+        if (this.isCurrentGeneration(generation)) this.filePositions.set(filePath, result.position);
       })
       .catch((err) => {
         // Log but don't throw - non-critical background operation
-        console.warn(`[SubagentWatcher] Failed to read initial content for ${agentId}:`, err);
+        if (this.isCurrentGeneration(generation)) {
+          console.warn(`[SubagentWatcher] Failed to read initial content for ${agentId}:`, err);
+        }
       });
 
-    this.resetIdleTimer(agentId);
+    this.resetIdleTimer(agentKey);
   }
 
   /**
@@ -1446,16 +1594,19 @@ export class SubagentWatcher extends EventEmitter {
     metaPath: string,
     projectHash: string,
     sessionId: string,
-    isInitialScan: boolean = false
+    isInitialScan: boolean = false,
+    generation = this.lifecycleGeneration
   ): Promise<void> {
+    if (!this.isCurrentGeneration(generation)) return;
     if (this.fileAgentContext.has(metaPath)) return;
     const agentId = basename(metaPath).replace('agent-', '').replace('.meta.json', '');
-    if (this.agentInfo.has(agentId)) return;
+    const agentKey = serializeSubagentKey(projectHash, sessionId, agentId);
+    if (this.agentInfo.has(agentKey)) return;
 
     // Prefer a real transcript if one was written alongside the sidecar.
     const jsonlPath = join(dirname(metaPath), `agent-${agentId}.jsonl`);
     if (existsSync(jsonlPath)) {
-      await this.registerAgentFile(jsonlPath, projectHash, sessionId, isInitialScan);
+      await this.registerAgentFile(jsonlPath, projectHash, sessionId, isInitialScan, generation);
       return;
     }
 
@@ -1465,6 +1616,7 @@ export class SubagentWatcher extends EventEmitter {
     } catch {
       return; // deleted between discovery and stat
     }
+    if (!this.isCurrentGeneration(generation)) return;
     if (isInitialScan && Date.now() - fileStat.mtime.getTime() > STARTUP_MAX_FILE_AGE_MS) {
       return; // skip stale historical agents on startup
     }
@@ -1476,9 +1628,11 @@ export class SubagentWatcher extends EventEmitter {
     } catch {
       return; // unreadable / not yet fully written — a later watch event retries
     }
+    if (!this.isCurrentGeneration(generation)) return;
     if (this.isInternalAgent(description)) return;
 
     const info: SubagentInfo = {
+      agentKey,
       agentId,
       sessionId,
       projectHash,
@@ -1493,38 +1647,68 @@ export class SubagentWatcher extends EventEmitter {
     };
 
     if (this.agentInfo.size >= MAX_TRACKED_AGENTS) {
-      const oldestId = this.findOldestInactiveAgent();
-      if (oldestId) this.removeAgent(oldestId);
+      const oldestId = this.findOldestCompletedAgent();
+      if (oldestId) {
+        this.removeAgent(oldestId);
+      } else {
+        this.emit('subagent:overflow', {
+          projectHash,
+          sessionId,
+          observation: 'unknown',
+          reason: 'capacity',
+        });
+        return;
+      }
     }
 
-    this.fileAgentContext.set(metaPath, { projectHash, sessionId });
-    this.agentInfo.set(agentId, info);
+    this.fileAgentContext.set(metaPath, { projectHash, sessionId, agentKey });
+    this.agentInfo.set(agentKey, info);
+    this.liveAgentKeys.add(agentKey);
+    this.emitSemanticRevision(projectHash, sessionId, 'discovered');
     this.emit('subagent:discovered', info);
-    this.resetIdleTimer(agentId);
+    this.resetIdleTimer(agentKey);
   }
 
   /**
    * Tail a file from a specific position
    */
-  private async tailFile(filePath: string, agentId: string, sessionId: string, fromPosition: number): Promise<number> {
+  private isMeaningfulTranscriptEntry(entry: SubagentTranscriptEntry): boolean {
+    if (entry.type === 'progress') return typeof entry.data?.type === 'string';
+    if (entry.type === 'user' || entry.type === 'assistant') {
+      const content = entry.message?.content;
+      return typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0;
+    }
+    return false;
+  }
+
+  private async tailFile(
+    filePath: string,
+    agentKey: string,
+    fromPosition: number,
+    generation = this.lifecycleGeneration
+  ): Promise<{ position: number; parsedEntries: number }> {
     return new Promise((resolve) => {
       let position = fromPosition;
+      let parsedEntries = 0;
 
       const stream = createReadStream(filePath, { start: fromPosition });
       const rl = createInterface({ input: stream });
 
       rl.on('line', (line) => {
+        if (!this.isCurrentGeneration(generation)) return;
         const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
         position += lineBytes; // Always advance past the line
 
         try {
           const entry = JSON.parse(line) as SubagentTranscriptEntry;
-          this.processEntry(entry, agentId, sessionId).catch(() => {
+          if (!this.isMeaningfulTranscriptEntry(entry)) return;
+          parsedEntries++;
+          this.processEntry(entry, agentKey, generation).catch(() => {
             // processEntry failure is non-critical
           });
 
           // Update entry count
-          const info = this.agentInfo.get(agentId);
+          const info = this.agentInfo.get(agentKey);
           if (info) {
             info.entryCount++;
           }
@@ -1534,11 +1718,11 @@ export class SubagentWatcher extends EventEmitter {
       });
 
       rl.on('close', () => {
-        resolve(position);
+        resolve({ position, parsedEntries });
       });
 
       rl.on('error', () => {
-        resolve(position);
+        resolve({ position, parsedEntries });
       });
     });
   }
@@ -1546,20 +1730,28 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Process a transcript entry and emit appropriate events
    */
-  private async processEntry(entry: SubagentTranscriptEntry, agentId: string, sessionId: string): Promise<void> {
-    const info = this.agentInfo.get(agentId);
+  private async processEntry(
+    entry: SubagentTranscriptEntry,
+    agentKey: string,
+    generation = this.lifecycleGeneration
+  ): Promise<void> {
+    if (!this.isCurrentGeneration(generation)) return;
+    const info = this.agentInfo.get(agentKey);
+    if (!info) return;
 
     if (info) {
       this._processModelInfo(entry, info);
       this._processTokenInfo(entry, info);
 
-      if (await this._processDescription(entry, agentId, info)) return;
+      if (await this._processDescription(entry, agentKey, info, generation)) return;
+      if (!this.isCurrentGeneration(generation)) return;
     }
 
     if (entry.type === 'progress' && entry.data) {
       const progress: SubagentProgress = {
-        agentId,
-        sessionId,
+        agentKey,
+        agentId: info.agentId,
+        sessionId: info.sessionId,
         timestamp: entry.timestamp,
         progressType: entry.data.type,
         query: entry.data.query,
@@ -1573,9 +1765,9 @@ export class SubagentWatcher extends EventEmitter {
       };
       this.emit('subagent:progress', progress);
     } else if (entry.type === 'assistant' && entry.message?.content) {
-      this._processAssistantContent(entry, agentId, sessionId);
+      this._processAssistantContent(entry, info);
     } else if (entry.type === 'user' && entry.message?.content) {
-      this._processUserContent(entry, agentId, sessionId);
+      this._processUserContent(entry, info);
     }
   }
 
@@ -1599,8 +1791,9 @@ export class SubagentWatcher extends EventEmitter {
 
   private async _processDescription(
     entry: SubagentTranscriptEntry,
-    agentId: string,
-    agent: SubagentInfo
+    agentKey: string,
+    agent: SubagentInfo,
+    generation = this.lifecycleGeneration
   ): Promise<boolean> {
     if (agent.description || entry.type !== 'user' || !entry.message?.content) return false;
 
@@ -1608,13 +1801,15 @@ export class SubagentWatcher extends EventEmitter {
     const description = await this._resolveDescription(
       agent.projectHash,
       agent.sessionId,
-      agentId,
+      agent.agentId,
       agent.filePath,
-      fallbackText
+      fallbackText,
+      generation
     );
+    if (!this.isCurrentGeneration(generation)) return true;
     if (description) {
       if (this.isInternalAgent(description)) {
-        this.removeAgent(agentId);
+        this.removeAgent(agentKey);
         return true;
       }
       agent.description = description;
@@ -1623,14 +1818,15 @@ export class SubagentWatcher extends EventEmitter {
     return false;
   }
 
-  private _processAssistantContent(entry: SubagentTranscriptEntry, agentId: string, sessionId: string): void {
+  private _processAssistantContent(entry: SubagentTranscriptEntry, agent: SubagentInfo): void {
     const messageContent = entry.message!.content;
     if (typeof messageContent === 'string') {
       const text = messageContent.trim();
       if (text.length > 0) {
         const message: SubagentMessage = {
-          agentId,
-          sessionId,
+          agentKey: agent.agentKey,
+          agentId: agent.agentId,
+          sessionId: agent.sessionId,
           timestamp: entry.timestamp,
           role: 'assistant',
           text: text.substring(0, MESSAGE_TEXT_LIMIT),
@@ -1642,10 +1838,10 @@ export class SubagentWatcher extends EventEmitter {
         if (content.type === 'tool_use' && content.name) {
           // Store toolUseId for linking to results, with timestamp for TTL cleanup
           if (content.id) {
-            if (!this.pendingToolCalls.has(agentId)) {
-              this.pendingToolCalls.set(agentId, new Map());
+            if (!this.pendingToolCalls.has(agent.agentKey)) {
+              this.pendingToolCalls.set(agent.agentKey, new Map());
             }
-            const agentCalls = this.pendingToolCalls.get(agentId)!;
+            const agentCalls = this.pendingToolCalls.get(agent.agentKey)!;
             // Enforce size limit to prevent memory leak from rapid tool calls
             if (agentCalls.size >= MAX_PENDING_TOOL_CALLS) {
               // FIFO eviction: delete first (oldest) entry using Map insertion order
@@ -1659,8 +1855,9 @@ export class SubagentWatcher extends EventEmitter {
           }
 
           const toolCall: SubagentToolCall = {
-            agentId,
-            sessionId,
+            agentKey: agent.agentKey,
+            agentId: agent.agentId,
+            sessionId: agent.sessionId,
             timestamp: entry.timestamp,
             tool: content.name,
             input: this.getTruncatedInput(content.name, content.input || {}),
@@ -1670,23 +1867,23 @@ export class SubagentWatcher extends EventEmitter {
           this.emit('subagent:tool_call', toolCall);
 
           // Update tool call count
-          const agentInfo = this.agentInfo.get(agentId);
+          const agentInfo = this.agentInfo.get(agent.agentKey);
           if (agentInfo) {
             agentInfo.toolCallCount++;
           }
         } else if (content.type === 'tool_result' && content.tool_use_id) {
           this.emitToolResult(
             { tool_use_id: content.tool_use_id, content: content.content, is_error: content.is_error },
-            agentId,
-            sessionId,
+            agent.agentKey,
             entry.timestamp
           );
         } else if (content.type === 'text' && content.text) {
           const text = content.text.trim();
           if (text.length > 0) {
             const message: SubagentMessage = {
-              agentId,
-              sessionId,
+              agentKey: agent.agentKey,
+              agentId: agent.agentId,
+              sessionId: agent.sessionId,
               timestamp: entry.timestamp,
               role: 'assistant',
               text: text.substring(0, MESSAGE_TEXT_LIMIT),
@@ -1698,14 +1895,15 @@ export class SubagentWatcher extends EventEmitter {
     }
   }
 
-  private _processUserContent(entry: SubagentTranscriptEntry, agentId: string, sessionId: string): void {
+  private _processUserContent(entry: SubagentTranscriptEntry, agent: SubagentInfo): void {
     const messageContent = entry.message!.content;
     if (typeof messageContent === 'string') {
       const userText = messageContent.trim();
       if (userText.length > 0 && userText.length < 500) {
         const message: SubagentMessage = {
-          agentId,
-          sessionId,
+          agentKey: agent.agentKey,
+          agentId: agent.agentId,
+          sessionId: agent.sessionId,
           timestamp: entry.timestamp,
           role: 'user',
           text: userText,
@@ -1718,16 +1916,16 @@ export class SubagentWatcher extends EventEmitter {
         if (content.type === 'tool_result' && content.tool_use_id) {
           this.emitToolResult(
             { tool_use_id: content.tool_use_id, content: content.content, is_error: content.is_error },
-            agentId,
-            sessionId,
+            agent.agentKey,
             entry.timestamp
           );
         } else if (content.type === 'text' && content.text) {
           const userText = content.text.trim();
           if (userText.length > 0 && userText.length < 500) {
             const message: SubagentMessage = {
-              agentId,
-              sessionId,
+              agentKey: agent.agentKey,
+              agentId: agent.agentId,
+              sessionId: agent.sessionId,
               timestamp: entry.timestamp,
               role: 'user',
               text: userText,
@@ -1773,12 +1971,13 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Reset idle timer for an agent
    */
-  private resetIdleTimer(agentId: string): void {
-    this.idleDeb.schedule(agentId, () => {
-      const info = this.agentInfo.get(agentId);
+  private resetIdleTimer(agentKey: string): void {
+    this.idleDeb.schedule(agentKey, () => {
+      const info = this.agentInfo.get(agentKey);
       if (!info) return;
       if (info.status === 'active') {
         info.status = 'idle';
+        this.emitSemanticRevision(info.projectHash, info.sessionId, 'idle');
       }
     });
   }

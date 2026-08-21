@@ -6,7 +6,7 @@
  * via TypeScript intersection types (e.g., SessionPort & EventPort).
  */
 
-export type { SessionCreationOptions, SessionPort } from './session-port.js';
+export type { SessionCreationOptions, SessionPort, SessionWireState } from './session-port.js';
 export type { EventPort } from './event-port.js';
 export type { RespawnPort } from './respawn-port.js';
 export type { ConfigPort } from './config-port.js';
@@ -15,3 +15,4 @@ export type { AuthPort } from './auth-port.js';
 export type { OrchestratorPort } from './orchestrator-port.js';
 export type { CronPort } from './cron-port.js';
 export type { TabLayoutPort } from './tab-layout-port.js';
+export type { AgentActivityControllerPort, AgentActivityPort } from './agent-activity-port.js';

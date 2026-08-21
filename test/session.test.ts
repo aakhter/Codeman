@@ -3,8 +3,40 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebServer } from '../src/web/server.js';
+import { Session } from '../src/session.js';
 
 const TEST_PORT = 3102;
+
+describe('Session autonomous availability', () => {
+  it.each([
+    ['waiting_agents', true],
+    ['checking_agents', true],
+    ['idle', false],
+  ] as const)('derives automation blocking from %s without changing raw status', (activityStatus, blocked) => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+
+    session.setActivityProjection({ activityStatus, activityStatusSince: blocked ? 123 : null });
+
+    expect(session.blocksIdleAutomation).toBe(blocked);
+    expect(session.isAutonomouslyIdle()).toBe(!blocked);
+    expect(session.isIdle()).toBe(true);
+    expect(session.isBusy()).toBe(false);
+    expect(session.isWorking).toBe(false);
+    expect(session.toState()).not.toHaveProperty('blocksIdleAutomation');
+  });
+
+  it('lets raw terminal status win over an observable-none projection', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'claude' });
+    const access = session as unknown as { _status: 'busy' | 'stopped' | 'error' };
+
+    for (const status of ['busy', 'stopped', 'error'] as const) {
+      access._status = status;
+      session.setActivityProjection({ activityStatus: status, activityStatusSince: null });
+      expect(session.blocksIdleAutomation).toBe(false);
+      expect(session.isAutonomouslyIdle()).toBe(false);
+    }
+  });
+});
 
 describe('Interactive Session Lifecycle', () => {
   let server: WebServer;

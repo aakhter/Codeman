@@ -29,11 +29,11 @@ Object.assign(CodemanApp.prototype, {
     const agentItems = [];
     for (const agentId of minimizedAgents) {
       const agent = this.subagents.get(agentId);
-      const displayName = agent?.description || agentId.substring(0, 12);
+      const displayName = agent?.description || agent?.name || agent?.agentId || 'Agent';
       const truncatedName = displayName.length > 25 ? displayName.substring(0, 25) + '…' : displayName;
       const statusClass = agent?.status || 'idle';
       agentItems.push(`
-        <div class="subagent-dropdown-item" onclick="event.stopPropagation(); app.restoreMinimizedSubagent(${escapeHtml(JSON.stringify(agentId))}, ${escapeHtml(JSON.stringify(sessionId))})" title="Click to restore">
+        <div class="subagent-dropdown-item" data-agent-key="${escapeHtml(agentId)}" onclick="event.stopPropagation(); app.restoreMinimizedSubagent(${escapeHtml(JSON.stringify(agentId))}, ${escapeHtml(JSON.stringify(sessionId))})" title="Click to restore">
           <span class="subagent-dropdown-status ${statusClass}"></span>
           <span class="subagent-dropdown-name">${escapeHtml(truncatedName)}</span>
           <span class="subagent-dropdown-close" onclick="event.stopPropagation(); app.permanentlyCloseMinimizedSubagent(${escapeHtml(JSON.stringify(agentId))}, ${escapeHtml(JSON.stringify(sessionId))})" title="Dismiss">&times;</span>
@@ -108,7 +108,7 @@ Object.assign(CodemanApp.prototype, {
    * Save subagent window states (minimized/open) to server for cross-browser persistence.
    * Called when a window is minimized, restored, or auto-minimized on completion.
    */
-  async saveSubagentWindowStates() {
+  saveSubagentWindowStates(initGeneration = this._initGeneration) {
     // Build state object: which agents are minimized per session
     const minimizedState = {};
     for (const [sessionId, agentIds] of this.minimizedSubagents) {
@@ -117,10 +117,10 @@ Object.assign(CodemanApp.prototype, {
 
     // Also track which windows are open (not minimized)
     const openWindows = [];
-    for (const [agentId, windowData] of this.subagentWindows) {
+    for (const [agentKey, windowData] of this.subagentWindows) {
       if (!windowData.minimized) {
         openWindows.push({
-          agentId,
+          agentKey,
           position: windowData.position || null,
         });
       }
@@ -128,15 +128,19 @@ Object.assign(CodemanApp.prototype, {
 
     const windowStates = { minimized: minimizedState, open: openWindows };
 
-    // Save to localStorage for quick restore
-    localStorage.setItem('codeman-subagent-window-states', JSON.stringify(windowStates));
-
-    // Save to server for cross-browser persistence
-    try {
-      await this._apiPut('/api/subagent-window-states', windowStates);
-    } catch (err) {
-      console.error('Failed to save subagent window states to server:', err);
-    }
+    return this._queueSubagentPersistence('windows', async () => {
+      if (initGeneration !== this._initGeneration) return;
+      try {
+        localStorage.setItem('codeman-subagent-window-states', JSON.stringify(windowStates));
+      } catch (err) {
+        this._reportSubagentPersistenceFailure('window cache', err);
+      }
+      try {
+        await this._apiPut('/api/subagent-window-states', windowStates);
+      } catch (err) {
+        this._reportSubagentPersistenceFailure('window server state', err);
+      }
+    });
   },
 
   /**
@@ -144,16 +148,21 @@ Object.assign(CodemanApp.prototype, {
    * Opens windows that were open before, keeps minimized ones minimized.
    * IMPORTANT: Parent associations are loaded from subagentParentMap BEFORE this is called.
    */
-  async restoreSubagentWindowStates() {
-    const states = await this.loadSubagentWindowStates();
+  async restoreSubagentWindowStates(initGeneration = this._initGeneration) {
+    const states = await this.loadSubagentWindowStates(initGeneration);
+    if (initGeneration !== this._initGeneration || !states) return;
 
     // Restore minimized state using the PERSISTENT parent map
     // Skip old agents from previous runs to avoid confusion
     const cutoffTime = Date.now() - 10 * 60 * 1000; // 10 minutes
     for (const [savedSessionId, agentIds] of Object.entries(states.minimized || {})) {
+      if (initGeneration !== this._initGeneration) return;
       if (Array.isArray(agentIds) && agentIds.length > 0) {
-        for (const agentId of agentIds) {
-          const agent = this.subagents.get(agentId);
+        for (const persistedKey of agentIds) {
+          if (initGeneration !== this._initGeneration) return;
+          const agentKey = this._resolvePersistedSubagentKey(persistedKey);
+          if (!agentKey) continue;
+          const agent = this.subagents.get(agentKey);
           if (!agent) continue; // Agent no longer exists
 
           // Skip completed or old agents
@@ -162,19 +171,19 @@ Object.assign(CodemanApp.prototype, {
 
           // Use the PERSISTENT parent map (THE source of truth)
           // Fall back to saved sessionId only if it exists in current sessions
-          const parentFromMap = this.subagentParentMap.get(agentId);
+          const parentFromMap = this.subagentParentMap.get(agentKey);
           const correctSessionId = parentFromMap || (this.sessions.has(savedSessionId) ? savedSessionId : null);
 
           if (correctSessionId) {
             // Ensure the parent map has this association
             if (!parentFromMap && this.sessions.has(savedSessionId)) {
-              this.setAgentParentSessionId(agentId, savedSessionId);
+              this.setAgentParentSessionId(agentKey, savedSessionId);
             }
 
             if (!this.minimizedSubagents.has(correctSessionId)) {
               this.minimizedSubagents.set(correctSessionId, new Set());
             }
-            this.minimizedSubagents.get(correctSessionId).add(agentId);
+            this.minimizedSubagents.get(correctSessionId).add(agentKey);
           }
         }
       }
@@ -183,15 +192,20 @@ Object.assign(CodemanApp.prototype, {
     // Restore open windows (for recent, non-completed agents only)
     const now = Date.now();
     const maxAgeMs = 10 * 60 * 1000; // 10 minutes - don't restore windows for old agents
-    for (const { agentId, position } of states.open || []) {
-      const agent = this.subagents.get(agentId);
+    for (const savedWindow of states.open || []) {
+      if (initGeneration !== this._initGeneration) return;
+      const agentKey = this._resolvePersistedSubagentKey(savedWindow.agentKey || savedWindow.agentId);
+      if (!agentKey) continue;
+      const { position } = savedWindow;
+      const agent = this.subagents.get(agentKey);
       // Only restore window if agent exists, is recent, and is still active/idle
       const agentAge = agent?.startedAt ? now - agent.startedAt : Infinity;
       if (agent && agent.status !== 'completed' && agentAge < maxAgeMs) {
-        this.openSubagentWindow(agentId);
+        if (initGeneration !== this._initGeneration) return;
+        this.openSubagentWindow(agentKey);
         // Restore position if saved (with viewport bounds check)
         if (position) {
-          const windowData = this.subagentWindows.get(agentId);
+          const windowData = this.subagentWindows.get(agentKey);
           if (windowData && windowData.element) {
             // Parse position values and clamp to viewport
             let left = parseInt(position.left, 10) || 50;
@@ -210,11 +224,14 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
+    if (initGeneration !== this._initGeneration) return;
     this.renderSessionTabs(); // Update tab badges
-    this.saveSubagentWindowStates(); // Persist corrected mappings
+    await this.saveSubagentWindowStates(initGeneration); // Persist corrected mappings
+    if (initGeneration !== this._initGeneration) return;
 
     // Update connection lines after all windows are restored (use rAF to ensure DOM is ready)
     requestAnimationFrame(() => {
+      if (initGeneration !== this._initGeneration) return;
       this.updateConnectionLines();
     });
   },
@@ -225,7 +242,7 @@ Object.assign(CodemanApp.prototype, {
   //
   // Connection lines are drawn from agent windows to their parent TABs.
   // The parent TAB is determined by the PERSISTENT subagentParentMap.
-  // This map stores agentId -> sessionId, where sessionId is the tab's data-id.
+  // This map stores agentKey -> sessionId, where sessionId is the tab's data-id.
 
   updateConnectionLines() {
     // Coalesce multiple calls — uses background scheduler priority to avoid
@@ -354,7 +371,7 @@ Object.assign(CodemanApp.prototype, {
           const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
           line.setAttribute('d', path);
           line.setAttribute('class', 'connection-line plan-to-subagent-line');
-          line.setAttribute('data-agent-id', agentId);
+          line.setAttribute('data-agent-key', agentId);
           line.setAttribute('data-plan-agent-id', nearestPlanAgent.id);
           svg.appendChild(line);
         }
@@ -383,7 +400,7 @@ Object.assign(CodemanApp.prototype, {
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         line.setAttribute('d', path);
         line.setAttribute('class', 'connection-line wizard-connection');
-        line.setAttribute('data-agent-id', agentId);
+        line.setAttribute('data-agent-key', agentId);
         svg.appendChild(line);
       } else {
         // NORMAL MODE: Connect agent window to its parent TAB
@@ -411,7 +428,7 @@ Object.assign(CodemanApp.prototype, {
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         line.setAttribute('d', path);
         line.setAttribute('class', 'connection-line');
-        line.setAttribute('data-agent-id', agentId);
+        line.setAttribute('data-agent-key', agentId);
         line.setAttribute('data-parent-tab', parentSessionId);
         svg.appendChild(line);
       }
@@ -698,6 +715,7 @@ Object.assign(CodemanApp.prototype, {
     const win = document.createElement('div');
     win.className = 'subagent-window';
     win.id = `subagent-window-${agentId}`;
+    win.dataset.agentKey = agentId;
     win.style.zIndex = ++this.subagentWindowZIndex;
 
     // Build parent header if we have parent info
@@ -710,7 +728,7 @@ Object.assign(CodemanApp.prototype, {
         : '';
 
     const teammateInfo = this.getTeammateInfo(agent);
-    const windowTitle = teammateInfo ? teammateInfo.name : agent.description || agentId.substring(0, 7);
+    const windowTitle = teammateInfo ? teammateInfo.name : agent.description || agent.agentId || 'agent';
     const maxTitleLen = isMobile ? 30 : 50;
     const truncatedTitle =
       windowTitle.length > maxTitleLen ? windowTitle.substring(0, maxTitleLen) + '...' : windowTitle;
@@ -719,7 +737,7 @@ Object.assign(CodemanApp.prototype, {
       : '';
     win.innerHTML = `
       <div class="subagent-window-header">
-        <div class="subagent-window-title" title="${escapeHtml(agent.description || agentId)}">
+        <div class="subagent-window-title" title="${escapeHtml(agent.description || agent.agentId || 'agent')}">
           <span class="icon">🤖</span>
           <span class="id">${escapeHtml(truncatedTitle)}</span>
           ${modelBadge}

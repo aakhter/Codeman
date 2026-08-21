@@ -20,6 +20,8 @@ import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { registerHookEventRoutes } from '../../src/web/routes/hook-event-routes.js';
+import { sessionWaits } from '../../src/web/session-wait-registry.js';
+import { approvalInbox } from '../../src/web/approval-inbox.js';
 
 interface LocalHarness {
   app: FastifyInstance;
@@ -74,6 +76,9 @@ describe('hook-event-routes', () => {
 
   afterEach(async () => {
     await harness.app.close();
+    sessionWaits.cancelAll(harness.ctx._sessionId);
+    approvalInbox.resolveForSession(harness.ctx._sessionId, 'dismissed');
+    vi.restoreAllMocks();
   });
 
   // ========== POST /api/hook-event ==========
@@ -81,9 +86,22 @@ describe('hook-event-routes', () => {
   describe('POST /api/hook-event', () => {
     it('adopts authoritative Claude identity from managed SessionStart without restricting source', async () => {
       const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+        claudeSessionId: string;
+        activityProjection?: { activityStatus: string; activityStatusSince: number | null };
         adoptClaudeSessionStartId: ReturnType<typeof vi.fn>;
       };
-      session.adoptClaudeSessionStartId = vi.fn();
+      session.claudeSessionId = 'claude-old-262';
+      const order: string[] = [];
+      session.adoptClaudeSessionStartId = vi.fn((id: string) => {
+        session.claudeSessionId = id;
+        order.push('adopt');
+      });
+      harness.ctx.agentActivity.identityChanged.mockImplementation(() => {
+        session.activityProjection = { activityStatus: 'checking_agents', activityStatusSince: 262 };
+        order.push('identity');
+      });
+      harness.ctx.persistSessionState.mockImplementation(() => order.push('persist'));
+      harness.ctx.startTranscriptWatcher.mockImplementation(() => order.push('transcript'));
       const res = await harness.app.inject({
         method: 'POST',
         url: '/api/hook-event',
@@ -100,8 +118,80 @@ describe('hook-event-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       expect(session.adoptClaudeSessionStartId).toHaveBeenCalledWith('claude-new-262');
+      expect(harness.ctx.agentActivity.identityChanged).toHaveBeenCalledWith(session);
       expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(session);
+      expect(order.slice(0, 4)).toEqual(['adopt', 'identity', 'persist', 'transcript']);
+      expect(session.activityProjection?.activityStatus).toBe('checking_agents');
     });
+
+    it('clears only an old-generation idle approval on authoritative identity replacement', async () => {
+      const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+        claudeSessionId: string;
+        adoptClaudeSessionStartId(id: string): void;
+      };
+      session.claudeSessionId = 'old-generation';
+      session.adoptClaudeSessionStartId = (id) => {
+        session.claudeSessionId = id;
+      };
+      approvalInbox.notePrompt({
+        sessionId: harness.ctx._sessionId,
+        sessionName: 'old',
+        kind: 'idle',
+        sourceSequence: 8,
+      });
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: {
+          event: 'session_start',
+          sessionId: harness.ctx._sessionId,
+          data: { session_id: 'new-generation', source: 'new' },
+        },
+      });
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+
+      harness.ctx.agentActivity.allocateEvent.mockReturnValue({ sequence: 1, kind: 'stop' });
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: null },
+      });
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+    });
+
+    it.each(['permission', 'question'] as const)(
+      'preserves a pending %s approval across identity replacement',
+      async (kind) => {
+        const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
+          claudeSessionId: string;
+          adoptClaudeSessionStartId(id: string): void;
+        };
+        session.claudeSessionId = 'old-generation';
+        session.adoptClaudeSessionStartId = (id) => {
+          session.claudeSessionId = id;
+        };
+        approvalInbox.notePrompt({ sessionId: harness.ctx._sessionId, sessionName: 'old', kind, sourceSequence: 8 });
+        await harness.app.inject({
+          method: 'POST',
+          url: '/api/hook-event',
+          payload: {
+            event: 'session_start',
+            sessionId: harness.ctx._sessionId,
+            data: { session_id: `new-${kind}`, source: 'new' },
+          },
+        });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).toMatchObject({ kind });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).not.toHaveProperty('sourceSequence');
+
+        harness.ctx.agentActivity.allocateEvent.mockReturnValue({ sequence: 1, kind: 'stop' });
+        await harness.app.inject({
+          method: 'POST',
+          url: '/api/hook-event',
+          payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: null },
+        });
+        expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+      }
+    );
 
     it('returns the checkpoint run id for a new-mode request', async () => {
       const session = harness.ctx.sessions.get(harness.ctx._sessionId) as unknown as {
@@ -141,6 +231,93 @@ describe('hook-event-routes', () => {
         'hook:stop',
         expect.objectContaining({ sessionId: harness.ctx._sessionId })
       );
+    });
+
+    it('records and wakes raw stop waiters before awaiting activity evidence', async () => {
+      const order: string[] = [];
+      let finish!: (decision: Record<string, unknown>) => void;
+      const pending = new Promise<Record<string, unknown>>((resolve) => (finish = resolve));
+      harness.ctx.agentActivity.allocateEvent.mockImplementation(() => ({ sequence: 12, kind: 'stop' }));
+      harness.ctx.agentActivity.decideEvent.mockImplementation(async () => pending);
+      harness.ctx.runSummaryTrackers.set(harness.ctx._sessionId, {
+        recordHookEvent: vi.fn(() => order.push('summary')),
+      } as never);
+      const notify = vi.spyOn(sessionWaits, 'notifySignal').mockImplementation(() => {
+        order.push('waiter');
+        return 0;
+      });
+
+      const response = harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: null },
+      });
+      await vi.waitFor(() => expect(order).toEqual(['waiter', 'summary']));
+      expect(harness.ctx.broadcast).not.toHaveBeenCalled();
+      finish({ presentToHuman: true, quarantined: false, autonomyBlocked: false });
+      await response;
+      notify.mockRestore();
+    });
+
+    it('emits only hook:suppressed when exact live-agent evidence suppresses an idle prompt', async () => {
+      harness.ctx.agentActivity.allocateEvent.mockReturnValue({ sequence: 22, kind: 'idle_prompt' });
+      harness.ctx.agentActivity.decideEvent.mockResolvedValue({
+        presentToHuman: false,
+        quarantined: false,
+        autonomyBlocked: true,
+        observation: 'live',
+        liveEvidence: 'watcher_or_frame',
+      });
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'idle_prompt', sessionId: harness.ctx._sessionId, data: { message: 'waiting' } },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.broadcast).toHaveBeenCalledTimes(1);
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith(
+        'hook:suppressed',
+        expect.objectContaining({ sessionId: harness.ctx._sessionId, hookEvent: 'idle_prompt', sourceSequence: 22 })
+      );
+      expect(harness.ctx.sendPushNotifications).not.toHaveBeenCalled();
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
+    });
+
+    it('keeps raw stop waiters and summaries while suppressing every legacy stop effect', async () => {
+      const receipt = { sequence: 41, kind: 'stop' };
+      const controller = { signalStopHook: vi.fn() };
+      const tracker = { recordHookEvent: vi.fn() };
+      harness.ctx.respawnControllers.set(harness.ctx._sessionId, controller as never);
+      harness.ctx.runSummaryTrackers.set(harness.ctx._sessionId, tracker as never);
+      harness.ctx.agentActivity.allocateEvent.mockReturnValue(receipt);
+      harness.ctx.agentActivity.decideEvent.mockResolvedValue({
+        presentToHuman: false,
+        quarantined: false,
+        autonomyBlocked: true,
+        observation: 'live',
+        liveEvidence: 'exact_process',
+        processReason: 'matching_process',
+      });
+      const notify = vi.spyOn(sessionWaits, 'notifySignal');
+
+      await harness.app.inject({
+        method: 'POST',
+        url: '/api/hook-event',
+        payload: { event: 'stop', sessionId: harness.ctx._sessionId, data: { message: 'raw stop' } },
+      });
+
+      expect(notify).toHaveBeenCalledWith(harness.ctx._sessionId, 'stop');
+      expect(tracker.recordHookEvent).toHaveBeenCalledWith('stop', expect.objectContaining({ message: 'raw stop' }));
+      expect(harness.ctx.broadcast).toHaveBeenCalledTimes(1);
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith(
+        'hook:suppressed',
+        expect.objectContaining({ hookEvent: 'stop', sourceSequence: 41, liveEvidence: 'exact_process' })
+      );
+      expect(controller.signalStopHook).not.toHaveBeenCalled();
+      expect(harness.ctx.sendPushNotifications).not.toHaveBeenCalled();
+      expect(harness.ctx.broadcastSessionStateDebounced).not.toHaveBeenCalled();
+      expect(approvalInbox.getForSession(harness.ctx._sessionId)).toBeUndefined();
     });
 
     it('sends push notifications for hook events', async () => {

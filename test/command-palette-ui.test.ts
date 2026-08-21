@@ -116,6 +116,22 @@ function loadPaletteHarness(overrides: Record<string, any> = {}) {
 }
 
 describe('Command-K session palette', () => {
+  it('includes effective agent activity in subtitle and search tokens', () => {
+    const { app } = loadPaletteHarness({
+      CodemanSessionActivity: {
+        resolve: (session: any) => ({
+          effectiveStatus: session.activityStatus || session.status,
+          expandedLabel:
+            session.activityStatus === 'waiting_agents' ? 'WAITING ON AGENTS' : session.status.toUpperCase(),
+        }),
+      },
+    });
+    app.sessions.get('sess-beta').activityStatus = 'waiting_agents';
+    const item = app
+      .buildCommandPaletteItems('waiting on agents')
+      .find((entry: any) => entry.sessionId === 'sess-beta');
+    expect(item.subtitle).toContain('WAITING ON AGENTS');
+  });
   it('does not expose Map-order sessions while the owner tab layout is pending', () => {
     const { app } = loadPaletteHarness();
     app._tabLayoutFirstPaintPending = true;

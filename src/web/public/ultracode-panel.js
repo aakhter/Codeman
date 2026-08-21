@@ -131,18 +131,17 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  // Phase 4: fetch an agent's live transcript by agentId. The workflow agent's
-  // agentId is byte-identical to the agent-<id>.jsonl stem already tracked by
-  // subagent-watcher, so we reuse the existing transcript route — no watcher edits.
+  // Phase 4: fetch an agent's live transcript by canonical agentKey.
   // Returns { formatted: string[], entryCount } or null when nothing is available
   // (queued / aged out of tracking / tracking disabled). Rendering into a connected
   // in-page floating window lives in ultracode-windows.js (openUltracodeAgentWindow) —
   // we no longer spawn a detached browser popup.
-  async _fetchWorkflowAgentTranscript(agentId) {
-    if (!agentId) return null;
+  async _fetchWorkflowAgentTranscript(agentKey) {
+    agentKey = this._requireSubagentEventKey?.({ agentKey }, 'workflow_transcript');
+    if (!agentKey) return null;
     let data = null;
     try {
-      const res = await fetch(`/api/subagents/${encodeURIComponent(agentId)}/transcript?format=formatted`);
+      const res = await fetch(`/api/subagents/${encodeURIComponent(agentKey)}/transcript?format=formatted`);
       data = await res.json();
     } catch {
       data = null;
@@ -271,15 +270,14 @@ Object.assign(CodemanApp.prototype, {
     } else if (a.lastToolName) {
       secondary = escapeHtml(a.lastToolName + (a.lastToolSummary ? ' · ' + a.lastToolSummary : ''));
     }
-    // Phase 4: cards with an agentId open the live transcript (the agentId is byte-identical
-    // to the agent-<id>.jsonl stem already tracked by subagent-watcher). 'start' agents have
-    // no agentId yet, so they stay non-clickable.
-    const clickable = !!a.agentId;
+    // Only a server-issued composite key may route transcript actions. agentId remains display metadata.
+    const agentKey = this._requireSubagentEventKey?.(a, 'workflow_card');
+    const clickable = !!agentKey;
     // At-a-glance state tint on the whole card: green when done, yellow while working.
     const cardStateCls = state === 'done' ? ' uw-state-done' : state === 'progress' ? ' uw-state-working' : '';
     const cardAttrs = clickable
       ? ` class="ultracode-agent-card ultracode-agent-card--clickable${cardStateCls}" role="button" tabindex="0"` +
-        ` title="View transcript" onclick="app.openUltracodeAgentWindow(${escapeHtml(JSON.stringify(a.agentId))},${escapeHtml(JSON.stringify(runId || ''))})"`
+        ` title="View transcript" onclick="app.openUltracodeAgentWindow(${escapeHtml(JSON.stringify(agentKey))},${escapeHtml(JSON.stringify(runId || ''))})"`
       : ` class="ultracode-agent-card${cardStateCls}"`;
     return (
       `<div${cardAttrs}>` +

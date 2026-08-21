@@ -441,11 +441,11 @@ Object.assign(CodemanApp.prototype, {
   // ── Connection lines ──────────────────────────────────────────────────────
 
   /** Queue an agent's connection line to draw itself on the next line rebuild. */
-  markConnectionLineEntering(agentId) {
-    if (!agentId || this._lineAnimStyle === 'off') return;
+  markConnectionLineEntering(agentKey) {
+    if (!agentKey || this._lineAnimStyle === 'off') return;
     if (!this._lineEnterActive) return;
-    if (this._lineEnterActive.has(agentId)) return;
-    this._lineEnterActive.set(agentId, { startTs: performance.now() });
+    if (this._lineEnterActive.has(agentKey)) return;
+    this._lineEnterActive.set(agentKey, { startTs: performance.now() });
   },
 
   /**
@@ -465,14 +465,18 @@ Object.assign(CodemanApp.prototype, {
     const now = performance.now();
     const duration = this._lineAnimDuration();
 
-    for (const [agentId, state] of active) {
+    for (const [agentKey, state] of active) {
       const elapsed = now - state.startTs;
       if (elapsed > duration + 50) {
-        active.delete(agentId);
+        active.delete(agentKey);
         continue;
       }
 
-      const path = svg.querySelector(`path[data-agent-id="${CSS.escape(agentId)}"]`);
+      let path = svg.querySelector(`path[data-agent-key="${CSS.escape(agentKey)}"]`);
+      // Session-lineage connectors use the same animation queue but are not agent records.
+      if (!path && agentKey.startsWith('lineage:')) {
+        path = svg.querySelector(`path[data-agent-id="${CSS.escape(agentKey)}"]`);
+      }
       if (!path) continue;
 
       const len = Math.max(1, Math.round(path.getTotalLength()));
@@ -484,6 +488,7 @@ Object.assign(CodemanApp.prototype, {
       // line keeps its look instead of being taken over by the animation.
       if (style === 'packet') {
         const packet = path.cloneNode(false);
+        packet.removeAttribute('data-agent-key');
         packet.removeAttribute('data-agent-id');
         packet.setAttribute('class', 'connection-line-packet');
         packet.style.setProperty('--line-len', `${len}px`);

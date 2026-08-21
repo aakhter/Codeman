@@ -127,6 +127,15 @@ interface MuxRow {
   mode?: string;
   attached?: boolean;
   pid?: number;
+  status?: string;
+  activityStatus?: string;
+}
+
+function resolveCliActivity(row: { status?: string; activityStatus?: string }): { status: string; label: string } {
+  const status = row.activityStatus || row.status || 'unknown';
+  const label =
+    status === 'waiting_agents' ? 'WAITING ON AGENTS' : status === 'checking_agents' ? 'CHECKING AGENTS' : status;
+  return { status, label };
 }
 
 /**
@@ -140,13 +149,14 @@ export function formatMuxTable(rows: MuxRow[]): string {
     return 'No tmux/Codeman sessions found on the running instance.';
   }
 
-  const headers = ['Display name', 'tmux session', 'sessionId', 'mode', 'status'];
+  const headers = ['Display name', 'tmux session', 'sessionId', 'mode', 'status', 'activity'];
   const cells = rows.map((r) => [
     r.name || '(unnamed)',
     r.muxName || '',
     r.sessionId || '',
     r.mode || '',
     r.attached ? 'attached' : 'detached',
+    resolveCliActivity(r).label,
   ]);
 
   const widths = headers.map((h, i) => Math.max(h.length, ...cells.map((row) => row[i].length)));
@@ -158,6 +168,37 @@ export function formatMuxTable(rows: MuxRow[]): string {
   const separator = widths.map((w) => '-'.repeat(w)).join('  ');
 
   return [renderRow(headers), separator, ...cells.map(renderRow)].join('\n');
+}
+
+export function mergeMuxActivity(rows: MuxRow[], statusPayload: unknown): MuxRow[] {
+  const sessions = Array.isArray(statusPayload)
+    ? statusPayload
+    : ((statusPayload as { sessions?: unknown })?.sessions ?? []);
+  const byId = new Map(
+    (Array.isArray(sessions) ? sessions : [])
+      .filter((session): session is { id: string; status?: string; activityStatus?: string } =>
+        Boolean(session && typeof session === 'object' && typeof (session as { id?: unknown }).id === 'string')
+      )
+      .map((session) => [session.id, session])
+  );
+  return (rows || []).map((row) => {
+    const session = byId.get(row.sessionId);
+    return session ? { ...row, status: session.status, activityStatus: session.activityStatus } : row;
+  });
+}
+
+const MUX_STATUS_ENRICH_TIMEOUT_MS = 1500;
+
+export async function enrichMuxActivityForOutput(
+  rows: MuxRow[],
+  options: { json?: boolean; fetchStatus: (timeoutMs: number) => Promise<unknown> }
+): Promise<MuxRow[]> {
+  if (options.json) return rows;
+  try {
+    return mergeMuxActivity(rows, await options.fetchStatus(MUX_STATUS_ENRICH_TIMEOUT_MS));
+  } catch {
+    return rows;
+  }
 }
 
 async function postAttachment(apiUrl: string, sessionId: string, filePath: string): Promise<boolean> {
@@ -453,12 +494,15 @@ sessionCmd
       console.log('  (none)');
     } else {
       for (const session of sessions) {
+        const activity = resolveCliActivity(session);
         const status =
-          session.status === 'idle'
+          activity.status === 'idle'
             ? chalk.green('idle')
-            : session.status === 'busy'
+            : activity.status === 'busy'
               ? chalk.yellow('busy')
-              : chalk.red(session.status);
+              : activity.status === 'waiting_agents' || activity.status === 'checking_agents'
+                ? chalk.magenta(activity.label)
+                : chalk.red(activity.label);
         console.log(`  ${chalk.cyan(session.id.slice(0, 8))} ${status} ${session.workingDir}`);
       }
     }
@@ -477,12 +521,15 @@ sessionCmd
     if (sessions.length === 0 && activeSessions.length > 0) {
       console.log(chalk.bold('\nActive Sessions (from web server):'));
       for (const session of activeSessions) {
+        const activity = resolveCliActivity(session);
         const status =
-          session.status === 'idle'
+          activity.status === 'idle'
             ? chalk.green('idle')
-            : session.status === 'busy'
+            : activity.status === 'busy'
               ? chalk.yellow('busy')
-              : chalk.red(session.status);
+              : activity.status === 'waiting_agents' || activity.status === 'checking_agents'
+                ? chalk.magenta(activity.label)
+                : chalk.red(activity.label);
         const name = session.name ? ` (${session.name})` : '';
         const mode = session.mode === 'shell' ? chalk.gray(' [shell]') : '';
         const cost = session.totalCost ? chalk.gray(` $${session.totalCost.toFixed(4)}`) : '';
@@ -760,6 +807,7 @@ interface SessionRow {
   id?: string;
   status?: string;
   workingDir?: string;
+  activityStatus?: string;
 }
 
 /** Aggregated, render-ready summary of a `/api/status` payload. */
@@ -767,6 +815,8 @@ export interface StatusSummary {
   active: number;
   idle: number;
   busy: number;
+  waitingAgents: number;
+  checkingAgents: number;
   tasks: { total: number; running: number; completed: number; failed: number };
   ralphActive: boolean;
 }
@@ -789,11 +839,16 @@ export function summarizeStatus(payload: unknown): StatusSummary {
   const tasks = { total: 0, running: 0, completed: 0, failed: 0 };
   let idle = 0;
   let busy = 0;
+  let waitingAgents = 0;
+  let checkingAgents = 0;
   let ralphActive = false;
 
   for (const s of sessions) {
-    if (s?.status === 'idle') idle++;
-    else if (s?.status === 'busy') busy++;
+    const activity = resolveCliActivity(s || {});
+    if (activity.status === 'waiting_agents') waitingAgents++;
+    else if (activity.status === 'checking_agents') checkingAgents++;
+    else if (activity.status === 'idle') idle++;
+    else if (activity.status === 'busy') busy++;
     const ts = (s as { taskStats?: typeof tasks })?.taskStats;
     if (ts) {
       tasks.total += ts.total ?? 0;
@@ -807,7 +862,7 @@ export function summarizeStatus(payload: unknown): StatusSummary {
 
   // "active" = sessions that aren't stopped (live sessions are all non-stopped).
   const active = sessions.filter((s) => s?.status !== 'stopped').length;
-  return { active, idle, busy, tasks, ralphActive };
+  return { active, idle, busy, waitingAgents, checkingAgents, tasks, ralphActive };
 }
 
 /**
@@ -821,12 +876,15 @@ export function formatSessionRows(sessions: SessionRow[]): string {
   return sessions
     .map((s) => {
       const id = (s.id || '').slice(0, 8);
+      const activity = resolveCliActivity(s);
       const status =
-        s.status === 'idle'
+        activity.status === 'idle'
           ? chalk.green('idle')
-          : s.status === 'busy'
+          : activity.status === 'busy'
             ? chalk.yellow('busy')
-            : chalk.red(s.status || 'unknown');
+            : activity.status === 'waiting_agents' || activity.status === 'checking_agents'
+              ? chalk.magenta(activity.label)
+              : chalk.red(activity.label);
       return `  ${chalk.cyan(id)} ${status} ${s.workingDir || ''}`.trimEnd();
     })
     .join('\n');
@@ -962,6 +1020,10 @@ program
       console.error(chalk.gray('  Is the Codeman web server running? Try --url to point at the right instance.'));
       process.exit(1);
     }
+    rows = await enrichMuxActivityForOutput(rows, {
+      json: options.json,
+      fetchStatus: (timeoutMs) => fetchServerJson(apiUrl, '/api/status', { timeoutMs }),
+    });
 
     if (options.json) {
       console.log(JSON.stringify(rows, null, 2));
@@ -1332,10 +1394,13 @@ program
     // as such, so the numbers are never silently a different thing.
     if (probe.sessions) {
       const live = probe.sessions;
+      const summary = summarizeStatus(live);
       console.log(chalk.bold('\nSessions (live, from the server):'));
       console.log(`  Total: ${live.length}`);
-      console.log(`  Idle: ${live.filter((s) => s.status === 'idle').length}`);
-      console.log(`  Busy: ${live.filter((s) => s.status === 'busy').length}`);
+      console.log(`  Idle: ${summary.idle}`);
+      console.log(`  Busy: ${summary.busy}`);
+      console.log(`  Waiting on agents: ${summary.waitingAgents}`);
+      console.log(`  Checking agents: ${summary.checkingAgents}`);
     } else {
       const manager = getSessionManager();
       const storedValues = Object.values(manager.getStoredSessions());

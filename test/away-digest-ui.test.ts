@@ -9,6 +9,10 @@ const stylesCss = readFileSync(join(process.cwd(), 'src/web/public/styles.css'),
 const mobileCss = readFileSync(join(process.cwd(), 'src/web/public/mobile.css'), 'utf-8');
 
 describe('away digest UI', () => {
+  it('renders the server-provided effective activity detail in still-running items', () => {
+    expect(panelsJs).toContain('escapeHtml(item.detail)');
+    expect(panelsJs).toContain("['stillRunning', 'Still Running']");
+  });
   it('exposes a header entry point and modal shell', () => {
     expect(indexHtml).toContain('onclick="app.openAwayDigest()"');
     expect(indexHtml).toContain('btn-away-digest--hidden');

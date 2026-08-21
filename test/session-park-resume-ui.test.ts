@@ -37,12 +37,31 @@ function loadTerminalUiPrototype() {
 }
 
 function makeFakeApp(proto: Proto, apiPostImpl: (path: string, body: unknown) => Promise<unknown>) {
-  return {
+  const app = {
     ...proto,
     _apiPost: vi.fn(apiPostImpl),
     showToast: vi.fn(),
     _onSessionListMaybeChanged: vi.fn(),
+    sessions: new Map<string, Record<string, unknown>>(),
+    idleTimers: new Map<string, unknown>(),
+    _onSessionParked: vi.fn(({ id }: { id: string }) => {
+      const session = app.sessions.get(id);
+      app.idleTimers.delete(id);
+      app._onSessionListMaybeChanged();
+      if (!session) return null;
+      Object.assign(session, { status: 'parked', activityStatus: 'parked', activityStatusSince: null });
+      return session;
+    }),
+    _onSessionResumed: vi.fn(({ id }: { id: string }) => {
+      const session = app.sessions.get(id);
+      app.idleTimers.delete(id);
+      app._onSessionListMaybeChanged();
+      if (!session) return null;
+      Object.assign(session, { status: 'active', activityStatus: 'active', activityStatusSince: null });
+      return session;
+    }),
   };
+  return app;
 }
 
 function fakeResponse(status: number, ok: boolean, jsonBody?: unknown) {
@@ -196,6 +215,30 @@ describe('COD-124 park/resume UI — _armedObligationLabels (pure, AC6)', () => 
 });
 
 describe('COD-124 park/resume UI — _parkSession orchestration (409 + force flow)', () => {
+  it('merges a successful direct park into the canonical session before a delayed duplicate SSE', async () => {
+    const { proto } = loadTerminalUiPrototype();
+    const app = makeFakeApp(proto, async () => fakeResponse(200, true));
+    const canonical = {
+      id: 's-direct-park',
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+      activityStatusSince: 10,
+    };
+    const row = { sessionId: 's-direct-park', status: 'idle', activityStatus: 'waiting_agents' };
+    app.sessions.set(canonical.id, canonical);
+    app.idleTimers.set(canonical.id, {});
+
+    await proto._parkSession.call(app, row);
+
+    expect(app._onSessionParked).toHaveBeenCalledWith({ id: canonical.id });
+    expect(canonical).toMatchObject({ status: 'parked', activityStatus: 'parked', activityStatusSince: null });
+    expect(row).toMatchObject({ status: 'parked', activityStatus: 'parked', activityStatusSince: null });
+    expect(app.idleTimers.has(canonical.id)).toBe(false);
+
+    app._onSessionParked({ id: canonical.id });
+    expect(canonical).toMatchObject({ status: 'parked', activityStatus: 'parked', activityStatusSince: null });
+  });
+
   it('parks directly on a clean 200 (no obligations)', async () => {
     const { proto } = loadTerminalUiPrototype();
     const apiPost = vi.fn(async () => fakeResponse(200, true));
@@ -264,6 +307,30 @@ describe('COD-124 park/resume UI — _parkSession orchestration (409 + force flo
 });
 
 describe('COD-124 park/resume UI — _resumeSession orchestration', () => {
+  it('merges a successful direct resume into the canonical session before a delayed duplicate SSE', async () => {
+    const { proto } = loadTerminalUiPrototype();
+    const app = makeFakeApp(proto, async () => fakeResponse(200, true));
+    const canonical = {
+      id: 's-direct-resume',
+      status: 'parked',
+      activityStatus: 'checking_agents',
+      activityStatusSince: 20,
+    };
+    const row = { sessionId: 's-direct-resume', status: 'parked', mode: 'claude', activityStatus: 'checking_agents' };
+    app.sessions.set(canonical.id, canonical);
+    app.idleTimers.set(canonical.id, {});
+
+    await proto._resumeSession.call(app, row);
+
+    expect(app._onSessionResumed).toHaveBeenCalledWith({ id: canonical.id });
+    expect(canonical).toMatchObject({ status: 'active', activityStatus: 'active', activityStatusSince: null });
+    expect(row).toMatchObject({ status: 'active', activityStatus: 'active', activityStatusSince: null });
+    expect(app.idleTimers.has(canonical.id)).toBe(false);
+
+    app._onSessionResumed({ id: canonical.id });
+    expect(canonical).toMatchObject({ status: 'active', activityStatus: 'active', activityStatusSince: null });
+  });
+
   it('resumes a claude session without confirming (restorable)', async () => {
     const { proto, confirmSpy } = loadTerminalUiPrototype();
     const apiPost = vi.fn(async () => fakeResponse(200, true));

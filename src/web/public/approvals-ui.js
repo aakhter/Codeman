@@ -23,6 +23,26 @@ function approvalKindToHook(kind) {
   return kind === 'permission' ? 'permission_prompt' : kind === 'question' ? 'elicitation_dialog' : 'idle_prompt';
 }
 
+/** Resolve out-of-order events by their server sequence, never by ID or wall-clock time. */
+function approvalEventDisposition(approvals, item, sameKindOnly = true) {
+  const current = [...(approvals?.values() || [])].find(
+    (candidate) => candidate.sessionId === item.sessionId && (!sameKindOnly || candidate.kind === item.kind)
+  );
+  if (!current) return { applies: true, current };
+
+  const eventSequence =
+    typeof item.sourceSequence === 'number' && Number.isFinite(item.sourceSequence) ? item.sourceSequence : null;
+  const currentSequence =
+    typeof current.sourceSequence === 'number' && Number.isFinite(current.sourceSequence)
+      ? current.sourceSequence
+      : null;
+  const comparable = eventSequence !== null && currentSequence !== null;
+  if (current.id === item.id) {
+    return { applies: !comparable || eventSequence >= currentSequence, current };
+  }
+  return { applies: comparable && eventSequence > currentSequence, current };
+}
+
 Object.assign(CodemanApp.prototype, {
   /** Synced setting, default OFF, opt-in via App Settings → Panels. */
   approvalsInboxEnabled() {
@@ -36,7 +56,10 @@ Object.assign(CodemanApp.prototype, {
    */
   async seedApprovals() {
     if (!this.approvals) this.approvals = new Map();
-    this.approvals.clear();
+    if (!this._approvalSessionRevisions) this._approvalSessionRevisions = new Map();
+    const requestGeneration = (this._approvalSeedGeneration || 0) + 1;
+    this._approvalSeedGeneration = requestGeneration;
+    const startRevision = this._approvalRevision || 0;
     // ⚠ Fetch and re-arm the tab-alert state machine REGARDLESS of the inbox
     // setting. The server-side approval store runs unconditionally (only the
     // inbox SURFACES are opt-in), and the red/yellow tab alert predates the
@@ -44,17 +67,43 @@ Object.assign(CodemanApp.prototype, {
     // reload landed with every alert store empty while a permission dialog sat
     // blocking a session (owner report 2026-08-15: rail said NEEDS YOU from
     // the live SSE event, the reloaded-elsewhere tab showed a plain green
-    // dot). Only populating `this.approvals` (bell/drawer/answer strips) stays
-    // behind the setting.
+    // dot). `renderApprovals()` still gates every inbox surface on the setting;
+    // the canonical map stays populated so event ordering remains safe.
     const data = await this._apiJson('/api/approvals');
-    const inboxOn = this.approvalsInboxEnabled();
-    for (const item of (data && data.approvals) || []) {
-      if (inboxOn) this.approvals.set(item.id, item);
+    if (requestGeneration !== this._approvalSeedGeneration) return;
+    if (!data || !Array.isArray(data.approvals)) return;
+    const fetched = data.approvals;
+    const fetchedSessions = new Set(fetched.map((item) => item.sessionId));
+
+    for (const existing of [...this.approvals.values()]) {
+      const changedAfterStart = (this._approvalSessionRevisions.get(existing.sessionId) || 0) > startRevision;
+      if (!fetchedSessions.has(existing.sessionId) && !changedAfterStart) {
+        this.approvals.delete(existing.id);
+        this.clearPendingHooks(existing.sessionId, approvalKindToHook(existing.kind));
+      }
+    }
+
+    for (const item of fetched) {
+      const current = [...this.approvals.values()].find((candidate) => candidate.sessionId === item.sessionId);
+      const changedAfterStart = (this._approvalSessionRevisions.get(item.sessionId) || 0) > startRevision;
+      if (!current && changedAfterStart) continue;
+      if (current && changedAfterStart) {
+        if (current.id === item.id) continue;
+        if (!approvalEventDisposition(this.approvals, item, false).applies) continue;
+      }
+      if (current && current.id !== item.id) {
+        this.approvals.delete(current.id);
+        this.clearPendingHooks(current.sessionId, approvalKindToHook(current.kind));
+      }
+      this.approvals.set(item.id, item);
       // ⚠ Skip items a human already looked at (`acknowledgedAt`, set by
       // markIdleAlertSeen → POST .../viewed). Re-arming those is exactly the
       // bug this flag exists for: clicking a yellow tab cleared the alert in
       // this tab's memory only, so the next reload seeded it right back.
-      if (item.acknowledgedAt) continue;
+      if (item.acknowledgedAt) {
+        this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+        continue;
+      }
       // Re-arm the tab alert state machine (idempotent set-add).
       this.setPendingHook(item.sessionId, approvalKindToHook(item.kind));
     }
@@ -66,11 +115,17 @@ Object.assign(CodemanApp.prototype, {
   _onApprovalPending(item) {
     if (!item || !item.id) return;
     if (!this.approvals) this.approvals = new Map();
+    const disposition = approvalEventDisposition(this.approvals, item, false);
+    if (!disposition.applies) return;
     // One active item per session (server invariant): drop any stale sibling.
     for (const [id, existing] of this.approvals) {
-      if (existing.sessionId === item.sessionId) this.approvals.delete(id);
+      if (existing.sessionId === item.sessionId && id !== item.id) {
+        this.approvals.delete(id);
+        this.clearPendingHooks(existing.sessionId, approvalKindToHook(existing.kind));
+      }
     }
     this.approvals.set(item.id, item);
+    this._markApprovalMutation(item.sessionId);
     // Hook-fed Claude prompts also arrive through their hook:* handlers, but
     // transition-fed Codex prompts have only approval:pending. Feed the shared
     // alert state machine here so live tabs and the phone overview do not wait
@@ -81,27 +136,56 @@ Object.assign(CodemanApp.prototype, {
 
   _onApprovalUpdated(item) {
     if (!item || !item.id) return;
+    const disposition = approvalEventDisposition(this.approvals, item);
     // Acknowledged elsewhere (this user opened the session on another device):
-    // spend the tab alert UNCONDITIONALLY, for the same reason
+    // spend the matching tab alert even when the inbox is disabled, for the same reason
     // _onApprovalResolved does: with the inbox setting OFF the item was never
     // stored in `this.approvals`, yet seedApprovals armed its alert, so gating
     // this on a map hit would strand a yellow tab on every other device.
-    if (item.acknowledgedAt) this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+    if (item.acknowledgedAt && disposition.applies) {
+      this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+    }
+    if (disposition.applies && disposition.current && disposition.current.id !== item.id) {
+      this.approvals.delete(disposition.current.id);
+      this.approvals.set(item.id, item);
+      this._markApprovalMutation(item.sessionId);
+      this.renderApprovals();
+      return;
+    }
+    if (!disposition.applies) return;
     if (!this.approvals?.has(item.id)) return;
     this.approvals.set(item.id, item);
+    this._markApprovalMutation(item.sessionId);
     this.renderApprovals();
   },
 
   _onApprovalResolved(info) {
     if (!info || !info.id) return;
-    // Clear the matching tab alert UNCONDITIONALLY: the inbox resolves on more
+    const disposition = approvalEventDisposition(this.approvals, info);
+    // Clear the matching tab alert even when the inbox is disabled: the inbox resolves on more
     // signals than the hook handlers do (superseded, expired, answered from
     // another device), clearPendingHooks is a no-op when nothing is set, and
     // with the inbox setting OFF the item was never stored in `this.approvals`
     // even though seedApprovals armed the alert — gating the clear on a map hit
-    // would strand that alert forever.
-    this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
-    if (this.approvals?.delete(info.id)) this.renderApprovals();
+    // would strand that alert forever. For different same-kind item IDs, the
+    // authoritative source sequence decides which side of the race wins.
+    if (disposition.applies) {
+      this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
+    }
+    let changed = (disposition.applies && this.approvals?.delete(info.id)) || false;
+    if (disposition.applies && disposition.current && disposition.current.id !== info.id) {
+      changed = this.approvals.delete(disposition.current.id) || changed;
+    }
+    if (disposition.applies) this._markApprovalMutation(info.sessionId);
+    if (changed) this.renderApprovals();
+  },
+
+  _markApprovalMutation(sessionId) {
+    if (!sessionId) return;
+    if (!this._approvalSessionRevisions) this._approvalSessionRevisions = new Map();
+    const revision = (this._approvalRevision || 0) + 1;
+    this._approvalRevision = revision;
+    this._approvalSessionRevisions.set(sessionId, revision);
   },
 
   // ─── Actions ─────────────────────────────────────────────────
@@ -157,7 +241,11 @@ Object.assign(CodemanApp.prototype, {
   async dismissApproval(id) {
     await this._apiJson(`/api/approvals/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: {} });
     // The SSE resolved event also lands; delete now for instant feedback.
-    if (this.approvals?.delete(id)) this.renderApprovals();
+    const item = this.approvals?.get(id);
+    if (this.approvals?.delete(id)) {
+      this._markApprovalMutation(item?.sessionId);
+      this.renderApprovals();
+    }
   },
 
   openApprovalSession(id) {

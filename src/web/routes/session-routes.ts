@@ -108,7 +108,15 @@ import {
   setHistoryIndexRefresher,
   setHistorySessionIndex,
 } from '../session-history-index.js';
-import type { SessionPort, EventPort, ConfigPort, InfraPort, AuthPort, RespawnPort } from '../ports/index.js';
+import type {
+  SessionPort,
+  EventPort,
+  ConfigPort,
+  InfraPort,
+  AuthPort,
+  RespawnPort,
+  AgentActivityPort,
+} from '../ports/index.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
   checkRemoteTmuxAvailable,
@@ -577,8 +585,12 @@ function waitCapacityResponse(err: WaitCapacityError): ApiResponse<never> {
  * Fixing it HERE rather than in `signalForStatus` is deliberate: liveness is not
  * derivable from `SessionStatus`, and the registry holds no `Session` reference.
  */
-function currentSignalFor(session: { pid: number | null; status: SessionStatus }, dead: boolean): WaitSignal | null {
+function currentSignalFor(
+  session: { pid: number | null; status: SessionStatus; isAutonomouslyIdle(): boolean },
+  dead: boolean
+): WaitSignal | null {
   if (dead || session.pid === null || session.pid === undefined) return 'exit';
+  if (session.status === 'idle' && !session.isAutonomouslyIdle()) return null;
   return signalForStatus(session.status);
 }
 
@@ -793,7 +805,7 @@ async function injectAgentSkill(casePath: string): Promise<void> {
 
 export function registerSessionRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort & AgentActivityPort
 ): void {
   // ═══════════════════════════════════════════════════════════════
   // Auth
@@ -2252,6 +2264,7 @@ export function registerSessionRoutes(
     const activeId = await resolveActiveClaudeSessionIdFromHistory(session, projectsDir);
     if (activeId && activeId !== session.claudeSessionId) {
       session.adoptClaudeSessionId(activeId);
+      ctx.agentActivity.identityChanged(session);
       // Flush the Enter that vouched for this adoption to state.json. A `/clear`
       // emits no completion event, so without this the anchor could still be
       // unpersisted when the server restarts — and recovery would fall back to
@@ -2273,6 +2286,7 @@ export function registerSessionRoutes(
 
     if (transcript.sessionId !== session.claudeSessionId && transcript.sessionId !== session.id) {
       session.adoptClaudeSessionId(transcript.sessionId);
+      ctx.agentActivity.identityChanged(session);
       if (session.docker) {
         void persistDockerCaseClaudeSessionId(
           CODEMAN_CONFIG_DIR,
@@ -4139,12 +4153,15 @@ export function registerSessionRoutes(
     // Live (in-memory) sessions.
     const live: LiveSessionInput[] = [...ctx.sessions.values()].map((s) => {
       const st = s.toState();
+      const activity = ctx.agentActivity.project(s);
       return {
         id: st.id,
         name: st.name,
         mode: st.mode,
         status: st.status,
         isWorking: s.isWorking,
+        activityStatus: activity.activityStatus,
+        activityStatusSince: activity.activityStatusSince,
         workingDir: st.workingDir,
         createdAt: st.createdAt,
         lastActivityAt: st.lastActivityAt,

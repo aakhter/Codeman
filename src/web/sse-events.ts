@@ -48,6 +48,8 @@
  * 3. Add the frontend listener in the appropriate `addListener()` call
  */
 
+import type { ApprovalResolvedInfo } from './approval-inbox.js';
+
 // ─── Core ────────────────────────────────────────────────────────────────────
 
 /** Sent to each SSE client on initial connection with full app state. */
@@ -372,6 +374,8 @@ export const HookStop = 'hook:stop' as const;
 export const HookTeammateIdle = 'hook:teammate_idle' as const;
 /** Claude Code hook: teammate task completed. */
 export const HookTaskCompleted = 'hook:task_completed' as const;
+/** A hook was received but its human-facing legacy effects were suppressed by exact agent activity evidence. */
+export const HookSuppressed = 'hook:suppressed' as const;
 
 // ─── Approvals Inbox ─────────────────────────────────────────────────────────
 
@@ -381,6 +385,11 @@ export const ApprovalPending = 'approval:pending' as const;
 export const ApprovalUpdated = 'approval:updated' as const;
 /** A pending approval left the inbox (answered, superseded, expired, ...). */
 export const ApprovalResolved = 'approval:resolved' as const;
+
+/** Keep the resolved SSE payload aligned with the exact item removed by the inbox. */
+export function approvalResolvedEventPayload(info: ApprovalResolvedInfo): ApprovalResolvedInfo {
+  return { ...info };
+}
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
@@ -634,6 +643,7 @@ export const SseEvent = {
   HookStop,
   HookTeammateIdle,
   HookTaskCompleted,
+  HookSuppressed,
 
   // Approvals Inbox
   ApprovalPending,

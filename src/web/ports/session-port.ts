@@ -5,6 +5,9 @@
 
 import type { Session } from '../../session.js';
 import type { SessionPlacementHints, TabLayoutSnapshot } from '../../tab-layout-service.js';
+import type { SessionActivityProjection } from '../../types/session.js';
+
+export type SessionWireState = SessionActivityProjection & Record<string, unknown>;
 
 export type SessionCreationOptions = SessionPlacementHints;
 
@@ -15,5 +18,5 @@ export interface SessionPort {
   setupSessionListeners(session: Session): Promise<void>;
   persistSessionState(session: Session): void;
   persistSessionStateNow(session: Session): void;
-  getSessionStateWithRespawn(session: Session): unknown;
+  getSessionStateWithRespawn(session: Session): SessionWireState;
 }

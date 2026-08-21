@@ -58,6 +58,7 @@ import {
   type SessionRemote,
   type SessionSource,
   type SessionDocker,
+  type SessionActivityProjection,
 } from './types.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
 import { probeRemoteCliVersion } from './remote-hosts.js';
@@ -552,6 +553,11 @@ export class Session extends EventEmitter {
   private ptyProcess: pty.IPty | null = null;
   private _pid: number | null = null;
   private _status: SessionStatus = 'idle';
+  private _activityProjection: SessionActivityProjection = {
+    activityStatus: 'idle',
+    activityStatusSince: null,
+  };
+  private _terminalActivityEpoch = 0;
   private _currentTaskId: string | null = null;
 
   // COD-118: bound repeated non-zero interactive-PTY exits. Recorded in the
@@ -577,6 +583,7 @@ export class Session extends EventEmitter {
   // screens' quiet ordering. Idle detection never reads it.
   private _wireActivityAt: number;
   private _wireActivitySettleUntil: number;
+  private readonly _restoredIdleAnchorAt?: number;
   private _claudeSessionId: string | null = null;
   private _claudeAuthoritativeSessionId: string | null = null;
   private _claudeSessionIdentityAdopted = false;
@@ -899,6 +906,9 @@ export class Session extends EventEmitter {
     // response viewer re-derive the live conversation without waiting for the
     // user to type again.
     this._lastSubmitAt = config.lastSubmitAt ?? 0;
+    this._restoredIdleAnchorAt = config.lastActivityAt
+      ? Math.max(config.lastActivityAt, config.lastSubmitAt ?? 0)
+      : undefined;
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;
@@ -1051,6 +1061,7 @@ export class Session extends EventEmitter {
         return undefined;
       },
       isWorking: () => this._isWorking,
+      isIdleAutomationBlocked: () => this.blocksIdleAutomation,
       isStopped: () => this._isStopped,
       getTotalTokens: () => this._totalInputTokens + this._totalOutputTokens,
       getSessionId: () => this.id,
@@ -1115,6 +1126,11 @@ export class Session extends EventEmitter {
 
   get lastActivityAt(): number {
     return this._wireActivityAt;
+  }
+
+  /** Recovery-only lower bound for when a persisted raw-idle episode could begin. */
+  get restoredIdleAnchorAt(): number | undefined {
+    return this._status === 'idle' ? this._restoredIdleAnchorAt : undefined;
   }
 
   /**
@@ -1205,6 +1221,46 @@ export class Session extends EventEmitter {
 
   get isWorking(): boolean {
     return this._isWorking;
+  }
+
+  /** Agent activity or uncertainty must not be mistaken for autonomous availability. */
+  get blocksIdleAutomation(): boolean {
+    return (
+      this._activityProjection.activityStatus === 'waiting_agents' ||
+      this._activityProjection.activityStatus === 'checking_agents'
+    );
+  }
+
+  /** Raw idle plus a fail-safe server activity projection. */
+  isAutonomouslyIdle(): boolean {
+    return this.isIdle() && !this.blocksIdleAutomation;
+  }
+
+  /** Current server-derived activity. This projection is never persisted by toState(). */
+  get activityProjection(): SessionActivityProjection {
+    return { ...this._activityProjection };
+  }
+
+  /** Monotonic invalidation token for decisions based on terminal quiescence. */
+  get terminalActivityEpoch(): number {
+    return this._terminalActivityEpoch;
+  }
+
+  setActivityProjection(projection: SessionActivityProjection, options: { reconstructEpisode?: boolean } = {}): void {
+    const isAgentActivity =
+      projection.activityStatus === 'waiting_agents' || projection.activityStatus === 'checking_agents';
+    const wasAgentActivity =
+      this._activityProjection.activityStatus === 'waiting_agents' ||
+      this._activityProjection.activityStatus === 'checking_agents';
+    this._activityProjection = {
+      ...projection,
+      activityStatusSince:
+        isAgentActivity && wasAgentActivity && !options.reconstructEpisode
+          ? this._activityProjection.activityStatusSince
+          : isAgentActivity
+            ? projection.activityStatusSince
+            : null,
+    };
   }
 
   /**
@@ -2251,6 +2307,10 @@ export class Session extends EventEmitter {
   }
 
   private _handleTerminalOutput(data: string): void {
+    // Invalidate idle decisions for every raw PTY chunk, including bytes held
+    // back by the sanitizer while it waits for the rest of an incomplete CSI.
+    this._terminalActivityEpoch++;
+    this.emit('terminalActivity');
     // COD-189: shell burst tracking runs on the SHARED output path — shell
     // sessions have their own onData handlers and never pass through the
     // interactive-session hooks.
@@ -2895,6 +2955,7 @@ export class Session extends EventEmitter {
     if (this._isWorking) return;
     this._isWorking = true;
     this._status = 'busy';
+    this._terminalActivityEpoch++;
     this.emit('working');
     this._autoOps.notifyWorking();
   }
@@ -3318,6 +3379,7 @@ export class Session extends EventEmitter {
     if (!this._isWorking) {
       this._isWorking = true;
       this._status = 'busy';
+      this._terminalActivityEpoch++;
       this.emit('working');
       this._autoOps.notifyWorking();
     }
@@ -3815,9 +3877,9 @@ export class Session extends EventEmitter {
    * input could disappear while the caller believed it had been delivered.
    */
   write(data: string): boolean {
-    this._trackSubmit(data);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
+    this._trackSubmit(data);
     return true;
   }
 
@@ -3837,6 +3899,8 @@ export class Session extends EventEmitter {
   private _trackSubmit(data: string): void {
     if (data.includes('\r') || data.includes('\n')) {
       this._lastSubmitAt = Date.now();
+      this._terminalActivityEpoch++;
+      this.emit('terminalActivity');
       // Codex last-response resolution compares submit times ACROSS sessions (a
       // sibling codex pane's submit would otherwise be mistaken for this one's),
       // so codex panes additionally publish theirs to the shared map.
@@ -3914,13 +3978,15 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
-    this._trackSubmit(data);
     if (this._mux && this._muxSession) {
-      return this._mux.sendInput(this.id, data);
+      const delivered = await this._mux.sendInput(this.id, data);
+      if (delivered) this._trackSubmit(data);
+      return delivered;
     }
     // Fallback to PTY write
     if (this.ptyProcess) {
       this.ptyProcess.write(data);
+      this._trackSubmit(data);
       return true;
     }
     return false;
@@ -3957,14 +4023,21 @@ export class Session extends EventEmitter {
       this._checkpointCodexFreshBaselineIds =
         baselineId && !baselineIds.includes(baselineId) ? [...baselineIds, baselineId] : baselineIds;
       this._checkpointCodexFreshTransitionArmed = true;
-    } else {
-      this._trackSubmit(data);
     }
     if (this._isStopped || (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)) {
       return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
     }
     if (this._mux && this._muxSession) {
       const result = await this._mux.sendCheckpointCommand(this.id, data);
+      if (result.ok) {
+        // Codex fresh-thread commands intentionally do not update lastSubmitAt:
+        // they are not viewer-history prompts, but successful delivery still
+        // invalidates pending idle decisions.
+        if (isCodexFreshThread) {
+          this._terminalActivityEpoch++;
+          this.emit('terminalActivity');
+        } else this._trackSubmit(data);
+      }
       if (isClear && !result.ok) {
         this._checkpointAwaitingInstantClear = false;
         this._checkpointInstantClearBaseline = null;
@@ -3976,6 +4049,7 @@ export class Session extends EventEmitter {
     if (this.mode === 'claude' && this.ptyProcess) {
       try {
         this.ptyProcess.write(data);
+        this._trackSubmit(data);
         return { ok: true, attempt: 1 };
       } catch (err) {
         if (isClear) {

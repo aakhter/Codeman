@@ -29,6 +29,25 @@ function summary(sessionId: string, events: RunSummary['events']): RunSummary {
 }
 
 describe('away digest', () => {
+  it('treats waiting/checking agents as still running despite raw idle', () => {
+    const digest = buildAwayDigest({
+      now: NOW,
+      range: resolveAwayDigestRange({ range: '1h', now: NOW }),
+      sessions: [
+        { id: 'waiting-agents', status: 'idle', activityStatus: 'waiting_agents' },
+        { id: 'checking-agents', status: 'idle', activityStatus: 'checking_agents' },
+      ],
+      lifecycleEntries: [],
+      subagents: [],
+      runSummaries: [],
+      dailyTokenStats: [],
+    } as any);
+    expect(digest.sections.stillRunning.map((item) => item.sessionId)).toEqual(['waiting-agents', 'checking-agents']);
+    expect(digest.sections.stillRunning.map((item) => item.detail)).toEqual([
+      'Status: WAITING ON AGENTS',
+      'Status: CHECKING AGENTS',
+    ]);
+  });
   it('resolves since-last-visit after the stored marker and defaults to 24h', () => {
     expect(resolveAwayDigestRange({ range: 'since-last-visit', lastViewed: NOW - HOUR, now: NOW })).toMatchObject({
       range: 'since-last-visit',

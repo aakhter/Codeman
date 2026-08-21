@@ -3029,6 +3029,13 @@ html.mobile-init .file-browser-panel {
     background: var(--text-muted);
     opacity: 0.5;
   }
+  .mobile-overview-dot--waiting_agents,
+  .mobile-overview-dot--checking_agents {
+    background: var(--session-purple);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--session-purple) 20%, transparent);
+  }
+  .mobile-overview-dot--waiting_agents { animation: agent-wait-pulse 3.2s ease-in-out infinite; }
+  .mobile-overview-dot--checking_agents { opacity: 0.72; }
 
   .mobile-overview-pill {
     flex-shrink: 0;
@@ -3059,6 +3066,12 @@ html.mobile-init .file-browser-panel {
   .mobile-overview-pill--working {
     border-color: var(--green);
     color: var(--green);
+  }
+  .mobile-overview-pill--waiting_agents,
+  .mobile-overview-pill--checking_agents {
+    background: color-mix(in srgb, var(--session-purple) 14%, transparent);
+    border-color: color-mix(in srgb, var(--session-purple) 42%, transparent);
+    color: var(--session-purple);
   }
 
   .mobile-overview-chevron {
@@ -3149,6 +3162,11 @@ html.mobile-init .file-browser-panel {
     content: '...';
     animation: none;
   }
+}
+
+html[data-session-list="sidebar"] .session-sidebar .session-tab[data-activity-status="waiting_agents"],
+html[data-session-list="sidebar"] .session-sidebar .session-tab[data-activity-status="checking_agents"] {
+  border-color: color-mix(in srgb, var(--session-purple) 35%, var(--border));
 }
 
 /* Light-skin compatibility for mobile-only chrome. These components predate
@@ -3966,5 +3984,9 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab .tab-close {
 @media (prefers-reduced-motion: reduce) {
   html[data-session-list="sidebar"] .session-sidebar {
     transition: none;
+  }
+  .mobile-overview-dot--waiting_agents,
+  .mobile-overview-dot--checking_agents {
+    animation: none;
   }
 }
