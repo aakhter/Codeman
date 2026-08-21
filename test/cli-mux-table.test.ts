@@ -7,8 +7,8 @@
  * tested (mirrors how `attach` leaves its request helper untested).
  */
 
-import { describe, it, expect } from 'vitest';
-import { formatMuxTable, mergeMuxActivity } from '../src/cli.js';
+import { describe, it, expect, vi } from 'vitest';
+import { enrichMuxActivityForOutput, formatMuxTable, mergeMuxActivity } from '../src/cli.js';
 
 const sampleRows = [
   {
@@ -76,6 +76,22 @@ describe('formatMuxTable', () => {
       sessions: [{ id: sampleRows[0].sessionId, status: 'idle', activityStatus: 'checking_agents' }],
     });
     expect(formatMuxTable(merged)).toContain('CHECKING AGENTS');
+  });
+
+  it('falls back to raw mux rows when bounded status enrichment times out', async () => {
+    const fetchStatus = vi.fn(async (timeoutMs: number) => {
+      expect(timeoutMs).toBe(1500);
+      throw new Error('request timed out');
+    });
+    await expect(enrichMuxActivityForOutput(sampleRows, { fetchStatus })).resolves.toEqual(sampleRows);
+    expect(fetchStatus).toHaveBeenCalledOnce();
+  });
+
+  it('keeps --json raw and never fetches status enrichment', async () => {
+    const fetchStatus = vi.fn();
+    const result = await enrichMuxActivityForOutput(sampleRows, { json: true, fetchStatus });
+    expect(result).toBe(sampleRows);
+    expect(fetchStatus).not.toHaveBeenCalled();
   });
 
   it('falls back to a placeholder display name when name is missing', () => {

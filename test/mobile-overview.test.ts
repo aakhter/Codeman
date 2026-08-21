@@ -14,13 +14,19 @@ const PUBLIC = resolve(import.meta.dirname, '../src/web/public');
 
 /** Minimal fake DOM node — enough surface for mobile-overview.js's programmatic builders. */
 function fakeElement(): any {
+  const attributes = new Map<string, string>();
   const el: any = {
     className: '',
     type: '',
     dataset: {},
     style: {},
     children: [] as any[],
-    setAttribute() {},
+    setAttribute(name: string, value: string) {
+      attributes.set(name, String(value));
+    },
+    getAttribute(name: string) {
+      return attributes.get(name) ?? null;
+    },
     appendChild(child: any) {
       el.children.push(child);
       return child;
@@ -108,6 +114,35 @@ describe('mobile overview model', () => {
     sessions[0].lastActivityAt = 50_000;
     sessions[1].lastActivityAt = 10;
     expect(build().current.map((row: any) => row.id)).toEqual(['old-wait', 'young-wait']);
+  });
+
+  it('presents winning action hooks in data and ARIA, then restores agent activity', () => {
+    const app = loadOverviewApp();
+    const sessions = [
+      session({ id: 'permission', name: 'Permission', activityStatus: 'waiting_agents' }),
+      session({ id: 'elicitation', name: 'Elicitation', activityStatus: 'checking_agents' }),
+      session({ id: 'idle-hook', name: 'Idle hook', activityStatus: 'waiting_agents' }),
+    ];
+    const pendingHooks = new Map([
+      ['permission', new Set(['permission_prompt'])],
+      ['elicitation', new Set(['elicitation_dialog'])],
+      ['idle-hook', new Set(['idle_prompt'])],
+    ]);
+    const model = app.buildMobileOverviewModel({ sessions, pendingHooks });
+    const rendered = new Map(
+      [...model.needsYou, ...model.current].map((row: any) => [row.id, app._buildMobileOverviewRow(row)])
+    );
+    expect(rendered.get('permission').dataset.activityStatus).toBe('needs');
+    expect(rendered.get('permission').getAttribute('aria-label')).toContain('needs your permission or input');
+    expect(rendered.get('elicitation').dataset.activityStatus).toBe('needs');
+    expect(rendered.get('idle-hook').dataset.activityStatus).toBe('waiting');
+    expect(rendered.get('idle-hook').getAttribute('aria-label')).toContain('waiting for your input');
+
+    const restored = app.buildMobileOverviewModel({ sessions, pendingHooks: new Map() });
+    const restoredRows = new Map(restored.current.map((row: any) => [row.id, app._buildMobileOverviewRow(row)]));
+    expect(restoredRows.get('permission').dataset.activityStatus).toBe('waiting_agents');
+    expect(restoredRows.get('permission').getAttribute('aria-label')).toContain('waiting on background agents');
+    expect(restoredRows.get('elicitation').dataset.activityStatus).toBe('checking_agents');
   });
   it('does not expose Map-order live sessions while the owner tab layout is pending', () => {
     const app = loadOverviewApp();

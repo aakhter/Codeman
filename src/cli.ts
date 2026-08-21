@@ -187,6 +187,20 @@ export function mergeMuxActivity(rows: MuxRow[], statusPayload: unknown): MuxRow
   });
 }
 
+const MUX_STATUS_ENRICH_TIMEOUT_MS = 1500;
+
+export async function enrichMuxActivityForOutput(
+  rows: MuxRow[],
+  options: { json?: boolean; fetchStatus: (timeoutMs: number) => Promise<unknown> }
+): Promise<MuxRow[]> {
+  if (options.json) return rows;
+  try {
+    return mergeMuxActivity(rows, await options.fetchStatus(MUX_STATUS_ENRICH_TIMEOUT_MS));
+  } catch {
+    return rows;
+  }
+}
+
 async function postAttachment(apiUrl: string, sessionId: string, filePath: string): Promise<boolean> {
   const envFile = readCodemanEnv();
   const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
@@ -1006,11 +1020,10 @@ program
       console.error(chalk.gray('  Is the Codeman web server running? Try --url to point at the right instance.'));
       process.exit(1);
     }
-    try {
-      rows = mergeMuxActivity(rows, await fetchServerJson(apiUrl, '/api/status'));
-    } catch {
-      // The mux mapping is still useful when the optional live-status join is unavailable.
-    }
+    rows = await enrichMuxActivityForOutput(rows, {
+      json: options.json,
+      fetchStatus: (timeoutMs) => fetchServerJson(apiUrl, '/api/status', { timeoutMs }),
+    });
 
     if (options.json) {
       console.log(JSON.stringify(rows, null, 2));

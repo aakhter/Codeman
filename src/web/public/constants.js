@@ -616,6 +616,15 @@ const AGENT_ACTIVITY_PRESENTATION = {
   },
 };
 
+const SESSION_ACTIVITY_ARIA = {
+  needs: 'needs your permission or input',
+  waiting: 'waiting for your input',
+  error: 'has an error',
+  working: 'working',
+  idle: 'idle',
+  done: 'done',
+};
+
 function resolveSessionActivity(session = {}) {
   const rawStatus = session.status || 'idle';
   const effectiveStatus = session.activityStatus || rawStatus;
@@ -641,7 +650,7 @@ function resolveSessionActivity(session = {}) {
     overviewState,
     compactLabel: presentation.compactLabel || effectiveStatus.toUpperCase(),
     expandedLabel: presentation.expandedLabel || effectiveStatus.toUpperCase(),
-    ariaPhrase: presentation.ariaPhrase || effectiveStatus.replaceAll('_', ' '),
+    ariaPhrase: presentation.ariaPhrase || SESSION_ACTIVITY_ARIA[effectiveStatus] || effectiveStatus.replaceAll('_', ' '),
     cssState: presentation.cssState || effectiveStatus.replaceAll('_', '-'),
     sortAnchor,
   };

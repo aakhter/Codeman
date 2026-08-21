@@ -457,8 +457,10 @@ Object.assign(CodemanApp.prototype, {
     item.className = 'home-sessions-row home-sessions-row--' + row.state;
     item.dataset.hsAction = 'session';
     item.dataset.hsSession = row.id;
-    item.dataset.activityStatus = row.activityStatus || row.state;
-    const activity = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    const underlying = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    const presentationStatus = underlying?.overviewState === row.state ? row.activityStatus || row.state : row.state;
+    item.dataset.activityStatus = presentationStatus;
+    const activity = window.CodemanSessionActivity?.resolve({ status: presentationStatus });
     item.setAttribute('aria-label', `${row.name}, ${activity?.ariaPhrase || row.state}`);
     item.title = row.dir ? `${row.name} (${row.dir})` : row.name;
 

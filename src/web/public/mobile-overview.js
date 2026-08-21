@@ -667,8 +667,10 @@ Object.assign(CodemanApp.prototype, {
     item.className = 'mobile-overview-row mobile-overview-row--' + row.state;
     item.dataset.moAction = 'session';
     item.dataset.moSession = row.id;
-    item.dataset.activityStatus = row.activityStatus || row.state;
-    const activity = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    const underlying = window.CodemanSessionActivity?.resolve({ status: row.activityStatus || row.state });
+    const presentationStatus = underlying?.overviewState === row.state ? row.activityStatus || row.state : row.state;
+    item.dataset.activityStatus = presentationStatus;
+    const activity = window.CodemanSessionActivity?.resolve({ status: presentationStatus });
     item.setAttribute('aria-label', `${row.name}, ${activity?.ariaPhrase || row.state}`);
 
     const dot = document.createElement('span');

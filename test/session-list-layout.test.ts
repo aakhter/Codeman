@@ -597,6 +597,9 @@ describe('rich session sidebar', () => {
     expect(STYLES_CSS).toContain('var(--session-purple)');
     expect(STYLES_CSS).toMatch(/prefers-reduced-motion: reduce[\s\S]*waiting-agents/);
     expect(MOBILE_CSS).toContain('[data-activity-status="waiting_agents"]');
+    expect(STYLES_CSS).toContain('--lineage-activity-color: var(--session-purple)');
+    expect(STYLES_CSS).toContain('stroke: var(--lineage-effective-color)');
+    expect(STYLES_CSS).toContain('fill: var(--lineage-effective-color)');
   });
   it('shows effective agent activity in rich sidebar metadata', () => {
     const { win, app } = boot({ stored: { sessionListLayout: 'sidebar-rich' } });

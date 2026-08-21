@@ -11231,13 +11231,14 @@ kbd {
    (4 4 on a 2.5px line reads as a dotted smudge), and `lineage-flow` marches by
    exactly two dash cycles, so it has to move with them. */
 .connection-line.lineage-line {
-  stroke: var(--lineage-color, var(--session-blue, #2b8fd9));
+  --lineage-effective-color: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  stroke: var(--lineage-effective-color);
   stroke-width: 2.5;
   stroke-dasharray: 5 5;
   stroke-linecap: round;
   opacity: 0.72;
-  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-color, var(--session-blue, #2b8fd9)))
-    drop-shadow(0 0 11px var(--lineage-color, var(--session-blue, #2b8fd9)));
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-effective-color))
+    drop-shadow(0 0 11px var(--lineage-effective-color));
 }
 
 /* ⚠ OUTSIDE the reduced-motion block below on purpose. A working child is the case
@@ -11249,7 +11250,7 @@ kbd {
 .connection-line.lineage-line--waiting-agents,
 .connection-line.lineage-line--checking-agents,
 .lineage-line-dot--waiting-agents,
-.lineage-line-dot--checking-agents { --lineage-color: var(--session-purple); }
+.lineage-line-dot--checking-agents { --lineage-activity-color: var(--session-purple); }
 .connection-line.lineage-line--checking-agents { opacity: 0.72; }
 
 .connection-line.lineage-line--proxied {
@@ -11270,10 +11271,11 @@ kbd {
 }
 
 .lineage-line-dot {
-  fill: var(--lineage-color, var(--session-blue, #2b8fd9));
+  --lineage-effective-color: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  fill: var(--lineage-effective-color);
   opacity: 0.85;
-  filter: drop-shadow(0 0 4px var(--lineage-color, var(--session-blue, #2b8fd9)))
-    drop-shadow(0 0 9px var(--lineage-color, var(--session-blue, #2b8fd9)));
+  filter: drop-shadow(0 0 4px var(--lineage-effective-color))
+    drop-shadow(0 0 9px var(--lineage-effective-color));
 }
 
 .lineage-line-dot--proxied {
