@@ -1252,9 +1252,14 @@ describe('system-routes', () => {
       } as never);
       mockedSubagentWatcher.killSubagent.mockResolvedValue(true);
 
-      await harness.app.inject({ method: 'DELETE', url: '/api/subagents/v1.exact' });
+      const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/v1.exact' });
 
       expect(mockedSubagentWatcher.killSubagent).toHaveBeenCalledWith('v1.exact');
+      expect(JSON.parse(res.body).data).toEqual({
+        agentKey: 'v1.exact',
+        agentId: 'same',
+        status: 'killed',
+      });
     });
 
     it('preserves an unambiguous legacy bare-ID kill fallback', async () => {

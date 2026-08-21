@@ -1052,7 +1052,10 @@ export function registerSystemRoutes(
     const exactReference = resolved.status === 'found' ? resolved.info.agentKey : agentId;
     const killed = await subagentWatcher.killSubagent(exactReference);
     if (killed) {
-      return { success: true, data: { agentId, status: 'killed' } };
+      return {
+        success: true,
+        data: { agentKey: info.agentKey, agentId: info.agentId, status: 'killed' },
+      };
     }
     return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Subagent not found or already completed');
   });
