@@ -714,7 +714,7 @@ export class SessionAutoOps extends EventEmitter {
       const baseline = baselineResult.observation;
 
       if (!this._ensureActive(runId, mode, step)) return;
-      const delivery = await this._deliverCheckpointCommand(`/${mode}\r`);
+      const delivery = await this._deliverCheckpointCommand(`/${mode}\r`, runId);
       if (!this._ensureActive(runId, mode, step)) return;
       if (!delivery.ok) {
         this._finishCheckpoint(runId, mode, 'failed', {
@@ -758,7 +758,7 @@ export class SessionAutoOps extends EventEmitter {
       this._transition(runId, mode, 'operation-complete', { step });
 
       if (!this._ensureActive(runId, mode, 'continue')) return;
-      const continuation = await this._deliverCheckpointCommand(`${continueText}\r`);
+      const continuation = await this._deliverCheckpointCommand(`${continueText}\r`, runId);
       if (!this._ensureActive(runId, mode, 'continue')) return;
       if (!continuation.ok) {
         this._finishCheckpoint(runId, mode, 'failed', {
@@ -804,10 +804,29 @@ export class SessionAutoOps extends EventEmitter {
     return { ready: !working, working, revision: 0 };
   }
 
-  private async _deliverCheckpointCommand(command: string): Promise<CommandDeliveryResult> {
-    if (this.callbacks.writeCheckpointCommand) return this.callbacks.writeCheckpointCommand(command);
-    const ok = await this.callbacks.writeCommand(command);
-    return ok ? { ok: true, attempt: 1 } : { ok: false, stage: 'text', attempt: 1 };
+  private async _deliverCheckpointCommand(command: string, runId: string): Promise<CommandDeliveryResult> {
+    while (runId === this._checkpointRunId && this._checkpointActive && !this.callbacks.isStopped()) {
+      // Acquire the writer before the final availability check. This keeps the
+      // check immediately adjacent to the actual callback boundary, including
+      // callbacks supplied through a dynamic adapter.
+      const checkpointWriter = this.callbacks.writeCheckpointCommand;
+      if (this._isIdleAutomationBlocked()) {
+        const available = await this._waitForObservation(
+          runId,
+          () => !this._isIdleAutomationBlocked(),
+          CHECKPOINT_READY_TIMEOUT_MS
+        );
+        if (available.kind !== 'matched') {
+          return { ok: false, stage: 'text', attempt: 1, error: 'checkpoint unavailable before delivery' };
+        }
+        continue;
+      }
+
+      if (checkpointWriter) return checkpointWriter(command);
+      const ok = await this.callbacks.writeCommand(command);
+      return ok ? { ok: true, attempt: 1 } : { ok: false, stage: 'text', attempt: 1 };
+    }
+    return { ok: false, stage: 'text', attempt: 1, error: 'checkpoint run cancelled before delivery' };
   }
 
   private _waitForObservation(

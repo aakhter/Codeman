@@ -6,6 +6,8 @@ describe('SessionAutoOps autonomous availability', () => {
   let tokens: number;
   let writeCommand: ReturnType<typeof vi.fn>;
   let writeCheckpointCommand: ReturnType<typeof vi.fn>;
+  let checkpointDeliveryAccesses: number;
+  let blockOnCheckpointDeliveryAccess: number | null;
   let observation: CheckpointObservation;
   let ops: SessionAutoOps;
 
@@ -15,10 +17,11 @@ describe('SessionAutoOps autonomous availability', () => {
     tokens = 0;
     writeCommand = vi.fn(async () => true);
     writeCheckpointCommand = vi.fn(async () => ({ ok: true as const, attempt: 1 }));
+    checkpointDeliveryAccesses = 0;
+    blockOnCheckpointDeliveryAccess = null;
     observation = { ready: true, working: false, revision: 1, conversationId: 'conversation-1' };
-    ops = new SessionAutoOps({
+    const callbacks = {
       writeCommand,
-      writeCheckpointCommand,
       getCheckpointObservation: async () => observation,
       getCheckpointBackendMode: () => 'claude',
       isWorking: () => false,
@@ -26,7 +29,15 @@ describe('SessionAutoOps autonomous availability', () => {
       isStopped: () => false,
       getTotalTokens: () => tokens,
       getSessionId: () => 'availability-test',
+    };
+    Object.defineProperty(callbacks, 'writeCheckpointCommand', {
+      get: () => {
+        checkpointDeliveryAccesses++;
+        if (checkpointDeliveryAccesses === blockOnCheckpointDeliveryAccess) activityBlocked = true;
+        return writeCheckpointCommand;
+      },
     });
+    ops = new SessionAutoOps(callbacks);
   });
 
   afterEach(() => {
@@ -97,4 +108,37 @@ describe('SessionAutoOps autonomous availability', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(writeCheckpointCommand).toHaveBeenCalledWith('continue\r');
   });
+
+  it.each(['live', 'unknown'])(
+    'rechecks %s activity at checkpoint and continuation delivery boundaries without duplicate writes',
+    async () => {
+      ops.setCheckpoint(true);
+      blockOnCheckpointDeliveryAccess = checkpointDeliveryAccesses + 1;
+
+      expect(ops.requestCheckpoint()).toEqual({ triggered: true, runId: expect.any(String) });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(writeCheckpointCommand).not.toHaveBeenCalled();
+
+      activityBlocked = false;
+      blockOnCheckpointDeliveryAccess = null;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(writeCheckpointCommand).toHaveBeenCalledTimes(1);
+      expect(writeCheckpointCommand).toHaveBeenLastCalledWith('/compact\r');
+
+      observation = { ready: false, working: true, revision: 1, conversationId: 'conversation-1' };
+      await vi.advanceTimersByTimeAsync(500);
+      observation = { ready: true, working: false, revision: 2, conversationId: 'conversation-1' };
+      blockOnCheckpointDeliveryAccess = checkpointDeliveryAccesses + 1;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(writeCheckpointCommand).toHaveBeenCalledTimes(1);
+
+      activityBlocked = false;
+      blockOnCheckpointDeliveryAccess = null;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(writeCheckpointCommand).toHaveBeenCalledTimes(2);
+      expect(writeCheckpointCommand).toHaveBeenLastCalledWith('continue\r');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(writeCheckpointCommand).toHaveBeenCalledTimes(2);
+    }
+  );
 });
