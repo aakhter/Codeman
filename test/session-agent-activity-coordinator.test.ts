@@ -147,16 +147,47 @@ describe('session agent activity coordinator', () => {
       const coordinator = new SessionAgentActivityCoordinator();
       const target = session();
       coordinator.attachSession(target);
-      coordinator.setObservation(target, 'live', 1);
-      expect(coordinator.decisionForHook(target, 'stop', 3).presentToHuman).toBe(false);
-      coordinator.completeEvent(target, 3);
-      expect(coordinator.decisionForHook(target, 'idle_prompt', 2)).toMatchObject({
+      coordinator.commitEvidence(target, {
+        observation: 'live',
+        semanticRevision: 0,
+        processReason: 'matching_process',
+      });
+      const lateIdle = coordinator.allocateEvent(target, 'idle_prompt', 2);
+      const stop = coordinator.decisionForHook(target, 'stop', 3);
+      expect(stop.presentToHuman).toBe(false);
+      coordinator.completeEvent(target, stop.event);
+      expect(coordinator.decisionForEvent(target, lateIdle)).toMatchObject({
         quarantined: true,
         presentToHuman: false,
       });
       expect(coordinator.decisionForHook(target, 'permission', 1).presentToHuman).toBe(true);
       expect(coordinator.decisionForHook(target, 'elicitation', 1).presentToHuman).toBe(true);
       expect(coordinator.isAutonomyBlocked(target)).toBe(true);
+    });
+
+    it('requires exact positive process provenance to suppress stop', () => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.onWatcherCount(target, 1, 1);
+      expect(coordinator.decisionForRawIdle(target).presentToHuman).toBe(false);
+      expect(coordinator.decisionForHook(target, 'stop', 1)).toMatchObject({
+        presentToHuman: true,
+        liveEvidence: 'watcher_or_frame',
+      });
+      expect(coordinator.decisionForHook(target, 'idle_prompt', 2).presentToHuman).toBe(false);
+      expect(coordinator.isAutonomyBlocked(target)).toBe(true);
+
+      coordinator.commitEvidence(target, {
+        observation: 'live',
+        semanticRevision: 1,
+        processReason: 'matching_process',
+      });
+      expect(coordinator.decisionForHook(target, 'stop', 3)).toMatchObject({
+        presentToHuman: false,
+        liveEvidence: 'exact_process',
+        processReason: 'matching_process',
+      });
     });
 
     it('fails open for a current human prompt but fails safe for autonomy under uncertainty', () => {
@@ -175,8 +206,19 @@ describe('session agent activity coordinator', () => {
       const target = session();
       coordinator.attachSession(target);
       coordinator.setObservation(target, 'none', 0);
-      expect(coordinator.decisionForHook(target, 'idle_prompt', 1).quarantined).toBe(false);
-      expect(coordinator.decisionForHook(target, 'idle_prompt', 1).quarantined).toBe(true);
+      const event = coordinator.allocateEvent(target, 'idle_prompt', 1);
+      expect(coordinator.decisionForEvent(target, event).quarantined).toBe(false);
+      expect(coordinator.decisionForEvent(target, event).quarantined).toBe(true);
+    });
+
+    it('allocates one strictly increasing sequence across every event kind', () => {
+      const coordinator = new SessionAgentActivityCoordinator();
+      const target = session();
+      coordinator.attachSession(target);
+      const kinds = ['raw_idle', 'stop', 'idle_prompt', 'permission', 'elicitation'] as const;
+      const events = kinds.map((kind, index) => coordinator.allocateEvent(target, kind, 100 - index));
+      expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
+      expect(events.map((event) => event.externalSourceSequence)).toEqual([100, 99, 98, 97, 96]);
     });
   });
 
@@ -198,6 +240,26 @@ describe('session agent activity coordinator', () => {
       expect(await Promise.all([first, second])).toEqual([false, false]);
       pending.resolve({ observation: 'none', semanticRevision: 0 });
       await Promise.resolve();
+      expect(coordinator.project(target).activityStatus).toBe('checking_agents');
+    });
+
+    it('counts foreground queue wait against the deadline and removes an expired consumer', async () => {
+      vi.useFakeTimers();
+      const scheduler = new BoundedActivityScheduler();
+      const blockers = Array.from({ length: 4 }, () => deferred<void>());
+      const occupying = blockers.map((blocker, index) =>
+        scheduler.enqueue(`occupier-${index}`, 'foreground', () => blocker.promise)
+      );
+      const inspect = vi.fn(async () => ({ observation: 'none' as const, semanticRevision: 0 }));
+      const coordinator = new SessionAgentActivityCoordinator({ scheduler, inspect, inspectionDeadlineMs: 100 });
+      const target = session();
+      coordinator.attachSession(target);
+      const result = coordinator.reconcile(target);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await result).toBe(false);
+      for (const blocker of blockers) blocker.resolve();
+      await Promise.all(occupying);
+      expect(inspect).not.toHaveBeenCalled();
       expect(coordinator.project(target).activityStatus).toBe('checking_agents');
     });
   });
@@ -312,7 +374,51 @@ describe('session agent activity coordinator', () => {
       expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
     });
 
-    it('allows exact zero to end grace early', () => {
+    it('allows exact zero from the fresh event reconciliation to end grace early', async () => {
+      vi.useFakeTimers();
+      const onDerivedIdle = vi.fn();
+      const coordinator = new SessionAgentActivityCoordinator({
+        onDerivedIdle,
+        inspect: async () => ({ observation: 'none', semanticRevision: 2, exactWatcherCount: 0 }),
+      });
+      for (const [index, kind] of (['raw_idle', 'stop', 'idle_prompt'] as const).entries()) {
+        const target = { ...session(), id: `target-${index}`, claudeSessionId: `conversation-${index}` };
+        coordinator.attachSession(target);
+        coordinator.onWatcherCount(target, 1, 1);
+        coordinator.onWatcherCount(target, 0, 2);
+        const event = coordinator.allocateEvent(target, kind);
+        const result = await coordinator.reconcileForEvent(target, event);
+        expect(result).not.toBe(false);
+        const reconciliation = coordinator.reconciliationForEvent(target, event, result);
+        expect(coordinator.decisionForEvent(target, event, { reconciliation }).settleEndedEarly).toBe(true);
+        expect(coordinator.project(target).activityStatus).toBe('idle');
+      }
+      expect(onDerivedIdle).toHaveBeenCalledTimes(3);
+    });
+
+    it('emits derived idle once per eligible edge and never while raw status is busy', async () => {
+      vi.useFakeTimers();
+      const onDerivedIdle = vi.fn();
+      const coordinator = new SessionAgentActivityCoordinator({ onDerivedIdle });
+      const target = session() as CoordinatorSession & { status: SessionStatus };
+      coordinator.attachSession(target);
+      coordinator.onWatcherCount(target, 1, 1);
+      coordinator.onWatcherCount(target, 0, 2);
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(1);
+      coordinator.onWatcherCount(target, 0, 2);
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(1);
+
+      coordinator.onWatcherCount(target, 1, 3);
+      target.status = 'busy';
+      coordinator.project(target);
+      coordinator.onWatcherCount(target, 0, 4);
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(onDerivedIdle).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not end grace from event kind without fresh exact-zero reconciliation', async () => {
       vi.useFakeTimers();
       const onDerivedIdle = vi.fn();
       const coordinator = new SessionAgentActivityCoordinator({ onDerivedIdle });
@@ -320,10 +426,54 @@ describe('session agent activity coordinator', () => {
       coordinator.attachSession(target);
       coordinator.onWatcherCount(target, 1, 1);
       coordinator.onWatcherCount(target, 0, 2);
-      coordinator.confirmExactZero(target);
-      expect(coordinator.project(target).activityStatus).toBe('idle');
-      expect(onDerivedIdle).toHaveBeenCalledTimes(1);
+      coordinator.decisionForHook(target, 'idle_prompt');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(coordinator.project(target).activityStatus).toBe('waiting_agents');
+      expect(onDerivedIdle).not.toHaveBeenCalled();
     });
+
+    it('rejects an exact-zero reconciliation after its decision token is invalidated', async () => {
+      const coordinator = new SessionAgentActivityCoordinator({
+        inspect: async () => ({ observation: 'none', semanticRevision: 2, exactWatcherCount: 0 }),
+      });
+      const target = session();
+      coordinator.attachSession(target);
+      coordinator.onWatcherCount(target, 1, 1);
+      coordinator.onWatcherCount(target, 0, 2);
+      const event = coordinator.allocateEvent(target, 'idle_prompt');
+      const result = await coordinator.reconcileForEvent(target, event);
+      coordinator.invalidateDecision(target);
+      expect(() => coordinator.reconciliationForEvent(target, event, result)).toThrow(/current/);
+    });
+
+    it.each(['identity', 'tracking', 'revision', 'evidence_revision'] as const)(
+      'invalidates a pending settle on %s generation change',
+      async (change) => {
+        vi.useFakeTimers();
+        const onDerivedIdle = vi.fn();
+        const coordinator = new SessionAgentActivityCoordinator({ onDerivedIdle });
+        const target = session() as CoordinatorSession & { claudeSessionId: string | null };
+        coordinator.attachSession(target);
+        coordinator.onWatcherCount(target, 1, 1);
+        coordinator.onWatcherCount(target, 0, 2);
+        if (change === 'identity') {
+          target.claudeSessionId = 'conversation-2';
+          coordinator.identityChanged(target);
+        }
+        if (change === 'tracking') coordinator.trackingDisabled(target);
+        if (change === 'revision') coordinator.onAgentRevision(target, 3);
+        if (change === 'evidence_revision') {
+          coordinator.commitEvidence(target, {
+            observation: 'unknown',
+            semanticRevision: 3,
+            processReason: 'no_registered_role_signature',
+          });
+        }
+        await vi.advanceTimersByTimeAsync(2500);
+        expect(onDerivedIdle).not.toHaveBeenCalled();
+        expect(coordinator.project(target).activityStatus).toBe(change === 'tracking' ? 'idle' : 'checking_agents');
+      }
+    );
   });
 
   describe('10. teardown', () => {
@@ -361,6 +511,35 @@ describe('session agent activity coordinator', () => {
       coordinator.cleanup();
       expect(coordinator.project(first).activityStatus).toBe('idle');
       expect(coordinator.project(second).activityStatus).toBe('idle');
+    });
+
+    it('keeps tracking disabled through late evidence, events, output, retry, and async completion', async () => {
+      vi.useFakeTimers();
+      const pending = deferred<{ observation: AgentObservation; semanticRevision: number }>();
+      const inspect = vi.fn(() => pending.promise);
+      const coordinator = new SessionAgentActivityCoordinator({ inspect });
+      const target = session();
+      coordinator.attachSession(target);
+      const preDisableEvent = coordinator.allocateEvent(target, 'idle_prompt');
+      const stale = coordinator.reconcile(target);
+      coordinator.trackingDisabled(target);
+      expect(coordinator.onAgentRevision(target, 5)).toBe(false);
+      coordinator.onWatcherCount(target, 1, 5);
+      coordinator.commitEvidence(target, {
+        observation: 'live',
+        semanticRevision: 5,
+        processReason: 'matching_process',
+      });
+      coordinator.onTerminalOutput(target);
+      pending.resolve({ observation: 'live', semanticRevision: 0 });
+      expect(await stale).toBe(false);
+      await vi.runAllTimersAsync();
+      expect(coordinator.project(target).activityStatus).toBe('idle');
+      expect(coordinator.isAutonomyBlocked(target)).toBe(false);
+      expect(inspect).toHaveBeenCalledTimes(1);
+      coordinator.trackingEnabled(target);
+      expect(() => coordinator.decisionForEvent(target, preDisableEvent)).toThrow(/stale/);
+      expect(coordinator.project(target).activityStatus).toBe('checking_agents');
     });
   });
 });

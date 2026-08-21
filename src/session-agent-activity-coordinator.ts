@@ -69,11 +69,48 @@ export type InspectionJob = (project: ObservableSessionProject, signal: AbortSig
 export type HookKind = 'raw_idle' | 'stop' | 'idle_prompt' | 'permission' | 'elicitation';
 
 export interface ActivityDecision {
+  event: ActivityEvent;
+  settleEndedEarly: boolean;
   presentToHuman: boolean;
   autonomyBlocked: boolean;
   quarantined: boolean;
   ambiguous: boolean;
   observation: AgentObservation;
+  liveEvidence: 'exact_process' | 'watcher_or_frame' | null;
+  processReason?: AgentEvidence['processReason'];
+}
+
+export interface EventReconciliation {
+  readonly event: ActivityEvent;
+  readonly identityGeneration: number;
+  readonly trackingGeneration: number;
+  readonly terminalActivityEpoch: number;
+  readonly semanticRevision: number;
+  readonly decisionToken: number;
+  readonly exactWatcherCount: 0;
+}
+
+export interface ReconciliationResult {
+  readonly event?: ActivityEvent;
+  readonly identityGeneration: number;
+  readonly trackingGeneration: number;
+  readonly terminalActivityEpoch: number;
+  readonly semanticRevision: number;
+  readonly decisionToken: number;
+  readonly evidence: AgentEvidence;
+}
+
+export interface ActivityDecisionInput {
+  reconciliation?: EventReconciliation;
+}
+
+export interface ActivityEvent {
+  readonly sessionId: string;
+  readonly identityGeneration: number;
+  readonly trackingGeneration: number;
+  readonly sequence: number;
+  readonly kind: HookKind;
+  readonly externalSourceSequence?: number;
 }
 
 interface SessionRecord {
@@ -86,13 +123,19 @@ interface SessionRecord {
   semanticRevision: number;
   decisionToken: number;
   eventSequence: number;
+  lastDecisionSequence: number;
   completionWatermark: number;
-  inFlight?: { promise: Promise<boolean>; controller: AbortController; token: number };
+  allocatedEvents: Map<number, ActivityEvent>;
+  eventReconciliations: Map<number, EventReconciliation>;
+  reconciliationResults: Set<ReconciliationResult>;
+  inFlight?: { promise: Promise<ReconciliationResult | false>; controller: AbortController; token: number };
   retryAttempt: number;
   retryTimer?: ReturnType<typeof setTimeout>;
   settleTimer?: ReturnType<typeof setTimeout>;
   settleGeneration: number;
   immediateRevisionRetry: boolean;
+  exactProcessLive: boolean;
+  processReason?: AgentEvidence['processReason'];
 }
 
 export interface CoordinatorOptions {
@@ -235,10 +278,16 @@ export class SessionAgentActivityCoordinator {
       semanticRevision: 0,
       decisionToken: 0,
       eventSequence: 0,
+      lastDecisionSequence: 0,
       completionWatermark: 0,
+      allocatedEvents: new Map(),
+      eventReconciliations: new Map(),
+      reconciliationResults: new Set(),
       retryAttempt: 0,
       settleGeneration: 0,
       immediateRevisionRetry: false,
+      exactProcessLive: false,
+      processReason: undefined,
     };
     this.records.set(session.id, record);
     session.setActivityProjection(projection);
@@ -259,11 +308,16 @@ export class SessionAgentActivityCoordinator {
 
   identityChanged(session: CoordinatorSession): void {
     const record = this.requireRecord(session);
+    this.invalidateSettle(record);
     record.identityGeneration += 1;
     record.decisionToken += 1;
     record.semanticRevision = 0;
     record.eventSequence = 0;
+    record.lastDecisionSequence = 0;
     record.completionWatermark = 0;
+    record.allocatedEvents.clear();
+    record.eventReconciliations.clear();
+    record.reconciliationResults.clear();
     this.abortInspection(record);
     this.setRecordObservation(record, this.isObservable(session) ? 'unknown' : 'not_observable');
     if (this.inspect && record.observation === 'unknown') this.scheduleReconcile(record, 0);
@@ -271,9 +325,13 @@ export class SessionAgentActivityCoordinator {
 
   trackingDisabled(session: CoordinatorSession): void {
     const record = this.requireRecord(session);
+    this.invalidateSettle(record);
     record.tracking = false;
     record.trackingGeneration += 1;
     record.decisionToken += 1;
+    record.allocatedEvents.clear();
+    record.eventReconciliations.clear();
+    record.reconciliationResults.clear();
     this.abortInspection(record);
     this.setRecordObservation(record, 'not_observable');
   }
@@ -289,8 +347,12 @@ export class SessionAgentActivityCoordinator {
 
   onAgentRevision(session: CoordinatorSession, semanticRevision: number): boolean {
     const record = this.requireRecord(session);
+    if (!record.tracking) return false;
     if (semanticRevision <= record.semanticRevision) return false;
+    this.invalidateSettle(record);
     record.semanticRevision = semanticRevision;
+    record.eventReconciliations.clear();
+    record.reconciliationResults.clear();
     record.decisionToken += 1;
     this.abortInspection(record);
     this.setRecordObservation(record, 'unknown');
@@ -301,7 +363,8 @@ export class SessionAgentActivityCoordinator {
 
   setObservation(session: CoordinatorSession, observation: AgentObservation, semanticRevision: number): void {
     const record = this.requireRecord(session);
-    record.semanticRevision = Math.max(record.semanticRevision, semanticRevision);
+    if (!record.tracking) return;
+    if (!this.acceptSemanticRevision(record, semanticRevision)) return;
     this.setRecordObservation(record, observation);
   }
 
@@ -319,30 +382,38 @@ export class SessionAgentActivityCoordinator {
 
   commitEvidence(session: CoordinatorSession, evidence: AgentEvidence): void {
     const record = this.requireRecord(session);
-    record.semanticRevision = Math.max(record.semanticRevision, evidence.semanticRevision);
+    if (!record.tracking) return;
+    if (!this.acceptSemanticRevision(record, evidence.semanticRevision)) return;
+    record.processReason = evidence.processReason;
+    const exactProcessLive = evidence.observation === 'live' && evidence.processReason === 'matching_process';
     if (evidence.exactWatcherCount !== undefined) {
       this.onWatcherCount(session, evidence.exactWatcherCount, evidence.semanticRevision);
-      if (evidence.exactWatcherCount === 0 && evidence.currentFrame === 'idle_prompt') this.confirmExactZero(session);
-      if (evidence.exactWatcherCount > 0 || evidence.observation === 'none') return;
+      if (evidence.exactWatcherCount > 0) {
+        if (exactProcessLive) {
+          record.exactProcessLive = true;
+          record.processReason = evidence.processReason;
+        }
+        return;
+      }
+      if (evidence.observation === 'none') return;
     }
     if (evidence.processReason === 'no_registered_role_signature') {
-      if (evidence.observation === 'live') this.setRecordObservation(record, 'live');
+      if (evidence.observation === 'live') this.setRecordObservation(record, 'live', false, evidence.processReason);
       return;
     }
-    this.setRecordObservation(record, evidence.observation);
+    this.setRecordObservation(record, evidence.observation, exactProcessLive, evidence.processReason);
   }
 
   onWatcherCount(session: CoordinatorSession, count: number, semanticRevision: number): void {
     const record = this.requireRecord(session);
+    if (!record.tracking) return;
     if (semanticRevision < record.semanticRevision) return;
     if (semanticRevision > record.semanticRevision) {
       record.decisionToken += 1;
       this.abortInspection(record);
     }
     record.semanticRevision = semanticRevision;
-    record.settleGeneration += 1;
-    if (record.settleTimer) this.cancelTimer(record.settleTimer);
-    record.settleTimer = undefined;
+    this.invalidateSettle(record);
     if (count > 0) {
       this.setRecordObservation(record, 'live');
       return;
@@ -352,26 +423,28 @@ export class SessionAgentActivityCoordinator {
       if (this.recordFor(session) !== record || record.settleGeneration !== generation) return;
       record.settleTimer = undefined;
       this.setRecordObservation(record, 'none');
-      this.onDerivedIdle?.(session);
     }, FINAL_AGENT_SETTLE_MS);
   }
 
-  confirmExactZero(session: CoordinatorSession): void {
+  private confirmExactZero(session: CoordinatorSession): boolean {
     const record = this.requireRecord(session);
-    if (!record.settleTimer) return;
+    if (!record.settleTimer) return false;
     this.cancelTimer(record.settleTimer);
     record.settleTimer = undefined;
     record.settleGeneration += 1;
     this.setRecordObservation(record, 'none');
-    this.onDerivedIdle?.(session);
+    return true;
   }
 
   onTerminalOutput(session: CoordinatorSession): void {
     const record = this.requireRecord(session);
+    if (!record.tracking) return;
     record.settleGeneration += 1;
     if (record.settleTimer) this.cancelTimer(record.settleTimer);
     record.settleTimer = undefined;
     record.decisionToken += 1;
+    record.eventReconciliations.clear();
+    record.reconciliationResults.clear();
     this.abortInspection(record);
     this.setRecordObservation(record, 'unknown');
   }
@@ -398,7 +471,26 @@ export class SessionAgentActivityCoordinator {
     };
   }
 
-  async reconcile(session: CoordinatorSession, kind: ActivityJobClass = 'foreground'): Promise<boolean> {
+  reconcile(session: CoordinatorSession, kind: ActivityJobClass = 'foreground'): Promise<ReconciliationResult | false> {
+    return this.reconcileInternal(session, kind);
+  }
+
+  async reconcileForEvent(
+    session: CoordinatorSession,
+    event: ActivityEvent,
+    kind: ActivityJobClass = 'foreground'
+  ): Promise<ReconciliationResult | false> {
+    const record = this.requireEvent(session, event);
+    if (record.inFlight) await record.inFlight.promise;
+    this.requireEvent(session, event);
+    return this.reconcileInternal(session, kind, event);
+  }
+
+  private async reconcileInternal(
+    session: CoordinatorSession,
+    kind: ActivityJobClass = 'foreground',
+    event?: ActivityEvent
+  ): Promise<ReconciliationResult | false> {
     const record = this.requireRecord(session);
     if (!this.inspect || !record.tracking) return false;
     if (record.inFlight) return record.inFlight.promise;
@@ -420,13 +512,12 @@ export class SessionAgentActivityCoordinator {
       semanticRevision: record.semanticRevision,
       token,
     };
-    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const deadline = this.scheduleTimer(() => controller.abort(), this.inspectionDeadlineMs);
     const promise = this.scheduler
       .enqueue(
         session.id,
         kind,
         () => {
-          deadline = this.scheduleTimer(() => controller.abort(), this.inspectionDeadlineMs);
           const aborted = new Promise<never>((_resolve, reject) => {
             controller.signal.addEventListener(
               'abort',
@@ -439,14 +530,24 @@ export class SessionAgentActivityCoordinator {
         controller.signal
       )
       .then((evidence) => {
-        if (!this.isLiveSnapshot(snapshot) || controller.signal.aborted) return false;
-        if (evidence.semanticRevision !== record.semanticRevision) return false;
+        if (!this.isLiveSnapshot(snapshot) || controller.signal.aborted) return false as const;
+        if (evidence.semanticRevision !== record.semanticRevision) return false as const;
         record.retryAttempt = evidence.observation === 'unknown' ? record.retryAttempt + 1 : 0;
         this.commitEvidence(session, evidence);
         if (record.observation === 'unknown' && !record.settleTimer) {
           this.scheduleReconcile(record, this.nextRetryDelay(session));
         }
-        return true;
+        const result: ReconciliationResult = {
+          event,
+          identityGeneration: record.identityGeneration,
+          trackingGeneration: record.trackingGeneration,
+          terminalActivityEpoch: session.terminalActivityEpoch,
+          semanticRevision: record.semanticRevision,
+          decisionToken: token,
+          evidence,
+        };
+        if (event) record.reconciliationResults.add(result);
+        return result;
       })
       .catch(() => {
         if (this.isLiveSnapshot(snapshot)) {
@@ -454,10 +555,10 @@ export class SessionAgentActivityCoordinator {
           this.setRecordObservation(record, 'unknown');
           this.scheduleReconcile(record, this.nextRetryDelay(session));
         }
-        return false;
+        return false as const;
       })
       .finally(() => {
-        if (deadline) this.cancelTimer(deadline);
+        this.cancelTimer(deadline);
         if (record.inFlight?.token === token) record.inFlight = undefined;
       });
     record.inFlight = { promise, controller, token };
@@ -465,20 +566,34 @@ export class SessionAgentActivityCoordinator {
   }
 
   decisionForRawIdle(session: CoordinatorSession): ActivityDecision {
-    return this.decision(session, 'raw_idle', this.requireRecord(session).eventSequence + 1);
+    return this.decisionForEvent(session, this.allocateEvent(session, 'raw_idle'));
   }
 
   decisionForHook(
     session: CoordinatorSession,
     kind: Exclude<HookKind, 'raw_idle'>,
-    sequence: number
+    externalSourceSequence?: number
   ): ActivityDecision {
-    return this.decision(session, kind, sequence);
+    return this.decisionForEvent(session, this.allocateEvent(session, kind, externalSourceSequence));
   }
 
-  completeEvent(session: CoordinatorSession, sequence: number): void {
+  allocateEvent(session: CoordinatorSession, kind: HookKind, externalSourceSequence?: number): ActivityEvent {
     const record = this.requireRecord(session);
-    record.completionWatermark = Math.max(record.completionWatermark, sequence);
+    const event: ActivityEvent = {
+      sessionId: session.id,
+      identityGeneration: record.identityGeneration,
+      trackingGeneration: record.trackingGeneration,
+      sequence: ++record.eventSequence,
+      kind,
+      externalSourceSequence,
+    };
+    record.allocatedEvents.set(event.sequence, event);
+    return event;
+  }
+
+  completeEvent(session: CoordinatorSession, event: ActivityEvent): void {
+    const record = this.requireEvent(session, event);
+    record.completionWatermark = Math.max(record.completionWatermark, event.sequence);
   }
 
   isAutonomyBlocked(session: CoordinatorSession): boolean {
@@ -487,22 +602,92 @@ export class SessionAgentActivityCoordinator {
     return this.isAmbiguous(record) || record.observation !== 'none';
   }
 
-  private decision(session: CoordinatorSession, kind: HookKind, sequence: number): ActivityDecision {
-    const record = this.requireRecord(session);
-    if ((kind === 'raw_idle' || kind === 'stop') && record.settleTimer) this.confirmExactZero(session);
-    const immediate = kind === 'permission' || kind === 'elicitation';
-    const quarantined = !immediate && (sequence <= record.completionWatermark || sequence <= record.eventSequence);
-    record.eventSequence = Math.max(record.eventSequence, sequence);
+  reconciliationForEvent(
+    session: CoordinatorSession,
+    event: ActivityEvent,
+    result: ReconciliationResult | false
+  ): EventReconciliation {
+    const record = this.requireEvent(session, event);
+    if (!record.tracking) throw new Error('Agent tracking is disabled for this session');
+    if (
+      result === false ||
+      !record.reconciliationResults.delete(result) ||
+      result.event !== event ||
+      result.evidence.exactWatcherCount !== 0 ||
+      result.identityGeneration !== record.identityGeneration ||
+      result.trackingGeneration !== record.trackingGeneration ||
+      result.terminalActivityEpoch !== session.terminalActivityEpoch ||
+      result.semanticRevision !== record.semanticRevision ||
+      result.decisionToken !== record.decisionToken
+    ) {
+      throw new Error('Event reconciliation does not prove exact watcher zero at the current semantic revision');
+    }
+    const reconciliation: EventReconciliation = {
+      event,
+      identityGeneration: record.identityGeneration,
+      trackingGeneration: record.trackingGeneration,
+      terminalActivityEpoch: session.terminalActivityEpoch,
+      semanticRevision: record.semanticRevision,
+      decisionToken: record.decisionToken,
+      exactWatcherCount: 0,
+    };
+    record.eventReconciliations.set(event.sequence, reconciliation);
+    return reconciliation;
+  }
+
+  decisionForEvent(
+    session: CoordinatorSession,
+    event: ActivityEvent,
+    input: ActivityDecisionInput = {}
+  ): ActivityDecision {
+    const record = this.requireEvent(session, event);
+    const reconciliation = input.reconciliation;
+    const exactZeroIsFresh =
+      !!reconciliation &&
+      record.eventReconciliations.get(event.sequence) === reconciliation &&
+      reconciliation.event === event &&
+      reconciliation.identityGeneration === record.identityGeneration &&
+      reconciliation.trackingGeneration === record.trackingGeneration &&
+      reconciliation.terminalActivityEpoch === session.terminalActivityEpoch &&
+      reconciliation.semanticRevision === record.semanticRevision &&
+      reconciliation.decisionToken === record.decisionToken;
+    if (reconciliation) record.eventReconciliations.delete(event.sequence);
+    const settleEndedEarly =
+      (event.kind === 'raw_idle' || event.kind === 'stop' || event.kind === 'idle_prompt') && exactZeroIsFresh
+        ? this.confirmExactZero(session)
+        : false;
+    const immediate = event.kind === 'permission' || event.kind === 'elicitation';
+    const quarantined =
+      !immediate && (event.sequence <= record.completionWatermark || event.sequence <= record.lastDecisionSequence);
+    record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
     const ambiguous = this.isAmbiguous(record);
     const autonomyBlocked = this.isAutonomyBlocked(session);
-    const suppressible = record.observation === 'live';
+    const suppressible = record.observation === 'live' && (event.kind !== 'stop' || record.exactProcessLive);
     return {
+      event,
+      settleEndedEarly,
       presentToHuman: immediate || (!quarantined && (ambiguous || !suppressible)),
       autonomyBlocked,
       quarantined,
       ambiguous,
       observation: ambiguous ? 'unknown' : record.observation,
+      liveEvidence:
+        record.observation === 'live' ? (record.exactProcessLive ? 'exact_process' : 'watcher_or_frame') : null,
+      processReason: record.processReason,
     };
+  }
+
+  private requireEvent(session: CoordinatorSession, event: ActivityEvent): SessionRecord {
+    const record = this.requireRecord(session);
+    if (
+      event.sessionId !== session.id ||
+      event.identityGeneration !== record.identityGeneration ||
+      event.trackingGeneration !== record.trackingGeneration ||
+      record.allocatedEvents.get(event.sequence) !== event
+    ) {
+      throw new Error('Activity event is stale or was not allocated by this coordinator');
+    }
+    return record;
   }
 
   private isObservable(session: CoordinatorSession): boolean {
@@ -529,14 +714,32 @@ export class SessionAgentActivityCoordinator {
     return matches > 1;
   }
 
-  private setRecordObservation(record: SessionRecord, observation: AgentObservation): void {
+  private setRecordObservation(
+    record: SessionRecord,
+    observation: AgentObservation,
+    exactProcessLive = false,
+    processReason?: AgentEvidence['processReason']
+  ): void {
+    const previousProjection = record.projection;
     record.observation = observation;
+    record.exactProcessLive = observation === 'live' && exactProcessLive;
+    record.processReason = processReason;
     if (observation !== 'unknown' && record.retryTimer) {
       this.cancelTimer(record.retryTimer);
       record.retryTimer = undefined;
     }
     record.projection = projectAgentActivity(record.session.status, observation, record.projection, this.now());
     record.session.setActivityProjection(record.projection);
+    const wasDerived =
+      previousProjection.activityStatus === 'waiting_agents' || previousProjection.activityStatus === 'checking_agents';
+    if (
+      wasDerived &&
+      observation === 'none' &&
+      record.projection.activityStatus === 'idle' &&
+      record.session.status === 'idle'
+    ) {
+      this.onDerivedIdle?.(record.session);
+    }
   }
 
   private isLiveSnapshot(snapshot: {
@@ -575,6 +778,25 @@ export class SessionAgentActivityCoordinator {
     record.inFlight?.controller.abort();
     record.inFlight = undefined;
     this.scheduler.cancelKey(record.session.id);
+  }
+
+  private invalidateSettle(record: SessionRecord): void {
+    record.settleGeneration += 1;
+    if (record.settleTimer) this.cancelTimer(record.settleTimer);
+    record.settleTimer = undefined;
+  }
+
+  private acceptSemanticRevision(record: SessionRecord, semanticRevision: number): boolean {
+    if (semanticRevision < record.semanticRevision) return false;
+    if (semanticRevision === record.semanticRevision) return true;
+    this.invalidateSettle(record);
+    record.semanticRevision = semanticRevision;
+    record.decisionToken += 1;
+    record.eventReconciliations.clear();
+    record.reconciliationResults.clear();
+    this.abortInspection(record);
+    this.setRecordObservation(record, 'unknown');
+    return true;
   }
 
   private scheduleReconcile(record: SessionRecord, delay: number): void {
