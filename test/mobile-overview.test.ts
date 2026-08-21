@@ -85,6 +85,30 @@ describe('mobile overview model', () => {
     const rendered = app._buildMobileOverviewRow(model.current[0]);
     expect(rendered.dataset.activityStatus).toBe('waiting_agents');
   });
+
+  it('orders agent waits by the stable episode anchor across repaint refreshes', () => {
+    const app = loadOverviewApp();
+    const sessions = [
+      session({
+        id: 'young-wait',
+        activityStatus: 'waiting_agents',
+        activityStatusSince: 9000,
+        lastActivityAt: 100,
+      }),
+      session({
+        id: 'old-wait',
+        activityStatus: 'waiting_agents',
+        activityStatusSince: 1000,
+        lastActivityAt: 900,
+      }),
+    ];
+    const build = () => app.buildMobileOverviewModel({ sessions, sessionOrder: sessions.map((s) => s.id) });
+
+    expect(build().current.map((row: any) => row.id)).toEqual(['old-wait', 'young-wait']);
+    sessions[0].lastActivityAt = 50_000;
+    sessions[1].lastActivityAt = 10;
+    expect(build().current.map((row: any) => row.id)).toEqual(['old-wait', 'young-wait']);
+  });
   it('does not expose Map-order live sessions while the owner tab layout is pending', () => {
     const app = loadOverviewApp();
     const model = app.buildMobileOverviewModel({

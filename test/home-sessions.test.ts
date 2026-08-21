@@ -103,6 +103,27 @@ describe('home sessions column: model', () => {
     expect(row).toMatchObject({ state: 'waiting_agents', pill: 'agents', since: { at: 1234 } });
     expect(app._buildHomeSessionRow(row).dataset.activityStatus).toBe('waiting_agents');
   });
+
+  it('orders checking episodes by activityStatusSince across incremental model rebuilds', () => {
+    const sessions = sessionMap([
+      { id: 'young-check', activityStatus: 'checking_agents', activityStatusSince: 8000, lastActivityAt: 100 },
+      { id: 'old-check', activityStatus: 'checking_agents', activityStatusSince: 2000, lastActivityAt: 900 },
+    ]);
+    const app = loadHomeSessionsApp({
+      sessions,
+      sessionOrder: ['young-check', 'old-check'],
+      webviews: new Map(),
+      webviewOrder: [],
+      cases: CASES,
+      pendingHooks: new Map(),
+    });
+    const ids = () => app.buildHomeSessionRows().map((row: any) => row.id);
+
+    expect(ids()).toEqual(['old-check', 'young-check']);
+    sessions.get('young-check').lastActivityAt = 50_000;
+    sessions.get('old-check').lastActivityAt = 10;
+    expect(ids()).toEqual(['old-check', 'young-check']);
+  });
   it('renders actual Home rows and badges in complete authoritative interleaved order', () => {
     const home = fakeElement();
     const app = loadHomeSessionsApp(

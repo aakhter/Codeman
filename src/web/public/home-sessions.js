@@ -241,6 +241,7 @@ Object.assign(CodemanApp.prototype, {
           dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
           state,
           activityStatus: window.CodemanSessionActivity?.resolve(session).effectiveStatus || session.status || 'idle',
+          activityStatusSince: Number(session.activityStatusSince) || 0,
           pill: HOME_SESSIONS_PILL_LABEL[state] || state,
           // Epoch ms, straight off the session payload; formatting happens at
           // render time so the clock below can redo it without a re-render.
