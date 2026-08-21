@@ -352,7 +352,7 @@ git commit -m "feat(ui): COD-351 manage Codex command profiles"
 - Create: `.changeset/cod-351-saved-codex-profiles.md`
 - Modify: `docs/superpowers/plans/2026-08-21-cod-351-saved-codex-command-profiles.md` only to check completed boxes.
 
-- [ ] **Step 1: Add the changeset**
+- [x] **Step 1: Add the changeset**
 
 ~~~md
 ---
@@ -362,14 +362,14 @@ git commit -m "feat(ui): COD-351 manage Codex command profiles"
 Add reusable private Codex command profiles for remote cases.
 ~~~
 
-- [ ] **Step 2: Run focused suites**
+- [x] **Step 2: Run focused suites**
 
 ~~~bash
 npm test -- test/state-store.test.ts test/codex-command-profiles.test.ts test/remote-hosts.test.ts test/routes/codex-command-profile-routes.test.ts test/routes/case-routes.test.ts test/routes/session-routes.test.ts test/remote-tmux-launch.test.ts test/ownership-scoping.test.ts test/app-settings-structure.test.ts test/run-mode-ui.test.ts
 npx vitest run --config config/vitest.browser.config.ts test/codex-command-profiles.browser.test.ts
 ~~~
 
-- [ ] **Step 3: Run static/build gates**
+- [x] **Step 3: Run static/build gates**
 
 ~~~bash
 npm run typecheck
@@ -382,7 +382,7 @@ npm run build
 git diff --check
 ~~~
 
-- [ ] **Step 4: Run isolated smoke**
+- [x] **Step 4: Run isolated smoke**
 
 ~~~bash
 node /home/ubuntu/.codex/skills/codeman-prod-realistic-smoke/scripts/run-codeman-prod-smoke.mjs --skip-claude
@@ -390,7 +390,7 @@ node /home/ubuntu/.codex/skills/codeman-prod-realistic-smoke/scripts/run-codeman
 
 Record summary, artifacts, console/page errors, long-scrollback result, and cleanup. Do not use `--base`.
 
-- [ ] **Step 5: Commit metadata**
+- [x] **Step 5: Commit metadata**
 
 ~~~bash
 git add .changeset/cod-351-saved-codex-profiles.md docs/superpowers/plans/2026-08-21-cod-351-saved-codex-command-profiles.md
