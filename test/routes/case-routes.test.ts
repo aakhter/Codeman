@@ -836,6 +836,34 @@ describe('case-routes', () => {
   });
 
   describe('case default group settings', () => {
+    it('saves an Edit Case default group under the renamed case name', async () => {
+      mockedExistsSync.mockImplementation((path) => String(path).endsWith('/nzbdav'));
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/nzbdav',
+        payload: { name: 'nzbdav-next', defaultGroupId: 'group-tcc' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav', 'nzbdav-next');
+      expect(harness.ctx.store.setCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav-next', 'group-tcc');
+    });
+
+    it('rejects an unknown Edit Case default group before changing the case', async () => {
+      mockedExistsSync.mockReturnValue(true);
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/nzbdav',
+        payload: { defaultGroupId: 'group-missing' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
+      expect(harness.ctx.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+    });
+
     it('returns the stored default and authoritative owner groups', async () => {
       mockedExistsSync.mockReturnValue(true);
       vi.mocked(harness.ctx.store.getCaseDefaultGroup).mockReturnValue('group-nzbdav');

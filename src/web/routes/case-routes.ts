@@ -1410,6 +1410,19 @@ export function registerCaseRoutes(
     if (!validatePathWithinBase(nextName, casesDir)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
+    if (update.defaultGroupId !== undefined) {
+      const snapshot = await ctx.tabLayouts.getSnapshot(owner);
+      if (
+        update.defaultGroupId !== null &&
+        !snapshot.layout.groups.some((group) => group.id === update.defaultGroupId)
+      ) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Default group does not exist');
+      }
+    }
+    const persistDefaultGroupUpdate = () => {
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
+      if (update.defaultGroupId !== undefined) ctx.store.setCaseDefaultGroup(owner, nextName, update.defaultGroupId);
+    };
 
     const linkedCases = await readLinkedCases();
     const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
@@ -1459,7 +1472,7 @@ export function registerCaseRoutes(
           commands: commands ?? host.commands,
         },
       };
-      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
+      persistDefaultGroupUpdate();
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: remotePath, type: 'remote-updated' });
       return { success: true, data: { case: caseInfo } };
     }
@@ -1496,7 +1509,7 @@ export function registerCaseRoutes(
           network: host.network ?? 'bridge',
         },
       };
-      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
+      persistDefaultGroupUpdate();
       ctx.broadcast(SseEvent.CaseLinked, {
         name: nextName,
         path: nextDockerCase.hostWorkspacePath,
@@ -1520,7 +1533,7 @@ export function registerCaseRoutes(
         linked: true,
         location: 'linked-local',
       };
-      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
+      persistDefaultGroupUpdate();
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: nextPath, type: 'updated' });
       return { success: true, data: { case: caseInfo } };
     }
@@ -1542,7 +1555,7 @@ export function registerCaseRoutes(
       hasClaudeMd: existsSync(join(nextPath, 'CLAUDE.md')),
       location: 'local',
     };
-    ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
+    persistDefaultGroupUpdate();
     ctx.broadcast(SseEvent.CaseCreated, { name: nextName, path: nextPath, type: 'updated' });
     return { success: true, data: { case: caseInfo } };
   });

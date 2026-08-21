@@ -588,10 +588,20 @@ export const UpdateCaseSchema = z
       .optional(),
     remotePath: remoteWorkspacePathSchema.optional(),
     commands: RemoteCommandOverridesSchema.optional(),
+    defaultGroupId: z.string().min(1).max(100).nullable().optional(),
   })
-  .refine((value) => value.name || value.path || value.hostId || value.remotePath || value.commands, {
-    message: 'At least one case parameter must be provided',
-  });
+  .refine(
+    (value) =>
+      value.name ||
+      value.path ||
+      value.hostId ||
+      value.remotePath ||
+      value.commands ||
+      value.defaultGroupId !== undefined,
+    {
+      message: 'At least one case parameter must be provided',
+    }
+  );
 
 export const CaseDefaultGroupSchema = z.object({
   groupId: z.string().min(1).max(100).nullable(),
