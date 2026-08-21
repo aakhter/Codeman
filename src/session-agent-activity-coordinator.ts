@@ -87,7 +87,7 @@ export interface EventReconciliation {
   readonly terminalActivityEpoch: number;
   readonly semanticRevision: number;
   readonly decisionToken: number;
-  readonly exactWatcherCount: 0;
+  readonly evidence: Readonly<AgentEvidence>;
 }
 
 export interface ReconciliationResult {
@@ -97,7 +97,7 @@ export interface ReconciliationResult {
   readonly terminalActivityEpoch: number;
   readonly semanticRevision: number;
   readonly decisionToken: number;
-  readonly evidence: AgentEvidence;
+  readonly evidence: Readonly<AgentEvidence>;
 }
 
 export interface ActivityDecisionInput {
@@ -128,7 +128,7 @@ interface SessionRecord {
   allocatedEvents: Map<number, ActivityEvent>;
   eventReconciliations: Map<number, EventReconciliation>;
   reconciliationResults: Set<ReconciliationResult>;
-  inFlight?: { promise: Promise<ReconciliationResult | false>; controller: AbortController; token: number };
+  inFlight?: SharedInspection;
   retryAttempt: number;
   retryTimer?: ReturnType<typeof setTimeout>;
   settleTimer?: ReturnType<typeof setTimeout>;
@@ -136,6 +136,25 @@ interface SessionRecord {
   immediateRevisionRetry: boolean;
   exactProcessLive: boolean;
   processReason?: AgentEvidence['processReason'];
+}
+
+interface InspectionSnapshot {
+  record: SessionRecord;
+  session: CoordinatorSession;
+  identityGeneration: number;
+  trackingGeneration: number;
+  terminalActivityEpoch: number;
+  semanticRevision: number;
+  token: number;
+}
+
+interface SharedInspection {
+  controller: AbortController;
+  token: number;
+  snapshot: InspectionSnapshot;
+  promise: Promise<Readonly<AgentEvidence> | false>;
+  consumers: Set<symbol>;
+  settled: boolean;
 }
 
 export interface CoordinatorOptions {
@@ -149,6 +168,11 @@ export interface CoordinatorOptions {
 }
 
 export type ActivityJobClass = 'foreground' | 'background';
+
+export interface ReconcileConsumerOptions {
+  kind?: ActivityJobClass;
+  deadlineMs?: number;
+}
 
 interface ScheduledJob<T> {
   key: string;
@@ -471,39 +495,56 @@ export class SessionAgentActivityCoordinator {
     };
   }
 
-  reconcile(session: CoordinatorSession, kind: ActivityJobClass = 'foreground'): Promise<ReconciliationResult | false> {
-    return this.reconcileInternal(session, kind);
-  }
-
-  async reconcileForEvent(
-    session: CoordinatorSession,
-    event: ActivityEvent,
-    kind: ActivityJobClass = 'foreground'
-  ): Promise<ReconciliationResult | false> {
-    const record = this.requireEvent(session, event);
-    if (record.inFlight) await record.inFlight.promise;
-    this.requireEvent(session, event);
-    return this.reconcileInternal(session, kind, event);
-  }
-
-  private async reconcileInternal(
+  reconcile(
     session: CoordinatorSession,
     kind: ActivityJobClass = 'foreground',
-    event?: ActivityEvent
+    deadlineMs: number = this.inspectionDeadlineMs
+  ): Promise<ReconciliationResult | false> {
+    return this.reconcileConsumer(session, undefined, { kind, deadlineMs });
+  }
+
+  reconcileForEvent(
+    session: CoordinatorSession,
+    event: ActivityEvent,
+    options: ReconcileConsumerOptions = {}
+  ): Promise<ReconciliationResult | false> {
+    this.requireEvent(session, event);
+    return this.reconcileConsumer(session, event, options);
+  }
+
+  private reconcileConsumer(
+    session: CoordinatorSession,
+    event: ActivityEvent | undefined,
+    options: ReconcileConsumerOptions
   ): Promise<ReconciliationResult | false> {
     const record = this.requireRecord(session);
-    if (!this.inspect || !record.tracking) return false;
-    if (record.inFlight) return record.inFlight.promise;
+    if (!this.inspect || !record.tracking) return Promise.resolve(false);
+    const deadlineMs = options.deadlineMs ?? this.inspectionDeadlineMs;
+    const deadlineAt = this.now() + Math.max(0, deadlineMs);
+    if (deadlineAt <= this.now()) return Promise.resolve(false);
+    let shared = record.inFlight;
+    if (shared && (shared.controller.signal.aborted || !this.isLiveSnapshot(shared.snapshot))) {
+      shared.controller.abort();
+      if (record.inFlight === shared) record.inFlight = undefined;
+      shared = undefined;
+    }
+    shared ??= this.startSharedInspection(record, options.kind ?? 'foreground');
+    if (!shared) return Promise.resolve(false);
+    return this.attachInspectionConsumer(record, shared, event, deadlineAt);
+  }
+
+  private startSharedInspection(record: SessionRecord, kind: ActivityJobClass): SharedInspection | undefined {
+    const session = record.session;
     if (record.retryTimer) {
       this.cancelTimer(record.retryTimer);
       record.retryTimer = undefined;
     }
     const project = this.projectFor(session);
-    if (!project) return false;
+    if (!project) return undefined;
 
     const controller = new AbortController();
     const token = ++record.decisionToken;
-    const snapshot = {
+    const snapshot: InspectionSnapshot = {
       record,
       session,
       identityGeneration: record.identityGeneration,
@@ -512,8 +553,16 @@ export class SessionAgentActivityCoordinator {
       semanticRevision: record.semanticRevision,
       token,
     };
-    const deadline = this.scheduleTimer(() => controller.abort(), this.inspectionDeadlineMs);
-    const promise = this.scheduler
+    const shared: SharedInspection = {
+      controller,
+      token,
+      snapshot,
+      consumers: new Set(),
+      settled: false,
+      promise: Promise.resolve(false),
+    };
+    record.inFlight = shared;
+    shared.promise = this.scheduler
       .enqueue(
         session.id,
         kind,
@@ -521,7 +570,7 @@ export class SessionAgentActivityCoordinator {
           const aborted = new Promise<never>((_resolve, reject) => {
             controller.signal.addEventListener(
               'abort',
-              () => reject(new DOMException('Inspection deadline exceeded', 'AbortError')),
+              () => reject(new DOMException('Inspection consumers detached', 'AbortError')),
               { once: true }
             );
           });
@@ -532,22 +581,13 @@ export class SessionAgentActivityCoordinator {
       .then((evidence) => {
         if (!this.isLiveSnapshot(snapshot) || controller.signal.aborted) return false as const;
         if (evidence.semanticRevision !== record.semanticRevision) return false as const;
-        record.retryAttempt = evidence.observation === 'unknown' ? record.retryAttempt + 1 : 0;
-        this.commitEvidence(session, evidence);
+        const authoritativeEvidence = Object.freeze({ ...evidence });
+        record.retryAttempt = authoritativeEvidence.observation === 'unknown' ? record.retryAttempt + 1 : 0;
+        this.commitEvidence(session, authoritativeEvidence);
         if (record.observation === 'unknown' && !record.settleTimer) {
           this.scheduleReconcile(record, this.nextRetryDelay(session));
         }
-        const result: ReconciliationResult = {
-          event,
-          identityGeneration: record.identityGeneration,
-          trackingGeneration: record.trackingGeneration,
-          terminalActivityEpoch: session.terminalActivityEpoch,
-          semanticRevision: record.semanticRevision,
-          decisionToken: token,
-          evidence,
-        };
-        if (event) record.reconciliationResults.add(result);
-        return result;
+        return authoritativeEvidence;
       })
       .catch(() => {
         if (this.isLiveSnapshot(snapshot)) {
@@ -558,11 +598,47 @@ export class SessionAgentActivityCoordinator {
         return false as const;
       })
       .finally(() => {
-        this.cancelTimer(deadline);
-        if (record.inFlight?.token === token) record.inFlight = undefined;
+        shared.settled = true;
+        if (record.inFlight === shared) record.inFlight = undefined;
       });
-    record.inFlight = { promise, controller, token };
-    return promise;
+    return shared;
+  }
+
+  private attachInspectionConsumer(
+    record: SessionRecord,
+    shared: SharedInspection,
+    event: ActivityEvent | undefined,
+    deadlineAt: number
+  ): Promise<ReconciliationResult | false> {
+    const consumer = Symbol('inspection-consumer');
+    shared.consumers.add(consumer);
+    return new Promise<ReconciliationResult | false>((resolve) => {
+      let finished = false;
+      const finish = (result: ReconciliationResult | false): void => {
+        if (finished) return;
+        finished = true;
+        this.cancelTimer(deadline);
+        shared.consumers.delete(consumer);
+        if (!shared.settled && shared.consumers.size === 0) shared.controller.abort();
+        resolve(result);
+      };
+      const deadline = this.scheduleTimer(() => finish(false), Math.max(0, deadlineAt - this.now()));
+      void shared.promise.then((evidence) => {
+        if (evidence === false || !this.isLiveSnapshot(shared.snapshot)) return finish(false);
+        if (event && !this.isCurrentEvent(record, event)) return finish(false);
+        const result: ReconciliationResult = {
+          event,
+          identityGeneration: record.identityGeneration,
+          trackingGeneration: record.trackingGeneration,
+          terminalActivityEpoch: record.session.terminalActivityEpoch,
+          semanticRevision: record.semanticRevision,
+          decisionToken: shared.token,
+          evidence,
+        };
+        if (event) record.reconciliationResults.add(result);
+        finish(result);
+      });
+    });
   }
 
   decisionForRawIdle(session: CoordinatorSession): ActivityDecision {
@@ -613,14 +689,13 @@ export class SessionAgentActivityCoordinator {
       result === false ||
       !record.reconciliationResults.delete(result) ||
       result.event !== event ||
-      result.evidence.exactWatcherCount !== 0 ||
       result.identityGeneration !== record.identityGeneration ||
       result.trackingGeneration !== record.trackingGeneration ||
       result.terminalActivityEpoch !== session.terminalActivityEpoch ||
       result.semanticRevision !== record.semanticRevision ||
       result.decisionToken !== record.decisionToken
     ) {
-      throw new Error('Event reconciliation does not prove exact watcher zero at the current semantic revision');
+      throw new Error('Event reconciliation is not current event-bound evidence');
     }
     const reconciliation: EventReconciliation = {
       event,
@@ -629,7 +704,7 @@ export class SessionAgentActivityCoordinator {
       terminalActivityEpoch: session.terminalActivityEpoch,
       semanticRevision: record.semanticRevision,
       decisionToken: record.decisionToken,
-      exactWatcherCount: 0,
+      evidence: result.evidence,
     };
     record.eventReconciliations.set(event.sequence, reconciliation);
     return reconciliation;
@@ -642,7 +717,7 @@ export class SessionAgentActivityCoordinator {
   ): ActivityDecision {
     const record = this.requireEvent(session, event);
     const reconciliation = input.reconciliation;
-    const exactZeroIsFresh =
+    const reconciliationIsFresh =
       !!reconciliation &&
       record.eventReconciliations.get(event.sequence) === reconciliation &&
       reconciliation.event === event &&
@@ -653,7 +728,9 @@ export class SessionAgentActivityCoordinator {
       reconciliation.decisionToken === record.decisionToken;
     if (reconciliation) record.eventReconciliations.delete(event.sequence);
     const settleEndedEarly =
-      (event.kind === 'raw_idle' || event.kind === 'stop' || event.kind === 'idle_prompt') && exactZeroIsFresh
+      (event.kind === 'raw_idle' || event.kind === 'stop' || event.kind === 'idle_prompt') &&
+      reconciliationIsFresh &&
+      reconciliation.evidence.exactWatcherCount === 0
         ? this.confirmExactZero(session)
         : false;
     const immediate = event.kind === 'permission' || event.kind === 'elicitation';
@@ -662,7 +739,11 @@ export class SessionAgentActivityCoordinator {
     record.lastDecisionSequence = Math.max(record.lastDecisionSequence, event.sequence);
     const ambiguous = this.isAmbiguous(record);
     const autonomyBlocked = this.isAutonomyBlocked(session);
-    const suppressible = record.observation === 'live' && (event.kind !== 'stop' || record.exactProcessLive);
+    const freshExactProcessLive =
+      reconciliationIsFresh &&
+      reconciliation.evidence.observation === 'live' &&
+      reconciliation.evidence.processReason === 'matching_process';
+    const suppressible = record.observation === 'live' && (event.kind !== 'stop' || freshExactProcessLive);
     return {
       event,
       settleEndedEarly,
@@ -672,22 +753,41 @@ export class SessionAgentActivityCoordinator {
       ambiguous,
       observation: ambiguous ? 'unknown' : record.observation,
       liveEvidence:
-        record.observation === 'live' ? (record.exactProcessLive ? 'exact_process' : 'watcher_or_frame') : null,
-      processReason: record.processReason,
+        record.observation !== 'live'
+          ? null
+          : event.kind === 'stop'
+            ? freshExactProcessLive
+              ? 'exact_process'
+              : 'watcher_or_frame'
+            : record.exactProcessLive
+              ? 'exact_process'
+              : 'watcher_or_frame',
+      processReason:
+        event.kind === 'stop'
+          ? reconciliationIsFresh
+            ? reconciliation.evidence.processReason
+            : undefined
+          : reconciliationIsFresh
+            ? reconciliation.evidence.processReason
+            : record.processReason,
     };
   }
 
   private requireEvent(session: CoordinatorSession, event: ActivityEvent): SessionRecord {
     const record = this.requireRecord(session);
-    if (
-      event.sessionId !== session.id ||
-      event.identityGeneration !== record.identityGeneration ||
-      event.trackingGeneration !== record.trackingGeneration ||
-      record.allocatedEvents.get(event.sequence) !== event
-    ) {
+    if (!this.isCurrentEvent(record, event)) {
       throw new Error('Activity event is stale or was not allocated by this coordinator');
     }
     return record;
+  }
+
+  private isCurrentEvent(record: SessionRecord, event: ActivityEvent): boolean {
+    return (
+      event.sessionId === record.session.id &&
+      event.identityGeneration === record.identityGeneration &&
+      event.trackingGeneration === record.trackingGeneration &&
+      record.allocatedEvents.get(event.sequence) === event
+    );
   }
 
   private isObservable(session: CoordinatorSession): boolean {
