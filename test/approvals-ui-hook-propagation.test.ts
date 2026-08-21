@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
+import { ApprovalInbox, type ApprovalResolvedInfo } from '../src/web/approval-inbox.js';
 
 const SOURCE = readFileSync(resolve(import.meta.dirname, '../src/web/public/approvals-ui.js'), 'utf8');
 const SETTINGS_SOURCE = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
@@ -217,6 +218,46 @@ describe('sequence-safe hook and approval resolution', () => {
     app._onApprovalResolved({ id: 'current', sessionId: 'session-1', kind: 'idle' });
     expect(app.clearPendingHooks).toHaveBeenCalledWith('session-1', 'idle_prompt');
     expect(app.approvals.has('current')).toBe(false);
+  });
+
+  it('orders browser clears from the actual inbox resolution and acknowledgement payloads', () => {
+    const emitResolution = (sourceSequence: number) => {
+      const inbox = new ApprovalInbox();
+      let emitted: ApprovalResolvedInfo | undefined;
+      inbox.onResolved = (info) => {
+        emitted = info;
+      };
+      inbox.notePrompt({ sessionId: 'session-1', sessionName: 'One', kind: 'idle', sourceSequence });
+      inbox.resolveForSession('session-1', 'resolved_in_terminal');
+      return emitted!;
+    };
+    const app = makeApp() as ApprovalsApp & { clearPendingHooks: ReturnType<typeof vi.fn> };
+    app.clearPendingHooks = vi.fn();
+    app.approvals.set('current', {
+      id: 'current',
+      sessionId: 'session-1',
+      kind: 'idle',
+      sourceSequence: 20,
+    });
+
+    const olderResolution = emitResolution(10);
+    expect(olderResolution).toMatchObject({ sourceSequence: 10 });
+    app._onApprovalResolved(olderResolution);
+    expect(app.clearPendingHooks).not.toHaveBeenCalled();
+
+    const newerResolution = emitResolution(30);
+    expect(newerResolution).toMatchObject({ sourceSequence: 30 });
+    app._onApprovalResolved(newerResolution);
+    expect(app.clearPendingHooks).toHaveBeenCalledWith('session-1', 'idle_prompt');
+
+    const ackInbox = new ApprovalInbox();
+    let acknowledged: ApprovalItem | undefined;
+    ackInbox.onUpdated = (item) => {
+      acknowledged = item;
+    };
+    ackInbox.notePrompt({ sessionId: 'session-2', sessionName: 'Two', kind: 'idle', sourceSequence: 40 });
+    ackInbox.acknowledge('session-2');
+    expect(acknowledged).toMatchObject({ sourceSequence: 40, acknowledgedAt: expect.any(Number) });
   });
 
   it('has no legacy handler for hook:suppressed diagnostics', () => {

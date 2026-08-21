@@ -48,6 +48,8 @@
  * 3. Add the frontend listener in the appropriate `addListener()` call
  */
 
+import type { ApprovalResolvedInfo } from './approval-inbox.js';
+
 // ─── Core ────────────────────────────────────────────────────────────────────
 
 /** Sent to each SSE client on initial connection with full app state. */
@@ -383,6 +385,11 @@ export const ApprovalPending = 'approval:pending' as const;
 export const ApprovalUpdated = 'approval:updated' as const;
 /** A pending approval left the inbox (answered, superseded, expired, ...). */
 export const ApprovalResolved = 'approval:resolved' as const;
+
+/** Keep the resolved SSE payload aligned with the exact item removed by the inbox. */
+export function approvalResolvedEventPayload(info: ApprovalResolvedInfo): ApprovalResolvedInfo {
+  return { ...info };
+}
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 

@@ -89,6 +89,8 @@ export interface ApprovalResolvedInfo {
   sessionId: string;
   kind: ApprovalKind;
   resolution: ApprovalResolution;
+  /** Sequence of the exact removed item; absent for legacy/generation-neutral items. */
+  sourceSequence?: number;
 }
 
 interface NotePromptArgs {
@@ -421,7 +423,13 @@ export class ApprovalInbox {
       this.recaptureTimers.delete(item.id);
     }
     if (!this.stopped) {
-      this.onResolved?.({ id: item.id, sessionId: item.sessionId, kind: item.kind, resolution });
+      this.onResolved?.({
+        id: item.id,
+        sessionId: item.sessionId,
+        kind: item.kind,
+        resolution,
+        ...(item.sourceSequence !== undefined ? { sourceSequence: item.sourceSequence } : {}),
+      });
     }
   }
 

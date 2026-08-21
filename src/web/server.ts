@@ -292,7 +292,7 @@ import type { EventLoopMonitorHandle } from '../utils/index.js';
 import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.js';
 import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { MAX_PASTE_IMAGE_BYTES } from '../config/buffer-limits.js';
-import { SseEvent } from './sse-events.js';
+import { SseEvent, approvalResolvedEventPayload } from './sse-events.js';
 import { getLatestPlanUsage } from './plan-usage-latest.js';
 import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
@@ -562,7 +562,7 @@ export class WebServer extends EventEmitter {
     // multi-user SSE scoping applies to them like any session event.
     approvalInbox.onPending = (item) => this.broadcast(SseEvent.ApprovalPending, { ...item });
     approvalInbox.onUpdated = (item) => this.broadcast(SseEvent.ApprovalUpdated, { ...item });
-    approvalInbox.onResolved = (info) => this.broadcast(SseEvent.ApprovalResolved, { ...info });
+    approvalInbox.onResolved = (info) => this.broadcast(SseEvent.ApprovalResolved, approvalResolvedEventPayload(info));
 
     // Set up mux event listeners
     this.mux.on('sessionCreated', (session) => {

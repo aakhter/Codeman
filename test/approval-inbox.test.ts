@@ -138,6 +138,7 @@ describe('normalizeCapturedFrame', () => {
 describe('ApprovalInbox', () => {
   it('bounds stop resolution by the hook receipt sequence', () => {
     const inbox = new ApprovalInbox();
+    const { resolved } = collect(inbox);
     inbox.notePrompt({ sessionId: 's-seq', sessionName: 'seq', kind: 'idle', sourceSequence: 8 });
 
     inbox.resolveForSession('s-seq', 'resolved_in_terminal', undefined, 7);
@@ -145,12 +146,16 @@ describe('ApprovalInbox', () => {
 
     inbox.resolveForSession('s-seq', 'resolved_in_terminal', undefined, 8);
     expect(inbox.getForSession('s-seq')).toBeUndefined();
+    expect(resolved).toEqual([
+      expect.objectContaining({ sessionId: 's-seq', resolution: 'resolved_in_terminal', sourceSequence: 8 }),
+    ]);
   });
 
   it.each(['permission', 'question'] as const)(
     'makes preserved %s ordering generation-neutral on identity replacement',
     (kind) => {
       const inbox = new ApprovalInbox();
+      const { resolved } = collect(inbox);
       inbox.notePrompt({ sessionId: 's-generation', sessionName: 'old', kind, sourceSequence: 8 });
 
       inbox.resetSourceSequenceForSession('s-generation', [kind]);
@@ -159,6 +164,7 @@ describe('ApprovalInbox', () => {
 
       inbox.resolveForSession('s-generation', 'resolved_in_terminal', undefined, 1);
       expect(inbox.getForSession('s-generation')).toBeUndefined();
+      expect(resolved.at(-1)).not.toHaveProperty('sourceSequence');
     }
   );
   let inbox: ApprovalInbox;
