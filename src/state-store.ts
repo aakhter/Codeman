@@ -299,6 +299,9 @@ export class StateStore {
     if (this.state.tabLayouts !== undefined) {
       parts.push(`"tabLayouts":${JSON.stringify(this.state.tabLayouts)}`);
     }
+    if (this.state.caseDefaultGroups !== undefined) {
+      parts.push(`"caseDefaultGroups":${JSON.stringify(this.state.caseDefaultGroups)}`);
+    }
     // ⚠️ This function is a hand-written ALLOWLIST, not a serializer over the
     // whole state: a key absent here is silently dropped on every save, however
     // correctly it was set in memory. `orchestrator` was missing, so orchestrator
@@ -704,6 +707,51 @@ export class StateStore {
   setTabLayout(owner: string, layout: TabLayout): void {
     const validated = validateTabLayout(layout);
     this.state.tabLayouts = { ...(this.state.tabLayouts ?? {}), [owner]: validated };
+    this.save();
+  }
+
+  /** Returns an owner's case default, distinguishing unset from intentional Ungrouped. */
+  getCaseDefaultGroup(owner: string, caseName: string): string | null | undefined {
+    const defaults = this.state.caseDefaultGroups;
+    if (!defaults || !Object.hasOwn(defaults, owner)) return undefined;
+
+    const ownerDefaults = defaults[owner];
+    return Object.hasOwn(ownerDefaults, caseName) ? ownerDefaults[caseName] : undefined;
+  }
+
+  /** Persists an owner-and-case scoped default session group. */
+  setCaseDefaultGroup(owner: string, caseName: string, groupId: string | null): void {
+    const defaults = this.state.caseDefaultGroups;
+    const existing = defaults && Object.hasOwn(defaults, owner) ? defaults[owner] : {};
+    const ownerDefaults = { ...existing, [caseName]: groupId };
+    this.state.caseDefaultGroups = { ...(defaults ?? {}), [owner]: ownerDefaults };
+    this.save();
+  }
+
+  /** Moves an owner's default when its case is renamed. */
+  renameCaseDefaultGroup(owner: string, fromCase: string, toCase: string): void {
+    const current = this.getCaseDefaultGroup(owner, fromCase);
+    if (current === undefined || fromCase === toCase) return;
+
+    const defaults = this.state.caseDefaultGroups;
+    const ownerDefaults = { ...(defaults && Object.hasOwn(defaults, owner) ? defaults[owner] : {}) };
+    delete ownerDefaults[fromCase];
+    const renamedDefaults = { ...ownerDefaults, [toCase]: current };
+    this.state.caseDefaultGroups = { ...(defaults ?? {}), [owner]: renamedDefaults };
+    this.save();
+  }
+
+  /** Removes an owner's default when its case is deleted. */
+  deleteCaseDefaultGroup(owner: string, caseName: string): void {
+    const defaults = this.state.caseDefaultGroups;
+    if (!defaults || !Object.hasOwn(defaults, owner)) return;
+
+    const existing = defaults[owner];
+    if (!Object.hasOwn(existing, caseName)) return;
+
+    const ownerDefaults = { ...existing };
+    delete ownerDefaults[caseName];
+    this.state.caseDefaultGroups = { ...defaults, [owner]: ownerDefaults };
     this.save();
   }
 
