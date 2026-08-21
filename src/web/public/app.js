@@ -4835,6 +4835,42 @@ class CodemanApp {
     this.subagents = next;
   }
 
+  _reportSubagentRestoreFailure(err) {
+    const diagnosticKey = 'restore-chain';
+    if (!this._subagentIdentityDiagnostics) this._subagentIdentityDiagnostics = new Set();
+    if (this._subagentIdentityDiagnostics.has(diagnosticKey)) return;
+    this._subagentIdentityDiagnostics.add(diagnosticKey);
+    console.warn('[subagents] failed to restore persisted window state:', err);
+  }
+
+  async _restoreSubagentStateForInit(gen) {
+    try {
+      await this.loadSubagentParentMap(gen);
+      if (gen !== this._initGeneration) return;
+
+      for (const [agentKey, sessionId] of this.subagentParentMap) {
+        if (gen !== this._initGeneration) return;
+        const agent = this.subagents.get(agentKey);
+        if (agent && this.sessions.has(sessionId)) {
+          agent.parentSessionId = sessionId;
+          const session = this.sessions.get(sessionId);
+          if (session) agent.parentSessionName = this.getSessionName(session);
+          this.subagents.set(agentKey, agent);
+        }
+      }
+
+      for (const [agentKey] of this.subagents) {
+        if (gen !== this._initGeneration) return;
+        if (!this.subagentParentMap.has(agentKey)) this.findParentSessionForSubagent(agentKey);
+      }
+
+      if (gen !== this._initGeneration) return;
+      await this.restoreSubagentWindowStates(gen);
+    } catch (err) {
+      if (gen === this._initGeneration) this._reportSubagentRestoreFailure(err);
+    }
+  }
+
   /**
    * Reset all app state maps, timers, and handlers to a clean baseline.
    * Called by handleInit() on SSE reconnect / page reload to prevent
@@ -5108,33 +5144,7 @@ class CodemanApp {
       // This ensures connection lines are drawn to the correct tabs
       // Clear the in-memory map first to ensure fresh state from storage
       this.subagentParentMap.clear();
-      this.loadSubagentParentMap(gen).then(async () => {
-        if (gen !== this._initGeneration) return;
-        // Apply stored parent associations to agents
-        for (const [agentKey, sessionId] of this.subagentParentMap) {
-          if (gen !== this._initGeneration) return;
-          const agent = this.subagents.get(agentKey);
-          if (agent && this.sessions.has(sessionId)) {
-            agent.parentSessionId = sessionId;
-            const session = this.sessions.get(sessionId);
-            if (session) {
-              agent.parentSessionName = this.getSessionName(session);
-            }
-            this.subagents.set(agentKey, agent);
-          }
-        }
-
-        // Now try to find parents for any agents that don't have one yet
-        for (const [agentKey] of this.subagents) {
-          if (gen !== this._initGeneration) return;
-          if (!this.subagentParentMap.has(agentKey)) {
-            this.findParentSessionForSubagent(agentKey);
-          }
-        }
-
-        // Finally, restore window states (this opens windows with correct parent info)
-        await this.restoreSubagentWindowStates(gen);
-      });
+      void this._restoreSubagentStateForInit(gen);
     }
 
     // Seed ultracode workflow runs (LEFT-pane summaries) from the snapshot

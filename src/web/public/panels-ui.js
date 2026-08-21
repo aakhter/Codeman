@@ -2084,6 +2084,7 @@ Object.assign(CodemanApp.prototype, {
         // Update local state
         const agent = this.subagents.get(agentKey);
         if (agent) {
+          this._touchSubagentEvent(agentKey);
           agent.status = 'completed';
           this.subagents.set(agentKey, agent);
         }

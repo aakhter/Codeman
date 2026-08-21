@@ -176,6 +176,41 @@ describe('opaque subagent event identity', () => {
 });
 
 describe('opaque subagent actions and browser identities', () => {
+  it('does not let a clear snapshot revive an agent killed after the clear began', async () => {
+    const app = makeApp();
+    const clearResponse = deferred<Response>();
+    const killResponse = deferred<{ json: () => Promise<{ success: boolean }> }>();
+    app.subagents.set('clear-trigger', agent('clear-trigger', { status: 'completed' }));
+    app.subagents.set('opaque-killed', agent('opaque-killed', { status: 'active' }));
+    app.showToast = vi.fn();
+    app.renderSubagentDetail = vi.fn();
+    app.renderMonitorSubagents = vi.fn();
+    app.updateSubagentBadge = vi.fn();
+    app._apiDelete = vi.fn().mockReturnValue(killResponse.promise);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(clearResponse.promise);
+
+    const clear = app.clearAllSubagents();
+    await Promise.resolve();
+    const kill = app.killSubagent('opaque-killed');
+    killResponse.resolve({ json: async () => ({ success: true }) });
+    await kill;
+    clearResponse.resolve({
+      json: async () => ({
+        success: true,
+        data: { cleared: 1, remaining: [agent('opaque-killed', { status: 'active' })] },
+      }),
+    } as Response);
+    await clear;
+
+    expect(app.subagents.get('opaque-killed')?.status).toBe('completed');
+    app._onSubagentDiscovered(agent('opaque-killed', { status: 'active', description: 'authoritative restart' }));
+    expect(app.subagents.get('opaque-killed')).toMatchObject({
+      status: 'active',
+      description: 'authoritative restart',
+    });
+  });
+
   it('encodes the selected key for mutations and transcript reads while displaying the bare ID', async () => {
     const app = makeApp();
     const key = 'opaque/key?one';
@@ -507,6 +542,68 @@ describe('manual completed-history clear', () => {
 });
 
 describe('subagent reconnect generations and persistence', () => {
+  it('normalizes corrupt persisted window shapes and recovers from malformed cache JSON', async () => {
+    const app = makeApp();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          data: {
+            minimized: {
+              'tab-a': [null, 42, '', 'opaque-first'],
+              'tab-b': null,
+            },
+            open: {},
+          },
+        }),
+      } as Response)
+      .mockRejectedValueOnce(new Error('offline'));
+
+    expect(await app.loadSubagentWindowStates(1)).toEqual({
+      minimized: { 'tab-a': ['opaque-first'] },
+      open: [],
+    });
+    expect(
+      app._normalizeSubagentWindowStates({
+        minimized: null,
+        open: [null, 7, {}, { agentKey: '' }, { agentKey: 'opaque-first', position: null }],
+      })
+    ).toEqual({ minimized: {}, open: [{ agentKey: 'opaque-first', position: null }] });
+
+    vi.spyOn(Storage.prototype, 'getItem').mockReturnValue('{not-json');
+    expect(await app.loadSubagentWindowStates(1)).toEqual({ minimized: {}, open: [] });
+    expect(error).toHaveBeenCalled();
+  });
+
+  it('bounds restore-chain failures and allows a later init generation to recover', async () => {
+    const app = makeApp();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    app.loadSubagentParentMap = vi.fn().mockResolvedValue(undefined);
+    app.restoreSubagentWindowStates = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('corrupt dependency'))
+      .mockResolvedValueOnce(undefined);
+
+    app._initGeneration = 1;
+    await expect(app._restoreSubagentStateForInit(1)).resolves.toBeUndefined();
+    app._initGeneration = 2;
+    await expect(app._restoreSubagentStateForInit(2)).resolves.toBeUndefined();
+
+    const staleFailure = deferred<never>();
+    app.restoreSubagentWindowStates.mockReturnValueOnce(staleFailure.promise);
+    app._initGeneration = 3;
+    const staleRestore = app._restoreSubagentStateForInit(3);
+    await Promise.resolve();
+    app._initGeneration = 4;
+    staleFailure.reject(new Error('superseded failure'));
+    await expect(staleRestore).resolves.toBeUndefined();
+
+    expect(app.restoreSubagentWindowStates).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects stale parent and window restore fetches after a newer init generation', async () => {
     const app = makeApp();
     app.subagents.set('opaque-first', agent('opaque-first'));

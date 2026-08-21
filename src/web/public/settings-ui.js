@@ -3496,6 +3496,29 @@ Object.assign(CodemanApp.prototype, {
    * Load subagent window states from server (or localStorage fallback).
    * Called on page load to restore minimized/open window states.
    */
+  _normalizeSubagentWindowStates(value) {
+    const normalized = { minimized: {}, open: [] };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return normalized;
+
+    if (value.minimized && typeof value.minimized === 'object' && !Array.isArray(value.minimized)) {
+      for (const [sessionId, persistedKeys] of Object.entries(value.minimized)) {
+        if (typeof sessionId !== 'string' || sessionId.length === 0 || !Array.isArray(persistedKeys)) continue;
+        const validKeys = persistedKeys.filter(key => typeof key === 'string' && key.length > 0);
+        if (validKeys.length > 0) normalized.minimized[sessionId] = validKeys;
+      }
+    }
+
+    if (Array.isArray(value.open)) {
+      normalized.open = value.open.filter(record => {
+        if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+        const persistedKey = record.agentKey || record.agentId;
+        return typeof persistedKey === 'string' && persistedKey.length > 0;
+      });
+    }
+
+    return normalized;
+  },
+
   async loadSubagentWindowStates(initGeneration = this._initGeneration) {
     let states = null;
 
@@ -3506,7 +3529,7 @@ Object.assign(CodemanApp.prototype, {
       if (res.ok) {
         const env = await res.json();
         if (initGeneration !== this._initGeneration) return null;
-        states = env?.success === true ? env.data : env;
+        states = this._normalizeSubagentWindowStates(env?.success === true ? env.data : env);
         // Also update localStorage
         try {
           localStorage.setItem('codeman-subagent-window-states', JSON.stringify(states));
@@ -3523,7 +3546,7 @@ Object.assign(CodemanApp.prototype, {
       try {
         const saved = localStorage.getItem('codeman-subagent-window-states');
         if (saved) {
-          states = JSON.parse(saved);
+          states = this._normalizeSubagentWindowStates(JSON.parse(saved));
         }
       } catch (err) {
         console.error('Failed to load subagent window states from localStorage:', err);
@@ -3531,7 +3554,7 @@ Object.assign(CodemanApp.prototype, {
     }
 
     if (initGeneration !== this._initGeneration) return null;
-    return states || { minimized: {}, open: [] };
+    return this._normalizeSubagentWindowStates(states);
   },
 
 
