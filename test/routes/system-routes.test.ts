@@ -36,7 +36,9 @@ vi.mock('../../src/subagent-watcher.js', () => ({
     getSubagents: vi.fn(() => []),
     getRecentSubagents: vi.fn(() => []),
     getSubagentsForSession: vi.fn(() => []),
+    getSubagentsForConversation: vi.fn(() => []),
     getSubagent: vi.fn(() => null),
+    resolveSubagentReference: vi.fn(() => ({ status: 'not_found' })),
     getTranscript: vi.fn(async () => []),
     formatTranscript: vi.fn(() => ''),
     killSubagent: vi.fn(async () => false),
@@ -146,6 +148,7 @@ describe('system-routes', () => {
     mockedExistsSync.mockReturnValue(true);
     mockedReaddirSync.mockReturnValue([]);
     mockedSubagentWatcher.getSubagents.mockReturnValue([]);
+    mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({ status: 'not_found' });
     mockedSubagentWatcher.getStats.mockReturnValue({
       totalAgents: 0,
       activeAgents: 0,
@@ -1132,6 +1135,26 @@ describe('system-routes', () => {
       expect(body.success).toBe(true);
       expect(body.data).toEqual(agentInfo);
     });
+
+    it('uses an opaque composite key for metadata lookup', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({
+        status: 'found',
+        info: { agentKey: 'v1.opaque', agentId: 'same', sessionId: 'conversation-a' },
+      } as never);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/subagents/v1.opaque' });
+
+      expect(res.statusCode).toBe(200);
+      expect(mockedSubagentWatcher.resolveSubagentReference).toHaveBeenCalledWith('v1.opaque');
+    });
+
+    it('rejects an ambiguous legacy bare ID', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({ status: 'ambiguous' } as never);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/subagents/shared' });
+
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: 'CONFLICT' });
+    });
   });
 
   // ========== GET /api/subagents/:agentId/transcript ==========
@@ -1176,6 +1199,26 @@ describe('system-routes', () => {
       });
       expect(mockedSubagentWatcher.getTranscript).toHaveBeenCalledWith('agent-1', 10);
     });
+
+    it('resolves opaque and unambiguous legacy references before transcript reads', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({
+        status: 'found',
+        info: { agentKey: 'v1.exact', agentId: 'same' },
+      } as never);
+
+      await harness.app.inject({ method: 'GET', url: '/api/subagents/v1.exact/transcript' });
+
+      expect(mockedSubagentWatcher.getTranscript).toHaveBeenCalledWith('v1.exact', undefined);
+    });
+
+    it('rejects an ambiguous legacy transcript reference', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({ status: 'ambiguous' } as never);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/subagents/shared/transcript' });
+
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: 'CONFLICT' });
+      expect(mockedSubagentWatcher.getTranscript).not.toHaveBeenCalled();
+    });
   });
 
   // ========== DELETE /api/subagents/:agentId ==========
@@ -1200,6 +1243,39 @@ describe('system-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
       expect(body.data.status).toBe('killed');
+    });
+
+    it('kills only the opaque composite record selected by the route', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({
+        status: 'found',
+        info: { agentKey: 'v1.exact', agentId: 'same', sessionId: 'conversation-a' },
+      } as never);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue(true);
+
+      await harness.app.inject({ method: 'DELETE', url: '/api/subagents/v1.exact' });
+
+      expect(mockedSubagentWatcher.killSubagent).toHaveBeenCalledWith('v1.exact');
+    });
+
+    it('preserves an unambiguous legacy bare-ID kill fallback', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({
+        status: 'found',
+        info: { agentKey: 'v1.only', agentId: 'legacy' },
+      } as never);
+      mockedSubagentWatcher.killSubagent.mockResolvedValue(true);
+
+      await harness.app.inject({ method: 'DELETE', url: '/api/subagents/legacy' });
+
+      expect(mockedSubagentWatcher.killSubagent).toHaveBeenCalledWith('v1.only');
+    });
+
+    it('rejects an ambiguous legacy bare-ID kill', async () => {
+      mockedSubagentWatcher.resolveSubagentReference.mockReturnValue({ status: 'ambiguous' } as never);
+
+      const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents/shared' });
+
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: 'CONFLICT' });
+      expect(mockedSubagentWatcher.killSubagent).not.toHaveBeenCalled();
     });
 
     it('returns error when kill fails', async () => {
@@ -1242,6 +1318,16 @@ describe('system-routes', () => {
       expect(body.success).toBe(true);
       expect(body.data.cleared).toBe(5);
     });
+
+    it('returns the canonical remaining live-agent snapshot after clearing history', async () => {
+      const live = [{ agentKey: 'v1.live', agentId: 'live', status: 'idle' }];
+      mockedSubagentWatcher.clearAll.mockReturnValue(2);
+      mockedSubagentWatcher.getSubagents.mockReturnValue(live as never);
+
+      const res = await harness.app.inject({ method: 'DELETE', url: '/api/subagents' });
+
+      expect(JSON.parse(res.body).data).toEqual({ cleared: 2, remaining: live });
+    });
   });
 
   // ========== GET /api/sessions/:id/subagents ==========
@@ -1256,7 +1342,10 @@ describe('system-routes', () => {
     });
 
     it('returns subagents for valid session', async () => {
-      mockedSubagentWatcher.getSubagentsForSession.mockReturnValue([{ agentId: 'sub-1', status: 'active' }] as never);
+      Object.defineProperty(harness.ctx._session, 'claudeSessionId', { value: 'conversation-a', configurable: true });
+      mockedSubagentWatcher.getSubagentsForConversation.mockReturnValue([
+        { agentKey: 'v1.exact', agentId: 'sub-1', sessionId: 'conversation-a', status: 'active' },
+      ] as never);
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -1266,6 +1355,10 @@ describe('system-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
       expect(body.data).toHaveLength(1);
+      expect(mockedSubagentWatcher.getSubagentsForConversation).toHaveBeenCalledWith(
+        harness.ctx._session.workingDir,
+        'conversation-a'
+      );
     });
   });
 

@@ -39,10 +39,12 @@ import { PENDING_TOOL_CALL_TTL_MS, MAX_PENDING_TOOL_CALLS, MAX_TRACKED_AGENTS } 
 import { STALE_DATA_MAX_AGE_MS } from './config/server-timing.js';
 import { FILE_PEEK_BYTES } from './config/buffer-limits.js';
 import { CleanupManager, KeyedDebouncer } from './utils/index.js';
+import { claudeProjectHash, parseSubagentKey, serializeSubagentKey } from './claude-project-identity.js';
 
 // ========== Types ==========
 
 export interface SubagentInfo {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   projectHash: string;
@@ -62,6 +64,7 @@ export interface SubagentInfo {
 }
 
 export interface SubagentToolCall {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -72,6 +75,7 @@ export interface SubagentToolCall {
 }
 
 export interface SubagentProgress {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -83,6 +87,7 @@ export interface SubagentProgress {
 }
 
 export interface SubagentMessage {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -126,6 +131,7 @@ export interface SubagentTranscriptEntry {
 }
 
 export interface SubagentToolResult {
+  agentKey: string;
   agentId: string;
   sessionId: string;
   timestamp: string;
@@ -145,7 +151,6 @@ const FULL_SCAN_EVERY_N_POLLS = 5; // Full directory traversal every 5th poll (5
 const LIVENESS_CHECK_MS = 10000; // Check if subagent processes are still alive every 10s
 const FILE_ALIVE_THRESHOLD_MS = 30000; // File mtime within 30s = agent alive (primary check)
 const STALE_COMPLETED_MAX_AGE_MS = STALE_DATA_MAX_AGE_MS; // Remove completed agents older than 1 hour
-const STALE_IDLE_MAX_AGE_MS = 4 * 60 * 60 * 1000; // Remove idle agents older than 4 hours
 const STARTUP_MAX_FILE_AGE_MS = 4 * 60 * 60 * 1000; // Only load files modified in last 4 hours on startup
 
 // Internal Claude Code agent patterns to filter out (not real user-initiated subagents)
@@ -177,6 +182,8 @@ export class SubagentWatcher extends EventEmitter {
   // Per-file debouncer for directory watcher (replaces per-file FSWatchers)
   private fileDeb = new KeyedDebouncer(FILE_CONTENT_DEBOUNCE_MS);
   private agentInfo = new Map<string, SubagentInfo>();
+  // Semantic live index is deliberately independent of completed display history.
+  private liveAgentKeys = new Set<string>();
   private idleDeb = new KeyedDebouncer(IDLE_TIMEOUT_MS);
   private cleanup = new CleanupManager();
   private _isRunning = false;
@@ -194,7 +201,8 @@ export class SubagentWatcher extends EventEmitter {
   // Store error handlers for FSWatchers to enable proper cleanup (prevent memory leaks)
   private dirWatcherErrorHandlers = new Map<string, (error: Error) => void>();
   // Map filePath → { projectHash, sessionId } for directory watcher file-change handling
-  private fileAgentContext = new Map<string, { projectHash: string; sessionId: string }>();
+  private fileAgentContext = new Map<string, { projectHash: string; sessionId: string; agentKey: string }>();
+  private semanticRevisions = new Map<string, number>();
 
   constructor() {
     super();
@@ -219,8 +227,10 @@ export class SubagentWatcher extends EventEmitter {
   private markSubagentAsCompleted(info: SubagentInfo): void {
     info.pid = undefined;
     info.status = 'completed';
-    this.pendingToolCalls.delete(info.agentId);
+    this.liveAgentKeys.delete(info.agentKey);
+    this.pendingToolCalls.delete(info.agentKey);
     this.emit('subagent:completed', info);
+    this.emitSemanticRevision(info.projectHash, info.sessionId, 'completed');
   }
 
   /**
@@ -250,20 +260,22 @@ export class SubagentWatcher extends EventEmitter {
    */
   private emitToolResult(
     content: { tool_use_id: string; content?: string | Array<{ type: string; text?: string }>; is_error?: boolean },
-    agentId: string,
-    sessionId: string,
+    agentKey: string,
     timestamp: string
   ): void {
+    const info = this.agentInfo.get(agentKey);
+    if (!info) return;
     const resultContent = this.extractToolResultContent(content.content);
-    const agentPendingCalls = this.pendingToolCalls.get(agentId);
+    const agentPendingCalls = this.pendingToolCalls.get(agentKey);
     const pendingCall = agentPendingCalls?.get(content.tool_use_id);
     const toolName = pendingCall?.toolName;
     // Delete after lookup to prevent memory leak
     agentPendingCalls?.delete(content.tool_use_id);
 
     const toolResult: SubagentToolResult = {
-      agentId,
-      sessionId,
+      agentKey,
+      agentId: info.agentId,
+      sessionId: info.sessionId,
       timestamp,
       toolUseId: content.tool_use_id,
       tool: toolName,
@@ -274,15 +286,32 @@ export class SubagentWatcher extends EventEmitter {
     this.emit('subagent:tool_result', toolResult);
   }
 
+  private parentKey(projectHash: string, sessionId: string): string {
+    return JSON.stringify([projectHash, sessionId]);
+  }
+
+  private emitSemanticRevision(projectHash: string, sessionId: string, reason: string): void {
+    const parentKey = this.parentKey(projectHash, sessionId);
+    const revision = (this.semanticRevisions.get(parentKey) ?? 0) + 1;
+    this.semanticRevisions.set(parentKey, revision);
+    this.emit('subagent:semantic_revision', {
+      projectHash,
+      sessionId,
+      revision,
+      reason,
+      agents: this.getSubagentsForIdentity(projectHash, sessionId),
+    });
+  }
+
   /**
-   * Find the oldest inactive (non-active) agent for LRU eviction.
-   * Returns the agent ID of the oldest inactive agent, or null if all are active.
+   * Find the oldest completed history record for LRU eviction.
+   * Positively live active/idle records are never capacity-evicted.
    */
-  private findOldestInactiveAgent(): string | null {
+  private findOldestCompletedAgent(): string | null {
     let oldestId: string | null = null;
     let oldestTime = Infinity;
     for (const [id, existing] of this.agentInfo) {
-      if (existing.status !== 'active' && existing.lastActivityAt < oldestTime) {
+      if (existing.status === 'completed' && existing.lastActivityAt < oldestTime) {
         oldestTime = existing.lastActivityAt;
         oldestId = id;
       }
@@ -535,16 +564,18 @@ export class SubagentWatcher extends EventEmitter {
     // Clear all state for clean restart
     this.filePositions.clear();
     this.agentInfo.clear();
+    this.liveAgentKeys.clear();
     this.knownSubagentDirs.clear();
     this.pendingToolCalls.clear();
     this.parentDescriptionCache.clear();
+    this.semanticRevisions.clear();
     this._pollCount = 0;
+    this.emit('subagent:reset', { reason: 'stop' });
   }
 
   /**
    * Clean up stale agents to prevent unbounded memory growth.
    * - Completed agents: removed after STALE_COMPLETED_MAX_AGE_MS (1 hour)
-   * - Idle agents: removed after STALE_IDLE_MAX_AGE_MS (4 hours)
    * Also enforces MAX_TRACKED_AGENTS limit with LRU eviction.
    * Also cleans up orphaned pending tool calls older than PENDING_TOOL_CALL_TTL_MS.
    */
@@ -558,18 +589,16 @@ export class SubagentWatcher extends EventEmitter {
       // Clean up based on status and age
       if (info.status === 'completed' && age > STALE_COMPLETED_MAX_AGE_MS) {
         agentsToDelete.add(agentId);
-      } else if (info.status === 'idle' && age > STALE_IDLE_MAX_AGE_MS) {
-        agentsToDelete.add(agentId);
       }
     }
 
     // Enforce max tracked agents limit (LRU eviction)
     const currentCount = this.agentInfo.size - agentsToDelete.size;
     if (currentCount > MAX_TRACKED_AGENTS) {
-      // Sort by lastActivityAt (oldest first) and evict oldest completed/idle agents
+      // Sort by lastActivityAt (oldest first) and evict completed display history only.
       const sortedAgents = Array.from(this.agentInfo.entries())
         .filter(([id]) => !agentsToDelete.has(id))
-        .filter(([, info]) => info.status !== 'active') // Keep active agents
+        .filter(([, info]) => info.status === 'completed')
         .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
 
       const toEvict = currentCount - MAX_TRACKED_AGENTS;
@@ -605,15 +634,17 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Remove an agent and all its associated resources.
    */
-  private removeAgent(agentId: string): void {
-    const info = this.agentInfo.get(agentId);
+  private removeAgent(agentKey: string): void {
+    const info = this.agentInfo.get(agentKey);
     if (info) {
-      this.agentInfo.delete(agentId);
-      this.pendingToolCalls.delete(agentId);
+      this.agentInfo.delete(agentKey);
+      this.liveAgentKeys.delete(agentKey);
+      this.pendingToolCalls.delete(agentKey);
       this.filePositions.delete(info.filePath);
       this.fileAgentContext.delete(info.filePath);
       this.fileDeb.cancelKey(info.filePath);
-      this.idleDeb.cancelKey(agentId);
+      this.idleDeb.cancelKey(agentKey);
+      this.emitSemanticRevision(info.projectHash, info.sessionId, 'removed');
     }
   }
 
@@ -632,12 +663,14 @@ export class SubagentWatcher extends EventEmitter {
    * Returns number of agents cleared.
    */
   clearAll(): number {
-    const count = this.agentInfo.size;
-    const agentIds = Array.from(this.agentInfo.keys());
-    for (const agentId of agentIds) {
-      this.removeAgent(agentId);
+    const completedKeys = Array.from(this.agentInfo.entries())
+      .filter(([, info]) => info.status === 'completed')
+      .map(([agentKey]) => agentKey);
+    for (const agentKey of completedKeys) {
+      this.removeAgent(agentKey);
     }
-    return count;
+    this.emit('subagent:reset', { reason: 'manual_clear', remaining: this.getLiveSubagents() });
+    return completedKeys.length;
   }
 
   /**
@@ -656,19 +689,74 @@ export class SubagentWatcher extends EventEmitter {
     return Array.from(this.agentInfo.values()).filter((info) => info.projectHash === projectHash);
   }
 
+  getLiveSubagents(): SubagentInfo[] {
+    const agents: SubagentInfo[] = [];
+    for (const agentKey of this.liveAgentKeys) {
+      const info = this.agentInfo.get(agentKey);
+      if (info && (info.status === 'active' || info.status === 'idle')) agents.push(info);
+    }
+    return agents;
+  }
+
+  private getSubagentsForIdentity(projectHash: string, sessionId: string): SubagentInfo[] {
+    return this.getLiveSubagents().filter((info) => info.projectHash === projectHash && info.sessionId === sessionId);
+  }
+
+  getSubagentsForConversation(workingDir: string, claudeSessionId: string): SubagentInfo[] {
+    return this.getSubagentsForIdentity(claudeProjectHash(workingDir), claudeSessionId);
+  }
+
+  async reconcileConversation(projectHash: string, claudeSessionId: string): Promise<SubagentInfo[]> {
+    const subagentDir = join(CLAUDE_PROJECTS_DIR, projectHash, claudeSessionId, 'subagents');
+    await this.reconcileDirectory(subagentDir, projectHash, claudeSessionId);
+    await this.watchWorkflowDirs(subagentDir, projectHash, claudeSessionId, false);
+    return this.getSubagentsForIdentity(projectHash, claudeSessionId);
+  }
+
+  private async reconcileDirectory(dir: string, projectHash: string, sessionId: string): Promise<void> {
+    let files: string[];
+    try {
+      files = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const file of files) {
+      if (file.startsWith('agent-') && file.endsWith('.jsonl')) {
+        await this.registerAgentFile(join(dir, file), projectHash, sessionId, false);
+      } else if (file.startsWith('agent-') && file.endsWith('.meta.json')) {
+        await this.registerAgentMeta(join(dir, file), projectHash, sessionId, false);
+      }
+    }
+  }
+
   /**
    * Get a specific subagent's info
    */
-  getSubagent(agentId: string): SubagentInfo | undefined {
-    return this.agentInfo.get(agentId);
+  resolveSubagentReference(
+    reference: string
+  ): { status: 'found'; info: SubagentInfo } | { status: 'not_found' } | { status: 'ambiguous' } {
+    if (parseSubagentKey(reference)) {
+      const info = this.agentInfo.get(reference);
+      return info ? { status: 'found', info } : { status: 'not_found' };
+    }
+    const matches = Array.from(this.agentInfo.values()).filter((info) => info.agentId === reference);
+    if (matches.length === 1) return { status: 'found', info: matches[0] };
+    if (matches.length > 1) return { status: 'ambiguous' };
+    return { status: 'not_found' };
+  }
+
+  getSubagent(reference: string): SubagentInfo | undefined {
+    const resolved = this.resolveSubagentReference(reference);
+    return resolved.status === 'found' ? resolved.info : undefined;
   }
 
   /**
    * Update a subagent's description.
    * Used to set the short description from TaskTracker when available.
    */
-  updateDescription(agentId: string, description: string): boolean {
-    const info = this.agentInfo.get(agentId);
+  updateDescription(reference: string, description: string): boolean {
+    const resolved = this.resolveSubagentReference(reference);
+    const info = resolved.status === 'found' ? resolved.info : undefined;
     if (info) {
       info.description = description;
       this.emit('subagent:updated', info);
@@ -729,8 +817,9 @@ export class SubagentWatcher extends EventEmitter {
    * Kill a subagent by its agent ID
    * Uses cached PID first, falls back to findSubagentProcess if needed.
    */
-  async killSubagent(agentId: string): Promise<boolean> {
-    const info = this.agentInfo.get(agentId);
+  async killSubagent(reference: string): Promise<boolean> {
+    const resolved = this.resolveSubagentReference(reference);
+    const info = resolved.status === 'found' ? resolved.info : undefined;
     if (!info) return false;
 
     // Already completed, nothing to kill
@@ -766,7 +855,7 @@ export class SubagentWatcher extends EventEmitter {
       if (agent.status === 'active' || agent.status === 'idle') {
         // Only kill subagents belonging to this specific session
         if (sessionId && agent.sessionId !== sessionId) continue;
-        await this.killSubagent(agent.agentId);
+        await this.killSubagent(agent.agentKey);
       }
     }
   }
@@ -840,8 +929,9 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Get transcript for a subagent (optionally limited to last N entries)
    */
-  async getTranscript(agentId: string, limit?: number): Promise<SubagentTranscriptEntry[]> {
-    const info = this.agentInfo.get(agentId);
+  async getTranscript(reference: string, limit?: number): Promise<SubagentTranscriptEntry[]> {
+    const resolved = this.resolveSubagentReference(reference);
+    const info = resolved.status === 'found' ? resolved.info : undefined;
     if (!info) return [];
 
     const entries: SubagentTranscriptEntry[] = [];
@@ -918,7 +1008,7 @@ export class SubagentWatcher extends EventEmitter {
    * Convert working directory to Claude's project hash format
    */
   private getProjectHash(workingDir: string): string {
-    return workingDir.replace(/\//g, '-');
+    return claudeProjectHash(workingDir);
   }
 
   /**
@@ -1155,7 +1245,7 @@ export class SubagentWatcher extends EventEmitter {
                 // Workflow agents nest one level deeper under subagents/workflows/{wf}/
                 // (each holds its own agent-{id}.jsonl/.meta.json) — the flat watcher
                 // above never sees them, so discover and watch each workflow dir too.
-                await this.watchWorkflowDirs(subagentDir, project, session);
+                await this.watchWorkflowDirs(subagentDir, project, session, true);
               } catch {
                 // subagent dir doesn't exist - skip
               }
@@ -1259,7 +1349,12 @@ export class SubagentWatcher extends EventEmitter {
    * and re-driven by the periodic scan, so newly created workflows are picked up
    * within one scan cycle (~5s) — the same latency as a new session's `subagents/`.
    */
-  private async watchWorkflowDirs(subagentDir: string, projectHash: string, sessionId: string): Promise<void> {
+  private async watchWorkflowDirs(
+    subagentDir: string,
+    projectHash: string,
+    sessionId: string,
+    isInitialScan = true
+  ): Promise<void> {
     const workflowsRoot = join(subagentDir, 'workflows');
     let names: string[];
     try {
@@ -1275,7 +1370,11 @@ export class SubagentWatcher extends EventEmitter {
       try {
         const st = await statAsync(wfDir);
         if (!st.isDirectory()) continue;
-        await this.watchSubagentDir(wfDir, projectHash, sessionId);
+        if (isInitialScan) {
+          await this.watchSubagentDir(wfDir, projectHash, sessionId);
+        } else {
+          await this.reconcileDirectory(wfDir, projectHash, sessionId);
+        }
       } catch {
         // workflow dir vanished mid-scan — skip
       }
@@ -1290,13 +1389,12 @@ export class SubagentWatcher extends EventEmitter {
     const context = this.fileAgentContext.get(filePath);
     if (!context) return;
 
-    const agentId = basename(filePath).replace('agent-', '').replace('.jsonl', '');
     const currentPos = this.filePositions.get(filePath) || 0;
-    const newPos = await this.tailFile(filePath, agentId, context.sessionId, currentPos);
+    const newPos = await this.tailFile(filePath, context.agentKey, currentPos);
     this.filePositions.set(filePath, newPos);
 
     // Update info
-    const existingInfo = this.agentInfo.get(agentId);
+    const existingInfo = this.agentInfo.get(context.agentKey);
     if (existingInfo) {
       try {
         const newStat = await statAsync(filePath);
@@ -1312,12 +1410,12 @@ export class SubagentWatcher extends EventEmitter {
         const extractedDescription = await this._resolveDescription(
           existingInfo.projectHash,
           existingInfo.sessionId,
-          agentId,
+          existingInfo.agentId,
           filePath
         );
         if (extractedDescription) {
           if (this.isInternalAgent(extractedDescription)) {
-            this.removeAgent(agentId);
+            this.removeAgent(context.agentKey);
             return;
           }
           existingInfo.description = extractedDescription;
@@ -1326,7 +1424,7 @@ export class SubagentWatcher extends EventEmitter {
       }
 
       // Reset idle timer
-      this.resetIdleTimer(agentId);
+      this.resetIdleTimer(context.agentKey);
     }
   }
 
@@ -1347,12 +1445,13 @@ export class SubagentWatcher extends EventEmitter {
     if (this.fileAgentContext.has(filePath)) return;
 
     const agentId = basename(filePath).replace('agent-', '').replace('.jsonl', '');
+    const agentKey = serializeSubagentKey(projectHash, sessionId, agentId);
 
     // Meta→transcript upgrade: the agent may already be registered from its
     // `.meta.json` sidecar (discovery-only — nothing to tail). Now that the real
     // `.jsonl` transcript has appeared, re-point to it and drop the stale sidecar
     // context, emitting `updated` below rather than a duplicate `discovered`.
-    const priorEntry = this.agentInfo.get(agentId);
+    const priorEntry = this.agentInfo.get(agentKey);
     const isMetaUpgrade = !!priorEntry && priorEntry.filePath.endsWith('.meta.json');
     if (isMetaUpgrade && priorEntry) {
       this.fileAgentContext.delete(priorEntry.filePath);
@@ -1376,7 +1475,8 @@ export class SubagentWatcher extends EventEmitter {
     }
 
     // Extract description - prefer reading from parent transcript (most reliable)
-    const description = await this._resolveDescription(projectHash, sessionId, agentId, filePath);
+    const description =
+      priorEntry?.description ?? (await this._resolveDescription(projectHash, sessionId, agentId, filePath));
 
     // Skip internal Claude Code agents (e.g., suggestion mode) - not real subagents
     if (this.isInternalAgent(description)) {
@@ -1384,6 +1484,7 @@ export class SubagentWatcher extends EventEmitter {
     }
 
     const info: SubagentInfo = {
+      agentKey,
       agentId,
       sessionId,
       projectHash,
@@ -1391,27 +1492,37 @@ export class SubagentWatcher extends EventEmitter {
       startedAt: fileStat.birthtime.toISOString(),
       lastActivityAt: fileStat.mtime.getTime(),
       status: 'active',
-      toolCallCount: 0,
-      entryCount: 0,
+      toolCallCount: priorEntry?.toolCallCount ?? 0,
+      entryCount: priorEntry?.entryCount ?? 0,
       fileSize: fileStat.size,
       description,
     };
 
     // Enforce MAX_TRACKED_AGENTS during insertion — evict oldest inactive agent
-    if (this.agentInfo.size >= MAX_TRACKED_AGENTS) {
-      const oldestId = this.findOldestInactiveAgent();
+    if (!isMetaUpgrade && this.agentInfo.size >= MAX_TRACKED_AGENTS) {
+      const oldestId = this.findOldestCompletedAgent();
       if (oldestId) {
         this.removeAgent(oldestId);
+      } else {
+        this.emit('subagent:overflow', {
+          projectHash,
+          sessionId,
+          observation: 'unknown',
+          reason: 'capacity',
+        });
+        return;
       }
     }
 
     // Track file context for directory watcher change handling
-    this.fileAgentContext.set(filePath, { projectHash, sessionId });
-    this.agentInfo.set(agentId, info);
+    this.fileAgentContext.set(filePath, { projectHash, sessionId, agentKey });
+    this.agentInfo.set(agentKey, info);
+    this.liveAgentKeys.add(agentKey);
     this.emit(isMetaUpgrade ? 'subagent:updated' : 'subagent:discovered', info);
+    this.emitSemanticRevision(projectHash, sessionId, isMetaUpgrade ? 'upgraded' : 'discovered');
 
     // Read existing content
-    this.tailFile(filePath, agentId, sessionId, 0)
+    this.tailFile(filePath, agentKey, 0)
       .then((position) => {
         this.filePositions.set(filePath, position);
       })
@@ -1420,7 +1531,7 @@ export class SubagentWatcher extends EventEmitter {
         console.warn(`[SubagentWatcher] Failed to read initial content for ${agentId}:`, err);
       });
 
-    this.resetIdleTimer(agentId);
+    this.resetIdleTimer(agentKey);
   }
 
   /**
@@ -1450,7 +1561,8 @@ export class SubagentWatcher extends EventEmitter {
   ): Promise<void> {
     if (this.fileAgentContext.has(metaPath)) return;
     const agentId = basename(metaPath).replace('agent-', '').replace('.meta.json', '');
-    if (this.agentInfo.has(agentId)) return;
+    const agentKey = serializeSubagentKey(projectHash, sessionId, agentId);
+    if (this.agentInfo.has(agentKey)) return;
 
     // Prefer a real transcript if one was written alongside the sidecar.
     const jsonlPath = join(dirname(metaPath), `agent-${agentId}.jsonl`);
@@ -1479,6 +1591,7 @@ export class SubagentWatcher extends EventEmitter {
     if (this.isInternalAgent(description)) return;
 
     const info: SubagentInfo = {
+      agentKey,
       agentId,
       sessionId,
       projectHash,
@@ -1493,20 +1606,32 @@ export class SubagentWatcher extends EventEmitter {
     };
 
     if (this.agentInfo.size >= MAX_TRACKED_AGENTS) {
-      const oldestId = this.findOldestInactiveAgent();
-      if (oldestId) this.removeAgent(oldestId);
+      const oldestId = this.findOldestCompletedAgent();
+      if (oldestId) {
+        this.removeAgent(oldestId);
+      } else {
+        this.emit('subagent:overflow', {
+          projectHash,
+          sessionId,
+          observation: 'unknown',
+          reason: 'capacity',
+        });
+        return;
+      }
     }
 
-    this.fileAgentContext.set(metaPath, { projectHash, sessionId });
-    this.agentInfo.set(agentId, info);
+    this.fileAgentContext.set(metaPath, { projectHash, sessionId, agentKey });
+    this.agentInfo.set(agentKey, info);
+    this.liveAgentKeys.add(agentKey);
     this.emit('subagent:discovered', info);
-    this.resetIdleTimer(agentId);
+    this.emitSemanticRevision(projectHash, sessionId, 'discovered');
+    this.resetIdleTimer(agentKey);
   }
 
   /**
    * Tail a file from a specific position
    */
-  private async tailFile(filePath: string, agentId: string, sessionId: string, fromPosition: number): Promise<number> {
+  private async tailFile(filePath: string, agentKey: string, fromPosition: number): Promise<number> {
     return new Promise((resolve) => {
       let position = fromPosition;
 
@@ -1519,12 +1644,12 @@ export class SubagentWatcher extends EventEmitter {
 
         try {
           const entry = JSON.parse(line) as SubagentTranscriptEntry;
-          this.processEntry(entry, agentId, sessionId).catch(() => {
+          this.processEntry(entry, agentKey).catch(() => {
             // processEntry failure is non-critical
           });
 
           // Update entry count
-          const info = this.agentInfo.get(agentId);
+          const info = this.agentInfo.get(agentKey);
           if (info) {
             info.entryCount++;
           }
@@ -1546,20 +1671,22 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Process a transcript entry and emit appropriate events
    */
-  private async processEntry(entry: SubagentTranscriptEntry, agentId: string, sessionId: string): Promise<void> {
-    const info = this.agentInfo.get(agentId);
+  private async processEntry(entry: SubagentTranscriptEntry, agentKey: string): Promise<void> {
+    const info = this.agentInfo.get(agentKey);
+    if (!info) return;
 
     if (info) {
       this._processModelInfo(entry, info);
       this._processTokenInfo(entry, info);
 
-      if (await this._processDescription(entry, agentId, info)) return;
+      if (await this._processDescription(entry, agentKey, info)) return;
     }
 
     if (entry.type === 'progress' && entry.data) {
       const progress: SubagentProgress = {
-        agentId,
-        sessionId,
+        agentKey,
+        agentId: info.agentId,
+        sessionId: info.sessionId,
         timestamp: entry.timestamp,
         progressType: entry.data.type,
         query: entry.data.query,
@@ -1573,9 +1700,9 @@ export class SubagentWatcher extends EventEmitter {
       };
       this.emit('subagent:progress', progress);
     } else if (entry.type === 'assistant' && entry.message?.content) {
-      this._processAssistantContent(entry, agentId, sessionId);
+      this._processAssistantContent(entry, info);
     } else if (entry.type === 'user' && entry.message?.content) {
-      this._processUserContent(entry, agentId, sessionId);
+      this._processUserContent(entry, info);
     }
   }
 
@@ -1599,7 +1726,7 @@ export class SubagentWatcher extends EventEmitter {
 
   private async _processDescription(
     entry: SubagentTranscriptEntry,
-    agentId: string,
+    agentKey: string,
     agent: SubagentInfo
   ): Promise<boolean> {
     if (agent.description || entry.type !== 'user' || !entry.message?.content) return false;
@@ -1608,13 +1735,13 @@ export class SubagentWatcher extends EventEmitter {
     const description = await this._resolveDescription(
       agent.projectHash,
       agent.sessionId,
-      agentId,
+      agent.agentId,
       agent.filePath,
       fallbackText
     );
     if (description) {
       if (this.isInternalAgent(description)) {
-        this.removeAgent(agentId);
+        this.removeAgent(agentKey);
         return true;
       }
       agent.description = description;
@@ -1623,14 +1750,15 @@ export class SubagentWatcher extends EventEmitter {
     return false;
   }
 
-  private _processAssistantContent(entry: SubagentTranscriptEntry, agentId: string, sessionId: string): void {
+  private _processAssistantContent(entry: SubagentTranscriptEntry, agent: SubagentInfo): void {
     const messageContent = entry.message!.content;
     if (typeof messageContent === 'string') {
       const text = messageContent.trim();
       if (text.length > 0) {
         const message: SubagentMessage = {
-          agentId,
-          sessionId,
+          agentKey: agent.agentKey,
+          agentId: agent.agentId,
+          sessionId: agent.sessionId,
           timestamp: entry.timestamp,
           role: 'assistant',
           text: text.substring(0, MESSAGE_TEXT_LIMIT),
@@ -1642,10 +1770,10 @@ export class SubagentWatcher extends EventEmitter {
         if (content.type === 'tool_use' && content.name) {
           // Store toolUseId for linking to results, with timestamp for TTL cleanup
           if (content.id) {
-            if (!this.pendingToolCalls.has(agentId)) {
-              this.pendingToolCalls.set(agentId, new Map());
+            if (!this.pendingToolCalls.has(agent.agentKey)) {
+              this.pendingToolCalls.set(agent.agentKey, new Map());
             }
-            const agentCalls = this.pendingToolCalls.get(agentId)!;
+            const agentCalls = this.pendingToolCalls.get(agent.agentKey)!;
             // Enforce size limit to prevent memory leak from rapid tool calls
             if (agentCalls.size >= MAX_PENDING_TOOL_CALLS) {
               // FIFO eviction: delete first (oldest) entry using Map insertion order
@@ -1659,8 +1787,9 @@ export class SubagentWatcher extends EventEmitter {
           }
 
           const toolCall: SubagentToolCall = {
-            agentId,
-            sessionId,
+            agentKey: agent.agentKey,
+            agentId: agent.agentId,
+            sessionId: agent.sessionId,
             timestamp: entry.timestamp,
             tool: content.name,
             input: this.getTruncatedInput(content.name, content.input || {}),
@@ -1670,23 +1799,23 @@ export class SubagentWatcher extends EventEmitter {
           this.emit('subagent:tool_call', toolCall);
 
           // Update tool call count
-          const agentInfo = this.agentInfo.get(agentId);
+          const agentInfo = this.agentInfo.get(agent.agentKey);
           if (agentInfo) {
             agentInfo.toolCallCount++;
           }
         } else if (content.type === 'tool_result' && content.tool_use_id) {
           this.emitToolResult(
             { tool_use_id: content.tool_use_id, content: content.content, is_error: content.is_error },
-            agentId,
-            sessionId,
+            agent.agentKey,
             entry.timestamp
           );
         } else if (content.type === 'text' && content.text) {
           const text = content.text.trim();
           if (text.length > 0) {
             const message: SubagentMessage = {
-              agentId,
-              sessionId,
+              agentKey: agent.agentKey,
+              agentId: agent.agentId,
+              sessionId: agent.sessionId,
               timestamp: entry.timestamp,
               role: 'assistant',
               text: text.substring(0, MESSAGE_TEXT_LIMIT),
@@ -1698,14 +1827,15 @@ export class SubagentWatcher extends EventEmitter {
     }
   }
 
-  private _processUserContent(entry: SubagentTranscriptEntry, agentId: string, sessionId: string): void {
+  private _processUserContent(entry: SubagentTranscriptEntry, agent: SubagentInfo): void {
     const messageContent = entry.message!.content;
     if (typeof messageContent === 'string') {
       const userText = messageContent.trim();
       if (userText.length > 0 && userText.length < 500) {
         const message: SubagentMessage = {
-          agentId,
-          sessionId,
+          agentKey: agent.agentKey,
+          agentId: agent.agentId,
+          sessionId: agent.sessionId,
           timestamp: entry.timestamp,
           role: 'user',
           text: userText,
@@ -1718,16 +1848,16 @@ export class SubagentWatcher extends EventEmitter {
         if (content.type === 'tool_result' && content.tool_use_id) {
           this.emitToolResult(
             { tool_use_id: content.tool_use_id, content: content.content, is_error: content.is_error },
-            agentId,
-            sessionId,
+            agent.agentKey,
             entry.timestamp
           );
         } else if (content.type === 'text' && content.text) {
           const userText = content.text.trim();
           if (userText.length > 0 && userText.length < 500) {
             const message: SubagentMessage = {
-              agentId,
-              sessionId,
+              agentKey: agent.agentKey,
+              agentId: agent.agentId,
+              sessionId: agent.sessionId,
               timestamp: entry.timestamp,
               role: 'user',
               text: userText,
@@ -1773,12 +1903,13 @@ export class SubagentWatcher extends EventEmitter {
   /**
    * Reset idle timer for an agent
    */
-  private resetIdleTimer(agentId: string): void {
-    this.idleDeb.schedule(agentId, () => {
-      const info = this.agentInfo.get(agentId);
+  private resetIdleTimer(agentKey: string): void {
+    this.idleDeb.schedule(agentKey, () => {
+      const info = this.agentInfo.get(agentKey);
       if (!info) return;
       if (info.status === 'active') {
         info.status = 'idle';
+        this.emitSemanticRevision(info.projectHash, info.sessionId, 'idle');
       }
     });
   }

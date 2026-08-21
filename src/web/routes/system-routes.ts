@@ -993,7 +993,8 @@ export function registerSystemRoutes(
   app.get('/api/sessions/:id/subagents', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
-    const subagents = subagentWatcher.getSubagentsForSession(session.workingDir);
+    const claudeSessionId = session.claudeSessionId ?? session.id;
+    const subagents = subagentWatcher.getSubagentsForConversation(session.workingDir, claudeSessionId);
     return { success: true, data: subagents };
   });
 
@@ -1001,7 +1002,11 @@ export function registerSystemRoutes(
     // Multi-user stopgap: cross-user subagent metadata is admin-only (no-op single-user).
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     const { agentId } = req.params as { agentId: string };
-    const info = subagentWatcher.getSubagent(agentId);
+    const resolved = subagentWatcher.resolveSubagentReference(agentId);
+    if (resolved.status === 'ambiguous') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, `Subagent ID ${agentId} is ambiguous; use its agentKey`);
+    }
+    const info = resolved.status === 'found' ? resolved.info : subagentWatcher.getSubagent(agentId);
     if (!info) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, `Subagent ${agentId} not found`);
     }
@@ -1015,7 +1020,12 @@ export function registerSystemRoutes(
     const { agentId } = req.params as { agentId: string };
     const { limit, format } = req.query as { limit?: string; format?: 'raw' | 'formatted' };
     const limitNum = limit ? parseInt(limit, 10) : undefined;
-    const transcript = await subagentWatcher.getTranscript(agentId, limitNum);
+    const resolved = subagentWatcher.resolveSubagentReference(agentId);
+    if (resolved.status === 'ambiguous') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, `Subagent ID ${agentId} is ambiguous; use its agentKey`);
+    }
+    const exactReference = resolved.status === 'found' ? resolved.info.agentKey : agentId;
+    const transcript = await subagentWatcher.getTranscript(exactReference, limitNum);
 
     if (format === 'formatted') {
       const formatted = subagentWatcher.formatTranscript(transcript);
@@ -1030,12 +1040,17 @@ export function registerSystemRoutes(
     // (no-op allow-all in single-user mode).
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     const { agentId } = req.params as { agentId: string };
-    const info = subagentWatcher.getSubagent(agentId);
+    const resolved = subagentWatcher.resolveSubagentReference(agentId);
+    if (resolved.status === 'ambiguous') {
+      return createErrorResponse(ApiErrorCode.CONFLICT, `Subagent ID ${agentId} is ambiguous; use its agentKey`);
+    }
+    const info = resolved.status === 'found' ? resolved.info : subagentWatcher.getSubagent(agentId);
     if (!info) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Subagent not found');
     }
 
-    const killed = await subagentWatcher.killSubagent(agentId);
+    const exactReference = resolved.status === 'found' ? resolved.info.agentKey : agentId;
+    const killed = await subagentWatcher.killSubagent(exactReference);
     if (killed) {
       return { success: true, data: { agentId, status: 'killed' } };
     }
@@ -1053,7 +1068,7 @@ export function registerSystemRoutes(
     // Multi-user stopgap: clearing ALL users' subagents is a cross-user write → admin-only (no-op single-user).
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     const cleared = subagentWatcher.clearAll();
-    return { success: true, data: { cleared } };
+    return { success: true, data: { cleared, remaining: subagentWatcher.getSubagents() } };
   });
 
   // ═══════════════════════════════════════════════════════════════

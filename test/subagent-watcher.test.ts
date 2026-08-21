@@ -68,6 +68,7 @@ import * as fs from 'fs';
 import * as fsPromises from 'node:fs/promises';
 import { createInterface } from 'readline';
 import { execSync } from 'child_process';
+import { serializeSubagentKey } from '../src/claude-project-identity.js';
 
 /**
  * Flush the microtask queue to allow async scanForSubagents() to complete.
@@ -233,6 +234,152 @@ describe('SubagentWatcher', () => {
       watcher.start(); // Should be no-op
 
       expect(watcher.isRunning()).toBe(true);
+    });
+  });
+
+  describe('Composite lifecycle identity', () => {
+    const registerMeta = async (
+      projectHash: string,
+      sessionId: string,
+      agentId: string,
+      mtime = new Date()
+    ): Promise<string> => {
+      const path = `/home/test/.claude/projects/${projectHash}/${sessionId}/subagents/agent-${agentId}.meta.json`;
+      mockExistsSync.mockReturnValue(false);
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: mtime,
+        mtime,
+        size: 50,
+      });
+      mockReadFileSync.mockReturnValue(JSON.stringify({ description: `Agent ${agentId} task` }));
+      await (
+        watcher as unknown as {
+          registerAgentMeta(path: string, projectHash: string, sessionId: string, initial: boolean): Promise<void>;
+        }
+      ).registerAgentMeta(path, projectHash, sessionId, false);
+      return serializeSubagentKey(projectHash, sessionId, agentId);
+    };
+
+    it('keeps identical bare IDs isolated across projects and conversations', async () => {
+      const firstKey = await registerMeta('-work-one', 'conversation-a', 'shared');
+      const secondKey = await registerMeta('-work-two', 'conversation-b', 'shared');
+
+      expect(watcher.getSubagents().map((agent) => agent.agentKey)).toEqual([firstKey, secondKey]);
+      expect(watcher.getSubagent(firstKey)?.sessionId).toBe('conversation-a');
+      expect(watcher.getSubagent(secondKey)?.sessionId).toBe('conversation-b');
+      expect(watcher.resolveSubagentReference('shared').status).toBe('ambiguous');
+      expect(watcher.updateDescription('shared', 'must not cross conversations')).toBe(false);
+    });
+
+    it('isolates parallel conversations in the same directory and returns only live exact matches', async () => {
+      await registerMeta('-work-shared', 'conversation-a', 'same');
+      const peerKey = await registerMeta('-work-shared', 'conversation-b', 'same');
+      watcher.getSubagent(serializeSubagentKey('-work-shared', 'conversation-a', 'same'))!.status = 'idle';
+      await watcher.killSubagent(peerKey);
+
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toHaveLength(1);
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-b')).toEqual([]);
+    });
+
+    it('upgrades one composite meta record when its transcript appears', async () => {
+      const key = await registerMeta('-work-shared', 'conversation-a', 'upgrade');
+      const transcript = '/home/test/.claude/projects/-work-shared/conversation-a/subagents/agent-upgrade.jsonl';
+      mockStatSync.mockReturnValue({
+        isDirectory: () => false,
+        birthtime: new Date(),
+        mtime: new Date(),
+        size: 100,
+      });
+      mockCreateInterface.mockReturnValue(createMockRl());
+
+      await (
+        watcher as unknown as {
+          registerAgentFile(path: string, projectHash: string, sessionId: string): Promise<void>;
+        }
+      ).registerAgentFile(transcript, '-work-shared', 'conversation-a');
+
+      expect(watcher.getSubagents()).toHaveLength(1);
+      expect(watcher.getSubagent(key)?.filePath).toBe(transcript);
+    });
+
+    it('targeted reconciliation bypasses startup age filtering', async () => {
+      const old = new Date(Date.now() - 8 * 60 * 60 * 1000);
+      mockReaddirSync.mockImplementation((path: string) => {
+        if (path.endsWith('/subagents')) return ['agent-old.meta.json'];
+        return [];
+      });
+      mockStatSync.mockImplementation((path: string) => ({
+        isDirectory: () => !path.endsWith('.json'),
+        birthtime: old,
+        mtime: old,
+        size: 50,
+      }));
+      mockReadFileSync.mockReturnValue(JSON.stringify({ description: 'Still live old agent' }));
+      mockExistsSync.mockReturnValue(false);
+
+      await watcher.reconcileConversation('-work-shared', 'conversation-a');
+
+      expect(watcher.getSubagentsForConversation('/work/shared', 'conversation-a')).toHaveLength(1);
+    });
+
+    it('history cleanup and manual clear retain positively live records', async () => {
+      const revisions = vi.fn();
+      const resets = vi.fn();
+      watcher.on('subagent:semantic_revision', revisions);
+      watcher.on('subagent:reset', resets);
+      const liveKey = await registerMeta('-work-shared', 'conversation-a', 'live');
+      const staleDoneKey = await registerMeta('-work-shared', 'conversation-a', 'stale-done');
+      await watcher.killSubagent(staleDoneKey);
+      const staleDone = watcher.getSubagent(staleDoneKey)!;
+      staleDone.lastActivityAt = Date.now() - 2 * 60 * 60 * 1000;
+
+      expect(watcher.cleanupNow()).toBe(1);
+      expect(watcher.getSubagent(liveKey)?.status).toBe('active');
+
+      const doneKey = await registerMeta('-work-shared', 'conversation-a', 'done');
+      await watcher.killSubagent(doneKey);
+
+      expect(watcher.clearAll()).toBe(1);
+      expect(watcher.getSubagent(liveKey)?.status).toBe('active');
+      expect(watcher.getSubagent(doneKey)).toBeUndefined();
+      expect(revisions.mock.calls.map(([event]) => event.revision)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+      expect(resets).toHaveBeenCalledWith({
+        reason: 'manual_clear',
+        remaining: [expect.objectContaining({ agentKey: liveKey })],
+      });
+    });
+
+    it('reports overflow as unknown only for the affected parent', async () => {
+      const overflow = vi.fn();
+      watcher.on('subagent:overflow', overflow);
+      const state = watcher as unknown as { agentInfo: Map<string, SubagentInfo> };
+      for (let i = 0; i < 500; i++) {
+        const agentKey = serializeSubagentKey('-other', 'peer', `live-${i}`);
+        state.agentInfo.set(agentKey, {
+          agentKey,
+          agentId: `live-${i}`,
+          sessionId: 'peer',
+          projectHash: '-other',
+          filePath: `/tmp/${i}`,
+          startedAt: new Date().toISOString(),
+          lastActivityAt: Date.now(),
+          status: 'active',
+          toolCallCount: 0,
+          entryCount: 0,
+          fileSize: 0,
+        });
+      }
+
+      await registerMeta('-affected', 'conversation-a', 'overflow');
+
+      expect(overflow).toHaveBeenCalledTimes(1);
+      expect(overflow.mock.calls[0][0]).toMatchObject({
+        projectHash: '-affected',
+        sessionId: 'conversation-a',
+        observation: 'unknown',
+      });
+      expect(overflow.mock.calls[0][0]).not.toMatchObject({ sessionId: 'peer' });
     });
   });
 
