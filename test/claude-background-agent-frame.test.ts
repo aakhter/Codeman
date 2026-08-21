@@ -53,6 +53,15 @@ describe('evaluateClaudeBackgroundAgentFrame', () => {
     });
   });
 
+  it('uses the current bottom renderer when a stale renderer remains near the top', () => {
+    const middleRows = Array.from({ length: 13 }, (_, index) => `ordinary row ${index}`).join('\n');
+    expect(evaluate(`✳ Waiting for 3 background agents to finish\n${middleRows}\n${renderer}\n────\n❯`)).toEqual({
+      status: 'positive',
+      reason: 'matching_visible_renderer',
+      renderedCount: 2,
+    });
+  });
+
   it('rejects zero and a count different from the exact watcher live count', () => {
     expect(evaluate('✳ Waiting for 0 background agents to finish')).toMatchObject({
       status: 'negative',

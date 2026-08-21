@@ -38,9 +38,18 @@ export function evaluateClaudeBackgroundAgentFrame(
   }
 
   const lines = frame.text.split(/\r?\n/);
-  const rendererIndex = lines.findIndex((line) => RENDERER_PATTERN.test(line));
-  if (rendererIndex < 0) return { status: 'negative', reason: 'renderer_not_found' };
-  if (rendererIndex < Math.max(0, lines.length - BOTTOM_REGION_ROWS)) {
+  const bottomRegionStart = Math.max(0, lines.length - BOTTOM_REGION_ROWS);
+  const hasRenderer = lines.some((line) => RENDERER_PATTERN.test(line));
+  if (!hasRenderer) return { status: 'negative', reason: 'renderer_not_found' };
+
+  let rendererIndex = -1;
+  for (let index = lines.length - 1; index >= bottomRegionStart; index -= 1) {
+    if (RENDERER_PATTERN.test(lines[index])) {
+      rendererIndex = index;
+      break;
+    }
+  }
+  if (rendererIndex < 0) {
     return { status: 'negative', reason: 'renderer_not_in_bottom_region' };
   }
 
