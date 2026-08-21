@@ -326,6 +326,57 @@ describe('session activity event reconciliation', () => {
     expect(app.sessions.get('late')).toMatchObject({ id: 'late', name: 'Late arrival', status: 'idle' });
   });
 
+  it.each([
+    ['parked', '_onSessionParked', 'parked'],
+    ['resumed', '_onSessionResumed', 'active'],
+    ['restored restart', '_onSessionRestarted', 'busy'],
+    ['crash-loop restart', '_onSessionRestarted', 'busy'],
+  ])('%s clears stale derived activity and its idle timer', (_label, handler, status) => {
+    vi.useFakeTimers();
+    const app = makeActivityEventApp();
+    const session = app.sessions.get('s1');
+    session.activityStatus = 'waiting_agents';
+    session.activityStatusSince = 1234;
+    app.idleTimers.set(
+      's1',
+      setTimeout(() => {}, 60_000)
+    );
+
+    app[handler]({ id: 's1' });
+
+    expect(session).toMatchObject({ status, activityStatus: status, activityStatusSince: null });
+    expect(app.idleTimers.has('s1')).toBe(false);
+    expect(app.renderSessionTabs).toHaveBeenCalled();
+    expect(app.renderMuxSessions).toHaveBeenCalled();
+  });
+
+  it('hydrates an unknown full session:updated snapshot while ignoring narrow lifecycle-shaped updates', () => {
+    const app = makeActivityEventApp();
+
+    app._onSessionUpdated({ id: 'full', status: 'idle', activityStatus: 'waiting_agents' });
+    expect(app.sessions.has('full')).toBe(false);
+
+    app._onSessionUpdated({
+      id: 'full',
+      pid: null,
+      status: 'idle',
+      workingDir: '/tmp/full',
+      currentTaskId: null,
+      createdAt: 100,
+      lastActivityAt: 200,
+      activityStatus: 'waiting_agents',
+      activityStatusSince: 150,
+    });
+
+    expect(app.sessions.get('full')).toMatchObject({
+      workingDir: '/tmp/full',
+      status: 'idle',
+      activityStatus: 'waiting_agents',
+    });
+    expect(app.renderSessionTabs).toHaveBeenCalled();
+    expect(app.renderMuxSessions).toHaveBeenCalled();
+  });
+
   it('reconnect hydration replaces stale activity and clears fields omitted by a legacy snapshot', () => {
     const app = makeInitApp();
     app.sessions.get('s1').activityStatus = 'waiting_agents';

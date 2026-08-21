@@ -1972,11 +1972,7 @@ class CodemanApp {
       } catch {
         /* ignore malformed payload */
       }
-      if (data && data.id) {
-        const live = this.sessions.get(data.id);
-        if (live) live.status = 'parked';
-      }
-      this._onSessionListMaybeChanged();
+      this._onSessionParked(data);
     });
 
     addListener(SSE_EVENTS.SESSION_RESUMED, (e) => {
@@ -1986,11 +1982,7 @@ class CodemanApp {
       } catch {
         /* ignore malformed payload */
       }
-      if (data && data.id) {
-        const live = this.sessions.get(data.id);
-        if (live) live.status = 'active';
-      }
-      this._onSessionListMaybeChanged();
+      this._onSessionResumed(data);
     });
 
     // Liveness heartbeat. The handler is deliberately empty: the whole point
@@ -2062,7 +2054,14 @@ class CodemanApp {
 
     let session = this.sessions.get(incoming.id);
     const existed = !!session;
-    if (!session && transition !== 'created' && transition !== 'hydrate') return null;
+    if (
+      !session &&
+      transition !== 'created' &&
+      transition !== 'hydrate' &&
+      !(transition === 'updated' && this._isFullSessionSnapshot(incoming))
+    ) {
+      return null;
+    }
     if (!session) session = { id: incoming.id };
     const previousStatus = session.status;
     const previousActivityStatus = session.activityStatus;
@@ -2084,11 +2083,13 @@ class CodemanApp {
     const hasStatus = Object.prototype.hasOwnProperty.call(incoming, 'status');
     const hasActivityStatus = Object.prototype.hasOwnProperty.call(incoming, 'activityStatus');
     const hasActivitySince = Object.prototype.hasOwnProperty.call(incoming, 'activityStatusSince');
-    const clearsDerived = transition === 'working' || transition === 'output' || transition === 'restart' || transition === 'exit';
+    const clearsDerived = ['working', 'output', 'restart', 'parked', 'resumed', 'exit'].includes(transition);
 
     if (clearsDerived) {
       if (!hasStatus) {
         if (transition === 'working' || transition === 'restart') session.status = 'busy';
+        else if (transition === 'parked') session.status = 'parked';
+        else if (transition === 'resumed') session.status = 'active';
         else if (transition === 'exit') session.status = 'stopped';
       }
       session.activityStatus = session.status;
@@ -2121,6 +2122,8 @@ class CodemanApp {
       transition === 'working' ||
       transition === 'output' ||
       transition === 'restart' ||
+      transition === 'parked' ||
+      transition === 'resumed' ||
       transition === 'exit'
     ) {
       if (timer) clearTimeout(timer);
@@ -2156,6 +2159,32 @@ class CodemanApp {
   _refreshSessionActivitySurfaces() {
     this.renderSessionTabs();
     this.renderMuxSessions?.();
+  }
+
+  _isFullSessionSnapshot(session) {
+    return (
+      !!session &&
+      Object.prototype.hasOwnProperty.call(session, 'pid') &&
+      typeof session.status === 'string' &&
+      typeof session.workingDir === 'string' &&
+      Object.prototype.hasOwnProperty.call(session, 'currentTaskId') &&
+      Number.isFinite(session.createdAt) &&
+      Number.isFinite(session.lastActivityAt)
+    );
+  }
+
+  _onSessionParked(data) {
+    if (data?.id) this._applySessionActivityEvent(data, 'parked');
+    this._onSessionListMaybeChanged?.();
+  }
+
+  _onSessionResumed(data) {
+    if (data?.id) this._applySessionActivityEvent(data, 'resumed');
+    this._onSessionListMaybeChanged?.();
+  }
+
+  _onSessionRestarted(data) {
+    if (data?.id) this._applySessionActivityEvent(data, 'restart');
   }
 
   _onSessionCreated(data) {
@@ -8329,7 +8358,7 @@ class CodemanApp {
               body: JSON.stringify({ clearBreaker: true }),
             });
             session.respawnBlocked = false;
-            session.status = 'busy';
+            this._onSessionRestarted({ id: sessionId });
           } catch (err) {
             console.error('Failed to restart crash-looped session:', err);
           }
@@ -8345,7 +8374,7 @@ class CodemanApp {
             : `/api/sessions/${sessionId}/interactive`;
           await fetch(endpoint, { method: 'POST' });
           // Update local session state
-          session.status = 'busy';
+          this._onSessionRestarted({ id: sessionId });
         } catch (err) {
           console.error('Failed to attach to restored session:', err);
         }
