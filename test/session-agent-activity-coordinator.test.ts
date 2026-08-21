@@ -130,6 +130,49 @@ describe('session agent activity coordinator', () => {
       expect(coordinator.project(restored).activityStatusSince).toBe(600);
     });
 
+    it('consumes restored reconstruction after an exact-zero settle before a later live episode', async () => {
+      vi.useFakeTimers();
+      let now = 1000;
+      const coordinator = new SessionAgentActivityCoordinator({ now: () => now });
+      const restored = { ...session(), rawIdleAnchorAt: 100 };
+      coordinator.attachSession(restored);
+      coordinator.onWatcherSnapshot(restored, [], 1);
+      await vi.advanceTimersByTimeAsync(FINAL_AGENT_SETTLE_MS);
+      expect(coordinator.project(restored)).toEqual({ activityStatus: 'idle', activityStatusSince: null });
+
+      now = 2000;
+      coordinator.onWatcherSnapshot(restored, ['new-agent'], 2, 100);
+      expect(coordinator.project(restored).activityStatusSince).toBe(2000);
+    });
+
+    it('does not resurrect restored reconstruction after identity change or tracking disable/re-enable', () => {
+      let now = 1000;
+      const coordinator = new SessionAgentActivityCoordinator({ now: () => now });
+      const identityChanged = { ...session(), id: 'identity', rawIdleAnchorAt: 100 };
+      coordinator.attachSession(identityChanged);
+      now = 2000;
+      coordinator.identityChanged(identityChanged);
+      coordinator.onWatcherSnapshot(identityChanged, ['new-agent'], 1, 100);
+      expect(coordinator.project(identityChanged).activityStatusSince).toBe(2000);
+
+      const toggled = { ...session(), id: 'toggled', rawIdleAnchorAt: 100 };
+      coordinator.attachSession(toggled);
+      coordinator.trackingDisabled(toggled);
+      now = 3000;
+      coordinator.trackingEnabled(toggled);
+      coordinator.onWatcherSnapshot(toggled, ['new-agent'], 1, 100);
+      expect(coordinator.project(toggled).activityStatusSince).toBe(3000);
+
+      const detached = { ...session(), id: 'detached', rawIdleAnchorAt: 100 };
+      coordinator.attachSession(detached);
+      coordinator.detachSession(detached);
+      now = 4000;
+      const reattachedAdapter = { ...detached };
+      coordinator.attachSession(reattachedAdapter);
+      coordinator.onWatcherSnapshot(reattachedAdapter, ['new-agent'], 1, 100);
+      expect(coordinator.project(reattachedAdapter).activityStatusSince).toBe(4000);
+    });
+
     it('notifies its owner whenever evidence changes the effective projection', () => {
       const onProjectionChanged = vi.fn();
       const coordinator = new SessionAgentActivityCoordinator({ onProjectionChanged });

@@ -326,6 +326,7 @@ export class BoundedActivityScheduler {
 
 export class SessionAgentActivityCoordinator {
   private readonly records = new Map<string, SessionRecord>();
+  private readonly restoredReconstructionConsumed = new Set<string>();
   private readonly inspect?: InspectionJob;
   private readonly now: () => number;
   private readonly scheduleTimer: typeof setTimeout;
@@ -376,7 +377,10 @@ export class SessionAgentActivityCoordinator {
       immediateRevisionRetry: false,
       exactProcessLive: false,
       processReason: undefined,
-      startupReconstructionPending: session.status === 'idle' && session.rawIdleAnchorAt !== undefined,
+      startupReconstructionPending:
+        session.status === 'idle' &&
+        session.rawIdleAnchorAt !== undefined &&
+        !this.restoredReconstructionConsumed.has(session.id),
     };
     this.records.set(session.id, record);
     session.setActivityProjection(projection);
@@ -386,6 +390,7 @@ export class SessionAgentActivityCoordinator {
   detachSession(session: CoordinatorSession): void {
     const record = this.recordFor(session);
     if (!record) return;
+    this.consumeStartupReconstruction(record);
     this.disposeRecord(record);
     this.records.delete(session.id);
   }
@@ -397,6 +402,9 @@ export class SessionAgentActivityCoordinator {
 
   identityChanged(session: CoordinatorSession): void {
     const record = this.requireRecord(session);
+    this.consumeStartupReconstruction(record);
+    record.projection = { activityStatus: session.status, activityStatusSince: null };
+    record.session.setActivityProjection(record.projection);
     this.invalidateSettle(record);
     record.identityGeneration += 1;
     record.decisionToken += 1;
@@ -419,6 +427,7 @@ export class SessionAgentActivityCoordinator {
 
   trackingDisabled(session: CoordinatorSession): void {
     const record = this.requireRecord(session);
+    this.consumeStartupReconstruction(record);
     this.invalidateSettle(record);
     record.tracking = false;
     record.trackingGeneration += 1;
@@ -568,6 +577,7 @@ export class SessionAgentActivityCoordinator {
     record.settleTimer = this.scheduleTimer(() => {
       if (this.recordFor(session) !== record || record.settleGeneration !== generation) return;
       record.settleTimer = undefined;
+      this.consumeStartupReconstruction(record);
       this.setRecordObservation(record, 'none');
     }, FINAL_AGENT_SETTLE_MS);
   }
@@ -578,6 +588,7 @@ export class SessionAgentActivityCoordinator {
     this.cancelTimer(record.settleTimer);
     record.settleTimer = undefined;
     record.settleGeneration += 1;
+    this.consumeStartupReconstruction(record);
     this.setRecordObservation(record, 'none');
     return true;
   }
@@ -1121,7 +1132,7 @@ export class SessionAgentActivityCoordinator {
     if (reconstruct) {
       record.projection.activityStatusSince = Math.min(this.now(), Math.max(0, episodeAnchorAt!));
     }
-    if (observation === 'live' && watcherSnapshot) record.startupReconstructionPending = false;
+    if (observation === 'live' && watcherSnapshot) this.consumeStartupReconstruction(record);
     record.session.setActivityProjection(record.projection, reconstruct ? { reconstructEpisode: true } : undefined);
     if (
       previousProjection.activityStatus !== record.projection.activityStatus ||
@@ -1134,6 +1145,11 @@ export class SessionAgentActivityCoordinator {
     if (wasDerived && record.projection.activityStatus === 'idle' && record.session.status === 'idle') {
       this.onDerivedIdle?.(record.session);
     }
+  }
+
+  private consumeStartupReconstruction(record: SessionRecord): void {
+    record.startupReconstructionPending = false;
+    this.restoredReconstructionConsumed.add(record.session.id);
   }
 
   private isLiveSnapshot(snapshot: {

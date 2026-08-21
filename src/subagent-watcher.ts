@@ -840,6 +840,23 @@ export class SubagentWatcher extends EventEmitter {
 
     // Already completed, nothing to kill
     if (info.status === 'completed') return { status: 'already_completed' };
+    const captured = {
+      agentKey: info.agentKey,
+      agentId: info.agentId,
+      sessionId: info.sessionId,
+      projectHash: info.projectHash,
+      status: info.status,
+    };
+    const capturedRecordIsCurrent = (): boolean =>
+      this.isCurrentGeneration(generation) &&
+      this.agentInfo.get(captured.agentKey) === info &&
+      this.liveAgentKeys.has(captured.agentKey) &&
+      info.agentKey === captured.agentKey &&
+      info.agentId === captured.agentId &&
+      info.sessionId === captured.sessionId &&
+      info.projectHash === captured.projectHash &&
+      info.status === captured.status &&
+      (info.status === 'active' || info.status === 'idle');
 
     if (!this.exactSubagentProcessProvider) return { status: 'atomic_termination_unavailable' };
     let proof: ExactSubagentProcessResult;
@@ -848,7 +865,7 @@ export class SubagentWatcher extends EventEmitter {
     } catch {
       return { status: 'unverifiable' };
     }
-    if (!this.isCurrentGeneration(generation)) return { status: 'unverifiable' };
+    if (!capturedRecordIsCurrent()) return { status: 'stale_process' };
     if (proof.status !== 'atomic_terminator') return proof;
     let termination: 'terminated' | 'stale' | 'failed';
     try {
@@ -858,7 +875,7 @@ export class SubagentWatcher extends EventEmitter {
     }
     if (termination === 'stale') return { status: 'stale_process' };
     if (termination === 'failed') return { status: 'signal_failed' };
-    if (!this.isCurrentGeneration(generation)) return { status: 'unverifiable' };
+    if (!capturedRecordIsCurrent()) return { status: 'stale_process' };
     this.markSubagentAsCompleted(info);
     return { status: 'killed', agentKey: info.agentKey };
   }

@@ -162,7 +162,6 @@ describe('background-agent wait integration', () => {
     const state = internals(server);
     await state.setupRoutes();
     const ctx = state.createRouteContext();
-    ctx.agentActivity.setTrackingEnabled(false);
 
     const restored = new Session({
       id: 'restored-parent',
@@ -193,12 +192,11 @@ describe('background-agent wait integration', () => {
       agents: evidence.get(conversationId) ?? [],
     }));
 
-    await ctx.addSession(restored);
-    expect(restored.activityProjection.activityStatus).toBe('idle');
-    ctx.agentActivity.setTrackingEnabled(true);
-    expect(restored.activityProjection.activityStatus).toBe('checking_agents');
+    const addingRestored = ctx.addSession(restored);
+    await vi.waitFor(() => expect(restored.activityProjection.activityStatus).toBe('checking_agents'));
     await vi.waitFor(() => expect(reconciliations.has(restored.claudeSessionId!)).toBe(true));
     reconciliations.get(restored.claudeSessionId!)!.resolve(evidence.get(restored.claudeSessionId!)!);
+    await addingRestored;
     await vi.waitFor(() => expect(restored.activityProjection.activityStatus).toBe('waiting_agents'));
 
     const addingFresh = ctx.addSession(fresh);

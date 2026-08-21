@@ -2154,6 +2154,72 @@ describe('SubagentWatcher', () => {
       expect(watcher.getSubagent(key)?.status).toBe('active');
       expect(watcher.getSemanticSnapshot('-work-shared', 'conversation-a').agents).toHaveLength(1);
     });
+
+    it('fences semantic commit when the captured record completes during atomic termination', async () => {
+      const key = registerKillAgent('same');
+      const termination = deferred<'terminated'>();
+      const completed = vi.fn();
+      watcher.on('subagent:completed', completed);
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: () => termination.promise }))
+      );
+      const state = watcher as unknown as {
+        markSubagentAsCompleted(info: SubagentInfo): void;
+      };
+      const captured = watcher.getSubagent(key)!;
+
+      const killing = watcher.killSubagent(key);
+      await Promise.resolve();
+      state.markSubagentAsCompleted(captured);
+      termination.resolve('terminated');
+
+      await expect(killing).resolves.toEqual({ status: 'stale_process' });
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(watcher.getSubagent(key)?.status).toBe('completed');
+    });
+
+    it('does not mutate a replacement object rediscovered under the same composite key', async () => {
+      const key = registerKillAgent('same');
+      const termination = deferred<'terminated'>();
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: () => termination.promise }))
+      );
+      const state = watcher as unknown as {
+        agentInfo: Map<string, SubagentInfo>;
+        liveAgentKeys: Set<string>;
+      };
+      const replacement = { ...watcher.getSubagent(key)!, description: 'rediscovered replacement' };
+
+      const killing = watcher.killSubagent(key);
+      await Promise.resolve();
+      state.agentInfo.delete(key);
+      state.liveAgentKeys.delete(key);
+      state.agentInfo.set(key, replacement);
+      state.liveAgentKeys.add(key);
+      termination.resolve('terminated');
+
+      await expect(killing).resolves.toEqual({ status: 'stale_process' });
+      expect(watcher.getSubagent(key)).toBe(replacement);
+      expect(replacement.status).toBe('active');
+    });
+
+    it('does not report killed when the captured record status changes during atomic termination', async () => {
+      const key = registerKillAgent('same');
+      const termination = deferred<'terminated'>();
+      watcher.setExactSubagentProcessProvider(
+        vi.fn(async () => ({ status: 'atomic_terminator', terminate: () => termination.promise }))
+      );
+      const captured = watcher.getSubagent(key)!;
+
+      const killing = watcher.killSubagent(key);
+      await Promise.resolve();
+      captured.status = 'idle';
+      termination.resolve('terminated');
+
+      await expect(killing).resolves.toEqual({ status: 'stale_process' });
+      expect(watcher.getSubagent(key)).toBe(captured);
+      expect(captured.status).toBe('idle');
+    });
   });
 
   describe('Error Handling', () => {
