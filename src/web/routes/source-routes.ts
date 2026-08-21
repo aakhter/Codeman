@@ -8,7 +8,7 @@
  *   POST   /api/sessions/:id/sources/upload         — upload a file source (COD-281)
  */
 
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { extname, join, posix as pathPosix } from 'node:path';
 import fs from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -23,6 +23,8 @@ import {
   UPLOAD_ALLOWED_EXTENSIONS,
 } from '../document-upload.js';
 import { writeRemoteFileBytes } from '../../remote-file-transfer.js';
+import { deleteRemoteWorkspacePath, listRemoteWorkspaceDirectory } from '../../remote-sftp.js';
+import type { SessionSource } from '../../types/sources.js';
 
 // Per-(IP, sessionId) token bucket for source uploads. Distinct from the
 // document-upload and paste-image buckets so the disk-fill surfaces are
@@ -63,6 +65,51 @@ export function _resetSourceUploadRateBuckets(): void {
 // attachment-history relationship, and from .claude-images/ (paste-image).
 const SOURCES_DIR = '.codeman-sources';
 const REMOTE_SOURCE_UPLOAD_SSH_TIMEOUT_MS = 15_000;
+const FILESYSTEM_SOURCE_ID_PREFIX = 'filesystem:';
+
+function filesystemSourceId(relativePath: string): string {
+  return `${FILESYSTEM_SOURCE_ID_PREFIX}${createHash('sha256').update(relativePath).digest('hex')}`;
+}
+
+function toFilesystemSource(sessionId: string, name: string): SessionSource {
+  const relativePath = `${SOURCES_DIR}/${name}`;
+  return {
+    id: filesystemSourceId(relativePath),
+    sessionId,
+    type: 'file',
+    title: name,
+    relativePath,
+    addedAt: 0,
+  };
+}
+
+async function listFilesystemSources(session: {
+  id: string;
+  workingDir: string;
+  remote?: import('../../types/session.js').SessionRemote;
+}): Promise<SessionSource[]> {
+  if (session.remote) {
+    try {
+      const entries = await listRemoteWorkspaceDirectory(session.remote, SOURCES_DIR);
+      return entries
+        .filter((entry) => entry.type === 'file')
+        .map((entry) => toFilesystemSource(session.id, entry.name))
+        .sort((a, b) => a.title.localeCompare(b.title));
+    } catch {
+      return [];
+    }
+  }
+
+  try {
+    const entries = await fs.readdir(join(session.workingDir, SOURCES_DIR), { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => toFilesystemSource(session.id, entry.name))
+      .sort((a, b) => a.title.localeCompare(b.title));
+  } catch {
+    return [];
+  }
+}
 
 /**
  * CSRF defense for the source-upload endpoint. Multipart/form-data is a
@@ -143,7 +190,9 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: SessionPort): vo
   app.get('/api/sessions/:id/sources', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
-    return { success: true, data: { sources: session.sources } };
+    const filesystemSources = await listFilesystemSources(session);
+    const metadataSources = session.sources.filter((source) => source.type !== 'file');
+    return { success: true, data: { sources: [...metadataSources, ...filesystemSources] } };
   });
 
   app.post('/api/sessions/:id/sources', async (req) => {
@@ -317,6 +366,22 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: SessionPort): vo
   app.delete('/api/sessions/:id/sources/:sourceId', async (req) => {
     const { id, sourceId } = req.params as { id: string; sourceId: string };
     const session = findSessionOrFail(ctx, id, req);
+    if (sourceId.startsWith(FILESYSTEM_SOURCE_ID_PREFIX)) {
+      const source = (await listFilesystemSources(session)).find((item) => item.id === sourceId);
+      if (source?.relativePath) {
+        try {
+          if (session.remote) await deleteRemoteWorkspacePath(session.remote, source.relativePath);
+          else await fs.unlink(join(session.workingDir, source.relativePath));
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw err;
+          }
+        }
+        session.removeSource(sourceId);
+        ctx.persistSessionState(session);
+        return { success: true };
+      }
+    }
     session.removeSource(sourceId);
     ctx.persistSessionState(session);
     return { success: true };
