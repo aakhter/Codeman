@@ -8,7 +8,7 @@ const publicDir = resolve(import.meta.dirname, '../src/web/public');
 const html = readFileSync(resolve(publicDir, 'index.html'), 'utf8');
 const ui = readFileSync(resolve(publicDir, 'session-ui.js'), 'utf8');
 const css = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
-let profiles: Array<{ id: string; name: string; command: string; usage: Array<{ name: string }> }>;
+let profiles: Array<{ id: string; name: string; command: string; usage: string[] }>;
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -43,7 +43,7 @@ describe('COD-351 Codex command profiles in Chromium', () => {
     failList = false;
     pendingProfileGet = null;
     profiles = [
-      { id: 'p-work', name: 'Work', command: 'codex --profile work', usage: [{ name: 'remote-a' }] },
+      { id: 'p-work', name: 'Work', command: 'codex --profile work', usage: ['remote-a'] },
       { id: 'p-unused', name: 'Unused', command: 'codex --profile unused', usage: [] },
     ];
     await page.route('**/api/codex-command-profiles**', async (route: Route) => {
@@ -62,7 +62,7 @@ describe('COD-351 Codex command profiles in Chromium', () => {
         return route.fulfill({
           status: 400,
           contentType: 'application/json',
-          body: JSON.stringify({ success: false, requiresConfirmation: true, usage: [{ name: 'remote-a' }] }),
+          body: JSON.stringify({ success: false, requiresConfirmation: true, usage: ['remote-a'] }),
         });
       }
       if (request.method() === 'DELETE' && request.url().endsWith('/p-work')) {
@@ -72,7 +72,7 @@ describe('COD-351 Codex command profiles in Chromium', () => {
           body: JSON.stringify({
             success: false,
             error: 'Profile is still used by remote cases',
-            usage: [{ name: 'remote-a' }],
+            usage: ['remote-a'],
           }),
         });
       }
@@ -91,7 +91,9 @@ describe('COD-351 Codex command profiles in Chromium', () => {
       content: `class CodemanApp {}\n${ui}\nwindow.app = Object.create(CodemanApp.prototype);`,
     });
     await page.evaluate(() => {
-      (window as any).app.showToast = () => {};
+      (window as any).__toasts = [];
+      (window as any).app.showToast = (message: string, type: string) =>
+        (window as any).__toasts.push({ message, type });
       for (const id of ['newCaseName', 'newCaseDescription', 'linkCaseName', 'linkCasePath', 'remoteHostId']) {
         const input = document.createElement('input');
         input.id = id;
@@ -119,14 +121,22 @@ describe('COD-351 Codex command profiles in Chromium', () => {
     expect(await page.locator('#codexCommandProfileManager').textContent()).toContain('remote-a');
     await page.getByText('Work — used by remote-a').click();
     await page.locator('#codexCommandProfileCommand').fill('codex --profile revised');
-    page.once('dialog', (dialog) => dialog.accept());
+    page.once('dialog', (dialog) => {
+      expect(dialog.message()).toBe('This profile is used by remote-a. Update it?');
+      return dialog.accept();
+    });
     await page.locator('#codexCommandProfileSave').click();
     await expect.poll(() => bodies.length).toBe(2);
     expect(bodies).toContainEqual({ name: 'Work', command: 'codex --profile revised' });
     expect(bodies).toContainEqual({ name: 'Work', command: 'codex --profile revised', confirmReferencedUpdate: true });
     await page.getByText('Work — used by remote-a').click();
     await page.locator('#codexCommandProfileDelete').click();
-    expect(await page.locator('#codexCommandProfileManager').textContent()).toContain('remote-a');
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__toasts))
+      .toContainEqual({
+        message: 'Profile is still used by remote cases: Used by remote-a',
+        type: 'error',
+      });
     await page.getByRole('button', { name: 'Unused', exact: true }).click();
     await page.locator('#codexCommandProfileDelete').click();
     expect(bodies).toEqual(
