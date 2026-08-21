@@ -17,6 +17,8 @@ import {
   writeRemoteCases,
   writeRemoteHosts,
 } from '../src/remote-hosts.js';
+import { StateStore } from '../src/state-store.js';
+import { migrateLegacyRemoteCaseCodexCommands } from '../src/codex-command-profiles.js';
 
 describe('remote-hosts domain', () => {
   let dir: string | null = null;
@@ -58,6 +60,159 @@ describe('remote-hosts domain', () => {
     await expect(readRemoteCases(root)).resolves.toEqual([
       { name: 'gpu-work', type: 'remote', hostId: 'gpu-box', remotePath: '/home/ubuntu/work' },
     ]);
+  });
+
+  it("migrates only an owner's legacy raw Codex overrides, preserving other overrides and remaining idempotent", async () => {
+    const root = configDir();
+    const store = new StateStore(join(root, 'state.json'));
+    await writeRemoteCases(root, [
+      {
+        name: 'alice case',
+        type: 'remote',
+        owner: 'alice',
+        hostId: 'a',
+        remotePath: '/a',
+        commands: { codex: ' codex --fast ', claude: 'claude' },
+      },
+      {
+        name: 'bob case',
+        type: 'remote',
+        owner: 'bob',
+        hostId: 'b',
+        remotePath: '/b',
+        commands: { codex: 'codex --fast' },
+      },
+      { name: 'legacy case', type: 'remote', hostId: 'l', remotePath: '/l', commands: { codex: 'codex legacy' } },
+    ]);
+
+    const first = await migrateLegacyRemoteCaseCodexCommands(root, 'alice', store, { allowOwnerlessSingleUser: false });
+    expect(first.profiles).toHaveLength(1);
+    expect(first.cases.find((item) => item.name === 'alice case')).toMatchObject({
+      codexCommandProfileId: first.profiles[0].id,
+      commands: { claude: 'claude' },
+    });
+    expect(first.cases.find((item) => item.name === 'bob case')?.commands?.codex).toBe('codex --fast');
+    expect(first.cases.find((item) => item.name === 'legacy case')?.commands?.codex).toBe('codex legacy');
+    expect(
+      await migrateLegacyRemoteCaseCodexCommands(root, 'alice', store, { allowOwnerlessSingleUser: false })
+    ).toEqual(first);
+  });
+
+  it('migrates ownerless legacy cases only in single-user mode under the @single library', async () => {
+    const root = configDir();
+    const store = new StateStore(join(root, 'state.json'));
+    await writeRemoteCases(root, [
+      { name: 'legacy case', type: 'remote', hostId: 'l', remotePath: '/l', commands: { codex: 'codex legacy' } },
+    ]);
+
+    const result = await migrateLegacyRemoteCaseCodexCommands(root, '@single', store, {
+      allowOwnerlessSingleUser: true,
+    });
+    expect(result.profiles).toEqual([expect.objectContaining({ name: expect.any(String), command: 'codex legacy' })]);
+    expect(result.cases[0]).toMatchObject({ codexCommandProfileId: result.profiles[0].id });
+    expect(result.cases[0].commands?.codex).toBeUndefined();
+  });
+
+  it('does not persist a case profile ID when profile durability fails', async () => {
+    const root = configDir();
+    await writeRemoteCases(root, [
+      {
+        name: 'alice case',
+        type: 'remote',
+        owner: 'alice',
+        hostId: 'a',
+        remotePath: '/a',
+        commands: { codex: 'codex' },
+      },
+    ]);
+    const profiles: Record<string, Array<{ id: string; name: string; command: string }>> = {};
+    const failingStore = {
+      getCodexCommandProfiles: (owner: string) => profiles[owner] ?? [],
+      setCodexCommandProfiles: (owner: string, next: Array<{ id: string; name: string; command: string }>) => {
+        profiles[owner] = next;
+      },
+      saveNowAsync: async () => Promise.reject(new Error('state disk full')),
+      getConfig: () => ({ stateFilePath: join(root, 'state.json') }),
+    };
+
+    await expect(
+      migrateLegacyRemoteCaseCodexCommands(root, 'alice', failingStore, { allowOwnerlessSingleUser: false })
+    ).rejects.toThrow('state disk full');
+    expect((await readRemoteCases(root))[0]).toMatchObject({ commands: { codex: 'codex' } });
+    expect((await readRemoteCases(root))[0].codexCommandProfileId).toBeUndefined();
+  });
+
+  it('does not reuse an in-memory profile after a failed save without durable acknowledgement', async () => {
+    const root = configDir();
+    await writeRemoteCases(root, [
+      {
+        name: 'alice case',
+        type: 'remote',
+        owner: 'alice',
+        hostId: 'a',
+        remotePath: '/a',
+        commands: { codex: 'codex retry' },
+      },
+    ]);
+    const profiles: Record<string, Array<{ id: string; name: string; command: string }>> = {};
+    let saveAttempts = 0;
+    const failingStore = {
+      getCodexCommandProfiles: (owner: string) => profiles[owner] ?? [],
+      setCodexCommandProfiles: (owner: string, next: Array<{ id: string; name: string; command: string }>) => {
+        profiles[owner] = next;
+      },
+      saveNowAsync: async () => {
+        saveAttempts++;
+        throw new Error('state disk full');
+      },
+      getConfig: () => ({ stateFilePath: join(root, 'state.json') }),
+    };
+
+    await expect(
+      migrateLegacyRemoteCaseCodexCommands(root, 'alice', failingStore, { allowOwnerlessSingleUser: false })
+    ).rejects.toThrow('state disk full');
+    expect(profiles.alice).toHaveLength(1);
+
+    await expect(
+      migrateLegacyRemoteCaseCodexCommands(root, 'alice', failingStore, { allowOwnerlessSingleUser: false })
+    ).rejects.toThrow('state disk full');
+    expect(saveAttempts).toBe(2);
+    expect((await readRemoteCases(root))[0]).toMatchObject({ commands: { codex: 'codex retry' } });
+    expect((await readRemoteCases(root))[0].codexCommandProfileId).toBeUndefined();
+  });
+
+  it('serializes simultaneous first migrations so Alice and Bob both keep their cases and profiles', async () => {
+    const root = configDir();
+    const store = new StateStore(join(root, 'state.json'));
+    await writeRemoteCases(root, [
+      {
+        name: 'alice case',
+        type: 'remote',
+        owner: 'alice',
+        hostId: 'a',
+        remotePath: '/a',
+        commands: { codex: 'codex alice' },
+      },
+      {
+        name: 'bob case',
+        type: 'remote',
+        owner: 'bob',
+        hostId: 'b',
+        remotePath: '/b',
+        commands: { codex: 'codex bob' },
+      },
+    ]);
+
+    await Promise.all([
+      migrateLegacyRemoteCaseCodexCommands(root, 'alice', store, { allowOwnerlessSingleUser: false }),
+      migrateLegacyRemoteCaseCodexCommands(root, 'bob', store, { allowOwnerlessSingleUser: false }),
+    ]);
+
+    expect(store.getCodexCommandProfiles('alice')).toHaveLength(1);
+    expect(store.getCodexCommandProfiles('bob')).toHaveLength(1);
+    const cases = await readRemoteCases(root);
+    expect(cases).toHaveLength(2);
+    expect(cases.every((remoteCase) => remoteCase.codexCommandProfileId !== undefined)).toBe(true);
   });
 
   it('returns safe mode defaults and remote display values', () => {

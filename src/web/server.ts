@@ -331,6 +331,7 @@ import {
   registerTabLayoutRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
+import { registerCodexCommandProfileRoutes } from './routes/codex-command-profile-routes.js';
 import { CronService } from '../cron/cron-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1733,6 +1734,7 @@ export class WebServer extends EventEmitter {
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
+    registerCodexCommandProfileRoutes(this.app, ctx);
     registerSessionRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);

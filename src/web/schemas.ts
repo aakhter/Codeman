@@ -575,6 +575,35 @@ export const RemoteCaseLinkSchema = z.object({
   commands: RemoteCommandOverridesSchema.optional(),
 });
 
+// ========== Saved Codex Command Profiles ==========
+
+const codexCommandProfileNameSchema = z.string().trim().min(1).max(60);
+const codexCommandProfileCommandSchema = z.string().trim().min(1).max(300);
+
+export const CodexCommandProfileCreateSchema = z
+  .object({
+    name: codexCommandProfileNameSchema,
+    command: codexCommandProfileCommandSchema,
+  })
+  .strict();
+
+export const CodexCommandProfileUpdateSchema = z
+  .object({
+    name: codexCommandProfileNameSchema.optional(),
+    command: codexCommandProfileCommandSchema.optional(),
+    confirmReferencedUpdate: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => value.name !== undefined || value.command !== undefined, {
+    message: 'At least one profile field must be provided',
+  });
+
+export const CodexCommandProfileParamsSchema = z
+  .object({
+    id: z.string().trim().min(1).max(100),
+  })
+  .strict();
+
 export const UpdateCaseSchema = z
   .object({
     name: z

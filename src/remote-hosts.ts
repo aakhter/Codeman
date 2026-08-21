@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { join, posix as posixPath } from 'node:path';
 import { homedir } from 'node:os';
 import { exec } from 'node:child_process';
@@ -39,7 +40,14 @@ async function readJsonArray<T>(path: string): Promise<T[]> {
 
 async function writeJsonArray<T>(configDir: string, path: string, value: T[]): Promise<void> {
   if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
-  await fs.writeFile(path, JSON.stringify(value, null, 2));
+  const tempPath = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(value, null, 2));
+    await fs.rename(tempPath, path);
+  } catch (error) {
+    await fs.unlink(tempPath).catch(() => {});
+    throw error;
+  }
 }
 
 export async function readRemoteHosts(configDir: string): Promise<RemoteHost[]> {
