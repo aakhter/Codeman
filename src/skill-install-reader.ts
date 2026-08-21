@@ -14,6 +14,7 @@ import type { Dirent } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { parse } from 'smol-toml';
+import { matchWildcard } from './utils/wildcard-match.js';
 
 // .md files present in repos that are NOT skills (mirrors skill-install's META_MD_FILENAMES)
 const META_MD = new Set([
@@ -222,15 +223,27 @@ export async function readSources(configDir?: string): Promise<SkillSource[]> {
 
 // ---- buildCatalog helpers ----
 
-/** Check whether relPath matches a glob pattern (supports * per segment, no **). */
+/**
+ * Check whether relPath matches a glob pattern (supports * per segment, no **).
+ *
+ * Matching goes through the shared `matchWildcard` walk, never a compiled RegExp (COD-342).
+ * Translating each `*` to its own `[^/]*` put several ambiguous quantifiers side by side, so a
+ * segment carrying many of them backtracked catastrophically — 12 wildcards against a
+ * 32-character name measured at 79 seconds, and this runs per candidate file with no await in
+ * the loop, which wedges the whole event loop rather than one request. That expression also left
+ * `?` out of its escape set, so `?` acted as a RegExp quantifier (`ab?*` matched `ab`) and a
+ * leading `?` threw `SyntaxError: Nothing to repeat` straight out of `buildCatalog`.
+ *
+ * `singleCharWildcard` stays off: `*` is this pattern language's only metacharacter, so `?` is
+ * matched literally.
+ */
 function matchGlob(pattern: string, relPath: string): boolean {
   const pat = pattern.split('/');
   const rel = relPath.split('/');
   if (pat.length !== rel.length) return false;
   return pat.every((seg, i) => {
     if (!seg.includes('*')) return seg === rel[i];
-    const re = new RegExp('^' + seg.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
-    return re.test(rel[i]);
+    return matchWildcard(seg, rel[i] ?? '');
   });
 }
 
