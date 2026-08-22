@@ -423,11 +423,6 @@ export function registerSystemRoutes(
   // Poll target for update progress — survives the restart the update triggers.
   app.get('/api/system/update/status', async () => getUpdateStatusForApi());
 
-  // Informational companion to the release-tag updater above: what this CHECKOUT
-  // looks like against its own remotes (ahead/behind, incoming commits), which a
-  // release tag cannot answer for a git install tracking a branch.
-  app.get('/api/system/repo-status', async () => getRepositoryStatus());
-
   // Kick off a detached update to the latest release. Returns immediately; the
   // browser then polls /api/system/update/status across the service restart.
   app.post('/api/system/update', async (_req, reply) => {
