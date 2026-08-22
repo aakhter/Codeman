@@ -595,7 +595,6 @@ Object.assign(CodemanApp.prototype, {
 
     const container = document.getElementById('terminalContainer');
     this.terminal.open(container);
-    this._installTerminalSelectionAutoCopy();
     this._installMobileTapMouseGuard();
     this._installTouchSelectionFocusGuard();
 

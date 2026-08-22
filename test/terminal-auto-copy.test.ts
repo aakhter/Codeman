@@ -287,6 +287,10 @@ describe('Auto Copy wiring', () => {
   const html = read('index.html');
   const schemas = readFileSync(resolve(import.meta.dirname, '../src/web/schemas.ts'), 'utf8');
 
+  it('does not call the removed timer-based selection installer during terminal initialization', () => {
+    expect(terminalUi).not.toContain('_installTerminalSelectionAutoCopy');
+  });
+
   it('arms on a selection change and disarms when the selection is dropped', () => {
     const start = terminalUi.indexOf('this.terminal.onSelectionChange?.(');
     expect(start).toBeGreaterThan(-1);
