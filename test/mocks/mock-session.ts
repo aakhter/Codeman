@@ -52,6 +52,7 @@ export class MockSession extends EventEmitter {
   ralphTracker: null = null;
   writeBuffer: string[] = [];
   terminalBuffer: string = '';
+  isCheckpointActive = false;
   cancelCheckpoint = vi.fn();
   /** Mirrors Session.lastSubmitAt — the response viewer credits history entries by it. */
   lastSubmitAt: number = 0;

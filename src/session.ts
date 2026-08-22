@@ -1614,6 +1614,11 @@ export class Session extends EventEmitter {
     return this._autoOps.checkpointState;
   }
 
+  /** Whether an agent-initiated checkpoint handoff is currently active. */
+  get isCheckpointActive(): boolean {
+    return this._autoOps.isCheckpointActive;
+  }
+
   get checkpointStates(): Record<string, CheckpointState> {
     return this._autoOps.checkpointStates;
   }

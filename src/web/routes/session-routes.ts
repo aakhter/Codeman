@@ -57,6 +57,7 @@ import {
   type SignalWaitResult,
 } from '../session-wait-registry.js';
 import { clampWaitMs, MAX_BUFFER_SCAN_BYTES } from '../../config/agent-wait.js';
+import { isKeyboardTerminalInput } from '../../terminal-input-classifier.js';
 import {
   autoConfigureRalph,
   canAccessOwned,
@@ -1603,7 +1604,16 @@ export function registerSessionRoutes(
     if (duplicate && !wantsWait) {
       return {};
     }
-    session.cancelCheckpoint('manual-takeover');
+    if (!duplicate && isKeyboardTerminalInput(inputStr)) {
+      if (session.isCheckpointActive) {
+        console.info('[Checkpoint] manual takeover', {
+          sessionId: id,
+          route: 'http',
+          inputClass: 'keyboard',
+        });
+      }
+      session.cancelCheckpoint('manual-takeover');
+    }
 
     // Only a waiting request pays for the tmux probe: the browser's plain input path
     // (thousands of calls per session) must stay exec-free.
