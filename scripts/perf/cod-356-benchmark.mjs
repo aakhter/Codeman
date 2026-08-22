@@ -31,7 +31,19 @@ import {
 import { CleanupRegistry, SignalCleanupController, validateDisposableTmuxSocket } from './cod-356-cleanup.mjs';
 import { proveReachedServerOwnership } from './cod-356-safety.mjs';
 import { runFixedOfferSchedule, summarizeFixedOfferSchedule } from './cod-356-scheduler.mjs';
-import { collectBenchmarkProvenance } from './cod-356-provenance.mjs';
+import {
+  assertCurrentHeadRevision,
+  assertGeneratedAssetsStableAtPublication,
+  assertGeneratedAssetManifestMatches,
+  collectBenchmarkProvenance,
+  collectGeneratedRuntimeAssetManifest,
+  compactReportFilenamesForPhase,
+  guardGeneratedAssetPublication,
+  loadCommittedBaselineAssetManifest,
+  resolveRuntimeRevisionPolicyFromGit,
+  validateBenchmarkPhase,
+  writePairedJsonArtifacts,
+} from './cod-356-provenance.mjs';
 import * as browserTelemetry from './cod-356-browser.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +58,36 @@ const API_OFFERED_COUNT = SAMPLE_WINDOW_MS / API_OFFER_INTERVAL_MS;
 const SERIOUS_CONSOLE = /(?:uncaught|unhandled|failed|fatal|error)/i;
 const BRANCH_POINT_REVISION = 'a445cdaf645309ce51d8b1431733afa8f0bc55ac';
 const RUNTIME_PATHS = ['src', 'packages', 'config', 'scripts/build.mjs', 'package-lock.json'];
+const GENERATED_ASSET_POLICY = {
+  repositoryRoot: ROOT,
+  runtimeRoot: join(ROOT, 'src/web/public'),
+  monitoredDirectories: ['vendor'],
+  documentedNonRuntimeFiles: ['vendor/exceljs.min.js', 'vendor/fflate.min.js'],
+  requiredAssets: [
+    'vendor/xterm-addon-fit.min.js',
+    'vendor/xterm-addon-serialize.min.js',
+    'vendor/xterm-addon-unicode11.min.js',
+    'vendor/xterm-addon-webgl.min.js',
+    'vendor/xterm-predictive-echo.js',
+    'vendor/xterm-zerolag-input.js',
+    'vendor/xterm.css',
+    'vendor/xterm.min.js',
+  ],
+  allowedFiles: [
+    'vendor/dompurify.min.js',
+    'vendor/exceljs.min.js',
+    'vendor/fflate.min.js',
+    'vendor/marked.min.js',
+    'vendor/xterm-addon-fit.min.js',
+    'vendor/xterm-addon-serialize.min.js',
+    'vendor/xterm-addon-unicode11.min.js',
+    'vendor/xterm-addon-webgl.min.js',
+    'vendor/xterm-predictive-echo.js',
+    'vendor/xterm-zerolag-input.js',
+    'vendor/xterm.css',
+    'vendor/xterm.min.js',
+  ],
+};
 const HARNESS_PATHS = [
   'scripts/perf/cod-356-benchmark.mjs',
   'scripts/perf/cod-356-cpu-worker.mjs',
@@ -73,6 +115,7 @@ function parseArgs(argv) {
     conditions: ['idle', 'cpu'],
     samples: 5,
     only: ['all'],
+    runtimeRevision: undefined,
   };
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
@@ -81,9 +124,14 @@ function parseArgs(argv) {
     else if (argument === '--conditions') options.conditions = argv[++index].split(',').filter(Boolean);
     else if (argument === '--samples') options.samples = Number(argv[++index]);
     else if (argument === '--only') options.only = argv[++index].split(',').filter(Boolean);
-    else throw new Error(`unknown argument: ${argument}`);
+    else if (argument === '--runtime-revision') {
+      if (index + 1 >= argv.length || argv[index + 1].startsWith('--')) {
+        throw new Error('--runtime-revision requires a full commit SHA value');
+      }
+      options.runtimeRevision = argv[++index];
+    } else throw new Error(`unknown argument: ${argument}`);
   }
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(options.phase)) throw new Error('phase must be a filesystem-safe label');
+  validateBenchmarkPhase(options.phase);
   if (!Number.isSafeInteger(options.samples) || options.samples < 1)
     throw new Error('samples must be at least one sample');
   options.selection = parseOnlySelection(options.only);
@@ -695,12 +743,20 @@ async function main() {
     logicalCpuCount,
   });
 
+  const revisionPolicy = await resolveRuntimeRevisionPolicyFromGit({
+    root: ROOT,
+    phase: options.phase,
+    requestedRevision: options.runtimeRevision,
+    branchPointRevision: BRANCH_POINT_REVISION,
+  });
+
   if (options.dryRun) {
     console.log(
       JSON.stringify(
         {
           dryRun: true,
           phase: options.phase,
+          revisionPolicy,
           only: options.only,
           selection: options.selection,
           matrix,
@@ -720,10 +776,14 @@ async function main() {
 
   const provenance = await collectBenchmarkProvenance({
     root: ROOT,
+    phase: options.phase,
+    requestedRuntimeRevision: options.runtimeRevision,
     branchPointRevision: BRANCH_POINT_REVISION,
     runtimePaths: RUNTIME_PATHS,
     harnessPaths: HARNESS_PATHS,
     ownedPaths: OWNED_TASK_PATHS,
+    generatedAssetPolicy: GENERATED_ASSET_POLICY,
+    acceptedBaselineReportPath: 'docs/reports/cod-356/baseline-summary.json',
   });
   const registry = new CleanupRegistry({ cleanupTimeoutMs: 15_000 });
   const controller = new AbortController();
@@ -750,6 +810,7 @@ async function main() {
   overallTimeout.unref();
 
   const startedAt = new Date().toISOString();
+  const reportSetId = randomBytes(16).toString('hex');
   const runs = [];
   const warmups = [];
   let fixtures = [];
@@ -968,6 +1029,7 @@ async function main() {
     );
   }
   const summary = {
+    reportSetId,
     schemaVersion: 2,
     issue: 'COD-356',
     phase: options.phase,
@@ -1017,20 +1079,99 @@ async function main() {
       tmuxCapture: 'PATH-first transparent tmux wrapper recording invocation start/end/status/duration',
     },
   });
-  await writeJsonArtifact(join(REPORT_DIR, 'baseline-summary.json'), summary);
-  await writeJsonArtifact(join(REPORT_DIR, 'baseline-environment.json'), environment);
-  await writeJsonArtifact(join(artifactDir, 'cleanup.json'), cleanup);
+  environment.reportSetId = reportSetId;
+  const reportFilenames = compactReportFilenamesForPhase(options.phase);
+  const summaryPath = join(REPORT_DIR, reportFilenames.summary);
+  const environmentPath = join(REPORT_DIR, reportFilenames.environment);
   if (!cleanup.stable) throw new Error(`cleanup was not stable: ${JSON.stringify(cleanup)}`);
   for (const cell of Object.values(cells)) {
     if (cell.input && (cell.input.missingCount || cell.input.duplicateCount || cell.input.reorderedCount)) {
       throw new Error('input byte identity was not stable; inspect raw artifacts before optimizing');
     }
   }
+  const verifyPublicationState = async () => {
+    const sourceCommit = provenance.revisionPolicy.headRevision;
+    await assertCurrentHeadRevision({ root: ROOT, sourceCommit });
+    let acceptedGeneratedAssetBaseline = null;
+    if (options.phase !== 'before') {
+      const accepted = await loadCommittedBaselineAssetManifest({
+        root: ROOT,
+        reportPath: 'docs/reports/cod-356/baseline-summary.json',
+        sourceCommit,
+      });
+      assertGeneratedAssetManifestMatches({
+        accepted: accepted.manifest,
+        actual: provenance.generatedRuntimeAssets,
+      });
+      acceptedGeneratedAssetBaseline = accepted.binding;
+    }
+    await assertCurrentHeadRevision({ root: ROOT, sourceCommit });
+    return {
+      checkedAt: new Date().toISOString(),
+      result: 'matched',
+      sourceCommit,
+      acceptedGeneratedAssetBaseline,
+    };
+  };
+  const verifyBeforeRename = async () => {
+    await verifyPublicationState();
+    try {
+      const verification = await assertGeneratedAssetsStableAtPublication({
+        preRunManifest: provenance.generatedRuntimeAssets,
+        collectCurrent: () => collectGeneratedRuntimeAssetManifest(GENERATED_ASSET_POLICY),
+      });
+      cleanup.preRenameGeneratedAssets = verification;
+      return verification;
+    } catch (error) {
+      cleanup.preRenameGeneratedAssets = error?.verification ?? {
+        checkedAt: new Date().toISOString(),
+        result: 'failed',
+        preHash: provenance.generatedRuntimeAssets.manifestHash,
+        postHash: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    }
+  };
+  try {
+    await guardGeneratedAssetPublication({
+      preRunManifest: provenance.generatedRuntimeAssets,
+      collectPostRun: () => collectGeneratedRuntimeAssetManifest(GENERATED_ASSET_POLICY),
+      verifyPublicationState,
+      publish: async (verification, publicationState) => {
+        cleanup.postRunGeneratedAssets = verification;
+        cleanup.postRunProvenance = publicationState;
+        summary.postRunGeneratedAssets = verification;
+        summary.postRunProvenance = publicationState;
+        environment.postRunGeneratedAssets = verification;
+        environment.postRunProvenance = publicationState;
+        await writePairedJsonArtifacts({
+          summaryPath,
+          environmentPath,
+          summary,
+          environment,
+          reportSetId,
+          beforeRename: verifyBeforeRename,
+        });
+      },
+    });
+  } catch (error) {
+    cleanup.postRunGeneratedAssets = error?.verification ?? {
+      checkedAt: new Date().toISOString(),
+      result: 'failed',
+      preHash: provenance.generatedRuntimeAssets.manifestHash,
+      postHash: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    await writeJsonArtifact(join(artifactDir, 'cleanup.json'), cleanup);
+    throw error;
+  }
+  await writeJsonArtifact(join(artifactDir, 'cleanup.json'), cleanup);
   console.log(
     JSON.stringify(
       {
-        summary: join(REPORT_DIR, 'baseline-summary.json'),
-        environment: join(REPORT_DIR, 'baseline-environment.json'),
+        summary: summaryPath,
+        environment: environmentPath,
         rawArtifactDirectory: artifactDir,
         cleanup,
       },

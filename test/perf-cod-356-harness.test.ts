@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -29,8 +30,20 @@ import {
 import {
   assertRuntimePackageManifestMatches,
   assertRuntimeTreeMatchesRevision,
+  assertGeneratedAssetsStableAtPublication,
+  assertGeneratedAssetManifestMatches,
   buildHarnessProvenance,
+  collectGeneratedRuntimeAssetManifest,
+  compactReportFilenamesForPhase,
+  guardGeneratedAssetPublication,
+  loadCommittedBaselineAssetManifest,
   parseTrackedStatusPaths,
+  resolveRuntimeRevisionPolicy,
+  resolveRuntimeRevisionPolicyFromGit,
+  validateBenchmarkPhase,
+  validatePairedReports,
+  verifyPostRunGeneratedAssets,
+  writePairedJsonArtifacts,
 } from '../scripts/perf/cod-356-provenance.mjs';
 import { proveReachedServerOwnership } from '../scripts/perf/cod-356-safety.mjs';
 import { runFixedOfferSchedule, summarizeFixedOfferSchedule } from '../scripts/perf/cod-356-scheduler.mjs';
@@ -78,6 +91,23 @@ describe('COD-356 benchmark policy', () => {
     expect(parseOnlySelection(['frontend', 'backend'])).toEqual({ input: false, frontend: true, backend: true });
     expect(() => parseOnlySelection(['unknown'])).toThrow('unsupported --only');
     expect(() => parseOnlySelection(['all', 'input'])).toThrow('cannot combine');
+  });
+
+  it('requires lowercase benchmark phase labels', () => {
+    expect(validateBenchmarkPhase('before')).toBe('before');
+    expect(validateBenchmarkPhase('after-poller')).toBe('after-poller');
+    expect(() => validateBenchmarkPhase('Before')).toThrow('lowercase');
+  });
+
+  it('uses baseline report names only for before and phase-specific names afterward', () => {
+    expect(compactReportFilenamesForPhase('before')).toEqual({
+      summary: 'baseline-summary.json',
+      environment: 'baseline-environment.json',
+    });
+    expect(compactReportFilenamesForPhase('after-poller')).toEqual({
+      summary: 'after-poller-summary.json',
+      environment: 'after-poller-environment.json',
+    });
   });
 
   it('rejects a wrong HTTP target that does not issue the nonce-authenticated cookie', async () => {
@@ -464,6 +494,146 @@ describe('COD-356 benchmark statistics', () => {
 });
 
 describe('COD-356 benchmark provenance', () => {
+  const branchPointRevision = 'a445cdaf645309ce51d8b1431733afa8f0bc55ac';
+  const postChangeRevision = '4a149c42af57e1c473ab196b1a39efd0f1a7d52d';
+
+  const resolvePolicy = (phase: string, requestedRevision?: string, overrides = {}) =>
+    resolveRuntimeRevisionPolicy({
+      phase,
+      requestedRevision,
+      branchPointRevision,
+      headRevision: postChangeRevision,
+      resolveCommit: async (revision: string) => revision,
+      isAncestor: async () => true,
+      ...overrides,
+    });
+
+  it('pins before runs to the implicit or explicit immutable branch point', async () => {
+    await expect(resolvePolicy('before')).resolves.toMatchObject({
+      runtimeRevision: branchPointRevision,
+      explicit: false,
+    });
+    await expect(resolvePolicy('before', branchPointRevision)).resolves.toMatchObject({
+      runtimeRevision: branchPointRevision,
+      explicit: true,
+    });
+    await expect(resolvePolicy('before', postChangeRevision)).rejects.toThrow('before phase');
+  });
+
+  it('requires an explicit full resolvable revision for post-change phases', async () => {
+    await expect(resolvePolicy('after-poller')).rejects.toThrow('requires --runtime-revision');
+    await expect(resolvePolicy('after-poller', '4a149c42')).rejects.toThrow('full 40-character');
+    await expect(
+      resolvePolicy('after-poller', 'f'.repeat(40), {
+        resolveCommit: async () => {
+          throw new Error('unknown revision');
+        },
+      })
+    ).rejects.toThrow('unknown runtime revision');
+  });
+
+  it('rejects a --runtime-revision flag without a value instead of treating it as implicit before', () => {
+    expect(() =>
+      execFileSync(process.execPath, ['scripts/perf/cod-356-benchmark.mjs', '--dry-run', '--runtime-revision'], {
+        cwd: process.cwd(),
+        stdio: 'pipe',
+      })
+    ).toThrow();
+  });
+
+  it('rejects post-change revisions outside the branch-point-to-HEAD ancestry', async () => {
+    await expect(resolvePolicy('after-poller', branchPointRevision)).rejects.toThrow('strict descendant');
+    await expect(
+      resolvePolicy('after-poller', postChangeRevision, {
+        isAncestor: async (ancestor: string) => ancestor !== branchPointRevision,
+      })
+    ).rejects.toThrow('descendant of branch point');
+    await expect(
+      resolvePolicy('after-poller', postChangeRevision, {
+        isAncestor: async (ancestor: string) => ancestor === branchPointRevision,
+      })
+    ).rejects.toThrow('reachable from current HEAD');
+  });
+
+  it('accepts a clean explicit post-change revision with both ancestry proofs', async () => {
+    await expect(resolvePolicy('after-poller', postChangeRevision)).resolves.toEqual({
+      runtimeRevision: postChangeRevision,
+      explicit: true,
+      comparisonBaselineRevision: branchPointRevision,
+      headRevision: postChangeRevision,
+    });
+  });
+
+  it('exercises revision policy against real Git ancestry and object resolution', async () => {
+    const repository = await mkdtemp(join(tmpdir(), 'cod356-revision-git-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        cwd: repository,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'COD-356',
+          GIT_AUTHOR_EMAIL: 'cod356@example.invalid',
+          GIT_COMMITTER_NAME: 'COD-356',
+          GIT_COMMITTER_EMAIL: 'cod356@example.invalid',
+        },
+      }).trim();
+    try {
+      git('init', '-q');
+      await writeFile(join(repository, 'runtime.txt'), 'before\n');
+      git('add', 'runtime.txt');
+      git('commit', '-qm', 'before');
+      const before = git('rev-parse', 'HEAD');
+      await writeFile(join(repository, 'runtime.txt'), 'after\n');
+      git('commit', '-qam', 'after');
+      const after = git('rev-parse', 'HEAD');
+      const unrelated = git('commit-tree', `${after}^{tree}`, '-m', 'unrelated');
+
+      await expect(
+        resolveRuntimeRevisionPolicyFromGit({
+          root: repository,
+          phase: 'after-poller',
+          requestedRevision: after,
+          branchPointRevision: before,
+        })
+      ).resolves.toMatchObject({ runtimeRevision: after });
+      await expect(
+        resolveRuntimeRevisionPolicyFromGit({
+          root: repository,
+          phase: 'after-poller',
+          requestedRevision: before,
+          branchPointRevision: before,
+        })
+      ).rejects.toThrow('strict descendant');
+      await expect(
+        resolveRuntimeRevisionPolicyFromGit({
+          root: repository,
+          phase: 'after-poller',
+          requestedRevision: unrelated,
+          branchPointRevision: before,
+        })
+      ).rejects.toThrow('descendant');
+      await expect(
+        resolveRuntimeRevisionPolicyFromGit({
+          root: repository,
+          phase: 'after-poller',
+          requestedRevision: after.slice(0, 8),
+          branchPointRevision: before,
+        })
+      ).rejects.toThrow('full 40-character');
+      await expect(
+        resolveRuntimeRevisionPolicyFromGit({
+          root: repository,
+          phase: 'after-poller',
+          requestedRevision: 'f'.repeat(40),
+          branchPointRevision: before,
+        })
+      ).rejects.toThrow('unknown runtime revision');
+    } finally {
+      await rm(repository, { recursive: true, force: true });
+    }
+  });
+
   it('parses leading-space and renamed porcelain paths without corrupting provenance', () => {
     expect(
       parseTrackedStatusPaths(
@@ -474,7 +644,8 @@ describe('COD-356 benchmark provenance', () => {
 
   it('records dirty harness content independently from informational HEAD', () => {
     const inputs = {
-      branchPointRevision: 'a445cdaf645309ce51d8b1431733afa8f0bc55ac',
+      branchPointRevision,
+      runtimeRevision: postChangeRevision,
       headRevision: 'deadbeef',
       runtimeTreeHash: 'runtime-tree-hash',
       harnessFiles: [
@@ -492,52 +663,506 @@ describe('COD-356 benchmark provenance', () => {
     });
 
     expect(first).toMatchObject({
-      runtimeRevision: 'a445cdaf645309ce51d8b1431733afa8f0bc55ac',
-      branchPointRevision: 'a445cdaf645309ce51d8b1431733afa8f0bc55ac',
+      runtimeRevision: postChangeRevision,
+      branchPointRevision,
+      comparisonBaselineRevision: branchPointRevision,
       headRevision: {
         value: 'deadbeef',
         semantics: 'informational only; not the measured runtime or harness identity',
       },
       runtimeTreeHash: 'runtime-tree-hash',
-      harness: { dirty: true },
+      harness: { dirty: true, dirtyPaths: ['scripts/perf/cod-356-benchmark.mjs'] },
       outOfScopeTrackedDirtyPaths: ['src/outside-task.ts'],
     });
     expect(first.harness.contentHash).not.toBe(changedContent.harness.contentHash);
   });
 
-  it('rejects a runtime tree that differs from the declared branch point', () => {
+  it('rejects a runtime tree that differs from the declared runtime revision', () => {
     expect(() =>
       assertRuntimeTreeMatchesRevision({
-        branchPointRevision: 'a445cdaf645309ce51d8b1431733afa8f0bc55ac',
+        runtimeRevision: postChangeRevision,
         changedPaths: ['src/index.ts'],
         untrackedPaths: [],
       })
-    ).toThrow('runtime tree does not match branch point');
+    ).toThrow('runtime tree does not match declared revision');
     expect(
       assertRuntimeTreeMatchesRevision({
-        branchPointRevision: 'a445cdaf645309ce51d8b1431733afa8f0bc55ac',
+        runtimeRevision: postChangeRevision,
         changedPaths: [],
         untrackedPaths: [],
       })
     ).toBe(true);
   });
 
-  it('allows only the benchmark script difference in the runtime package manifest', () => {
-    const branchPoint = JSON.stringify({ scripts: { test: 'vitest' }, dependencies: { fastify: '5.0.0' } });
+  it('compares the package manifest to the declared runtime revision and permits only the harness script', () => {
+    const revisionContent = JSON.stringify({ scripts: { test: 'vitest' }, dependencies: { fastify: '5.0.0' } });
     const harness = JSON.stringify({
       scripts: { test: 'vitest', 'perf:cod356': 'node scripts/perf/cod-356-benchmark.mjs' },
       dependencies: { fastify: '5.0.0' },
     });
-    expect(assertRuntimePackageManifestMatches({ branchPointContent: branchPoint, actualContent: harness })).toEqual({
+    expect(
+      assertRuntimePackageManifestMatches({
+        declaredRevision: postChangeRevision,
+        revisionContent,
+        actualContent: harness,
+      })
+    ).toEqual({
       allowedDifference: 'scripts.perf:cod356 only',
+      comparedToRevision: postChangeRevision,
       normalizedHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(() =>
       assertRuntimePackageManifestMatches({
-        branchPointContent: branchPoint,
+        declaredRevision: postChangeRevision,
+        revisionContent,
         actualContent: JSON.stringify({ scripts: { test: 'vitest' }, dependencies: { fastify: '6.0.0' } }),
       })
-    ).toThrow('runtime package manifest does not match branch point');
+    ).toThrow('runtime package manifest does not match declared revision');
+  });
+});
+
+describe('COD-356 ignored generated runtime assets', () => {
+  const requiredAssets = ['vendor/critical.js'];
+  const monitoredDirectories = ['vendor'];
+  const allowedFiles = ['vendor/critical.js', 'vendor/document-preview.js'];
+
+  async function fixture() {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), 'cod356-assets-'));
+    const runtimeRoot = join(repositoryRoot, 'runtime');
+    await mkdir(join(runtimeRoot, 'vendor'), { recursive: true });
+    await writeFile(join(runtimeRoot, 'vendor/critical.js'), 'critical-v1');
+    await writeFile(join(runtimeRoot, 'vendor/document-preview.js'), 'not loaded during startup');
+    return { repositoryRoot, runtimeRoot };
+  }
+
+  const collect = ({ repositoryRoot, runtimeRoot }: Awaited<ReturnType<typeof fixture>>) =>
+    collectGeneratedRuntimeAssetManifest({
+      repositoryRoot,
+      runtimeRoot,
+      requiredAssets,
+      monitoredDirectories,
+      allowedFiles,
+    });
+
+  it('accepts and compares an exact regular-file manifest', async () => {
+    const assetFixture = await fixture();
+    try {
+      const accepted = await collect(assetFixture);
+      expect(accepted.runtimeRoot).toBe('runtime');
+      expect(accepted.files).toEqual([
+        {
+          path: 'vendor/critical.js',
+          bytes: 11,
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      ]);
+      expect(assertGeneratedAssetManifestMatches({ accepted, actual: await collect(assetFixture) })).toBe(true);
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects byte changes and missing required assets', async () => {
+    const assetFixture = await fixture();
+    try {
+      const accepted = await collect(assetFixture);
+      await writeFile(join(assetFixture.runtimeRoot, 'vendor/critical.js'), 'critical-v2');
+      await expect(
+        Promise.resolve().then(async () =>
+          assertGeneratedAssetManifestMatches({ accepted, actual: await collect(assetFixture) })
+        )
+      ).rejects.toThrow('does not match accepted baseline');
+      await unlink(join(assetFixture.runtimeRoot, 'vendor/critical.js'));
+      await expect(collect(assetFixture)).rejects.toThrow('missing required generated runtime asset');
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unexpected files in monitored directories', async () => {
+    const assetFixture = await fixture();
+    try {
+      await writeFile(join(assetFixture.runtimeRoot, 'vendor/unexpected.js'), 'surprise');
+      await expect(collect(assetFixture)).rejects.toThrow('unexpected generated runtime asset');
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects symlinks and required paths escaping the runtime root', async () => {
+    const assetFixture = await fixture();
+    try {
+      await unlink(join(assetFixture.runtimeRoot, 'vendor/critical.js'));
+      await symlink('/etc/passwd', join(assetFixture.runtimeRoot, 'vendor/critical.js'));
+      await expect(collect(assetFixture)).rejects.toThrow('symlink');
+      await expect(
+        collectGeneratedRuntimeAssetManifest({
+          repositoryRoot: assetFixture.repositoryRoot,
+          runtimeRoot: assetFixture.runtimeRoot,
+          requiredAssets: ['../outside.js'],
+          monitoredDirectories,
+          allowedFiles,
+        })
+      ).rejects.toThrow('outside declared runtime root');
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('compares schema and policy identity in addition to file bytes', async () => {
+    const assetFixture = await fixture();
+    try {
+      const accepted = await collect(assetFixture);
+      expect(() =>
+        assertGeneratedAssetManifestMatches({ accepted, actual: { ...accepted, schemaVersion: 2 } })
+      ).toThrow('does not match accepted baseline');
+      expect(() =>
+        assertGeneratedAssetManifestMatches({
+          accepted,
+          actual: {
+            ...accepted,
+            policy: { ...accepted.policy, allowedFiles: [...accepted.policy.allowedFiles, 'vendor/extra.js'] },
+          },
+        })
+      ).toThrow('does not match accepted baseline');
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('records stable pre/post hashes for unchanged generated assets', async () => {
+    const assetFixture = await fixture();
+    try {
+      const preRun = await collect(assetFixture);
+      await expect(
+        verifyPostRunGeneratedAssets({ preRunManifest: preRun, collectPostRun: () => collect(assetFixture) })
+      ).resolves.toMatchObject({
+        result: 'matched',
+        preHash: preRun.manifestHash,
+        postHash: preRun.manifestHash,
+      });
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses publication after a mid-run asset mutation', async () => {
+    const assetFixture = await fixture();
+    const publish = vi.fn(async () => 'published');
+    try {
+      const preRun = await collect(assetFixture);
+      await writeFile(join(assetFixture.runtimeRoot, 'vendor/critical.js'), 'mutated-during-run');
+      await expect(
+        guardGeneratedAssetPublication({
+          preRunManifest: preRun,
+          collectPostRun: () => collect(assetFixture),
+          publish,
+        })
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('changed during benchmark run'),
+        verification: { result: 'failed', preHash: preRun.manifestHash },
+      });
+      expect(publish).not.toHaveBeenCalled();
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses canonical summary publication when an asset changes after report staging', async () => {
+    const assetFixture = await fixture();
+    const summaryPath = join(assetFixture.repositoryRoot, 'summary.json');
+    const environmentPath = join(assetFixture.repositoryRoot, 'environment.json');
+    try {
+      const preRun = await collect(assetFixture);
+      await writePairedJsonArtifacts({
+        summaryPath,
+        environmentPath,
+        summary: { generation: 'accepted' },
+        environment: { generation: 'accepted' },
+        reportSetId: 'accepted-set',
+      });
+      await expect(
+        guardGeneratedAssetPublication({
+          preRunManifest: preRun,
+          collectPostRun: () => collect(assetFixture),
+          publish: async () =>
+            writePairedJsonArtifacts({
+              summaryPath,
+              environmentPath,
+              summary: { generation: 'stale-success' },
+              environment: { generation: 'stale-success' },
+              reportSetId: 'stale-set',
+              beforeRename: async () => {
+                await writeFile(join(assetFixture.runtimeRoot, 'vendor/critical.js'), 'mutated-after-staging');
+                await assertGeneratedAssetsStableAtPublication({
+                  preRunManifest: preRun,
+                  collectCurrent: () => collect(assetFixture),
+                });
+              },
+            }),
+        })
+      ).rejects.toThrow('changed immediately before compact report publication');
+      expect(JSON.parse(await readFile(summaryPath, 'utf8')).reportSetId).toBe('accepted-set');
+      expect(JSON.parse(await readFile(environmentPath, 'utf8')).reportSetId).toBe('accepted-set');
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses publication when HEAD moves after measurement', async () => {
+    const assetFixture = await fixture();
+    const publish = vi.fn(async () => 'published');
+    try {
+      const preRun = await collect(assetFixture);
+      await expect(
+        guardGeneratedAssetPublication({
+          preRunManifest: preRun,
+          collectPostRun: () => collect(assetFixture),
+          verifyPublicationState: async () => {
+            throw new Error('current HEAD moved after provenance capture');
+          },
+          publish,
+        })
+      ).rejects.toThrow('current HEAD moved');
+      expect(publish).not.toHaveBeenCalled();
+    } finally {
+      await rm(assetFixture.repositoryRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('COD-356 immutable accepted asset baseline', () => {
+  const reportPath = 'docs/reports/cod-356/baseline-summary.json';
+  const gitEnvironment = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'COD-356',
+    GIT_AUTHOR_EMAIL: 'cod356@example.invalid',
+    GIT_COMMITTER_NAME: 'COD-356',
+    GIT_COMMITTER_EMAIL: 'cod356@example.invalid',
+  };
+
+  async function repositoryWithReport(report: unknown) {
+    const root = await mkdtemp(join(tmpdir(), 'cod356-baseline-git-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8', env: gitEnvironment }).trim();
+    git('init', '-q');
+    await mkdir(join(root, 'docs/reports/cod-356'), { recursive: true });
+    await writePairedJsonArtifacts({
+      summaryPath: join(root, reportPath),
+      environmentPath: join(root, 'docs/reports/cod-356/baseline-environment.json'),
+      summary: report,
+      environment: { phase: 'before' },
+      reportSetId: 'accepted-test-report-set',
+    });
+    git('add', reportPath, 'docs/reports/cod-356/baseline-environment.json');
+    git('commit', '-qm', 'accepted baseline');
+    return { root, git };
+  }
+
+  const manifest = {
+    schemaVersion: 1,
+    algorithm: 'sha256',
+    runtimeRoot: 'src/web/public',
+    policy: { requiredAssets: ['vendor/x.js'], monitoredDirectories: ['vendor'], allowedFiles: ['vendor/x.js'] },
+    files: [{ path: 'vendor/x.js', bytes: 1, sha256: 'a'.repeat(64) }],
+    manifestHash: 'b'.repeat(64),
+  };
+
+  it('loads a valid accepted manifest from the committed HEAD blob', async () => {
+    const repository = await repositoryWithReport({ provenance: { generatedRuntimeAssets: manifest } });
+    try {
+      const sourceCommit = repository.git('rev-parse', 'HEAD');
+      await expect(
+        loadCommittedBaselineAssetManifest({ root: repository.root, reportPath, sourceCommit })
+      ).resolves.toMatchObject({
+        manifest,
+        binding: {
+          sourceCommit: expect.stringMatching(/^[a-f0-9]{40}$/),
+          blobObjectId: expect.stringMatching(/^[a-f0-9]{40}$/),
+          contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          indexBlobObjectId: expect.stringMatching(/^[a-f0-9]{40}$/),
+          indexContentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          workingContentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          indexMatchesHead: true,
+          workingMatchesHead: true,
+        },
+      });
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['unstaged', 'staged'])('rejects a %s working baseline replacement', async (mode) => {
+    const repository = await repositoryWithReport({ provenance: { generatedRuntimeAssets: manifest } });
+    try {
+      await writeFile(join(repository.root, reportPath), `${JSON.stringify({ replacement: true })}\n`);
+      if (mode === 'staged') repository.git('add', reportPath);
+      const sourceCommit = repository.git('rev-parse', 'HEAD');
+      await expect(
+        loadCommittedBaselineAssetManifest({ root: repository.root, reportPath, sourceCommit })
+      ).rejects.toThrow(`${mode === 'staged' ? 'index' : 'working'} baseline report does not match committed Git blob`);
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a staged-only replacement after the working file is restored to HEAD bytes', async () => {
+    const repository = await repositoryWithReport({ provenance: { generatedRuntimeAssets: manifest } });
+    try {
+      await writeFile(join(repository.root, reportPath), `${JSON.stringify({ stagedReplacement: true })}\n`);
+      repository.git('add', reportPath);
+      const headContent = repository.git('show', `HEAD:${reportPath}`);
+      await writeFile(join(repository.root, reportPath), `${headContent}\n`);
+      expect(repository.git('hash-object', reportPath)).toBe(repository.git('rev-parse', `HEAD:${reportPath}`));
+      expect(repository.git('diff', '--cached', '--name-only')).toBe(reportPath);
+      const sourceCommit = repository.git('rev-parse', 'HEAD');
+      await expect(
+        loadCommittedBaselineAssetManifest({ root: repository.root, reportPath, sourceCommit })
+      ).rejects.toThrow('index baseline report does not match committed Git blob');
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects when HEAD advances after the source commit was resolved', async () => {
+    const repository = await repositoryWithReport({ provenance: { generatedRuntimeAssets: manifest } });
+    try {
+      const sourceCommit = repository.git('rev-parse', 'HEAD');
+      await writeFile(join(repository.root, 'advance.txt'), 'advance\n');
+      repository.git('add', 'advance.txt');
+      repository.git('commit', '-qm', 'advance HEAD');
+      await expect(
+        loadCommittedBaselineAssetManifest({ root: repository.root, reportPath, sourceCommit })
+      ).rejects.toThrow('current HEAD moved after provenance capture');
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a missing accepted baseline Git blob', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod356-baseline-git-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: root, env: gitEnvironment });
+      await writeFile(join(root, 'README'), 'no baseline');
+      execFileSync('git', ['add', 'README'], { cwd: root, env: gitEnvironment });
+      execFileSync('git', ['commit', '-qm', 'no baseline'], { cwd: root, env: gitEnvironment });
+      const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: gitEnvironment,
+      }).trim();
+      await expect(loadCommittedBaselineAssetManifest({ root, reportPath, sourceCommit })).rejects.toThrow(
+        'committed accepted baseline blob is missing'
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a malformed committed accepted baseline', async () => {
+    const repository = await repositoryWithReport({ provenance: {} });
+    try {
+      const sourceCommit = repository.git('rev-parse', 'HEAD');
+      await expect(
+        loadCommittedBaselineAssetManifest({ root: repository.root, reportPath, sourceCommit })
+      ).rejects.toThrow('committed accepted baseline manifest is malformed');
+    } finally {
+      await rm(repository.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('COD-356 paired compact report publication', () => {
+  it('writes a shared report set and binds the canonical summary to the exact environment bytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod356-report-pair-'));
+    const summaryPath = join(root, 'summary.json');
+    const environmentPath = join(root, 'environment.json');
+    try {
+      await writePairedJsonArtifacts({
+        summaryPath,
+        environmentPath,
+        summary: { phase: 'before' },
+        environment: { platform: 'test' },
+        reportSetId: 'report-set-1',
+      });
+      const summaryContent = await readFile(summaryPath, 'utf8');
+      const environmentContent = await readFile(environmentPath, 'utf8');
+      expect(validatePairedReports({ summaryContent, environmentContent, summaryPath, environmentPath })).toMatchObject(
+        { reportSetId: 'report-set-1' }
+      );
+      expect(JSON.parse(summaryContent).reportSetId).toBe(JSON.parse(environmentContent).reportSetId);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a mismatched or partially published pair', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod356-report-pair-'));
+    const summaryPath = join(root, 'summary.json');
+    const environmentPath = join(root, 'environment.json');
+    try {
+      await writePairedJsonArtifacts({
+        summaryPath,
+        environmentPath,
+        summary: { generation: 'old' },
+        environment: { generation: 'old' },
+        reportSetId: 'old-set',
+      });
+      await expect(
+        writePairedJsonArtifacts({
+          summaryPath,
+          environmentPath,
+          summary: { generation: 'new' },
+          environment: { generation: 'new' },
+          reportSetId: 'new-set',
+          renameImpl: async (source: string, destination: string) => {
+            if (destination === summaryPath) throw new Error('injected summary rename failure');
+            await rename(source, destination);
+          },
+        })
+      ).rejects.toThrow('injected summary rename failure');
+      await expect(async () =>
+        validatePairedReports({
+          summaryContent: await readFile(summaryPath, 'utf8'),
+          environmentContent: await readFile(environmentPath, 'utf8'),
+          summaryPath,
+          environmentPath,
+        })
+      ).rejects.toThrow('reportSetId');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('checks publication state after staging both files and before the first rename', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod356-report-pair-'));
+    const summaryPath = join(root, 'summary.json');
+    const environmentPath = join(root, 'environment.json');
+    try {
+      await writePairedJsonArtifacts({
+        summaryPath,
+        environmentPath,
+        summary: { generation: 'old' },
+        environment: { generation: 'old' },
+        reportSetId: 'old-set',
+      });
+      await expect(
+        writePairedJsonArtifacts({
+          summaryPath,
+          environmentPath,
+          summary: { generation: 'new' },
+          environment: { generation: 'new' },
+          reportSetId: 'new-set',
+          beforeRename: async () => {
+            throw new Error('current HEAD moved after compact reports were staged');
+          },
+        })
+      ).rejects.toThrow('current HEAD moved');
+      expect(JSON.parse(await readFile(summaryPath, 'utf8')).reportSetId).toBe('old-set');
+      expect(JSON.parse(await readFile(environmentPath, 'utf8')).reportSetId).toBe('old-set');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

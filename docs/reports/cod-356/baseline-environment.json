@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-08-22T14:45:13.699Z",
+  "capturedAt": "2026-08-22T16:08:29.582Z",
   "platform": "linux",
   "release": "6.8.0-124-generic",
   "hostname": "beelink",
@@ -8,20 +8,25 @@
   "logicalCpuCount": 8,
   "cpuModel": "Intel(R) Core(TM) i3-N305",
   "totalMemoryBytes": 33417818112,
-  "freeMemoryBytesAtStart": 26206523392,
+  "freeMemoryBytesAtStart": 26589949952,
   "issue": "COD-356",
   "phase": "before",
   "provenance": {
     "runtimeRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
     "branchPointRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
     "runtimeTreeHash": "8adb932b9da5f06b592ed3e41dfa89991fac676e6b614f84929fa7b18ec6b5df",
     "headRevision": {
-      "value": "2dce8d2716a78e031794fec87811d168b8f2743f",
+      "value": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
       "semantics": "informational only; not the measured runtime or harness identity"
+    },
+    "harnessHeadRevision": {
+      "value": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "semantics": "informational commit containing or preceding the working-tree harness content"
     },
     "harness": {
       "algorithm": "sha256 of sorted path/byte-length/content-sha256 manifest",
-      "contentHash": "220970b94e7c20114f4afeca1bea00626d2c584d5524b56177c5a8e0d7e9353c",
+      "contentHash": "8784a34bed994f65005a2b38676e722be0dad821245cc54f721c15a16bca2792",
       "files": [
         {
           "path": "package.json",
@@ -30,8 +35,8 @@
         },
         {
           "path": "scripts/perf/cod-356-benchmark.mjs",
-          "bytes": 42526,
-          "sha256": "44f35aa1cd0ae4c6f229c02ffd6cae70c57a3b341b2e6f5bd06dd03ea8a959f6"
+          "bytes": 47506,
+          "sha256": "0a3d81aeb678558afba1f777463b8a26bddbc302c8a64d1565235a0f211dd313"
         },
         {
           "path": "scripts/perf/cod-356-browser.mjs",
@@ -60,8 +65,8 @@
         },
         {
           "path": "scripts/perf/cod-356-provenance.mjs",
-          "bytes": 5236,
-          "sha256": "18766dc6a191323e2b32e8d2c58bd97c0cc6944efebb1a39c3f6cc0889e6a5eb"
+          "bytes": 23832,
+          "sha256": "3847e119db02d7c277da661797f9ffa9694300418edc77591d3296b5fd9314e1"
         },
         {
           "path": "scripts/perf/cod-356-safety.mjs",
@@ -75,19 +80,129 @@
         },
         {
           "path": "test/perf-cod-356-harness.test.ts",
-          "bytes": 30205,
-          "sha256": "742b15b3d3910c30dead9a4141686ebd1c10f9951b51c9342c2b4655ea873ba3"
+          "bytes": 55377,
+          "sha256": "87f629212e88c9e6b2a99721239903c0e1ac5b3f333fe2619222133756489e84"
         }
       ],
-      "dirty": true
+      "dirty": true,
+      "dirtyPaths": [
+        "package.json",
+        "scripts/perf/cod-356-benchmark.mjs",
+        "scripts/perf/cod-356-browser.mjs",
+        "scripts/perf/cod-356-cleanup.mjs",
+        "scripts/perf/cod-356-cpu-worker.mjs",
+        "scripts/perf/cod-356-input-probe.mjs",
+        "scripts/perf/cod-356-metrics.mjs",
+        "scripts/perf/cod-356-provenance.mjs",
+        "scripts/perf/cod-356-safety.mjs",
+        "scripts/perf/cod-356-scheduler.mjs",
+        "test/perf-cod-356-harness.test.ts"
+      ]
     },
     "outOfScopeTrackedDirtyPaths": [],
-    "runtimePaths": ["src", "packages", "config", "scripts/build.mjs", "package-lock.json"],
+    "runtimePaths": [
+      "src",
+      "packages",
+      "config",
+      "scripts/build.mjs",
+      "package-lock.json"
+    ],
+    "revisionPolicy": {
+      "runtimeRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "explicit": false,
+      "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "headRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac"
+    },
+    "runtimePackageHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4",
+    "generatedRuntimeAssets": {
+      "schemaVersion": 1,
+      "algorithm": "sha256",
+      "runtimeRoot": "src/web/public",
+      "policy": {
+        "requiredAssets": [
+          "vendor/xterm-addon-fit.min.js",
+          "vendor/xterm-addon-serialize.min.js",
+          "vendor/xterm-addon-unicode11.min.js",
+          "vendor/xterm-addon-webgl.min.js",
+          "vendor/xterm-predictive-echo.js",
+          "vendor/xterm-zerolag-input.js",
+          "vendor/xterm.css",
+          "vendor/xterm.min.js"
+        ],
+        "monitoredDirectories": [
+          "vendor"
+        ],
+        "allowedFiles": [
+          "vendor/dompurify.min.js",
+          "vendor/exceljs.min.js",
+          "vendor/fflate.min.js",
+          "vendor/marked.min.js",
+          "vendor/xterm-addon-fit.min.js",
+          "vendor/xterm-addon-serialize.min.js",
+          "vendor/xterm-addon-unicode11.min.js",
+          "vendor/xterm-addon-webgl.min.js",
+          "vendor/xterm-predictive-echo.js",
+          "vendor/xterm-zerolag-input.js",
+          "vendor/xterm.css",
+          "vendor/xterm.min.js"
+        ],
+        "documentedNonRuntimeFiles": [
+          "vendor/exceljs.min.js",
+          "vendor/fflate.min.js"
+        ]
+      },
+      "files": [
+        {
+          "path": "vendor/xterm-addon-fit.min.js",
+          "bytes": 1476,
+          "sha256": "2aa05e1fbeaadcff510412f09e0165c4d7170431a65294f9207ff56dbe1f7843"
+        },
+        {
+          "path": "vendor/xterm-addon-serialize.min.js",
+          "bytes": 16495,
+          "sha256": "2fa7463561b97192b3cf901aaac65306b5191e081d4aeabb811a95d42e81b6bd"
+        },
+        {
+          "path": "vendor/xterm-addon-unicode11.min.js",
+          "bytes": 52408,
+          "sha256": "effeca12025364fc8ab8d4df0d6af6fe191d52f99f4ec0ae8751dc005920536e"
+        },
+        {
+          "path": "vendor/xterm-addon-webgl.min.js",
+          "bytes": 247535,
+          "sha256": "b85f8d4b3e9756bebb757e3fe47134d70f03ea3d6b187624426d2e2b65dec06c"
+        },
+        {
+          "path": "vendor/xterm-predictive-echo.js",
+          "bytes": 22174,
+          "sha256": "4fa33242d18f435788a6b6f47cf3b6df4805eef860f105988094a7808852cf90"
+        },
+        {
+          "path": "vendor/xterm-zerolag-input.js",
+          "bytes": 27504,
+          "sha256": "565860ab32098f0d98558ad3f2cf0c899fd2329320c15905497ceb2ff0b369f1"
+        },
+        {
+          "path": "vendor/xterm.css",
+          "bytes": 7112,
+          "sha256": "854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6"
+        },
+        {
+          "path": "vendor/xterm.min.js",
+          "bytes": 489036,
+          "sha256": "857ad85bfa79688de6b6bcf7c28d81f974a28eb793d418b22f58fa77e1636a1f"
+        }
+      ],
+      "manifestHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
+      "comparison": "authoritative accepted baseline manifest"
+    },
+    "acceptedGeneratedAssetBaseline": null,
     "packageManifestVerification": {
       "allowedDifference": "scripts.perf:cod356 only",
+      "comparedToRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
       "normalizedHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4"
     },
-    "runtimeVerification": "git diff and untracked-file checks against branch point passed before resource creation"
+    "runtimeVerification": "git diff and untracked-file checks against declared runtime revision passed before resource creation"
   },
   "loadProfile": {
     "workers": 7,
@@ -105,5 +220,23 @@
     "nodeProcess": "process.cpuUsage/process.memoryUsage benchmark preload with /proc exact-PID fallback on Linux",
     "eventLoopDelay": "perf_hooks.monitorEventLoopDelay at 10ms resolution in a benchmark-only preload",
     "tmuxCapture": "PATH-first transparent tmux wrapper recording invocation start/end/status/duration"
+  },
+  "reportSetId": "3475746ab0dbbc1d6e843116ad9605d1",
+  "postRunGeneratedAssets": {
+    "checkedAt": "2026-08-22T16:08:29.583Z",
+    "result": "matched",
+    "preHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
+    "postHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
+    "error": null
+  },
+  "postRunProvenance": {
+    "checkedAt": "2026-08-22T16:08:29.595Z",
+    "result": "matched",
+    "sourceCommit": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "acceptedGeneratedAssetBaseline": null
+  },
+  "reportPair": {
+    "role": "environment",
+    "canonicalSummaryFile": "baseline-summary.json"
   }
 }

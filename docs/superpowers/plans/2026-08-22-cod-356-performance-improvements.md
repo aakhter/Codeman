@@ -229,20 +229,23 @@ npm run lint
 git diff --check
 ```
 
-- [ ] **Step 7: Run a backend checkpoint benchmark**
+- [ ] **Step 7: Commit the polling change**
 
 ```bash
-npm run perf:cod356 -- --phase after-poller --conditions idle,cpu --samples 5
-```
-
-Require zero synchronous activity captures, no per-session poll overlap, no more than two concurrent captures, and lower event-loop/API p95 in both idle-session cells. If the coordinator regresses interactive metrics materially, stop and diagnose before continuing.
-
-- [ ] **Step 8: Commit the polling change**
-
-```bash
-git add src/working-frame-poll-coordinator.ts src/session.ts test/working-frame-poll-coordinator.test.ts test/codex-working-detection.test.ts test/opencode-working-detection.test.ts test/session-cleanup.test.ts docs/reports/cod-356
+git add src/working-frame-poll-coordinator.ts src/session.ts test/working-frame-poll-coordinator.test.ts test/codex-working-detection.test.ts test/opencode-working-detection.test.ts test/session-cleanup.test.ts
 git commit -m "perf(activity): COD-356 remove blocking tmux polling"
 ```
+
+- [ ] **Step 8: Run and commit the backend checkpoint evidence**
+
+```bash
+COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
+npm run perf:cod356 -- --phase after-poller --conditions idle,cpu --samples 5 --runtime-revision "$COD356_RUNTIME_REVISION"
+git add docs/reports/cod-356/after-poller-summary.json docs/reports/cod-356/after-poller-environment.json
+git commit -m "test(perf): COD-356 record after-poller evidence"
+```
+
+Require zero synchronous activity captures, no per-session poll overlap, no more than two concurrent captures, and lower event-loop/API p95 in both idle-session cells. The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`. If the coordinator regresses interactive metrics materially, stop and diagnose before continuing.
 
 ## Task 4: Instrument and lock down terminal input byte identity
 
@@ -286,20 +289,23 @@ If every new byte-identity test passes, record that repeated characters are a re
 
 Use Playwright init scripts to wrap browser input, `WebSocket.send`, ACK handling, and terminal output receipt. The disposable input probe provides authoritative PTY byte timestamps and framed output. Store correlation data only in benchmark artifacts; production logging stays unchanged.
 
-- [ ] **Step 4: Re-run the input-only benchmark checkpoint**
+- [ ] **Step 4: Commit the input evidence and regressions**
 
 ```bash
-npm run perf:cod356 -- --phase input-trace --conditions idle,cpu --samples 5 --only input
-```
-
-Document the dominant measured input cost and select the smallest optimization in Task 5. Update the plan's Task 5 decision note before editing runtime code.
-
-- [ ] **Step 5: Commit the input evidence and regressions**
-
-```bash
-git add scripts/perf test/input-send-order.test.ts test/reliable-input-dedup.test.ts test/routes/session-input-delivery.test.ts test/codex-predictive-echo.test.ts test/terminal-input-performance.browser.test.ts config/test-suites.ts docs/reports/cod-356
+git add scripts/perf test/input-send-order.test.ts test/reliable-input-dedup.test.ts test/routes/session-input-delivery.test.ts test/codex-predictive-echo.test.ts test/terminal-input-performance.browser.test.ts config/test-suites.ts
 git commit -m "test(input): COD-356 trace terminal byte delivery"
 ```
+
+- [ ] **Step 5: Run and commit the input-only checkpoint evidence**
+
+```bash
+COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
+npm run perf:cod356 -- --phase input-trace --conditions idle,cpu --samples 5 --only input --runtime-revision "$COD356_RUNTIME_REVISION"
+git add docs/reports/cod-356/input-trace-summary.json docs/reports/cod-356/input-trace-environment.json
+git commit -m "test(perf): COD-356 record input-trace evidence"
+```
+
+Document the dominant measured input cost and select the smallest optimization in Task 5. The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`. Update the plan's Task 5 decision note before editing runtime code.
 
 ## Task 5: Optimize the measured terminal input hot path
 
@@ -341,20 +347,23 @@ The failing test must assert the avoided operation count and all correctness inv
 
 Run the exact focused Node/browser files from Task 4. Do not batch raw input across control, Enter, paste, composition, or protocol boundaries.
 
-- [ ] **Step 4: Benchmark and retain only a demonstrated win**
+- [ ] **Step 4: Commit the input optimization**
 
 ```bash
-npm run perf:cod356 -- --phase after-input --conditions idle,cpu --samples 5 --only input
-```
-
-Keep the change only if byte identity remains exact and the targeted median or p95 improves without a material opposite-condition regression.
-
-- [ ] **Step 5: Commit the input optimization**
-
-```bash
-git add src/web/public/app.js src/web/public/terminal-ui.js src/web/routes/ws-routes.ts src/session.ts test docs/reports/cod-356/input-findings.md
+git add src/web/public/app.js src/web/public/terminal-ui.js src/web/routes/ws-routes.ts src/session.ts test
 git commit -m "perf(input): COD-356 reduce typing hot-path work"
 ```
+
+- [ ] **Step 5: Benchmark, retain the win, and commit evidence**
+
+```bash
+COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
+npm run perf:cod356 -- --phase after-input --conditions idle,cpu --samples 5 --only input --runtime-revision "$COD356_RUNTIME_REVISION"
+git add docs/reports/cod-356/after-input-summary.json docs/reports/cod-356/after-input-environment.json docs/reports/cod-356/input-findings.md
+git commit -m "test(perf): COD-356 record after-input evidence"
+```
+
+Keep the change only if byte identity remains exact and the targeted median or p95 improves without a material opposite-condition regression. The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`.
 
 ## Task 6: Profile and defer noncritical frontend startup work
 
@@ -407,20 +416,23 @@ npm run check:frontend-syntax
 npm run build
 ```
 
-- [ ] **Step 6: Benchmark the frontend checkpoint**
+- [ ] **Step 6: Commit frontend startup improvements**
 
 ```bash
-npm run perf:cod356 -- --phase after-frontend --conditions idle,cpu --samples 5 --only frontend
-```
-
-Require a lower critical request/decoded-byte or parse/evaluate cost and improved app-ready/long-task metrics. Revert any lazy split whose extra requests make both cold and warm startup worse.
-
-- [ ] **Step 7: Commit frontend startup improvements**
-
-```bash
-git add scripts/perf src/web/public scripts/build.mjs test/frontend-lazy-loading.test.ts test/perf-browser.test.ts docs/reports/cod-356/frontend-findings.md
+git add scripts/perf src/web/public scripts/build.mjs test/frontend-lazy-loading.test.ts test/perf-browser.test.ts
 git commit -m "perf(web): COD-356 defer optional startup work"
 ```
+
+- [ ] **Step 7: Benchmark and commit frontend evidence**
+
+```bash
+COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
+npm run perf:cod356 -- --phase after-frontend --conditions idle,cpu --samples 5 --only frontend --runtime-revision "$COD356_RUNTIME_REVISION"
+git add docs/reports/cod-356/after-frontend-summary.json docs/reports/cod-356/after-frontend-environment.json docs/reports/cod-356/frontend-findings.md
+git commit -m "test(perf): COD-356 record after-frontend evidence"
+```
+
+Require a lower critical request/decoded-byte or parse/evaluate cost and improved app-ready/long-task metrics. The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`. Revert any lazy split whose extra requests make both cold and warm startup worse.
 
 ## Task 7: Reduce measured rendering/layout work
 
@@ -453,13 +465,23 @@ npm run test:browser -- test/tab-activation.browser.test.ts test/session-sidebar
 npm run check:frontend-syntax
 ```
 
-- [ ] **Step 4: Benchmark and commit only a demonstrated improvement**
+- [ ] **Step 4: Commit the rendering improvement**
 
 ```bash
-npm run perf:cod356 -- --phase after-render --conditions idle,cpu --samples 5 --only frontend
-git add src/web/public test docs/reports/cod-356/frontend-findings.md
+git add src/web/public test
 git commit -m "perf(render): COD-356 reduce redundant browser work"
 ```
+
+- [ ] **Step 5: Benchmark and commit only demonstrated evidence**
+
+```bash
+COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
+npm run perf:cod356 -- --phase after-render --conditions idle,cpu --samples 5 --only frontend --runtime-revision "$COD356_RUNTIME_REVISION"
+git add docs/reports/cod-356/after-render-summary.json docs/reports/cod-356/after-render-environment.json docs/reports/cod-356/frontend-findings.md
+git commit -m "test(perf): COD-356 record after-render evidence"
+```
+
+The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`.
 
 ## Task 8: Run final before/after verification
 
@@ -473,7 +495,8 @@ git commit -m "perf(render): COD-356 reduce redundant browser work"
 - [ ] **Step 1: Run the identical final matrix**
 
 ```bash
-npm run perf:cod356 -- --phase after --conditions idle,cpu --samples 5
+COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
+npm run perf:cod356 -- --phase after --conditions idle,cpu --samples 5 --runtime-revision "$COD356_RUNTIME_REVISION"
 ```
 
 Compare branch-point baseline and final results by matrix cell. Report median/p95 deltas, raw artifact locations, byte identity, cleanup, and any metric that did not improve.
