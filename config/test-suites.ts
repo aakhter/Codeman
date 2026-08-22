@@ -19,6 +19,7 @@
  * why these are a runnable suite (`npm run test:browser`) rather than skipped.
  */
 export const BROWSER_TEST_GLOBS = [
+  'test/tab-rail-resize.browser.test.ts',
   'test/inline-rename.test.ts',
   'test/opencode-resize.test.ts',
   'test/webgl-fallback.test.ts',

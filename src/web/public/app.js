@@ -920,6 +920,7 @@ class CodemanApp {
     // and then applies the sidebar variant on top — do not call both.
     this.applySessionListLayout();
     this.applyTabOrientation();
+    this.initTabRailResize?.();
     this.applyMonitorVisibility();
     this.applyLineageLineSettings?.();
     this._installLineageStripScrollListener?.();
@@ -4475,9 +4476,17 @@ class CodemanApp {
         const nameEl = tab.querySelector('.tab-name');
         if (nameEl) {
           const _p = parseSessionPrefix(name);
-          const _label = _p && _p.suffix ? _p.suffix : name;
-          if (nameEl.textContent !== _label) {
-            nameEl.textContent = _label;
+          if (nameEl.dataset.fullName !== name) {
+            nameEl.replaceChildren();
+            if (_p && _p.suffix) {
+              const prefix = document.createElement('span');
+              prefix.className = 'tab-name-prefix';
+              prefix.textContent = `${_p.prefix}: `;
+              nameEl.append(prefix, document.createTextNode(_p.suffix));
+            } else {
+              nameEl.textContent = name;
+            }
+            nameEl.dataset.fullName = name;
             tab.title = _p && _p.suffix
               ? (session.workingDir ? `${_p.prefix} (${session.workingDir})` : _p.prefix)
               : (session.workingDir || '');
@@ -4716,7 +4725,9 @@ class CodemanApp {
       // JUST the description on the tab; the generated w<n>-<case> id moves to the
       // tooltip and stays visible in the session settings modal.
       const parsedName = parseSessionPrefix(name);
-      const tabLabel = parsedName && parsedName.suffix ? parsedName.suffix : name;
+      const tabLabel = parsedName && parsedName.suffix
+        ? `<span class="tab-name-prefix">${escapeHtml(parsedName.prefix)}: </span>${escapeHtml(parsedName.suffix)}`
+        : escapeHtml(name);
       const tabTooltip = parsedName && parsedName.suffix
         ? (session.workingDir ? `${parsedName.prefix} (${session.workingDir})` : parsedName.prefix)
         : (session.workingDir || '');
@@ -4738,7 +4749,7 @@ class CodemanApp {
           <span class="tab-info">
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
-              <span class="tab-name" data-session-id="${id}">${escapeHtml(tabLabel)}</span>
+              <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}

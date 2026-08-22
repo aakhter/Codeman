@@ -162,6 +162,37 @@ function resolveTabOrientation(input) {
   return 'vertical';
 }
 
+const TAB_RAIL_MIN_WIDTH = 208;
+const TAB_RAIL_DEFAULT_WIDTH = 256;
+const TAB_RAIL_MAX_WIDTH = 360;
+
+function resolveTabRailWidth(input = {}) {
+  const viewportWidth = Number(input.viewportWidth);
+  const mainWidth = Number(input.mainWidth);
+  const minTerminalWidth = Number(input.minTerminalWidth);
+  const limits = [TAB_RAIL_MAX_WIDTH];
+  if (Number.isFinite(viewportWidth) && viewportWidth > 0) limits.push(Math.floor(viewportWidth * 0.4));
+  if (Number.isFinite(mainWidth) && mainWidth > 0 && Number.isFinite(minTerminalWidth) && minTerminalWidth > 0) {
+    limits.push(Math.floor(mainWidth - minTerminalWidth));
+  }
+  const effectiveMax = Math.max(TAB_RAIL_MIN_WIDTH, Math.min(...limits));
+  const requested = Number(input.width);
+  const width = Number.isFinite(requested) ? requested : TAB_RAIL_DEFAULT_WIDTH;
+  return Math.round(Math.min(effectiveMax, Math.max(TAB_RAIL_MIN_WIDTH, width)));
+}
+
+function resolveTabRailKeyboardWidth(input = {}) {
+  let width;
+  if (input.key === 'Home') width = TAB_RAIL_MIN_WIDTH;
+  else if (input.key === 'End') width = TAB_RAIL_MAX_WIDTH;
+  else if (input.key === 'Enter') width = TAB_RAIL_DEFAULT_WIDTH;
+  else if (input.key === 'ArrowLeft' || input.key === 'ArrowRight') {
+    const direction = input.key === 'ArrowLeft' ? -1 : 1;
+    width = (Number(input.currentWidth) || TAB_RAIL_DEFAULT_WIDTH) + direction * (input.shiftKey ? 32 : 8);
+  } else return null;
+  return resolveTabRailWidth({ ...input, width });
+}
+
 // Sliver of the neighbouring tab left visible when the strip scrolls a tab into
 // view. Landing a tab flush against the edge reads as "this is the last one";
 // the gap is what tells the user there is more strip to swipe to.
@@ -626,6 +657,13 @@ if (typeof window !== 'undefined') {
     resolveTabOrientation,
     computeTabScrollLeft,
     TAB_SCROLL_REVEAL_PX,
+  };
+  window.CodemanTabRail = {
+    DEFAULT_WIDTH: TAB_RAIL_DEFAULT_WIDTH,
+    MIN_WIDTH: TAB_RAIL_MIN_WIDTH,
+    MAX_WIDTH: TAB_RAIL_MAX_WIDTH,
+    resolveWidth: resolveTabRailWidth,
+    resolveKeyboardWidth: resolveTabRailKeyboardWidth,
   };
   window.CodemanWsReconnect = {
     plan: planWsReconnect,

@@ -402,6 +402,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
     document.getElementById('appSettingsTabOrientation').value =
       settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
+    const tabRailWidth = window.CodemanTabRail?.resolveWidth({
+      width: settings.tabRailWidth ?? defaults.tabRailWidth ?? 256,
+    }) ?? 256;
+    this.syncTabRailWidthSetting?.(tabRailWidth);
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     document.getElementById('appSettingsSessionListLayout').value =
       settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
@@ -2030,6 +2034,7 @@ Object.assign(CodemanApp.prototype, {
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
       tabOrientation: document.getElementById('appSettingsTabOrientation').value,
+      tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       skin: document.getElementById('appSettingsSkin').value,
@@ -2428,6 +2433,7 @@ Object.assign(CodemanApp.prototype, {
         ralphTrackerEnabled: false,
         tabTwoRows: false,
         tabOrientation: 'horizontal',
+        tabRailWidth: 256,
         sessionListLayout: 'header',
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
@@ -2944,7 +2950,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'sessionListLayout', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'sessionListLayout', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
           'terminalFontFamily',
           'language',
