@@ -318,7 +318,11 @@ Document the dominant measured input cost and select the smallest optimization i
 - Modify: focused tests selected in Task 4
 - Modify: `docs/reports/cod-356/input-findings.md`
 
-- [ ] **Step 1: Record the evidence-backed optimization decision**
+**Decision/outcome:** `f58f3ea9` was measured once, rejected for no material cold improvement and steady p95
+regressions, then reverted by `02bfc38a`. No Task 5 runtime optimization is retained, Step 5 remains unchecked, and no
+further Task 5 architecture attempt or after-input rerun will be made.
+
+- [x] **Step 1: Record the evidence-backed optimization decision**
 
 Before code, add a short decision table to `input-findings.md` with measured time/allocation/frequency for:
 
@@ -331,7 +335,7 @@ Before code, add a short decision table to `input-findings.md` with measured tim
 
 Select only contributors that materially affect median or p95. Preserve immediate `pagehide` durability and server-authoritative exactly-once semantics.
 
-- [ ] **Step 2: Write the focused failing test for the selected change**
+- [x] **Step 2: Write the focused failing test for the selected change**
 
 Examples, chosen only when supported by the trace:
 
@@ -343,11 +347,11 @@ Examples, chosen only when supported by the trace:
 
 The failing test must assert the avoided operation count and all correctness invariants.
 
-- [ ] **Step 3: Implement the minimal optimization and observe GREEN**
+- [x] **Step 3: Implement the minimal optimization and observe GREEN**
 
 Run the exact focused Node/browser files from Task 4. Do not batch raw input across control, Enter, paste, composition, or protocol boundaries.
 
-- [ ] **Step 4: Commit the input optimization**
+- [x] **Step 4: Commit the input optimization**
 
 ```bash
 git add src/web/public/app.js src/web/public/terminal-ui.js src/web/routes/ws-routes.ts src/session.ts test
