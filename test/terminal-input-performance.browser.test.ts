@@ -689,8 +689,13 @@ describe('terminal input real browser/server/probe correlation', () => {
         data: input,
       });
       expect(await waitForProbeBytes(beforeProbe, Buffer.from(input))).toEqual(Buffer.from(input));
-      expect(await observation.wait()).toEqual(expect.any(Number));
-      expect(await terminalContains(token)).toBe(true);
+      expect(await observation.waitForDetection()).toMatchObject({
+        token,
+        timestamp: expect.any(Number),
+        snapshot: {
+          active: { containsToken: true },
+        },
+      });
       expect(
         await page.evaluate(() => ({
           listenerRetained: Boolean((window as any).__cod356VisibleObservation?.disposable),

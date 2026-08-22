@@ -189,6 +189,7 @@ export async function armFirstVisibleObservation(page, token, { timeoutMs = 10_0
         id,
         tokenLength: value.length,
         detectedAt: null,
+        detection: null,
         checks: 0,
         snapshots: [],
         disposable: null,
@@ -232,7 +233,13 @@ export async function armFirstVisibleObservation(page, token, { timeoutMs = 10_0
           });
         }
         if (active?.containsToken && observation.detectedAt === null) {
-          observation.detectedAt = performance.now();
+          const detectedAt = performance.now();
+          observation.detectedAt = detectedAt;
+          observation.detection = {
+            token: value,
+            timestamp: detectedAt,
+            snapshot: { timestamp: detectedAt, active },
+          };
         }
       };
       observation.disposable = terminal.onWriteParsed(inspect);
@@ -258,40 +265,44 @@ export async function armFirstVisibleObservation(page, token, { timeoutMs = 10_0
       observation.timeoutId = null;
     }, observationId);
   };
+  const waitForDetection = async () => {
+    try {
+      return await page
+        .waitForFunction(
+          (id) => {
+            const observation = window.__cod356VisibleObservation;
+            return observation?.id === id && observation.detection ? observation.detection : false;
+          },
+          observationId,
+          { timeout: timeoutMs }
+        )
+        .then((handle) => handle.jsonValue());
+    } catch (error) {
+      const diagnostic = page.isClosed()
+        ? { pageClosed: true }
+        : await page.evaluate((id) => {
+            const observation = window.__cod356VisibleObservation;
+            if (observation?.id !== id) return { observationReplaced: true };
+            return {
+              checks: observation.checks,
+              tokenLength: observation.tokenLength,
+              snapshots: observation.snapshots,
+              recentOutputFrames: window.__cod356?.outputFrames?.slice(-8) ?? [],
+              recentTerminalReceipts: window.__cod356?.terminalReceipts?.slice(-8) ?? [],
+              recentXtermWrites: window.__cod356?.xtermWrites?.slice(-8) ?? [],
+              recentFlushCalls: window.__cod356?.flushCalls?.slice(-8) ?? [],
+            };
+          }, observationId);
+      throw new Error(`first-visible observation unavailable: ${JSON.stringify(diagnostic)}`, { cause: error });
+    } finally {
+      await dispose();
+    }
+  };
   return {
     async wait() {
-      try {
-        return await page
-          .waitForFunction(
-            (id) => {
-              const observation = window.__cod356VisibleObservation;
-              return observation?.id === id && Number.isFinite(observation.detectedAt) ? observation.detectedAt : false;
-            },
-            observationId,
-            { timeout: timeoutMs }
-          )
-          .then((handle) => handle.jsonValue());
-      } catch (error) {
-        const diagnostic = page.isClosed()
-          ? { pageClosed: true }
-          : await page.evaluate((id) => {
-              const observation = window.__cod356VisibleObservation;
-              if (observation?.id !== id) return { observationReplaced: true };
-              return {
-                checks: observation.checks,
-                tokenLength: observation.tokenLength,
-                snapshots: observation.snapshots,
-                recentOutputFrames: window.__cod356?.outputFrames?.slice(-8) ?? [],
-                recentTerminalReceipts: window.__cod356?.terminalReceipts?.slice(-8) ?? [],
-                recentXtermWrites: window.__cod356?.xtermWrites?.slice(-8) ?? [],
-                recentFlushCalls: window.__cod356?.flushCalls?.slice(-8) ?? [],
-              };
-            }, observationId);
-        throw new Error(`first-visible observation unavailable: ${JSON.stringify(diagnostic)}`, { cause: error });
-      } finally {
-        await dispose();
-      }
+      return (await waitForDetection()).timestamp;
     },
+    waitForDetection,
     dispose,
   };
 }
