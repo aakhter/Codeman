@@ -194,8 +194,10 @@ describe('ws-routes', () => {
   describe('client input', () => {
     it('forwards input messages to session.write()', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const info = vi.spyOn(console, 'info').mockImplementation(() => {});
       try {
         const session = ctx._session;
+        session.isCheckpointActive = true;
 
         ws.send(JSON.stringify({ t: 'i', d: 'ls -la\r' }));
 
@@ -204,6 +206,40 @@ describe('ws-routes', () => {
           expect(session.writeBuffer).toContain('ls -la\r');
           expect(session.cancelCheckpoint).toHaveBeenCalledWith('manual-takeover');
         });
+        expect(info).toHaveBeenCalledWith('[Checkpoint] manual takeover', {
+          sessionId: 'ws-test-session',
+          route: 'ws',
+          inputClass: 'keyboard',
+        });
+        expect(JSON.stringify(info.mock.calls)).not.toContain('ls -la');
+      } finally {
+        info.mockRestore();
+        ws.close();
+      }
+    });
+
+    it.each(['\x1b[I', '\x1b[<0;10;5M', '\x1b[M !!'])('forwards report-only input without takeover', async (input) => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        const session = ctx._session;
+        session.isCheckpointActive = true;
+        ws.send(JSON.stringify({ t: 'i', d: input }));
+        await vi.waitFor(() => expect(session.writeBuffer).toContain(input));
+        expect(session.cancelCheckpoint).not.toHaveBeenCalled();
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('cancels for mixed report and keyboard input', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        const session = ctx._session;
+        session.isCheckpointActive = true;
+        const input = '\x1b[<0;10;5Mx';
+        ws.send(JSON.stringify({ t: 'i', d: input }));
+        await vi.waitFor(() => expect(session.writeBuffer).toContain(input));
+        expect(session.cancelCheckpoint).toHaveBeenCalledWith('manual-takeover');
       } finally {
         ws.close();
       }
@@ -253,6 +289,7 @@ describe('ws-routes', () => {
 
         expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 7 });
         expect(session.writeBuffer).not.toContain('again\r');
+        expect(session.cancelCheckpoint).not.toHaveBeenCalled();
       } finally {
         ws.close();
       }
