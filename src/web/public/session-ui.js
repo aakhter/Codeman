@@ -428,7 +428,8 @@ Object.assign(CodemanApp.prototype, {
     }
 
     try {
-      const mode = this._runMode || 'claude';
+      const validModes = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'];
+      const mode = (options.mode && validModes.includes(options.mode) ? options.mode : null) || this._runMode || 'claude';
       if (mode === 'opencode') {
         return await this.runOpenCode(options);
       }

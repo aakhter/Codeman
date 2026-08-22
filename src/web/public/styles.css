@@ -8747,6 +8747,85 @@ kbd {
   font-weight: 500;
 }
 
+.command-palette-agent-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.45rem;
+  vertical-align: middle;
+}
+
+.command-palette-agent-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  font-size: 0.6rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.command-palette-agent-arrow:hover {
+  color: var(--text);
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.command-palette-agent-label {
+  min-width: 3.2rem;
+  text-align: center;
+  color: var(--accent-hover);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.command-palette-agent-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.35rem;
+  color: var(--accent-hover);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.shortcut-palette-modes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.7rem;
+  margin-top: 0.4rem;
+  padding-left: 0.15rem;
+}
+
+.shortcut-palette-label {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.shortcut-palette-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--text);
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.shortcut-palette-chip input {
+  cursor: pointer;
+}
+
 /* Session Manager modal (COD-121) */
 .session-manager-modal {
   max-width: 720px;

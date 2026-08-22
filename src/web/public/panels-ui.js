@@ -735,6 +735,35 @@ Object.assign(CodemanApp.prototype, {
     return true;
   },
 
+  _getFilteredPaletteModes() {
+    const raw = (typeof this.getPaletteAgentModes === 'function' ? this.getPaletteAgentModes() : null) || ['claude', 'codex', 'opencode'];
+    const isAvailable = typeof this.isCliAvailable === 'function' ? this.isCliAvailable.bind(this) : null;
+    const filtered = isAvailable ? raw.filter((m) => m === 'shell' || isAvailable(m)) : raw;
+    return filtered.length ? filtered : ['claude'];
+  },
+
+  _resetPaletteModeIndex() {
+    const modes = this._getFilteredPaletteModes();
+    const current = this.runMode || this._runMode || 'claude';
+    const idx = modes.indexOf(current);
+    this._commandPaletteModeIndex = idx >= 0 ? idx : 0;
+  },
+
+  _getPaletteMode() {
+    const modes = this._getFilteredPaletteModes();
+    const idx = Number.isFinite(this._commandPaletteModeIndex) ? this._commandPaletteModeIndex : 0;
+    return modes[Math.max(0, Math.min(idx, modes.length - 1))];
+  },
+
+  _cyclePaletteMode(delta) {
+    const modes = this._getFilteredPaletteModes();
+    if (!modes.length) return;
+    const len = modes.length;
+    this._commandPaletteModeIndex = (Number.isFinite(this._commandPaletteModeIndex) ? this._commandPaletteModeIndex : 0) + delta;
+    this._commandPaletteModeIndex = ((this._commandPaletteModeIndex % len) + len) % len;
+    this.renderCommandPalette();
+  },
+
   openCommandPalette() {
     const modal = document.getElementById('commandPaletteModal');
     const search = document.getElementById('commandPaletteSearch');
@@ -742,6 +771,7 @@ Object.assign(CodemanApp.prototype, {
 
     this.closeMobileHeaderUtilities?.();
     this.commandPaletteActiveIndex = 0;
+    this._resetPaletteModeIndex();
     search.value = '';
     modal.classList.add('active');
 
@@ -771,6 +801,18 @@ Object.assign(CodemanApp.prototype, {
     });
 
     search?.addEventListener('keydown', async (e) => {
+      const activeItem = (this.commandPaletteItems || [])[this.commandPaletteActiveIndex || 0];
+      const isNewSessionActive = activeItem?.type === 'new-session';
+      if (e.key === 'ArrowLeft' && isNewSessionActive) {
+        e.preventDefault();
+        this._cyclePaletteMode(-1);
+        return;
+      }
+      if (e.key === 'ArrowRight' && isNewSessionActive) {
+        e.preventDefault();
+        this._cyclePaletteMode(1);
+        return;
+      }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         this.moveCommandPaletteSelection(1);
@@ -801,6 +843,15 @@ Object.assign(CodemanApp.prototype, {
     });
 
     list?.addEventListener?.('click', (e) => {
+      const pickerBtn = e.target?.closest?.('[data-palette-cycle]');
+      if (pickerBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const delta = pickerBtn.dataset.paletteCycle === 'next' ? 1 : -1;
+        const activeItem = (this.commandPaletteItems || [])[this.commandPaletteActiveIndex || 0];
+        if (activeItem?.type === 'new-session') this._cyclePaletteMode(delta);
+        return;
+      }
       const row = e.target?.closest?.('[data-command-index]');
       if (!row) return;
       this.commandPaletteActiveIndex = Number(row.dataset.commandIndex) || 0;
@@ -845,13 +896,14 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _buildCommandPaletteNewSessionItem(query = '') {
-    const mode = this.runMode || this._runMode || 'claude';
-    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi' };
+    const mode = this._getPaletteMode?.() || this.runMode || this._runMode || 'claude';
+    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', shell: 'Shell' };
     const caseName = this._findCommandPaletteCaseMatch(query) || document.getElementById('quickStartCase')?.value || 'testcase';
     return {
       id: 'new-session',
       type: 'new-session',
       caseName,
+      mode,
       title: 'New session',
       subtitle: `Run ${labels[mode] || mode} in ${caseName}`,
     };
@@ -905,16 +957,33 @@ Object.assign(CodemanApp.prototype, {
     this.commandPaletteItems = items;
     this.commandPaletteActiveIndex = Math.max(0, Math.min(this.commandPaletteActiveIndex || 0, items.length - 1));
 
+    const paletteModes = this._getFilteredPaletteModes();
     list.innerHTML = items
       .map((item, index) => {
         const active = index === this.commandPaletteActiveIndex ? ' active' : '';
         const icon = item.type === 'new-session' ? '+' : item.type === 'browse-sessions' ? '≡' : '›';
         const browse = item.type === 'browse-sessions' ? ' command-palette-item--browse' : '';
+        let extra = '';
+        if (item.type === 'new-session') {
+          const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', shell: 'Shell' };
+          const currentMode = item.mode || this._getPaletteMode();
+          const label = labels[currentMode] || currentMode;
+          const showPicker = paletteModes.length > 1;
+          if (showPicker) {
+            extra = ` <span class="command-palette-agent-picker" aria-label="Agent: ${escapeHtml(label)} — use left/right to change">
+              <button type="button" class="command-palette-agent-arrow" data-palette-cycle="prev" aria-label="Previous agent">◀</button>
+              <span class="command-palette-agent-label">${escapeHtml(label)}</span>
+              <button type="button" class="command-palette-agent-arrow" data-palette-cycle="next" aria-label="Next agent">▶</button>
+            </span>`;
+          } else {
+            extra = ` <span class="command-palette-agent-pill">${escapeHtml(label)}</span>`;
+          }
+        }
         return `
           <button class="command-palette-item${active}${browse}" type="button" data-command-index="${index}">
             <span class="command-palette-icon" aria-hidden="true">${icon}</span>
             <span class="command-palette-text">
-              <span class="command-palette-title">${escapeHtml(item.title)}</span>
+              <span class="command-palette-title">${escapeHtml(item.title)}${extra}</span>
               <span class="command-palette-subtitle">${escapeHtml(item.subtitle || '')}</span>
             </span>
           </button>
@@ -970,7 +1039,8 @@ Object.assign(CodemanApp.prototype, {
           caseSelect.value = item.caseName;
         }
       }
-      await this.run();
+      const paletteMode = item.mode || this._getPaletteMode?.() || this.runMode || 'claude';
+      await this.run({ mode: paletteMode });
     }
   },
 
