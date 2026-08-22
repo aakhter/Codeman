@@ -236,7 +236,11 @@ export async function armFirstVisibleObservation(page, token, { timeoutMs = 10_0
         }
       };
       observation.disposable = terminal.onWriteParsed(inspect);
-      observation.timeoutId = setTimeout(() => observation.disposable?.dispose(), deadlineMs);
+      observation.timeoutId = setTimeout(() => {
+        observation.disposable?.dispose();
+        observation.disposable = null;
+        observation.timeoutId = null;
+      }, deadlineMs);
       window.__cod356VisibleObservation = observation;
       inspect();
       return id;
@@ -297,6 +301,15 @@ export async function prepareInputTrialObservation(page, token, options) {
     throw new Error('current-trial visible token was present before input send');
   }
   return armFirstVisibleObservation(page, token, options);
+}
+
+export async function withInputTrialObservation(page, token, operation, options) {
+  const observation = await prepareInputTrialObservation(page, token, options);
+  try {
+    return await operation(observation);
+  } finally {
+    await observation.dispose();
+  }
 }
 
 export async function browserQueueSnapshot(page) {

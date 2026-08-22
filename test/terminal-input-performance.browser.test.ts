@@ -14,7 +14,11 @@ import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { MAX_INPUT_LENGTH } from '../src/config/terminal-limits.js';
-import { armFirstVisibleObservation, prepareInputTrialObservation } from '../scripts/perf/cod-356-browser.mjs';
+import {
+  armFirstVisibleObservation,
+  prepareInputTrialObservation,
+  withInputTrialObservation,
+} from '../scripts/perf/cod-356-browser.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const PROBE = resolve(ROOT, 'scripts/perf/cod-356-input-probe.mjs');
@@ -249,10 +253,6 @@ type TraceCursor = {
 
 async function resetTrace(): Promise<TraceCursor> {
   const counts = await page.evaluate(() => {
-    const app = (window as any).app;
-    // Scope visible convergence to this trial rather than allowing an
-    // identical payload from the preceding transport to remain in scrollback.
-    app.terminal.clear();
     return {
       wsIndex: (window as any).__cod356Wire.ws.length,
       httpIndex: (window as any).__cod356Wire.http.length,
@@ -532,6 +532,31 @@ describe('terminal input real browser/server/probe correlation', () => {
     expect(await page.evaluate(() => (window as any).app._wsSessionId)).toBe(active);
   });
 
+  it('scopes current-trial traces without clearing the shared real-session terminal', async () => {
+    await page.evaluate(() => {
+      const terminal = (window as any).app.terminal;
+      (window as any).__cod356OriginalTerminalClear = terminal.clear.bind(terminal);
+      terminal.clear = () => {
+        throw new Error('shared terminal clear is forbidden');
+      };
+    });
+    try {
+      await expect(resetTrace()).resolves.toEqual({
+        probeIndex: expect.any(Number),
+        wsIndex: expect.any(Number),
+        httpIndex: expect.any(Number),
+        logicalIndex: expect.any(Number),
+        terminalIndex: expect.any(Number),
+      });
+    } finally {
+      await page.evaluate(() => {
+        const terminal = (window as any).app.terminal;
+        terminal.clear = (window as any).__cod356OriginalTerminalClear;
+        delete (window as any).__cod356OriginalTerminalClear;
+      });
+    }
+  });
+
   it('records first-visible convergence before a separately observed xterm drain callback', async () => {
     const before = await resetTrace();
     const input = 'visible-boundary';
@@ -573,35 +598,83 @@ describe('terminal input real browser/server/probe correlation', () => {
   });
 
   it('pre-arms deterministic current-token observation across queued and direct writes', async () => {
-    for (let iteration = 0; iteration < 24; iteration++) {
-      const source = iteration % 2 === 0 ? 'queued-flush' : 'direct-write';
-      const token = `COD356_OBSERVER:${source}:${iteration}`;
-      await page.evaluate(() => (window as any).app.terminal.clear());
-      const observation = await armFirstVisibleObservation(page, token);
-      const writeStartedAt = await page.evaluate(
-        ({ value, selectedSource }) => {
-          const app = (window as any).app;
-          const startedAt = performance.now();
-          if (selectedSource === 'queued-flush') {
-            app.pendingWrites.push(value);
-            app.flushPendingWrites();
-          } else {
-            app.terminal.write(value);
-          }
-          return startedAt;
-        },
-        { value: token, selectedSource: source }
-      );
-      const detectedAt = await observation.wait();
-      expect(detectedAt).toBeGreaterThanOrEqual(writeStartedAt);
-      expect(await terminalContains(token)).toBe(true);
-      await observation.dispose();
+    const isolatedPage = await context.newPage();
+    try {
+      await isolatedPage.setContent('<div id="terminal"></div>');
+      await isolatedPage.addScriptTag({ url: `${baseUrl}/vendor/xterm.min.js` });
+      await isolatedPage.evaluate(() => {
+        const terminal = new (window as any).Terminal({ cols: 80, rows: 24 });
+        terminal.open(document.getElementById('terminal'));
+        (window as any).app = {
+          terminal,
+          pendingWrites: [] as string[],
+          flushPendingWrites() {
+            const joined = this.pendingWrites.join('');
+            this.pendingWrites = [];
+            this.terminal.write(joined);
+          },
+        };
+      });
+      for (let iteration = 0; iteration < 24; iteration++) {
+        const source = iteration % 2 === 0 ? 'queued-flush' : 'direct-write';
+        const token = `COD356_OBSERVER:${source}:${iteration}`;
+        const observation = await armFirstVisibleObservation(isolatedPage, token);
+        const writeStartedAt = await isolatedPage.evaluate(
+          ({ value, selectedSource }) => {
+            const app = (window as any).app;
+            const startedAt = performance.now();
+            if (selectedSource === 'queued-flush') {
+              app.pendingWrites.push(value);
+              app.flushPendingWrites();
+            } else {
+              app.terminal.write(value);
+            }
+            return startedAt;
+          },
+          { value: token, selectedSource: source }
+        );
+        const detectedAt = await observation.wait();
+        expect(detectedAt).toBeGreaterThanOrEqual(writeStartedAt);
+        expect(
+          await isolatedPage.evaluate((value) => {
+            const buffer = (window as any).app.terminal.buffer.active;
+            let rendered = '';
+            for (let row = 0; row < buffer.length; row++) {
+              rendered += buffer.getLine(row)?.translateToString(false) ?? '';
+            }
+            return rendered.includes(value);
+          }, token)
+        ).toBe(true);
+        expect(
+          await isolatedPage.evaluate(() => ({
+            listenerRetained: Boolean((window as any).__cod356VisibleObservation?.disposable),
+            timerRetained: Boolean((window as any).__cod356VisibleObservation?.timeoutId),
+          }))
+        ).toEqual({ listenerRetained: false, timerRetained: false });
+      }
+
+      await expect(
+        withInputTrialObservation(isolatedPage, 'COD356_OBSERVER:cleanup-failure', async () => {
+          throw new Error('intentional post-arm failure');
+        })
+      ).rejects.toThrow('intentional post-arm failure');
       expect(
-        await page.evaluate(() => ({
+        await isolatedPage.evaluate(() => ({
           listenerRetained: Boolean((window as any).__cod356VisibleObservation?.disposable),
           timerRetained: Boolean((window as any).__cod356VisibleObservation?.timeoutId),
         }))
       ).toEqual({ listenerRetained: false, timerRetained: false });
+
+      await armFirstVisibleObservation(isolatedPage, 'COD356_OBSERVER:timeout-cleanup', { timeoutMs: 20 });
+      await isolatedPage.waitForTimeout(50);
+      expect(
+        await isolatedPage.evaluate(() => ({
+          listenerRetained: Boolean((window as any).__cod356VisibleObservation?.disposable),
+          timerRetained: Boolean((window as any).__cod356VisibleObservation?.timeoutId),
+        }))
+      ).toEqual({ listenerRetained: false, timerRetained: false });
+    } finally {
+      await isolatedPage.close();
     }
   });
 

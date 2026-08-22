@@ -551,55 +551,94 @@ async function runBrowserSample({
       const expectedBase64 = expected.toString('base64');
       const expectedDataHash = await page.evaluate((data) => window.__cod356HashText(data), input);
       const visibleToken = `COD356_ECHO:${expectedBase64}`;
-      const visibleObservation = await browserTelemetry.prepareInputTrialObservation(page, visibleToken);
-      const queueAtSend = await browserTelemetry.browserQueueSnapshot(page);
-      const sendStart = performance.now();
-      await page.evaluate(({ id, data }) => window.app._sendInputAsync(id, data), { id: targetSessionId, data: input });
-      const inputSendMs = performance.now() - sendStart;
-      const sentFrame = await page
-        .waitForFunction(
-          (dataHash) =>
-            [...window.__cod356.webSocketSends]
-              .reverse()
-              .find((entry) => entry.frame?.t === 'i' && entry.frame?.dataHash === dataHash),
-          expectedDataHash,
-          { timeout: 5_000 }
-        )
-        .then((handle) => handle.jsonValue());
-      if (!Number.isInteger(sentFrame?.frame?.seq))
-        throw new Error('browser did not serialize a sequenced input frame');
-      const sequence = sentFrame.frame.seq;
-      let receivedEvents = [];
-      const probeDeadline = Date.now() + 10_000;
-      while (Date.now() < probeDeadline) {
-        const events = await browserTelemetry.readProbeEvents(probeLog);
-        receivedEvents = events.slice(priorEvents.length).filter((event) => event.type === 'stdin');
-        if (Buffer.concat(receivedEvents.map((event) => Buffer.from(event.base64, 'base64'))).includes(expected)) break;
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-      }
-      const probeReceiptMs = performance.now() - sendStart;
-      const probeEvent = receivedEvents[0];
-      if (!Number.isFinite(probeEvent?.timestampEpochMs)) throw new Error('probe receipt epoch timestamp unavailable');
-      let probeOutputEvent = null;
-      const outputDeadline = Date.now() + 2_000;
-      while (!probeOutputEvent && Date.now() < outputDeadline) {
-        probeOutputEvent = (await browserTelemetry.readProbeEvents(probeLog))
-          .slice(priorEvents.length)
-          .find((event) => event.type === 'stdout-frame' && event.inputId === probeEvent.id);
-        if (!probeOutputEvent) await new Promise((resolveWait) => setTimeout(resolveWait, 5));
-      }
-      if (!Number.isFinite(probeOutputEvent?.timestampEpochMs)) {
-        throw new Error('probe framed-output timestamp unavailable');
-      }
-      const ack = await page
-        .waitForFunction((seq) => window.__cod356.inputAcks.find((entry) => entry.seq === seq), sequence, {
-          timeout: 10_000,
-        })
-        .then((handle) => handle.jsonValue());
-      const browserAckMs = ack.timestamp - sentFrame.timestamp;
-      const queueAtAck = await browserTelemetry.browserQueueSnapshot(page);
-      const visibleDetectedAt = await visibleObservation.wait();
-      await visibleObservation.dispose();
+      const observed = await browserTelemetry.withInputTrialObservation(
+        page,
+        visibleToken,
+        async (visibleObservation) => {
+          const queueAtSend = await browserTelemetry.browserQueueSnapshot(page);
+          const sendStart = performance.now();
+          await page.evaluate(({ id, data }) => window.app._sendInputAsync(id, data), {
+            id: targetSessionId,
+            data: input,
+          });
+          const inputSendMs = performance.now() - sendStart;
+          const sentFrame = await page
+            .waitForFunction(
+              (dataHash) =>
+                [...window.__cod356.webSocketSends]
+                  .reverse()
+                  .find((entry) => entry.frame?.t === 'i' && entry.frame?.dataHash === dataHash),
+              expectedDataHash,
+              { timeout: 5_000 }
+            )
+            .then((handle) => handle.jsonValue());
+          if (!Number.isInteger(sentFrame?.frame?.seq)) {
+            throw new Error('browser did not serialize a sequenced input frame');
+          }
+          const sequence = sentFrame.frame.seq;
+          let receivedEvents = [];
+          const probeDeadline = Date.now() + 10_000;
+          while (Date.now() < probeDeadline) {
+            const events = await browserTelemetry.readProbeEvents(probeLog);
+            receivedEvents = events.slice(priorEvents.length).filter((event) => event.type === 'stdin');
+            if (Buffer.concat(receivedEvents.map((event) => Buffer.from(event.base64, 'base64'))).includes(expected))
+              break;
+            await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+          }
+          const probeReceiptMs = performance.now() - sendStart;
+          const probeEvent = receivedEvents[0];
+          if (!Number.isFinite(probeEvent?.timestampEpochMs)) {
+            throw new Error('probe receipt epoch timestamp unavailable');
+          }
+          let probeOutputEvent = null;
+          const outputDeadline = Date.now() + 2_000;
+          while (!probeOutputEvent && Date.now() < outputDeadline) {
+            probeOutputEvent = (await browserTelemetry.readProbeEvents(probeLog))
+              .slice(priorEvents.length)
+              .find((event) => event.type === 'stdout-frame' && event.inputId === probeEvent.id);
+            if (!probeOutputEvent) await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+          }
+          if (!Number.isFinite(probeOutputEvent?.timestampEpochMs)) {
+            throw new Error('probe framed-output timestamp unavailable');
+          }
+          const ack = await page
+            .waitForFunction((seq) => window.__cod356.inputAcks.find((entry) => entry.seq === seq), sequence, {
+              timeout: 10_000,
+            })
+            .then((handle) => handle.jsonValue());
+          const browserAckMs = ack.timestamp - sentFrame.timestamp;
+          const queueAtAck = await browserTelemetry.browserQueueSnapshot(page);
+          const visibleDetectedAt = await visibleObservation.wait();
+          return {
+            queueAtSend,
+            inputSendMs,
+            sentFrame,
+            sequence,
+            receivedEvents,
+            probeReceiptMs,
+            probeEvent,
+            probeOutputEvent,
+            ack,
+            browserAckMs,
+            queueAtAck,
+            visibleDetectedAt,
+          };
+        }
+      );
+      const {
+        queueAtSend,
+        inputSendMs,
+        sentFrame,
+        sequence,
+        probeReceiptMs,
+        probeEvent,
+        probeOutputEvent,
+        ack,
+        browserAckMs,
+        queueAtAck,
+        visibleDetectedAt,
+      } = observed;
+      let { receivedEvents } = observed;
       await page.waitForFunction(
         () => window.app.pendingWrites.length === 0 && window.app.writeFrameScheduled === false,
         undefined,
