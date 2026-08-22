@@ -58,7 +58,12 @@ import {
 } from '../scripts/perf/cod-356-provenance.mjs';
 import { proveReachedServerOwnership } from '../scripts/perf/cod-356-safety.mjs';
 import { runFixedOfferSchedule, summarizeFixedOfferSchedule } from '../scripts/perf/cod-356-scheduler.mjs';
-import { assertBrowserSampleClean, prepareInteractiveTargetSession } from '../scripts/perf/cod-356-browser.mjs';
+import {
+  assertBrowserSampleClean,
+  prepareInteractiveTargetSession,
+  resolveAuthoritativeRunningPid,
+  waitForAuthoritativeSessionReady,
+} from '../scripts/perf/cod-356-browser.mjs';
 
 describe('COD-356 benchmark policy', () => {
   const valid = {
@@ -152,23 +157,105 @@ describe('COD-356 benchmark policy', () => {
 });
 
 describe('COD-356 browser lifecycle safety', () => {
+  it('repairs cached pid=null only when authoritative state proves the exact target is running', () => {
+    expect(
+      resolveAuthoritativeRunningPid('measured-target', {
+        id: 'measured-target',
+        pid: 4321,
+        status: 'busy',
+      })
+    ).toBe(4321);
+  });
+
+  it('leaves a genuinely stopped target eligible for the real attach path', () => {
+    expect(
+      resolveAuthoritativeRunningPid('measured-target', {
+        id: 'measured-target',
+        pid: null,
+        status: 'idle',
+      })
+    ).toBeNull();
+  });
+
+  it('never masks a busy response proven for a foreign or wrong target', () => {
+    expect(
+      resolveAuthoritativeRunningPid('measured-target', {
+        id: 'foreign-target',
+        pid: 4321,
+        status: 'busy',
+      })
+    ).toBeNull();
+  });
+
+  it('waits for exact authoritative process readiness before measurement', async () => {
+    const states = [
+      { id: 'measured-target', pid: null, status: 'busy' },
+      { id: 'measured-target', pid: 4321, status: 'busy' },
+    ];
+    const fetchState = vi.fn(async () => states.shift());
+    await expect(
+      waitForAuthoritativeSessionReady(fetchState, 'measured-target', { timeoutMs: 100, intervalMs: 0 })
+    ).resolves.toMatchObject({ id: 'measured-target', pid: 4321 });
+    expect(fetchState).toHaveBeenCalledTimes(2);
+  });
+
   it('waits for the intermediate interactive WebSocket before switching to the measured target', async () => {
-    const calls: string[] = [];
+    const calls: Array<string | { sessionId: string; authoritativeRunningPid: number | null }> = [];
     const page = {
-      evaluate: vi.fn(async (_callback, sessionId: string) => calls.push(`select:${sessionId}`)),
+      evaluate: vi.fn(async (_callback, selection) => calls.push(selection)),
       waitForFunction: vi.fn(async (_callback, sessionId: string) => calls.push(`ready:${sessionId}`)),
     };
 
     await prepareInteractiveTargetSession(page, {
       interactiveSessionId: 'interactive-fixture',
       targetSessionId: 'measured-target',
+      authoritativeSessions: {
+        'interactive-fixture': { id: 'interactive-fixture', pid: null, status: 'busy' },
+        'measured-target': { id: 'measured-target', pid: null, status: 'busy' },
+      },
+      waitForAuthoritativeReady: async (sessionId: string) => {
+        calls.push(`server-ready:${sessionId}`);
+        return {
+          id: sessionId,
+          pid: sessionId === 'interactive-fixture' ? 2001 : 2002,
+          status: 'busy',
+        };
+      },
     });
 
     expect(calls).toEqual([
-      'select:interactive-fixture',
+      'server-ready:interactive-fixture',
+      { sessionId: 'interactive-fixture', authoritativeRunningPid: 2001 },
       'ready:interactive-fixture',
-      'select:measured-target',
+      'server-ready:measured-target',
+      { sessionId: 'measured-target', authoritativeRunningPid: 2002 },
       'ready:measured-target',
+    ]);
+  });
+
+  it('attaches a genuinely stopped target before waiting for authoritative readiness', async () => {
+    const calls: Array<string | { sessionId: string; authoritativeRunningPid: number | null }> = [];
+    const page = {
+      evaluate: vi.fn(async (_callback, selection) => calls.push(selection)),
+      waitForFunction: vi.fn(async (_callback, sessionId: string) => calls.push(`ready:${sessionId}`)),
+    };
+
+    await prepareInteractiveTargetSession(page, {
+      interactiveSessionId: null,
+      targetSessionId: 'stopped-target',
+      authoritativeSessions: {
+        'stopped-target': { id: 'stopped-target', pid: null, status: 'idle' },
+      },
+      waitForAuthoritativeReady: async (sessionId: string) => {
+        calls.push(`server-ready:${sessionId}`);
+        return { id: sessionId, pid: 3001, status: 'busy' };
+      },
+    });
+
+    expect(calls).toEqual([
+      { sessionId: 'stopped-target', authoritativeRunningPid: null },
+      'ready:stopped-target',
+      'server-ready:stopped-target',
     ]);
   });
 

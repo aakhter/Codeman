@@ -477,6 +477,7 @@ async function attachInputCorrelationInstrumentation(page) {
 async function runBrowserSample({
   browser,
   baseUrl,
+  auth,
   credentials,
   sessionIds,
   applicationCondition,
@@ -494,7 +495,10 @@ async function runBrowserSample({
   page.on('pageerror', (error) => pageErrors.push(error.message));
   page.on('console', (message) => {
     if ((message.type() === 'error' || message.type() === 'warning') && SERIOUS_CONSOLE.test(message.text())) {
-      seriousConsoleErrors.push(`${message.type()}: ${message.text()}`);
+      const location = message.location();
+      seriousConsoleErrors.push(
+        `${message.type()}: ${message.text()}${location.url ? ` (${location.url}:${location.lineNumber})` : ''}`
+      );
     }
   });
   await browserTelemetry.installPageInstrumentation(page);
@@ -513,7 +517,25 @@ async function runBrowserSample({
         : selectInteractiveFixture(sessionIds, sampleIndex)
       : null;
   const terminalStart = performance.now();
-  await browserTelemetry.prepareInteractiveTargetSession(page, { interactiveSessionId, targetSessionId });
+  const preparationIds = [...new Set([interactiveSessionId, targetSessionId].filter(Boolean))];
+  const fetchAuthoritativeSession = async (sessionId) => {
+    const { payload } = await api(baseUrl, auth, 'GET', `/api/sessions/${encodeURIComponent(sessionId)}`);
+    return payload;
+  };
+  const authoritativeSessions = Object.fromEntries(
+    await Promise.all(
+      preparationIds.map(async (sessionId) => {
+        return [sessionId, await fetchAuthoritativeSession(sessionId)];
+      })
+    )
+  );
+  await browserTelemetry.prepareInteractiveTargetSession(page, {
+    interactiveSessionId,
+    targetSessionId,
+    authoritativeSessions,
+    waitForAuthoritativeReady: (sessionId) =>
+      browserTelemetry.waitForAuthoritativeSessionReady(fetchAuthoritativeSession, sessionId),
+  });
   const firstTerminalReadyMs = performance.now() - terminalStart;
   await attachInputCorrelationInstrumentation(page);
   if (!selection.input) {

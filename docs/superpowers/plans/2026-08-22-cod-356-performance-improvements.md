@@ -371,6 +371,10 @@ Keep the change only if byte identity remains exact and the targeted median or p
 
 ## Task 6: Profile and defer noncritical frontend startup work
 
+**Rejected after measurement:** the only dependency-safe split failed the app-ready/long-task retention gate and was
+explicitly reverted. The negative evidence is preserved; do not retry Task 6 without a new profile-proven candidate and
+an updated plan.
+
 **Files:**
 
 - Create: `scripts/perf/cod-356-asset-report.mjs`

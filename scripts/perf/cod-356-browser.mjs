@@ -1,8 +1,45 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export async function selectSessionAndWaitForTerminal(page, sessionId) {
-  await page.evaluate((id) => window.app.selectSession(id), sessionId);
+export function resolveAuthoritativeRunningPid(sessionId, authoritativeSession) {
+  if (authoritativeSession?.id !== sessionId) return null;
+  if (!['idle', 'busy'].includes(authoritativeSession.status)) return null;
+  return Number.isSafeInteger(authoritativeSession.pid) && authoritativeSession.pid > 0
+    ? authoritativeSession.pid
+    : null;
+}
+
+export async function waitForAuthoritativeSessionReady(
+  fetchState,
+  sessionId,
+  { timeoutMs = 20_000, intervalMs = 50, signal } = {}
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() <= deadline) {
+    signal?.throwIfAborted();
+    lastState = await fetchState(sessionId);
+    if (resolveAuthoritativeRunningPid(sessionId, lastState) !== null) return lastState;
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+  throw new Error(`authoritative session ${sessionId} did not become process-ready: ${JSON.stringify(lastState)}`);
+}
+
+export async function selectSessionAndWaitForTerminal(page, sessionId, authoritativeSession) {
+  const authoritativeRunningPid = resolveAuthoritativeRunningPid(sessionId, authoritativeSession);
+  await page.evaluate(
+    ({ sessionId: id, authoritativeRunningPid: runningPid }) => {
+      const cached = window.app.sessions.get(id);
+      // WebServer's 1s light-state cache can carry pid=null from immediately
+      // before this benchmark fixture attached. Repair only that exact stale
+      // field, and only from the uncached per-session API state fetched by the
+      // harness. A genuinely stopped or foreign session still takes the real
+      // attach path in selectSession().
+      if (cached?.pid === null && runningPid !== null) cached.pid = runningPid;
+      return window.app.selectSession(id);
+    },
+    { sessionId, authoritativeRunningPid }
+  );
   await page.waitForFunction(
     (id) =>
       window.app.activeSessionId === id && Boolean(window.app.terminal?.buffer?.active) && window.app._wsReady === true,
@@ -11,9 +48,29 @@ export async function selectSessionAndWaitForTerminal(page, sessionId) {
   );
 }
 
-export async function prepareInteractiveTargetSession(page, { interactiveSessionId, targetSessionId }) {
-  if (interactiveSessionId) await selectSessionAndWaitForTerminal(page, interactiveSessionId);
-  await selectSessionAndWaitForTerminal(page, targetSessionId);
+export async function prepareInteractiveTargetSession(
+  page,
+  { interactiveSessionId, targetSessionId, authoritativeSessions = {}, waitForAuthoritativeReady }
+) {
+  const prepare = async (sessionId) => {
+    const initialState = authoritativeSessions[sessionId];
+    const attachAlreadyInProgress =
+      initialState?.id === sessionId && initialState.status === 'busy' && initialState.pid === null;
+    if (attachAlreadyInProgress) {
+      const readyState = (await waitForAuthoritativeReady?.(sessionId)) ?? initialState;
+      await selectSessionAndWaitForTerminal(page, sessionId, readyState);
+      return;
+    }
+    await selectSessionAndWaitForTerminal(page, sessionId, initialState);
+    if (resolveAuthoritativeRunningPid(sessionId, initialState) === null) {
+      await waitForAuthoritativeReady?.(sessionId);
+    }
+  };
+
+  if (interactiveSessionId) {
+    await prepare(interactiveSessionId);
+  }
+  await prepare(targetSessionId);
 }
 
 export function assertBrowserSampleClean({ pageErrors, seriousConsoleErrors }) {
