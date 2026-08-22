@@ -420,10 +420,12 @@ describe('COD-356 benchmark statistics', () => {
         outputFrames: [
           { timestamp: 8, correlationTokens: ['COD356_ECHO:current'] },
           { timestamp: 9, correlationTokens: ['COD356_ECHO:adjacent'] },
+          { timestamp: 12, correlationTokens: ['COD356_ECHO:current'] },
         ],
         terminalReceipts: [
           { startedAt: 8.5, correlationTokens: ['COD356_ECHO:current'] },
           { startedAt: 9.5, correlationTokens: ['COD356_ECHO:adjacent'] },
+          { startedAt: 12.5, correlationTokens: ['COD356_ECHO:current'] },
         ],
       })
     ).toEqual({

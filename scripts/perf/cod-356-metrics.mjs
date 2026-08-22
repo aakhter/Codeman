@@ -322,9 +322,13 @@ export function selectCorrelatedOutputBoundaries({ token, writes, outputFrames, 
     (Array.isArray(entry?.correlationTokens) && entry.correlationTokens.includes(token));
   const matchingWrite = writes.findLast(hasToken);
   if (!matchingWrite) throw new Error('exact current-token terminal write unavailable');
-  const matchingOutput = outputFrames.findLast(hasToken);
+  const matchingOutput = outputFrames.findLast(
+    (entry) => hasToken(entry) && entry.timestamp <= matchingWrite.startedAt
+  );
   if (!matchingOutput) throw new Error('exact current-token output frame unavailable');
-  const terminalReceipt = terminalReceipts.findLast(hasToken);
+  const terminalReceipt = terminalReceipts.findLast(
+    (entry) => hasToken(entry) && entry.startedAt <= matchingWrite.startedAt
+  );
   if (!terminalReceipt) throw new Error('exact current-token terminal receipt unavailable');
   return { matchingWrite, matchingOutput, terminalReceipt };
 }
