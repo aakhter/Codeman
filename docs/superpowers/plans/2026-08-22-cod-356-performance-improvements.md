@@ -260,7 +260,7 @@ Require zero synchronous activity captures, no per-session poll overlap, no more
 - Create: `test/terminal-input-performance.browser.test.ts`
 - Modify: `config/test-suites.ts`
 
-- [ ] **Step 1: Add failing deterministic regression cases**
+- [x] **Step 1: Add failing deterministic regression cases**
 
 Cover these exact classes through both WebSocket and HTTP fallback:
 
@@ -276,7 +276,7 @@ Cover these exact classes through both WebSocket and HTTP fallback:
 
 The browser test must compare browser logical input records, serialized WebSocket frames, probe-received PTY bytes, and visible terminal convergence. It must identify which layer duplicated or lost data rather than relying on screenshots.
 
-- [ ] **Step 2: Run focused tests and capture RED or the confirmed invariant**
+- [x] **Step 2: Run focused tests and capture RED or the confirmed invariant**
 
 ```bash
 npm test -- test/input-send-order.test.ts test/reliable-input-dedup.test.ts test/routes/session-input-delivery.test.ts
@@ -285,18 +285,18 @@ npm run test:browser -- test/codex-predictive-echo.test.ts test/terminal-input-p
 
 If every new byte-identity test passes, record that repeated characters are a rendering/convergence or starvation symptom and do not change transport semantics speculatively.
 
-- [ ] **Step 3: Add correlation measurements without production hot-path logging**
+- [x] **Step 3: Add correlation measurements without production hot-path logging**
 
 Use Playwright init scripts to wrap browser input, `WebSocket.send`, ACK handling, and terminal output receipt. The disposable input probe provides authoritative PTY byte timestamps and framed output. Store correlation data only in benchmark artifacts; production logging stays unchanged.
 
-- [ ] **Step 4: Commit the input evidence and regressions**
+- [x] **Step 4: Commit the input evidence and regressions**
 
 ```bash
 git add scripts/perf test/input-send-order.test.ts test/reliable-input-dedup.test.ts test/routes/session-input-delivery.test.ts test/codex-predictive-echo.test.ts test/terminal-input-performance.browser.test.ts config/test-suites.ts
 git commit -m "test(input): COD-356 trace terminal byte delivery"
 ```
 
-- [ ] **Step 5: Run and commit the input-only checkpoint evidence**
+- [x] **Step 5: Run and commit the input-only checkpoint evidence**
 
 ```bash
 COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
