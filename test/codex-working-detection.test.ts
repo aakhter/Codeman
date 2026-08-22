@@ -6,6 +6,7 @@ import {
   Session,
 } from '../src/session.js';
 import { formatPaneSnapshot } from '../src/tmux-manager.js';
+import { workingFramePollCoordinator } from '../src/working-frame-poll-coordinator.js';
 
 describe('Codex working detection', () => {
   it('detects Codex TUI working frames', () => {
@@ -783,14 +784,29 @@ describe('checkpoint prompt observations', () => {
 describe('Codex idle transition (COD-175)', () => {
   let session: Session;
   let frame: string | null;
+  let asyncCapture: ReturnType<typeof vi.fn>;
+  let syncCapture: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    session = new Session({ id: 'codex-idle-confirmation', workingDir: '/tmp', mode: 'codex' });
     frame = null;
-    const internals = session as unknown as { _mux: unknown; _muxSession: unknown };
-    internals._mux = { captureActivePaneBuffer: vi.fn(() => frame) };
+    const internals = session as unknown as {
+      _mux: unknown;
+      _muxSession: unknown;
+      _startWorkingFramePoller(): void;
+    };
+    asyncCapture = vi.fn(async () => frame);
+    syncCapture = vi.fn(() => {
+      throw new Error('idle confirmation must not use synchronous capture');
+    });
+    internals._mux = {
+      capturePaneTextAsync: asyncCapture,
+      captureActivePaneBuffer: syncCapture,
+      killSession: vi.fn(async () => false),
+    };
     internals._muxSession = { muxName: 'codeman-test1234' };
+    internals._startWorkingFramePoller();
   });
 
   afterEach(async () => {
@@ -802,7 +818,7 @@ describe('Codex idle transition (COD-175)', () => {
     (session as unknown as { _detectInteractiveActivity(data: string): void })._detectInteractiveActivity(data);
   }
 
-  it('clears isWorking when the rendered composer confirms turn end', () => {
+  it('clears isWorking exactly once when async rendered capture confirms turn end', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
@@ -811,19 +827,40 @@ describe('Codex idle transition (COD-175)', () => {
     expect(session.status).toBe('busy');
 
     // frames keep ticking — idle timer keeps re-arming
-    vi.advanceTimersByTime(1000);
+    await vi.advanceTimersByTimeAsync(1000);
     feed('• Working (3s • esc to interrupt)');
-    vi.advanceTimersByTime(4000);
+    await vi.advanceTimersByTimeAsync(4000);
     expect(session.isWorking).toBe(true);
     expect(idleEvents.length).toBe(0);
 
     // A rendered composer positively confirms the turn ended.
     frame = '› Type your next prompt';
-    vi.advanceTimersByTime(6000);
+    await vi.advanceTimersByTimeAsync(6000);
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
     expect(idleEvents.length).toBe(1);
     expect(idleEvents[0]).toEqual({ reason: 'turn-end' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(idleEvents).toHaveLength(1);
+    expect(asyncCapture).toHaveBeenCalled();
+    expect(syncCapture).not.toHaveBeenCalled();
+  });
+
+  it('re-arms idle confirmation for working and unknown async frames', async () => {
+    const idleEvents: Array<{ reason?: string }> = [];
+    session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
+    feed('• Working (2s • esc to interrupt)');
+
+    frame = '• Working (7s • esc to interrupt)';
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(session.isWorking).toBe(true);
+    frame = 'tool output without prompt';
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(session.isWorking).toBe(true);
+    frame = '› next prompt';
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(session.isWorking).toBe(false);
+    expect(idleEvents).toEqual([{ reason: 'turn-end' }]);
   });
 
   it('clears stale working state before labeling a restarted CLI as initially ready', () => {
@@ -845,10 +882,10 @@ describe('Codex idle transition (COD-175)', () => {
     expect(idleEvents).toEqual([{ reason: 'initial-ready' }]);
   });
 
-  it('re-enters working on the next turn after going idle', () => {
+  it('re-enters working on the next turn after going idle', async () => {
     feed('• Working (2s • esc to interrupt)');
     frame = '› Type your next prompt';
-    vi.advanceTimersByTime(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(session.isWorking).toBe(false);
 
     feed('• Working (1s • esc to interrupt)');
@@ -886,6 +923,8 @@ describe('Codex idle transition (COD-175)', () => {
 describe('COD-181 remote working-frame poller', () => {
   let session: Session;
   let frame: string | null;
+  let asyncCapture: ReturnType<typeof vi.fn>;
+  let syncCapture: ReturnType<typeof vi.fn>;
 
   const WORKING_FRAME =
     '\x1b[1m•\x1b[0m \x1b[1mWorking\x1b[0m (3m 12s • esc to interrupt) · 1 background terminal running\r\n' +
@@ -895,6 +934,7 @@ describe('COD-181 remote working-frame poller', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     session = new Session({
+      id: 'remote-codex-poller',
       workingDir: '/tmp',
       mode: 'codex',
       remote: { hostId: 'mac-mini', label: 'mac-mini', host: '10.0.0.9', username: 'u', remotePath: '/tmp' },
@@ -905,7 +945,15 @@ describe('COD-181 remote working-frame poller', () => {
       _muxSession: unknown;
       _startWorkingFramePoller(): void;
     };
-    s._mux = { captureActivePaneBuffer: vi.fn(() => frame), killSession: vi.fn(async () => false) };
+    asyncCapture = vi.fn(async () => frame);
+    syncCapture = vi.fn(() => {
+      throw new Error('activity polling must not use synchronous capture');
+    });
+    s._mux = {
+      capturePaneTextAsync: asyncCapture,
+      captureActivePaneBuffer: syncCapture,
+      killSession: vi.fn(async () => false),
+    };
     s._muxSession = { muxName: 'codeman-test1234' };
     s._startWorkingFramePoller();
   });
@@ -915,136 +963,273 @@ describe('COD-181 remote working-frame poller', () => {
     vi.useRealTimers();
   });
 
-  it('flips to busy from a rendered Working frame (SGR escapes inside the line)', () => {
+  it('flips to busy from a rendered Working frame (SGR escapes inside the line)', async () => {
     const workingEvents: number[] = [];
     session.on('working', () => workingEvents.push(Date.now()));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100); // one poll tick
+    await vi.advanceTimersByTimeAsync(4_200); // one staggered poll tick
     expect(session.isWorking).toBe(true);
     expect(session.status).toBe('busy');
     expect(workingEvents.length).toBe(1);
+    expect(asyncCapture).toHaveBeenCalled();
+    expect(syncCapture).not.toHaveBeenCalled();
   });
 
-  it('stays busy while the frame keeps showing Working (polls re-arm the quiet window)', () => {
+  it('stays busy while the frame keeps showing Working (polls re-arm the quiet window)', async () => {
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     expect(session.isWorking).toBe(true);
     // 30 more seconds of a long turn — well past the 5s quiet window, but each
     // 2s poll sees the Working line and re-arms it.
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(session.isWorking).toBe(true);
   });
 
-  it('flips to idle via the quiet window once the Working line disappears', () => {
+  it('flips to idle via the quiet window once the Working line disappears', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(4_200);
+    await vi.advanceTimersByTimeAsync(4_200);
     expect(session.isWorking).toBe(true);
 
     frame = IDLE_FRAME;
-    vi.advanceTimersByTime(7_000); // > EXTERNAL_CLI_IDLE_DELAY_MS with no positive polls
+    await vi.advanceTimersByTimeAsync(7_000); // > EXTERNAL_CLI_IDLE_DELAY_MS with no positive polls
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
     expect(idleEvents.length).toBe(1);
     expect(idleEvents[0]).toEqual({ reason: 'turn-end' });
   });
 
-  it('stays busy across quiet windows while the current Codex layout still says Working', () => {
+  it('stays busy across quiet windows while the current Codex layout still says Working', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     frame = '• Working (31)\n› retained prompt';
 
-    vi.advanceTimersByTime(20_000);
+    await vi.advanceTimersByTimeAsync(20_000);
 
     expect(session.isWorking).toBe(true);
     expect(session.status).toBe('busy');
     expect(idleEvents).toEqual([]);
   });
 
-  it('stays busy across quiet windows when the rendered state is unknown', () => {
+  it('stays busy across quiet windows when the rendered state is unknown', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     frame = 'tool output with no current Codex UI';
 
-    vi.advanceTimersByTime(20_000);
+    await vi.advanceTimersByTimeAsync(20_000);
 
     expect(session.isWorking).toBe(true);
     expect(session.status).toBe('busy');
     expect(idleEvents).toEqual([]);
   });
 
-  it('stays busy across quiet windows when pane capture is unavailable', () => {
+  it('stays busy across quiet windows when pane capture is unavailable', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     frame = null;
 
-    vi.advanceTimersByTime(20_000);
+    await vi.advanceTimersByTimeAsync(20_000);
 
     expect(session.isWorking).toBe(true);
     expect(session.status).toBe('busy');
     expect(idleEvents).toEqual([]);
   });
 
-  it('emits exactly one turn-end idle for a rendered composer', () => {
+  it('emits exactly one turn-end idle for a rendered composer', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     frame = '› Type your next prompt';
 
-    vi.advanceTimersByTime(20_000);
+    await vi.advanceTimersByTimeAsync(20_000);
 
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
     expect(idleEvents).toEqual([{ reason: 'turn-end' }]);
   });
 
-  it('emits exactly one turn-end idle for a rendered numbered-choice dialog', () => {
+  it('emits exactly one turn-end idle for a rendered numbered-choice dialog', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     frame = 'Allow this command?\n  1. Yes\n❯ 2. No';
 
-    vi.advanceTimersByTime(20_000);
+    await vi.advanceTimersByTimeAsync(20_000);
 
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
     expect(idleEvents).toEqual([{ reason: 'turn-end' }]);
   });
 
-  it('lets working evidence override a retained composer at the timer boundary', () => {
+  it('lets working evidence override a retained composer at the timer boundary', async () => {
     const idleEvents: Array<{ reason?: string }> = [];
     session.on('idle', (info?: { reason?: string }) => idleEvents.push(info ?? {}));
 
     frame = WORKING_FRAME;
-    vi.advanceTimersByTime(2_100);
+    await vi.advanceTimersByTimeAsync(4_200);
     frame = '• Working (31)\n› retained prompt';
 
-    vi.advanceTimersByTime(5_100);
+    await vi.advanceTimersByTimeAsync(5_100);
 
     expect(session.isWorking).toBe(true);
     expect(session.status).toBe('busy');
     expect(idleEvents).toEqual([]);
   });
 
-  it('never flips busy from an idle frame', () => {
+  it('never flips busy from an idle frame', async () => {
     frame = IDLE_FRAME;
-    vi.advanceTimersByTime(20_000);
+    await vi.advanceTimersByTimeAsync(20_000);
     expect(session.isWorking).toBe(false);
+  });
+
+  it('ignores a late activity capture after mux replacement and poll generation change', async () => {
+    let resolve!: (value: string | null) => void;
+    const pending = new Promise<string | null>((done) => {
+      resolve = done;
+    });
+    asyncCapture.mockImplementationOnce(() => pending);
+    const internals = session as unknown as { _muxSession: unknown; _startWorkingFramePoller(): void };
+
+    await vi.advanceTimersByTimeAsync(4_200);
+    internals._muxSession = { muxName: 'codeman-replacement' };
+    internals._startWorkingFramePoller();
+    resolve(WORKING_FRAME);
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(4_200);
+
+    expect(session.isWorking).toBe(false);
+    expect(asyncCapture.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('ignores a late activity capture after restart resets the poll generation', async () => {
+    let resolve!: (value: string | null) => void;
+    asyncCapture.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((done) => {
+          resolve = done;
+        })
+    );
+    const internals = session as unknown as { _resetBuffers(): void };
+
+    await vi.advanceTimersByTimeAsync(4_200);
+    internals._resetBuffers();
+    resolve(WORKING_FRAME);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(session.isWorking).toBe(false);
+  });
+
+  it('fences the pre-respawn capture in the real remote reattach path', async () => {
+    let resolve!: (value: string | null) => void;
+    asyncCapture.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((done) => {
+          resolve = done;
+        })
+    );
+    const internals = session as unknown as {
+      _useMux: boolean;
+      _mux: Record<string, unknown>;
+    };
+    internals._useMux = true;
+    internals._mux.muxSessionExists = vi.fn(async () => true);
+    internals._mux.respawnPane = vi.fn(async () => 1234);
+
+    await vi.advanceTimersByTimeAsync(4_200);
+    await expect(session.reattachRemote()).resolves.toBe(true);
+    resolve(WORKING_FRAME);
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(4_200);
+
+    expect(session.isWorking).toBe(false);
+    expect(asyncCapture.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('ignores a late activity capture after stop', async () => {
+    let resolve!: (value: string | null) => void;
+    asyncCapture.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((done) => {
+          resolve = done;
+        })
+    );
+
+    await vi.advanceTimersByTimeAsync(4_200);
+    await session.stop(false);
+    resolve(WORKING_FRAME);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(session.isWorking).toBe(false);
+  });
+});
+
+describe('shared capture saturation', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('keeps scheduled polls and simultaneous Codex idle confirmations within total concurrency two', async () => {
+    let active = 0;
+    let maximum = 0;
+    const resolvers: Array<() => void> = [];
+    const captures: Array<ReturnType<typeof vi.fn>> = [];
+    const sessions = Array.from({ length: 3 }, (_, index) => {
+      const session = new Session({ id: `saturated-${index}`, workingDir: '/tmp', mode: 'codex' });
+      const capture = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            active += 1;
+            maximum = Math.max(maximum, active);
+            resolvers.push(() => {
+              active -= 1;
+              resolve('• Working (9s • esc to interrupt)');
+            });
+          })
+      );
+      captures.push(capture);
+      const internals = session as unknown as {
+        _mux: unknown;
+        _muxSession: unknown;
+        _startWorkingFramePoller(): void;
+        _detectInteractiveActivity(data: string): void;
+      };
+      internals._mux = { capturePaneTextAsync: capture, killSession: vi.fn(async () => false) };
+      internals._muxSession = { muxName: `codeman-saturated-${index}` };
+      internals._startWorkingFramePoller();
+      internals._detectInteractiveActivity('• Working (2s • esc to interrupt)');
+      return session;
+    });
+
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(active).toBe(2);
+    expect(maximum).toBe(2);
+    expect(captures.reduce((total, capture) => total + capture.mock.calls.length, 0)).toBe(2);
+    resolvers.shift()?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(maximum).toBe(2);
+    expect(captures.reduce((total, capture) => total + capture.mock.calls.length, 0)).toBe(3);
+    expect(workingFramePollCoordinator.getStats().maximumActiveCaptures).toBe(2);
+
+    await Promise.all(sessions.map((session) => session.stop(false)));
+    resolvers.splice(0).forEach((resolve) => resolve());
   });
 });

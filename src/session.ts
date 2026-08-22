@@ -136,6 +136,7 @@ import {
 } from './session-attachment-history.js';
 import type { CodexProviderEnvironment } from './readmymind-predictor.js';
 import type { CodexProviderIdentity } from './codex-provider-identity.js';
+import { workingFramePollCoordinator } from './working-frame-poll-coordinator.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -188,7 +189,6 @@ const SHELL_BURST_SETTLE_MS = 1500;
  *  frame always has the line fully assembled. Must be shorter than
  *  EXTERNAL_CLI_IDLE_DELAY_MS so positive polls keep re-arming the
  *  quiet-window timer. */
-const WORKING_FRAME_POLL_MS = 2000;
 // How long after construction a RECOVERED session's wire activity stamp keeps
 // its restored previous-run value. Recovery attaches every pane at boot and the
 // attach repaint arrives as ordinary PTY output; without this window that
@@ -617,8 +617,17 @@ export class Session extends EventEmitter {
   private _checkpointDirectPtySawClear = false;
   private activityTimeout: NodeJS.Timeout | null = null;
   private _externalCliIdleTimer: NodeJS.Timeout | null = null;
-  /** COD-181/182 — rendered-frame working poller for external-CLI sessions (local AND remote) */
-  private _workingFramePollTimer: NodeJS.Timeout | null = null;
+  /** Shared rendered-frame poll registration for external-CLI sessions (local AND remote). */
+  private _workingFramePollUnregister: (() => void) | null = null;
+  private _workingFramePollGeneration = 0;
+  private _workingFrameCapture: {
+    generation: number;
+    mux: TerminalMultiplexer;
+    muxName: string;
+    controller: AbortController;
+    promise: Promise<string | null>;
+  } | null = null;
+  private _externalCliIdleGeneration = 0;
   /** COD-189 — shell burst tracking (heal live scrollback from capture after big bursts) */
   private _shellBurstBytes = 0;
   private _shellBurstRepaints = 0;
@@ -2265,12 +2274,14 @@ export class Session extends EventEmitter {
       return false;
     }
 
+    this._stopWorkingFramePoller();
     const newPid = await mux.respawnPane(this._buildRespawnPaneOptions());
     if (!newPid) {
       console.error('[Session] reattachRemote: respawnPane failed for', this._muxSession.muxName);
       return false;
     }
     console.log('[Session] reattachRemote: reattached remote session', this._muxSession.muxName, 'pid', newPid);
+    if (isExternalCliMode(this.mode)) this._startWorkingFramePoller();
     return true;
   }
 
@@ -2759,6 +2770,8 @@ export class Session extends EventEmitter {
         clearTimeout(this._externalCliIdleTimer);
         this._externalCliIdleTimer = null;
       }
+      this._externalCliIdleGeneration += 1;
+      this._stopWorkingFramePoller();
       if (this._promptCheckInterval) {
         clearInterval(this._promptCheckInterval);
         this._promptCheckInterval = null;
@@ -3355,6 +3368,7 @@ export class Session extends EventEmitter {
   }
 
   private _resetBuffers(): void {
+    this._stopWorkingFramePoller();
     this._status = 'busy';
     // A Session object can be restarted after its PTY exits. Do not carry a
     // latched working frame from the previous process into the new startup
@@ -3436,20 +3450,69 @@ export class Session extends EventEmitter {
   }
 
   private _startWorkingFramePoller(): void {
-    if (this._workingFramePollTimer) clearInterval(this._workingFramePollTimer);
-    this._workingFramePollTimer = setInterval(() => {
-      if (this._isStopped) return;
-      const muxName = this._muxSession?.muxName;
-      if (!muxName || typeof this._mux?.captureActivePaneBuffer !== 'function') return;
-      const frame = this._mux.captureActivePaneBuffer(muxName);
-      if (!frame) return;
-      // The -e capture carries SGR escapes that can sit inside the pattern
-      // (e.g. bold around "Working") — strip before matching.
-      const plain = frame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
-      if (detectExternalCliWorkingFrame(plain, this.mode)) {
-        this._noteExternalWorkingFrame();
-      }
-    }, WORKING_FRAME_POLL_MS);
+    this._stopWorkingFramePoller();
+    const generation = this._workingFramePollGeneration;
+    this._workingFramePollUnregister = workingFramePollCoordinator.register({
+      key: this.id,
+      capture: () => this._captureWorkingFrameAsync(generation),
+      onFrame: (frame) => {
+        if (generation !== this._workingFramePollGeneration || this._isStopped) return;
+        if (!frame) return;
+        // The async capture may carry SGR escapes that can sit inside the
+        // pattern (e.g. bold around "Working") — strip before matching.
+        const plain = frame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
+        if (detectExternalCliWorkingFrame(plain, this.mode)) {
+          this._noteExternalWorkingFrame();
+        }
+      },
+    });
+  }
+
+  private _stopWorkingFramePoller(): void {
+    this._workingFramePollGeneration += 1;
+    this._workingFramePollUnregister?.();
+    this._workingFramePollUnregister = null;
+    this._workingFrameCapture?.controller.abort();
+    this._workingFrameCapture = null;
+  }
+
+  private _captureWorkingFrameAsync(generation = this._workingFramePollGeneration): Promise<string | null> {
+    if (generation !== this._workingFramePollGeneration || this._isStopped) return Promise.resolve(null);
+    const mux = this._mux;
+    const muxName = this._muxSession?.muxName;
+    if (!muxName || !mux || typeof mux.capturePaneTextAsync !== 'function') return Promise.resolve(null);
+
+    const current = this._workingFrameCapture;
+    if (current && current.generation === generation && current.mux === mux && current.muxName === muxName) {
+      return current.promise;
+    }
+
+    const controller = new AbortController();
+    const capture = {
+      generation,
+      mux,
+      muxName,
+      controller,
+      promise: Promise.resolve<string | null>(null),
+    };
+    capture.promise = mux
+      .capturePaneTextAsync(muxName, { lastLines: 80, signal: controller.signal })
+      .then((frame) => {
+        if (
+          generation !== this._workingFramePollGeneration ||
+          this._isStopped ||
+          this._mux !== mux ||
+          this._muxSession?.muxName !== muxName
+        ) {
+          return null;
+        }
+        return frame;
+      })
+      .finally(() => {
+        if (this._workingFrameCapture === capture) this._workingFrameCapture = null;
+      });
+    this._workingFrameCapture = capture;
+    return capture.promise;
   }
 
   /**
@@ -3460,14 +3523,15 @@ export class Session extends EventEmitter {
    */
   private _armExternalCliIdleTimer(): void {
     if (this._externalCliIdleTimer) clearTimeout(this._externalCliIdleTimer);
-    this._externalCliIdleTimer = setTimeout(() => {
+    const idleGeneration = ++this._externalCliIdleGeneration;
+    this._externalCliIdleTimer = setTimeout(async () => {
       this._externalCliIdleTimer = null;
-      if (this._isStopped) return;
+      if (this._isStopped || idleGeneration !== this._externalCliIdleGeneration) return;
       const wasWorking = this._isWorking;
       const isInitialReady = this._status === 'busy' && !this._isWorking;
       if (wasWorking && this.mode === 'codex') {
-        const muxName = this._muxSession?.muxName;
-        const frame = muxName ? this._mux?.captureActivePaneBuffer?.(muxName) : null;
+        const frame = await workingFramePollCoordinator.captureNow(this.id);
+        if (this._isStopped || idleGeneration !== this._externalCliIdleGeneration || !this._isWorking) return;
         if (classifyCodexRenderedState(frame) !== 'input-ready') {
           this._armExternalCliIdleTimer();
           return;
@@ -3494,12 +3558,9 @@ export class Session extends EventEmitter {
       clearTimeout(this._externalCliIdleTimer);
       this._externalCliIdleTimer = null;
     }
+    this._externalCliIdleGeneration += 1;
 
-    // Clear the COD-181 remote working-frame poller
-    if (this._workingFramePollTimer) {
-      clearInterval(this._workingFramePollTimer);
-      this._workingFramePollTimer = null;
-    }
+    this._stopWorkingFramePoller();
 
     // Clear the COD-189 shell burst settle timer
     if (this._shellBurstSettleTimer) {

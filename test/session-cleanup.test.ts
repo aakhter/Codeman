@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { WebServer, subagentConversationIdForCleanup } from '../src/web/server.js';
 import { Session } from '../src/session.js';
+import { workingFramePollCoordinator } from '../src/working-frame-poll-coordinator.js';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -15,6 +16,24 @@ describe('subagent cleanup identity', () => {
 
     expect(subagentConversationIdForCleanup(session)).toBe('claude-conversation-id');
     expect(subagentConversationIdForCleanup({ id: 'codeman-only', claudeSessionId: undefined })).toBeUndefined();
+  });
+});
+
+describe('working-frame poll cleanup', () => {
+  it('unregisters the session from the shared coordinator on stop', async () => {
+    const session = new Session({ id: 'cleanup-poller', workingDir: '/tmp', mode: 'codex' });
+    const internals = session as unknown as {
+      _mux: unknown;
+      _muxSession: unknown;
+      _startWorkingFramePoller(): void;
+    };
+    internals._mux = { capturePaneTextAsync: async () => null };
+    internals._muxSession = { muxName: 'codeman-cleanup' };
+    internals._startWorkingFramePoller();
+
+    expect(workingFramePollCoordinator.has('cleanup-poller')).toBe(true);
+    await session.stop(false);
+    expect(workingFramePollCoordinator.has('cleanup-poller')).toBe(false);
   });
 });
 
