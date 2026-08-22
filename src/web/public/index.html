@@ -358,6 +358,8 @@
 
     <!-- Main Terminal Area -->
     <main class="main">
+      <aside class="tab-rail" id="tabRail" aria-label="Session navigation"></aside>
+
       <!-- Collapsible session sidebar (opt-in layout). Deliberately EMPTY in
            markup: applySessionListLayout() moves #sessionTabs in here, so the
            vertical list is the exact same DOM node as the header strip and every
@@ -1869,6 +1871,16 @@
               <div class="set-group">
                 <div class="set-group-head"><h4>Tabs</h4><span class="set-scope">device</span></div>
                 <div class="set-group-body">
+                  <div class="set-row has-field" data-search="tab orientation horizontal vertical side rail">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Tab Orientation</span>
+                      <span class="set-row-desc">Keep tabs in the header or place them beside the terminal. Phones stay horizontal.</span>
+                    </div>
+                    <select id="appSettingsTabOrientation" class="set-select">
+                      <option value="horizontal">Horizontal (top)</option>
+                      <option value="vertical">Vertical (side rail)</option>
+                    </select>
+                  </div>
                   <div class="set-row has-field" data-search="session list layout sidebar tab strip vertical">
                     <div class="set-row-text">
                       <span class="set-row-label">Session List Layout</span>

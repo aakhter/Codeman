@@ -400,6 +400,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
+    document.getElementById('appSettingsTabOrientation').value =
+      settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     document.getElementById('appSettingsSessionListLayout').value =
       settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
@@ -2027,6 +2029,7 @@ Object.assign(CodemanApp.prototype, {
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
+      tabOrientation: document.getElementById('appSettingsTabOrientation').value,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       skin: document.getElementById('appSettingsSkin').value,
@@ -2178,6 +2181,7 @@ Object.assign(CodemanApp.prototype, {
     // Re-parents #sessionTabs between header host and sidebar if the layout
     // changed, then calls applyTabWrapSettings() itself — do not call both.
     this.applySessionListLayout();
+    this.applyTabOrientation({ settleRailWidth: true });
     this.applyLineageLineSettings?.();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
@@ -2423,6 +2427,7 @@ Object.assign(CodemanApp.prototype, {
         imageWatcherEnabled: false,
         ralphTrackerEnabled: false,
         tabTwoRows: false,
+        tabOrientation: 'horizontal',
         sessionListLayout: 'header',
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
@@ -2664,6 +2669,48 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  applyTabOrientation(options = {}) {
+    const settings = this.loadAppSettingsFromStorage();
+    const defaults = this.getDefaultSettings();
+    const sidebarOwnsTabs = this.isSessionSidebarActive?.() === true;
+    const orientation =
+      !sidebarOwnsTabs && window.CodemanTabOverflow?.resolveTabOrientation
+        ? window.CodemanTabOverflow.resolveTabOrientation({
+            deviceType: MobileDetection.getDeviceType(),
+            setting: settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal',
+          })
+        : 'horizontal';
+
+    const root = document.documentElement;
+    const previous = root.getAttribute('data-tab-orientation') || 'horizontal';
+    root.setAttribute('data-tab-orientation', orientation);
+
+    const tabsEl = document.getElementById('sessionTabs');
+    const rail = document.getElementById('tabRail');
+    const headerHost = document.getElementById('sessionTabsHost');
+    if (!sidebarOwnsTabs && tabsEl && rail && headerHost) {
+      if (orientation === 'vertical') {
+        if (tabsEl.parentElement !== rail) rail.appendChild(tabsEl);
+      } else if (tabsEl.parentElement !== headerHost) {
+        headerHost.appendChild(tabsEl);
+      }
+    }
+    if (tabsEl) {
+      tabsEl.setAttribute('aria-orientation', sidebarOwnsTabs || orientation === 'vertical' ? 'vertical' : 'horizontal');
+    }
+
+    const settleRailWidth =
+      options.settleRailWidth === true && (orientation === 'vertical' || previous !== orientation);
+    this.applyTabRailWidth?.({ settle: settleRailWidth });
+    if (previous !== orientation) {
+      this.updateTabOverflowMode?.();
+      if (!settleRailWidth) this.fitAddon?.fit();
+      this._fullRenderSessionTabs?.();
+      this._updateConnectionLinesImmediate?.();
+      this._refreshHomeSessionsIfVisible?.();
+    }
+  },
+
   applyTabWrapSettings() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
@@ -2897,7 +2944,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'sessionListLayout', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'sessionListLayout', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
           'terminalFontFamily',
           'language',

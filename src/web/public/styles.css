@@ -62,6 +62,7 @@
   --ring-glow: 0 0 12px -2px rgba(56, 182, 240, 0.55);
   --header-height: 36px;
   --toolbar-height: 42px;
+  --tab-rail-width: 256px;
   --sidebar-width: 260px;
   --sidebar-width-rich: 300px; /* detailed rows carry a stamps line as well */
   --sidebar-width-collapsed: 44px; /* == --touch-target-min */
@@ -572,6 +573,53 @@ body {
 
 .session-tabs::-webkit-scrollbar-thumb:hover {
   background: var(--border-light);
+}
+
+.tab-rail {
+  display: none;
+  flex: 0 0 var(--tab-rail-width);
+  width: var(--tab-rail-width);
+  min-width: 0;
+  overflow: hidden;
+  background: var(--glass-bg);
+  border-right: 1px solid var(--glass-border);
+  position: relative;
+  z-index: 11;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail {
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tabs {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0.35rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab {
+  width: 100%;
+  max-width: none;
+  justify-content: flex-start;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab > * {
+  flex-shrink: 0;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+html[data-tab-orientation='vertical'] .header-right {
+  margin-left: auto;
 }
 
 .session-tab {

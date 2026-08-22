@@ -919,6 +919,7 @@ class CodemanApp {
     // Calls applyTabWrapSettings() itself (it owns tabs-two-rows / tabs-show-folder)
     // and then applies the sidebar variant on top — do not call both.
     this.applySessionListLayout();
+    this.applyTabOrientation();
     this.applyMonitorVisibility();
     this.applyLineageLineSettings?.();
     this._installLineageStripScrollListener?.();
@@ -4586,6 +4587,17 @@ class CodemanApp {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const manualTwoRows = deviceType === 'desktop' ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false) : false;
+
+    const orientation = window.CodemanTabOverflow?.resolveTabOrientation
+      ? window.CodemanTabOverflow.resolveTabOrientation({
+          deviceType,
+          setting: settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal',
+        })
+      : 'horizontal';
+    if (orientation === 'vertical') {
+      container.classList.remove('tabs-auto-wrap');
+      return;
+    }
 
     if (manualTwoRows || deviceType !== 'desktop') {
       container.classList.remove('tabs-auto-wrap');

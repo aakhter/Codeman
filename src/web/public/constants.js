@@ -156,6 +156,12 @@ function shouldAutoWrapTabs(input) {
   return scrollWidth > clientWidth + 1;
 }
 
+function resolveTabOrientation(input) {
+  if (!input || input.setting !== 'vertical') return 'horizontal';
+  if (input.deviceType === 'mobile') return 'horizontal';
+  return 'vertical';
+}
+
 // Sliver of the neighbouring tab left visible when the strip scrolls a tab into
 // view. Landing a tab flush against the edge reads as "this is the last one";
 // the gap is what tells the user there is more strip to swipe to.
@@ -617,6 +623,7 @@ if (typeof window !== 'undefined') {
   window.shouldSkipWebGL = shouldSkipWebGL;
   window.CodemanTabOverflow = {
     shouldAutoWrapTabs,
+    resolveTabOrientation,
     computeTabScrollLeft,
     TAB_SCROLL_REVEAL_PX,
   };
