@@ -6062,8 +6062,11 @@ class CodemanApp {
       collapsedGroupIds: [...this.collapsedTabGroupIds],
       orientation: this._tabOrientation(),
       openWebviewIds: [...(this.webviewOrder || [])],
-      activeSessionId: this.activeSessionId,
-      activeWebviewId: this.activeWebviewId,
+      // Selection is presentation state, not structure. Session/webview activation
+      // already updates the existing rows synchronously; when a collapsed group
+      // swaps its highlighted member, visibleRefs changes and the identity check
+      // still forces the required rebuild. Keeping active ids in this key rebuilt
+      // every visible 15-row list on every otherwise structure-neutral tab switch.
       focusRefs: projection.focusRefs,
       focusCollapsed: projection.focusCollapsed,
       visibleRefs: projection.visibleRefs,

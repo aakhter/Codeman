@@ -886,6 +886,143 @@ describe('Buffer loading performance', () => {
   });
 });
 
+describe('Frontend render work profile', () => {
+  let context: BrowserContext;
+  let page: Page;
+  const sessionIds: string[] = [];
+
+  beforeAll(async () => {
+    ({ context, page } = await freshPage());
+    await navigateAndWait(page);
+  });
+
+  afterAll(async () => {
+    for (const id of sessionIds) {
+      await deleteSession(page, id).catch(() => {});
+    }
+    await context?.close();
+  });
+
+  it('ranks session-list, layout, and terminal replay work under the COD-356 render workload', async () => {
+    for (let i = 0; i < 15; i++) {
+      sessionIds.push(await createSession(page, `perf-render-profile-${i}`));
+    }
+    await page.waitForFunction(
+      (ids: string[]) => ids.every((id) => document.querySelector(`.session-tab[data-id="${id}"]`)),
+      sessionIds,
+      { timeout: 10_000 }
+    );
+
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Performance.enable');
+    const metricsBefore = await cdp.send('Performance.getMetrics');
+
+    const profile = await page.evaluate(async (ids: string[]) => {
+      const app = (window as unknown as { app: any }).app;
+      const stats: Record<string, { count: number; durationMs: number }> = {};
+      const restore: Array<() => void> = [];
+      const wrap = (owner: any, name: string, label = name) => {
+        const original = owner[name];
+        stats[label] = { count: 0, durationMs: 0 };
+        owner[name] = function (...args: unknown[]) {
+          stats[label].count++;
+          const started = performance.now();
+          const result = original.apply(this, args);
+          if (result && typeof result.then === 'function') {
+            return result.finally(() => {
+              stats[label].durationMs += performance.now() - started;
+            });
+          }
+          stats[label].durationMs += performance.now() - started;
+          return result;
+        };
+        restore.push(() => {
+          owner[name] = original;
+        });
+      };
+
+      wrap(app, '_renderSessionTabsImmediate', 'sessionListIncremental');
+      wrap(app, '_fullRenderSessionTabs', 'sessionListFullRebuild');
+      wrap(app, 'updateTabOverflowMode', 'forcedLayoutOverflow');
+      wrap(app, '_scrollActiveTabIntoView', 'forcedLayoutActiveTab');
+      wrap(app, 'chunkedTerminalWrite', 'terminalCanonicalReplay');
+      wrap(app.fitAddon, 'fit', 'terminalFit');
+
+      const elementPrototype = Element.prototype as Element & {
+        getBoundingClientRect: typeof Element.prototype.getBoundingClientRect;
+      };
+      const originalRect = elementPrototype.getBoundingClientRect;
+      stats.forcedLayoutRectRead = { count: 0, durationMs: 0 };
+      elementPrototype.getBoundingClientRect = function () {
+        stats.forcedLayoutRectRead.count++;
+        const started = performance.now();
+        const result = originalRect.call(this);
+        stats.forcedLayoutRectRead.durationMs += performance.now() - started;
+        return result;
+      };
+      restore.push(() => {
+        elementPrototype.getBoundingClientRect = originalRect;
+      });
+
+      const tabContainer = document.getElementById('sessionTabs');
+      let tabMutationRecords = 0;
+      const observer = new MutationObserver((records) => {
+        tabMutationRecords += records.length;
+      });
+      if (tabContainer) observer.observe(tabContainer, { attributes: true, childList: true, subtree: true });
+
+      try {
+        app._fullRenderSessionTabs();
+        for (const id of [ids[1], ids[7], ids[14], ids[0]]) {
+          await app.selectSession(id);
+        }
+        for (let i = 0; i < 20; i++) {
+          const id = ids[i % ids.length];
+          const session = app.sessions.get(id);
+          app._onSessionUpdated({
+            session: {
+              ...session,
+              lastActivityAt: (session.lastActivityAt || Date.now()) + i + 1,
+            },
+          });
+          await new Promise((resolve) => setTimeout(resolve, 110));
+        }
+
+        const replay = Array.from({ length: 100_000 }, (_, index) => `profile-line-${index}\r\n`).join('');
+        const owner = app._beginBufferLoad('cod356-render-profile');
+        await app.chunkedTerminalWrite(replay, 32 * 1024, owner);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      } finally {
+        observer.disconnect();
+        for (const undo of restore.reverse()) undo();
+      }
+
+      return { stats, tabMutationRecords };
+    }, sessionIds);
+
+    const metricsAfter = await cdp.send('Performance.getMetrics');
+    await cdp.detach();
+    const metricMap = (metrics: typeof metricsBefore) =>
+      Object.fromEntries(metrics.metrics.map(({ name, value }) => [name, value]));
+    const before = metricMap(metricsBefore);
+    const after = metricMap(metricsAfter);
+    const browser = Object.fromEntries(
+      [
+        'LayoutCount',
+        'LayoutDuration',
+        'RecalcStyleCount',
+        'RecalcStyleDuration',
+        'ScriptDuration',
+        'TaskDuration',
+      ].map((name) => [name, (after[name] || 0) - (before[name] || 0)])
+    );
+
+    console.log(`[render profile] ${JSON.stringify({ ...profile, browser }, null, 2)}`);
+    expect(profile.stats.terminalCanonicalReplay.count).toBe(1);
+    expect(profile.stats.sessionListIncremental.count).toBeGreaterThan(0);
+  }, 60_000);
+});
+
 describe('Memory usage under load', () => {
   let context: BrowserContext;
   let page: Page;
