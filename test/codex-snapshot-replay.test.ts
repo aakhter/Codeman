@@ -180,7 +180,7 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
 
   it('uses full terminal history when refreshing an active Codex session after dropped output', () => {
     const source = appSource();
-    const refreshStart = source.indexOf('async _onSessionNeedsRefresh()');
+    const refreshStart = source.indexOf('async _onSessionNeedsRefresh(');
     const fullFetch = source.indexOf('/terminal?full=1', refreshStart);
     const switchGuard = source.indexOf('if (this.activeSessionId !== sessionId) return;', refreshStart);
     const block = source.slice(refreshStart, switchGuard + 80);

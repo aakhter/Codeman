@@ -149,6 +149,12 @@ export interface SessionIdleInfo {
   reason: SessionIdleReason;
 }
 
+/** Metadata for a startup-only canonical terminal refresh. */
+export interface SessionRefreshInfo {
+  reason: 'initial-ready';
+  generation: number;
+}
+
 /** Line buffer flush interval (100ms) - forces processing of partial lines */
 const LINE_BUFFER_FLUSH_INTERVAL = 100;
 
@@ -677,6 +683,7 @@ export class Session extends EventEmitter {
   // Timer tracking for cleanup (prevents memory leaks)
   private _promptCheckInterval: NodeJS.Timeout | null = null;
   private _promptCheckTimeout: NodeJS.Timeout | null = null;
+  private _interactiveStartupGeneration: number = 0;
   private _shellIdleTimer: NodeJS.Timeout | null = null;
 
   // Multiplexer session support (tmux)
@@ -2436,6 +2443,7 @@ export class Session extends EventEmitter {
     if (this.ptyProcess) {
       throw new Error('Session already has a running process');
     }
+    const startupGeneration = ++this._interactiveStartupGeneration;
 
     // Bounds the workspace-trust scan (see _maybeAcceptTrustDialog). Stamped here
     // rather than at PTY spawn so a slow mux attach still counts as startup.
@@ -2586,9 +2594,12 @@ export class Session extends EventEmitter {
             // the full buffer once the TUI has rendered.
             this._promptCheckTimeout = setTimeout(() => {
               this._promptCheckTimeout = null;
-              if (this._isStopped) return;
+              if (this._isStopped || startupGeneration !== this._interactiveStartupGeneration) return;
               this._status = 'idle';
-              this.emit('needsRefresh');
+              this.emit('needsRefresh', {
+                reason: 'initial-ready',
+                generation: startupGeneration,
+              } satisfies SessionRefreshInfo);
             }, 3000);
           } else {
             // Claude mode: wait for ❯ prompt

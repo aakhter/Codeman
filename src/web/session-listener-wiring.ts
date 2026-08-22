@@ -23,6 +23,7 @@ import type {
   RalphTodoItem,
   ActiveBashTool,
   SessionIdleInfo,
+  SessionRefreshInfo,
 } from '../session.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import type { RalphStatusBlock, CircuitBreakerStatus } from '../types.js';
@@ -40,7 +41,7 @@ export interface SessionListenerRefs {
   terminalActivity: () => void;
   terminal: (data: string) => void;
   clearTerminal: () => void;
-  needsRefresh: () => void;
+  needsRefresh: (info?: SessionRefreshInfo) => void;
   resized: (data: { cols: number; rows: number }) => void;
   message: (msg: ClaudeMessage) => void;
   error: (error: string) => void;
@@ -160,8 +161,8 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
     },
 
     /** Broadcasts `session:needsRefresh` — tells clients to reload buffer */
-    needsRefresh: () => {
-      deps.broadcast(SseEvent.SessionNeedsRefresh, { id: session.id });
+    needsRefresh: (info?: SessionRefreshInfo) => {
+      deps.broadcast(SseEvent.SessionNeedsRefresh, info ? { id: session.id, ...info } : { id: session.id });
     },
 
     /** Broadcasts `session:resized` — PTY geometry changed; other-dims viewers reconcile (COD-179) */

@@ -41,6 +41,22 @@ afterEach(() => {
 });
 
 describe('session listener wiring', () => {
+  it('preserves tagged initial-ready refresh metadata and legacy wire compatibility', () => {
+    const session = new Session({ id: 'wiring-refresh-metadata', workingDir: '/tmp', mode: 'codex' });
+    const deps = listenerDeps();
+    const refs = createSessionListeners(session, deps);
+
+    refs.needsRefresh({ reason: 'initial-ready', generation: 4 });
+    refs.needsRefresh();
+
+    expect(deps.broadcast).toHaveBeenNthCalledWith(1, SseEvent.SessionNeedsRefresh, {
+      id: session.id,
+      reason: 'initial-ready',
+      generation: 4,
+    });
+    expect(deps.broadcast).toHaveBeenNthCalledWith(2, SseEvent.SessionNeedsRefresh, { id: session.id });
+  });
+
   it('suppresses raw idle effects while the coordinator reports live agents', async () => {
     const session = new Session({ id: 'wiring-agent-idle-suppressed', workingDir: '/tmp', mode: 'claude' });
     const deps = listenerDeps();

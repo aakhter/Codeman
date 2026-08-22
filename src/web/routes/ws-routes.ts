@@ -31,6 +31,7 @@
 
 import { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
+import type { SessionRefreshInfo } from '../../session.js';
 import type { SessionPort } from '../ports/session-port.js';
 import { MAX_INPUT_LENGTH } from '../../config/terminal-limits.js';
 import { isAllowedRequestHost, isAllowedRequestOrigin, type HostPolicy } from '../network-auth-policy.js';
@@ -250,9 +251,9 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         }
       };
 
-      const onNeedsRefresh = () => {
+      const onNeedsRefresh = (info?: SessionRefreshInfo) => {
         if (socket.readyState === 1) {
-          socket.send('{"t":"r"}');
+          socket.send(info ? JSON.stringify({ t: 'r', ...info }) : '{"t":"r"}');
         }
       };
 
