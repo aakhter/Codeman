@@ -1306,6 +1306,8 @@ and effort involved in moving workloads.
 
   describe('POST /api/sessions/:id/input', () => {
     it('sends input to session', async () => {
+      harness.ctx._session.isCheckpointActive = true;
+      const info = vi.spyOn(console, 'info').mockImplementation(() => {});
       const res = await harness.app.inject({
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/input`,
@@ -1317,6 +1319,39 @@ and effort involved in moving workloads.
       expect(harness.ctx.sessions.get(harness.ctx._sessionId)?.cancelCheckpoint).toHaveBeenCalledWith(
         'manual-takeover'
       );
+      expect(info).toHaveBeenCalledWith('[Checkpoint] manual takeover', {
+        sessionId: harness.ctx._sessionId,
+        route: 'http',
+        inputClass: 'keyboard',
+      });
+      expect(JSON.stringify(info.mock.calls)).not.toContain('hello');
+      info.mockRestore();
+    });
+
+    it.each(['\x1b[O', '\x1b[<64;10;5M', '\x1b[M !!'])('forwards report-only input without takeover', async (input) => {
+      const session = harness.ctx._session;
+      session.isCheckpointActive = true;
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/input`,
+        payload: { input },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(session.writeBuffer).toContain(input);
+      expect(session.cancelCheckpoint).not.toHaveBeenCalled();
+    });
+
+    it('cancels for mixed report and keyboard input', async () => {
+      const session = harness.ctx._session;
+      session.isCheckpointActive = true;
+      const input = '\x1b[Ox';
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/input`,
+        payload: { input },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(session.cancelCheckpoint).toHaveBeenCalledWith('manual-takeover');
     });
 
     it('returns error for unknown session', async () => {
@@ -1352,15 +1387,18 @@ and effort involved in moving workloads.
       // First delivery of seq 1 — applied (200, written once).
       const first = await post({ input: 'prompt', seq: 1, clientId: 'cid-1' });
       expect(first.statusCode).toBe(200);
+      session.cancelCheckpoint.mockClear();
 
       // Redelivery of the SAME seq (client never saw the ACK) — still 200, but
       // must NOT write again.
       const dup = await post({ input: 'prompt', seq: 1, clientId: 'cid-1' });
       expect(dup.statusCode).toBe(200);
+      expect(session.cancelCheckpoint).not.toHaveBeenCalled();
 
       // A genuinely new seq — applied.
       const next = await post({ input: '\r', seq: 2, clientId: 'cid-1' });
       expect(next.statusCode).toBe(200);
+      expect(session.cancelCheckpoint).toHaveBeenCalledOnce();
 
       expect(session.writeBuffer).toEqual(['prompt', '\r']);
     });
