@@ -122,6 +122,10 @@ run(
 );
 run('minify app.js', 'npx esbuild dist/web/public/app.js --minify --outfile=dist/web/public/app.js --allow-overwrite');
 run(
+  'minify lazy-feature-loader.js',
+  'npx esbuild dist/web/public/lazy-feature-loader.js --minify --outfile=dist/web/public/lazy-feature-loader.js --allow-overwrite'
+);
+run(
   'minify tab-rail-resize.js',
   'npx esbuild dist/web/public/tab-rail-resize.js --minify --outfile=dist/web/public/tab-rail-resize.js --allow-overwrite'
 );
@@ -148,6 +152,10 @@ run(
 run(
   'minify session-ui.js',
   'npx esbuild dist/web/public/session-ui.js --minify --outfile=dist/web/public/session-ui.js --allow-overwrite'
+);
+run(
+  'minify ralph-wizard.js',
+  'npx esbuild dist/web/public/ralph-wizard.js --minify --outfile=dist/web/public/ralph-wizard.js --allow-overwrite'
 );
 run(
   'minify styles.css',
@@ -202,6 +210,20 @@ console.log('\n[build] content-hash cache busting');
     renameSync(filePath, join(distPublic, hashed));
     manifest[file] = hashed;
   }
+  // The eager loader must point at the immutable optional chunk. Rewrite it
+  // after the optional assets are named, then hash the rewritten loader itself.
+  const lazyLoader = 'lazy-feature-loader.js';
+  const lazyLoaderPath = join(distPublic, lazyLoader);
+  let lazyLoaderContent = readFileSync(lazyLoaderPath, 'utf8');
+  for (const [original, hashed] of Object.entries(manifest)) {
+    lazyLoaderContent = lazyLoaderContent.replaceAll(`'${original}'`, `'${hashed}'`);
+    lazyLoaderContent = lazyLoaderContent.replaceAll(`"${original}"`, `"${hashed}"`);
+  }
+  writeFileSync(lazyLoaderPath, lazyLoaderContent);
+  const lazyLoaderHash = createHash('md5').update(lazyLoaderContent).digest('hex').slice(0, 8);
+  const lazyLoaderHashed = `lazy-feature-loader.${lazyLoaderHash}.js`;
+  renameSync(lazyLoaderPath, join(distPublic, lazyLoaderHashed));
+  manifest[lazyLoader] = lazyLoaderHashed;
   // Rewrite index.html to reference hashed filenames
   let html = readFileSync(join(distPublic, 'index.html'), 'utf8');
   for (const [original, hashed] of Object.entries(manifest)) {

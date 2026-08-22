@@ -975,6 +975,33 @@ describe('No console errors during normal usage', () => {
   });
 });
 
+describe('Optional frontend startup graph', () => {
+  for (const [label, viewport] of [
+    ['desktop', { width: 1280, height: 800 }],
+    ['mobile', { width: 390, height: 844 }],
+  ] as const) {
+    it(`${label} defers Ralph wizard until its first real action`, async () => {
+      const context = await browser.newContext({ viewport });
+      const page = await context.newPage();
+      const requests: string[] = [];
+      const errors: string[] = [];
+      page.on('request', (request) => requests.push(new URL(request.url()).pathname));
+      page.on('pageerror', (error) => errors.push(error.message));
+      try {
+        await navigateAndWait(page);
+        expect(requests).not.toContain('/ralph-wizard.js');
+
+        await page.locator('.welcome-ralph-link').evaluate((button: HTMLElement) => button.click());
+        await page.waitForSelector('#ralphWizardModal.active');
+        expect(requests.filter((path) => path === '/ralph-wizard.js')).toHaveLength(1);
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+});
+
 describe('Performance summary', () => {
   it('prints threshold reference', () => {
     console.log('\n--- Performance Thresholds ---');
