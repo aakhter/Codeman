@@ -107,3 +107,94 @@ Runtime provenance was pinned to `ef38287c116fda7d467c417a1db8403150f52eb7`.
   `/tmp/cod356-artifacts-after-frontend-smoke-ZPuQ7g`; its temporary reports were removed.
 - One fresh full matrix then produced the committed paired reports and final raw directory above. No selective sample was
   rerun or relabeled.
+
+## Task 7 render candidate: reject and revert
+
+Task 7 found a real redundant render path, but the candidate failed the end-to-end retention gate. Runtime commit
+`6ca0598dbb5ac25e4e8400cdff1077dbb32efd08` was explicitly reverted by `6890c8a4`; no Task 7 product or candidate-only
+test change remains. The deterministic operation-count result is useful diagnostic evidence, but it does not justify
+shipping a change whose immutable immediate-parent comparison has material startup and long-task regressions. Do not
+attempt another speculative render change without the architecture checkpoint required by the plan.
+
+### Ranked causal profile and lifecycle regression
+
+A real Chromium profile exercised 15 sessions, four visible tab switches, 20 live session updates, and a 100,000-line
+(2,088,890-byte) canonical replay. Before the candidate, the ranked measured paths were:
+
+| Path                               | Calls | Main-thread duration |
+| ---------------------------------- | ----: | -------------------: |
+| Required terminal canonical replay |     1 |             473.3 ms |
+| Incremental session-list updates   |    17 |              29.4 ms |
+| Full session-list rebuilds         |     3 |              13.1 ms |
+| Active-tab forced layout           |     6 |              10.1 ms |
+| Terminal fit                       |    20 |               9.9 ms |
+| Repeated bounding-rect reads       |    12 |               9.3 ms |
+| Session-list overflow layout       |    21 |               8.8 ms |
+
+The canonical replay was dominant but required and occurred once, so it was not optimized. The concrete redundant path
+was the active session identifier in `_tabStructureKey`: every otherwise presentation-only visible selection change made
+the structure key differ and rebuilt all 15 rows even though `_updateActiveTabImmediate` already updated selection. Exact
+visible reference comparison still made a rebuild necessary when collapsed-group visibility changed.
+
+The jsdom regression imported the shipping controller and terminal writer, rendered 15 actual rows, performed four tab
+switch reconciliations and three debounced live updates, and replayed exactly 100,000 lines. RED was the expected four
+calls to `_fullRenderSessionTabs` versus a budget of zero. The one-line structural-key candidate went GREEN (1/1): four
+switch rebuilds became zero, the same DOM node objects survived, order and single selection stayed exact, and joined
+terminal writes were byte-identical. The required unit suite passed 25/25, required browser suite 17/17, and frontend
+syntax, typecheck, lint, format, lockfile, and diff gates passed. Lint retained only the pre-existing
+`src/web/server.ts:1549` explicit-`any` warning. Two unrelated command-palette whitespace assertions in
+`test/tab-layout-app.test.ts` also failed at clean parent `ca11a1d`; the candidate-relevant collapsed-group cases and all
+25 `tab-layout-browser` cases passed.
+
+The follow-up identical Chromium workload confirmed the local win: full rebuilds fell 3 -> 1 and 13.1 -> 4.0 ms (the
+remaining call was explicit setup), script time fell 230.968 -> 214.013 ms, and layout duration fell
+24.748 -> 22.016 ms. Incremental updates were 17 -> 17, the canonical replay remained 1 -> 1, and terminal fit stayed
+20 -> 20. Other forced-layout counts fell, but their durations did not consistently improve; style-recalculation time
+rose 114.686 -> 119.993 ms. This profile establishes the removed operation, not an end-to-end retention result.
+
+### Immutable immediate-parent retention matrix
+
+Because the required `after-render` report compares with branch point `a445cdaf`, an additional fresh control measured
+immediate parent `ca11a1d` under the same current harness and accepted protocol. Both runs contain one warmup plus five
+recorded samples in every idle/CPU x idle/interactive cell. Values below are parent -> candidate and percentage changes
+are median / p95; negative is faster or fewer.
+
+| Cell               |                                            App-ready median / p95 |                                 First-terminal-ready median / p95 |  Long-task count median / p95 |           Long-task duration median / p95 |
+| ------------------ | ----------------------------------------------------------------: | ----------------------------------------------------------------: | ----------------------------: | ----------------------------------------: |
+| Idle / idle        |         582.744 / 599.621 -> 581.283 / 615.926 ms (-0.3% / +2.7%) |         505.925 / 515.208 -> 519.768 / 523.472 ms (+2.7% / +1.6%) |      3 / 4 -> 3 / 4 (0% / 0%) |   95 / 129 -> 97 / 128 ms (+2.1% / -0.8%) |
+| Idle / interactive |        608.289 / 623.927 -> 605.707 / 706.958 ms (-0.4% / +13.3%) |   998.914 / 1,207.627 -> 1,015.911 / 1,229.034 ms (+1.7% / +1.8%) |  3 / 4 -> 3 / 5 (0% / +25.0%) | 100 / 137 -> 98 / 187 ms (-2.0% / +36.5%) |
+| CPU / idle         |  960.176 / 1,097.563 -> 1,068.345 / 1,201.471 ms (+11.3% / +9.5%) |         758.523 / 859.008 -> 828.022 / 870.006 ms (+9.2% / +1.3%) | 8 / 10 -> 8 / 9 (0% / -10.0%) | 75.5 / 262 -> 83 / 264 ms (+9.9% / +0.8%) |
+| CPU / interactive  | 1,137.970 / 1,151.065 -> 1,118.701 / 1,212.119 ms (-1.7% / +5.3%) | 1,430.631 / 1,533.011 -> 1,569.455 / 1,601.344 ms (+9.7% / +4.5%) |    9 / 10 -> 9 / 10 (0% / 0%) |   81 / 270 -> 85 / 294 ms (+4.9% / +8.9%) |
+
+The candidate's idle/interactive app-ready p95 (+13.3%), long-task-count p95 (+25.0%), and long-task-duration p95
+(+36.5%), plus CPU/idle app-ready median (+11.3%) and CPU terminal-ready medians (+9.2% and +9.7%), are material. No
+selective sample was rerun. These direct results fail retention even though the micro-profile operation count improved.
+
+### Required longitudinal matrix and evidence integrity
+
+For completeness, the required report's comparator is branch point `a445cdaf`, so this table is longitudinal across
+intervening tasks and is not used as causal evidence. Values are branch point -> candidate; changes are median / p95.
+
+| Cell               |                                              App-ready median / p95 |                                  First-terminal-ready median / p95 |        Long-task count median / p95 |             Long-task duration median / p95 |
+| ------------------ | ------------------------------------------------------------------: | -----------------------------------------------------------------: | ----------------------------------: | ------------------------------------------: |
+| Idle / idle        |           587.761 / 664.628 -> 581.283 / 615.926 ms (-1.1% / -7.3%) |          490.236 / 500.909 -> 519.768 / 523.472 ms (+6.0% / +4.5%) |            3 / 4 -> 3 / 4 (0% / 0%) |  119 / 143 -> 97 / 128 ms (-18.5% / -10.5%) |
+| Idle / interactive |          596.682 / 640.350 -> 605.707 / 706.958 ms (+1.5% / +10.4%) |   981.312 / 1,095.130 -> 1,015.911 / 1,229.034 ms (+3.5% / +12.2%) |    4 / 6 -> 3 / 5 (-25.0% / -16.7%) |    92 / 135 -> 98 / 187 ms (+6.5% / +38.5%) |
+| CPU / idle         | 1,230.882 / 1,392.891 -> 1,068.345 / 1,201.471 ms (-13.2% / -13.7%) |      949.644 / 1,451.588 -> 828.022 / 870.006 ms (-12.8% / -40.1%) |  27 / 29 -> 8 / 9 (-70.4% / -69.0%) | 71.5 / 191 -> 83 / 264 ms (+16.1% / +38.2%) |
+| CPU / interactive  | 1,437.657 / 1,536.566 -> 1,118.701 / 1,212.119 ms (-22.2% / -21.1%) | 1,705.647 / 1,882.677 -> 1,569.455 / 1,601.344 ms (-8.0% / -14.9%) | 30 / 31 -> 9 / 10 (-70.0% / -67.7%) |   76 / 238 -> 85 / 294 ms (+11.8% / +23.5%) |
+
+Candidate report set `3b37cb61caafe1158cbb2caec9f9ede5` pins runtime `6ca0598d`; parent-control report
+set `6bc2c1687e0a8bc0e50664c7e364ca4b` pins `ca11a1d`. Both bind the identical harness content hash
+`f36d06cc112379d5aa674984f8e30a76509b071a24a4826773c8f8facd47234b` and generated-asset manifest
+`f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268`. Every cell has five recorded samples,
+both CPU cells used the fixed seven-worker cohort within deadline, and every page/serious-console array is empty. Both
+runs completed stable cleanup with zero remaining sessions or exact child PIDs, a closed browser, matched post-run
+assets, and matched post-run provenance. Raw artifacts are `/tmp/cod356-artifacts-after-render-RJNL0p` and
+`/tmp/cod356-artifacts-render-parent-control-Q2Lwhi`. The compact candidate and control report pairs are retained; no
+product runtime is retained.
+
+After the explicit revert, the product and candidate-test diff against `ca11a1d` is empty. The remaining required unit
+tests passed 24/24 (the candidate-only render-budget test was removed), the required browser tests passed 17/17, and
+frontend syntax, typecheck, lint, format, lockfile, report-pair hash, JSON, and diff checks passed. As a supplementary
+check, the unchanged `test/perf-browser.test.ts` passed 27/28; its unrelated session-options tab timing exceeded the
+pre-existing 200 ms threshold at 255.6 ms and again at 203.5 ms when focused. This occurs on the exact parent-equivalent
+product/test tree and is not a retained Task 7 regression, but it remains an explicit verification concern.

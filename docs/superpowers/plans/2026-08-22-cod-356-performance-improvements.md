@@ -491,6 +491,11 @@ git commit -m "test(perf): COD-356 record after-render evidence"
 
 The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`.
 
+**Task 7 outcome (2026-08-22):** Rejected and reverted. The candidate removed the measured redundant session-list
+rebuild, but a fresh immutable immediate-parent 4x5 control showed material end-to-end tail and CPU median regressions.
+All Task 7 checkboxes remain incomplete because no product change was retained. Do not attempt another render candidate
+without an architecture checkpoint and a newly profiled design.
+
 ## Task 8: Run final before/after verification
 
 **Files:**
