@@ -41,8 +41,17 @@ Object.assign(CodemanApp.prototype, {
   _onHookElicitationComplete(data) {
     // Question answered in the terminal: clear the action alert without
     // waiting for `stop` (the turn may keep running for a long time).
+    // ⚠️ BOTH action kinds, matching the server's APPROVAL_RESOLVING_EVENTS,
+    // which resolves a session's pending item whatever its kind. An
+    // AskUserQuestion dialog arrives as `permission_prompt` (only MCP
+    // elicitation is `elicitation_dialog`), so clearing just the elicitation
+    // entry left the red alert armed on exactly the dialog these events are
+    // most often about. Normally the server's `approval:resolved` broadcast
+    // clears it too; this is the path that still works when the store holds no
+    // item for the session (restart, superseded).
     if (data.sessionId) {
       this.clearPendingHooks(data.sessionId, 'elicitation_dialog');
+      this.clearPendingHooks(data.sessionId, 'permission_prompt');
     }
   },
 
@@ -387,6 +396,10 @@ Object.assign(CodemanApp.prototype, {
     this.loadTunnelStatus();
     document.getElementById('appSettingsLocalEcho').checked = settings.localEchoEnabled ?? MobileDetection.isTouchDevice();
     document.getElementById('appSettingsLiveMirror').checked = settings.liveMirrorEnabled ?? defaults.liveMirrorEnabled ?? true;
+    // Auto Copy (copy-on-select): per-device, default OFF everywhere. It quietly
+    // overwrites the system clipboard on a gesture the user may have meant only as
+    // a way to read, so it is opt-in rather than a default anyone has to discover.
+    document.getElementById('appSettingsAutoCopySelection').checked = settings.autoCopySelection === true;
     document.getElementById('appSettingsTerminalFont').value = settings.terminalFontFamily || '';
     document.getElementById('appSettingsTerminalWheelLocal').checked =
       settings.terminalWheelLocalScrollback ?? defaults.terminalWheelLocalScrollback ?? false;
@@ -2187,6 +2200,7 @@ Object.assign(CodemanApp.prototype, {
       tunnelEnabled: document.getElementById('appSettingsTunnelEnabled').checked,
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
       liveMirrorEnabled: document.getElementById('appSettingsLiveMirror').checked,
+      autoCopySelection: document.getElementById('appSettingsAutoCopySelection').checked,
       terminalFontFamily: document.getElementById('appSettingsTerminalFont').value.trim(),
       terminalWheelLocalScrollback: document.getElementById('appSettingsTerminalWheelLocal').checked,
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
@@ -2410,6 +2424,11 @@ Object.assign(CodemanApp.prototype, {
       showFileViewerButton: _fvb,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
+      // Copy-on-select. Per-device (clipboard access differs by device and by
+      // origin: the plain-HTTP LAN install has no navigator.clipboard at all)
+      // and absent from SettingsUpdateSchema (.strict()), so sending it would
+      // 400 the whole settings PUT.
+      autoCopySelection: _acs,
       // Per-device by nature (the font must exist on the device) and absent
       // from SettingsUpdateSchema (.strict()) — sending it would 400 the PUT.
       terminalFontFamily: _tff,
@@ -3407,6 +3426,7 @@ Object.assign(CodemanApp.prototype, {
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
           'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
           'terminalFontFamily',
+          'autoCopySelection',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',

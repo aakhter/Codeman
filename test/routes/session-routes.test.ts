@@ -935,12 +935,23 @@ and effort involved in moving workloads.
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.data.messages).toEqual([
-        { kind: 'prompt', label: 'Prompt', text: 'i need to create a naming recommendation for project helix' },
-        { kind: 'status', label: 'Status', text: 'gpt-5.4 medium · kb · main · Ready · Context 100% left' },
-        { kind: 'tool', label: 'Tool', text: '• Explored\n  └ Read SKILL.md' },
+        {
+          kind: 'prompt',
+          label: 'Prompt',
+          role: 'user',
+          text: 'i need to create a naming recommendation for project helix',
+        },
+        {
+          kind: 'status',
+          label: 'Status',
+          role: 'assistant',
+          text: 'gpt-5.4 medium · kb · main · Ready · Context 100% left',
+        },
+        { kind: 'tool', label: 'Tool', role: 'assistant', text: '• Explored\n  └ Read SKILL.md' },
         {
           kind: 'response',
           label: 'Response',
+          role: 'assistant',
           text: 'Subject: Naming Recommendation for Project Helix\n\nThe product helps customers move virtual machine workloads between hypervisors while keeping operations stable. It improves visibility into application dependencies and reduces the risk and effort involved in moving workloads.',
         },
       ]);
@@ -2143,6 +2154,7 @@ and effort involved in moving workloads.
       expect(body.data.terminalBuffer).toContain(lastLine);
       expect(body.data.source).toBe('mux-full-history');
       expect(typeof body.data.fullSize).toBe('number');
+      expect(res.headers['server-timing']).toMatch(/^capture;dur=\d+\.\d, prepare;dur=\d+\.\d, total;dur=\d+\.\d$/);
     });
 
     it('tab switch (with tail) uses the visible frame, not full history', async () => {

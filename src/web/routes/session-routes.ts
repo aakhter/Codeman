@@ -12,6 +12,7 @@ import { existsSync, statSync, mkdirSync, writeFileSync, realpathSync } from 'no
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   ApiErrorCode,
   createErrorResponse,
@@ -2285,6 +2286,22 @@ export function registerSessionRoutes(
       };
     }
 
+    // OpenCode / Gemini / Antigravity / Pi render their own TUIs and write no
+    // Claude transcript, so the scan below finds nothing and the response viewer
+    // renders permanently empty for them. Segment the terminal buffer instead —
+    // the pane IS the transcript for these CLIs. Codex is already handled above,
+    // where a real rollout file is the better source.
+    if (isExternalCliTranscriptMode(session.mode)) {
+      const externalQuery = req.query as { context?: string };
+      const blocks = parseExternalCliTranscript(session.terminalBuffer, session.mode);
+      return {
+        text: getLastTranscriptResponse(blocks),
+        timestamp: '',
+        hasContext: blocks.length > 0,
+        messages: externalQuery.context === 'full' ? blocks : undefined,
+      };
+    }
+
     // Scan ~/.claude/projects/*/ for the transcript file
     const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
 
@@ -2535,7 +2552,9 @@ export function registerSessionRoutes(
   // Query params:
   //   tail=<bytes> - Only return last N bytes (faster initial load)
   //   frame=1     - COD-187 live mirror: ONLY the current visible frame
-  app.get('/api/sessions/:id/terminal', async (req) => {
+  //   full=1       - Explicitly request the entire tmux scrollback (COD-47)
+  app.get('/api/sessions/:id/terminal', async (req, reply) => {
+    const routeStartedAt = performance.now();
     const { id } = req.params as { id: string };
     const query = req.query as { tail?: string; frame?: string; lines?: string; capture?: string; full?: string };
     const session = findSessionOrFail(ctx, id, req);
@@ -2571,14 +2590,12 @@ export function registerSessionRoutes(
       };
     }
 
-    // A request WITHOUT a `tail` param is a FULL RELOAD (the browser reloaded the
-    // page and needs the whole scroll history back). A request WITH `tail` is a
-    // tab switch — only the recent tail matters and speed wins. On a full reload
-    // we capture the ENTIRE tmux scrollback (`-S -`, COD-47) so the user gets
-    // back history that scrolled off Codeman's byte buffer; on a tab switch we
-    // capture only the visible frame, which stays fast.
+    // `full=1` is the EXPLICIT full-history signal (COD-47): capture the ENTIRE
+    // tmux scrollback so history beyond the server byte buffer can be recovered.
+    // Requests WITHOUT it — shell selection/tab switches (`tail=`) and legacy
+    // no-param callers — keep the fast visible-frame capture.
     const tailBytes = query.tail ? parseInt(query.tail, 10) : 0;
-    const isFullReload = tailBytes <= 0;
+    const isFullReload = query.full === '1' || tailBytes <= 0;
     // COD-187 (history view lazy load): `lines=N` bounds the full-history
     // capture to the last N lines — the fast first page. The frontend expands
     // to the unbounded capture only when the user scrolls to the partial top.
@@ -2610,6 +2627,7 @@ export function registerSessionRoutes(
       session.mode === 'opencode' ||
       session.mode === 'antigravity';
     const muxName = session.muxName;
+    const captureStartedAt = performance.now();
     // COD-180: a remote session's canonical scrollback lives ONLY on the remote
     // tmux server — the local wrapper is a nested-tmux client repainted in
     // place, so its own history is ~one screen. Capture over ssh first; on
@@ -2634,6 +2652,7 @@ export function registerSessionRoutes(
         isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true, lastLines } : undefined
       );
     }
+    const captureFinishedAt = performance.now();
     // COD-189: shell FULL reloads are capture-canonical too. Fast bursts make
     // the byte history sparse (tmux attach-client jump-scroll skips output),
     // while the pane history is contiguous — with the history-limit fix the
@@ -2754,6 +2773,14 @@ export function registerSessionRoutes(
       source === 'mux-full-history' &&
       cleanBuffer.length > 0 &&
       cleanBuffer.split('\n').length >= lastLines;
+
+    const finishedAt = performance.now();
+    reply.header(
+      'Server-Timing',
+      `capture;dur=${(captureFinishedAt - captureStartedAt).toFixed(1)}, ` +
+        `prepare;dur=${(finishedAt - captureFinishedAt).toFixed(1)}, ` +
+        `total;dur=${(finishedAt - routeStartedAt).toFixed(1)}`
+    );
 
     return {
       terminalBuffer: cleanBuffer,
@@ -3190,6 +3217,8 @@ export function registerSessionRoutes(
         dockerResumeId = dockerCase.lastClaudeSessionId;
       }
     } else {
+      // Check OpenCode availability if requested. Error text comes from the
+      // resolver so it carries the resolution diagnostics; same for the modes below.
       if (mode === 'opencode') {
         const { isOpenCodeAvailable, getOpenCodeNotFoundMessage } =
           await import('../../utils/opencode-cli-resolver.js');

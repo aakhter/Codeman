@@ -99,8 +99,6 @@ packages/gesture-control/.vite/
 # Claude Code plan tracking
 plan.json
 
-# Unfinished TUI (local development only)
-src/tui/
 .claude/
 !.claude/commands/
 media-assets/
