@@ -301,6 +301,7 @@ async function restoreAckDelivery(): Promise<void> {
     delete (window as any).__cod356OriginalAckDelivery;
     delete (window as any).__cod356SavedAckDelivery;
     delete (window as any).__cod356DelayedAcks;
+    delete (window as any).__cod356ReconnectAcks;
   });
 }
 
@@ -727,7 +728,8 @@ describe('terminal input real browser/server/probe correlation', () => {
     await page.evaluate((id) => {
       const app = (window as any).app;
       (window as any).__cod356SavedAckDelivery = app._ackDelivery.bind(app);
-      app._ackDelivery = () => {};
+      (window as any).__cod356ReconnectAcks = [];
+      app._ackDelivery = (...args: unknown[]) => (window as any).__cod356ReconnectAcks.push(args);
       app._sendInputAsync(id, 'socket-reconnect');
       app._persistReliableNow();
     }, sessionId);
@@ -736,18 +738,25 @@ describe('terminal input real browser/server/probe correlation', () => {
     );
     await assertCurrentLayers(before, ['socket-reconnect']);
     await page.evaluate(() => {
-      const app = (window as any).app;
-      app._ackDelivery = (window as any).__cod356SavedAckDelivery;
-      app._ws.close();
+      (window as any).app._ws.close();
     });
     await page.waitForFunction(
-      () => {
-        const app = (window as any).app;
-        return app._wsReady === true && app._pendingDeliveries.size === 0;
-      },
-      undefined,
+      (wsIndex) =>
+        (window as any).app._wsReady === true &&
+        (window as any).__cod356Wire.ws
+          .slice(wsIndex)
+          .filter((entry: any) => entry.frame?.t === 'i' && entry.frame.d === 'socket-reconnect').length === 2 &&
+        (window as any).__cod356ReconnectAcks.length >= 2,
+      before.wsIndex,
       { timeout: 20_000 }
     );
+    await page.evaluate(() => {
+      const app = (window as any).app;
+      const original = (window as any).__cod356SavedAckDelivery;
+      app._ackDelivery = original;
+      original(...(window as any).__cod356ReconnectAcks[0]);
+    });
+    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0);
     await new Promise((resolveWait) => setTimeout(resolveWait, 200));
     const bytes = Buffer.concat(
       readProbeEvents()
