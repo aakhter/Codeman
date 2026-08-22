@@ -5691,7 +5691,7 @@ class CodemanApp {
       },
       { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
       {
-        label: 'Move group earlier',
+        label: 'Move up',
         run: () =>
           this.editTabLayout(
             { type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) },
@@ -5699,7 +5699,7 @@ class CodemanApp {
           ),
       },
       {
-        label: 'Move group later',
+        label: 'Move down',
         run: () =>
           this.editTabLayout(
             {
@@ -5791,10 +5791,10 @@ class CodemanApp {
     const next = blocks.find((block) => block.start === sourceEnd);
     return [
       ...(sourceStart > 0
-        ? [{ label: 'Move earlier', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
+        ? [{ label: 'Move up', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
         : []),
       ...(sourceEnd < refs.length
-        ? [{ label: 'Move later', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
+        ? [{ label: 'Move down', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
         : []),
       { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
       ...this.tabLayout.groups.map((group) => ({
@@ -7864,14 +7864,14 @@ class CodemanApp {
   moveActiveTabLeft() {
     if (!this.activeSessionId) return;
     const ref = { kind: 'session', id: this.activeSessionId };
-    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move earlier');
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move up');
     if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
   moveActiveTabRight() {
     if (!this.activeSessionId) return;
     const ref = { kind: 'session', id: this.activeSessionId };
-    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move later');
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move down');
     if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
