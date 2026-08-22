@@ -1,0 +1,109 @@
+{
+  "capturedAt": "2026-08-22T14:45:13.699Z",
+  "platform": "linux",
+  "release": "6.8.0-124-generic",
+  "hostname": "beelink",
+  "node": "v22.22.0",
+  "architecture": "x64",
+  "logicalCpuCount": 8,
+  "cpuModel": "Intel(R) Core(TM) i3-N305",
+  "totalMemoryBytes": 33417818112,
+  "freeMemoryBytesAtStart": 26206523392,
+  "issue": "COD-356",
+  "phase": "before",
+  "provenance": {
+    "runtimeRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "branchPointRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "runtimeTreeHash": "8adb932b9da5f06b592ed3e41dfa89991fac676e6b614f84929fa7b18ec6b5df",
+    "headRevision": {
+      "value": "2dce8d2716a78e031794fec87811d168b8f2743f",
+      "semantics": "informational only; not the measured runtime or harness identity"
+    },
+    "harness": {
+      "algorithm": "sha256 of sorted path/byte-length/content-sha256 manifest",
+      "contentHash": "220970b94e7c20114f4afeca1bea00626d2c584d5524b56177c5a8e0d7e9353c",
+      "files": [
+        {
+          "path": "package.json",
+          "bytes": 5418,
+          "sha256": "e78806138e4d181c34067804db9302056bb90bc6fd5e6d25b451dcd5ca746c3b"
+        },
+        {
+          "path": "scripts/perf/cod-356-benchmark.mjs",
+          "bytes": 42526,
+          "sha256": "44f35aa1cd0ae4c6f229c02ffd6cae70c57a3b341b2e6f5bd06dd03ea8a959f6"
+        },
+        {
+          "path": "scripts/perf/cod-356-browser.mjs",
+          "bytes": 5333,
+          "sha256": "7411ff53e8d62dc02fe8744e216787eca3acb9837fc60bc2b1cfc1c9c700ae2d"
+        },
+        {
+          "path": "scripts/perf/cod-356-cleanup.mjs",
+          "bytes": 8081,
+          "sha256": "dfb5d4fbd8035465cea58c2d427c64919d177627f61540dacd42d96ce0c6b1f8"
+        },
+        {
+          "path": "scripts/perf/cod-356-cpu-worker.mjs",
+          "bytes": 1097,
+          "sha256": "4c428b9e5c313d0378e80aa29334f5b4824933e00237967aa68022abddab2775"
+        },
+        {
+          "path": "scripts/perf/cod-356-input-probe.mjs",
+          "bytes": 1249,
+          "sha256": "7c4bf6732396e65a1d628419e8b81ca9aa917017fcbb2a5c2ca0496cfdabfbd8"
+        },
+        {
+          "path": "scripts/perf/cod-356-metrics.mjs",
+          "bytes": 18279,
+          "sha256": "7eb8183920a61bdf64d5e6065ed6c8819189d03c22951806ff50e8987a67ce14"
+        },
+        {
+          "path": "scripts/perf/cod-356-provenance.mjs",
+          "bytes": 5236,
+          "sha256": "18766dc6a191323e2b32e8d2c58bd97c0cc6944efebb1a39c3f6cc0889e6a5eb"
+        },
+        {
+          "path": "scripts/perf/cod-356-safety.mjs",
+          "bytes": 3664,
+          "sha256": "6e94a3be2a36b70dbb69e2a3860ddf18bebff5974ffde8de2d0f809ccfdae3d0"
+        },
+        {
+          "path": "scripts/perf/cod-356-scheduler.mjs",
+          "bytes": 4824,
+          "sha256": "f5b0d7d6ebdde1a766b7dc415420580995a5b3e48d9e29531e69a4db43b72286"
+        },
+        {
+          "path": "test/perf-cod-356-harness.test.ts",
+          "bytes": 30205,
+          "sha256": "742b15b3d3910c30dead9a4141686ebd1c10f9951b51c9342c2b4655ea873ba3"
+        }
+      ],
+      "dirty": true
+    },
+    "outOfScopeTrackedDirtyPaths": [],
+    "runtimePaths": ["src", "packages", "config", "scripts/build.mjs", "package-lock.json"],
+    "packageManifestVerification": {
+      "allowedDifference": "scripts.perf:cod356 only",
+      "normalizedHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4"
+    },
+    "runtimeVerification": "git diff and untracked-file checks against branch point passed before resource creation"
+  },
+  "loadProfile": {
+    "workers": 7,
+    "dutyCycle": 0.7,
+    "durationMs": 60000,
+    "busyIntervalMs": 70,
+    "idleIntervalMs": 30
+  },
+  "affinity": {
+    "applied": false,
+    "strategy": "platform scheduler",
+    "fallback": "Node child_process has no portable CPU affinity API; worker count leaves host headroom"
+  },
+  "measurement": {
+    "nodeProcess": "process.cpuUsage/process.memoryUsage benchmark preload with /proc exact-PID fallback on Linux",
+    "eventLoopDelay": "perf_hooks.monitorEventLoopDelay at 10ms resolution in a benchmark-only preload",
+    "tmuxCapture": "PATH-first transparent tmux wrapper recording invocation start/end/status/duration"
+  }
+}

@@ -25,7 +25,7 @@
 - Create after measurement: `docs/reports/cod-356/baseline-summary.json`
 - Create after measurement: `docs/reports/cod-356/baseline-environment.json`
 
-- [ ] **Step 1: Write failing harness-policy and statistics tests**
+- [x] **Step 1: Write failing harness-policy and statistics tests**
 
 Cover these pure contracts in `test/perf-cod-356-harness.test.ts`:
 
@@ -37,7 +37,7 @@ Cover these pure contracts in `test/perf-cod-356-harness.test.ts`:
 - register and clean up exact child PIDs, temporary data directories, browsers, and disposable session IDs;
 - refuse to run if the target reports the production instance identity.
 
-- [ ] **Step 2: Run the focused test and observe RED**
+- [x] **Step 2: Run the focused test and observe RED**
 
 Run:
 
@@ -47,11 +47,11 @@ npm run test:perf -- test/perf-cod-356-harness.test.ts
 
 Expected: FAIL because the metrics and safety modules do not exist.
 
-- [ ] **Step 3: Implement the minimal metrics and safety layer**
+- [x] **Step 3: Implement the minimal metrics and safety layer**
 
 `cod-356-metrics.mjs` owns validation, percentile calculation, environment metadata, artifact serialization, and an explicit cleanup registry. `cod-356-cpu-worker.mjs` alternates bounded busy and idle intervals and exits on its deadline or parent disconnect. Do not use broad process matching for cleanup.
 
-- [ ] **Step 4: Implement the disposable benchmark runner**
+- [x] **Step 4: Implement the disposable benchmark runner**
 
 The runner must:
 
@@ -71,7 +71,7 @@ Add a package script:
 "perf:cod356": "node scripts/perf/cod-356-benchmark.mjs"
 ```
 
-- [ ] **Step 5: Run harness tests and dry-run cleanup verification**
+- [x] **Step 5: Run harness tests and dry-run cleanup verification**
 
 Run:
 
@@ -82,7 +82,7 @@ npm run perf:cod356 -- --dry-run
 
 Expected: tests pass; dry run prints the resolved matrix and cleanup plan without starting load or a server.
 
-- [ ] **Step 6: Capture the branch-point baseline**
+- [x] **Step 6: Capture the branch-point baseline**
 
 Run:
 
@@ -92,7 +92,7 @@ npm run perf:cod356 -- --phase before --conditions idle,cpu --samples 5
 
 Expected: all four cells complete, compact baseline files are written under `docs/reports/cod-356/`, raw artifacts are stored in the reported temporary artifact directory, and post-run checks show no remaining benchmark server, CPU worker, browser, or disposable session.
 
-- [ ] **Step 7: Review baseline evidence before optimizing**
+- [x] **Step 7: Review baseline evidence before optimizing**
 
 Record in the summary:
 
@@ -106,7 +106,7 @@ Record in the summary:
 
 If the harness cannot reproduce correct byte identity or stable cleanup, fix the harness before continuing.
 
-- [ ] **Step 8: Commit benchmark harness and baseline**
+- [x] **Step 8: Commit benchmark harness and baseline**
 
 ```bash
 git add package.json scripts/perf test/perf-cod-356-harness.test.ts docs/reports/cod-356
