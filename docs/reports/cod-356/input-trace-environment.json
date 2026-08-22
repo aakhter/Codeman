@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-08-22T19:35:41.122Z",
+  "capturedAt": "2026-08-22T19:55:05.538Z",
   "platform": "linux",
   "release": "6.8.0-124-generic",
   "hostname": "beelink",
@@ -8,25 +8,25 @@
   "logicalCpuCount": 8,
   "cpuModel": "Intel(R) Core(TM) i3-N305",
   "totalMemoryBytes": 33417818112,
-  "freeMemoryBytesAtStart": 26780098560,
+  "freeMemoryBytesAtStart": 26242584576,
   "issue": "COD-356",
   "phase": "input-trace",
   "provenance": {
-    "runtimeRevision": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+    "runtimeRevision": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
     "branchPointRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
     "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
     "runtimeTreeHash": "15e7896d3caa7ad149d6daeff611b7f8c6f2f529f4dc8a7c380b41f0b563258c",
     "headRevision": {
-      "value": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+      "value": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
       "semantics": "informational only; not the measured runtime or harness identity"
     },
     "harnessHeadRevision": {
-      "value": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+      "value": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
       "semantics": "informational commit containing or preceding the working-tree harness content"
     },
     "harness": {
       "algorithm": "sha256 of sorted path/byte-length/content-sha256 manifest",
-      "contentHash": "4c8e200bd008250b9bd6598a1021261f52849f056a474a1a0c6a32743a3265bc",
+      "contentHash": "a7c9b90710039743273ab26a2501da76696d8c84e68737379d245dc26eae9a6f",
       "files": [
         {
           "path": "package.json",
@@ -35,13 +35,13 @@
         },
         {
           "path": "scripts/perf/cod-356-benchmark.mjs",
-          "bytes": 60171,
-          "sha256": "2c5138ba48a630f5a9900b033be4c8d6bfc0d2641258eb1a2d4671246f9e3974"
+          "bytes": 60411,
+          "sha256": "fa116066fd7678f1647775fc23bd5b403605029b85bc3b8a7fa13c72d62da83f"
         },
         {
           "path": "scripts/perf/cod-356-browser.mjs",
-          "bytes": 12510,
-          "sha256": "db22b0bd68b4bdb3b24f585f2cd638d06a768837486d378f899196f25e82d6c9"
+          "bytes": 12631,
+          "sha256": "3f05d67a16ba8af5c60d0fc4accbdff6a84f0933de5c1083c07a6b0b5665af0a"
         },
         {
           "path": "scripts/perf/cod-356-cleanup.mjs",
@@ -60,8 +60,8 @@
         },
         {
           "path": "scripts/perf/cod-356-metrics.mjs",
-          "bytes": 28821,
-          "sha256": "1be22276e73ba7fed06777a34a7151b688bfd1c899b2c3d0698ac92f7ac784c2"
+          "bytes": 29734,
+          "sha256": "33accb7ae4a1b433f10b6cfe0329327658e32d6f4a0fa1156c4e26912235d290"
         },
         {
           "path": "scripts/perf/cod-356-provenance.mjs",
@@ -80,8 +80,8 @@
         },
         {
           "path": "test/perf-cod-356-harness.test.ts",
-          "bytes": 67013,
-          "sha256": "5e193a89af661a5c21d2958562ad8d330d071351a8f861b6a4b5beb588fc1535"
+          "bytes": 68753,
+          "sha256": "9af20ac3e7882ce3ddd1cc7a7d7de49067d01ae98af9b9e3a3e93304258016b4"
         }
       ],
       "dirty": false,
@@ -96,10 +96,10 @@
       "package-lock.json"
     ],
     "revisionPolicy": {
-      "runtimeRevision": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+      "runtimeRevision": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
       "explicit": true,
       "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
-      "headRevision": "f329e930e33340c65cdb32a585ac36200d8d9e1e"
+      "headRevision": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b"
     },
     "runtimePackageHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4",
     "generatedRuntimeAssets": {
@@ -185,7 +185,7 @@
       "comparison": "exact file bytes and sizes match accepted before baseline manifest"
     },
     "acceptedGeneratedAssetBaseline": {
-      "sourceCommit": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+      "sourceCommit": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
       "blobObjectId": "d8c2fe9b5019944d0a0f678dfec8a26968c0096d",
       "contentSha256": "724b991cf3d0a8d299289f5b864df92b4e3ed69a2d6d1c9cb985333625f52d51",
       "indexBlobObjectId": "d8c2fe9b5019944d0a0f678dfec8a26968c0096d",
@@ -228,7 +228,7 @@
     },
     "packageManifestVerification": {
       "allowedDifference": "scripts.perf:cod356 only",
-      "comparedToRevision": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+      "comparedToRevision": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
       "normalizedHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4"
     },
     "runtimeVerification": "git diff and untracked-file checks against declared runtime revision passed before resource creation"
@@ -273,20 +273,20 @@
     "apiOffersPerSample": 45,
     "apiOfferIntervalMs": 50
   },
-  "reportSetId": "74561fcebc6182099da168e8ed9e7d3b",
+  "reportSetId": "6d839b4d536f06d07f195e84b4915ff7",
   "postRunGeneratedAssets": {
-    "checkedAt": "2026-08-22T19:35:41.123Z",
+    "checkedAt": "2026-08-22T19:55:05.538Z",
     "result": "matched",
     "preHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
     "postHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
     "error": null
   },
   "postRunProvenance": {
-    "checkedAt": "2026-08-22T19:35:41.245Z",
+    "checkedAt": "2026-08-22T19:55:05.623Z",
     "result": "matched",
-    "sourceCommit": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+    "sourceCommit": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
     "acceptedGeneratedAssetBaseline": {
-      "sourceCommit": "f329e930e33340c65cdb32a585ac36200d8d9e1e",
+      "sourceCommit": "c0a38ae67006f3eaa0520d0e4aec16d634c31c7b",
       "blobObjectId": "d8c2fe9b5019944d0a0f678dfec8a26968c0096d",
       "contentSha256": "724b991cf3d0a8d299289f5b864df92b4e3ed69a2d6d1c9cb985333625f52d51",
       "indexBlobObjectId": "d8c2fe9b5019944d0a0f678dfec8a26968c0096d",
