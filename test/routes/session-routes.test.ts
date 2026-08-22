@@ -1308,24 +1308,29 @@ and effort involved in moving workloads.
     it('sends input to session', async () => {
       harness.ctx._session.isCheckpointActive = true;
       const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-      const res = await harness.app.inject({
-        method: 'POST',
-        url: `/api/sessions/${harness.ctx._sessionId}/input`,
-        payload: { input: 'hello' },
-      });
-      expect(res.statusCode).toBe(200);
-      const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(harness.ctx.sessions.get(harness.ctx._sessionId)?.cancelCheckpoint).toHaveBeenCalledWith(
-        'manual-takeover'
-      );
-      expect(info).toHaveBeenCalledWith('[Checkpoint] manual takeover', {
-        sessionId: harness.ctx._sessionId,
-        route: 'http',
-        inputClass: 'keyboard',
-      });
-      expect(JSON.stringify(info.mock.calls)).not.toContain('hello');
-      info.mockRestore();
+      const session = harness.ctx._session;
+      const write = vi.spyOn(session, 'write');
+      try {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/input`,
+          payload: { input: 'hello' },
+        });
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.success).toBe(true);
+        expect(session.cancelCheckpoint).toHaveBeenCalledWith('manual-takeover');
+        expect(info).toHaveBeenCalledWith('[Checkpoint] manual takeover', {
+          sessionId: harness.ctx._sessionId,
+          route: 'http',
+          inputClass: 'keyboard',
+        });
+        expect(JSON.stringify(info.mock.calls)).not.toContain('hello');
+        expect(session.cancelCheckpoint.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0]);
+      } finally {
+        write.mockRestore();
+        info.mockRestore();
+      }
     });
 
     it.each(['\x1b[O', '\x1b[<64;10;5M', '\x1b[M !!'])('forwards report-only input without takeover', async (input) => {

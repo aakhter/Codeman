@@ -195,8 +195,9 @@ describe('ws-routes', () => {
     it('forwards input messages to session.write()', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
       const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const session = ctx._session;
+      const write = vi.spyOn(session, 'write');
       try {
-        const session = ctx._session;
         session.isCheckpointActive = true;
 
         ws.send(JSON.stringify({ t: 'i', d: 'ls -la\r' }));
@@ -212,7 +213,9 @@ describe('ws-routes', () => {
           inputClass: 'keyboard',
         });
         expect(JSON.stringify(info.mock.calls)).not.toContain('ls -la');
+        expect(session.cancelCheckpoint.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0]);
       } finally {
+        write.mockRestore();
         info.mockRestore();
         ws.close();
       }
