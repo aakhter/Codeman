@@ -498,6 +498,7 @@ export async function loadCommittedBaselineAssetManifest({ root, reportPath, sou
   }
   return {
     manifest,
+    benchmarkProtocol: report?.benchmarkProtocol ?? null,
     binding: {
       sourceCommit,
       blobObjectId: summaryFile.blobObjectId,
@@ -571,6 +572,7 @@ export async function collectBenchmarkProvenance({
   });
   const generatedRuntimeAssets = await collectGeneratedRuntimeAssetManifest(generatedAssetPolicy);
   let acceptedGeneratedAssetBaseline = null;
+  let acceptedBenchmarkProtocol = null;
   if (phase !== 'before') {
     const accepted = await loadCommittedBaselineAssetManifest({
       root,
@@ -582,6 +584,7 @@ export async function collectBenchmarkProvenance({
       actual: generatedRuntimeAssets,
     });
     acceptedGeneratedAssetBaseline = accepted.binding;
+    acceptedBenchmarkProtocol = accepted.benchmarkProtocol;
   }
   const harnessFiles = await Promise.all(
     harnessPaths.map(async (path) => ({ path, content: await readFile(join(root, path)) }))
@@ -615,6 +618,7 @@ export async function collectBenchmarkProvenance({
           : 'exact file bytes and sizes match accepted before baseline manifest',
     },
     acceptedGeneratedAssetBaseline,
+    acceptedBenchmarkProtocol,
     packageManifestVerification,
     runtimeVerification:
       'git diff and untracked-file checks against declared runtime revision passed before resource creation',

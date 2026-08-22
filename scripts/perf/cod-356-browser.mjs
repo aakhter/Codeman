@@ -1,6 +1,28 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+export async function selectSessionAndWaitForTerminal(page, sessionId) {
+  await page.evaluate((id) => window.app.selectSession(id), sessionId);
+  await page.waitForFunction(
+    (id) =>
+      window.app.activeSessionId === id && Boolean(window.app.terminal?.buffer?.active) && window.app._wsReady === true,
+    sessionId,
+    { timeout: 20_000 }
+  );
+}
+
+export async function prepareInteractiveTargetSession(page, { interactiveSessionId, targetSessionId }) {
+  if (interactiveSessionId) await selectSessionAndWaitForTerminal(page, interactiveSessionId);
+  await selectSessionAndWaitForTerminal(page, targetSessionId);
+}
+
+export function assertBrowserSampleClean({ pageErrors, seriousConsoleErrors }) {
+  if (pageErrors.length > 0) throw new Error(`browser page error: ${pageErrors.join(' | ')}`);
+  if (seriousConsoleErrors.length > 0) {
+    throw new Error(`serious browser console error: ${seriousConsoleErrors.join(' | ')}`);
+  }
+}
+
 export async function createServerTelemetryPreload(dataDir, telemetryLog) {
   const preloadPath = join(dataDir, 'cod356-server-telemetry.mjs');
   const source = `import { appendFile } from 'node:fs/promises';

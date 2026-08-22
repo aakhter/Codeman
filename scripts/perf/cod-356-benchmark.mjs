@@ -12,18 +12,26 @@ import { performance } from 'node:perf_hooks';
 import { chromium } from 'playwright';
 
 import {
+  FIXED_INPUT_TRIALS_PER_SAMPLE,
+  INPUT_SETTLE_WINDOW_MS,
   WorkerCoverageSupervisor,
   aggregateEventLoopIntervals,
+  assertComparableInputTrialProfiles,
   assertLoadCoverage,
   authenticateDisposableTarget,
+  buildCorrelatedInputTimeline,
+  buildInputTrialProfile,
   calculateProcCpuPercent,
   collectEnvironmentMetadata,
+  createInputTrialPayload,
   deriveLoadProfile,
   diffByteSequences,
   parseOnlySelection,
+  runFixedInputTrials,
   runFixedLoadWindow,
   selectInteractiveFixture,
   summarizeTmuxTrace,
+  summarizeInputTrialMatrix,
   summarizeSamples,
   validateBenchmarkOptions,
   writeJsonArtifact,
@@ -391,25 +399,20 @@ async function runBrowserSample({
   const appReadyMs = performance.now() - navigationStart;
   await browserTelemetry.attachAppInstrumentation(page);
 
-  if (applicationCondition === 'interactive') {
-    const interactiveSessionId =
-      sampleIndex === 'warmup' ? sessionIds[1] : selectInteractiveFixture(sessionIds, sampleIndex);
-    await page.evaluate((id) => window.app.selectSession(id), interactiveSessionId);
-    await page.waitForFunction((id) => window.app.activeSessionId === id, interactiveSessionId);
-  }
   const targetSessionId = sessionIds[0];
+  const interactiveSessionId =
+    applicationCondition === 'interactive'
+      ? sampleIndex === 'warmup'
+        ? sessionIds[1]
+        : selectInteractiveFixture(sessionIds, sampleIndex)
+      : null;
   const terminalStart = performance.now();
-  await page.evaluate((id) => window.app.selectSession(id), targetSessionId);
-  await page.waitForFunction(
-    (id) =>
-      window.app.activeSessionId === id && Boolean(window.app.terminal?.buffer?.active) && window.app._wsReady === true,
-    targetSessionId,
-    { timeout: 20_000 }
-  );
+  await browserTelemetry.prepareInteractiveTargetSession(page, { interactiveSessionId, targetSessionId });
   const firstTerminalReadyMs = performance.now() - terminalStart;
   if (!selection.input) {
     const browserMetrics = await browserTelemetry.collectBrowserMetrics(page);
     await context.close();
+    browserTelemetry.assertBrowserSampleClean({ pageErrors, seriousConsoleErrors });
     return {
       navigationMs,
       appReadyMs,
@@ -421,95 +424,133 @@ async function runBrowserSample({
       seriousConsoleErrors,
     };
   }
-  const priorEvents = await browserTelemetry.readProbeEvents(probeLog);
-  const nonce = `${applicationCondition}-${sampleIndex}-${Date.now().toString(36)}`;
-  const input = `cod356:${nonce}:aaabbb111___`;
-  const expected = Buffer.from(input);
-  const expectedBase64 = expected.toString('base64');
-  const queueAtSend = await browserTelemetry.browserQueueSnapshot(page);
-  const sendStart = performance.now();
-  await page.evaluate(({ id, data }) => window.app._sendInputAsync(id, data), { id: targetSessionId, data: input });
-  const inputSendMs = performance.now() - sendStart;
-  const sentFrame = await page
-    .waitForFunction(
-      (data) =>
-        [...window.__cod356.webSocketSends]
-          .reverse()
-          .find((entry) => entry.frame?.t === 'i' && entry.frame?.d === data),
-      input,
-      { timeout: 5_000 }
-    )
-    .then((handle) => handle.jsonValue());
-  if (!Number.isInteger(sentFrame?.frame?.seq)) throw new Error('browser did not serialize a sequenced input frame');
-  const sequence = sentFrame.frame.seq;
-  let receivedEvents = [];
-  const probeDeadline = Date.now() + 10_000;
-  while (Date.now() < probeDeadline) {
-    const events = await browserTelemetry.readProbeEvents(probeLog);
-    receivedEvents = events.slice(priorEvents.length).filter((event) => event.type === 'stdin');
-    if (Buffer.concat(receivedEvents.map((event) => Buffer.from(event.base64, 'base64'))).includes(expected)) break;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-  }
-  const probeReceiptMs = performance.now() - sendStart;
-  const ack = await page
-    .waitForFunction((seq) => window.__cod356.inputAcks.find((entry) => entry.seq === seq), sequence, {
-      timeout: 10_000,
-    })
-    .then((handle) => handle.jsonValue());
-  const browserAckMs = ack.timestamp - sentFrame.timestamp;
-  const queueAtAck = await browserTelemetry.browserQueueSnapshot(page);
-  const visibleToken = `COD356_ECHO:${expectedBase64}`;
-  const convergenceDeadline = Date.now() + 10_000;
-  while (Date.now() < convergenceDeadline && !(await browserTelemetry.terminalContains(page, visibleToken))) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-  }
-  if (!(await browserTelemetry.terminalContains(page, visibleToken))) {
-    throw new Error('visible terminal convergence was not observed');
-  }
-  await page.waitForFunction(
-    () => window.app.pendingWrites.length === 0 && window.app.writeFrameScheduled === false,
-    undefined,
-    { timeout: 5_000 }
-  );
-  const flushCompleteAt = await page.evaluate(
-    () => new Promise((resolveFlush) => window.app.terminal.write('', () => resolveFlush(performance.now())))
-  );
-  const convergenceMs = flushCompleteAt - sentFrame.timestamp;
-  const queueAtConvergence = await browserTelemetry.browserQueueSnapshot(page);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
-  receivedEvents = (await browserTelemetry.readProbeEvents(probeLog))
-    .slice(priorEvents.length)
-    .filter((event) => event.type === 'stdin');
-  const received = Buffer.concat(receivedEvents.map((event) => Buffer.from(event.base64, 'base64')));
-  const identity = diffByteSequences(expected, received);
-  const queueAfterSettle = await browserTelemetry.browserQueueSnapshot(page);
+  const pageTimeOriginMs = await page.evaluate(() => performance.timeOrigin);
+  const terminalTrials = [];
+  const inputTrials = await runFixedInputTrials({
+    trialCount: FIXED_INPUT_TRIALS_PER_SAMPLE,
+    runTrial: async (trialIndex) => {
+      const priorEvents = await browserTelemetry.readProbeEvents(probeLog);
+      const priorTraceCounts = await page.evaluate(() => ({
+        outputFrames: window.__cod356.outputFrames.length,
+        longTasks: window.__cod356.longTasks.length,
+      }));
+      const input = createInputTrialPayload({ sampleIndex, trialIndex });
+      const expected = Buffer.from(input);
+      const expectedBase64 = expected.toString('base64');
+      const queueAtSend = await browserTelemetry.browserQueueSnapshot(page);
+      const sendStart = performance.now();
+      await page.evaluate(({ id, data }) => window.app._sendInputAsync(id, data), { id: targetSessionId, data: input });
+      const inputSendMs = performance.now() - sendStart;
+      const sentFrame = await page
+        .waitForFunction(
+          (data) =>
+            [...window.__cod356.webSocketSends]
+              .reverse()
+              .find((entry) => entry.frame?.t === 'i' && entry.frame?.d === data),
+          input,
+          { timeout: 5_000 }
+        )
+        .then((handle) => handle.jsonValue());
+      if (!Number.isInteger(sentFrame?.frame?.seq))
+        throw new Error('browser did not serialize a sequenced input frame');
+      const sequence = sentFrame.frame.seq;
+      let receivedEvents = [];
+      const probeDeadline = Date.now() + 10_000;
+      while (Date.now() < probeDeadline) {
+        const events = await browserTelemetry.readProbeEvents(probeLog);
+        receivedEvents = events.slice(priorEvents.length).filter((event) => event.type === 'stdin');
+        if (Buffer.concat(receivedEvents.map((event) => Buffer.from(event.base64, 'base64'))).includes(expected)) break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      const probeReceiptMs = performance.now() - sendStart;
+      const probeEvent = receivedEvents[0];
+      if (!Number.isFinite(probeEvent?.timestampEpochMs)) throw new Error('probe receipt epoch timestamp unavailable');
+      const ack = await page
+        .waitForFunction((seq) => window.__cod356.inputAcks.find((entry) => entry.seq === seq), sequence, {
+          timeout: 10_000,
+        })
+        .then((handle) => handle.jsonValue());
+      const browserAckMs = ack.timestamp - sentFrame.timestamp;
+      const queueAtAck = await browserTelemetry.browserQueueSnapshot(page);
+      const visibleToken = `COD356_ECHO:${expectedBase64}`;
+      const convergenceDeadline = Date.now() + 10_000;
+      while (Date.now() < convergenceDeadline && !(await browserTelemetry.terminalContains(page, visibleToken))) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      if (!(await browserTelemetry.terminalContains(page, visibleToken))) {
+        throw new Error('visible terminal convergence was not observed');
+      }
+      await page.waitForFunction(
+        () => window.app.pendingWrites.length === 0 && window.app.writeFrameScheduled === false,
+        undefined,
+        { timeout: 5_000 }
+      );
+      const flushCompleteAt = await page.evaluate(
+        () => new Promise((resolveFlush) => window.app.terminal.write('', () => resolveFlush(performance.now())))
+      );
+      const convergenceMs = flushCompleteAt - sentFrame.timestamp;
+      const queueAtConvergence = await browserTelemetry.browserQueueSnapshot(page);
+      const matchingOutput = await page.evaluate(
+        (token) => window.__cod356.outputFrames.find((entry) => entry.data.includes(token)) ?? null,
+        visibleToken
+      );
+      if (!matchingOutput) throw new Error('matching output frame timestamp unavailable');
+      await new Promise((resolveWait) => setTimeout(resolveWait, INPUT_SETTLE_WINDOW_MS));
+      receivedEvents = (await browserTelemetry.readProbeEvents(probeLog))
+        .slice(priorEvents.length)
+        .filter((event) => event.type === 'stdin');
+      const received = Buffer.concat(receivedEvents.map((event) => Buffer.from(event.base64, 'base64')));
+      const identity = diffByteSequences(expected, received);
+      const queueAfterSettle = await browserTelemetry.browserQueueSnapshot(page);
+      const trialBrowserMetrics = await browserTelemetry.collectBrowserMetrics(page);
+      const outputFrames = trialBrowserMetrics.outputFrames.slice(priorTraceCounts.outputFrames);
+      const trialLongTasks = trialBrowserMetrics.longTasks.slice(priorTraceCounts.longTasks);
+      const timeline = buildCorrelatedInputTimeline({
+        pageTimeOriginMs,
+        sentFrameBrowserMs: sentFrame.timestamp,
+        ackBrowserMs: ack.timestamp,
+        probeEpochMs: probeEvent.timestampEpochMs,
+        probeMonotonicNs: probeEvent.timestampNs,
+        frameMatchBrowserMs: matchingOutput.timestamp,
+        flushBrowserMs: flushCompleteAt,
+        settleCompleteBrowserMs: queueAfterSettle.timestamp,
+        longTasks: trialLongTasks,
+      });
+      terminalTrials.push({
+        sampleIndex,
+        trialIndex,
+        queueAtSend,
+        queueAtAck,
+        queueAtConvergence,
+        queueAfterSettle,
+        outputFrameCount: outputFrames.length,
+        outputFrameBytes: outputFrames.reduce((sum, frame) => sum + frame.byteLength, 0),
+        flushMs: flushCompleteAt - matchingOutput.timestamp,
+        flushReason: null,
+        timeline,
+      });
+      return {
+        sampleIndex,
+        trialIndex,
+        inputSendMs,
+        browserAckMs,
+        probeReceiptMs,
+        convergenceMs,
+        settleWindowMs: INPUT_SETTLE_WINDOW_MS,
+        sequence,
+        timeline,
+        ...identity,
+      };
+    },
+  });
   const browserMetrics = await browserTelemetry.collectBrowserMetrics(page);
-  const matchingOutput = await page.evaluate(
-    (token) => window.__cod356.outputFrames.find((entry) => entry.data.includes(token)) ?? null,
-    visibleToken
-  );
   await context.close();
+  browserTelemetry.assertBrowserSampleClean({ pageErrors, seriousConsoleErrors });
   return {
     ...(selection.frontend ? { navigationMs, appReadyMs, firstTerminalReadyMs, ...browserMetrics } : {}),
-    input: {
-      inputSendMs,
-      browserAckMs,
-      probeReceiptMs,
-      convergenceMs,
-      settleWindowMs: 500,
-      sequence,
-      ...identity,
-    },
-    terminal: {
-      queueAtSend,
-      queueAtAck,
-      queueAtConvergence,
-      queueAfterSettle,
-      outputFrameCount: browserMetrics.outputFrames.length,
-      outputFrameBytes: browserMetrics.outputFrames.reduce((sum, frame) => sum + frame.byteLength, 0),
-      flushMs: matchingOutput ? flushCompleteAt - matchingOutput.timestamp : null,
-      flushReason: matchingOutput ? null : 'matching output frame timestamp unavailable',
-    },
+    pageTimeOriginMs,
+    inputTrials,
+    terminalTrials,
     pageErrors,
     seriousConsoleErrors,
   };
@@ -525,6 +566,7 @@ async function runApiWindow(baseUrl, auth) {
 
 async function runSample(context) {
   context.signal.throwIfAborted();
+  const sampleStartedAtEpochMs = Date.now();
   const sampleStartedAt = performance.now();
   const coverageMarker = context.loadSupervisor?.beginSample() ?? null;
   const telemetryBefore = context.selection.backend ? await readJsonLines(context.telemetryLog) : [];
@@ -535,6 +577,7 @@ async function runSample(context) {
     context.selection.input || context.selection.frontend ? runBrowserSample(context) : Promise.resolve(null),
   ]);
   const sampleElapsedMs = performance.now() - sampleStartedAt;
+  const sampleEndedAtEpochMs = Date.now();
   const tmuxCapture = context.selection.backend
     ? summarizeTmuxTrace((await readTmuxTrace(context.tmuxTraceLog)).slice(tmuxBefore))
     : null;
@@ -556,6 +599,11 @@ async function runSample(context) {
     applicationCondition: context.applicationCondition,
     sampleIndex: context.sampleIndex,
     recordedAt: new Date().toISOString(),
+    sampleTimeline: {
+      startedAtEpochMs: sampleStartedAtEpochMs,
+      endedAtEpochMs: sampleEndedAtEpochMs,
+      elapsedMonotonicMs: sampleElapsedMs,
+    },
     eventLoopHistogram: telemetry.map((entry) => entry.eventLoop),
     measurementSelection: context.selection,
     apiSchedule: apiMetrics,
@@ -597,9 +645,10 @@ function summaryOrNull(samples) {
 }
 
 function compactCellSummary(runs, warmupRun) {
-  const inputRows = runs.map((run) => run.browser?.input).filter(Boolean);
+  const inputTrialMatrix = runs.map((run) => run.browser?.inputTrials).filter(Boolean);
+  const inputSummary = inputTrialMatrix.length ? summarizeInputTrialMatrix(inputTrialMatrix) : null;
   const browserRuns = runs.filter((run) => run.browser && Number.isFinite(run.browser.navigationMs));
-  const terminalRuns = runs.filter((run) => run.browser?.terminal);
+  const terminalRows = runs.flatMap((run) => run.browser?.terminalTrials ?? []);
   const tmuxRuns = runs.filter((run) => run.tmuxCapture);
   const tmuxAvailable = tmuxRuns.filter((run) => run.tmuxCapture.available);
   const apiSchedules = runs.map((run) => run.apiSchedule).filter(Boolean);
@@ -645,24 +694,7 @@ function compactCellSummary(runs, warmupRun) {
             : null,
         }
       : null,
-    input: inputRows.length
-      ? {
-          sendMs: summaryOrNull(inputRows.map((row) => row.inputSendMs)),
-          browserAckMs: summaryOrNull(inputRows.map((row) => row.browserAckMs)),
-          probeReceiptMs: summaryOrNull(inputRows.map((row) => row.probeReceiptMs)),
-          convergenceMs: summaryOrNull(inputRows.map((row) => row.convergenceMs)),
-          settleWindowMs: Math.min(...inputRows.map((row) => row.settleWindowMs)),
-          expectedBytes: inputRows.reduce((sum, row) => sum + row.expectedBytes, 0),
-          receivedBytes: inputRows.reduce((sum, row) => sum + row.receivedBytes, 0),
-          duplicateCount: inputRows.reduce((sum, row) => sum + row.duplicateCount, 0),
-          missingCount: inputRows.reduce((sum, row) => sum + row.missingCount, 0),
-          reorderedCount: inputRows.reduce((sum, row) => sum + row.reorderedCount, 0),
-          exactSamples: inputRows.map((row) => ({
-            expectedBase64: row.expectedBase64,
-            receivedBase64: row.receivedBase64,
-          })),
-        }
-      : null,
+    input: inputSummary ? { ...inputSummary, settleWindowMs: INPUT_SETTLE_WINDOW_MS } : null,
     loadCoverage: {
       expectedWorkers: Math.max(...runs.map((run) => run.loadCoverage.expectedWorkers)),
       minimumActiveWorkers: Math.min(...runs.map((run) => run.loadCoverage.minimumActiveWorkers)),
@@ -680,27 +712,21 @@ function compactCellSummary(runs, warmupRun) {
               deadlineMet: loadWindows.every((window) => window.sampleCompletedAtMs < window.deadlineAtMs),
             },
     },
-    terminal: terminalRuns.length
+    terminal: terminalRows.length
       ? {
-          pendingWritesCountAtSend: summaryOrNull(
-            values(terminalRuns, (run) => run.browser.terminal.queueAtSend.pendingWritesCount)
-          ),
-          pendingWritesBytesAtSend: summaryOrNull(
-            values(terminalRuns, (run) => run.browser.terminal.queueAtSend.pendingWritesBytes)
-          ),
+          pendingWritesCountAtSend: summaryOrNull(terminalRows.map((row) => row.queueAtSend.pendingWritesCount)),
+          pendingWritesBytesAtSend: summaryOrNull(terminalRows.map((row) => row.queueAtSend.pendingWritesBytes)),
           pendingWritesCountAfterSettle: summaryOrNull(
-            values(terminalRuns, (run) => run.browser.terminal.queueAfterSettle.pendingWritesCount)
+            terminalRows.map((row) => row.queueAfterSettle.pendingWritesCount)
           ),
           pendingWritesBytesAfterSettle: summaryOrNull(
-            values(terminalRuns, (run) => run.browser.terminal.queueAfterSettle.pendingWritesBytes)
+            terminalRows.map((row) => row.queueAfterSettle.pendingWritesBytes)
           ),
-          writeFrameScheduledAfterSettle: terminalRuns.map(
-            (run) => run.browser.terminal.queueAfterSettle.writeFrameScheduled
-          ),
-          outputFrameCount: summaryOrNull(values(terminalRuns, (run) => run.browser.terminal.outputFrameCount)),
-          outputFrameBytes: summaryOrNull(values(terminalRuns, (run) => run.browser.terminal.outputFrameBytes)),
-          flushMs: summaryOrNull(values(terminalRuns, (run) => run.browser.terminal.flushMs)),
-          unavailableReasons: terminalRuns.map((run) => run.browser.terminal.flushReason).filter(Boolean),
+          writeFrameScheduledAfterSettle: terminalRows.map((row) => row.queueAfterSettle.writeFrameScheduled),
+          outputFrameCount: summaryOrNull(terminalRows.map((row) => row.outputFrameCount)),
+          outputFrameBytes: summaryOrNull(terminalRows.map((row) => row.outputFrameBytes)),
+          flushMs: summaryOrNull(terminalRows.map((row) => row.flushMs)),
+          unavailableReasons: terminalRows.map((row) => row.flushReason).filter(Boolean),
         }
       : null,
     browser: browserRuns.length
@@ -725,6 +751,13 @@ function compactCellSummary(runs, warmupRun) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const inputTrialProfile = buildInputTrialProfile({ sampleCount: options.samples });
+  const benchmarkProtocol = {
+    schemaVersion: 1,
+    inputTrials: inputTrialProfile,
+    apiOffersPerSample: API_OFFERED_COUNT,
+    apiOfferIntervalMs: API_OFFER_INTERVAL_MS,
+  };
   const logicalCpuCount = availableParallelism();
   const loadProfile = deriveLoadProfile({ logicalCpuCount });
   const applicationConditions =
@@ -761,6 +794,7 @@ async function main() {
           selection: options.selection,
           matrix,
           samples: options.samples,
+          benchmarkProtocol,
           warmupsPerCell: 1,
           fixtureCount: FIXTURE_COUNT,
           target: { host: HOST, port: 'auto (never 3002)', instance: 'cod356-benchmark-<nonce>' },
@@ -785,6 +819,12 @@ async function main() {
     generatedAssetPolicy: GENERATED_ASSET_POLICY,
     acceptedBaselineReportPath: 'docs/reports/cod-356/baseline-summary.json',
   });
+  if (options.phase !== 'before') {
+    assertComparableInputTrialProfiles({
+      baseline: provenance.acceptedBenchmarkProtocol?.inputTrials,
+      comparison: inputTrialProfile,
+    });
+  }
   const registry = new CleanupRegistry({ cleanupTimeoutMs: 15_000 });
   const controller = new AbortController();
   let cleanupEvidence;
@@ -1035,6 +1075,7 @@ async function main() {
     phase: options.phase,
     startedAt,
     completedAt: new Date().toISOString(),
+    benchmarkProtocol,
     provenance,
     target: {
       host: HOST,
@@ -1079,6 +1120,7 @@ async function main() {
       tmuxCapture: 'PATH-first transparent tmux wrapper recording invocation start/end/status/duration',
     },
   });
+  environment.benchmarkProtocol = benchmarkProtocol;
   environment.reportSetId = reportSetId;
   const reportFilenames = compactReportFilenamesForPhase(options.phase);
   const summaryPath = join(REPORT_DIR, reportFilenames.summary);
@@ -1102,6 +1144,10 @@ async function main() {
       assertGeneratedAssetManifestMatches({
         accepted: accepted.manifest,
         actual: provenance.generatedRuntimeAssets,
+      });
+      assertComparableInputTrialProfiles({
+        baseline: accepted.benchmarkProtocol?.inputTrials,
+        comparison: inputTrialProfile,
       });
       acceptedGeneratedAssetBaseline = accepted.binding;
     }

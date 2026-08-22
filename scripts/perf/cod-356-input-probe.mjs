@@ -1,6 +1,6 @@
 import { appendFile } from 'node:fs/promises';
 
-import { formatInputAcknowledgement } from './cod-356-metrics.mjs';
+import { createProbeInputEvent, formatInputAcknowledgement } from './cod-356-metrics.mjs';
 
 const logPath = process.env.COD356_PROBE_LOG;
 if (!logPath) throw new Error('COD356_PROBE_LOG is required');
@@ -21,8 +21,9 @@ process.stdin.on('data', (chunk) => {
   const bytes = Buffer.from(chunk);
   const id = ++sequence;
   const timestampNs = process.hrtime.bigint().toString();
-  const base64 = bytes.toString('base64');
-  record({ type: 'stdin', id, timestampNs, base64, byteLength: bytes.length });
+  const event = createProbeInputEvent({ id, monotonicNs: timestampNs, epochMs: Date.now(), bytes });
+  const { base64 } = event;
+  record(event);
   process.stdout.write(`\r\nCOD356_ECHO:${base64}`);
   process.stdout.write(formatInputAcknowledgement({ id, timestampNs, bytes }));
 });

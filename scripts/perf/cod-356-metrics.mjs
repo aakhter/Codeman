@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { availableParallelism, cpus, freemem, hostname, platform, release, totalmem } from 'node:os';
 import { dirname } from 'node:path';
@@ -7,6 +8,74 @@ export const APPROVED_APPLICATION_CONDITIONS = Object.freeze(['idle', 'interacti
 export const MAX_LOAD_DURATION_MS = 60_000;
 export const DEFAULT_DUTY_CYCLE = 0.7;
 export const APPROVED_ONLY_SCOPES = Object.freeze(['input', 'frontend', 'backend']);
+export const FIXED_INPUT_TRIALS_PER_SAMPLE = 8;
+export const INPUT_SETTLE_WINDOW_MS = 500;
+const INPUT_TRIAL_EVIDENCE_BASE_CELL_MS = 24_000;
+const INPUT_ADDITIONAL_TRIAL_BUDGET_MS = 750;
+
+export function buildInputTrialProfile({ sampleCount }) {
+  requirePositiveInteger(sampleCount, 'benchmark samples');
+  const projectedCellMs =
+    INPUT_TRIAL_EVIDENCE_BASE_CELL_MS +
+    (sampleCount + 1) * (FIXED_INPUT_TRIALS_PER_SAMPLE - 1) * INPUT_ADDITIONAL_TRIAL_BUDGET_MS;
+  if (projectedCellMs >= MAX_LOAD_DURATION_MS) {
+    throw new Error('input trial profile exceeds the 60-second CPU load deadline budget');
+  }
+  const profile = {
+    schemaVersion: 1,
+    sampleCount,
+    trialsPerSample: FIXED_INPUT_TRIALS_PER_SAMPLE,
+    totalRecordedTrials: sampleCount * FIXED_INPUT_TRIALS_PER_SAMPLE,
+    sequential: true,
+    adaptive: false,
+    payloadSchedule: 'cod356-input-v2/sample-{sampleIndex}/trial-{trialIndex}',
+    settleWindowMs: INPUT_SETTLE_WINDOW_MS,
+    cpuDeadlineBudget: {
+      fixedWindowMs: MAX_LOAD_DURATION_MS,
+      evidenceBaseCellMs: INPUT_TRIAL_EVIDENCE_BASE_CELL_MS,
+      perAdditionalTrialBudgetMs: INPUT_ADDITIONAL_TRIAL_BUDGET_MS,
+      projectedCellMs,
+      marginMs: MAX_LOAD_DURATION_MS - projectedCellMs,
+    },
+  };
+  return {
+    ...profile,
+    hash: createHash('sha256').update(JSON.stringify(profile)).digest('hex'),
+  };
+}
+
+export function assertComparableInputTrialProfiles({ baseline, comparison }) {
+  if (
+    !baseline?.hash ||
+    baseline.hash !== comparison?.hash ||
+    JSON.stringify(baseline) !== JSON.stringify(comparison)
+  ) {
+    throw new Error('input trial profile does not match accepted baseline');
+  }
+  return true;
+}
+
+export function createInputTrialPayload({ sampleIndex, trialIndex }) {
+  if (!(sampleIndex === 'warmup' || (Number.isSafeInteger(sampleIndex) && sampleIndex > 0))) {
+    throw new Error('input trial sample index must be warmup or a positive integer');
+  }
+  if (!Number.isSafeInteger(trialIndex) || trialIndex < 1 || trialIndex > FIXED_INPUT_TRIALS_PER_SAMPLE) {
+    throw new Error(`input trial index must be between 1 and ${FIXED_INPUT_TRIALS_PER_SAMPLE}`);
+  }
+  return `cod356:sample-${sampleIndex}:trial-${trialIndex}:aaabbb111___`;
+}
+
+export function createProbeInputEvent({ id, monotonicNs, epochMs, bytes }) {
+  const content = Buffer.from(bytes);
+  return {
+    type: 'stdin',
+    id,
+    timestampNs: monotonicNs,
+    timestampEpochMs: epochMs,
+    base64: content.toString('base64'),
+    byteLength: content.length,
+  };
+}
 
 function requirePositiveInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be at least one sample`);
@@ -87,6 +156,115 @@ export function summarizeSamples(samples) {
     presentation: Object.fromEntries(
       ['min', 'median', 'p95', 'p99', 'max'].map((key) => [key, round(statistics[key])])
     ),
+  };
+}
+
+export function summarizeInputTrialMatrix(trialsBySample) {
+  if (!Array.isArray(trialsBySample) || trialsBySample.length === 0) {
+    throw new Error('input trial matrix requires browser samples');
+  }
+  const payloads = new Set();
+  for (const [sampleOffset, trials] of trialsBySample.entries()) {
+    if (!Array.isArray(trials) || trials.length !== FIXED_INPUT_TRIALS_PER_SAMPLE) {
+      throw new Error(`each browser sample must contain exactly ${FIXED_INPUT_TRIALS_PER_SAMPLE} input trials`);
+    }
+    for (const [trialOffset, trial] of trials.entries()) {
+      if (trial.sampleIndex !== sampleOffset + 1 || trial.trialIndex !== trialOffset + 1) {
+        throw new Error('input trials must preserve deterministic sample/trial order');
+      }
+      if (payloads.has(trial.expectedBase64)) throw new Error('each input trial requires a unique framed payload');
+      payloads.add(trial.expectedBase64);
+      if (
+        !trial.exact ||
+        trial.expectedBase64 !== trial.receivedBase64 ||
+        trial.duplicateCount !== 0 ||
+        trial.missingCount !== 0 ||
+        trial.reorderedCount !== 0
+      ) {
+        throw new Error('input trial byte identity was not exact');
+      }
+      if (trial.settleWindowMs !== INPUT_SETTLE_WINDOW_MS) {
+        throw new Error(`each input trial requires the fixed ${INPUT_SETTLE_WINDOW_MS}ms settle/reset boundary`);
+      }
+    }
+  }
+  const trials = trialsBySample.flat();
+  const metric = (field) => ({
+    pooled: summarizeSamples(trials.map((trial) => trial[field])),
+    perSample: trialsBySample.map((sample, index) => ({
+      sampleIndex: index + 1,
+      ...summarizeSamples(sample.map((trial) => trial[field])),
+    })),
+  });
+  const p95Rank = Math.ceil(0.95 * trials.length);
+  return {
+    semantics: `empirical user-interaction distribution clustered within ${trialsBySample.length === 5 ? 'five' : trialsBySample.length} independent browser samples`,
+    sampleCount: trialsBySample.length,
+    trialsPerSample: FIXED_INPUT_TRIALS_PER_SAMPLE,
+    totalTrials: trials.length,
+    quantileDesign: {
+      estimator: 'nearest-rank',
+      p95Rank,
+      observationsAboveP95Rank: trials.length - p95Rank,
+      p95IsMaximum: p95Rank === trials.length,
+      noDeletionOrWinsorization: true,
+    },
+    sendMs: metric('inputSendMs'),
+    browserAckMs: metric('browserAckMs'),
+    probeReceiptMs: metric('probeReceiptMs'),
+    convergenceMs: metric('convergenceMs'),
+    expectedBytes: trials.reduce((sum, trial) => sum + trial.expectedBytes, 0),
+    receivedBytes: trials.reduce((sum, trial) => sum + trial.receivedBytes, 0),
+    duplicateCount: 0,
+    missingCount: 0,
+    reorderedCount: 0,
+    exactTrials: trials.map(({ sampleIndex, trialIndex, expectedBase64, receivedBase64 }) => ({
+      sampleIndex,
+      trialIndex,
+      expectedBase64,
+      receivedBase64,
+    })),
+  };
+}
+
+export async function runFixedInputTrials({ trialCount, runTrial }) {
+  if (trialCount !== FIXED_INPUT_TRIALS_PER_SAMPLE) {
+    throw new Error(`input workload requires exactly ${FIXED_INPUT_TRIALS_PER_SAMPLE} fixed trials`);
+  }
+  const trials = [];
+  for (let trialIndex = 1; trialIndex <= trialCount; trialIndex++) {
+    trials.push(await runTrial(trialIndex));
+  }
+  return trials;
+}
+
+export function buildCorrelatedInputTimeline({
+  pageTimeOriginMs,
+  sentFrameBrowserMs,
+  ackBrowserMs,
+  probeEpochMs,
+  probeMonotonicNs,
+  frameMatchBrowserMs,
+  flushBrowserMs,
+  settleCompleteBrowserMs,
+  longTasks,
+}) {
+  const browserBoundary = (browserMs) => ({ browserMs, epochMs: pageTimeOriginMs + browserMs });
+  return {
+    clockMapping: { pageTimeOriginEpochMs: pageTimeOriginMs },
+    send: browserBoundary(sentFrameBrowserMs),
+    ack: browserBoundary(ackBrowserMs),
+    probeReceipt: { epochMs: probeEpochMs, monotonicNs: probeMonotonicNs },
+    frameMatch: browserBoundary(frameMatchBrowserMs),
+    flushAndConvergence: browserBoundary(flushBrowserMs),
+    settleAndResetComplete: browserBoundary(settleCompleteBrowserMs),
+    longTasks: longTasks.map((task) => ({
+      startBrowserMs: task.startTime,
+      endBrowserMs: task.startTime + task.duration,
+      startEpochMs: pageTimeOriginMs + task.startTime,
+      endEpochMs: pageTimeOriginMs + task.startTime + task.duration,
+      durationMs: task.duration,
+    })),
   };
 }
 
@@ -202,7 +380,31 @@ export function summarizeTmuxTrace(events) {
       failures: null,
       incomplete: null,
       durationsMs: [],
+      captures: [],
+      wrapperInvocations: [],
     };
+  }
+  const wrapperStarts = new Map();
+  const wrapperInvocations = [];
+  for (const event of [...events].sort((left, right) =>
+    BigInt(left.timestampNs) < BigInt(right.timestampNs) ? -1 : 1
+  )) {
+    if (event.type === 'start') {
+      wrapperStarts.set(event.invocationId, event);
+    } else {
+      const started = wrapperStarts.get(event.invocationId);
+      if (started) {
+        wrapperInvocations.push({
+          invocationId: event.invocationId,
+          command: started.command,
+          startTimestampNs: started.timestampNs,
+          endTimestampNs: event.timestampNs,
+          durationMs: Number(BigInt(event.timestampNs) - BigInt(started.timestampNs)) / 1e6,
+          status: event.status,
+        });
+        wrapperStarts.delete(event.invocationId);
+      }
+    }
   }
   const captureIds = new Set(
     events
@@ -214,6 +416,7 @@ export function summarizeTmuxTrace(events) {
     .sort((left, right) => (BigInt(left.timestampNs) < BigInt(right.timestampNs) ? -1 : 1));
   const starts = new Map();
   const durationsMs = [];
+  const captures = [];
   let subprocessCount = 0;
   let failures = 0;
   let active = 0;
@@ -223,11 +426,19 @@ export function summarizeTmuxTrace(events) {
       subprocessCount++;
       active++;
       maxOverlap = Math.max(maxOverlap, active);
-      starts.set(event.invocationId, BigInt(event.timestampNs));
+      starts.set(event.invocationId, event.timestampNs);
     } else if (event.type === 'end') {
       const started = starts.get(event.invocationId);
       if (started !== undefined) {
-        durationsMs.push(Number(BigInt(event.timestampNs) - started) / 1e6);
+        const durationMs = Number(BigInt(event.timestampNs) - BigInt(started)) / 1e6;
+        durationsMs.push(durationMs);
+        captures.push({
+          invocationId: event.invocationId,
+          startTimestampNs: started,
+          endTimestampNs: event.timestampNs,
+          durationMs,
+          status: event.status,
+        });
         starts.delete(event.invocationId);
         active = Math.max(0, active - 1);
       }
@@ -242,6 +453,10 @@ export function summarizeTmuxTrace(events) {
     failures,
     incomplete: starts.size,
     durationsMs,
+    captures: captures.sort((left, right) => (BigInt(left.startTimestampNs) < BigInt(right.startTimestampNs) ? -1 : 1)),
+    wrapperInvocations: wrapperInvocations.sort((left, right) =>
+      BigInt(left.startTimestampNs) < BigInt(right.startTimestampNs) ? -1 : 1
+    ),
   };
 }
 

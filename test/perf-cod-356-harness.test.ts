@@ -6,19 +6,27 @@ import { execFileSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  FIXED_INPUT_TRIALS_PER_SAMPLE,
   WorkerCoverageSupervisor,
   aggregateEventLoopIntervals,
+  assertComparableInputTrialProfiles,
   authenticateDisposableTarget,
   assertLoadCoverage,
+  buildCorrelatedInputTimeline,
+  buildInputTrialProfile,
+  createInputTrialPayload,
+  createProbeInputEvent,
   calculateProcCpuPercent,
   deriveLoadProfile,
   diffByteSequences,
   formatInputAcknowledgement,
   parseOnlySelection,
   runFixedLoadWindow,
+  runFixedInputTrials,
   selectInteractiveFixture,
   summarizeTmuxTrace,
   summarizeSamples,
+  summarizeInputTrialMatrix,
   validateBenchmarkOptions,
 } from '../scripts/perf/cod-356-metrics.mjs';
 import {
@@ -47,6 +55,7 @@ import {
 } from '../scripts/perf/cod-356-provenance.mjs';
 import { proveReachedServerOwnership } from '../scripts/perf/cod-356-safety.mjs';
 import { runFixedOfferSchedule, summarizeFixedOfferSchedule } from '../scripts/perf/cod-356-scheduler.mjs';
+import { assertBrowserSampleClean, prepareInteractiveTargetSession } from '../scripts/perf/cod-356-browser.mjs';
 
 describe('COD-356 benchmark policy', () => {
   const valid = {
@@ -139,7 +148,202 @@ describe('COD-356 benchmark policy', () => {
   });
 });
 
+describe('COD-356 browser lifecycle safety', () => {
+  it('waits for the intermediate interactive WebSocket before switching to the measured target', async () => {
+    const calls: string[] = [];
+    const page = {
+      evaluate: vi.fn(async (_callback, sessionId: string) => calls.push(`select:${sessionId}`)),
+      waitForFunction: vi.fn(async (_callback, sessionId: string) => calls.push(`ready:${sessionId}`)),
+    };
+
+    await prepareInteractiveTargetSession(page, {
+      interactiveSessionId: 'interactive-fixture',
+      targetSessionId: 'measured-target',
+    });
+
+    expect(calls).toEqual([
+      'select:interactive-fixture',
+      'ready:interactive-fixture',
+      'select:measured-target',
+      'ready:measured-target',
+    ]);
+  });
+
+  it('fails a sample on every page error or serious console error without filtering it', () => {
+    expect(() => assertBrowserSampleClean({ pageErrors: [], seriousConsoleErrors: [] })).not.toThrow();
+    expect(() =>
+      assertBrowserSampleClean({
+        pageErrors: [],
+        seriousConsoleErrors: ['warning: WebSocket is closed before the connection is established'],
+      })
+    ).toThrow('serious browser console error');
+    expect(() =>
+      assertBrowserSampleClean({ pageErrors: ['uncaught browser failure'], seriousConsoleErrors: [] })
+    ).toThrow('browser page error');
+  });
+});
+
 describe('COD-356 benchmark statistics', () => {
+  const exactTrial = (sampleIndex: number, trialIndex: number, convergenceMs: number) => {
+    const payload = Buffer.from(`sample-${sampleIndex}-trial-${trialIndex}`);
+    return {
+      sampleIndex,
+      trialIndex,
+      inputSendMs: convergenceMs / 10,
+      browserAckMs: convergenceMs / 5,
+      probeReceiptMs: convergenceMs / 4,
+      convergenceMs,
+      settleWindowMs: 500,
+      expectedBase64: payload.toString('base64'),
+      receivedBase64: payload.toString('base64'),
+      expectedBytes: payload.length,
+      receivedBytes: payload.length,
+      duplicateCount: 0,
+      missingCount: 0,
+      reorderedCount: 0,
+      mismatchIndexes: [],
+      exact: true,
+    };
+  };
+
+  it('uses a fixed five-by-eight trial protocol with a reproducible compatibility hash', () => {
+    const baseline = buildInputTrialProfile({ sampleCount: 5 });
+    const comparison = buildInputTrialProfile({ sampleCount: 5 });
+    expect(FIXED_INPUT_TRIALS_PER_SAMPLE).toBe(8);
+    expect(baseline).toMatchObject({
+      schemaVersion: 1,
+      sampleCount: 5,
+      trialsPerSample: 8,
+      totalRecordedTrials: 40,
+      sequential: true,
+      adaptive: false,
+      payloadSchedule: 'cod356-input-v2/sample-{sampleIndex}/trial-{trialIndex}',
+      settleWindowMs: 500,
+      hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      cpuDeadlineBudget: {
+        fixedWindowMs: 60_000,
+        evidenceBaseCellMs: 24_000,
+        perAdditionalTrialBudgetMs: 750,
+        projectedCellMs: 55_500,
+        marginMs: 4_500,
+      },
+    });
+    expect(assertComparableInputTrialProfiles({ baseline, comparison })).toBe(true);
+    expect(() =>
+      assertComparableInputTrialProfiles({ baseline, comparison: buildInputTrialProfile({ sampleCount: 4 }) })
+    ).toThrow('input trial profile does not match accepted baseline');
+    expect(() => buildInputTrialProfile({ sampleCount: 6 })).toThrow('60-second CPU load deadline budget');
+  });
+
+  it('uses deterministic unique framed payloads and records both monotonic and epoch probe receipt clocks', () => {
+    expect(createInputTrialPayload({ sampleIndex: 3, trialIndex: 7 })).toBe('cod356:sample-3:trial-7:aaabbb111___');
+    expect(createInputTrialPayload({ sampleIndex: 'warmup', trialIndex: 1 })).toBe(
+      'cod356:sample-warmup:trial-1:aaabbb111___'
+    );
+    const bytes = Buffer.from('abc');
+    expect(createProbeInputEvent({ id: 4, monotonicNs: '9000', epochMs: 1_700_000_000_123, bytes })).toEqual({
+      type: 'stdin',
+      id: 4,
+      timestampNs: '9000',
+      timestampEpochMs: 1_700_000_000_123,
+      base64: 'YWJj',
+      byteLength: 3,
+    });
+  });
+
+  it('reports a pooled empirical p95 that is not the maximum and exposes sample clustering', () => {
+    const trialsBySample = Array.from({ length: 5 }, (_, sample) =>
+      Array.from({ length: 8 }, (_, trial) => exactTrial(sample + 1, trial + 1, sample * 8 + trial + 1))
+    );
+    const summary = summarizeInputTrialMatrix(trialsBySample);
+    expect(summary).toMatchObject({
+      semantics: 'empirical user-interaction distribution clustered within five independent browser samples',
+      sampleCount: 5,
+      trialsPerSample: 8,
+      totalTrials: 40,
+      quantileDesign: {
+        estimator: 'nearest-rank',
+        p95Rank: 38,
+        observationsAboveP95Rank: 2,
+        p95IsMaximum: false,
+        noDeletionOrWinsorization: true,
+      },
+      convergenceMs: {
+        pooled: expect.objectContaining({ count: 40, p95: 38, p99: 40, max: 40 }),
+        perSample: expect.arrayContaining([
+          expect.objectContaining({ sampleIndex: 1, median: 4.5, p95: 8, max: 8 }),
+          expect.objectContaining({ sampleIndex: 5, median: 36.5, p95: 40, max: 40 }),
+        ]),
+      },
+    });
+    expect(summary.convergenceMs.pooled.samples).toEqual(Array.from({ length: 40 }, (_, index) => index + 1));
+  });
+
+  it('rejects incomplete, duplicated, or byte-inexact input trials instead of reducing the population', () => {
+    const complete = Array.from({ length: 5 }, (_, sample) =>
+      Array.from({ length: 8 }, (_, trial) => exactTrial(sample + 1, trial + 1, 10))
+    );
+    expect(() => summarizeInputTrialMatrix(complete.map((sample) => sample.slice(0, 7)))).toThrow(
+      'exactly 8 input trials'
+    );
+    const duplicated = structuredClone(complete);
+    duplicated[0][1].expectedBase64 = duplicated[0][0].expectedBase64;
+    duplicated[0][1].receivedBase64 = duplicated[0][0].receivedBase64;
+    expect(() => summarizeInputTrialMatrix(duplicated)).toThrow('unique framed payload');
+    const inexact = structuredClone(complete);
+    inexact[2][3].duplicateCount = 1;
+    inexact[2][3].exact = false;
+    expect(() => summarizeInputTrialMatrix(inexact)).toThrow('byte identity');
+  });
+
+  it('runs exactly eight sequential trials and fails closed without adapting at a deadline', async () => {
+    const order: number[] = [];
+    await expect(
+      runFixedInputTrials({
+        trialCount: FIXED_INPUT_TRIALS_PER_SAMPLE,
+        runTrial: async (trialIndex) => {
+          order.push(trialIndex);
+          if (trialIndex === 6) throw new Error('CPU samples exceeded the approved 60-second load deadline');
+          return trialIndex;
+        },
+      })
+    ).rejects.toThrow('60-second load deadline');
+    expect(order).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  it('maps input, flush, probe, and long-task boundaries onto coherent browser and epoch clocks', () => {
+    expect(
+      buildCorrelatedInputTimeline({
+        pageTimeOriginMs: 1_700_000_000_000,
+        sentFrameBrowserMs: 100,
+        ackBrowserMs: 110,
+        probeEpochMs: 1_700_000_000_115,
+        probeMonotonicNs: '9000000',
+        frameMatchBrowserMs: 125,
+        flushBrowserMs: 140,
+        settleCompleteBrowserMs: 650,
+        longTasks: [{ startTime: 120, duration: 30 }],
+      })
+    ).toEqual({
+      clockMapping: { pageTimeOriginEpochMs: 1_700_000_000_000 },
+      send: { browserMs: 100, epochMs: 1_700_000_000_100 },
+      ack: { browserMs: 110, epochMs: 1_700_000_000_110 },
+      probeReceipt: { epochMs: 1_700_000_000_115, monotonicNs: '9000000' },
+      frameMatch: { browserMs: 125, epochMs: 1_700_000_000_125 },
+      flushAndConvergence: { browserMs: 140, epochMs: 1_700_000_000_140 },
+      settleAndResetComplete: { browserMs: 650, epochMs: 1_700_000_000_650 },
+      longTasks: [
+        {
+          startBrowserMs: 120,
+          endBrowserMs: 150,
+          startEpochMs: 1_700_000_000_120,
+          endEpochMs: 1_700_000_000_150,
+          durationMs: 30,
+        },
+      ],
+    });
+  });
+
   it.each(['idle', 'interactive'])(
     'runs the cpu-%s warmup and five samples under one fixed load window',
     async (applicationCondition) => {
@@ -296,7 +500,9 @@ describe('COD-356 benchmark statistics', () => {
     expect(
       summarizeTmuxTrace([
         { type: 'start', invocationId: 'a', timestampNs: '1000000', command: 'capture-pane' },
+        { type: 'start', invocationId: 'c', timestampNs: '1500000', command: 'other' },
         { type: 'start', invocationId: 'b', timestampNs: '2000000', command: 'capture-pane' },
+        { type: 'end', invocationId: 'c', timestampNs: '2500000', status: 0 },
         { type: 'end', invocationId: 'a', timestampNs: '4000000', status: 0 },
         { type: 'end', invocationId: 'b', timestampNs: '6000000', status: 1 },
       ])
@@ -307,6 +513,48 @@ describe('COD-356 benchmark statistics', () => {
       failures: 1,
       incomplete: 0,
       durationsMs: [3, 4],
+      captures: [
+        {
+          invocationId: 'a',
+          startTimestampNs: '1000000',
+          endTimestampNs: '4000000',
+          durationMs: 3,
+          status: 0,
+        },
+        {
+          invocationId: 'b',
+          startTimestampNs: '2000000',
+          endTimestampNs: '6000000',
+          durationMs: 4,
+          status: 1,
+        },
+      ],
+      wrapperInvocations: [
+        {
+          invocationId: 'a',
+          command: 'capture-pane',
+          startTimestampNs: '1000000',
+          endTimestampNs: '4000000',
+          durationMs: 3,
+          status: 0,
+        },
+        {
+          invocationId: 'c',
+          command: 'other',
+          startTimestampNs: '1500000',
+          endTimestampNs: '2500000',
+          durationMs: 1,
+          status: 0,
+        },
+        {
+          invocationId: 'b',
+          command: 'capture-pane',
+          startTimestampNs: '2000000',
+          endTimestampNs: '6000000',
+          durationMs: 4,
+          status: 1,
+        },
+      ],
     });
     expect(summarizeTmuxTrace([])).toEqual({
       available: false,
@@ -316,6 +564,8 @@ describe('COD-356 benchmark statistics', () => {
       failures: null,
       incomplete: null,
       durationsMs: [],
+      captures: [],
+      wrapperInvocations: [],
     });
   });
 
