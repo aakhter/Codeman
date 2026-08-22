@@ -2,90 +2,94 @@
 
 ## Result
 
-The normal typing path preserved byte identity in every recorded benchmark trial: 160/160 exact, with zero missing,
-duplicate, or reordered bytes. Deterministic regression coverage also preserved logical records, serialized WebSocket
-and HTTP payloads, authoritative probe PTY bytes, and visible output for repeated runs, control/Enter boundaries,
-near-limit paste, CJK composition, delayed ACK, socket reconnect, reload, and live-socket lost-ACK redelivery.
+The corrected input trace preserved byte identity in all 160/160 recorded trials: 5 samples × 8 trials in each of
+four idle/CPU and idle/interactive cells, with zero missing, duplicate, or reordered PTY bytes. The deterministic
+regressions additionally cover repeated runs, printable/control/Enter record boundaries, near-limit paste, real CJK
+composition, delayed and lost ACK redelivery, socket reconnect, reload, HTTP fallback, and predictive-echo edits.
 
-This means the reported repeated-character symptom is not reproduced in the ordinary transport path. The measured
-failure mode is browser convergence/starvation: input reaches and is acknowledged by the server quickly, while visible
-xterm convergence is delayed by browser scheduling and long tasks.
+Repeated characters are therefore not reproduced in the ordinary browser-record, serialized-frame, or PTY transport
+layers. Steady input-to-first-visible medians are 11.3-15.9 ms. The remaining large tail is a cold idle-session
+lifecycle cost, not normal transport duplication and not evidence for weakening durable delivery semantics.
 
-One narrower reliability gap is now explicitly characterized rather than hidden: if the server process restarts after
-applying input but before the browser receives/persists its ACK, the session's in-memory dedup table is lost and the
-durable browser retry can apply the same record again. The failing layer in that exceptional window is
-`Session._appliedInputSeq` process lifetime, not browser serialization or normal lost-ACK redelivery. Task 5 must not
-silently change that protocol contract as a performance optimization.
-
-The restart characterization asserts the boundary precisely: before restart, one logical record produces one
-serialized frame, one PTY write, and current-trial xterm convergence; after restart, durable recovery serializes one
-retry without a second logical input, and the reset process-local dedup state applies a second PTY copy. It does not
-claim post-restart exactly-once delivery or use post-restart visibility as proof of that failed invariant.
+One narrower correctness gap remains explicitly characterized: if the server restarts after applying input but before
+the browser receives/persists its ACK, process-local `Session._appliedInputSeq` state is lost and a durable retry can
+apply a second PTY copy. The restart regression records that boundary; it does not claim exactly-once delivery across
+server restart. Normal reconnect/reload and delayed/lost ACK paths remain exactly once at the PTY.
 
 ## Input-trace evidence
 
-Runtime: `5b8565ab59f780478a75a806e9302eab11de94a6`
+Runtime and harness revision: `f329e930e33340c65cdb32a585ac36200d8d9e1e`
 
-Report set: `1ea4a5ebed166d6ebe32f47d650a8442`
+Report set: `74561fcebc6182099da168e8ed9e7d3b`
 
-Raw artifacts: `/tmp/cod356-artifacts-input-trace-4OWeCr`
+Raw artifacts: `/tmp/cod356-artifacts-input-trace-GsKXYV`
 
-All values below are milliseconds. Cold is trial 1 of each recorded sample; steady is trials 2-8. Values are medians;
-the parenthesized value is p95.
+All values are milliseconds. Cold is trial 1 of each recorded sample; steady is trials 2-8. Each value is median
+(p95). `convergence` is WebSocket send to the first successful, pre-armed current-token observation in the real xterm
+buffer. The observer runs on `onWriteParsed`; a unique token and pre-send absence check isolate each trial without
+resetting client state independently of the tmux pane.
 
-| Cell             | Profile |     Send call |    Browser ACK |       Probe PTY | Visible convergence | Long-task overlap |
-| ---------------- | ------- | ------------: | -------------: | --------------: | ------------------: | ----------------: |
-| idle-idle        | cold    | 4.424 (5.600) |  1.700 (2.900) | 10.819 (16.017) |   510.300 (583.500) |               1/5 |
-| idle-idle        | steady  | 1.900 (4.924) |  0.900 (8.700) |  9.030 (21.258) |    69.500 (130.900) |              3/35 |
-| idle-interactive | cold    | 2.634 (2.860) | 1.500 (29.800) |  7.591 (37.671) |    90.800 (110.800) |               0/5 |
-| idle-interactive | steady  | 1.606 (3.488) |  0.700 (6.900) |  6.429 (17.827) |    55.700 (138.300) |              3/35 |
-| cpu-idle         | cold    | 4.075 (6.211) |  4.400 (8.900) | 14.886 (30.687) |   666.800 (899.500) |               5/5 |
-| cpu-idle         | steady  | 3.101 (8.245) |  2.100 (7.100) | 12.103 (26.655) |   120.500 (225.400) |             34/35 |
-| cpu-interactive  | cold    | 6.348 (7.825) |  3.300 (6.000) | 15.652 (18.389) |   127.300 (238.400) |               5/5 |
-| cpu-interactive  | steady  | 2.828 (5.812) |  1.600 (5.800) | 10.651 (17.581) |   176.100 (217.000) |             34/35 |
+| Cell             | Profile |  Send call | Browser ACK |   Probe PTY |   Convergence | Receipt → output start | Output duration | Output end → visible | Long-task overlap |
+| ---------------- | ------- | ---------: | ----------: | ----------: | ------------: | ---------------------: | --------------: | -------------------: | ----------------: |
+| idle-idle        | cold    |  1.8 (2.1) |   0.7 (1.9) |   6.1 (6.3) | 302.5 (358.0) |          292.1 (345.0) |       0.0 (0.1) |           1.6 (16.6) |               0/5 |
+| idle-idle        | steady  |  1.6 (2.7) |   0.7 (1.3) |   6.0 (9.3) |   12.1 (28.0) |              0.4 (0.9) |       0.2 (0.3) |            0.8 (1.9) |              0/35 |
+| idle-interactive | cold    |  2.1 (2.3) |   1.1 (2.3) |   6.9 (7.5) |   17.0 (57.7) |              0.7 (7.3) |       0.3 (0.5) |           1.4 (26.2) |               0/5 |
+| idle-interactive | steady  |  1.6 (3.4) |   0.7 (4.3) |  5.8 (11.1) |   11.3 (52.2) |              0.3 (0.7) |       0.1 (0.2) |            0.5 (2.1) |              0/35 |
+| cpu-idle         | cold    |  4.0 (7.6) |   4.2 (7.1) | 16.3 (24.2) | 434.1 (448.6) |          370.9 (397.5) |       0.1 (0.1) |          40.7 (50.1) |               0/5 |
+| cpu-idle         | steady  |  2.8 (5.2) |   2.5 (9.1) | 12.6 (23.7) |   15.1 (44.1) |             0.8 (17.7) |       0.2 (0.7) |            0.8 (6.0) |              4/35 |
+| cpu-interactive  | cold    | 8.9 (15.0) | 10.0 (11.6) | 33.8 (42.3) |   36.4 (92.5) |              3.5 (4.7) |       0.3 (0.7) |           5.2 (72.7) |               1/5 |
+| cpu-interactive  | steady  |  3.0 (6.9) |   2.2 (7.5) | 13.3 (21.8) |   15.9 (37.1) |              0.7 (2.4) |       0.2 (0.4) |            0.9 (4.4) |              2/35 |
 
-The accepted baseline's cold convergence medians were 426.8, 80.7, 884.4, and 223.6 ms for the same cell order;
-steady medians were 66.9, 46.5, 109.5, and 174.6 ms. The input-trace run therefore retains the already-observed
-idle cold-first variance while confirming the large Task 3 CPU ACK/probe improvement. Because this checkpoint adds
-measurement wrappers and is not an input optimization, these differences are diagnostic rather than an acceptance
-claim.
+The synchronous input, ACK, terminal-handler, flush, and direct-write wrapper durations are instrumented upper bounds:
+they include the original call plus measurement overhead. The xterm write callback normally precedes `onWriteParsed`,
+so the signed visible-to-drain values are negative; drain is reported separately and is never substituted for first
+visibility.
+
+All five idle-idle and five CPU-idle cold trials used the direct-terminal-write boundary; every other recorded trial
+used `flushPendingWrites`. The cold idle-session delay is overwhelmingly receipt-to-direct-write start (292.1 ms idle,
+370.9 ms under CPU load). Output-call duration itself is at most 0.1 ms median, and none of those ten slow cold trials
+overlapped a browser long task. Across the entire matrix only 7/160 trials overlapped a long task. The corrected
+boundaries therefore do not support the earlier `_safeYield` or general browser-starvation causal claim.
+
+The two CPU cohorts each started all 7/7 fixed workers and met the hard 60-second deadline. Their remaining margins
+were 9,662.8 ms (CPU-idle) and 7,727.9 ms (CPU-interactive). All page-error and serious-console arrays were empty.
+Cleanup reported no surviving exact PID, no disposable session, a closed browser, matched generated assets and
+provenance, and no warning or error.
+
+## Benchmark validity correction
+
+The rejected trace cleared only the browser xterm between trials while tmux continued producing incremental screen
+deltas. In the minimal real-probe reproduction, the probe event, WebSocket terminal payload, terminal handler, and
+queued xterm write all contained the exact trial-2 token. The payload then applied `ESC[2S ESC[A` against the locally
+cleared screen, and the `onWriteParsed` buffer contained only the ACK. The failing boundary was benchmark-induced
+client/pane state divergence, not transport loss. The corrected harness preserves the authoritative screen state and
+uses unique tokens plus trace indices. It passed 24 sequential actual-probe observations and 24 alternating queued/direct
+write observations with zero misses and no retained observer listener or timer.
 
 ## Dominant cost and Task 5 decision
 
-| Boundary                                                                                             | Measured result                                                                               | Decision                                                       |
-| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| Reliable record creation, persistence scheduling, indicator computation, and WebSocket serialization | Browser input wrapper median 0.3-0.4 ms; p95 0.7-1.1 ms                                       | Too small to justify transport batching or durability changes. |
-| ACK handling, pending-record lookup/removal, persistence scheduling, and indicator update            | Median 0.2-0.3 ms; p95 0.5-0.8 ms                                                             | Do not weaken ACK or exactly-once semantics.                   |
-| Server parse/dedup/write plus transport to probe                                                     | Send-to-probe median 6.4-15.7 ms across cold/steady profiles                                  | Not the dominant visible delay.                                |
-| Terminal event handler before queued rendering                                                       | Median 0.1-0.2 ms; p95 at most 2.9 ms                                                         | Event parsing itself is not dominant.                          |
-| Output-frame receipt to xterm flush callback / convergence                                           | Cell median 44.1-159.1 ms; full convergence median 60.6-175.2 ms                              | Dominant measured input cost.                                  |
-| Browser long tasks                                                                                   | 78/80 CPU-loaded trials overlapped the input-to-convergence interval, versus 7/80 idle trials | Starvation strongly correlates with slow convergence.          |
+Do not add an input batching change, weaken ACK persistence, or add the previously proposed `_safeYield` microtask fast
+path: steady rendering is already 11.3-15.9 ms median, flush/output calls are sub-millisecond, and the slow cold trials
+do not correlate with long tasks.
 
-The smallest Task 5 experiment is a bounded small-frame fast path in `terminal-ui.js`: when a live terminal output
-event begins from an empty queue and remains below a conservative byte threshold, coalesce within the current task and
-flush by microtask instead of waiting for the three-way `_safeYield` race. Preserve `_safeYield`, the 32/64 KiB frame
-budgets, history/load ordering, and backlog recovery for larger or already-queued output. Retain the change only if the
-focused operation-count test proves one flush per bounded burst and the after-input matrix lowers convergence median or
-p95 without byte-identity, CPU-condition, or opposite-cell regression.
+The smallest evidence-backed Task 5 performance target is the cold active-session buffer-load lifecycle. Instrument and
+then eliminate the late full-buffer/direct-write replay that holds first live output for roughly 292-371 ms after the
+terminal handler has already received it. The first experiment should be narrowly generation-scoped: prove whether an
+auto-selected already-active session returns input-ready while its canonical buffer load is still in flight, and prevent
+that load from overtaking the first live output without asymmetrically clearing, reordering, or duplicating pane data.
+Retain a runtime change only if a focused lifecycle regression preserves history/live-output ordering and a fresh
+after-input matrix lowers cold idle convergence without regressing steady, interactive, CPU, or byte-identity results.
 
-The server-restart dedup window is a separate correctness decision, not part of that performance experiment. Track it
-as a Jira-backed protocol change that defines a persisted dedup epoch/high-water mark before changing runtime behavior;
-then prove crash/restart boundaries against a disposable process and PTY. Task 4 deliberately records the duplicate and
-does not claim exactly-once delivery across a server process restart. Normal reconnect/reload, delayed-ACK, and
-live-socket lost-ACK paths remain exactly once at the PTY.
-
-Do not batch input records, alter control/Enter/composition boundaries, remove synchronous `pagehide` durability, or
-change server-authoritative ACK/dedup semantics. If the bounded fast path does not produce a repeatable win, Task 5
-should make no transport change and defer the remaining xterm/render work to Task 7.
+Treat the server-restart dedup window as a separate correctness task: define a persisted dedup epoch/high-water mark and
+prove crash/restart boundaries against a disposable process and PTY. It must not be folded into the performance change.
 
 ## Scoped regression evidence
 
 - `npm test -- test/input-send-order.test.ts test/reliable-input-dedup.test.ts test/routes/session-input-delivery.test.ts`
-  passed 3 files and 37 tests.
-- `npm run test:browser -- test/codex-predictive-echo.test.ts test/terminal-input-performance.browser.test.ts` passed
-  2 files and 20 tests.
-- The real-browser regression starts a disposable Codeman child and session, drives the production input and CJK
-  handlers, observes real WebSocket and HTTP input endpoints, reads authoritative bytes from the tmux PTY probe, and
-  checks the actual xterm buffer. No in-page transport, server-dedup, PTY, or visible-output substitute is used.
-- The restart-before-ACK regression restarts that child process and intentionally observes two PTY copies; this is
-  characterization of the known process-local dedup gap, not an exactly-once invariant or a simulated restart.
+  passes 3 files and 37 tests.
+- `npm run test:browser -- test/codex-predictive-echo.test.ts test/terminal-input-performance.browser.test.ts` passes
+  2 files and 24 tests.
+- `npm run test:perf -- test/perf-cod-356-harness.test.ts` passes 1 file and 92 tests.
+- The browser regression starts a disposable Codeman child and real tmux-backed probe, drives production input and CJK
+  handlers, observes real WebSocket and HTTP endpoints, reads authoritative PTY bytes, and inspects the actual xterm
+  buffer. It uses no in-page transport, server-dedup, PTY, or visible-output substitute.
