@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-22  
 **Issue:** COD-356  
-**Status:** Awaiting written-spec review
+**Status:** Approved
 
 ## Problem
 
