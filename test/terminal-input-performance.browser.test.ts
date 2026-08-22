@@ -1,300 +1,677 @@
 /**
- * @fileoverview Browser-native byte tracing for COD-356.
+ * @fileoverview Real-browser, real-server terminal byte tracing for COD-356.
  *
- * This deliberately runs the production CodemanApp reliable-send methods in a
- * real Chromium realm while replacing only the network boundary with a small
- * deterministic input probe. Each case compares four independent layers:
- * logical browser records, serialized transport frames, exactly-once probe PTY
- * bytes, and the probe's authoritative repaint/convergence stream.
+ * A disposable Codeman child owns a unique data directory and tmux socket. A
+ * PATH-first Codex shim runs the benchmark input probe inside the real PTY.
+ * Each assertion correlates the production browser record, serialized WS/HTTP
+ * frame, probe-received PTY bytes, and xterm-visible output.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { MAX_INPUT_LENGTH } from '../src/config/terminal-limits.js';
 
-const constants = readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8');
-const appSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+const ROOT = resolve(import.meta.dirname, '..');
+const PROBE = resolve(ROOT, 'scripts/perf/cod-356-input-probe.mjs');
+const USERNAME = 'cod356-input-test';
+const PASSWORD = 'cod356-input-password';
 
+let testRoot: string;
+let dataDir: string;
+let probeLog: string;
+let socketName: string;
+let port: number;
+let baseUrl: string;
+let server: ChildProcess | null = null;
+let serverLog = '';
 let browser: Browser;
+let context: BrowserContext;
 let page: Page;
+let sessionId: string;
 
-beforeAll(async () => {
-  browser = await chromium.launch({ headless: true });
-  page = await browser.newPage();
-  await page.setContent('<!doctype html><html><body><textarea id="ime"></textarea></body></html>');
-  await page.evaluate(() => {
-    Object.assign(window, {
-      MobileDetection: {},
-      HTMLCanvasElement: class {},
+function authorization(): string {
+  return `Basic ${Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64')}`;
+}
+
+async function choosePort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const candidate = createServer();
+    candidate.once('error', reject);
+    candidate.listen(0, '127.0.0.1', () => {
+      const address = candidate.address();
+      const selected = typeof address === 'object' && address ? address.port : 0;
+      candidate.close((error) => (error ? reject(error) : resolvePort(selected)));
     });
   });
-  await page.addScriptTag({ content: `${constants}\n${appSource}\nwindow.__CodemanApp = CodemanApp;` });
-});
+}
 
-afterAll(async () => {
-  await browser?.close();
-});
+async function verifyPortReleased(): Promise<void> {
+  await new Promise<void>((resolvePort, rejectPort) => {
+    const candidate = createServer();
+    candidate.once('error', rejectPort);
+    candidate.listen(port, '127.0.0.1', () => candidate.close((error) => (error ? rejectPort(error) : resolvePort())));
+  });
+}
 
-type Trace = {
-  logical: string[];
-  serialized: string[];
-  probe: string[];
-  visible: string[];
-  pending: number;
+async function waitForStatus(): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (server?.exitCode !== null) throw new Error(`Codeman child exited early:\n${serverLog.slice(-4_000)}`);
+    try {
+      const response = await fetch(`${baseUrl}/api/status`, { headers: { Authorization: authorization() } });
+      if (response.ok) return;
+    } catch {
+      // Child is still binding.
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`Codeman child did not become ready:\n${serverLog.slice(-4_000)}`);
+}
+
+async function startServer(): Promise<void> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.VITEST;
+  delete env.VITEST_MODE;
+  delete env.VITEST_POOL_ID;
+  delete env.VITEST_WORKER_ID;
+  delete env.NODE_ENV;
+  Object.assign(env, {
+    CODEMAN_INSTANCE: `cod356-input-${process.pid}`,
+    CODEMAN_DATA_DIR: dataDir,
+    CODEMAN_HOST: '127.0.0.1',
+    CODEMAN_PORT: String(port),
+    CODEMAN_USERNAME: USERNAME,
+    CODEMAN_PASSWORD: PASSWORD,
+    CODEMAN_TMUX_SOCKET: socketName,
+    COD356_PROBE_LOG: probeLog,
+    PATH: `${join(testRoot, 'bin')}:${process.env.PATH ?? ''}`,
+  });
+  server = spawn(
+    join(ROOT, 'node_modules/.bin/tsx'),
+    ['src/index.ts', 'web', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: ROOT,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+  server.stdout?.on('data', (chunk) => (serverLog += chunk.toString()));
+  server.stderr?.on('data', (chunk) => (serverLog += chunk.toString()));
+  await waitForStatus();
+}
+
+async function stopServer(): Promise<void> {
+  const child = server;
+  server = null;
+  if (!child || child.exitCode !== null) return;
+  child.kill('SIGTERM');
+  await new Promise<void>((resolveExit, rejectExit) => {
+    let reapTimeout: ReturnType<typeof setTimeout> | undefined;
+    const terminateTimeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reapTimeout = setTimeout(() => rejectExit(new Error('Codeman child did not exit after SIGKILL')), 5_000);
+    }, 5_000);
+    child.once('exit', () => {
+      clearTimeout(terminateTimeout);
+      if (reapTimeout) clearTimeout(reapTimeout);
+      resolveExit();
+    });
+  });
+}
+
+async function api(method: string, path: string, body?: unknown): Promise<any> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: { Authorization: authorization(), 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
+  const payload = await response.json();
+  return payload.data ?? payload;
+}
+
+function readProbeEvents(): Array<Record<string, any>> {
+  const content = readFileSync(probeLog, 'utf8');
+  const completeContent = content.endsWith('\n') ? content : content.slice(0, content.lastIndexOf('\n') + 1);
+  return completeContent
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function waitForProbeBytes(startIndex: number, expected: Buffer, expectedCopies = 1): Promise<Buffer> {
+  const deadline = Date.now() + 20_000;
+  const targetLength = expected.length * expectedCopies;
+  let bytes = Buffer.alloc(0);
+  while (Date.now() < deadline) {
+    bytes = Buffer.concat(
+      readProbeEvents()
+        .slice(startIndex)
+        .filter((event) => event.type === 'stdin')
+        .map((event) => Buffer.from(event.base64, 'base64'))
+    );
+    if (bytes.length >= targetLength) return bytes;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  throw new Error(`probe timed out: expected ${targetLength} bytes, received ${bytes.length}`);
+}
+
+async function installPageTrace(): Promise<void> {
+  await page.evaluate(() => {
+    const trace = ((window as any).__cod356InputTrace ??= { logical: [], terminal: [] });
+    trace.logical = [];
+    trace.terminal = [];
+    const app = (window as any).app;
+    if (!app.__cod356InputWrapped) {
+      const originalInput = app._sendInputAsync.bind(app);
+      app._sendInputAsync = (id: string, data: string, options?: unknown) => {
+        trace.logical.push({ id, data, timestamp: performance.now() });
+        return originalInput(id, data, options);
+      };
+      const originalTerminal = app._onSessionTerminal.bind(app);
+      app._onSessionTerminal = (event: { id: string; data: string }) => {
+        trace.terminal.push({ ...event, timestamp: performance.now() });
+        return originalTerminal(event);
+      };
+      app.__cod356InputWrapped = true;
+    }
+  });
+}
+
+async function openSession(): Promise<void> {
+  await page.evaluate((id) => (window as any).app.selectSession(id), sessionId);
+  await page.waitForFunction(
+    (id) => {
+      const app = (window as any).app;
+      return app.activeSessionId === id && app._wsReady === true && app._wsSessionId === id && !!app.terminal?.buffer;
+    },
+    sessionId,
+    { timeout: 20_000 }
+  );
+  await installPageTrace();
+}
+
+type TraceCursor = {
+  probeIndex: number;
+  wsIndex: number;
+  httpIndex: number;
+  logicalIndex: number;
+  terminalIndex: number;
 };
 
-async function traceCase(
-  transport: 'ws' | 'http',
-  inputs: string[],
-  options: { loseFirstAck?: boolean } = {}
-): Promise<Trace> {
-  return page.evaluate(
-    async ({ transport, inputs, loseFirstAck }) => {
-      const App = (window as any).__CodemanApp;
-      const app = Object.create(App.prototype);
-      Object.assign(app, {
-        _clientId: 'browser-trace-client',
-        _seqCounters: new Map(),
-        _pendingDeliveries: new Map(),
-        _postDraining: new Set(),
-        _persistReliableState() {},
-        _persistReliableNow() {},
-        _updateConnectionIndicator() {},
-        clearPendingHooks() {},
-        markIdleAlertSeen() {},
-        pendingHooks: new Map(),
-        activeSessionId: 's1',
-        isOnline: true,
-        _connectionStatus: 'connected',
-        _ws: null,
-        _wsSessionId: null,
-        _reliableAckTimeoutMs: 1,
-        _wsLastRecvAt: Date.now(),
-      });
-      const trace = { logical: [], serialized: [], probe: [], visible: [] };
-      const seen = new Set<string>();
-      let ackNumber = 0;
-      const applyAtProbe = (frame: { cid: string; seq: number; d: string }) => {
-        const key = `${frame.cid}:${frame.seq}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          trace.probe.push(frame.d);
-          trace.visible.push(frame.d);
-        }
-        ackNumber++;
-        if (!(loseFirstAck && ackNumber === 1)) app._onWsInputAck(frame.seq);
-      };
-      const originalReliableSend = app._reliableSend.bind(app);
-      app._reliableSend = (sessionId: string, data: string, useMux: boolean) => {
-        trace.logical.push(data);
-        return originalReliableSend(sessionId, data, useMux);
-      };
-
-      if (transport === 'ws') {
-        app._wsSessionId = 's1';
-        app._ws = {
-          readyState: 1,
-          send(raw: string) {
-            trace.serialized.push(raw);
-            applyAtProbe(JSON.parse(raw));
-          },
-          close() {},
-        };
-      } else {
-        (window as any).fetch = async (_url: string, init: RequestInit) => {
-          const body = JSON.parse(String(init.body));
-          trace.serialized.push(String(init.body));
-          const key = `browser-trace-client:${body.seq}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            trace.probe.push(body.input);
-            trace.visible.push(body.input);
-          }
-          return new Response('{}', { status: 200 });
-        };
-      }
-
-      for (const input of inputs) app._sendInputAsync('s1', input);
-      for (let index = 0; index < 50 && app._pendingDeliveries.size; index++) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 0));
-      }
-      if (transport === 'ws' && loseFirstAck) {
-        const pending = app._pendingDeliveries.get('s1');
-        pending[0].sentAt = Date.now() - 100;
-        app._wsLastRecvAt = Date.now();
-        app._redeliverSweep();
-        for (const record of [...(app._pendingDeliveries.get('s1') ?? [])]) app._onWsInputAck(record.seq);
-      }
-      return { ...trace, pending: app._pendingDeliveries.size };
-    },
-    { transport, inputs, loseFirstAck: options.loseFirstAck ?? false }
-  );
+async function resetTrace(): Promise<TraceCursor> {
+  const counts = await page.evaluate(() => {
+    const app = (window as any).app;
+    // Scope visible convergence to this trial rather than allowing an
+    // identical payload from the preceding transport to remain in scrollback.
+    app.terminal.clear();
+    return {
+      wsIndex: (window as any).__cod356Wire.ws.length,
+      httpIndex: (window as any).__cod356Wire.http.length,
+      logicalIndex: (window as any).__cod356InputTrace.logical.length,
+      terminalIndex: (window as any).__cod356InputTrace.terminal.length,
+    };
+  });
+  return { probeIndex: readProbeEvents().length, ...counts };
 }
+
+async function terminalContains(token: string): Promise<boolean> {
+  return page.evaluate((value) => {
+    const terminal = (window as any).app.terminal;
+    const buffer = terminal?.buffer?.active;
+    if (!buffer) return false;
+    let rendered = '';
+    for (let row = 0; row < buffer.length; row++) rendered += buffer.getLine(row)?.translateToString(false) ?? '';
+    return rendered.includes(value);
+  }, token);
+}
+
+async function withForcedHttp<T>(transport: 'ws' | 'http', operation: () => Promise<T>): Promise<T> {
+  if (transport === 'ws') return operation();
+  const current = await page.evaluate(() => {
+    const app = (window as any).app;
+    const active = app._wsSessionId;
+    app._wsSessionId = '__cod356_force_http__';
+    return active;
+  });
+  try {
+    return await operation();
+  } finally {
+    await page.evaluate((active) => {
+      const app = (window as any).app;
+      if (app._wsSessionId === '__cod356_force_http__') app._wsSessionId = active;
+    }, current);
+  }
+}
+
+async function assertCurrentLayers(
+  before: TraceCursor,
+  inputs: readonly string[],
+  transport: 'ws' | 'http' = 'ws',
+  serializedCopies = 1
+): Promise<void> {
+  const visibleTokens = readProbeEvents()
+    .slice(before.probeIndex)
+    .filter((event) => event.type === 'stdin')
+    .map((event) => event.base64 as string);
+  expect(visibleTokens.length).toBeGreaterThan(0);
+  await page.waitForFunction(
+    ({ terminalIndex, tokens }) => {
+      const output = (window as any).__cod356InputTrace.terminal
+        .slice(terminalIndex)
+        .map((entry: any) => entry.data)
+        .join('');
+      return tokens.every((token) => output.includes(token.slice(-48)));
+    },
+    { terminalIndex: before.terminalIndex, tokens: visibleTokens },
+    { timeout: 10_000 }
+  );
+  const layers = await page.evaluate(
+    ({ before, transport }) => ({
+      logical: (window as any).__cod356InputTrace.logical.slice(before.logicalIndex).map((entry: any) => entry.data),
+      serialized:
+        transport === 'ws'
+          ? (window as any).__cod356Wire.ws
+              .slice(before.wsIndex)
+              .filter((entry: any) => entry.frame?.t === 'i')
+              .map((entry: any) => entry.frame.d)
+          : (window as any).__cod356Wire.http
+              .slice(before.httpIndex)
+              .filter((entry: any) => typeof entry.body?.input === 'string')
+              .map((entry: any) => entry.body.input),
+      terminal: (window as any).__cod356InputTrace.terminal.slice(before.terminalIndex),
+    }),
+    { before, transport }
+  );
+  expect(layers.logical).toEqual(inputs);
+  expect(layers.serialized).toEqual(Array.from({ length: serializedCopies }, () => [...inputs]).flat());
+  const terminalOutput = layers.terminal.map((entry: any) => entry.data).join('');
+  for (const token of visibleTokens) expect(terminalOutput).toContain(token.slice(-48));
+  await expect.poll(() => terminalContains(visibleTokens.at(-1)!.slice(-48)), { timeout: 10_000 }).toBe(true);
+}
+
+async function deliverAndTrace(transport: 'ws' | 'http', inputs: readonly string[]): Promise<void> {
+  const before = await resetTrace();
+  const expected = Buffer.from(inputs.join(''));
+  await withForcedHttp(transport, async () => {
+    await page.evaluate(
+      ({ id, records }) => {
+        const app = (window as any).app;
+        for (const data of records) app._sendInputAsync(id, data);
+      },
+      { id: sessionId, records: inputs }
+    );
+
+    expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
+    await page.waitForFunction(
+      ({ index, transport, count }) => {
+        const entries =
+          transport === 'ws'
+            ? (window as any).__cod356Wire.ws.slice(index).filter((entry: any) => entry.frame?.t === 'i')
+            : (window as any).__cod356Wire.http
+                .slice(index)
+                .filter((entry: any) => typeof entry.body?.input === 'string');
+        return entries.length >= count;
+      },
+      { index: transport === 'ws' ? before.wsIndex : before.httpIndex, transport, count: inputs.length },
+      { timeout: 10_000 }
+    );
+    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, { timeout: 10_000 });
+    await assertCurrentLayers(before, inputs, transport);
+  });
+}
+
+beforeAll(async () => {
+  testRoot = mkdtempSync(join(tmpdir(), 'cod356-input-browser-'));
+  dataDir = join(testRoot, 'data');
+  probeLog = join(testRoot, 'probe.jsonl');
+  socketName = `cod356-input-${process.pid}-${Date.now()}`;
+  mkdirSync(join(testRoot, 'bin'), { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(probeLog, '');
+  const shim = join(testRoot, 'bin', 'codex');
+  writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${PROBE}"\n`);
+  chmodSync(shim, 0o700);
+  port = await choosePort();
+  baseUrl = `http://127.0.0.1:${port}`;
+  await startServer();
+
+  browser = await chromium.launch({ headless: true });
+  context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    httpCredentials: { username: USERNAME, password: PASSWORD },
+  });
+  page = await context.newPage();
+  await page.addInitScript(() => {
+    const wire = ((window as any).__cod356Wire = { ws: [], http: [] });
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      let frame = null;
+      if (typeof data === 'string') {
+        try {
+          frame = JSON.parse(data);
+        } catch {}
+      }
+      wire.ws.push({ data, frame, timestamp: performance.now() });
+      return originalSend.call(this, data);
+    };
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
+      if (/\/api\/sessions\/[^/]+\/input$/.test(url)) {
+        let body = null;
+        try {
+          body = JSON.parse(String(init?.body));
+        } catch {}
+        wire.http.push({ url, body, timestamp: performance.now() });
+      }
+      return originalFetch(input, init);
+    };
+  });
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => document.body.classList.contains('app-loaded'), undefined, { timeout: 20_000 });
+
+  const created = await api('POST', '/api/sessions', {
+    mode: 'codex',
+    workingDir: testRoot,
+    name: 'cod356-input-probe',
+  });
+  sessionId = created.session?.id ?? created.id ?? created.sessionId;
+  expect(sessionId).toBeTruthy();
+  await openSession();
+  const readyDeadline = Date.now() + 20_000;
+  while (!readProbeEvents().some((event) => event.type === 'ready')) {
+    if (Date.now() >= readyDeadline) throw new Error('input probe did not become ready');
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+}, 120_000);
+
+afterAll(async () => {
+  if (sessionId && server) await api('DELETE', `/api/sessions/${sessionId}`).catch(() => undefined);
+  await context?.close();
+  await browser?.close();
+  await stopServer();
+  try {
+    execFileSync('tmux', ['-L', socketName, 'kill-server'], { stdio: 'ignore' });
+  } catch {
+    // Exact disposable server already exited.
+  }
+  if (testRoot) rmSync(testRoot, { recursive: true, force: true });
+}, 60_000);
 
 const payloadCases = [
   ['500 identical printable characters', ['x'.repeat(500)]],
   ['repeated runs', ['aaabbb111___']],
-  ['rapid printable/control/Enter boundaries', ['abc', '\x03', 'def', '\x1b', '\r']],
-  ['paste near the configured input limit', ['界'.repeat(21_840)]],
+  ['rapid printable/control/Enter boundaries', ['ab', '\x03', 'cd', '\x1b', 'ef', '\r']],
+  // Leave room for the reliable-delivery JSON envelope so the HTTP fallback's
+  // keepalive request remains below Chromium's 64 KiB serialized-body cap.
+  ['paste near the configured input limit', ['p'.repeat(MAX_INPUT_LENGTH - 1024)]],
 ] as const;
 
-describe('terminal input browser/protocol/probe correlation', () => {
+describe('terminal input real browser/server/probe correlation', () => {
   it.each(['ws', 'http'] as const)(
-    '%s preserves all deterministic payload classes at every layer',
+    '%s preserves deterministic payloads at every production layer',
     async (transport) => {
-      for (const [_label, inputs] of payloadCases) {
-        const trace = await traceCase(transport, [...inputs]);
-        expect(trace.logical).toEqual(inputs);
-        expect(trace.serialized.map((raw) => JSON.parse(raw).d ?? JSON.parse(raw).input)).toEqual(inputs);
-        expect(trace.probe).toEqual(inputs);
-        expect(trace.visible).toEqual(inputs);
-        expect(trace.pending).toBe(0);
-      }
+      for (const [_label, inputs] of payloadCases) await deliverAndTrace(transport, inputs);
+    },
+    120_000
+  );
+
+  it.each(['ws', 'http'] as const)(
+    '%s sends one real CJK composition commit without intermediates',
+    async (transport) => {
+      const before = await resetTrace();
+      await withForcedHttp(transport, async () => {
+        await page.evaluate(() => {
+          const app = (window as any).app;
+          const cjk = document.querySelector<HTMLTextAreaElement>('#cjkInput')!;
+          // app.js declares CjkInput as a global lexical binding rather than a
+          // window property. Direct eval reaches that exact production helper.
+          const cjkInput = eval('CjkInput');
+          cjkInput.init({ send: (text: string) => app._handleCjkInput(text) });
+          cjk.value = '\u200b';
+          cjk.dispatchEvent(new CompositionEvent('compositionstart'));
+          cjk.value = '\u200b你';
+          cjk.dispatchEvent(new InputEvent('input', { data: '你', inputType: 'insertCompositionText' }));
+          cjk.value = '\u200b你好';
+          cjk.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertCompositionText' }));
+          cjk.dispatchEvent(new CompositionEvent('compositionend', { data: '你好' }));
+          cjk.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertFromComposition' }));
+        });
+        const expected = Buffer.from('你好');
+        expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
+        await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, {
+          timeout: 10_000,
+        });
+        await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+        const bytes = Buffer.concat(
+          readProbeEvents()
+            .slice(before.probeIndex)
+            .filter((event) => event.type === 'stdin')
+            .map((event) => Buffer.from(event.base64, 'base64'))
+        );
+        expect(bytes).toEqual(expected);
+        await assertCurrentLayers(before, ['你好'], transport);
+      });
     }
   );
 
-  it('lost WebSocket ACK resends a frame but the authoritative PTY receives it exactly once', async () => {
-    const trace = await traceCase('ws', ['aaabbb111___'], { loseFirstAck: true });
-    expect(trace.logical).toEqual(['aaabbb111___']);
-    expect(trace.serialized).toHaveLength(2);
-    expect(trace.probe).toEqual(['aaabbb111___']);
-    expect(trace.visible).toEqual(trace.probe);
-    expect(trace.pending).toBe(0);
+  it('restores the real WebSocket target when an HTTP-scoped assertion fails', async () => {
+    const active = await page.evaluate(() => (window as any).app._wsSessionId);
+    await expect(
+      withForcedHttp('http', async () => {
+        expect(await page.evaluate(() => (window as any).app._wsSessionId)).toBe('__cod356_force_http__');
+        throw new Error('intentional cleanup probe');
+      })
+    ).rejects.toThrow('intentional cleanup probe');
+    expect(await page.evaluate(() => (window as any).app._wsSessionId)).toBe(active);
   });
 
-  it('emits only the committed CJK composition record', async () => {
-    const inputs = await page.evaluate(async () => {
-      const textarea = document.querySelector<HTMLTextAreaElement>('#ime')!;
-      const committed: string[] = [];
-      let composing = false;
-      textarea.addEventListener('compositionstart', () => (composing = true));
-      textarea.addEventListener('input', (event) => {
-        if (!composing && (event as InputEvent).data) committed.push((event as InputEvent).data!);
-      });
-      textarea.addEventListener('compositionend', (event) => {
-        composing = false;
-        committed.push((event as CompositionEvent).data);
-      });
-      textarea.dispatchEvent(new CompositionEvent('compositionstart', { data: '' }));
-      textarea.dispatchEvent(new InputEvent('input', { data: '你', inputType: 'insertCompositionText' }));
-      textarea.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertCompositionText' }));
-      textarea.dispatchEvent(new CompositionEvent('compositionend', { data: '你好' }));
-      return committed;
+  it('redelivers while an ACK is delayed but writes the real PTY exactly once', async () => {
+    const before = await resetTrace();
+    await page.evaluate((id) => {
+      const app = (window as any).app;
+      (window as any).__cod356SavedAckDelivery = app._ackDelivery.bind(app);
+      (window as any).__cod356DelayedAcks = [];
+      app._ackDelivery = (targetId: string, seq: number) => {
+        (window as any).__cod356DelayedAcks.push([targetId, seq]);
+      };
+      app._sendInputAsync(id, 'delayed-ack');
+    }, sessionId);
+    expect(await waitForProbeBytes(before.probeIndex, Buffer.from('delayed-ack'))).toEqual(Buffer.from('delayed-ack'));
+    expect(await page.evaluate(() => (window as any).app._pendingDeliveries.size)).toBe(1);
+    await page.waitForFunction(() => (window as any).__cod356DelayedAcks.length >= 1, undefined, { timeout: 10_000 });
+    await page.evaluate((id) => {
+      const app = (window as any).app;
+      app._pendingDeliveries.get(id)[0].sentAt = Date.now() - app._reliableAckTimeoutMs - 1;
+      app._wsLastRecvAt = Date.now();
+      app._redeliverSweep();
+    }, sessionId);
+    await page.waitForFunction(
+      (index) =>
+        (window as any).__cod356Wire.ws.slice(index).filter((entry: any) => entry.frame?.d === 'delayed-ack').length ===
+        2,
+      before.wsIndex,
+      { timeout: 10_000 }
+    );
+    await page.waitForFunction(() => (window as any).__cod356DelayedAcks.length >= 2, undefined, { timeout: 10_000 });
+    const bytes = Buffer.concat(
+      readProbeEvents()
+        .slice(before.probeIndex)
+        .filter((event) => event.type === 'stdin')
+        .map((event) => Buffer.from(event.base64, 'base64'))
+    );
+    expect(bytes).toEqual(Buffer.from('delayed-ack'));
+    await assertCurrentLayers(before, ['delayed-ack'], 'ws', 2);
+    await page.evaluate(() => {
+      const app = (window as any).app;
+      const delayedAck = (window as any).__cod356DelayedAcks[0];
+      app._ackDelivery = (window as any).__cod356SavedAckDelivery;
+      app._ackDelivery(delayedAck[0], delayedAck[1]);
     });
-    expect(inputs).toEqual(['你好']);
-    for (const transport of ['ws', 'http'] as const) {
-      const trace = await traceCase(transport, inputs);
-      expect(trace.logical).toEqual(['你好']);
-      expect(trace.probe).toEqual(['你好']);
-      expect(trace.visible).toEqual(['你好']);
-    }
+    expect(await page.evaluate(() => (window as any).app._pendingDeliveries.size)).toBe(0);
   });
 
-  it('reloads a pending durable record and reconnects without a second PTY write while server dedup survives', async () => {
-    const result = await page.evaluate(async () => {
-      const storage = new Map<string, string>();
-      Object.defineProperty(window, 'localStorage', {
-        configurable: true,
-        value: {
-          get length() {
-            return storage.size;
-          },
-          key: (index: number) => [...storage.keys()][index] ?? null,
-          getItem: (key: string) => storage.get(key) ?? null,
-          setItem: (key: string, value: string) => storage.set(key, value),
-          removeItem: (key: string) => storage.delete(key),
-        },
-      });
-      const App = (window as any).__CodemanApp;
-      const makeApp = () => {
-        const app = Object.create(App.prototype);
-        Object.assign(app, {
-          _clientId: '',
-          _seqCounters: new Map(),
-          _pendingDeliveries: new Map(),
-          _postDraining: new Set(),
-          _persistReliableTimer: null,
-          _reliableMaxBytes: 1024 * 1024,
-          _updateConnectionIndicator() {},
-          clearPendingHooks() {},
-          markIdleAlertSeen() {},
-          pendingHooks: new Map(),
-          activeSessionId: 's1',
-          _ws: null,
-          _wsSessionId: null,
-        });
-        app._loadReliableState();
-        return app;
-      };
-      const seen = new Set<string>();
-      const probe: string[] = [];
-      let acknowledge = false;
-      const connect = (app: any) => {
-        app._wsSessionId = 's1';
-        app._ws = {
-          readyState: 1,
-          send(raw: string) {
-            const frame = JSON.parse(raw);
-            const key = `${frame.cid}:${frame.seq}`;
-            if (!seen.has(key)) {
-              seen.add(key);
-              probe.push(frame.d);
-            }
-            if (acknowledge) app._onWsInputAck(frame.seq);
-          },
-          close() {},
-        };
-      };
-
-      const first = makeApp();
-      connect(first);
-      first._sendInputAsync('s1', 'survive-reload');
-      first._persistReliableNow();
-      const firstClientId = first._clientId;
-
-      acknowledge = true;
-      const reloaded = makeApp();
-      connect(reloaded);
-      reloaded._onWsReady('s1');
-      await new Promise((resolveWait) => setTimeout(resolveWait, 0));
-      return {
-        firstClientId,
-        reloadedClientId: reloaded._clientId,
-        probe,
-        pending: reloaded._pendingDeliveries.size,
-      };
-    });
-
-    expect(result.reloadedClientId).toBe(result.firstClientId);
-    expect(result.probe).toEqual(['survive-reload']);
-    expect(result.pending).toBe(0);
-  });
-
-  it('attributes restart-before-ACK duplication to volatile server dedup, not browser serialization', async () => {
-    const result = await page.evaluate(() => {
-      const serialized: string[] = [];
-      const probe: string[] = [];
-      const frame = { t: 'i', cid: 'restart-client', seq: 1, d: 'restart-window' };
-      let serverSeen = new Set<string>();
-      const deliver = () => {
-        const raw = JSON.stringify(frame);
-        serialized.push(raw);
-        const decoded = JSON.parse(raw);
-        const key = `${decoded.cid}:${decoded.seq}`;
-        if (!serverSeen.has(key)) {
-          serverSeen.add(key);
-          probe.push(decoded.d);
+  it('lost ACK redelivery serializes twice but reaches the real PTY exactly once', async () => {
+    const before = await resetTrace();
+    await page.evaluate((id) => {
+      const app = (window as any).app;
+      const original = app._ackDelivery.bind(app);
+      let dropped = false;
+      app._ackDelivery = (targetId: string, seq: number) => {
+        if (!dropped) {
+          dropped = true;
+          return;
         }
+        app._ackDelivery = original;
+        return original(targetId, seq);
       };
-      deliver();
-      serverSeen = new Set(); // process restart loses Session._appliedInputSeq
-      deliver(); // durable browser record is still pending because ACK was lost
-      return { logical: [frame.d], serialized, probe, failingLayer: 'server-dedup-process-lifetime' };
-    });
-
-    expect(result.logical).toEqual(['restart-window']);
-    expect(result.serialized).toHaveLength(2);
-    expect(result.probe).toEqual(['restart-window', 'restart-window']);
-    expect(result.failingLayer).toBe('server-dedup-process-lifetime');
+      app._sendInputAsync(id, 'lost-ack-once');
+    }, sessionId);
+    expect(await waitForProbeBytes(before.probeIndex, Buffer.from('lost-ack-once'))).toEqual(
+      Buffer.from('lost-ack-once')
+    );
+    await page.evaluate((id) => {
+      const app = (window as any).app;
+      app._pendingDeliveries.get(id)[0].sentAt = Date.now() - app._reliableAckTimeoutMs - 1;
+      app._wsLastRecvAt = Date.now();
+      app._redeliverSweep();
+    }, sessionId);
+    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, { timeout: 10_000 });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    const bytes = Buffer.concat(
+      readProbeEvents()
+        .slice(before.probeIndex)
+        .filter((event) => event.type === 'stdin')
+        .map((event) => Buffer.from(event.base64, 'base64'))
+    );
+    expect(bytes).toEqual(Buffer.from('lost-ack-once'));
+    await assertCurrentLayers(before, ['lost-ack-once'], 'ws', 2);
   });
+
+  it('reconnects a pending durable record over a real socket with one PTY write', async () => {
+    const before = await resetTrace();
+    await page.evaluate((id) => {
+      const app = (window as any).app;
+      (window as any).__cod356SavedAckDelivery = app._ackDelivery.bind(app);
+      app._ackDelivery = () => {};
+      app._sendInputAsync(id, 'socket-reconnect');
+      app._persistReliableNow();
+    }, sessionId);
+    expect(await waitForProbeBytes(before.probeIndex, Buffer.from('socket-reconnect'))).toEqual(
+      Buffer.from('socket-reconnect')
+    );
+    await assertCurrentLayers(before, ['socket-reconnect']);
+    await page.evaluate(() => {
+      const app = (window as any).app;
+      app._ackDelivery = (window as any).__cod356SavedAckDelivery;
+      app._ws.close();
+    });
+    await page.waitForFunction(
+      () => {
+        const app = (window as any).app;
+        return app._wsReady === true && app._pendingDeliveries.size === 0;
+      },
+      undefined,
+      { timeout: 20_000 }
+    );
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    const bytes = Buffer.concat(
+      readProbeEvents()
+        .slice(before.probeIndex)
+        .filter((event) => event.type === 'stdin')
+        .map((event) => Buffer.from(event.base64, 'base64'))
+    );
+    expect(bytes).toEqual(Buffer.from('socket-reconnect'));
+    await assertCurrentLayers(before, ['socket-reconnect'], 'ws', 2);
+  });
+
+  it('reloads a pending durable record and server dedup keeps PTY bytes exactly once', async () => {
+    const before = await resetTrace();
+    const identity = await page.evaluate((id) => {
+      const app = (window as any).app;
+      const clientId = app._clientId;
+      app._ackDelivery = () => {};
+      app._sendInputAsync(id, 'reload-pending');
+      app._persistReliableNow();
+      return clientId;
+    }, sessionId);
+    expect(await waitForProbeBytes(before.probeIndex, Buffer.from('reload-pending'))).toEqual(
+      Buffer.from('reload-pending')
+    );
+    await assertCurrentLayers(before, ['reload-pending']);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.body.classList.contains('app-loaded'), undefined, { timeout: 20_000 });
+    await openSession();
+    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, { timeout: 20_000 });
+    expect(await page.evaluate(() => (window as any).app._clientId)).toBe(identity);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    const bytes = Buffer.concat(
+      readProbeEvents()
+        .slice(before.probeIndex)
+        .filter((event) => event.type === 'stdin')
+        .map((event) => Buffer.from(event.base64, 'base64'))
+    );
+    expect(bytes).toEqual(Buffer.from('reload-pending'));
+    expect(
+      await page.evaluate(() => ({
+        logical: (window as any).__cod356InputTrace.logical.map((entry: any) => entry.data),
+        serialized: [
+          ...(window as any).__cod356Wire.ws
+            .filter((entry: any) => entry.frame?.d === 'reload-pending')
+            .map((entry: any) => entry.frame.d),
+          ...(window as any).__cod356Wire.http
+            .filter((entry: any) => entry.body?.input === 'reload-pending')
+            .map((entry: any) => entry.body.input),
+        ],
+      }))
+    ).toEqual({ logical: [], serialized: ['reload-pending'] });
+    await expect
+      .poll(() => terminalContains(Buffer.from('reload-pending').toString('base64')), { timeout: 10_000 })
+      .toBe(true);
+  }, 60_000);
+
+  it('identifies process-local server dedup as the restart-before-ACK duplicate layer', async () => {
+    const before = await resetTrace();
+    await page.evaluate((id) => {
+      const app = (window as any).app;
+      app._ackDelivery = () => {};
+      app._sendInputAsync(id, 'restart-window');
+      app._persistReliableNow();
+    }, sessionId);
+    expect(await waitForProbeBytes(before.probeIndex, Buffer.from('restart-window'))).toEqual(
+      Buffer.from('restart-window')
+    );
+    await assertCurrentLayers(before, ['restart-window']);
+    await stopServer();
+    await verifyPortReleased();
+    const tmuxSessions = execFileSync('tmux', ['-L', socketName, 'list-sessions', '-F', '#{session_name}'], {
+      encoding: 'utf8',
+    });
+    expect(tmuxSessions.split('\n')).toContain(`codeman-${sessionId.slice(0, 8)}`);
+    await startServer();
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.body.classList.contains('app-loaded'), undefined, { timeout: 20_000 });
+    await openSession();
+    const duplicated = await waitForProbeBytes(before.probeIndex, Buffer.from('restart-window'), 2);
+    expect(duplicated).toEqual(Buffer.from('restart-windowrestart-window'));
+    expect(await page.evaluate(() => (window as any).app._pendingDeliveries.size)).toBe(0);
+    expect(
+      await page.evaluate(() => ({
+        logical: (window as any).__cod356InputTrace.logical.map((entry: any) => entry.data),
+        serialized: [
+          ...(window as any).__cod356Wire.ws
+            .filter((entry: any) => entry.frame?.d === 'restart-window')
+            .map((entry: any) => entry.frame.d),
+          ...(window as any).__cod356Wire.http
+            .filter((entry: any) => entry.body?.input === 'restart-window')
+            .map((entry: any) => entry.body.input),
+        ],
+      }))
+    ).toEqual({ logical: [], serialized: ['restart-window'] });
+  }, 60_000);
 });
