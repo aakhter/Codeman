@@ -368,6 +368,73 @@ async function readTmuxTrace(filePath) {
     });
 }
 
+async function attachInputCorrelationInstrumentation(page) {
+  await page.evaluate(() => {
+    const app = window.app;
+    const trace = window.__cod356;
+    Object.assign(trace, {
+      inputCalls: [],
+      ackHandlers: [],
+      terminalReceipts: [],
+      flushCalls: [],
+    });
+    const byteLength = (value) => new TextEncoder().encode(value ?? '').byteLength;
+    const originalInput = app._sendInputAsync.bind(app);
+    app._sendInputAsync = (sessionId, data, options) => {
+      const startedAt = performance.now();
+      const entry = { sessionId, data, byteLength: byteLength(data), startedAt, completedAt: null, durationMs: null };
+      trace.inputCalls.push(entry);
+      try {
+        return originalInput(sessionId, data, options);
+      } finally {
+        entry.completedAt = performance.now();
+        entry.durationMs = entry.completedAt - startedAt;
+      }
+    };
+    const originalAck = app._onWsInputAck.bind(app);
+    app._onWsInputAck = (seq) => {
+      const startedAt = performance.now();
+      const result = originalAck(seq);
+      const completedAt = performance.now();
+      trace.ackHandlers.push({ seq, startedAt, completedAt, durationMs: completedAt - startedAt });
+      return result;
+    };
+    const originalTerminal = app._onSessionTerminal.bind(app);
+    app._onSessionTerminal = (event) => {
+      const startedAt = performance.now();
+      const result = originalTerminal(event);
+      const completedAt = performance.now();
+      trace.terminalReceipts.push({
+        startedAt,
+        completedAt,
+        durationMs: completedAt - startedAt,
+        byteLength: byteLength(event?.data),
+        data: event?.data ?? '',
+      });
+      return result;
+    };
+    if (typeof app.flushPendingWrites === 'function') {
+      const originalFlush = app.flushPendingWrites.bind(app);
+      app.flushPendingWrites = (...args) => {
+        const startedAt = performance.now();
+        const beforeCount = app.pendingWrites?.length ?? null;
+        const beforeBytes = app.pendingWrites?.reduce((sum, value) => sum + value.length, 0) ?? null;
+        const result = originalFlush(...args);
+        const completedAt = performance.now();
+        trace.flushCalls.push({
+          startedAt,
+          completedAt,
+          durationMs: completedAt - startedAt,
+          beforeCount,
+          beforeBytes,
+          afterCount: app.pendingWrites?.length ?? null,
+        });
+        return result;
+      };
+    }
+  });
+}
+
 async function runBrowserSample({
   browser,
   baseUrl,
@@ -398,6 +465,7 @@ async function runBrowserSample({
   await page.waitForFunction(() => document.body.classList.contains('app-loaded'), undefined, { timeout: 20_000 });
   const appReadyMs = performance.now() - navigationStart;
   await browserTelemetry.attachAppInstrumentation(page);
+  await attachInputCorrelationInstrumentation(page);
 
   const targetSessionId = sessionIds[0];
   const interactiveSessionId =
@@ -433,6 +501,10 @@ async function runBrowserSample({
       const priorTraceCounts = await page.evaluate(() => ({
         outputFrames: window.__cod356.outputFrames.length,
         longTasks: window.__cod356.longTasks.length,
+        inputCalls: window.__cod356.inputCalls.length,
+        ackHandlers: window.__cod356.ackHandlers.length,
+        terminalReceipts: window.__cod356.terminalReceipts.length,
+        flushCalls: window.__cod356.flushCalls.length,
       }));
       const input = createInputTrialPayload({ sampleIndex, trialIndex });
       const expected = Buffer.from(input);
@@ -465,6 +537,17 @@ async function runBrowserSample({
       const probeReceiptMs = performance.now() - sendStart;
       const probeEvent = receivedEvents[0];
       if (!Number.isFinite(probeEvent?.timestampEpochMs)) throw new Error('probe receipt epoch timestamp unavailable');
+      let probeOutputEvent = null;
+      const outputDeadline = Date.now() + 2_000;
+      while (!probeOutputEvent && Date.now() < outputDeadline) {
+        probeOutputEvent = (await browserTelemetry.readProbeEvents(probeLog))
+          .slice(priorEvents.length)
+          .find((event) => event.type === 'stdout-frame' && event.inputId === probeEvent.id);
+        if (!probeOutputEvent) await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+      }
+      if (!Number.isFinite(probeOutputEvent?.timestampEpochMs)) {
+        throw new Error('probe framed-output timestamp unavailable');
+      }
       const ack = await page
         .waitForFunction((seq) => window.__cod356.inputAcks.find((entry) => entry.seq === seq), sequence, {
           timeout: 10_000,
@@ -505,7 +588,22 @@ async function runBrowserSample({
       const trialBrowserMetrics = await browserTelemetry.collectBrowserMetrics(page);
       const outputFrames = trialBrowserMetrics.outputFrames.slice(priorTraceCounts.outputFrames);
       const trialLongTasks = trialBrowserMetrics.longTasks.slice(priorTraceCounts.longTasks);
-      const timeline = buildCorrelatedInputTimeline({
+      const correlation = await page.evaluate(
+        ({ counts, data, seq, visibleToken }) => ({
+          inputCall: window.__cod356.inputCalls.slice(counts.inputCalls).find((entry) => entry.data === data) ?? null,
+          ackHandler: window.__cod356.ackHandlers.slice(counts.ackHandlers).find((entry) => entry.seq === seq) ?? null,
+          terminalReceipt:
+            window.__cod356.terminalReceipts
+              .slice(counts.terminalReceipts)
+              .find((entry) => entry.data.includes(visibleToken)) ?? null,
+          flushCalls: window.__cod356.flushCalls.slice(counts.flushCalls),
+        }),
+        { counts: priorTraceCounts, data: input, seq: sequence, visibleToken }
+      );
+      if (!correlation.inputCall || !correlation.ackHandler || !correlation.terminalReceipt) {
+        throw new Error('browser input correlation boundary unavailable');
+      }
+      const baseTimeline = buildCorrelatedInputTimeline({
         pageTimeOriginMs,
         sentFrameBrowserMs: sentFrame.timestamp,
         ackBrowserMs: ack.timestamp,
@@ -516,6 +614,27 @@ async function runBrowserSample({
         settleCompleteBrowserMs: queueAfterSettle.timestamp,
         longTasks: trialLongTasks,
       });
+      const overlapsInputLongTask = trialLongTasks.some(
+        (task) => task.startTime <= flushCompleteAt && task.startTime + task.duration >= correlation.inputCall.startedAt
+      );
+      const timeline = {
+        ...baseTimeline,
+        browserInput: correlation.inputCall,
+        websocketSerializeAndSend: {
+          browserMs: sentFrame.timestamp,
+          epochMs: pageTimeOriginMs + sentFrame.timestamp,
+          byteLength: sentFrame.byteLength,
+        },
+        ackHandling: correlation.ackHandler,
+        probeOutput: {
+          epochMs: probeOutputEvent.timestampEpochMs,
+          monotonicNs: probeOutputEvent.timestampNs,
+          inputId: probeOutputEvent.inputId,
+        },
+        terminalReceipt: correlation.terminalReceipt,
+        flushCalls: correlation.flushCalls,
+        overlapsInputLongTask,
+      };
       terminalTrials.push({
         sampleIndex,
         trialIndex,
@@ -527,6 +646,11 @@ async function runBrowserSample({
         outputFrameBytes: outputFrames.reduce((sum, frame) => sum + frame.byteLength, 0),
         flushMs: flushCompleteAt - matchingOutput.timestamp,
         flushReason: null,
+        inputCallDurationMs: correlation.inputCall.durationMs,
+        ackHandlerDurationMs: correlation.ackHandler.durationMs,
+        terminalReceiptDurationMs: correlation.terminalReceipt.durationMs,
+        flushCallDurationMs: correlation.flushCalls.reduce((sum, entry) => sum + entry.durationMs, 0),
+        overlapsInputLongTask,
         timeline,
       });
       return {
@@ -726,6 +850,11 @@ function compactCellSummary(runs, warmupRun) {
           outputFrameCount: summaryOrNull(terminalRows.map((row) => row.outputFrameCount)),
           outputFrameBytes: summaryOrNull(terminalRows.map((row) => row.outputFrameBytes)),
           flushMs: summaryOrNull(terminalRows.map((row) => row.flushMs)),
+          inputCallDurationMs: summaryOrNull(terminalRows.map((row) => row.inputCallDurationMs)),
+          ackHandlerDurationMs: summaryOrNull(terminalRows.map((row) => row.ackHandlerDurationMs)),
+          terminalReceiptDurationMs: summaryOrNull(terminalRows.map((row) => row.terminalReceiptDurationMs)),
+          flushCallDurationMs: summaryOrNull(terminalRows.map((row) => row.flushCallDurationMs)),
+          inputLongTaskOverlapCount: terminalRows.filter((row) => row.overlapsInputLongTask).length,
           unavailableReasons: terminalRows.map((row) => row.flushReason).filter(Boolean),
         }
       : null,

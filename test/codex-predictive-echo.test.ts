@@ -191,6 +191,7 @@ const d = CODEX_AVAILABLE ? describe : describe.skip;
 
 beforeAll(async () => {
   if (!CODEX_AVAILABLE) return;
+  mkdirSync(resolve(ROOT, 'tmp'), { recursive: true });
   codexHome = mkdtempSync(resolve(ROOT, 'tmp', 'codexlab-'));
   trustedWorkdir = mkdtempSync(resolve(ROOT, 'tmp', 'codexlab-work-'));
   untrustedWorkdir = mkdtempSync(resolve(ROOT, 'tmp', 'codexlab-untrusted-'));
@@ -498,6 +499,11 @@ d('codex predictive echo E2E (real codex TUI)', () => {
 
     expect(withPredictor.length).toBeGreaterThan(0);
     expect(withoutPredictor).toBe(withPredictor); // the visual-only invariant, end to end
+    // The same script covers insert, backspace, cursor edit, paste, and a final
+    // output repaint/clear. Byte identity is insufficient unless the overlay
+    // also converges completely after those boundaries.
+    expect(await spanCount()).toBe(0);
+    expect(await predictState()).toMatchObject({ outstanding: 0 });
   }, 60_000);
 
   it('#218: arrows + mid-word insert submit the exact edited text', async () => {

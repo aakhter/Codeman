@@ -17,6 +17,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Session } from '../../src/session.js';
+import { MAX_INPUT_LENGTH } from '../../src/config/terminal-limits.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
@@ -153,5 +154,22 @@ describe('POST /api/sessions/:id/input rollback wiring', () => {
 
     expect(res.statusCode).toBe(200);
     expect(session.shouldApplyInput('c2', 5)).toBe(true);
+  });
+
+  it.each([
+    ['500 identical printable characters', 'x'.repeat(500)],
+    ['repeated runs', 'aaabbb111___'],
+    ['printable/control/Enter boundaries', `ab\x03cd\x1bef\r`],
+    ['paste near the configured input limit', 'p'.repeat(MAX_INPUT_LENGTH - 16)],
+    ['one CJK composition commit', '你好世界'],
+  ])('delivers %s exactly once through HTTP redelivery', async (_label, input) => {
+    const session = harness.ctx.sessions.get('test-session-1')!;
+
+    const first = await post({ input, useMux: false, clientId: 'trace-client', seq: 41 });
+    const duplicate = await post({ input, useMux: false, clientId: 'trace-client', seq: 41 });
+
+    expect(first.statusCode).toBe(200);
+    expect(duplicate.statusCode).toBe(200);
+    expect(session.writeBuffer.filter((value) => value === input)).toHaveLength(1);
   });
 });

@@ -24,6 +24,14 @@ process.stdin.on('data', (chunk) => {
   const event = createProbeInputEvent({ id, monotonicNs: timestampNs, epochMs: Date.now(), bytes });
   const { base64 } = event;
   record(event);
+  const outputTimestampNs = process.hrtime.bigint().toString();
+  record({
+    type: 'stdout-frame',
+    inputId: id,
+    timestampNs: outputTimestampNs,
+    timestampEpochMs: Date.now(),
+    base64,
+  });
   process.stdout.write(`\r\nCOD356_ECHO:${base64}`);
   process.stdout.write(formatInputAcknowledgement({ id, timestampNs, bytes }));
 });
