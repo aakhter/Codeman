@@ -478,6 +478,7 @@ const DEFAULT_SHORTCUTS = [
       { modifiers: ['alt'], key: 'k', code: 'KeyK' },
     ],
     action: 'openCommandPalette',
+    paletteAgentModes: ['claude', 'codex', 'opencode'],
   },
   {
     id: 'toggle-session-sidebar',
@@ -1232,6 +1233,11 @@ class CodemanApp {
         next.bindings = this.normalizeShortcutBindings(override.bindings);
         delete next.displayBindings;
       }
+      if (Array.isArray(override.paletteAgentModes)) {
+        const valid = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'];
+        const filtered = override.paletteAgentModes.filter((m) => valid.includes(m));
+        if (filtered.length) next.paletteAgentModes = filtered;
+      }
       return next;
     });
   }
@@ -1241,7 +1247,18 @@ class CodemanApp {
       ...shortcut,
       bindings: shortcut.bindings ? shortcut.bindings.map((binding) => ({ ...binding, modifiers: [...(binding.modifiers || [])] })) : undefined,
       displayBindings: shortcut.displayBindings ? [...shortcut.displayBindings] : undefined,
+      paletteAgentModes: shortcut.paletteAgentModes ? [...shortcut.paletteAgentModes] : undefined,
     }));
+  }
+
+  getPaletteAgentModes() {
+    const registry = this.getShortcutRegistry?.() || [];
+    const palette = registry.find((s) => s.id === 'command-palette');
+    const modes = Array.isArray(palette?.paletteAgentModes) && palette.paletteAgentModes.length
+      ? palette.paletteAgentModes
+      : ['claude', 'codex', 'opencode'];
+    const valid = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'];
+    return modes.filter((m) => valid.includes(m));
   }
 
   normalizeShortcutBindings(bindings) {

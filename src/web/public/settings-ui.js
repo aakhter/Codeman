@@ -3744,10 +3744,24 @@ Object.assign(CodemanApp.prototype, {
         <button type="button" class="shortcut-reset-btn" data-shortcut-action="reset" title="Reset to default"${overridden ? '' : ' disabled'}>Reset</button>
         <input class="shortcut-enabled-checkbox" type="checkbox" ${shortcut.disabled ? '' : 'checked'} data-shortcut-action="toggle" title="Enable/disable">`
           : '';
+        let paletteHtml = '';
+        if (shortcut.id === 'command-palette') {
+          const allModes = ['claude', 'codex', 'opencode', 'gemini', 'antigravity', 'pi', 'shell'];
+          const labels = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', shell: 'Shell' };
+          const current = Array.isArray(shortcut.paletteAgentModes) && shortcut.paletteAgentModes.length ? shortcut.paletteAgentModes : ['claude', 'codex', 'opencode'];
+          const chips = allModes
+            .map((m) => {
+              const checked = current.includes(m) ? ' checked' : '';
+              return `<label class="shortcut-palette-chip"><input type="checkbox" data-palette-agent="${escapeHtml(m)}"${checked}> ${escapeHtml(labels[m] || m)}</label>`;
+            })
+            .join('');
+          paletteHtml = `<div class="shortcut-palette-modes"><span class="shortcut-palette-label">Agents for ←/→:</span> ${chips}</div>`;
+        }
         return `<div class="shortcut-setting-row${configurable ? '' : ' shortcut-setting-row--fixed'}" data-shortcut-id="${escapeHtml(shortcut.id)}">
         <label class="shortcut-setting-label">${escapeHtml(shortcut.label)}</label>
         <input class="shortcut-binding-input" type="text" readonly value="${escapeHtml(bindingLabel)}" placeholder="(none)" data-id="${escapeHtml(shortcut.id)}">
         ${controls}
+        ${paletteHtml}
       </div>`;
       })
       .join('');
@@ -3769,10 +3783,56 @@ Object.assign(CodemanApp.prototype, {
     });
     list.addEventListener('change', (e) => {
       const box = e.target;
-      if (!box?.matches?.('[data-shortcut-action="toggle"]')) return;
-      const id = box.closest?.('[data-shortcut-id]')?.dataset?.shortcutId;
-      if (id) this.toggleShortcutEnabled(id, box.checked);
+      if (box?.matches?.('[data-shortcut-action="toggle"]')) {
+        const id = box.closest?.('[data-shortcut-id]')?.dataset?.shortcutId;
+        if (id) this.toggleShortcutEnabled(id, box.checked);
+        return;
+      }
+      if (box?.matches?.('[data-palette-agent]')) {
+        const mode = box.dataset.paletteAgent;
+        const row = box.closest?.('[data-shortcut-id]');
+        const id = row?.dataset?.shortcutId;
+        if (id) this.togglePaletteAgentMode(id, mode, box.checked);
+      }
     });
+  },
+
+  togglePaletteAgentMode(shortcutId, mode, checked) {
+    const valid = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi'];
+    if (!valid.includes(mode)) return;
+    const settings = this.loadAppSettingsFromStorage();
+    const shortcutOverrides = { ...(settings.shortcutOverrides || {}) };
+    const current = shortcutOverrides[shortcutId] || {};
+    const existing = Array.isArray(current.paletteAgentModes) && current.paletteAgentModes.length ? [...current.paletteAgentModes] : null;
+    // Use registry default when no override exists
+    const fallback = typeof this.getPaletteAgentModes === 'function' ? null : ['claude', 'codex', 'opencode'];
+    let modes;
+    if (existing) modes = existing;
+    else if (typeof this.getShortcutRegistry === 'function') {
+      const reg = this.getShortcutRegistry().find((s) => s.id === shortcutId);
+      modes = Array.isArray(reg?.paletteAgentModes) && reg.paletteAgentModes.length ? [...reg.paletteAgentModes] : ['claude', 'codex', 'opencode'];
+    } else {
+      modes = [...(fallback || ['claude', 'codex', 'opencode'])];
+    }
+    const set = new Set(modes);
+    if (checked) set.add(mode);
+    else set.delete(mode);
+    if (set.size === 0) {
+      this.showToast?.('At least one agent must be selected', 'error');
+      // revert checkbox
+      const input = document.querySelector(`[data-shortcut-id="${shortcutId}"] [data-palette-agent="${mode}"]`);
+      if (input) input.checked = true;
+      return;
+    }
+    // Preserve a stable order: follow allModes order, not insertion order
+    const allModes = ['claude', 'codex', 'opencode', 'gemini', 'antigravity', 'pi', 'shell'];
+    const ordered = allModes.filter((m) => set.has(m));
+    shortcutOverrides[shortcutId] = { ...current, paletteAgentModes: ordered };
+    settings.shortcutOverrides = shortcutOverrides;
+    this.saveAppSettingsToStorage(settings);
+    // Sync to server for cross-device persistence (shortcutOverrides is synced)
+    try { this._apiPut?.('/api/settings', { shortcutOverrides }); } catch {}
+    // No full re-render to preserve focus; the palette will pick up on next open
   },
 
   readShortcutOverridesFromSettings() {

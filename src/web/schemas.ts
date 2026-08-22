@@ -1095,6 +1095,11 @@ export const SettingsUpdateSchema = z
           .object({
             bindings: z.array(z.record(z.string(), z.unknown())).max(16).optional(),
             disabled: z.boolean().optional(),
+            paletteAgentModes: z
+              .array(z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']))
+              .min(1)
+              .max(7)
+              .optional(),
           })
           .passthrough()
       )
