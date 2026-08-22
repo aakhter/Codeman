@@ -115,11 +115,13 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       controller._fullRenderSessionTabs();
       (window as any).__cod339Controller = controller;
     });
+    await page.addScriptTag({ content: 'app = window.__cod339Controller; window.app = app;' });
   });
 
   beforeEach(async () => {
     await page.evaluate(() => {
       const controller = (window as any).__cod339Controller;
+      controller.closeTabRailActionMenu?.();
       controller.__cod339Settings = { sessionListLayout: 'sidebar', sessionSidebarFontSize: 14 };
       controller._sidebarCollapsedOverride = false;
       controller.activeSessionId = 'short';
@@ -140,6 +142,32 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
     await page.close();
     await browser.close();
   });
+
+  async function applyExpandedSurface(surface: 'sidebar' | 'rail') {
+    await page.evaluate((nextSurface) => {
+      const controller = (window as any).__cod339Controller;
+      controller.__cod339Settings =
+        nextSurface === 'sidebar'
+          ? { sessionListLayout: 'sidebar', sessionSidebarFontSize: 14 }
+          : { sessionListLayout: 'header', tabOrientation: 'vertical', sessionSidebarFontSize: 14 };
+      controller._sidebarCollapsedOverride = false;
+      controller.activeSessionId = 'short';
+      document.documentElement.dataset.sessionList = nextSurface === 'sidebar' ? 'sidebar' : 'header';
+      document.documentElement.dataset.sidebar = 'expanded';
+      document.documentElement.dataset.tabOrientation = nextSurface === 'sidebar' ? 'horizontal' : 'vertical';
+      document.documentElement.classList.remove('tab-rail-compact');
+      controller._lastTabStructureKey = null;
+      controller.applySessionListLayout();
+      controller._fullRenderSessionTabs();
+    }, surface);
+  }
+
+  async function tabMoreState(targetPage: Page, sessionId = 'long') {
+    return targetPage.locator(`.session-tab[data-id="${sessionId}"] .tab-more`).evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { visibility: style.visibility, pointerEvents: style.pointerEvents };
+    });
+  }
 
   it('keeps the complete action cluster immediately beside a short session name', async () => {
     const tab = page.locator('.session-tab[data-id="short"]');
@@ -365,5 +393,55 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
     expect.soft(parentClasses.compact).toContain('session-tab');
     expect.soft(parentClasses.compact).not.toContain('tab-name-row');
     expect.soft(parentClasses.expanded).toContain('tab-name-row');
+  });
+
+  it('reveals and opens nested session actions contextually on expanded vertical surfaces', async () => {
+    for (const surface of ['sidebar', 'rail'] as const) {
+      await applyExpandedSurface(surface);
+      const longTab = page.locator('.session-tab[data-id="long"]');
+
+      expect(await tabMoreState(page)).toEqual({ visibility: 'hidden', pointerEvents: 'none' });
+
+      await longTab.hover();
+      expect(await tabMoreState(page)).toEqual({ visibility: 'visible', pointerEvents: 'auto' });
+      try {
+        await longTab.locator('.tab-more').click();
+        expect(await page.locator('.tab-rail-action-menu').count()).toBe(1);
+      } finally {
+        await page.evaluate(() => (window as any).__cod339Controller.closeTabRailActionMenu());
+      }
+      expect(await page.locator('.tab-rail-action-menu').count()).toBe(0);
+
+      await page.mouse.move(1200, 760);
+      expect(await longTab.evaluate((element) => element.matches(':hover'))).toBe(false);
+      await longTab.focus();
+      expect(await tabMoreState(page)).toEqual({ visibility: 'visible', pointerEvents: 'auto' });
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.evaluate(() => {
+        const controller = (window as any).__cod339Controller;
+        controller.activeSessionId = 'long';
+        controller._fullRenderSessionTabs();
+      });
+      expect(await tabMoreState(page)).toEqual({ visibility: 'visible', pointerEvents: 'auto' });
+    }
+  });
+
+  it('keeps nested session actions reachable for coarse pointers', async () => {
+    const touchContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: true });
+    try {
+      const touchPage = await touchContext.newPage();
+      for (const surface of ['sidebar', 'rail'] as const) {
+        await applyExpandedSurface(surface);
+        const fixture = await page.locator('html').evaluate((element) => {
+          const clone = element.cloneNode(true) as HTMLElement;
+          clone.querySelectorAll('script').forEach((script) => script.remove());
+          return `<!doctype html>${clone.outerHTML}`;
+        });
+        await touchPage.setContent(fixture);
+        expect(await tabMoreState(touchPage)).toEqual({ visibility: 'visible', pointerEvents: 'auto' });
+      }
+    } finally {
+      await touchContext.close();
+    }
   });
 });
