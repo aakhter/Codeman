@@ -13,6 +13,7 @@ import {
   authenticateDisposableTarget,
   assertLoadCoverage,
   buildCorrelatedInputTimeline,
+  buildInputBoundaryMetrics,
   buildInputTrialProfile,
   createInputTrialPayload,
   createProbeInputEvent,
@@ -23,6 +24,7 @@ import {
   parseOnlySelection,
   runFixedLoadWindow,
   runFixedInputTrials,
+  selectProductionOutputBoundary,
   selectInteractiveFixture,
   summarizeTmuxTrace,
   summarizeSamples,
@@ -320,7 +322,10 @@ describe('COD-356 benchmark statistics', () => {
         probeEpochMs: 1_700_000_000_115,
         probeMonotonicNs: '9000000',
         frameMatchBrowserMs: 125,
-        flushBrowserMs: 140,
+        flushStartBrowserMs: 130,
+        flushEndBrowserMs: 132,
+        visibleDetectedBrowserMs: 140,
+        xtermDrainBrowserMs: 145,
         settleCompleteBrowserMs: 650,
         longTasks: [{ startTime: 120, duration: 30 }],
       })
@@ -330,7 +335,10 @@ describe('COD-356 benchmark statistics', () => {
       ack: { browserMs: 110, epochMs: 1_700_000_000_110 },
       probeReceipt: { epochMs: 1_700_000_000_115, monotonicNs: '9000000' },
       frameMatch: { browserMs: 125, epochMs: 1_700_000_000_125 },
-      flushAndConvergence: { browserMs: 140, epochMs: 1_700_000_000_140 },
+      flushStart: { browserMs: 130, epochMs: 1_700_000_000_130 },
+      flushEnd: { browserMs: 132, epochMs: 1_700_000_000_132 },
+      firstVisibleObservation: { browserMs: 140, epochMs: 1_700_000_000_140 },
+      xtermDrain: { browserMs: 145, epochMs: 1_700_000_000_145 },
       settleAndResetComplete: { browserMs: 650, epochMs: 1_700_000_000_650 },
       longTasks: [
         {
@@ -342,6 +350,62 @@ describe('COD-356 benchmark statistics', () => {
         },
       ],
     });
+  });
+
+  it('defines convergence at first visible observation and never substitutes a later drain callback', () => {
+    expect(
+      buildInputBoundaryMetrics({
+        sendAt: 100,
+        terminalReceiptAt: 120,
+        flushStartedAt: 125,
+        flushCompletedAt: 127,
+        visibleDetectedAt: 135,
+        xtermDrainAt: 180,
+      })
+    ).toEqual({
+      convergenceMs: 35,
+      receiptToFlushStartMs: 5,
+      flushDurationMs: 2,
+      flushEndToFirstVisibleMs: 8,
+      firstVisibleToDrainMs: 45,
+    });
+  });
+
+  it('rejects a first-visible observation before the production flush begins', () => {
+    expect(() =>
+      buildInputBoundaryMetrics({
+        sendAt: 100,
+        terminalReceiptAt: 120,
+        flushStartedAt: 125,
+        flushCompletedAt: 140,
+        visibleDetectedAt: 124,
+        xtermDrainAt: 150,
+      })
+    ).toThrow('visible observation preceded production flush start');
+  });
+
+  it('uses the matching real terminal write when output bypasses the pending-write flush', () => {
+    expect(
+      selectProductionOutputBoundary({
+        matchingWrite: { flushId: null, startedAt: 130, completedAt: 131, drainedAt: 132 },
+        flushCalls: [],
+      })
+    ).toEqual({
+      id: null,
+      source: 'direct-terminal-write',
+      startedAt: 130,
+      completedAt: 131,
+      durationMs: 1,
+    });
+  });
+
+  it('uses the owning pending-write flush when the matching terminal write has a flush id', () => {
+    expect(
+      selectProductionOutputBoundary({
+        matchingWrite: { flushId: 7, startedAt: 130, completedAt: 131, drainedAt: 132 },
+        flushCalls: [{ id: 7, startedAt: 125, completedAt: 133, durationMs: 8 }],
+      })
+    ).toEqual({ id: 7, source: 'flushPendingWrites', startedAt: 125, completedAt: 133, durationMs: 8 });
   });
 
   it.each(['idle', 'interactive'])(

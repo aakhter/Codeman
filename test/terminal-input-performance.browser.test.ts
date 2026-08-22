@@ -11,9 +11,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { MAX_INPUT_LENGTH } from '../src/config/terminal-limits.js';
+import { armFirstVisibleObservation, prepareInputTrialObservation } from '../scripts/perf/cod-356-browser.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const PROBE = resolve(ROOT, 'scripts/perf/cod-356-input-probe.mjs');
@@ -162,9 +163,16 @@ async function waitForProbeBytes(startIndex: number, expected: Buffer, expectedC
 
 async function installPageTrace(): Promise<void> {
   await page.evaluate(() => {
-    const trace = ((window as any).__cod356InputTrace ??= { logical: [], terminal: [] });
+    const trace = ((window as any).__cod356InputTrace ??= {
+      logical: [],
+      terminal: [],
+      flushCalls: [],
+      xtermWrites: [],
+    });
     trace.logical = [];
     trace.terminal = [];
+    trace.flushCalls ??= [];
+    trace.xtermWrites ??= [];
     const app = (window as any).app;
     if (!app.__cod356InputWrapped) {
       const originalInput = app._sendInputAsync.bind(app);
@@ -178,6 +186,42 @@ async function installPageTrace(): Promise<void> {
         return originalTerminal(event);
       };
       app.__cod356InputWrapped = true;
+    }
+    if (!app.__cod356FlushWrapped) {
+      let activeFlushId: number | null = null;
+      let nextFlushId = 1;
+      const originalWrite = app.terminal.write.bind(app.terminal);
+      app.terminal.write = (data: string, callback?: () => void) => {
+        const text = typeof data === 'string' ? data : '';
+        const entry = {
+          flushId: activeFlushId,
+          startedAt: performance.now(),
+          completedAt: null as number | null,
+          drainedAt: null as number | null,
+          byteLength: new TextEncoder().encode(text).byteLength,
+          sample: `${text.slice(0, 128)}${text.slice(-128)}`,
+        };
+        trace.xtermWrites.push(entry);
+        const result = originalWrite(data, () => {
+          entry.drainedAt = performance.now();
+          callback?.();
+        });
+        entry.completedAt = performance.now();
+        return result;
+      };
+      const originalFlush = app.flushPendingWrites.bind(app);
+      app.flushPendingWrites = (...args: unknown[]) => {
+        const entry = { id: nextFlushId++, startedAt: performance.now(), completedAt: null as number | null };
+        trace.flushCalls.push(entry);
+        activeFlushId = entry.id;
+        try {
+          return originalFlush(...args);
+        } finally {
+          entry.completedAt = performance.now();
+          activeFlushId = null;
+        }
+      };
+      app.__cod356FlushWrapped = true;
     }
   });
 }
@@ -246,6 +290,18 @@ async function withForcedHttp<T>(transport: 'ws' | 'http', operation: () => Prom
       if (app._wsSessionId === '__cod356_force_http__') app._wsSessionId = active;
     }, current);
   }
+}
+
+async function restoreAckDelivery(): Promise<void> {
+  if (!page || page.isClosed()) return;
+  await page.evaluate(() => {
+    const app = (window as any).app;
+    const original = (window as any).__cod356OriginalAckDelivery ?? (window as any).__cod356SavedAckDelivery;
+    if (app && original) app._ackDelivery = original;
+    delete (window as any).__cod356OriginalAckDelivery;
+    delete (window as any).__cod356SavedAckDelivery;
+    delete (window as any).__cod356DelayedAcks;
+  });
 }
 
 async function assertCurrentLayers(
@@ -403,6 +459,10 @@ afterAll(async () => {
   if (testRoot) rmSync(testRoot, { recursive: true, force: true });
 }, 60_000);
 
+afterEach(async () => {
+  await restoreAckDelivery();
+});
+
 const payloadCases = [
   ['500 identical printable characters', ['x'.repeat(500)]],
   ['repeated runs', ['aaabbb111___']],
@@ -471,6 +531,114 @@ describe('terminal input real browser/server/probe correlation', () => {
     expect(await page.evaluate(() => (window as any).app._wsSessionId)).toBe(active);
   });
 
+  it('records first-visible convergence before a separately observed xterm drain callback', async () => {
+    const before = await resetTrace();
+    const input = 'visible-boundary';
+    const token = `COD356_ECHO:${Buffer.from(input).toString('base64')}`;
+    const visibleObservation = await armFirstVisibleObservation(page, token);
+    const sentAt = await page.evaluate(
+      ({ id, data }) => {
+        const timestamp = performance.now();
+        (window as any).app._sendInputAsync(id, data);
+        return timestamp;
+      },
+      { id: sessionId, data: input }
+    );
+    expect(await waitForProbeBytes(before.probeIndex, Buffer.from(input))).toEqual(Buffer.from(input));
+    const visibleDetectedAt = await visibleObservation.wait();
+    const xtermDrainAt = await page.evaluate(
+      () =>
+        new Promise<number>((resolveDrain) =>
+          (window as any).app.terminal.write('', () => resolveDrain(performance.now()))
+        )
+    );
+    const productionBoundaries = await page.evaluate((value) => {
+      const trace = (window as any).__cod356InputTrace;
+      const write = trace.xtermWrites?.find((entry: any) => entry.sample.includes(value));
+      const flush = trace.flushCalls?.find((entry: any) => entry.id === write?.flushId);
+      return { write: write ?? null, flush: flush ?? null };
+    }, token);
+    expect(productionBoundaries.flush).toMatchObject({
+      startedAt: expect.any(Number),
+      completedAt: expect.any(Number),
+    });
+    expect(productionBoundaries.write).toMatchObject({ startedAt: expect.any(Number), drainedAt: expect.any(Number) });
+    expect(productionBoundaries.flush!.startedAt).toBeLessThanOrEqual(productionBoundaries.flush!.completedAt);
+    expect(productionBoundaries.flush!.startedAt).toBeLessThanOrEqual(visibleDetectedAt);
+    expect(visibleDetectedAt).toBeGreaterThanOrEqual(sentAt);
+    expect(xtermDrainAt).toBeGreaterThanOrEqual(visibleDetectedAt);
+    expect(visibleDetectedAt - sentAt).toBeLessThanOrEqual(xtermDrainAt - sentAt);
+    await assertCurrentLayers(before, [input]);
+  });
+
+  it('pre-arms deterministic current-token observation across queued and direct writes', async () => {
+    for (let iteration = 0; iteration < 24; iteration++) {
+      const source = iteration % 2 === 0 ? 'queued-flush' : 'direct-write';
+      const token = `COD356_OBSERVER:${source}:${iteration}`;
+      await page.evaluate(() => (window as any).app.terminal.clear());
+      const observation = await armFirstVisibleObservation(page, token);
+      const writeStartedAt = await page.evaluate(
+        ({ value, selectedSource }) => {
+          const app = (window as any).app;
+          const startedAt = performance.now();
+          if (selectedSource === 'queued-flush') {
+            app.pendingWrites.push(value);
+            app.flushPendingWrites();
+          } else {
+            app.terminal.write(value);
+          }
+          return startedAt;
+        },
+        { value: token, selectedSource: source }
+      );
+      const detectedAt = await observation.wait();
+      expect(detectedAt).toBeGreaterThanOrEqual(writeStartedAt);
+      expect(await terminalContains(token)).toBe(true);
+      await observation.dispose();
+      expect(
+        await page.evaluate(() => ({
+          listenerRetained: Boolean((window as any).__cod356VisibleObservation?.disposable),
+          timerRetained: Boolean((window as any).__cod356VisibleObservation?.timeoutId),
+        }))
+      ).toEqual({ listenerRetained: false, timerRetained: false });
+    }
+  });
+
+  it('preserves authoritative screen alignment across repeated real probe trials', async () => {
+    for (let iteration = 0; iteration < 24; iteration++) {
+      const input = `probe-observer-${iteration}:aaabbb111___`;
+      const token = `COD356_ECHO:${Buffer.from(input).toString('base64')}`;
+      const beforeProbe = readProbeEvents().length;
+      const observation = await prepareInputTrialObservation(page, token);
+      await page.evaluate(({ id, data }) => (window as any).app._sendInputAsync(id, data), {
+        id: sessionId,
+        data: input,
+      });
+      expect(await waitForProbeBytes(beforeProbe, Buffer.from(input))).toEqual(Buffer.from(input));
+      expect(await observation.wait()).toEqual(expect.any(Number));
+      expect(await terminalContains(token)).toBe(true);
+      expect(
+        await page.evaluate(() => ({
+          listenerRetained: Boolean((window as any).__cod356VisibleObservation?.disposable),
+          timerRetained: Boolean((window as any).__cod356VisibleObservation?.timeoutId),
+        }))
+      ).toEqual({ listenerRetained: false, timerRetained: false });
+    }
+  });
+
+  it('restores an ACK delivery override through the shared cleanup helper', async () => {
+    await page.evaluate(() => {
+      const app = (window as any).app;
+      (window as any).__cod356OriginalAckDelivery = app._ackDelivery.bind(app);
+      app._ackDelivery = () => {
+        throw new Error('leaked ACK override');
+      };
+    });
+    await restoreAckDelivery();
+    await expect(page.evaluate(() => (window as any).app._ackDelivery('__missing__', -1))).resolves.toBeUndefined();
+    expect(await page.evaluate(() => (window as any).__cod356OriginalAckDelivery)).toBeUndefined();
+  });
+
   it('redelivers while an ACK is delayed but writes the real PTY exactly once', async () => {
     const before = await resetTrace();
     await page.evaluate((id) => {
@@ -521,6 +689,7 @@ describe('terminal input real browser/server/probe correlation', () => {
     await page.evaluate((id) => {
       const app = (window as any).app;
       const original = app._ackDelivery.bind(app);
+      (window as any).__cod356OriginalAckDelivery = original;
       let dropped = false;
       app._ackDelivery = (targetId: string, seq: number) => {
         if (!dropped) {
@@ -595,6 +764,7 @@ describe('terminal input real browser/server/probe correlation', () => {
     const identity = await page.evaluate((id) => {
       const app = (window as any).app;
       const clientId = app._clientId;
+      (window as any).__cod356OriginalAckDelivery = app._ackDelivery.bind(app);
       app._ackDelivery = () => {};
       app._sendInputAsync(id, 'reload-pending');
       app._persistReliableNow();
@@ -639,6 +809,7 @@ describe('terminal input real browser/server/probe correlation', () => {
     const before = await resetTrace();
     await page.evaluate((id) => {
       const app = (window as any).app;
+      (window as any).__cod356OriginalAckDelivery = app._ackDelivery.bind(app);
       app._ackDelivery = () => {};
       app._sendInputAsync(id, 'restart-window');
       app._persistReliableNow();

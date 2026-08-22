@@ -66,7 +66,8 @@ if (process.argv.some((value) => value === 'src/index.ts' || value.endsWith('/sr
 
 export async function readProbeEvents(probeLog) {
   const text = await readFile(probeLog, 'utf8').catch(() => '');
-  return text
+  const completeText = text.endsWith('\n') ? text : text.slice(0, text.lastIndexOf('\n') + 1);
+  return completeText
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line));
@@ -75,6 +76,27 @@ export async function readProbeEvents(probeLog) {
 export async function installPageInstrumentation(page) {
   await page.addInitScript(() => {
     window.__cod356 = { longTasks: [], webSocketSends: [], inputAcks: [], outputFrames: [] };
+    const hashText = (value) => {
+      let hash = 0x811c9dc5;
+      for (let index = 0; index < value.length; index++) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return (hash >>> 0).toString(16).padStart(8, '0');
+    };
+    const boundedText = (value) => {
+      const text = value ?? '';
+      const correlationToken = text.match(/COD356_ECHO:[A-Za-z0-9+/=]{1,128}/)?.[0] ?? null;
+      return {
+        hash: hashText(text),
+        byteLength: new TextEncoder().encode(text).byteLength,
+        prefix: text.slice(0, 128),
+        suffix: text.slice(-128),
+        correlationToken,
+      };
+    };
+    window.__cod356HashText = hashText;
+    window.__cod356BoundedText = boundedText;
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         window.__cod356.longTasks.push({ startTime: entry.startTime, duration: entry.duration });
@@ -91,7 +113,18 @@ export async function installPageInstrumentation(page) {
       let frame = null;
       if (typeof data === 'string') {
         try {
-          frame = JSON.parse(data);
+          const parsed = JSON.parse(data);
+          frame = {
+            t: parsed?.t ?? null,
+            seq: parsed?.seq ?? null,
+            cid: parsed?.cid ?? null,
+            ...(typeof parsed?.d === 'string'
+              ? {
+                  dataHash: hashText(parsed.d),
+                  dataByteLength: new TextEncoder().encode(parsed.d).byteLength,
+                }
+              : {}),
+          };
         } catch {}
       }
       window.__cod356.webSocketSends.push({ timestamp: performance.now(), byteLength, frame });
@@ -111,10 +144,10 @@ export async function attachAppInstrumentation(page) {
     };
     const originalTerminal = app._onSessionTerminal.bind(app);
     app._onSessionTerminal = (event) => {
+      const bounded = window.__cod356BoundedText(event?.data ?? '');
       trace.outputFrames.push({
         timestamp: performance.now(),
-        byteLength: new TextEncoder().encode(event?.data ?? '').byteLength,
-        data: event?.data ?? '',
+        ...bounded,
       });
       return originalTerminal(event);
     };
@@ -132,6 +165,135 @@ export async function terminalContains(page, token) {
     }
     return rendered.includes(value);
   }, token);
+}
+
+export async function armFirstVisibleObservation(page, token, { timeoutMs = 10_000 } = {}) {
+  if (typeof token !== 'string' || token.length === 0 || token.length > 256) {
+    throw new Error('first-visible correlation token must contain 1-256 characters');
+  }
+  const observationId = await page.evaluate(
+    ({ value, deadlineMs }) => {
+      const previous = window.__cod356VisibleObservation;
+      previous?.disposable?.dispose();
+      if (previous?.timeoutId) clearTimeout(previous.timeoutId);
+      const terminal = window.app?.terminal;
+      if (!terminal?.buffer?.active || typeof terminal.onWriteParsed !== 'function') {
+        throw new Error('xterm onWriteParsed observation is unavailable');
+      }
+      const id = (window.__cod356NextVisibleObservationId ?? 0) + 1;
+      window.__cod356NextVisibleObservationId = id;
+      const observation = {
+        id,
+        tokenLength: value.length,
+        detectedAt: null,
+        checks: 0,
+        snapshots: [],
+        disposable: null,
+        timeoutId: null,
+      };
+      const hashText = (text) => {
+        let hash = 0x811c9dc5;
+        for (let index = 0; index < text.length; index++) {
+          hash ^= text.charCodeAt(index);
+          hash = Math.imul(hash, 0x01000193);
+        }
+        return (hash >>> 0).toString(16).padStart(8, '0');
+      };
+      const snapshotBuffer = (buffer) => {
+        if (!buffer) return null;
+        let rendered = '';
+        for (let row = Math.max(0, buffer.baseY - 20); row < buffer.length; row++) {
+          rendered += buffer.getLine(row)?.translateToString(false) ?? '';
+        }
+        return {
+          hash: hashText(rendered),
+          length: rendered.length,
+          containsToken: rendered.includes(value),
+          prefix: rendered.slice(0, 64),
+          suffix: rendered.slice(-64),
+          baseY: buffer.baseY,
+          viewportY: buffer.viewportY,
+          cursorX: buffer.cursorX,
+          cursorY: buffer.cursorY,
+        };
+      };
+      const inspect = () => {
+        observation.checks++;
+        const active = snapshotBuffer(terminal.buffer.active);
+        if (observation.snapshots.length < 16) {
+          observation.snapshots.push({
+            timestamp: performance.now(),
+            active,
+            normal: snapshotBuffer(terminal.buffer.normal),
+            alternate: snapshotBuffer(terminal.buffer.alternate),
+          });
+        }
+        if (active?.containsToken && observation.detectedAt === null) {
+          observation.detectedAt = performance.now();
+        }
+      };
+      observation.disposable = terminal.onWriteParsed(inspect);
+      observation.timeoutId = setTimeout(() => observation.disposable?.dispose(), deadlineMs);
+      window.__cod356VisibleObservation = observation;
+      inspect();
+      return id;
+    },
+    { value: token, deadlineMs: timeoutMs }
+  );
+  const dispose = async () => {
+    if (page.isClosed()) return;
+    await page.evaluate((id) => {
+      const observation = window.__cod356VisibleObservation;
+      if (observation?.id !== id) return;
+      observation.disposable?.dispose();
+      if (observation.timeoutId) clearTimeout(observation.timeoutId);
+      observation.disposable = null;
+      observation.timeoutId = null;
+    }, observationId);
+  };
+  return {
+    async wait() {
+      try {
+        return await page
+          .waitForFunction(
+            (id) => {
+              const observation = window.__cod356VisibleObservation;
+              return observation?.id === id && Number.isFinite(observation.detectedAt) ? observation.detectedAt : false;
+            },
+            observationId,
+            { timeout: timeoutMs }
+          )
+          .then((handle) => handle.jsonValue());
+      } catch (error) {
+        const diagnostic = page.isClosed()
+          ? { pageClosed: true }
+          : await page.evaluate((id) => {
+              const observation = window.__cod356VisibleObservation;
+              if (observation?.id !== id) return { observationReplaced: true };
+              return {
+                checks: observation.checks,
+                tokenLength: observation.tokenLength,
+                snapshots: observation.snapshots,
+                recentOutputFrames: window.__cod356?.outputFrames?.slice(-8) ?? [],
+                recentTerminalReceipts: window.__cod356?.terminalReceipts?.slice(-8) ?? [],
+                recentXtermWrites: window.__cod356?.xtermWrites?.slice(-8) ?? [],
+                recentFlushCalls: window.__cod356?.flushCalls?.slice(-8) ?? [],
+              };
+            }, observationId);
+        throw new Error(`first-visible observation unavailable: ${JSON.stringify(diagnostic)}`, { cause: error });
+      } finally {
+        await dispose();
+      }
+    },
+    dispose,
+  };
+}
+
+export async function prepareInputTrialObservation(page, token, options) {
+  if (await terminalContains(page, token)) {
+    throw new Error('current-trial visible token was present before input send');
+  }
+  return armFirstVisibleObservation(page, token, options);
 }
 
 export async function browserQueueSnapshot(page) {

@@ -20,6 +20,7 @@ import {
   assertLoadCoverage,
   authenticateDisposableTarget,
   buildCorrelatedInputTimeline,
+  buildInputBoundaryMetrics,
   buildInputTrialProfile,
   calculateProcCpuPercent,
   collectEnvironmentMetadata,
@@ -29,6 +30,7 @@ import {
   parseOnlySelection,
   runFixedInputTrials,
   runFixedLoadWindow,
+  selectProductionOutputBoundary,
   selectInteractiveFixture,
   summarizeTmuxTrace,
   summarizeInputTrialMatrix,
@@ -377,12 +379,21 @@ async function attachInputCorrelationInstrumentation(page) {
       ackHandlers: [],
       terminalReceipts: [],
       flushCalls: [],
+      xtermWrites: [],
     });
     const byteLength = (value) => new TextEncoder().encode(value ?? '').byteLength;
+    const boundedText = (value) => window.__cod356BoundedText(value ?? '');
     const originalInput = app._sendInputAsync.bind(app);
     app._sendInputAsync = (sessionId, data, options) => {
       const startedAt = performance.now();
-      const entry = { sessionId, data, byteLength: byteLength(data), startedAt, completedAt: null, durationMs: null };
+      const entry = {
+        sessionId,
+        dataHash: window.__cod356HashText(data ?? ''),
+        byteLength: byteLength(data),
+        startedAt,
+        completedAt: null,
+        durationMs: null,
+      };
       trace.inputCalls.push(entry);
       try {
         return originalInput(sessionId, data, options);
@@ -408,28 +419,55 @@ async function attachInputCorrelationInstrumentation(page) {
         startedAt,
         completedAt,
         durationMs: completedAt - startedAt,
-        byteLength: byteLength(event?.data),
-        data: event?.data ?? '',
+        ...boundedText(event?.data),
       });
       return result;
     };
     if (typeof app.flushPendingWrites === 'function') {
       const originalFlush = app.flushPendingWrites.bind(app);
+      const originalWrite = app.terminal.write.bind(app.terminal);
+      let activeFlushId = null;
+      let nextFlushId = 1;
+      app.terminal.write = (data, callback) => {
+        const text = typeof data === 'string' ? data : '';
+        const entry = {
+          flushId: activeFlushId,
+          startedAt: performance.now(),
+          completedAt: null,
+          drainedAt: null,
+          ...boundedText(text),
+        };
+        trace.xtermWrites.push(entry);
+        const result = originalWrite(data, () => {
+          entry.drainedAt = performance.now();
+          callback?.();
+        });
+        entry.completedAt = performance.now();
+        return result;
+      };
       app.flushPendingWrites = (...args) => {
         const startedAt = performance.now();
         const beforeCount = app.pendingWrites?.length ?? null;
         const beforeBytes = app.pendingWrites?.reduce((sum, value) => sum + value.length, 0) ?? null;
-        const result = originalFlush(...args);
-        const completedAt = performance.now();
-        trace.flushCalls.push({
+        const entry = {
+          id: nextFlushId++,
           startedAt,
-          completedAt,
-          durationMs: completedAt - startedAt,
+          completedAt: null,
+          durationMs: null,
           beforeCount,
           beforeBytes,
-          afterCount: app.pendingWrites?.length ?? null,
-        });
-        return result;
+          afterCount: null,
+        };
+        trace.flushCalls.push(entry);
+        activeFlushId = entry.id;
+        try {
+          return originalFlush(...args);
+        } finally {
+          entry.completedAt = performance.now();
+          entry.durationMs = entry.completedAt - startedAt;
+          entry.afterCount = app.pendingWrites?.length ?? null;
+          activeFlushId = null;
+        }
       };
     }
   });
@@ -465,7 +503,6 @@ async function runBrowserSample({
   await page.waitForFunction(() => document.body.classList.contains('app-loaded'), undefined, { timeout: 20_000 });
   const appReadyMs = performance.now() - navigationStart;
   await browserTelemetry.attachAppInstrumentation(page);
-  await attachInputCorrelationInstrumentation(page);
 
   const targetSessionId = sessionIds[0];
   const interactiveSessionId =
@@ -477,6 +514,7 @@ async function runBrowserSample({
   const terminalStart = performance.now();
   await browserTelemetry.prepareInteractiveTargetSession(page, { interactiveSessionId, targetSessionId });
   const firstTerminalReadyMs = performance.now() - terminalStart;
+  await attachInputCorrelationInstrumentation(page);
   if (!selection.input) {
     const browserMetrics = await browserTelemetry.collectBrowserMetrics(page);
     await context.close();
@@ -505,21 +543,25 @@ async function runBrowserSample({
         ackHandlers: window.__cod356.ackHandlers.length,
         terminalReceipts: window.__cod356.terminalReceipts.length,
         flushCalls: window.__cod356.flushCalls.length,
+        xtermWrites: window.__cod356.xtermWrites.length,
       }));
       const input = createInputTrialPayload({ sampleIndex, trialIndex });
       const expected = Buffer.from(input);
       const expectedBase64 = expected.toString('base64');
+      const expectedDataHash = await page.evaluate((data) => window.__cod356HashText(data), input);
+      const visibleToken = `COD356_ECHO:${expectedBase64}`;
+      const visibleObservation = await browserTelemetry.prepareInputTrialObservation(page, visibleToken);
       const queueAtSend = await browserTelemetry.browserQueueSnapshot(page);
       const sendStart = performance.now();
       await page.evaluate(({ id, data }) => window.app._sendInputAsync(id, data), { id: targetSessionId, data: input });
       const inputSendMs = performance.now() - sendStart;
       const sentFrame = await page
         .waitForFunction(
-          (data) =>
+          (dataHash) =>
             [...window.__cod356.webSocketSends]
               .reverse()
-              .find((entry) => entry.frame?.t === 'i' && entry.frame?.d === data),
-          input,
+              .find((entry) => entry.frame?.t === 'i' && entry.frame?.dataHash === dataHash),
+          expectedDataHash,
           { timeout: 5_000 }
         )
         .then((handle) => handle.jsonValue());
@@ -555,29 +597,55 @@ async function runBrowserSample({
         .then((handle) => handle.jsonValue());
       const browserAckMs = ack.timestamp - sentFrame.timestamp;
       const queueAtAck = await browserTelemetry.browserQueueSnapshot(page);
-      const visibleToken = `COD356_ECHO:${expectedBase64}`;
-      const convergenceDeadline = Date.now() + 10_000;
-      while (Date.now() < convergenceDeadline && !(await browserTelemetry.terminalContains(page, visibleToken))) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-      }
-      if (!(await browserTelemetry.terminalContains(page, visibleToken))) {
-        throw new Error('visible terminal convergence was not observed');
-      }
+      const visibleDetectedAt = await visibleObservation.wait();
+      await visibleObservation.dispose();
       await page.waitForFunction(
         () => window.app.pendingWrites.length === 0 && window.app.writeFrameScheduled === false,
         undefined,
         { timeout: 5_000 }
       );
-      const flushCompleteAt = await page.evaluate(
-        () => new Promise((resolveFlush) => window.app.terminal.write('', () => resolveFlush(performance.now())))
-      );
-      const convergenceMs = flushCompleteAt - sentFrame.timestamp;
       const queueAtConvergence = await browserTelemetry.browserQueueSnapshot(page);
+      const matchingWrite = await page.evaluate(
+        ({ index, visibleAt, token }) => {
+          const writes = window.__cod356.xtermWrites
+            .slice(index)
+            .filter((entry) => entry.startedAt <= visibleAt && entry.byteLength > 0);
+          return writes.filter((entry) => entry.correlationToken === token).at(-1) ?? writes.at(-1) ?? null;
+        },
+        {
+          index: priorTraceCounts.xtermWrites,
+          visibleAt: visibleDetectedAt,
+          token: visibleToken,
+        }
+      );
+      const currentFlushCalls = await page.evaluate(
+        (index) => window.__cod356.flushCalls.slice(index),
+        priorTraceCounts.flushCalls
+      );
+      let matchingFlush;
+      try {
+        matchingFlush = selectProductionOutputBoundary({ matchingWrite, flushCalls: currentFlushCalls });
+      } catch (error) {
+        const diagnostic = await page.evaluate(
+          (counts) => ({
+            flushCalls: window.__cod356.flushCalls.slice(counts.flushCalls),
+            xtermWrites: window.__cod356.xtermWrites.slice(counts.xtermWrites),
+            terminalReceipts: window.__cod356.terminalReceipts.slice(counts.terminalReceipts),
+          }),
+          priorTraceCounts
+        );
+        throw new Error(`${error.message}: ${JSON.stringify(diagnostic)}`);
+      }
       const matchingOutput = await page.evaluate(
-        (token) => window.__cod356.outputFrames.find((entry) => entry.data.includes(token)) ?? null,
-        visibleToken
+        ({ index, flushStartedAt }) =>
+          window.__cod356.outputFrames
+            .slice(index)
+            .filter((entry) => entry.timestamp <= flushStartedAt)
+            .at(-1) ?? null,
+        { index: priorTraceCounts.outputFrames, flushStartedAt: matchingFlush.startedAt }
       );
       if (!matchingOutput) throw new Error('matching output frame timestamp unavailable');
+      const xtermDrainAt = matchingWrite?.drainedAt ?? null;
       await new Promise((resolveWait) => setTimeout(resolveWait, INPUT_SETTLE_WINDOW_MS));
       receivedEvents = (await browserTelemetry.readProbeEvents(probeLog))
         .slice(priorEvents.length)
@@ -589,20 +657,35 @@ async function runBrowserSample({
       const outputFrames = trialBrowserMetrics.outputFrames.slice(priorTraceCounts.outputFrames);
       const trialLongTasks = trialBrowserMetrics.longTasks.slice(priorTraceCounts.longTasks);
       const correlation = await page.evaluate(
-        ({ counts, data, seq, visibleToken }) => ({
-          inputCall: window.__cod356.inputCalls.slice(counts.inputCalls).find((entry) => entry.data === data) ?? null,
+        ({ counts, dataHash, seq, flushStartedAt }) => ({
+          inputCall:
+            window.__cod356.inputCalls.slice(counts.inputCalls).find((entry) => entry.dataHash === dataHash) ?? null,
           ackHandler: window.__cod356.ackHandlers.slice(counts.ackHandlers).find((entry) => entry.seq === seq) ?? null,
           terminalReceipt:
             window.__cod356.terminalReceipts
               .slice(counts.terminalReceipts)
-              .find((entry) => entry.data.includes(visibleToken)) ?? null,
+              .filter((entry) => entry.startedAt <= flushStartedAt)
+              .at(-1) ?? null,
           flushCalls: window.__cod356.flushCalls.slice(counts.flushCalls),
         }),
-        { counts: priorTraceCounts, data: input, seq: sequence, visibleToken }
+        {
+          counts: priorTraceCounts,
+          dataHash: expectedDataHash,
+          seq: sequence,
+          flushStartedAt: matchingFlush.startedAt,
+        }
       );
       if (!correlation.inputCall || !correlation.ackHandler || !correlation.terminalReceipt) {
         throw new Error('browser input correlation boundary unavailable');
       }
+      const boundaryMetrics = buildInputBoundaryMetrics({
+        sendAt: sentFrame.timestamp,
+        terminalReceiptAt: correlation.terminalReceipt.startedAt,
+        flushStartedAt: matchingFlush.startedAt,
+        flushCompletedAt: matchingFlush.completedAt,
+        visibleDetectedAt,
+        xtermDrainAt,
+      });
       const baseTimeline = buildCorrelatedInputTimeline({
         pageTimeOriginMs,
         sentFrameBrowserMs: sentFrame.timestamp,
@@ -610,12 +693,16 @@ async function runBrowserSample({
         probeEpochMs: probeEvent.timestampEpochMs,
         probeMonotonicNs: probeEvent.timestampNs,
         frameMatchBrowserMs: matchingOutput.timestamp,
-        flushBrowserMs: flushCompleteAt,
+        flushStartBrowserMs: matchingFlush.startedAt,
+        flushEndBrowserMs: matchingFlush.completedAt,
+        visibleDetectedBrowserMs: visibleDetectedAt,
+        xtermDrainBrowserMs: xtermDrainAt,
         settleCompleteBrowserMs: queueAfterSettle.timestamp,
         longTasks: trialLongTasks,
       });
       const overlapsInputLongTask = trialLongTasks.some(
-        (task) => task.startTime <= flushCompleteAt && task.startTime + task.duration >= correlation.inputCall.startedAt
+        (task) =>
+          task.startTime <= visibleDetectedAt && task.startTime + task.duration >= correlation.inputCall.startedAt
       );
       const timeline = {
         ...baseTimeline,
@@ -644,8 +731,11 @@ async function runBrowserSample({
         queueAfterSettle,
         outputFrameCount: outputFrames.length,
         outputFrameBytes: outputFrames.reduce((sum, frame) => sum + frame.byteLength, 0),
-        flushMs: flushCompleteAt - matchingOutput.timestamp,
-        flushReason: null,
+        receiptToFlushStartMs: boundaryMetrics.receiptToFlushStartMs,
+        flushDurationMs: boundaryMetrics.flushDurationMs,
+        flushBoundarySource: matchingFlush.source,
+        flushEndToFirstVisibleMs: boundaryMetrics.flushEndToFirstVisibleMs,
+        firstVisibleToDrainMs: boundaryMetrics.firstVisibleToDrainMs,
         inputCallDurationMs: correlation.inputCall.durationMs,
         ackHandlerDurationMs: correlation.ackHandler.durationMs,
         terminalReceiptDurationMs: correlation.terminalReceipt.durationMs,
@@ -659,7 +749,7 @@ async function runBrowserSample({
         inputSendMs,
         browserAckMs,
         probeReceiptMs,
-        convergenceMs,
+        convergenceMs: boundaryMetrics.convergenceMs,
         settleWindowMs: INPUT_SETTLE_WINDOW_MS,
         sequence,
         timeline,
@@ -818,7 +908,14 @@ function compactCellSummary(runs, warmupRun) {
             : null,
         }
       : null,
-    input: inputSummary ? { ...inputSummary, settleWindowMs: INPUT_SETTLE_WINDOW_MS } : null,
+    input: inputSummary
+      ? {
+          ...inputSummary,
+          settleWindowMs: INPUT_SETTLE_WINDOW_MS,
+          convergenceSemantics:
+            'WebSocket send timestamp to the first successful current-trial xterm buffer observation; xterm drain is reported separately',
+        }
+      : null,
     loadCoverage: {
       expectedWorkers: Math.max(...runs.map((run) => run.loadCoverage.expectedWorkers)),
       minimumActiveWorkers: Math.min(...runs.map((run) => run.loadCoverage.minimumActiveWorkers)),
@@ -838,6 +935,16 @@ function compactCellSummary(runs, warmupRun) {
     },
     terminal: terminalRows.length
       ? {
+          instrumentationSemantics: {
+            wrapperDurations:
+              'Synchronous wrapper elapsed times are instrumented upper bounds that include the original handler call and measurement overhead',
+            firstVisible:
+              'First successful current-trial xterm buffer observation; it is not substituted with a later terminal.write callback',
+            xtermDrain:
+              'Callback for the production xterm write carrying the trial token; reported separately and may precede the polling observation',
+            productionOutputBoundary:
+              'The matching pending-write flush when present, otherwise the matching real direct terminal.write call used by cold/full-screen output',
+          },
           pendingWritesCountAtSend: summaryOrNull(terminalRows.map((row) => row.queueAtSend.pendingWritesCount)),
           pendingWritesBytesAtSend: summaryOrNull(terminalRows.map((row) => row.queueAtSend.pendingWritesBytes)),
           pendingWritesCountAfterSettle: summaryOrNull(
@@ -849,13 +956,24 @@ function compactCellSummary(runs, warmupRun) {
           writeFrameScheduledAfterSettle: terminalRows.map((row) => row.queueAfterSettle.writeFrameScheduled),
           outputFrameCount: summaryOrNull(terminalRows.map((row) => row.outputFrameCount)),
           outputFrameBytes: summaryOrNull(terminalRows.map((row) => row.outputFrameBytes)),
-          flushMs: summaryOrNull(terminalRows.map((row) => row.flushMs)),
+          receiptToFlushStartMs: summaryOrNull(terminalRows.map((row) => row.receiptToFlushStartMs)),
+          flushDurationMs: summaryOrNull(terminalRows.map((row) => row.flushDurationMs)),
+          flushBoundarySources: {
+            flushPendingWrites: terminalRows.filter((row) => row.flushBoundarySource === 'flushPendingWrites').length,
+            directTerminalWrite: terminalRows.filter((row) => row.flushBoundarySource === 'direct-terminal-write')
+              .length,
+          },
+          flushEndToFirstVisibleMs: summaryOrNull(terminalRows.map((row) => row.flushEndToFirstVisibleMs)),
+          firstVisibleToDrainMs: summaryOrNull(
+            terminalRows.map((row) => row.firstVisibleToDrainMs).filter(Number.isFinite)
+          ),
+          xtermDrainUnavailableCount: terminalRows.filter((row) => !Number.isFinite(row.firstVisibleToDrainMs)).length,
           inputCallDurationMs: summaryOrNull(terminalRows.map((row) => row.inputCallDurationMs)),
           ackHandlerDurationMs: summaryOrNull(terminalRows.map((row) => row.ackHandlerDurationMs)),
           terminalReceiptDurationMs: summaryOrNull(terminalRows.map((row) => row.terminalReceiptDurationMs)),
           flushCallDurationMs: summaryOrNull(terminalRows.map((row) => row.flushCallDurationMs)),
           inputLongTaskOverlapCount: terminalRows.filter((row) => row.overlapsInputLongTask).length,
-          unavailableReasons: terminalRows.map((row) => row.flushReason).filter(Boolean),
+          unavailableReasons: [],
         }
       : null,
     browser: browserRuns.length

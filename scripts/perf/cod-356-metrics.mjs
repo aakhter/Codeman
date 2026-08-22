@@ -245,7 +245,10 @@ export function buildCorrelatedInputTimeline({
   probeEpochMs,
   probeMonotonicNs,
   frameMatchBrowserMs,
-  flushBrowserMs,
+  flushStartBrowserMs,
+  flushEndBrowserMs,
+  visibleDetectedBrowserMs,
+  xtermDrainBrowserMs,
   settleCompleteBrowserMs,
   longTasks,
 }) {
@@ -256,7 +259,10 @@ export function buildCorrelatedInputTimeline({
     ack: browserBoundary(ackBrowserMs),
     probeReceipt: { epochMs: probeEpochMs, monotonicNs: probeMonotonicNs },
     frameMatch: browserBoundary(frameMatchBrowserMs),
-    flushAndConvergence: browserBoundary(flushBrowserMs),
+    flushStart: browserBoundary(flushStartBrowserMs),
+    flushEnd: browserBoundary(flushEndBrowserMs),
+    firstVisibleObservation: browserBoundary(visibleDetectedBrowserMs),
+    xtermDrain: xtermDrainBrowserMs === null ? null : browserBoundary(xtermDrainBrowserMs),
     settleAndResetComplete: browserBoundary(settleCompleteBrowserMs),
     longTasks: longTasks.map((task) => ({
       startBrowserMs: task.startTime,
@@ -265,6 +271,48 @@ export function buildCorrelatedInputTimeline({
       endEpochMs: pageTimeOriginMs + task.startTime + task.duration,
       durationMs: task.duration,
     })),
+  };
+}
+
+export function buildInputBoundaryMetrics({
+  sendAt,
+  terminalReceiptAt,
+  flushStartedAt,
+  flushCompletedAt,
+  visibleDetectedAt,
+  xtermDrainAt = null,
+}) {
+  const required = { sendAt, terminalReceiptAt, flushStartedAt, flushCompletedAt, visibleDetectedAt };
+  for (const [name, value] of Object.entries(required)) {
+    if (!Number.isFinite(value)) throw new Error(`${name} boundary unavailable`);
+  }
+  if (terminalReceiptAt < sendAt) throw new Error('terminal receipt preceded input send');
+  if (flushStartedAt < terminalReceiptAt) throw new Error('production flush preceded terminal receipt');
+  if (flushCompletedAt < flushStartedAt) throw new Error('production flush completion preceded its start');
+  if (visibleDetectedAt < flushStartedAt) throw new Error('visible observation preceded production flush start');
+  if (xtermDrainAt !== null && !Number.isFinite(xtermDrainAt)) throw new Error('xterm drain boundary unavailable');
+  return {
+    convergenceMs: visibleDetectedAt - sendAt,
+    receiptToFlushStartMs: flushStartedAt - terminalReceiptAt,
+    flushDurationMs: flushCompletedAt - flushStartedAt,
+    flushEndToFirstVisibleMs: visibleDetectedAt - flushCompletedAt,
+    firstVisibleToDrainMs: xtermDrainAt === null ? null : xtermDrainAt - visibleDetectedAt,
+  };
+}
+
+export function selectProductionOutputBoundary({ matchingWrite, flushCalls }) {
+  if (!matchingWrite?.completedAt) throw new Error('matching production terminal write boundary unavailable');
+  if (matchingWrite.flushId !== null && matchingWrite.flushId !== undefined) {
+    const flush = flushCalls.find((entry) => entry.id === matchingWrite.flushId);
+    if (!flush?.completedAt) throw new Error('matching pending-write flush boundary unavailable');
+    return { ...flush, source: 'flushPendingWrites' };
+  }
+  return {
+    id: null,
+    source: 'direct-terminal-write',
+    startedAt: matchingWrite.startedAt,
+    completedAt: matchingWrite.completedAt,
+    durationMs: matchingWrite.completedAt - matchingWrite.startedAt,
   };
 }
 
