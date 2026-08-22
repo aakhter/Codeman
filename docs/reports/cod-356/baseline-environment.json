@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-08-22T16:08:29.582Z",
+  "capturedAt": "2026-08-22T17:37:24.885Z",
   "platform": "linux",
   "release": "6.8.0-124-generic",
   "hostname": "beelink",
@@ -8,7 +8,7 @@
   "logicalCpuCount": 8,
   "cpuModel": "Intel(R) Core(TM) i3-N305",
   "totalMemoryBytes": 33417818112,
-  "freeMemoryBytesAtStart": 26589949952,
+  "freeMemoryBytesAtStart": 26920235008,
   "issue": "COD-356",
   "phase": "before",
   "provenance": {
@@ -17,16 +17,16 @@
     "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
     "runtimeTreeHash": "8adb932b9da5f06b592ed3e41dfa89991fac676e6b614f84929fa7b18ec6b5df",
     "headRevision": {
-      "value": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "value": "3c81576ec020972836b177b72fd460d02d7352f2",
       "semantics": "informational only; not the measured runtime or harness identity"
     },
     "harnessHeadRevision": {
-      "value": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "value": "3c81576ec020972836b177b72fd460d02d7352f2",
       "semantics": "informational commit containing or preceding the working-tree harness content"
     },
     "harness": {
       "algorithm": "sha256 of sorted path/byte-length/content-sha256 manifest",
-      "contentHash": "8784a34bed994f65005a2b38676e722be0dad821245cc54f721c15a16bca2792",
+      "contentHash": "46c97740474f626bb620080fa2358df8f188ac2bf8e6fb7adf29a655341d8093",
       "files": [
         {
           "path": "package.json",
@@ -35,13 +35,13 @@
         },
         {
           "path": "scripts/perf/cod-356-benchmark.mjs",
-          "bytes": 47506,
-          "sha256": "0a3d81aeb678558afba1f777463b8a26bddbc302c8a64d1565235a0f211dd313"
+          "bytes": 49234,
+          "sha256": "9932fb554bbfb843383f43f62e4bd9f291c3ef62dadf3090a72d51dca11b95ba"
         },
         {
           "path": "scripts/perf/cod-356-browser.mjs",
-          "bytes": 5333,
-          "sha256": "7411ff53e8d62dc02fe8744e216787eca3acb9837fc60bc2b1cfc1c9c700ae2d"
+          "bytes": 6270,
+          "sha256": "78b124321d38cad70cfaa5833a9d4ebfdf3c0b473b8fa7737ffb4b370d2cef8b"
         },
         {
           "path": "scripts/perf/cod-356-cleanup.mjs",
@@ -55,18 +55,18 @@
         },
         {
           "path": "scripts/perf/cod-356-input-probe.mjs",
-          "bytes": 1249,
-          "sha256": "7c4bf6732396e65a1d628419e8b81ca9aa917017fcbb2a5c2ca0496cfdabfbd8"
+          "bytes": 1295,
+          "sha256": "c74938a26bf9a57994938de0a43b8d59882ff8f10237b26092b6cfbd140fc919"
         },
         {
           "path": "scripts/perf/cod-356-metrics.mjs",
-          "bytes": 18279,
-          "sha256": "7eb8183920a61bdf64d5e6065ed6c8819189d03c22951806ff50e8987a67ce14"
+          "bytes": 26513,
+          "sha256": "0ac63830a7e9f892da7530818a111f19844fc19797b382b0a9271b9658af6c07"
         },
         {
           "path": "scripts/perf/cod-356-provenance.mjs",
-          "bytes": 23832,
-          "sha256": "3847e119db02d7c277da661797f9ffa9694300418edc77591d3296b5fd9314e1"
+          "bytes": 24021,
+          "sha256": "62b9e03147a964e8d1657c71e82dc9490a88ac9f6180c48183b742c93c646f9c"
         },
         {
           "path": "scripts/perf/cod-356-safety.mjs",
@@ -80,26 +80,19 @@
         },
         {
           "path": "test/perf-cod-356-harness.test.ts",
-          "bytes": 55377,
-          "sha256": "87f629212e88c9e6b2a99721239903c0e1ac5b3f333fe2619222133756489e84"
+          "bytes": 64854,
+          "sha256": "5a0bd82a3a078ae3d7720947497a54ef93fcfc0c995101f77b0ca8b4fd1132b6"
         }
       ],
-      "dirty": true,
-      "dirtyPaths": [
-        "package.json",
-        "scripts/perf/cod-356-benchmark.mjs",
-        "scripts/perf/cod-356-browser.mjs",
-        "scripts/perf/cod-356-cleanup.mjs",
-        "scripts/perf/cod-356-cpu-worker.mjs",
-        "scripts/perf/cod-356-input-probe.mjs",
-        "scripts/perf/cod-356-metrics.mjs",
-        "scripts/perf/cod-356-provenance.mjs",
-        "scripts/perf/cod-356-safety.mjs",
-        "scripts/perf/cod-356-scheduler.mjs",
-        "test/perf-cod-356-harness.test.ts"
-      ]
+      "dirty": false,
+      "dirtyPaths": []
     },
-    "outOfScopeTrackedDirtyPaths": [],
+    "outOfScopeTrackedDirtyPaths": [
+      "src/mux-interface.ts",
+      "src/session.ts",
+      "src/tmux-manager.ts",
+      "src/working-frame-poll-coordinator.ts"
+    ],
     "runtimePaths": [
       "src",
       "packages",
@@ -111,7 +104,7 @@
       "runtimeRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
       "explicit": false,
       "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
-      "headRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac"
+      "headRevision": "3c81576ec020972836b177b72fd460d02d7352f2"
     },
     "runtimePackageHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4",
     "generatedRuntimeAssets": {
@@ -197,6 +190,7 @@
       "comparison": "authoritative accepted baseline manifest"
     },
     "acceptedGeneratedAssetBaseline": null,
+    "acceptedBenchmarkProtocol": null,
     "packageManifestVerification": {
       "allowedDifference": "scripts.perf:cod356 only",
       "comparedToRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
@@ -221,18 +215,41 @@
     "eventLoopDelay": "perf_hooks.monitorEventLoopDelay at 10ms resolution in a benchmark-only preload",
     "tmuxCapture": "PATH-first transparent tmux wrapper recording invocation start/end/status/duration"
   },
-  "reportSetId": "3475746ab0dbbc1d6e843116ad9605d1",
+  "benchmarkProtocol": {
+    "schemaVersion": 1,
+    "inputTrials": {
+      "schemaVersion": 1,
+      "sampleCount": 5,
+      "trialsPerSample": 8,
+      "totalRecordedTrials": 40,
+      "sequential": true,
+      "adaptive": false,
+      "payloadSchedule": "cod356-input-v2/sample-{sampleIndex}/trial-{trialIndex}",
+      "settleWindowMs": 500,
+      "cpuDeadlineBudget": {
+        "fixedWindowMs": 60000,
+        "evidenceBaseCellMs": 24000,
+        "perAdditionalTrialBudgetMs": 750,
+        "projectedCellMs": 55500,
+        "marginMs": 4500
+      },
+      "hash": "d775b183d44296783ff1546226b77777164496c78165ebda76bae98c2c0e44da"
+    },
+    "apiOffersPerSample": 45,
+    "apiOfferIntervalMs": 50
+  },
+  "reportSetId": "4163bef9ae5cba2276daba4369e1acca",
   "postRunGeneratedAssets": {
-    "checkedAt": "2026-08-22T16:08:29.583Z",
+    "checkedAt": "2026-08-22T17:37:24.886Z",
     "result": "matched",
     "preHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
     "postHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
     "error": null
   },
   "postRunProvenance": {
-    "checkedAt": "2026-08-22T16:08:29.595Z",
+    "checkedAt": "2026-08-22T17:37:24.903Z",
     "result": "matched",
-    "sourceCommit": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "sourceCommit": "3c81576ec020972836b177b72fd460d02d7352f2",
     "acceptedGeneratedAssetBaseline": null
   },
   "reportPair": {
