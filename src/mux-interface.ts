@@ -330,6 +330,12 @@ export interface TerminalMultiplexer extends EventEmitter {
   capturePaneText?(muxName: string, paneTarget?: string): string | null;
 
   /**
+   * Plain text from the active pane, captured asynchronously from a bounded
+   * recent-line window for activity detection.
+   */
+  capturePaneTextAsync?(muxName: string, opts?: { lastLines?: number; signal?: AbortSignal }): Promise<string | null>;
+
+  /**
    * COD-180 — capture a REMOTE session's pane buffer on the remote tmux server
    * over ssh. The remote history is the canonical scrollback for remote
    * sessions (the local wrapper accumulates none). Returns null on failure so

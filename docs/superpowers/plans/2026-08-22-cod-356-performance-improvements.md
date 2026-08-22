@@ -121,7 +121,7 @@ git commit -m "test(perf): COD-356 establish responsiveness baseline"
 - Modify: `src/tmux-manager.ts`
 - Create: `test/tmux-capture-text.test.ts`
 
-- [ ] **Step 1: Write failing async-capture tests**
+- [x] **Step 1: Write failing async-capture tests**
 
 Test that the new API:
 
@@ -133,7 +133,7 @@ Test that the new API:
 - never invokes `execSync` or `captureActivePaneBuffer`;
 - settles asynchronously so a delayed child does not block a zero-delay event-loop sentinel.
 
-- [ ] **Step 2: Run the focused test and observe RED**
+- [x] **Step 2: Run the focused test and observe RED**
 
 ```bash
 npm test -- test/tmux-capture-text.test.ts
@@ -141,7 +141,7 @@ npm test -- test/tmux-capture-text.test.ts
 
 Expected: FAIL because `capturePaneTextAsync` is absent.
 
-- [ ] **Step 3: Implement the minimal async API**
+- [x] **Step 3: Implement the minimal async API**
 
 Add this optional interface method:
 
@@ -151,7 +151,7 @@ capturePaneTextAsync?(muxName: string, opts?: { lastLines?: number; signal?: Abo
 
 Implement it in `TmuxManager` with an asynchronous child process, a fixed timeout, a small bounded buffer, validated tmux target, and `capture-pane -p -S -N -t <session>`. Targeting the session directly lets tmux select its active pane and avoids the existing `list-panes` lookup. Treat a dead or renamed pane as an ordinary `null` result.
 
-- [ ] **Step 4: Run focused verification**
+- [x] **Step 4: Run focused verification**
 
 ```bash
 npm test -- test/tmux-capture-text.test.ts test/tmux-capture-full-history.test.ts
@@ -160,7 +160,7 @@ npm run typecheck
 
 Expected: async text tests pass and styled/full-history capture remains unchanged.
 
-- [ ] **Step 5: Commit the capture primitive**
+- [x] **Step 5: Commit the capture primitive**
 
 ```bash
 git add src/mux-interface.ts src/tmux-manager.ts test/tmux-capture-text.test.ts
