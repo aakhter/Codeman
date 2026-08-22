@@ -634,13 +634,6 @@ class CodemanApp {
     // refused for those and retried far more slowly — see _maybeRefetchFullHistory.
     this._fullHistoryRepullUseless = new Set();
     this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
-    // Startup-only canonical refreshes are fenced per browser client and per
-    // tab-selection generation. Generic backpressure refreshes intentionally
-    // remain unconditional recovery operations.
-    this._terminalInputGenerations = new Map();
-    this._terminalOutputGenerations = new Map();
-    this._terminalSelectionInputBaselines = new Map();
-    this._terminalStartupRefreshSeen = new Map();
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
     this.respawnCountdownTimers = {}; // { sessionId: { timerName: { endsAt, totalMs, reason } } }
@@ -2321,10 +2314,6 @@ class CodemanApp {
   }
 
   _onSessionTerminal(data) {
-    this._terminalOutputGenerations?.set(
-      data.id,
-      (this._terminalOutputGenerations.get(data.id) || 0) + 1,
-    );
     // Terminal output invalidates any older waiting/checking projection even
     // when this tab is not active and therefore has no renderer work below.
     this._applySessionActivityEvent(data, 'output');
@@ -3345,11 +3334,10 @@ class CodemanApp {
     }
   }
 
-  async _onSessionNeedsRefresh(data = {}) {
+  async _onSessionNeedsRefresh() {
     // Server sends this after SSE backpressure clears — terminal data was dropped,
     // so reload the buffer to recover from any display corruption.
     if (!this.activeSessionId || !this.terminal) return;
-    if (data?.id && data.id !== this.activeSessionId) return;
     // Skip if buffer load already in progress — avoids competing clear+rewrite cycles
     if (this._isLoadingBuffer) return;
     // COD-187: mirror tabs recover with a cheap frame refetch, never a history
@@ -3359,24 +3347,6 @@ class CodemanApp {
       return;
     }
     const sessionId = this.activeSessionId;
-    const isInitialReady = data?.reason === 'initial-ready'
-      && Number.isInteger(data?.generation)
-      && data.generation > 0;
-    const selectGeneration = this._selectGeneration;
-    const inputGeneration = this._terminalInputGenerations?.get(sessionId) || 0;
-    const outputGeneration = this._terminalOutputGenerations?.get(sessionId) || 0;
-    if (isInitialReady) {
-      const seen = this._terminalStartupRefreshSeen?.get(sessionId);
-      if (seen?.selectGeneration === selectGeneration && seen?.startupGeneration === data.generation) return;
-      this._terminalStartupRefreshSeen?.set(sessionId, {
-        selectGeneration,
-        startupGeneration: data.generation,
-      });
-      const selectionInputBaseline = this._terminalSelectionInputBaselines?.get(sessionId) || 0;
-      // Input sent since this client selected and canonically loaded the pane
-      // makes the startup replay stale before its fetch even begins.
-      if (inputGeneration > selectionInputBaseline) return;
-    }
     try {
       // Recovery should restore the WHOLE picture, so ask for full history
       // rather than a tail. Measured on a 900-line shell pane: the tail rewrite
@@ -3397,11 +3367,6 @@ class CodemanApp {
       // history into the terminal the user is now looking at. The window is two
       // fetches wide in the fallback case, so this guard is not optional.
       if (this.activeSessionId !== sessionId) return;
-      if (isInitialReady && this._selectGeneration !== selectGeneration) return;
-      if (isInitialReady && (
-        (this._terminalInputGenerations?.get(sessionId) || 0) !== inputGeneration
-        || (this._terminalOutputGenerations?.get(sessionId) || 0) !== outputGeneration
-      )) return;
       if (data.terminalBuffer) {
         // This refresh is SERVER-triggered, so a user quietly reading scrollback
         // did not ask for it and must not be dragged to the bottom by it (#259).
@@ -4116,7 +4081,7 @@ class CodemanApp {
         } else if (msg.t === 'c') {
           this._onSessionClearTerminal({ id: sessionId });
         } else if (msg.t === 'r') {
-          this._onSessionNeedsRefresh({ id: sessionId, reason: msg.reason, generation: msg.generation });
+          this._onSessionNeedsRefresh({ id: sessionId });
         } else if (msg.t === 'ia') {
           // Input ACK — the server applied (or deduped) this seq; drop it from
           // the durable queue so it can never be re-delivered/lost.
@@ -4272,10 +4237,6 @@ class CodemanApp {
    */
   _sendInputAsync(sessionId, input, opts) {
     if (!sessionId || !input) return;
-    this._terminalInputGenerations?.set(
-      sessionId,
-      (this._terminalInputGenerations.get(sessionId) || 0) + 1,
-    );
     this._reliableSend(sessionId, input, opts?.useMux === true);
   }
 
@@ -4938,10 +4899,6 @@ class CodemanApp {
     this.ralphStates.clear();
     this.terminalBuffers.clear();
     this.terminalBufferCache.clear();
-    this._terminalInputGenerations?.clear();
-    this._terminalOutputGenerations?.clear();
-    this._terminalSelectionInputBaselines?.clear();
-    this._terminalStartupRefreshSeen?.clear();
     this._xtermSnapshots?.clear();
     this.projectInsights.clear();
     this.teams.clear();
@@ -8370,10 +8327,6 @@ class CodemanApp {
 
     const selectGen = ++this._selectGeneration;
     this._setTerminalLoadState(sessionId, selectGen, 'resizing');
-    this._terminalSelectionInputBaselines?.set(
-      sessionId,
-      this._terminalInputGenerations?.get(sessionId) || 0,
-    );
 
     if (selectGen !== this._selectGeneration) {
       this._clearTerminalLoadState(sessionId, selectGen);
@@ -8894,10 +8847,6 @@ class CodemanApp {
       this.closeAttachmentHistory?.();
     }
     this.terminalLoadStates.delete(sessionId);
-    this._terminalInputGenerations?.delete(sessionId);
-    this._terminalOutputGenerations?.delete(sessionId);
-    this._terminalSelectionInputBaselines?.delete(sessionId);
-    this._terminalStartupRefreshSeen?.delete(sessionId);
     this.clearCountdownTimers(sessionId);
     this.closeSessionLogViewerWindows(sessionId);
     this.closeSessionImagePopups(sessionId);

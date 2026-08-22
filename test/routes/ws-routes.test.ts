@@ -151,17 +151,6 @@ describe('ws-routes', () => {
       }
     });
 
-    it('preserves tagged initial-ready refresh metadata', async () => {
-      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
-      try {
-        ctx._session.emit('needsRefresh', { reason: 'initial-ready', generation: 7 });
-
-        await expect(nextMessage(ws)).resolves.toEqual({ t: 'r', reason: 'initial-ready', generation: 7 });
-      } finally {
-        ws.close();
-      }
-    });
-
     it('coalesces rapid terminal emissions into a single frame', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
       try {
