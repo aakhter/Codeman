@@ -1,5 +1,17 @@
 # aicodeman
 
+## 1.21.1
+
+### Patch Changes
+
+- 59c709a: Place expanded-sidebar actions beside session names and add persisted 11-18px session-name-only sizing.
+- afa00fd: Apply session-name sizing and compact inline actions to the full-width vertical side rail.
+- 5a5547b: Add owner-scoped default session groups to Case Settings.
+- d9c5d5d: Add reusable private Codex command profiles for remote cases.
+- 702e479: Restore the contextual session actions menu in expanded vertical navigation.
+- 1818ad9: Restore Codex needs-input approvals and tab alerts after completed turns while preserving Claude live-agent suppression.
+- Keep agent checkpoint handoffs active through terminal mouse and focus reports, while preserving immediate manual takeover for keyboard input across WebSocket and HTTP delivery.
+
 ## Unreleased
 
 ## 1.21.0
@@ -110,6 +122,7 @@
   **Upload (COD-317):** `POST /api/sessions/:id/files/upload?path=<relativeDir>` writes any file to the workspace with CSRF (`Origin/Referer==Host` or `X-Codeman-CSRF`), per-`(IP,session)` token bucket (20/min), `sanitizeUploadFilename`, `validateSessionFilePath` confinement, `isSensitivePath`/`isBlockedAttachmentPath`/`.git` guards, symlink-safe `lstat` + `O_EXCL|O_NOFOLLOW` and non-recursive `mkdir` loop, `409` on exists, 50 MB cap via `@fastify/multipart`; remote writes via `writeRemoteFileBytes` (`umask 077`, atomic `mv -n`, 15 s timeout). Header `⬆ Upload` handles multi-file (10/batch, concurrency 3, progress toasts, order-preserving) and drag-drop onto a folder now targets that folder; both now respect the **current folder** (last expanded) and show `· in <dir>` in the status bar.
 
   **Mkdir / Rename / Delete (COD-318):** `POST /api/sessions/:id/files/mkdir {path}`, `POST /api/sessions/:id/files/rename {from,to}`, `DELETE /api/sessions/:id/files?path=` share the same guards plus recursive `fs.rm` for local deletes and `mkdir -p`/`SFTP rename`/`rm -rf` for remote via new `remote-sftp.ts` helpers (`createRemoteWorkspaceDirectory`, `renameRemoteWorkspacePath`, `deleteRemoteWorkspacePath`). Header `＋ New folder` creates in the current folder (e.g. `src/utils` when that is expanded) and auto-expands it; per-row `✎ Rename` (prompt for new base, moves expanded/current state) and `🗑 Delete` (confirm, recursive for non-empty dirs) appear on hover. All operations refresh the tree and keep `fileBrowserCurrentDir`/`ExpandedDirs` consistent.
+
 - Wiki user manual, a phone tab tap-zone fix, per-parent lineage colours, and two robustness fixes.
   - **Wiki**: `docs/wiki/` is now a 30-page user manual (installation, quick start, the dashboard, agent CLIs, remote/Docker cases, hooks, security, HTTP API, troubleshooting and more), published to the GitHub wiki by a sync workflow on every push that touches it.
   - **Phone tabs**: on a narrow phone the active tab's geometric centre could land on its gear icon, so a thumb aiming at the tab opened Session Options instead of switching. The active tab's name now reserves a minimum width, and a static test recomputes the clearance from the stylesheet so widening the icons fails there rather than on a phone.
@@ -137,6 +150,7 @@
   - That drift was a silent hole, not a tidiness problem: a file excluded from CI and added to no runner is tested by NOTHING, and every command stays green, because vitest counts "no files matched" as success. `test/test-suite-partition.test.ts` now fails if any test file is reachable by no runner or by two.
   - ⚠️ A file filter must match its runner: `npm test -- test/mobile/keyboard.test.ts` matches nothing and exits green having run zero tests, because the gate excludes that path. Use `npm run test:mobile -- <file>`. Documented in CLAUDE.md, and the one place that recommended the old form was corrected.
   - Docs synced: CLAUDE.md, AGENTS.md, .github/CONTRIBUTING.md, both READMEs, and two ci.yml comments that claimed only `test/mobile/**` was excluded (it is three suites, and 5 Playwright files rather than 3).
+
 ## 1.19.11
 
 ### Patch Changes
@@ -176,7 +190,6 @@
 ### Patch Changes
 
 - Fix desktop tab and terminal interaction regressions: replace ambiguous tab hamburger drag handles with grip affordances; make F2 inline renames repaint immediately, remain usable in compact rails, preserve group editors, and serialize overlapping saves; keep vertical console placement and tab-list accessibility synchronized; adapt Session Options to narrow viewports; and unblock CJK input while agent output is active.
-
 
 ## 1.19.6
 
