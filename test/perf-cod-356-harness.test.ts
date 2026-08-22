@@ -25,6 +25,7 @@ import {
   runFixedLoadWindow,
   runFixedInputTrials,
   selectProductionOutputBoundary,
+  selectCorrelatedOutputBoundaries,
   selectInteractiveFixture,
   summarizeTmuxTrace,
   summarizeSamples,
@@ -406,6 +407,41 @@ describe('COD-356 benchmark statistics', () => {
         flushCalls: [{ id: 7, startedAt: 125, completedAt: 133, durationMs: 8 }],
       })
     ).toEqual({ id: 7, source: 'flushPendingWrites', startedAt: 125, completedAt: 133, durationMs: 8 });
+  });
+
+  it('selects exact current-token output boundaries amid adjacent terminal traffic', () => {
+    expect(
+      selectCorrelatedOutputBoundaries({
+        token: 'COD356_ECHO:current',
+        writes: [
+          { startedAt: 10, correlationTokens: ['COD356_ECHO:current'] },
+          { startedAt: 11, correlationTokens: ['COD356_ECHO:adjacent'] },
+        ],
+        outputFrames: [
+          { timestamp: 8, correlationTokens: ['COD356_ECHO:current'] },
+          { timestamp: 9, correlationTokens: ['COD356_ECHO:adjacent'] },
+        ],
+        terminalReceipts: [
+          { startedAt: 8.5, correlationTokens: ['COD356_ECHO:current'] },
+          { startedAt: 9.5, correlationTokens: ['COD356_ECHO:adjacent'] },
+        ],
+      })
+    ).toEqual({
+      matchingWrite: { startedAt: 10, correlationTokens: ['COD356_ECHO:current'] },
+      matchingOutput: { timestamp: 8, correlationTokens: ['COD356_ECHO:current'] },
+      terminalReceipt: { startedAt: 8.5, correlationTokens: ['COD356_ECHO:current'] },
+    });
+  });
+
+  it('rejects missing exact current-token output boundaries instead of falling back', () => {
+    expect(() =>
+      selectCorrelatedOutputBoundaries({
+        token: 'COD356_ECHO:current',
+        writes: [{ startedAt: 10, correlationTokens: ['COD356_ECHO:adjacent'] }],
+        outputFrames: [{ timestamp: 8, correlationTokens: ['COD356_ECHO:adjacent'] }],
+        terminalReceipts: [{ startedAt: 8.5, correlationTokens: ['COD356_ECHO:adjacent'] }],
+      })
+    ).toThrow('exact current-token terminal write unavailable');
   });
 
   it.each(['idle', 'interactive'])(

@@ -30,6 +30,7 @@ import {
   parseOnlySelection,
   runFixedInputTrials,
   runFixedLoadWindow,
+  selectCorrelatedOutputBoundaries,
   selectProductionOutputBoundary,
   selectInteractiveFixture,
   summarizeTmuxTrace,
@@ -605,26 +606,35 @@ async function runBrowserSample({
         { timeout: 5_000 }
       );
       const queueAtConvergence = await browserTelemetry.browserQueueSnapshot(page);
-      const matchingWrite = await page.evaluate(
-        ({ index, visibleAt, token }) => {
-          const writes = window.__cod356.xtermWrites
-            .slice(index)
-            .filter((entry) => entry.startedAt <= visibleAt && entry.byteLength > 0);
-          return writes.filter((entry) => entry.correlationToken === token).at(-1) ?? writes.at(-1) ?? null;
-        },
-        {
-          index: priorTraceCounts.xtermWrites,
-          visibleAt: visibleDetectedAt,
-          token: visibleToken,
-        }
+      const currentBoundaries = await page.evaluate(
+        ({ counts, visibleAt }) => ({
+          writes: window.__cod356.xtermWrites
+            .slice(counts.xtermWrites)
+            .filter((entry) => entry.startedAt <= visibleAt && entry.byteLength > 0),
+          outputFrames: window.__cod356.outputFrames.slice(counts.outputFrames),
+          terminalReceipts: window.__cod356.terminalReceipts.slice(counts.terminalReceipts),
+          flushCalls: window.__cod356.flushCalls.slice(counts.flushCalls),
+        }),
+        { counts: priorTraceCounts, visibleAt: visibleDetectedAt }
       );
-      const currentFlushCalls = await page.evaluate(
-        (index) => window.__cod356.flushCalls.slice(index),
-        priorTraceCounts.flushCalls
-      );
+      let matchingWrite;
+      let matchingOutput;
+      let matchingReceipt;
       let matchingFlush;
       try {
-        matchingFlush = selectProductionOutputBoundary({ matchingWrite, flushCalls: currentFlushCalls });
+        const exact = selectCorrelatedOutputBoundaries({
+          token: visibleToken,
+          writes: currentBoundaries.writes,
+          outputFrames: currentBoundaries.outputFrames,
+          terminalReceipts: currentBoundaries.terminalReceipts,
+        });
+        matchingWrite = exact.matchingWrite;
+        matchingOutput = exact.matchingOutput;
+        matchingReceipt = exact.terminalReceipt;
+        matchingFlush = selectProductionOutputBoundary({
+          matchingWrite,
+          flushCalls: currentBoundaries.flushCalls,
+        });
       } catch (error) {
         const diagnostic = await page.evaluate(
           (counts) => ({
@@ -636,15 +646,6 @@ async function runBrowserSample({
         );
         throw new Error(`${error.message}: ${JSON.stringify(diagnostic)}`);
       }
-      const matchingOutput = await page.evaluate(
-        ({ index, flushStartedAt }) =>
-          window.__cod356.outputFrames
-            .slice(index)
-            .filter((entry) => entry.timestamp <= flushStartedAt)
-            .at(-1) ?? null,
-        { index: priorTraceCounts.outputFrames, flushStartedAt: matchingFlush.startedAt }
-      );
-      if (!matchingOutput) throw new Error('matching output frame timestamp unavailable');
       const xtermDrainAt = matchingWrite?.drainedAt ?? null;
       await new Promise((resolveWait) => setTimeout(resolveWait, INPUT_SETTLE_WINDOW_MS));
       receivedEvents = (await browserTelemetry.readProbeEvents(probeLog))
@@ -657,30 +658,24 @@ async function runBrowserSample({
       const outputFrames = trialBrowserMetrics.outputFrames.slice(priorTraceCounts.outputFrames);
       const trialLongTasks = trialBrowserMetrics.longTasks.slice(priorTraceCounts.longTasks);
       const correlation = await page.evaluate(
-        ({ counts, dataHash, seq, flushStartedAt }) => ({
+        ({ counts, dataHash, seq }) => ({
           inputCall:
             window.__cod356.inputCalls.slice(counts.inputCalls).find((entry) => entry.dataHash === dataHash) ?? null,
           ackHandler: window.__cod356.ackHandlers.slice(counts.ackHandlers).find((entry) => entry.seq === seq) ?? null,
-          terminalReceipt:
-            window.__cod356.terminalReceipts
-              .slice(counts.terminalReceipts)
-              .filter((entry) => entry.startedAt <= flushStartedAt)
-              .at(-1) ?? null,
           flushCalls: window.__cod356.flushCalls.slice(counts.flushCalls),
         }),
         {
           counts: priorTraceCounts,
           dataHash: expectedDataHash,
           seq: sequence,
-          flushStartedAt: matchingFlush.startedAt,
         }
       );
-      if (!correlation.inputCall || !correlation.ackHandler || !correlation.terminalReceipt) {
+      if (!correlation.inputCall || !correlation.ackHandler) {
         throw new Error('browser input correlation boundary unavailable');
       }
       const boundaryMetrics = buildInputBoundaryMetrics({
         sendAt: sentFrame.timestamp,
-        terminalReceiptAt: correlation.terminalReceipt.startedAt,
+        terminalReceiptAt: matchingReceipt.startedAt,
         flushStartedAt: matchingFlush.startedAt,
         flushCompletedAt: matchingFlush.completedAt,
         visibleDetectedAt,
@@ -718,7 +713,22 @@ async function runBrowserSample({
           monotonicNs: probeOutputEvent.timestampNs,
           inputId: probeOutputEvent.inputId,
         },
-        terminalReceipt: correlation.terminalReceipt,
+        terminalReceipt: matchingReceipt,
+        outputFrame: {
+          timestamp: matchingOutput.timestamp,
+          hash: matchingOutput.hash,
+          byteLength: matchingOutput.byteLength,
+          correlationToken: visibleToken,
+        },
+        terminalWrite: {
+          flushId: matchingWrite.flushId,
+          startedAt: matchingWrite.startedAt,
+          completedAt: matchingWrite.completedAt,
+          drainedAt: matchingWrite.drainedAt,
+          hash: matchingWrite.hash,
+          byteLength: matchingWrite.byteLength,
+          correlationToken: visibleToken,
+        },
         flushCalls: correlation.flushCalls,
         overlapsInputLongTask,
       };
@@ -738,7 +748,7 @@ async function runBrowserSample({
         firstVisibleToDrainMs: boundaryMetrics.firstVisibleToDrainMs,
         inputCallDurationMs: correlation.inputCall.durationMs,
         ackHandlerDurationMs: correlation.ackHandler.durationMs,
-        terminalReceiptDurationMs: correlation.terminalReceipt.durationMs,
+        terminalReceiptDurationMs: matchingReceipt.durationMs,
         flushCallDurationMs: correlation.flushCalls.reduce((sum, entry) => sum + entry.durationMs, 0),
         overlapsInputLongTask,
         timeline,

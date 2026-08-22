@@ -86,13 +86,16 @@ export async function installPageInstrumentation(page) {
     };
     const boundedText = (value) => {
       const text = value ?? '';
-      const correlationToken = text.match(/COD356_ECHO:[A-Za-z0-9+/=]{1,128}/)?.[0] ?? null;
+      const correlationTokens = [
+        ...new Set([...text.matchAll(/COD356_ECHO:[A-Za-z0-9+/=]{1,128}/g)].map((match) => match[0])),
+      ].slice(-16);
       return {
         hash: hashText(text),
         byteLength: new TextEncoder().encode(text).byteLength,
         prefix: text.slice(0, 128),
         suffix: text.slice(-128),
-        correlationToken,
+        correlationToken: correlationTokens[0] ?? null,
+        correlationTokens,
       };
     };
     window.__cod356HashText = hashText;

@@ -316,6 +316,19 @@ export function selectProductionOutputBoundary({ matchingWrite, flushCalls }) {
   };
 }
 
+export function selectCorrelatedOutputBoundaries({ token, writes, outputFrames, terminalReceipts }) {
+  const hasToken = (entry) =>
+    entry?.correlationToken === token ||
+    (Array.isArray(entry?.correlationTokens) && entry.correlationTokens.includes(token));
+  const matchingWrite = writes.findLast(hasToken);
+  if (!matchingWrite) throw new Error('exact current-token terminal write unavailable');
+  const matchingOutput = outputFrames.findLast(hasToken);
+  if (!matchingOutput) throw new Error('exact current-token output frame unavailable');
+  const terminalReceipt = terminalReceipts.findLast(hasToken);
+  if (!terminalReceipt) throw new Error('exact current-token terminal receipt unavailable');
+  return { matchingWrite, matchingOutput, terminalReceipt };
+}
+
 export function calculateProcCpuPercent({ beforeTicks, afterTicks, elapsedMs, clockTicksPerSecond }) {
   if (!Number.isFinite(clockTicksPerSecond) || clockTicksPerSecond <= 0) {
     return { value: null, reason: 'clock ticks per second unavailable' };
