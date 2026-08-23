@@ -111,6 +111,41 @@ describe('legacy session-order SSE routing', () => {
     cleanup.dispose();
   });
 
+  it.each([
+    {
+      label: 'order-only repair',
+      change: changeWith({ alice: ['a', 'b'] }, ['a', 'bob-1', 'b'], true),
+      ownerOrder: ['a', 'b'],
+      globalOrder: ['a', 'bob-1', 'b'],
+    },
+    {
+      label: 'legacy-only deletion',
+      change: changeWith({ alice: [] }, ['bob-1'], true),
+      ownerOrder: [],
+      globalOrder: ['bob-1'],
+    },
+  ])('delivers an $label correction to same-owner devices and admins only', ({ change, ownerOrder, globalOrder }) => {
+    const cleanup = new CleanupManager();
+    const manager = new SseStreamManager({ getSessionStateWithRespawn: () => null }, cleanup);
+    const alicePhone = client();
+    const aliceDesktop = client();
+    const bob = client();
+    const admin = client();
+    manager.addClient(alicePhone.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(aliceDesktop.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(bob.reply, null, false, undefined, { username: 'bob', role: 'user' });
+    manager.addClient(admin.reply, null, false, undefined, { username: 'root', role: 'admin' });
+
+    manager.broadcastSessionOrder(change);
+
+    const ownerFrame = `event: session:orderChanged\ndata: ${JSON.stringify({ order: ownerOrder })}\n\n`;
+    expect(alicePhone.writes).toEqual([ownerFrame]);
+    expect(aliceDesktop.writes).toEqual([ownerFrame]);
+    expect(bob.writes).toEqual([]);
+    expect(admin.writes).toEqual([`event: session:orderChanged\ndata: ${JSON.stringify({ order: globalOrder })}\n\n`]);
+    cleanup.dispose();
+  });
+
   it('skips an inherited-key username without starving later matching and admin recipients', () => {
     const cleanup = new CleanupManager();
     const manager = new SseStreamManager({ getSessionStateWithRespawn: () => null }, cleanup);

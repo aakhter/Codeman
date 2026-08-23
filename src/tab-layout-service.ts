@@ -85,6 +85,7 @@ interface OwnerProjectionPublication {
 interface PreparedOrderProjection {
   owner: string;
   previousOrder: string[];
+  authoritativeBeforeIds: string[];
   claimedIds: string[];
   currentIds: string[];
   order: string[];
@@ -212,9 +213,10 @@ export class TabLayoutService {
 
   private prepareOrderProjection(item: OwnerProjectionPublication): PreparedOrderProjection {
     const excluded = item.excludedSessionIds ?? new Set<string>();
-    const facts = item.metadata
-      .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible && !excluded.has(fact.id))
+    const authoritativeBeforeIds = item.metadata
+      .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible)
       .map((fact) => fact.id);
+    const facts = authoritativeBeforeIds.filter((id) => !excluded.has(id));
     const visible = new Set(facts);
     const foreign = new Set(
       item.metadata.filter((fact) => fact.kind === 'session' && !fact.ownerValid && fact.visible).map((fact) => fact.id)
@@ -232,6 +234,7 @@ export class TabLayoutService {
     return {
       owner: item.owner,
       previousOrder,
+      authoritativeBeforeIds: normalizeSessionOrder([...authoritativeBeforeIds, ...excluded]),
       claimedIds,
       currentIds: normalizeSessionOrder([...order, ...facts]),
       order,
@@ -271,8 +274,14 @@ export class TabLayoutService {
     });
     const changedEntries: Array<[string, string[]]> = [];
     for (const projection of projections) {
-      if (!sameOrder(projection.previousOrder, projection.order)) {
-        changedEntries.push([projection.owner, [...projection.order]]);
+      const beforeIds = new Set(projection.authoritativeBeforeIds);
+      const currentIds = new Set(projection.currentIds);
+      const persistedBefore = beforeOrder.filter((id) => beforeIds.has(id));
+      const persistedAfter = accepted.sessionOrder.filter((id) => currentIds.has(id));
+      const layoutOrderChanged = !sameOrder(projection.previousOrder, projection.order);
+      const persistedOwnerSliceChanged = !sameOrder(persistedBefore, persistedAfter);
+      if (layoutOrderChanged || persistedOwnerSliceChanged) {
+        changedEntries.push([projection.owner, persistedAfter]);
       }
     }
     const change: SessionOrderProjectionChange = {

@@ -271,7 +271,12 @@ describe('TabLayoutService', () => {
     expect(h.store.commitTabLayoutProjection.mock.calls[0][0]).toEqual({});
     expect(h.broadcast).not.toHaveBeenCalled();
     expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
-      changedOwnerOrders: {},
+      changedOwnerOrders: { alice: ['a', 'b'] },
+      globalOrder: ['a', 'b'],
+      globalChanged: true,
+    });
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: ['a', 'b'] },
       globalOrder: ['a', 'b'],
       globalChanged: true,
     });
@@ -596,6 +601,11 @@ describe('TabLayoutService', () => {
     expect(h.order).toEqual([]);
     expect(h.store.commitTabLayoutProjection).toHaveBeenCalledExactlyOnceWith({}, expect.any(Function));
     expect(h.broadcast).not.toHaveBeenCalled();
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: [] },
+      globalOrder: [],
+      globalChanged: true,
+    });
   });
 
   it('removes a deleted legacy ID absent from an existing layout without bumping its version', async () => {
@@ -617,6 +627,11 @@ describe('TabLayoutService', () => {
     expect(h.order).toEqual(['keep']);
     expect(h.store.commitTabLayoutProjection.mock.calls[0][0]).toEqual({});
     expect(h.broadcast).not.toHaveBeenCalled();
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: ['keep'] },
+      globalOrder: ['keep'],
+      globalChanged: true,
+    });
   });
 
   it('removes legacy-only IDs from post-removal repair with no migrated layout or layout delta', async () => {
@@ -638,6 +653,11 @@ describe('TabLayoutService', () => {
     expect(h.store.commitTabLayoutProjection).toHaveBeenCalledTimes(1);
     expect(h.store.commitTabLayoutProjection.mock.calls[0][0]).toEqual({});
     expect(h.broadcast).not.toHaveBeenCalled();
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: [], bob: ['keep'] },
+      globalOrder: ['keep'],
+      globalChanged: true,
+    });
   });
 
   it('removes a confirmed stale legacy-only ID even before owner layout migration', async () => {
@@ -657,6 +677,11 @@ describe('TabLayoutService', () => {
     expect(h.order).toEqual([]);
     expect(h.store.commitTabLayoutProjection).toHaveBeenCalledExactlyOnceWith({}, expect.any(Function));
     expect(h.broadcast).not.toHaveBeenCalled();
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: [] },
+      globalOrder: [],
+      globalChanged: true,
+    });
   });
 
   it('does not prune or bump when restoration was skipped', async () => {
@@ -737,7 +762,7 @@ describe('TabLayoutService', () => {
     expect(h.broadcastSessionOrder).toHaveBeenCalledTimes(1);
   });
 
-  it('does not report an owner-order change when a placement-only PUT repairs stale global order', async () => {
+  it('reports an authoritative owner-order correction when a placement-only PUT repairs stale global order', async () => {
     const h = createHarness({
       layouts: {
         alice: existing([
@@ -770,7 +795,7 @@ describe('TabLayoutService', () => {
     expect(result.status).toBe('updated');
     expect(h.order).toEqual(['a', 'b']);
     expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
-      changedOwnerOrders: {},
+      changedOwnerOrders: { alice: ['a', 'b'] },
       globalOrder: ['a', 'b'],
       globalChanged: true,
     });
