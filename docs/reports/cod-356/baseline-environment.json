@@ -1,0 +1,269 @@
+{
+  "capturedAt": "2026-08-23T01:17:48.690Z",
+  "platform": "linux",
+  "release": "6.8.0-124-generic",
+  "hostname": "beelink",
+  "node": "v22.22.0",
+  "architecture": "x64",
+  "logicalCpuCount": 8,
+  "cpuModel": "Intel(R) Core(TM) i3-N305",
+  "totalMemoryBytes": 33417818112,
+  "freeMemoryBytesAtStart": 25570881536,
+  "issue": "COD-356",
+  "phase": "before",
+  "provenance": {
+    "runtimeRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "branchBaseRevision": "a5ec3ce4830ff671e686568c72cd966a8cd4c52b",
+    "comparisonRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "runtimeTreeHash": "8adb932b9da5f06b592ed3e41dfa89991fac676e6b614f84929fa7b18ec6b5df",
+    "headRevision": {
+      "value": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "semantics": "informational only; not the measured runtime or harness identity"
+    },
+    "harnessHeadRevision": {
+      "value": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "semantics": "informational commit containing or preceding the working-tree harness content"
+    },
+    "harness": {
+      "algorithm": "sha256 of sorted path/byte-length/content-sha256 manifest",
+      "contentHash": "d96677535fb5c1454f553fcc82a76a70185e04d7474dfc39a138c4b2d6e8ee63",
+      "files": [
+        {
+          "path": "package.json",
+          "bytes": 5418,
+          "sha256": "e78806138e4d181c34067804db9302056bb90bc6fd5e6d25b451dcd5ca746c3b"
+        },
+        {
+          "path": "scripts/perf/cod-356-benchmark.mjs",
+          "bytes": 63365,
+          "sha256": "0f4b26bd1fb2ab5f71487a482732357f75b7e89733aef5cc7b0d2326c10c21dc"
+        },
+        {
+          "path": "scripts/perf/cod-356-browser.mjs",
+          "bytes": 15624,
+          "sha256": "453c8fc3bb19e6d1b6bb7d874ff10763eeb9bee55e412fb14519efea06ca2123"
+        },
+        {
+          "path": "scripts/perf/cod-356-cleanup.mjs",
+          "bytes": 13506,
+          "sha256": "7365cda77c1ed449fc39a4fc79cdc824728ad630fc5798e1c23eeb8dc5697513"
+        },
+        {
+          "path": "scripts/perf/cod-356-cpu-worker.mjs",
+          "bytes": 1097,
+          "sha256": "4c428b9e5c313d0378e80aa29334f5b4824933e00237967aa68022abddab2775"
+        },
+        {
+          "path": "scripts/perf/cod-356-input-probe.mjs",
+          "bytes": 1501,
+          "sha256": "71cf838ac66d73befbfd074e195e92ddd5b3bb13598b58042c09863cdbcb5891"
+        },
+        {
+          "path": "scripts/perf/cod-356-metrics.mjs",
+          "bytes": 29734,
+          "sha256": "33accb7ae4a1b433f10b6cfe0329327658e32d6f4a0fa1156c4e26912235d290"
+        },
+        {
+          "path": "scripts/perf/cod-356-provenance.mjs",
+          "bytes": 24270,
+          "sha256": "6c563281f6cc79bc8f0b59dafc9ba526a201dc3b86ecbfb529a4a6ea21601402"
+        },
+        {
+          "path": "scripts/perf/cod-356-safety.mjs",
+          "bytes": 8415,
+          "sha256": "24cbd8c6d37aad5a04831cd30bfe7272c32ff66d1edd2b32c70ac0225363831c"
+        },
+        {
+          "path": "scripts/perf/cod-356-scheduler.mjs",
+          "bytes": 4824,
+          "sha256": "f5b0d7d6ebdde1a766b7dc415420580995a5b3e48d9e29531e69a4db43b72286"
+        },
+        {
+          "path": "test/perf-cod-356-harness.test.ts",
+          "bytes": 78724,
+          "sha256": "f5ebe329519d3b34153dfdb2e0a14f8fce222b65bebca4609a1b8580483590b8"
+        }
+      ],
+      "dirty": true,
+      "dirtyPaths": [
+        "package.json",
+        "scripts/perf/cod-356-benchmark.mjs",
+        "scripts/perf/cod-356-browser.mjs",
+        "scripts/perf/cod-356-cleanup.mjs",
+        "scripts/perf/cod-356-cpu-worker.mjs",
+        "scripts/perf/cod-356-input-probe.mjs",
+        "scripts/perf/cod-356-metrics.mjs",
+        "scripts/perf/cod-356-provenance.mjs",
+        "scripts/perf/cod-356-safety.mjs",
+        "scripts/perf/cod-356-scheduler.mjs",
+        "test/perf-cod-356-harness.test.ts"
+      ]
+    },
+    "outOfScopeTrackedDirtyPaths": [],
+    "runtimePaths": [
+      "src",
+      "packages",
+      "config",
+      "scripts/build.mjs",
+      "package-lock.json"
+    ],
+    "revisionPolicy": {
+      "runtimeRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "explicit": true,
+      "branchBaseRevision": "a5ec3ce4830ff671e686568c72cd966a8cd4c52b",
+      "comparisonRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "comparisonBaselineRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "headRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac"
+    },
+    "runtimePackageHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4",
+    "generatedRuntimeAssets": {
+      "schemaVersion": 1,
+      "algorithm": "sha256",
+      "runtimeRoot": "src/web/public",
+      "policy": {
+        "requiredAssets": [
+          "vendor/xterm-addon-fit.min.js",
+          "vendor/xterm-addon-serialize.min.js",
+          "vendor/xterm-addon-unicode11.min.js",
+          "vendor/xterm-addon-webgl.min.js",
+          "vendor/xterm-predictive-echo.js",
+          "vendor/xterm-zerolag-input.js",
+          "vendor/xterm.css",
+          "vendor/xterm.min.js"
+        ],
+        "monitoredDirectories": [
+          "vendor"
+        ],
+        "allowedFiles": [
+          "vendor/dompurify.min.js",
+          "vendor/exceljs.min.js",
+          "vendor/fflate.min.js",
+          "vendor/marked.min.js",
+          "vendor/xterm-addon-fit.min.js",
+          "vendor/xterm-addon-serialize.min.js",
+          "vendor/xterm-addon-unicode11.min.js",
+          "vendor/xterm-addon-webgl.min.js",
+          "vendor/xterm-predictive-echo.js",
+          "vendor/xterm-zerolag-input.js",
+          "vendor/xterm.css",
+          "vendor/xterm.min.js"
+        ],
+        "documentedNonRuntimeFiles": [
+          "vendor/exceljs.min.js",
+          "vendor/fflate.min.js"
+        ]
+      },
+      "files": [
+        {
+          "path": "vendor/xterm-addon-fit.min.js",
+          "bytes": 1476,
+          "sha256": "2aa05e1fbeaadcff510412f09e0165c4d7170431a65294f9207ff56dbe1f7843"
+        },
+        {
+          "path": "vendor/xterm-addon-serialize.min.js",
+          "bytes": 16495,
+          "sha256": "2fa7463561b97192b3cf901aaac65306b5191e081d4aeabb811a95d42e81b6bd"
+        },
+        {
+          "path": "vendor/xterm-addon-unicode11.min.js",
+          "bytes": 52408,
+          "sha256": "effeca12025364fc8ab8d4df0d6af6fe191d52f99f4ec0ae8751dc005920536e"
+        },
+        {
+          "path": "vendor/xterm-addon-webgl.min.js",
+          "bytes": 247535,
+          "sha256": "b85f8d4b3e9756bebb757e3fe47134d70f03ea3d6b187624426d2e2b65dec06c"
+        },
+        {
+          "path": "vendor/xterm-predictive-echo.js",
+          "bytes": 22174,
+          "sha256": "4fa33242d18f435788a6b6f47cf3b6df4805eef860f105988094a7808852cf90"
+        },
+        {
+          "path": "vendor/xterm-zerolag-input.js",
+          "bytes": 27504,
+          "sha256": "565860ab32098f0d98558ad3f2cf0c899fd2329320c15905497ceb2ff0b369f1"
+        },
+        {
+          "path": "vendor/xterm.css",
+          "bytes": 7112,
+          "sha256": "854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6"
+        },
+        {
+          "path": "vendor/xterm.min.js",
+          "bytes": 489036,
+          "sha256": "857ad85bfa79688de6b6bcf7c28d81f974a28eb793d418b22f58fa77e1636a1f"
+        }
+      ],
+      "manifestHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
+      "comparison": "authoritative accepted baseline manifest"
+    },
+    "acceptedGeneratedAssetBaseline": null,
+    "acceptedBenchmarkProtocol": null,
+    "packageManifestVerification": {
+      "allowedDifference": "scripts.perf:cod356 only",
+      "comparedToRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+      "normalizedHash": "f87d7f1799c7705a8743eee7f6338ccd8738bcfc8cca6ad4c70d308d12b67ac4"
+    },
+    "runtimeVerification": "git diff and untracked-file checks against declared runtime revision passed before resource creation"
+  },
+  "loadProfile": {
+    "workers": 7,
+    "dutyCycle": 0.7,
+    "durationMs": 60000,
+    "busyIntervalMs": 70,
+    "idleIntervalMs": 30
+  },
+  "affinity": {
+    "applied": false,
+    "strategy": "platform scheduler",
+    "fallback": "Node child_process has no portable CPU affinity API; worker count leaves host headroom"
+  },
+  "measurement": {
+    "nodeProcess": "process.cpuUsage/process.memoryUsage benchmark preload with /proc exact-PID fallback on Linux",
+    "eventLoopDelay": "perf_hooks.monitorEventLoopDelay at 10ms resolution in a benchmark-only preload",
+    "tmuxCapture": "PATH-first transparent tmux wrapper recording invocation start/end/status/duration"
+  },
+  "benchmarkProtocol": {
+    "schemaVersion": 1,
+    "inputTrials": {
+      "schemaVersion": 1,
+      "sampleCount": 5,
+      "trialsPerSample": 8,
+      "totalRecordedTrials": 40,
+      "sequential": true,
+      "adaptive": false,
+      "payloadSchedule": "cod356-input-v2/sample-{sampleIndex}/trial-{trialIndex}",
+      "settleWindowMs": 500,
+      "cpuDeadlineBudget": {
+        "fixedWindowMs": 60000,
+        "evidenceBaseCellMs": 24000,
+        "perAdditionalTrialBudgetMs": 750,
+        "projectedCellMs": 55500,
+        "marginMs": 4500
+      },
+      "hash": "d775b183d44296783ff1546226b77777164496c78165ebda76bae98c2c0e44da"
+    },
+    "apiOffersPerSample": 45,
+    "apiOfferIntervalMs": 50
+  },
+  "reportSetId": "10fb75599cf4c6d11e4996b97624fe7a",
+  "postRunGeneratedAssets": {
+    "checkedAt": "2026-08-23T01:17:48.690Z",
+    "result": "matched",
+    "preHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
+    "postHash": "f583a889dd91980030849f0c474baf4f0b5a2197a38e6097be92ec0bb12bc268",
+    "error": null
+  },
+  "postRunProvenance": {
+    "checkedAt": "2026-08-23T01:17:48.704Z",
+    "result": "matched",
+    "sourceCommit": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+    "acceptedGeneratedAssetBaseline": null
+  },
+  "reportPair": {
+    "role": "environment",
+    "canonicalSummaryFile": "baseline-summary.json"
+  }
+}

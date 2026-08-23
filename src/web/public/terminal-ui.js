@@ -546,9 +546,213 @@ Object.assign(CodemanApp.prototype, {
     return Number.isFinite(stored) && stored > 0 ? Math.max(stored, DEFAULT_SCROLLBACK) : DEFAULT_SCROLLBACK;
   },
 
+  _destroyMobileImePreview() {
+    try {
+      this._mobileImePreview?.destroy?.();
+    } catch {
+      // The preview is visual-only; terminal replacement must continue.
+    }
+    this._mobileImePreview = null;
+    this._mobileImePreviewSessionId = null;
+    this._mobileImeCommitOwnership = null;
+    try {
+      this._mobileImePreviewNode?.remove?.();
+    } catch {
+      // Best-effort node cleanup only.
+    }
+    try {
+      this._mobileImePreviewHelpers?.classList?.remove('codeman-ime-preview-owned');
+    } catch {
+      // Best-effort ownership cleanup only.
+    }
+    this._mobileImePreviewNode = null;
+    this._mobileImePreviewHelpers = null;
+    try {
+      if (this._mobileImePreviewOfflineHandler) {
+        window.removeEventListener('offline', this._mobileImePreviewOfflineHandler);
+      }
+      if (this._mobileImePreviewPagehideHandler) {
+        window.removeEventListener('pagehide', this._mobileImePreviewPagehideHandler);
+      }
+    } catch {
+      // Best-effort listener cleanup only.
+    }
+    this._mobileImePreviewOfflineHandler = null;
+    this._mobileImePreviewPagehideHandler = null;
+  },
+
+  _initMobileImePreview() {
+    this._destroyMobileImePreview();
+    let preview = null;
+    let helpers = null;
+    try {
+      if (typeof MobileImePreview === 'undefined' || !MobileImePreview?.isIosWebKitTouch?.()) return;
+      const textarea = this.terminal?.textarea;
+      helpers = this.terminal?.element?.querySelector?.('.xterm-helpers');
+      if (!textarea || !helpers) return;
+
+      preview = document.createElement('span');
+      this._mobileImePreviewNode = preview;
+      this._mobileImePreviewHelpers = helpers;
+      preview.className = 'codeman-ime-preview';
+      preview.setAttribute('aria-hidden', 'true');
+      preview.hidden = true;
+      helpers.appendChild(preview);
+      const syncPreviewTypography = () => {
+        try {
+          const compositionView =
+            helpers.querySelector?.('.composition-view') || this.terminal?.element?.querySelector?.('.composition-view');
+          if (!compositionView || !preview.style) return;
+          const style = typeof getComputedStyle === 'function' ? getComputedStyle(compositionView) : compositionView.style;
+          for (const property of [
+            'fontFamily',
+            'fontSize',
+            'fontWeight',
+            'fontStyle',
+            'lineHeight',
+            'height',
+          ]) {
+            const value = style?.[property] || compositionView.style?.[property];
+            if (value) preview.style[property] = value;
+          }
+          let foreground = this.terminal?.options?.theme?.foreground;
+          if (!foreground) {
+            try {
+              foreground = window.codemanCurrentXtermTheme?.()?.foreground;
+            } catch {
+              // Theme lookup is best-effort; retain the safe terminal fallback.
+            }
+          }
+          preview.style.color = foreground || '#e0e0e0';
+        } catch {
+          // Typography matching is visual-only and must not block input.
+        }
+      };
+      const clearPreview = () => {
+        try {
+          preview.hidden = true;
+        } catch {}
+        try {
+          preview.textContent = '';
+        } catch {}
+        try {
+          delete preview.dataset.phase;
+        } catch {}
+        try {
+          helpers.classList.remove('codeman-ime-preview-owned');
+        } catch {}
+      };
+      const controller = MobileImePreview.create({
+        textarea,
+        render: ({ text, phase }) => {
+          try {
+            syncPreviewTypography();
+            preview.textContent = text;
+            preview.dataset.phase = phase;
+            preview.hidden = !text;
+            helpers.classList.toggle('codeman-ime-preview-owned', !!text);
+          } catch {
+            clearPreview();
+          }
+        },
+        clear: clearPreview,
+      });
+      this._mobileImePreview = controller;
+      this._mobileImePreviewSessionId = this.activeSessionId;
+
+      this._mobileImePreviewOfflineHandler = () => {
+        try {
+          this._mobileImePreview?.reset?.();
+        } catch {
+          // Disconnect cleanup is visual-only.
+        }
+        this._mobileImeCommitOwnership = null;
+      };
+      this._mobileImePreviewPagehideHandler = () => this._destroyMobileImePreview();
+      window.addEventListener('offline', this._mobileImePreviewOfflineHandler);
+      window.addEventListener('pagehide', this._mobileImePreviewPagehideHandler);
+    } catch {
+      this._destroyMobileImePreview();
+    }
+  },
+
+  _flushPendingTerminalInput() {
+    this._inputFlushTimeout = null;
+    if (this._pendingInput && this.activeSessionId) {
+      const input = this._pendingInput;
+      const sessionId = this.activeSessionId;
+      this._pendingInput = '';
+      this._sendInputAsync(sessionId, input);
+    }
+  },
+
+  _consumeMobileImeTerminalData(data) {
+    let isImeCommit = false;
+    try {
+      isImeCommit = this._mobileImePreview?.consumeTerminalData(data) === true;
+    } catch {
+      // The preview is visual-only; normal terminal input must continue.
+    }
+    if (isImeCommit) {
+      try {
+        const controller = this._mobileImePreview;
+        const state = controller?.state;
+        this._mobileImeCommitOwnership =
+          controller && state?.committed === true
+            ? {
+                controller,
+                generation: state.generation,
+                sessionId: this.activeSessionId,
+                acceptedOutputEpoch: this._terminalOutputAcceptanceEpoch || 0,
+              }
+            : null;
+      } catch {
+        this._mobileImeCommitOwnership = null;
+      }
+    }
+    return isImeCommit;
+  },
+
+  _handleNormalTerminalData(data, { isImeCommit = false } = {}) {
+    try {
+      this._predictHookOnData(data, { isImeCommit });
+    } catch {
+      // A broken visual hook must never block the wire.
+    }
+
+    this._pendingInput += data;
+
+    // Control chars (Enter, Ctrl+C, escape sequences) and multi-character
+    // chunks flush immediately and preserve the original data byte-for-byte.
+    if (data.charCodeAt(0) < 32 || data.length > 1) {
+      if (this._inputFlushTimeout) {
+        clearTimeout(this._inputFlushTimeout);
+        this._inputFlushTimeout = null;
+      }
+      this._flushPendingTerminalInput();
+      return;
+    }
+
+    const now = performance.now();
+    if (now - this._lastKeystrokeTime > 50) {
+      if (this._inputFlushTimeout) {
+        clearTimeout(this._inputFlushTimeout);
+        this._inputFlushTimeout = null;
+      }
+      this._lastKeystrokeTime = now;
+      this._flushPendingTerminalInput();
+    } else {
+      this._lastKeystrokeTime = now;
+      if (!this._inputFlushTimeout) {
+        this._inputFlushTimeout = setTimeout(() => this._flushPendingTerminalInput(), 0);
+      }
+    }
+  },
+
   initTerminal() {
     const scrollback = this._userScrollback();
 
+    this._destroyMobileImePreview();
     this.terminal = new Terminal({
       theme: { ...window.codemanCurrentXtermTheme() },
       fontFamily: window.CodemanTerminalFont.resolve(this.loadAppSettingsFromStorage?.().terminalFontFamily),
@@ -595,6 +799,7 @@ Object.assign(CodemanApp.prototype, {
 
     const container = document.getElementById('terminalContainer');
     this.terminal.open(container);
+    this._initMobileImePreview();
     this._installMobileTapMouseGuard();
     this._installTouchSelectionFocusGuard();
 
@@ -1608,15 +1813,7 @@ Object.assign(CodemanApp.prototype, {
     this._inputFlushTimeout = null;
     this._lastKeystrokeTime = 0;
 
-    const flushInput = () => {
-      this._inputFlushTimeout = null;
-      if (this._pendingInput && this.activeSessionId) {
-        const input = this._pendingInput;
-        const sessionId = this.activeSessionId;
-        this._pendingInput = '';
-        this._sendInputAsync(sessionId, input);
-      }
-    };
+    const flushInput = () => this._flushPendingTerminalInput();
 
     // Local echo mode: buffer keystrokes locally (shown in overlay) and only
     // send to PTY on Enter.  Avoids out-of-order delivery on high-latency
@@ -1624,6 +1821,8 @@ Object.assign(CodemanApp.prototype, {
     // survives tab switches and reconnects.
 
     this.terminal.onData((data) => {
+      const originalData = data;
+      const isImeCommit = this._consumeMobileImeTerminalData(originalData);
       // Mouse SGR reports (tap-to-position) are NOT IME input — they must reach
       // the PTY even while the CJK input field owns focus. Without this exception
       // tapping to move the cursor silently does nothing whenever Chinese input
@@ -1737,6 +1936,35 @@ Object.assign(CodemanApp.prototype, {
         // instant visual feedback.  Nothing is sent to the PTY until Enter
         // (or a control char) is pressed — avoids out-of-order char delivery.
         if (this._localEchoEnabled && !echoPassthrough) {
+          if (isImeCommit) {
+            const ownership = this._mobileImeCommitOwnership;
+            const controller = ownership?.controller || this._mobileImePreview;
+            let transferred = false;
+            try {
+              const updateOverlay =
+                originalData.length === 1
+                  ? this._localEchoOverlay?.addChar
+                  : this._localEchoOverlay?.appendText;
+              if (typeof updateOverlay === 'function') {
+                updateOverlay.call(this._localEchoOverlay, originalData);
+                transferred = true;
+              }
+            } catch {
+              // A broken local overlay must not lose the committed bytes.
+            }
+            if (transferred) {
+              try {
+                controller?.completeCommit?.({ predicted: true });
+              } catch {
+                // Ownership transfer is visual-only.
+              } finally {
+                if (this._mobileImeCommitOwnership === ownership) this._mobileImeCommitOwnership = null;
+              }
+              return;
+            }
+            this._handleNormalTerminalData(originalData, { isImeCommit: true });
+            return;
+          }
           if (data === '\x7f') {
             const source = this._localEchoOverlay?.removeChar();
             if (source === 'flushed') {
@@ -1790,8 +2018,12 @@ Object.assign(CodemanApp.prototype, {
             return;
           }
           if (data.length > 1 && data.charCodeAt(0) >= 32) {
-            // Paste: append to overlay only (sent on Enter)
-            this._localEchoOverlay?.appendText(data);
+            // Untagged paste: append to the overlay only and send on Enter.
+            try {
+              this._localEchoOverlay?.appendText(data);
+            } catch {
+              // Preserve the existing local-only paste path if its overlay is unavailable.
+            }
             return;
           }
           if (data.charCodeAt(0) < 32) {
@@ -1963,39 +2195,7 @@ Object.assign(CodemanApp.prototype, {
         // which is the byte-identity guarantee for #218/#219/#220/#222 —
         // with the predictor active, absent or throwing, the wire sees the
         // same bytes. Body in _predictHookOnData (vm-testable).
-        this._predictHookOnData(data);
-
-        // ── Normal Mode (echo disabled) ──
-        this._pendingInput += data;
-
-        // Control chars (Enter, Ctrl+C, escape sequences) — flush immediately
-        if (data.charCodeAt(0) < 32 || data.length > 1) {
-          if (this._inputFlushTimeout) {
-            clearTimeout(this._inputFlushTimeout);
-            this._inputFlushTimeout = null;
-          }
-          flushInput();
-          return;
-        }
-
-        // Regular chars — flush immediately if typed after a gap (>50ms),
-        // otherwise batch via microtask to coalesce rapid keystrokes (paste).
-        const now = performance.now();
-        if (now - this._lastKeystrokeTime > 50) {
-          // Single char after a gap — send immediately, no setTimeout latency
-          if (this._inputFlushTimeout) {
-            clearTimeout(this._inputFlushTimeout);
-            this._inputFlushTimeout = null;
-          }
-          this._lastKeystrokeTime = now;
-          flushInput();
-        } else {
-          // Rapid sequence (paste or fast typing) — coalesce via microtask
-          this._lastKeystrokeTime = now;
-          if (!this._inputFlushTimeout) {
-            this._inputFlushTimeout = setTimeout(flushInput, 0);
-          }
-        }
+        this._handleNormalTerminalData(data, { isImeCommit });
       }
     });
   },
@@ -4466,12 +4666,21 @@ Object.assign(CodemanApp.prototype, {
     return performance.now() - this._lastUserScrollUpAt < window.CodemanTerminalInput.USER_SCROLL_STICKY_SUPPRESS_MS;
   },
 
-  batchTerminalWrite(data) {
+  batchTerminalWrite(data, preservedAcceptedOutputEpoch) {
+    const acceptedOutputEpoch =
+      preservedAcceptedOutputEpoch ?? (this._terminalOutputAcceptanceEpoch || 0) + 1;
+    if (preservedAcceptedOutputEpoch === undefined) {
+      this._terminalOutputAcceptanceEpoch = acceptedOutputEpoch;
+    }
+
     // If a buffer load (chunkedTerminalWrite) is in progress, queue live events
     // to prevent interleaving historical buffer data with live SSE data.
     // This is critical: interleaving causes cursor position chaos with Ink redraws.
     if (this._isLoadingBuffer) {
       if (this._loadBufferQueue) this._loadBufferQueue.push(data);
+      if (this._loadBufferQueueAcceptanceEpochs) {
+        this._loadBufferQueueAcceptanceEpochs.push(acceptedOutputEpoch);
+      }
       return;
     }
 
@@ -4501,6 +4710,12 @@ Object.assign(CodemanApp.prototype, {
       if (hasScreenClear) {
         this.flickerFilterActive = true;
         this.flickerFilterBuffer += data;
+        if (!this._flickerFilterEpochSegments) this._flickerFilterEpochSegments = [];
+        this._flickerFilterEpochSegments.push({ length: data.length, epoch: acceptedOutputEpoch });
+        this._flickerFilterMaxAcceptanceEpoch = Math.max(
+          this._flickerFilterMaxAcceptanceEpoch || 0,
+          acceptedOutputEpoch
+        );
 
         if (this.flickerFilterTimeout) {
           clearTimeout(this.flickerFilterTimeout);
@@ -4515,13 +4730,29 @@ Object.assign(CodemanApp.prototype, {
 
       if (this.flickerFilterActive) {
         this.flickerFilterBuffer += data;
+        if (!this._flickerFilterEpochSegments) this._flickerFilterEpochSegments = [];
+        this._flickerFilterEpochSegments.push({ length: data.length, epoch: acceptedOutputEpoch });
+        this._flickerFilterMaxAcceptanceEpoch = Math.max(
+          this._flickerFilterMaxAcceptanceEpoch || 0,
+          acceptedOutputEpoch
+        );
         return;
       }
     }
 
     // Accumulate raw data (may contain DEC 2026 markers)
-    this.pendingWrites.push(data);
+    this._queuePendingTerminalWrite(data, acceptedOutputEpoch);
     this._scheduleTerminalWriteFlush();
+  },
+
+  _queuePendingTerminalWrite(data, acceptedOutputEpoch = 0) {
+    this.pendingWrites.push(data);
+    if (!this._pendingWriteAcceptanceEpochs) this._pendingWriteAcceptanceEpochs = [];
+    this._pendingWriteAcceptanceEpochs.push(acceptedOutputEpoch);
+    this._pendingWritesMaxAcceptanceEpoch = Math.max(
+      this._pendingWritesMaxAcceptanceEpoch || 0,
+      acceptedOutputEpoch
+    );
   },
 
   /**
@@ -4551,9 +4782,25 @@ Object.assign(CodemanApp.prototype, {
     if (!this.flickerFilterBuffer) return;
 
     // Transfer buffered data to normal pending writes
-    this.pendingWrites.push(this.flickerFilterBuffer);
+    const segments = this._flickerFilterEpochSegments || [];
+    const representedLength = segments.reduce((sum, segment) => sum + segment.length, 0);
+    if (segments.length > 0 && representedLength === this.flickerFilterBuffer.length) {
+      let offset = 0;
+      for (const segment of segments) {
+        const end = offset + segment.length;
+        this._queuePendingTerminalWrite(this.flickerFilterBuffer.slice(offset, end), segment.epoch);
+        offset = end;
+      }
+    } else {
+      this._queuePendingTerminalWrite(
+        this.flickerFilterBuffer,
+        this._flickerFilterMaxAcceptanceEpoch || 0
+      );
+    }
     this.flickerFilterBuffer = '';
     this.flickerFilterActive = false;
+    this._flickerFilterEpochSegments = [];
+    this._flickerFilterMaxAcceptanceEpoch = 0;
 
     // Trigger a normal flush
     this._scheduleTerminalWriteFlush();
@@ -4582,6 +4829,15 @@ Object.assign(CodemanApp.prototype, {
    * Position is tracked dynamically by _findPrompt() on every render.
    */
   _updateLocalEchoState() {
+    if (this._mobileImePreviewSessionId !== this.activeSessionId) {
+      this._mobileImePreviewSessionId = this.activeSessionId;
+      this._mobileImeCommitOwnership = null;
+      try {
+        this._mobileImePreview?.reset?.();
+      } catch {
+        // The preview is visual-only; session switching must continue.
+      }
+    }
     const settings = this.loadAppSettingsFromStorage();
     const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
     const echoEnabled = settings.localEchoEnabled ?? MobileDetection.isTouchDevice();
@@ -4670,17 +4926,17 @@ Object.assign(CodemanApp.prototype, {
    * sends, never throws into the caller. The onData wire path behaves
    * byte-identically with this active, absent or broken.
    */
-  _predictHookOnData(data) {
+  _predictHookOnData(data, { isImeCommit = false } = {}) {
     if (this._localEchoPolicy !== 'predict' || !this._predictiveEcho) return;
+    let ok = false;
     try {
       if (this._echoDebugCounts) this._echoDebugCounts.totalOnData++;
       const kind = window.CodemanTerminalInput.classifyPredictInput(data);
-      let ok = false;
-      if (kind === 'char') ok = this._predictiveEcho.predictChar(data);
+      if (isImeCommit && kind === 'text') ok = this._predictiveEcho.predictText(data);
+      else if (kind === 'char') ok = this._predictiveEcho.predictChar(data);
       else if (kind === 'backspace') ok = this._predictiveEcho.predictBackspace();
-      // 'clear' AND 'text' (plain paste, IME word commits) both change the
-      // composer in ways the display has not shown yet: clear the run and let
-      // the addon's anchor hold suppress prediction until the echo catches up
+      // Untagged text (plain paste) and control input retain the existing clear
+      // path. Only text tagged by the IME controller is predicted atomically.
       else {
         this._predictiveEcho.clearPredictions();
         ok = false;
@@ -4695,6 +4951,15 @@ Object.assign(CodemanApp.prototype, {
       }
     } catch {
       /* predictions must never block the wire */
+    } finally {
+      if (isImeCommit) {
+        try {
+          this._mobileImePreview?.completeCommit?.({ predicted: ok });
+        } catch {
+          /* preview completion must never block the wire */
+        }
+        if (ok) this._mobileImeCommitOwnership = null;
+      }
     }
   },
 
@@ -4884,8 +5149,18 @@ Object.assign(CodemanApp.prototype, {
     // xterm.js 6.0+ natively handles DEC 2026 synchronized output markers.
     // Pass raw data through — xterm.js buffers content between markers and
     // renders atomically, eliminating split-frame Ink redraws.
-    const joined = this.pendingWrites.join('');
+    const acceptedEpochs = this._pendingWriteAcceptanceEpochs || [];
+    const pendingMaxAcceptanceEpoch = this._pendingWritesMaxAcceptanceEpoch || 0;
+    const pendingEntries = this.pendingWrites.map((data, index) => ({
+      data,
+      epoch:
+        acceptedEpochs[index] ??
+        (this.pendingWrites.length === 1 ? pendingMaxAcceptanceEpoch : 0),
+    }));
+    const joined = pendingEntries.map((entry) => entry.data).join('');
     this.pendingWrites = [];
+    this._pendingWriteAcceptanceEpochs = [];
+    this._pendingWritesMaxAcceptanceEpoch = 0;
     const _joinedLen = joined.length;
     if (_joinedLen > 16384) _crashDiag.log(`FLUSH: ${(_joinedLen / 1024).toFixed(0)}KB`);
 
@@ -4909,12 +5184,73 @@ Object.assign(CodemanApp.prototype, {
     const preserveViewportY =
       this.terminal.buffer?.active && !this.isTerminalAtBottom() ? this.terminal.buffer.active.viewportY : null;
 
+    const firstChunkLength = Math.min(_joinedLen, MAX_FRAME_BYTES);
+    let representedOffset = 0;
+    let flushedAcceptedOutputEpoch = 0;
+    const deferredEntries = [];
+    for (const entry of pendingEntries) {
+      const entryStart = representedOffset;
+      const entryEnd = entryStart + entry.data.length;
+      if (entryStart < firstChunkLength && entryEnd > 0) {
+        flushedAcceptedOutputEpoch = Math.max(flushedAcceptedOutputEpoch, entry.epoch);
+      }
+      if (entryEnd > firstChunkLength) {
+        const sliceStart = Math.max(0, firstChunkLength - entryStart);
+        deferredEntries.push({ data: entry.data.slice(sliceStart), epoch: entry.epoch });
+      }
+      representedOffset = entryEnd;
+    }
+
+    let authoritativeFallback = null;
+    try {
+      const ownership = this._mobileImeCommitOwnership;
+      const controller = ownership?.controller;
+      const state = controller?.state;
+      if (
+        ownership &&
+        controller === this._mobileImePreview &&
+        ownership.sessionId === this.activeSessionId &&
+        ownership.generation === state?.generation &&
+        state?.committed === true &&
+        flushedAcceptedOutputEpoch > ownership.acceptedOutputEpoch
+      ) {
+        authoritativeFallback = {
+          ownership,
+          controller,
+          generation: state.generation,
+          sessionId: this.activeSessionId,
+        };
+      }
+    } catch {
+      // A broken visual state reader must never affect terminal output.
+    }
+    const noteAuthoritativeOutput = () => {
+      const fallback = authoritativeFallback;
+      if (!fallback) return;
+      try {
+        const state = fallback.controller.state;
+        if (
+          this._mobileImeCommitOwnership === fallback.ownership &&
+          this._mobileImePreview === fallback.controller &&
+          this.activeSessionId === fallback.sessionId &&
+          state?.generation === fallback.generation &&
+          state?.committed === true
+        ) {
+          fallback.controller.noteAuthoritativeOutput?.();
+        }
+      } catch {
+        // Authoritative output is never delayed or consumed by the preview.
+      }
+    };
+
     if (_joinedLen <= MAX_FRAME_BYTES) {
-      this.terminal.write(joined);
+      this.terminal.write(joined, noteAuthoritativeOutput);
     } else {
       // Write first chunk now, defer rest to next frame
-      this.terminal.write(joined.slice(0, MAX_FRAME_BYTES));
-      this.pendingWrites.push(joined.slice(MAX_FRAME_BYTES));
+      this.terminal.write(joined.slice(0, MAX_FRAME_BYTES), noteAuthoritativeOutput);
+      for (const entry of deferredEntries) {
+        this._queuePendingTerminalWrite(entry.data, entry.epoch);
+      }
       deferred = true;
       this._scheduleTerminalWriteFlush();
     }
@@ -5230,6 +5566,7 @@ Object.assign(CodemanApp.prototype, {
     this._bufferLoadOwner = loadOwner;
     this._isLoadingBuffer = true;
     this._loadBufferQueue = [];
+    this._loadBufferQueueAcceptanceEpochs = [];
     return loadOwner;
   },
 
@@ -5238,14 +5575,18 @@ Object.assign(CodemanApp.prototype, {
       return false;
     }
     const queued = this._loadBufferQueue;
+    const queuedEpochs = this._loadBufferQueueAcceptanceEpochs;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
+    this._loadBufferQueueAcceptanceEpochs = null;
     this._bufferLoadOwner = null;
     // COD-144: replay (rather than discard) queued live events when the load
     // painted nothing — the queued prompt is the only content a new session has.
     if (opts?.flushQueued && queued && queued.length) {
-      for (const data of queued) {
-        this.batchTerminalWrite(data);
+      for (let index = 0; index < queued.length; index++) {
+        const acceptedOutputEpoch = queuedEpochs?.[index];
+        if (acceptedOutputEpoch === undefined) this.batchTerminalWrite(queued[index]);
+        else this.batchTerminalWrite(queued[index], acceptedOutputEpoch);
       }
     }
     return true;
