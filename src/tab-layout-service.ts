@@ -209,12 +209,15 @@ export class TabLayoutService {
   ): SessionOrderProjectionChange {
     const projections = publications.map((item) => {
       const excluded = item.excludedSessionIds ?? new Set<string>();
-      const previous = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
-      const next = flattenOwnerSessionOrder(item.next).filter((id) => !excluded.has(id));
       const facts = item.metadata
         .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible && !excluded.has(fact.id))
         .map((fact) => fact.id);
-      const claimedIds = normalizeSessionOrder([...previous, ...flattenOwnerSessionOrder(item.next), ...facts]);
+      const visible = new Set(facts);
+      const rawPrevious = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
+      const rawNext = flattenOwnerSessionOrder(item.next);
+      const previous = rawPrevious.filter((id) => visible.has(id) || excluded.has(id));
+      const next = rawNext.filter((id) => visible.has(id) && !excluded.has(id));
+      const claimedIds = normalizeSessionOrder([...rawPrevious, ...rawNext, ...facts]);
       const currentIds = normalizeSessionOrder([...next, ...facts]);
       return {
         owner: item.owner,
@@ -347,7 +350,7 @@ export class TabLayoutService {
       const change = this.publish(needsLayout ? { [owner]: next } : {}, [
         { owner, previous: prepared.current, next, metadata: prepared.metadata },
       ]);
-      return { order: flattenOwnerSessionOrder(next), ...change };
+      return { order: flattenOwnerSessionOrder(next).filter((id) => visible.has(id)), ...change };
     });
   }
 

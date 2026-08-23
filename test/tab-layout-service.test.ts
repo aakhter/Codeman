@@ -721,7 +721,7 @@ describe('TabLayoutService', () => {
 
     const result = await h.service.putLegacyOrder({ owner: 'alice', isAdmin: false }, ['b', 'a', 'child', 'parent']);
 
-    expect(result.order.filter((id) => id !== 'unknown')).toEqual(['b', 'a', 'child', 'parent', 'c']);
+    expect(result.order).toEqual(['b', 'a', 'child', 'parent', 'c']);
     expect(h.layouts.alice.groups).toEqual([
       {
         id: 'g',
@@ -739,6 +739,11 @@ describe('TabLayoutService', () => {
       { kind: 'session', id: 'parent' },
       { kind: 'session', id: 'c' },
     ]);
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: ['b', 'a', 'child', 'parent', 'c'] },
+      globalOrder: ['b', 'a', 'child', 'parent', 'c'],
+      globalChanged: true,
+    });
     expect(await h.service.get('alice')).toEqual(h.layouts.alice);
   });
 
