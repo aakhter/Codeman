@@ -39,7 +39,7 @@
       );
     }
 
-    function activate(reason, requiresFocus = FOCUS_REASONS.has(reason)) {
+    function activate(reason, requiresFocus = FOCUS_REASONS.has(reason), bypassDedupe = false) {
       if (destroyed || suppressionDepth > 0 || !isVisible()) return false;
       if (requiresFocus && !isFocused()) return false;
       const sessionId = deps.activeSessionId();
@@ -52,6 +52,7 @@
       const elapsed = currentTime - lastSentAt;
       const explicitRestore = reason === 'restore-terminal-size';
       if (
+        !bypassDedupe &&
         !explicitRestore &&
         signature === lastSignature &&
         Number.isFinite(elapsed) &&
@@ -126,7 +127,9 @@
       if (destroyed || !pending) return false;
       const sessionId = deps.activeSessionId();
       if (sessionId !== pendingSessionId) return false;
-      return activate(reason, pendingRequiresFocus);
+      // This is a proven-unsent activation, so an old socket's recent matching
+      // signature must not suppress delivery on the fresh socket.
+      return activate(reason, pendingRequiresFocus, true);
     }
 
     function hasPending(sessionId = deps.activeSessionId()) {

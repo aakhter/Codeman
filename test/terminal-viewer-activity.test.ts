@@ -440,6 +440,30 @@ describe('terminal viewer activity controller', () => {
     expect(send).toHaveBeenCalledTimes(3);
   });
 
+  it('flushes a genuinely pending activation inside the prior socket dedupe window', () => {
+    let attempt = 0;
+    const send = vi.fn(() => {
+      attempt += 1;
+      return attempt !== 2;
+    });
+    const h = harness({ send });
+    h.setNow(100);
+    expect(h.controller.activate('pointerdown')).toBe(true);
+
+    h.setNow(101);
+    expect(h.controller.activate('restore-terminal-size')).toBe(false);
+    expect(h.controller.hasPending()).toBe(true);
+
+    h.setNow(102);
+    expect(h.controller.flushPending('ws-open')).toBe(true);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(h.controller.hasPending()).toBe(false);
+
+    h.setNow(103);
+    expect(h.controller.activate('pointerdown')).toBe(false);
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
   it('keeps a pending focus-based activation queued until focus returns', () => {
     let ready = false;
     const send = vi.fn(() => ready);
