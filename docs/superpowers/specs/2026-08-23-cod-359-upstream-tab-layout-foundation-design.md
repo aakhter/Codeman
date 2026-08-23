@@ -59,39 +59,55 @@ COD-359 retains upstream's legacy ordering contract alongside the new owner layo
 new migration reads that order, but the old contract is not made read-only until COD-360 migrates the browser to
 `/api/tab-layout`. This avoids silently disabling ordering for existing browsers and cross-device clients between PRs.
 
-The two contracts are synchronized rather than independent. The legacy PUT derives the authenticated owner, enters that
-owner's service queue, applies the merged session rank to the owner layout, commits at most one changed layout, and returns
-the canonical flattened session projection. For the normal pre-COD-360 flat layout, the effective legacy order after the
-existing server-known-ID merge is preserved exactly. If an API client has already introduced groups, the bridge preserves
-group membership and group order, ranks session refs within their existing containers, and leaves webview slots stable;
-the returned legacy projection reflects that canonical grouped result rather than destroying structure the old client
-cannot represent.
+The two contracts are synchronized rather than independent. For a regular caller, the legacy PUT derives the authenticated
+owner, enters that owner's service queue, applies the merged session rank to the owner layout, commits at most one changed
+layout, and returns the canonical flattened owner-session projection. In multi-user mode it rejects IDs outside the
+caller's authoritative sessions and never returns them; single-user behavior retains the existing server-known-ID merge.
+For the normal pre-COD-360 flat layout, the effective owner order is preserved exactly. Because the legacy API has no
+inherited-placement concept, every owner-valid child represented by a legacy PUT is materialized as `placement: 'manual'`
+before ranking, so the next normalization cannot silently move it back beside its parent. If an API client has already
+introduced groups, the bridge preserves group membership and group order, ranks session refs within their existing
+containers, and leaves webview slots stable; the returned legacy projection reflects that canonical grouped result rather
+than destroying structure the old client cannot represent.
+
+A regular multi-user PUT may rank only the caller's authoritative sessions. An admin PUT retains the upstream machine-wide
+contract: the service merges the global request, partitions it into per-owner relative ranks, acquires every affected owner
+queue in stable order, updates each existing owner layout without moving refs across owners or groups, and commits the
+changed layout map plus canonical global projection together. Flat layouts preserve the merged request exactly; if groups
+constrain an owner's relative order, the canonical response preserves requested cross-owner interleaving while reflecting
+the group-preserving owner result. Thus an existing admin browser can still order its normal pre-COD-360 machine-wide
+session list without leaving any owner's future tab-layout GET stale.
 
 Conversely, every successful layout initialization, normalization, lifecycle commit, or PUT refreshes the stored legacy
 session-order projection from the canonical flattened owner session refs while preserving server-known IDs outside that
-owner. It emits `session:orderChanged` only when that projection changes. This makes `/api/status.sessionOrder` a
-compatibility projection of the owner layout after initialization, prevents a later legacy reorder from leaving a stale
-stored layout, and gives COD-360 a safe cutover GET without overwriting either side.
+owner. It emits `session:orderChanged` only when that owner's projection changes. `/api/status.sessionOrder` and the event
+payload expose only the authenticated owner's slice to a regular multi-user client (admins retain the global view), so the
+bridge does not leak foreign session IDs. This makes the legacy value a compatibility projection of the owner layout after
+initialization, prevents a later legacy reorder from leaving a stale stored layout, and gives COD-360 a safe cutover GET
+without overwriting either side.
 
-`StateStore` gains one validated combined write primitive for operations that change both representations. It prepares the
-next `tabLayouts[owner]` value and global `sessionOrder` projection in memory, persists them through one state-file save,
-and makes neither visible if validation or persistence fails. Service code emits layout and legacy invalidations only after
-that combined save succeeds. Operations that change only one representation may retain their focused setter, but may not
-implement synchronization as two independently observable writes.
+`StateStore` gains one validated combined mutation primitive for operations that change both representations. Its global
+critical section validates the next affected `tabLayouts` entries, derives the global `sessionOrder` projection from the
+latest committed in-memory state, and publishes the layout map plus order together before scheduling one normal debounced
+state-file save. This prevents independent owner queues from losing one another's projection updates and supports the admin
+multi-owner transaction. Validation or synchronous store rejection changes neither value and emits no event. Disk
+durability retains StateStore's existing asynchronous retry/circuit-breaker semantics: acceptance and invalidation do not
+claim a new synchronous disk acknowledgement or rollback protocol. Operations that change only one representation may
+retain a focused setter, but synchronization may not be implemented as two independently observable mutations.
 
 ### Coordination service
 
 `src/tab-layout-service.ts` is the only authoritative mutation boundary. It gathers persisted sessions, live sessions, and
-saved webviews; normalizes them through the pure model; serializes work per owner; persists before broadcasting; and
-provides lifecycle wrappers for atomic creation, deletion, and stale cleanup.
+saved webviews; normalizes them through the pure model; serializes work per owner; commits accepted store state before
+broadcasting; and provides lifecycle wrappers for atomic creation, deletion, and stale cleanup.
 
 GET and lifecycle reconciliation may persist one initialization or normalization update. PUT uses a side-effect-free
 reconciliation preparation path: it derives the same authoritative base and version that GET would produce without storing
 or broadcasting, compares `baseVersion`, and only then commits the normalized requested layout. A stale PUT therefore
 writes nothing; a matching direct-first or normalization-requiring PUT collapses reconciliation plus the requested change
 into one tab-layout version change and one tab-layout invalidation. When its flattened session order also changes, the
-layout and legacy projection are persisted atomically in one combined state save before both applicable invalidations; a
-conflict updates neither representation.
+layout and latest global legacy projection are accepted atomically by the combined store mutation before both applicable
+invalidations; a conflict updates neither representation.
 
 The service retains the historical restoration state machine. Deletion-sensitive work fails closed while restoration is
 pending or failed. Only successful completion or an explicit test-only skip unlocks destructive cleanup. Startup
@@ -104,6 +120,12 @@ not yet been restored.
 `{ baseVersion, layout }`, applies a 128 KiB body limit, and performs an exact-version compare against the side-effect-free
 reconciled base before validation and commit. The request cannot provide an owner key. The legacy session-order status
 field, PUT route, and `session:orderChanged` event remain intact as a synchronized temporary compatibility surface.
+
+The server adds a dedicated trusted session-order dispatch boundary rather than inferring ownership from the client body or
+an order entry. It retains the browser wire shape `{ order }` while selecting payload per recipient: another regular device
+for the affected owner receives only that owner's slice, admins receive the latest global projection, and other regular
+users receive nothing. This recipient-aware dispatch avoids both the generic `session:` fail-closed starvation and foreign
+session-ID disclosure; the trusted routing owner is not serialized as browser data.
 
 Successful mutations emit the minimal tab-layout SSE invalidation through the existing registry and owner filtering. The
 event does not duplicate the layout; consumers refetch. Registry parity may require the corresponding public event token,
@@ -120,7 +142,7 @@ but this branch adds no browser handler, renderer, projection, settings UI, or g
    differs from that prepared version, it returns the prepared authoritative layout and performs no write or invalidation.
 6. A valid matching PUT normalizes the requested layout against the same facts, stores one incremented result, synchronizes
    the legacy projection, then emits the applicable owner-filtered layout and legacy-order invalidations. Initialization or
-   normalization is folded into that single layout commit and, when necessary, its atomic compatibility projection save.
+   normalization is folded into that single layout commit and, when necessary, its atomic compatibility projection update.
 7. Existing browsers continue reading and writing `sessionOrder` until COD-360 migrates them. A legacy PUT is translated
    through the owner queue into the canonical layout and then returned/broadcast as its flattened compatibility projection.
 8. Session, Ralph, cron, and webview creation hooks update layout only after their underlying creation succeeds. Session,
@@ -139,7 +161,8 @@ Included:
   through the owner layout service;
 - an extraction-specific side-effect-free PUT reconciliation path with no-write conflict and single-write direct-first
   guarantees;
-- a validated combined StateStore persistence primitive for atomic layout-and-legacy-projection updates;
+- a validated combined StateStore mutation primitive for one or more affected layouts plus the global projection, with a
+  global critical section and one debounced save;
 - the minimum route-port, server, state, session/webview/Ralph/cron, event-registry, mock, and test wiring needed by those
   behaviors;
 - a minor changeset for the new versioned owner-scoped API.
@@ -148,8 +171,8 @@ Excluded:
 
 - new browser layout fetching, grouped or flat rendering, collapse UI, lineage drawing, editing UI, drag/drop, menus, and
   accessibility tree behavior; the existing legacy session-order browser behavior remains operational;
-- HTTP semantic-operation replay, recovery-base layouts, Focus flags/groups, search, case-default groups, automatic child
-  placement, Session Bridge placement, and saved-webview UI integration;
+- HTTP semantic-operation replay, recovery-base layouts, Focus flags/groups, search, case-default groups, post-cutpoint
+  child-creation placement integration, Session Bridge placement, and saved-webview UI integration;
 - unrelated downstream refactors or fixes that happen to touch the same large server or route files;
 - writes, branches, pull requests, or comments on the read-only GitHub `upstream` remote;
 - production deployment from the upstream review branch.
@@ -162,13 +185,16 @@ Excluded:
   event.
 - A matching PUT against a missing or normalization-requiring layout folds reconciliation and the requested update into one
   stored layout version and one layout invalidation; it never exposes an intermediate persisted layout. A changed legacy
-  projection adds its event but is part of the same atomic state save, not a second write or layout version.
+  projection adds its event but is part of the same atomic in-memory store mutation, not a second layout version.
 - Owner queues continue after a rejected operation and never serialize unrelated owners behind one another.
-- Persistence completes before invalidation. A failed store write propagates and cannot announce a state that was not
-  committed. A combined layout/projection failure leaves both prior representations intact and emits neither event.
+- The combined store mutation is accepted before invalidation. A validation or synchronous acceptance failure leaves both
+  prior representations intact and emits neither event. A later asynchronous disk failure follows existing dirty-state
+  retry and circuit-breaker behavior; COD-359 does not advertise synchronous durability.
 - Legacy-to-layout translation is serialized with all other owner mutations. Flat layouts honor the merged legacy order;
-  grouped layouts preserve group membership/order and webview slots. Layout-to-legacy projection preserves server-known
-  IDs outside the owner and emits no event when the projection is unchanged.
+  grouped layouts preserve group membership/order and webview slots, and inherited children become manual before legacy
+  ranking. Layout-to-legacy projection preserves server-known IDs outside the owner and emits no event when the projection
+  is unchanged. A global commit critical section prevents concurrent owner projections from overwriting one another. Admin
+  machine-wide writes acquire affected owner queues in stable order and atomically update all changed owner layouts.
 - Restoration-pending and restoration-failed deletion paths remain closed. Only successful restoration or an explicit
   test-only skip unlocks destructive cleanup; failed restoration cannot prune sessions that were never proven stale.
 - Creation hooks run only after successful underlying creation. Transactional deletion wrappers prevent layout repair and
@@ -184,12 +210,12 @@ Focused verification will prove:
 - owner-key derivation, single-user compatibility, deterministic/idempotent migration, restart persistence, foreign-owner
   isolation, and authoritative replacement by live records;
 - preservation of the legacy status field and writable session-order route, including validation, server-known ID merge,
-  persistence, cross-device broadcast, migration use, and bidirectional compatibility synchronization until COD-360
-  replaces the browser consumer;
+  owner filtering, trusted-owner cross-device broadcast, migration use, and bidirectional compatibility synchronization
+  until COD-360 replaces the browser consumer;
 - exact-version conflicts, per-owner serialization, queue recovery after failure, one layout version/invalidation per
-  commit, atomic combined projection saves, validation and persistence failures, side-effect-free conflict reconciliation,
-  single-write direct-first and normalized PUTs, restoration success/failure/skip gating, deletion repair, and stable
-  multi-owner stale cleanup;
+  commit, atomic combined projection mutation, validation and store-acceptance failures, side-effect-free conflict
+  reconciliation, single-write direct-first and normalized PUTs, restoration success/failure/skip gating, deletion repair,
+  and stable multi-owner stale cleanup;
 - authenticated GET/PUT envelopes, owner isolation, the 128 KiB body limit, `400` validation responses, and `409` conflict
   responses through focused Fastify injection tests;
 - session, webview, Ralph, cron, restore, cleanup, route-port, SSE filtering, and event-registry integration required by the
@@ -200,7 +226,11 @@ Focused verification will prove:
 The compatibility regression must explicitly exercise: initialize an owner layout, submit a legacy reorder, then perform a
 COD-360-style tab-layout GET and verify that it returns the reordered canonical layout. Additional coverage must prove the
 reverse projection after a layout PUT, no event on an unchanged projection, foreign/server-known ID preservation, and
-group/webview preservation when an old client submits an order it cannot fully represent.
+group/webview preservation when an old client submits an order it cannot fully represent. It must also cover concurrent
+updates from two owner queues without a lost global projection; flat and grouped parent/child legacy reorders that survive a
+subsequent normalized GET as manual placement; same-owner cross-device event delivery; other-user nondelivery; and
+owner-filtered status/event payloads. An admin regression must prove a machine-wide reorder updates each affected owner's
+relative layout order, preserves the requested global projection, and delivers the global payload to admin devices.
 
 Run only explicitly named safe test files from the managed session. Finish with typecheck, lint, formatting, lockfile,
 frontend-syntax/event-parity checks, and the production build. Audit the final branch diff against `upstream/master`, the
