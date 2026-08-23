@@ -67,8 +67,9 @@ For the normal pre-COD-360 flat layout, the effective owner order is preserved e
 inherited-placement concept, every owner-valid child represented by a legacy PUT is materialized as `placement: 'manual'`
 before ranking, so the next normalization cannot silently move it back beside its parent. If an API client has already
 introduced groups, the bridge preserves group membership and group order, ranks session refs within their existing
-containers, and leaves webview slots stable; the returned legacy projection reflects that canonical grouped result rather
-than destroying structure the old client cannot represent.
+containers, and leaves webview and unknown stored-ref slots stable. Unknown refs preserved by the historical normalizer are
+never accepted as untrusted regular-client rank input and are not erased by translation. The returned legacy projection
+reflects that canonical grouped result rather than destroying structure the old client cannot represent.
 
 A regular multi-user PUT may rank only the caller's authoritative sessions. An admin PUT retains the upstream machine-wide
 contract: the service merges the global request, partitions it into per-owner relative ranks, acquires every affected owner
@@ -80,11 +81,12 @@ session list without leaving any owner's future tab-layout GET stale.
 
 Conversely, every successful layout initialization, normalization, lifecycle commit, or PUT refreshes the stored legacy
 session-order projection from the canonical flattened owner session refs while preserving server-known IDs outside that
-owner. It emits `session:orderChanged` only when that owner's projection changes. `/api/status.sessionOrder` and the event
-payload expose only the authenticated owner's slice to a regular multi-user client (admins retain the global view), so the
-bridge does not leak foreign session IDs. This makes the legacy value a compatibility projection of the owner layout after
-initialization, prevents a later legacy reorder from leaving a stale stored layout, and gives COD-360 a safe cutover GET
-without overwriting either side.
+owner. A changed owner slice emits `session:orderChanged` to that owner's devices, and any changed global projection emits
+the latest global order to admins. Therefore an admin-only cross-owner interleaving change still invalidates other admin
+devices even when every owner-relative slice is unchanged. `/api/status.sessionOrder` and regular-user event payloads expose
+only the authenticated owner's slice (admins retain the global view), so the bridge does not leak foreign session IDs. This
+makes the legacy value a compatibility projection of the owner layout after initialization, prevents a later legacy reorder
+from leaving a stale stored layout, and gives COD-360 a safe cutover GET without overwriting either side.
 
 `StateStore` gains one validated combined mutation primitive for operations that change both representations. Its global
 critical section validates the next affected `tabLayouts` entries, derives the global `sessionOrder` projection from the
@@ -186,15 +188,17 @@ Excluded:
 - A matching PUT against a missing or normalization-requiring layout folds reconciliation and the requested update into one
   stored layout version and one layout invalidation; it never exposes an intermediate persisted layout. A changed legacy
   projection adds its event but is part of the same atomic in-memory store mutation, not a second layout version.
-- Owner queues continue after a rejected operation and never serialize unrelated owners behind one another.
+- Owner queues continue after a rejected operation. Unrelated owners prepare independently and do not share an owner queue;
+  only the brief final publication of their shared global projection is serialized by the mandatory store critical section.
 - The combined store mutation is accepted before invalidation. A validation or synchronous acceptance failure leaves both
   prior representations intact and emits neither event. A later asynchronous disk failure follows existing dirty-state
   retry and circuit-breaker behavior; COD-359 does not advertise synchronous durability.
 - Legacy-to-layout translation is serialized with all other owner mutations. Flat layouts honor the merged legacy order;
-  grouped layouts preserve group membership/order and webview slots, and inherited children become manual before legacy
-  ranking. Layout-to-legacy projection preserves server-known IDs outside the owner and emits no event when the projection
-  is unchanged. A global commit critical section prevents concurrent owner projections from overwriting one another. Admin
-  machine-wide writes acquire affected owner queues in stable order and atomically update all changed owner layouts.
+  grouped layouts preserve group membership/order, webview slots, and unknown stored-ref slots, and inherited children
+  become manual before legacy ranking. Layout-to-legacy projection preserves server-known IDs outside the owner and emits no
+  owner event when that slice is unchanged; a changed global interleaving still emits an admin-only event. A global commit
+  critical section prevents concurrent owner projections from overwriting one another. Admin machine-wide writes acquire
+  affected owner queues in stable order and atomically update all changed owner layouts.
 - Restoration-pending and restoration-failed deletion paths remain closed. Only successful restoration or an explicit
   test-only skip unlocks destructive cleanup; failed restoration cannot prune sessions that were never proven stale.
 - Creation hooks run only after successful underlying creation. Transactional deletion wrappers prevent layout repair and
@@ -226,11 +230,12 @@ Focused verification will prove:
 The compatibility regression must explicitly exercise: initialize an owner layout, submit a legacy reorder, then perform a
 COD-360-style tab-layout GET and verify that it returns the reordered canonical layout. Additional coverage must prove the
 reverse projection after a layout PUT, no event on an unchanged projection, foreign/server-known ID preservation, and
-group/webview preservation when an old client submits an order it cannot fully represent. It must also cover concurrent
-updates from two owner queues without a lost global projection; flat and grouped parent/child legacy reorders that survive a
-subsequent normalized GET as manual placement; same-owner cross-device event delivery; other-user nondelivery; and
-owner-filtered status/event payloads. An admin regression must prove a machine-wide reorder updates each affected owner's
-relative layout order, preserves the requested global projection, and delivers the global payload to admin devices.
+group/webview/unknown-ref preservation when an old client submits an order it cannot fully represent. It must also cover
+concurrent updates from two owner queues without a lost global projection; flat and grouped parent/child legacy reorders
+that survive a subsequent normalized GET as manual placement; same-owner cross-device event delivery; other-user
+nondelivery; and owner-filtered status/event payloads. Admin regressions must prove a machine-wide reorder updates each
+affected owner's relative layout order, preserves the requested global projection, delivers the global payload to admin
+devices, and emits an admin-only event when only cross-owner interleaving changes.
 
 Run only explicitly named safe test files from the managed session. Finish with typecheck, lint, formatting, lockfile,
 frontend-syntax/event-parity checks, and the production build. Audit the final branch diff against `upstream/master`, the
