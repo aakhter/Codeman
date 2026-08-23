@@ -39,15 +39,7 @@ const MobileTabSheet = {
     console.log('[MobileTabSheet] init', { isMobile: this._isEnabled(), width: window.innerWidth });
   },
   _isEnabled() {
-    try {
-      // Use <=430 to include iPhone Pro Max (430) which isMobile() excludes (strict <430)
-      if (window.MobileDetection) {
-        const w = window.innerWidth;
-        if (w <= 430) return true;
-        return MobileDetection.isMobile();
-      }
-    } catch {}
-    return window.innerWidth <= 430 || window.innerWidth < 768;
+    return window.innerWidth < 600;
   },
   _shouldShowPill() {
     try {
