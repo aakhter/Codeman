@@ -48,18 +48,22 @@ Object.assign(CodemanApp.prototype, {
   _setTabRailWidth(width) {
     const policy = window.CodemanTabRail;
     if (!policy) return 256;
+    const preferred = policy.resolveWidth({ width });
     const bounds = this._getTabRailBounds();
-    const resolved = policy.resolveWidth({ width, ...bounds });
+    const resolved = policy.resolveWidth({ width: preferred, ...bounds });
     const effectiveMax = policy.resolveWidth({ width: policy.MAX_WIDTH, ...bounds });
     const root = document.documentElement;
     root.style.setProperty('--tab-rail-width', `${resolved}px`);
-    root.classList.toggle('tab-rail-compact', resolved < 240);
+    const wasCompact = root.classList.contains('tab-rail-compact');
+    const compact = resolved < 240;
+    root.classList.toggle('tab-rail-compact', compact);
+    if (wasCompact !== compact) this._fullRenderSessionTabs?.();
     const handle = document.getElementById('tabRailResizeHandle');
     if (handle) {
       handle.setAttribute('aria-valuemax', String(effectiveMax));
       handle.setAttribute('aria-valuenow', String(resolved));
     }
-    this.syncTabRailWidthSetting(resolved);
+    this.syncTabRailWidthSetting(preferred);
     return resolved;
   },
 
@@ -190,6 +194,7 @@ Object.assign(CodemanApp.prototype, {
     handle.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return;
       event.preventDefault();
+      this.closeTabRailActionMenu();
       this._claimTabRailResize();
       this._tabRailDragWidth = this._getCurrentTabRailWidth();
       this._tabRailPendingClientX = event.clientX;
@@ -227,5 +232,71 @@ Object.assign(CodemanApp.prototype, {
         this.applyTabRailWidth({ persist: false });
       }, 100);
     });
+  },
+
+  closeTabRailActionMenu(options = {}) {
+    const menu = document.querySelector('.tab-rail-action-menu');
+    const trigger = this._tabRailActionMenuTrigger;
+    menu?.remove();
+    if (this._tabRailActionMenuOutside) {
+      document.removeEventListener('pointerdown', this._tabRailActionMenuOutside, true);
+      this._tabRailActionMenuOutside = null;
+    }
+    this._tabRailActionMenuTrigger = null;
+    if (options.restoreFocus) trigger?.focus?.();
+  },
+
+  openTabRailActionMenu(event, sessionId) {
+    event.preventDefault();
+    event.stopPropagation();
+    this.closeTabRailActionMenu();
+    const trigger = event.currentTarget;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Session actions');
+    const settings = this.loadAppSettingsFromStorage();
+    const actions = [
+      { label: 'Session options', run: () => this.openSessionOptions(sessionId) },
+      ...(settings.showTabDetachButton || this.detachedSessions?.has(sessionId)
+        ? [{ label: 'Open in a new window', run: () => this.detachSession(sessionId) }]
+        : []),
+      { label: 'Close session', className: 'danger', run: () => this.requestCloseSession(sessionId) },
+    ];
+    for (const action of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.textContent = action.label;
+      if (action.className) button.className = action.className;
+      button.addEventListener('click', () => {
+        this.closeTabRailActionMenu();
+        action.run();
+      });
+      menu.appendChild(button);
+    }
+    document.body.appendChild(menu);
+    const rect = trigger.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menuRect.height - 8))}px`;
+    this._tabRailActionMenuTrigger = trigger;
+    this._tabRailActionMenuOutside = (pointerEvent) => {
+      if (!menu.contains(pointerEvent.target) && pointerEvent.target !== trigger) this.closeTabRailActionMenu();
+    };
+    document.addEventListener('pointerdown', this._tabRailActionMenuOutside, true);
+    menu.addEventListener('keydown', (keyEvent) => {
+      const buttons = [...menu.querySelectorAll('button')];
+      const index = buttons.indexOf(document.activeElement);
+      if (keyEvent.key === 'Escape') {
+        keyEvent.preventDefault();
+        this.closeTabRailActionMenu({ restoreFocus: true });
+      } else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+        keyEvent.preventDefault();
+        const direction = keyEvent.key === 'ArrowDown' ? 1 : -1;
+        buttons[(index + direction + buttons.length) % buttons.length]?.focus();
+      }
+    });
+    menu.querySelector('button')?.focus();
   },
 });

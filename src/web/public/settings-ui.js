@@ -409,6 +409,11 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     document.getElementById('appSettingsSessionListLayout').value =
       settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
+    const sessionSidebarFontSize = this.resolveSessionSidebarFontSize(
+      settings.sessionSidebarFontSize ?? defaults.sessionSidebarFontSize
+    );
+    document.getElementById('appSettingsSessionSidebarFontSize').value = String(sessionSidebarFontSize);
+    document.getElementById('appSettingsSessionSidebarFontSizeValue').textContent = `${sessionSidebarFontSize} px`;
     // Claude CLI settings
     const claudeModeSelect = document.getElementById('appSettingsClaudeMode');
     const allowedToolsRow = document.getElementById('allowedToolsRow');
@@ -2037,6 +2042,9 @@ Object.assign(CodemanApp.prototype, {
       tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
+      sessionSidebarFontSize: this.resolveSessionSidebarFontSize(
+        document.getElementById('appSettingsSessionSidebarFontSize').value
+      ),
       skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
@@ -2435,6 +2443,7 @@ Object.assign(CodemanApp.prototype, {
         tabOrientation: 'horizontal',
         tabRailWidth: 256,
         sessionListLayout: 'header',
+        sessionSidebarFontSize: 14,
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
         webglRendererEnabled: false, // mobile always uses the DOM renderer
@@ -2680,7 +2689,7 @@ Object.assign(CodemanApp.prototype, {
     const defaults = this.getDefaultSettings();
     const sidebarOwnsTabs = this.isSessionSidebarActive?.() === true;
     const orientation =
-      !sidebarOwnsTabs && window.CodemanTabOverflow?.resolveTabOrientation
+      !this.isSoloWindow && !sidebarOwnsTabs && window.CodemanTabOverflow?.resolveTabOrientation
         ? window.CodemanTabOverflow.resolveTabOrientation({
             deviceType: MobileDetection.getDeviceType(),
             setting: settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal',
@@ -2950,7 +2959,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'sessionListLayout', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'sessionListLayout', 'sessionSidebarFontSize', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
           'terminalFontFamily',
           'language',

@@ -2284,6 +2284,123 @@ html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-input {
   align-items: center;
 }
 
+.session-tab .tab-more {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.5rem;
+  padding: 0;
+  visibility: hidden;
+  pointer-events: none;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: 700 1rem/1 monospace;
+  cursor: pointer;
+}
+
+html[data-session-list='sidebar'][data-sidebar='expanded'] .session-sidebar .tab-name-row > .tab-actions > .tab-more,
+html[data-tab-orientation='vertical']:not(.tab-rail-compact) .tab-rail .tab-name-row > .tab-actions > .tab-more,
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active > .tab-actions > .tab-more {
+  display: inline-flex;
+}
+
+.session-tab:hover > .tab-actions > .tab-more,
+.session-tab:focus-within > .tab-actions > .tab-more,
+.session-tab.active > .tab-actions > .tab-more,
+html[data-session-list='sidebar'][data-sidebar='expanded'] .session-sidebar
+  :is(.session-tab:hover, .session-tab:focus-within, .session-tab.active)
+  .tab-name-row
+  > .tab-actions
+  > .tab-more,
+html[data-tab-orientation='vertical']:not(.tab-rail-compact) .tab-rail
+  :is(.session-tab:hover, .session-tab:focus-within, .session-tab.active)
+  .tab-name-row
+  > .tab-actions
+  > .tab-more {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab .tab-actions > :is(.tab-gear, .tab-detach, .tab-close) {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .session-tab > .tab-actions > .tab-more,
+  html[data-session-list='sidebar'][data-sidebar='expanded']
+    .session-sidebar
+    .session-tab
+    .tab-name-row
+    > .tab-actions
+    > .tab-more,
+  html[data-tab-orientation='vertical']:not(.tab-rail-compact)
+    .tab-rail
+    .session-tab
+    .tab-name-row
+    > .tab-actions
+    > .tab-more {
+    visibility: visible;
+    pointer-events: auto;
+  }
+}
+
+.tab-rail-action-menu {
+  position: fixed;
+  z-index: 2000;
+  display: grid;
+  min-width: 180px;
+  padding: 0.3rem;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--btn-radius);
+  background: var(--floating-bg);
+  box-shadow: var(--elevated-shadow);
+}
+
+.tab-rail-action-menu button {
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tab-rail-action-menu button:hover,
+.tab-rail-action-menu button:focus-visible {
+  background: var(--control-bg-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tab-rail-action-menu .danger {
+  color: var(--red);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+  width: min(220px, 44vw);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field output {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 /* Pop-out button is opt-in (App Settings → Tab Bar, default off; per-device).
    settings-ui.js mirrors the setting as the tabs-show-detach class on <html>.
    A tab that is ALREADY detached keeps its icon regardless: it is the
@@ -16972,8 +17089,25 @@ html[data-session-list="sidebar"] .session-sidebar .tab-info {
   min-width: 0;
 }
 
+html[data-session-list="sidebar"] .session-sidebar .tab-name-row,
 html[data-session-list="sidebar"] .session-sidebar .tab-name {
+  min-width: 0;
   max-width: none;
+}
+
+html[data-session-list='sidebar'] .session-sidebar .tab-name {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  font-size: var(--session-sidebar-name-font-size, 14px);
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name {
+  font-size: var(--session-sidebar-name-font-size, 14px);
+}
+
+html[data-session-list='sidebar'] .session-sidebar .tab-actions,
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-row > .tab-actions {
+  flex-shrink: 0;
 }
 
 /* Reveal-on-hover reads badly on a 40px-tall full-width row, so keep the row
