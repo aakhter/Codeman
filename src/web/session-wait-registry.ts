@@ -187,7 +187,7 @@ export function hooksAvailableForMode(mode: SessionMode): boolean {
 
 /** Whether this mode can create and answer Approvals Inbox items. */
 export function approvalsAvailableForMode(mode: SessionMode): boolean {
-  return mode === 'claude' || mode === 'codex';
+  return mode === 'claude' || mode === 'codex' || mode === 'opencode';
 }
 
 /** Outcome of resolving a caller-supplied wait target against a session's mode. */
