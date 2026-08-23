@@ -419,6 +419,26 @@ describe('TmuxManager (unit)', () => {
       consoleError.mockRestore();
     });
 
+    it('reports authoritative failure so an identical target can be retried', () => {
+      const commandCallbacks: Array<(error: Error | null) => void> = [];
+      const completions: boolean[] = [];
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        commandCallbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+
+      expect(manager.resizeWindow('codeman-abc12345', 75, 62, (success) => completions.push(success))).toBe(true);
+      commandCallbacks.shift()!(new Error('tmux failed'));
+      expect(completions).toEqual([false]);
+
+      expect(manager.resizeWindow('codeman-abc12345', 75, 62, (success) => completions.push(success))).toBe(true);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      commandCallbacks.shift()!(null);
+      expect(completions).toEqual([false, true]);
+      consoleError.mockRestore();
+    });
+
     it('retains serialization when error logging requests a re-entrant resize', () => {
       const callbacks: Array<(error: Error | null) => void> = [];
       mockedExec.mockImplementation((_cmd, _options, callback) => {

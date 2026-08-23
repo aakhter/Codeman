@@ -4200,12 +4200,22 @@ export class Session extends EventEmitter {
   private _ptyCols = 120;
   private _ptyRows = 40;
 
+  private _terminalResizeRequestSequence = 0;
+  private _pendingTerminalResize: {
+    sequence: number;
+    cols: number;
+    rows: number;
+    authority?: { token: symbol; generation: number };
+  } | null = null;
+
   private readonly _terminalSizing = new TerminalSizingOwnership();
   private _acceptsTerminalViewerSizing = true;
 
   private _suspendTerminalViewerSizing(): void {
     this._acceptsTerminalViewerSizing = false;
     this._terminalSizing.clear();
+    this._terminalResizeRequestSequence += 1;
+    this._pendingTerminalResize = null;
   }
 
   private _resumeTerminalViewerSizing(): void {
@@ -4228,7 +4238,7 @@ export class Session extends EventEmitter {
     const activation = this._terminalSizing.activate(token, dimensions);
     if (activation.dimensions) {
       const { cols, rows, viewportType } = activation.dimensions;
-      this.resize(cols, rows, { viewportType });
+      this._resizeTerminal(cols, rows, { viewportType }, { token, generation: activation.generation });
     }
     return activation.generation;
   }
@@ -4247,7 +4257,12 @@ export class Session extends EventEmitter {
     if (!this._terminalSizing.isOwner(token)) {
       return false;
     }
-    this.resize(cols, rows, { viewportType, force });
+    this._resizeTerminal(
+      cols,
+      rows,
+      { viewportType, force },
+      { token, generation: this._terminalSizing.currentGeneration }
+    );
     return true;
   }
 
@@ -4260,7 +4275,7 @@ export class Session extends EventEmitter {
       return false;
     }
     const { cols, rows, viewportType } = activation.dimensions;
-    this.resize(cols, rows, { viewportType, force });
+    this._resizeTerminal(cols, rows, { viewportType, force }, { token, generation: activation.generation });
     return true;
   }
 
@@ -4277,26 +4292,90 @@ export class Session extends EventEmitter {
    * @param rows - Number of rows (height in lines)
    */
   resize(cols: number, rows: number, options: { viewportType?: ResizeViewportType; force?: boolean } = {}): void {
+    this._resizeTerminal(cols, rows, options);
+  }
+
+  private _resizeTerminal(
+    cols: number,
+    rows: number,
+    options: { viewportType?: ResizeViewportType; force?: boolean },
+    authority?: { token: symbol; generation: number }
+  ): void {
+    const pty = this.ptyProcess;
+    if (!pty) return;
+
     const dimsChanged = cols !== this._ptyCols || rows !== this._ptyRows;
-    if (this.ptyProcess && (dimsChanged || options.force)) {
+    const pending = this._pendingTerminalResize;
+    const correctsStaleAuthority = !!pending && !!authority && pending.authority?.generation !== authority.generation;
+    const duplicatesPending =
+      !!pending && pending.cols === cols && pending.rows === rows && !correctsStaleAuthority && !options.force;
+    if ((!dimsChanged && !options.force && !correctsStaleAuthority) || duplicatesPending) return;
+
+    const sequence = ++this._terminalResizeRequestSequence;
+    const request = { sequence, cols, rows, authority };
+    this._pendingTerminalResize = request;
+
+    const confirm = (success: boolean): void => {
+      if (this._pendingTerminalResize?.sequence !== sequence) return;
+      this._pendingTerminalResize = null;
+      if (!success) return;
+      if (
+        authority &&
+        (!this._acceptsTerminalViewerSizing ||
+          this._terminalSizing.currentGeneration !== authority.generation ||
+          !this._terminalSizing.isOwner(authority.token))
+      ) {
+        return;
+      }
+
+      const confirmedChange = cols !== this._ptyCols || rows !== this._ptyRows;
       this._ptyCols = cols;
       this._ptyRows = rows;
-      if (!IS_TEST_MODE && this._mux && this._muxSession) {
-        this._mux.resizeWindow?.(this._muxSession.muxName, cols, rows);
-      }
-      try {
-        this.ptyProcess.resize(cols, rows);
-      } catch {
-        this.ptyProcess = null;
-      }
       // COD-179: tell every connected client the shared geometry changed. A
       // viewer whose xterm has different dims renders the subsequent TUI
       // repaint frames misaligned (orphan "Working" rows in scrollback) and
       // needs to reconcile by rewriting from the tmux capture. Only a real
       // geometry change matters — a forced same-size SIGWINCH can't misalign.
-      if (dimsChanged) {
+      if (confirmedChange) {
         this.emit('resized', { cols, rows });
       }
+    };
+
+    const authoritativeResize = this._mux && this._muxSession ? this._mux.resizeWindow : undefined;
+    if (authoritativeResize && this._muxSession) {
+      let admissionKnown = false;
+      let synchronousCompletion: boolean | undefined;
+      let accepted = false;
+      try {
+        accepted = authoritativeResize.call(this._mux, this._muxSession.muxName, cols, rows, (success) => {
+          if (!admissionKnown) synchronousCompletion = success;
+          else confirm(success);
+        });
+      } catch {
+        admissionKnown = true;
+        confirm(false);
+        return;
+      }
+      admissionKnown = true;
+      if (!accepted) {
+        confirm(false);
+        return;
+      }
+      try {
+        pty.resize(cols, rows);
+      } catch {
+        if (this.ptyProcess === pty) this.ptyProcess = null;
+      }
+      if (synchronousCompletion !== undefined) confirm(synchronousCompletion);
+      return;
+    }
+
+    try {
+      pty.resize(cols, rows);
+      confirm(true);
+    } catch {
+      if (this.ptyProcess === pty) this.ptyProcess = null;
+      confirm(false);
     }
   }
 

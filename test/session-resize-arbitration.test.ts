@@ -7,6 +7,8 @@ type ResizeableSessionInternals = {
   _ptyRows: number;
 };
 
+type ResizeCompletion = (success: boolean) => void;
+
 type SizingLifecycleInternals = {
   _mux: { killSession: () => Promise<boolean> } | null;
   _respawnBlocked: boolean;
@@ -35,6 +37,24 @@ function attachFakePty(session: Session, cols = 160, rows = 48) {
   internals._ptyCols = cols;
   internals._ptyRows = rows;
   return resize;
+}
+
+function sessionWithAuthoritativeResize(cols = 160, rows = 48) {
+  const completions: ResizeCompletion[] = [];
+  const resizeWindow = vi.fn(
+    (_muxName: string, _cols: number, _rows: number, onComplete?: ResizeCompletion): boolean => {
+      if (onComplete) completions.push(onComplete);
+      return true;
+    }
+  );
+  const session = new Session({
+    workingDir: '/tmp',
+    mode: 'opencode',
+    mux: { isAvailable: () => true, resizeWindow },
+    muxSession: { muxName: 'codeman-resize', sessionId: 'resize', createdAt: Date.now() },
+  } as ConstructorParameters<typeof Session>[0]);
+  attachFakePty(session, cols, rows);
+  return { session, resizeWindow, completions };
 }
 
 function prepareSuccessfulInteractiveStart(session: Session) {
@@ -73,6 +93,43 @@ function prepareSuccessfulInteractiveStart(session: Session) {
 }
 
 describe('Session resize ownership', () => {
+  it('keeps a failed authoritative target retryable and confirms only the successful retry', () => {
+    const { session, resizeWindow, completions } = sessionWithAuthoritativeResize(140, 44);
+    const phone = Symbol('phone');
+    const seen: Array<{ cols: number; rows: number }> = [];
+    session.on('resized', (dimensions) => seen.push(dimensions));
+
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    expect(resizeWindow).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([]);
+
+    completions.shift()!(false);
+    expect(seen).toEqual([]);
+    expect(session.resizeFromTerminalViewer(phone, 75, 62, 'mobile')).toBe(true);
+    expect(resizeWindow).toHaveBeenCalledTimes(2);
+
+    completions.shift()!(true);
+    expect(seen).toEqual([{ cols: 75, rows: 62 }]);
+  });
+
+  it('does not confirm a successful resize after its viewer ownership generation is stale', () => {
+    const { session, resizeWindow, completions } = sessionWithAuthoritativeResize(140, 44);
+    const phone = Symbol('phone');
+    const desktop = Symbol('desktop');
+    const seen: Array<{ cols: number; rows: number }> = [];
+    session.on('resized', (dimensions) => seen.push(dimensions));
+
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    expect(resizeWindow).toHaveBeenCalledTimes(1);
+
+    session.activateTerminalViewer(desktop);
+    completions.shift()!(true);
+
+    expect(seen).toEqual([]);
+    expect((session as unknown as ResizeableSessionInternals)._ptyCols).toBe(140);
+    expect((session as unknown as ResizeableSessionInternals)._ptyRows).toBe(44);
+  });
+
   it('immediately hands an idle connected desktop pane to an explicitly active phone', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
     const resize = attachFakePty(session, 140, 44);

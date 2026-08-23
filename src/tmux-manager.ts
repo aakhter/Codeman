@@ -1984,6 +1984,13 @@ export function buildHeadroomExports(mode: SessionMode, headroomClaudeUrl?: stri
   return [];
 }
 
+interface WindowResizeRequest {
+  cols: number;
+  rows: number;
+  onComplete?: (success: boolean) => void;
+  completed: boolean;
+}
+
 /**
  * Manages tmux sessions that wrap Claude CLI or shell processes.
  *
@@ -2017,7 +2024,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     {
       generation: number;
       running: boolean;
-      pending: { cols: number; rows: number } | null;
+      active: WindowResizeRequest | null;
+      pending: WindowResizeRequest | null;
       cancelled: boolean;
     }
   >();
@@ -4309,7 +4317,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
-  resizeWindow(muxName: string, cols: number, rows: number): boolean {
+  resizeWindow(muxName: string, cols: number, rows: number, onComplete?: (success: boolean) => void): boolean {
     if (!isValidMuxName(muxName)) {
       console.error('[TmuxManager] Invalid session name in resizeWindow:', muxName);
       return false;
@@ -4322,11 +4330,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const state = this.pendingWindowResizes.get(muxName) ?? {
       generation: ++this.windowResizeGeneration,
       running: false,
+      active: null,
       pending: null,
       cancelled: false,
     };
-    state.pending = { cols, rows };
+    const superseded = state.pending;
+    state.pending = { cols, rows, onComplete, completed: false };
     this.pendingWindowResizes.set(muxName, state);
+    if (superseded) this.completeWindowResizeRequest(superseded, false);
     if (!state.running) this.drainWindowResize(muxName, state);
     return true;
   }
@@ -4336,7 +4347,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     state: {
       generation: number;
       running: boolean;
-      pending: { cols: number; rows: number } | null;
+      active: WindowResizeRequest | null;
+      pending: WindowResizeRequest | null;
       cancelled: boolean;
     }
   ): void {
@@ -4349,6 +4361,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     state.pending = null;
+    state.active = next;
     state.running = true;
     let completed = false;
     const complete = (error: unknown): void => {
@@ -4363,6 +4376,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           }
         }
       } finally {
+        const succeeded = !error && !state.cancelled && this.isCurrentWindowResize(muxName, state);
+        this.completeWindowResizeRequest(next, succeeded);
+        state.active = null;
         state.running = false;
         if (!state.cancelled && this.isCurrentWindowResize(muxName, state)) {
           this.drainWindowResize(muxName, state);
@@ -4386,6 +4402,20 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
+  private completeWindowResizeRequest(request: WindowResizeRequest, success: boolean): void {
+    if (request.completed) return;
+    request.completed = true;
+    try {
+      request.onComplete?.(success);
+    } catch (error) {
+      try {
+        console.error('[TmuxManager] Resize completion callback failed:', error);
+      } catch {
+        // Completion reporting is best-effort and must not strand the queue.
+      }
+    }
+  }
+
   private isCurrentWindowResize(muxName: string, state: { generation: number }): boolean {
     const current = this.pendingWindowResizes.get(muxName);
     return current === state && current.generation === state.generation;
@@ -4395,16 +4425,26 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const state = this.pendingWindowResizes.get(muxName);
     if (!state) return;
     state.cancelled = true;
+    const active = state.active;
+    const pending = state.pending;
+    state.active = null;
     state.pending = null;
     if (this.isCurrentWindowResize(muxName, state)) {
       this.pendingWindowResizes.delete(muxName);
     }
+    if (active) this.completeWindowResizeRequest(active, false);
+    if (pending) this.completeWindowResizeRequest(pending, false);
   }
 
   private invalidateAllWindowResizes(): void {
     for (const state of this.pendingWindowResizes.values()) {
       state.cancelled = true;
+      const active = state.active;
+      const pending = state.pending;
+      state.active = null;
       state.pending = null;
+      if (active) this.completeWindowResizeRequest(active, false);
+      if (pending) this.completeWindowResizeRequest(pending, false);
     }
     this.pendingWindowResizes.clear();
   }
