@@ -7212,6 +7212,7 @@ class CodemanApp {
   }
 
   _fullRenderSessionTabs() {
+    this.closeTabRailActionMenu?.();
     if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
     this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
@@ -8902,6 +8903,7 @@ class CodemanApp {
 
   // Shared cleanup for all session data — called from both closeSession() and session:deleted handler
   _cleanupSessionData(sessionId) {
+    this.closeTabRailActionMenu?.();
     // If the deleted session is currently being renamed, abort the rename
     // so the inline <input> doesn't ghost as a stale tab on screen.
     if (this._activeRename?.sessionId === sessionId) {

@@ -444,4 +444,14 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
       await touchContext.close();
     }
   });
+
+  it('closes the real action menu when viewport geometry changes', async () => {
+    await applyExpandedSurface('rail');
+    const tab = page.locator('.session-tab[data-id="long"]');
+    await tab.hover();
+    await tab.locator('.tab-more').click();
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(1);
+    await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(0);
+  });
 });

@@ -3073,7 +3073,7 @@ Object.assign(CodemanApp.prototype, {
     // — same precedence the home rail's gate uses (home-sessions.js).
     const sidebarOwnsTabs = this.isSessionSidebarActive?.() === true;
     const orientation =
-      !sidebarOwnsTabs && window.CodemanTabOverflow?.resolveTabOrientation
+      !this.isSoloWindow && !sidebarOwnsTabs && window.CodemanTabOverflow?.resolveTabOrientation
         ? window.CodemanTabOverflow.resolveTabOrientation({
             deviceType: MobileDetection.getDeviceType(),
             setting,
